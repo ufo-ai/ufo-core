@@ -69,8 +69,9 @@ async def test_jobs_link_header_walk_advances_the_watermark() -> None:
     assert result.deletes == ()
     assert result.next_cursor == "2026-03-01T00:00:00Z"
 
-    body = next(page.body for page in result.pages if page.source_ref == "jobs/1")
-    assert "Staff Engineer" in body
+    page = next(page for page in result.pages if page.source_ref == "jobs/1")
+    assert page.updated_at == "2026-01-01T00:00:00.000000+00:00"
+    assert "Staff Engineer" in page.body
 
 
 async def test_incremental_sends_updated_after_from_the_cursor() -> None:

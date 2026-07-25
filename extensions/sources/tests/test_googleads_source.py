@@ -97,6 +97,33 @@ async def test_customers_lists_and_flatten_derives_id() -> None:
     assert "Acme" in body
 
 
+async def test_campaign_metrics_project_the_observation_date_as_created_time() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, json={"resourceNames": ["customers/123"]})
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "results": [
+                        {
+                            "campaign": {"id": "9", "resourceName": "customers/123/campaigns/9"},
+                            "segments": {"date": "2026-02-01"},
+                            "metrics": {"clicks": "4"},
+                        }
+                    ]
+                }
+            ],
+        )
+
+    with _dev_token("dev"):
+        result = await _fetch("campaign_metrics", handle)
+
+    assert {page.source_ref for page in result.pages} == {"campaign_metrics/123:9:2026-02-01"}
+    assert result.pages[0].created_at == "2026-02-01T00:00:00.000000+00:00"
+    assert result.pages[0].updated_at is None
+
+
 async def test_missing_developer_token_skips_the_stream() -> None:
     with _dev_token(None), pytest.raises(StreamSkipped):
         await _fetch("customers", _customers_handler())

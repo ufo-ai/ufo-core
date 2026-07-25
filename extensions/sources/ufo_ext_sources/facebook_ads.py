@@ -22,15 +22,27 @@ GRAPH_VERSION = "v25.0"
 PAGE_SIZE = 100
 
 FACEBOOK_ADS_STREAMS: list[StreamSpec] = [
-    StreamSpec(name="ad_accounts", source_object="adaccounts", primary_key="id"),
     StreamSpec(
-        name="campaigns", source_object="campaigns", primary_key="id", cursor_field="updated_time"
+        name="ad_accounts",
+        source_object="adaccounts",
+        primary_key="id",
+        created_at_field="created_time",
+    ),
+    StreamSpec(
+        name="campaigns",
+        source_object="campaigns",
+        primary_key="id",
+        cursor_field="updated_time",
+        created_at_field="created_time",
+        updated_at_field="updated_time",
     ),
     StreamSpec(
         name="ad_sets",
         source_object="adsets",
         primary_key="id",
         cursor_field="updated_time",
+        created_at_field="created_time",
+        updated_at_field="updated_time",
         canonical=False,
     ),
     StreamSpec(
@@ -38,6 +50,8 @@ FACEBOOK_ADS_STREAMS: list[StreamSpec] = [
         source_object="ads",
         primary_key="id",
         cursor_field="updated_time",
+        created_at_field="created_time",
+        updated_at_field="updated_time",
         canonical=False,
     ),
     StreamSpec(
@@ -45,6 +59,8 @@ FACEBOOK_ADS_STREAMS: list[StreamSpec] = [
         source_object="insights",
         primary_key="id",
         cursor_field="date_stop",
+        created_at_field="date_stop",
+        updated_at_field=None,
         canonical=False,
     ),
 ]

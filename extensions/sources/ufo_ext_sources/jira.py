@@ -35,12 +35,21 @@ _REFUSAL_STATUS = frozenset({401, 403})
 
 JIRA_STREAMS: list[StreamSpec] = [
     StreamSpec(name="projects", source_object="project", primary_key="id"),
-    StreamSpec(name="issues", source_object="issue", primary_key="id", cursor_field="updated"),
+    StreamSpec(
+        name="issues",
+        source_object="issue",
+        primary_key="id",
+        cursor_field="updated",
+        created_at_field="fields.created",
+        updated_at_field="updated",
+    ),
     StreamSpec(
         name="issue_comments",
         source_object="comment",
         primary_key="id",
         cursor_field="updated",
+        created_at_field="created",
+        updated_at_field="updated",
         canonical=False,
     ),
     StreamSpec(name="users", source_object="user", primary_key="accountId"),
@@ -50,6 +59,7 @@ JIRA_STREAMS: list[StreamSpec] = [
         source_object="sprint",
         primary_key="id",
         cursor_field="updatedDate",
+        updated_at_field="updatedDate",
         canonical=False,
     ),
 ]

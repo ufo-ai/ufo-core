@@ -61,6 +61,10 @@ def _refs(result: SyncResult) -> set[str]:
     return {page.source_ref for page in result.pages}
 
 
+def _commit(sha: str, date: str) -> dict[str, object]:
+    return {"sha": sha, "commit": {"committer": {"date": date}}}
+
+
 async def test_repositories_fan_out_over_granted_orgs_and_advance_a_watermark() -> None:
     def handle(request: httpx.Request) -> httpx.Response:
         assert request.url.host == "api.github.com"
@@ -75,6 +79,7 @@ async def test_repositories_fan_out_over_granted_orgs_and_advance_a_watermark() 
     assert result.deletes == ()
     assert _refs(result) == {"repositories/100"}
     assert result.next_cursor == "2026-02-02T00:00:00Z"
+    assert result.pages[0].updated_at == "2026-02-02T00:00:00.000000+00:00"
 
 
 async def test_organizations_walk_the_user_orgs_collection() -> None:
@@ -86,6 +91,30 @@ async def test_organizations_walk_the_user_orgs_collection() -> None:
     assert result.snapshot is False
     assert result.next_cursor is None
     assert _refs(result) == {"organizations/1", "organizations/2"}
+
+
+async def test_stargazers_request_star_timestamps_and_project_user_identity() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/user/orgs":
+            return httpx.Response(200, json=[ORG])
+        if request.url.path == "/orgs/acme/repos":
+            return httpx.Response(200, json=[REPO])
+        if request.url.path == "/repos/acme/repo1/stargazers":
+            assert "application/vnd.github.star+json" in request.headers["Accept"]
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "starred_at": "2026-02-03T00:00:00Z",
+                        "user": {"id": 42, "login": "ada"},
+                    }
+                ],
+            )
+        return httpx.Response(404, json={"path": request.url.path})
+
+    result = await _fetch("stargazers", handle)
+    assert _refs(result) == {"stargazers/42"}
+    assert result.pages[0].created_at == "2026-02-03T00:00:00.000000+00:00"
 
 
 def _issues_handler(seen: list[str]) -> Callable[[httpx.Request], httpx.Response]:
@@ -196,7 +225,7 @@ async def test_pull_requests_drop_embedded_repositories() -> None:
 async def test_newest_first_stream_stops_at_the_repo_watermark() -> None:
     """`commits` arrives newest-first and append-only: once a whole page sits at or below the
     repo's watermark every later page is older, so the walk stops instead of re-reading history."""
-    stale = {"sha": "aaa", "created_at": "2026-02-01T00:00:00Z"}
+    stale = _commit("aaa", "2026-02-01T00:00:00Z")
     requested: list[str] = []
 
     def handle(request: httpx.Request) -> httpx.Response:
@@ -232,9 +261,9 @@ async def test_commits_backfill_windows_and_resumes_downward_with_until(
     between slices is never dropped (it stays above the frozen `high` for the next steady-state
     pass), and the window dissolves to the plain `high` watermark once the walk exhausts."""
     monkeypatch.setattr(backend_module, "MAX_RECORDS_PER_RUN", 1)
-    newest = {"sha": "c1", "created_at": "2026-03-03T00:00:00Z"}
-    middle = {"sha": "c2", "created_at": "2026-03-02T00:00:00Z"}
-    oldest = {"sha": "c3", "created_at": "2026-03-01T00:00:00Z"}
+    newest = _commit("c1", "2026-03-03T00:00:00Z")
+    middle = _commit("c2", "2026-03-02T00:00:00Z")
+    oldest = _commit("c3", "2026-03-01T00:00:00Z")
     seen_until: list[str | None] = []
 
     def handle(request: httpx.Request) -> httpx.Response:
@@ -377,7 +406,7 @@ async def test_repo_refusal_mid_walk_skips_only_that_repo() -> None:
     the repo's stored state untouched — its mid-backfill window survives to resume, where a silent
     end would have dissolved it — and its neighbors still sync."""
     repo2 = {**REPO, "id": 101, "name": "repo2", "full_name": "acme/repo2"}
-    fresh = {"sha": "c9", "created_at": "2026-03-05T00:00:00Z"}
+    fresh = _commit("c9", "2026-03-05T00:00:00Z")
 
     def handle(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/user/orgs":

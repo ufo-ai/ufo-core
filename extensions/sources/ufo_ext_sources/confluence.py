@@ -74,19 +74,28 @@ _PARAMS: dict[str, dict[str, Any]] = {
 CONFLUENCE_STREAMS: list[StreamSpec] = [
     StreamSpec(name="spaces", source_object="spaces", primary_key="id"),
     StreamSpec(
-        name="pages", source_object="pages", primary_key="id", cursor_field="version.createdAt"
+        name="pages",
+        source_object="pages",
+        primary_key="id",
+        cursor_field="version.createdAt",
+        created_at_field="createdAt",
+        updated_at_field="version.createdAt",
     ),
     StreamSpec(
         name="blog_posts",
         source_object="blogposts",
         primary_key="id",
         cursor_field="version.createdAt",
+        created_at_field="createdAt",
+        updated_at_field="version.createdAt",
     ),
     StreamSpec(
         name="comments",
         source_object="footer-comments",
         primary_key="id",
         cursor_field="version.createdAt",
+        created_at_field="createdAt",
+        updated_at_field="version.createdAt",
         canonical=False,
     ),
     StreamSpec(name="groups", source_object="group", primary_key="id", canonical=False),
@@ -95,6 +104,8 @@ CONFLUENCE_STREAMS: list[StreamSpec] = [
         source_object="audit",
         primary_key="creationDate",
         cursor_field="creationDate",
+        created_at_field="creationDate",
+        updated_at_field=None,
         canonical=False,
     ),
 ]
@@ -194,7 +205,7 @@ class ConfluenceConnector(RestConnector):
                 "kind": "blog_post" if stream.name == "blog_posts" else "page",
                 "url": url,
                 "body": _body_text(record),
-                "created_at": get_path(record, "version.createdAt"),
+                "created_at": record.get("createdAt"),
                 "updated_at": get_path(record, "version.createdAt"),
             }
         elif stream.name == "comments":
@@ -203,7 +214,7 @@ class ConfluenceConnector(RestConnector):
                 "body": _body_text(record),
                 "author": get_path(record, "version.authorId"),
                 "url": url,
-                "created_at": get_path(record, "version.createdAt"),
+                "created_at": record.get("createdAt"),
                 "parent_external_id": record.get("pageId") or record.get("blogPostId"),
             }
         else:

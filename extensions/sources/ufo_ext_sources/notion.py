@@ -36,19 +36,28 @@ _BLOCK_NO_DESCEND = frozenset({"child_page", "child_database", "ai_block"})
 NOTION_STREAMS: list[StreamSpec] = [
     StreamSpec(name="users", source_object="users", primary_key="id"),
     StreamSpec(
-        name="pages", source_object="page", primary_key="id", cursor_field="last_edited_time"
+        name="pages",
+        source_object="page",
+        primary_key="id",
+        cursor_field="last_edited_time",
+        created_at_field="created_time",
+        updated_at_field="last_edited_time",
     ),
     StreamSpec(
         name="data_sources",
         source_object="data_source",
         primary_key="id",
         cursor_field="last_edited_time",
+        created_at_field="created_time",
+        updated_at_field="last_edited_time",
     ),
     StreamSpec(
         name="comments",
         source_object="comments",
         primary_key="id",
         cursor_field="created_time",
+        created_at_field="created_time",
+        updated_at_field=None,
         canonical=False,
     ),
     StreamSpec(
@@ -56,6 +65,8 @@ NOTION_STREAMS: list[StreamSpec] = [
         source_object="blocks",
         primary_key="id",
         cursor_field="last_edited_time",
+        created_at_field="created_time",
+        updated_at_field="last_edited_time",
         canonical=False,
     ),
 ]

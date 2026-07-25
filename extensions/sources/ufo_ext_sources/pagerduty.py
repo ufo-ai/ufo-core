@@ -30,12 +30,14 @@ INCIDENTS = StreamSpec(
     source_object="incidents",
     primary_key="id",
     cursor_field="updated_at",
+    updated_at_field="updated_at",
 )
 INCIDENT_NOTES = StreamSpec(
     name="incident_notes",
     source_object="notes",
     primary_key="id",
     cursor_field="created_at",
+    updated_at_field=None,
     canonical=False,
 )
 ESCALATION_POLICIES = StreamSpec(

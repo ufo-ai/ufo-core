@@ -90,7 +90,10 @@ async def test_pages_search_paginates_and_render_lifts_readable_content() -> Non
     assert result.next_cursor == "2026-02-05T00:00:00.000Z"
     assert seen and all(version == NOTION_VERSION for version in seen)
 
-    body = next(page.body for page in result.pages if page.source_ref == "pages/p1")
+    page = next(page for page in result.pages if page.source_ref == "pages/p1")
+    assert page.created_at == "2026-01-01T00:00:00.000000+00:00"
+    assert page.updated_at == "2026-02-01T00:00:00.000000+00:00"
+    body = page.body
     assert "Roadmap" in body
     assert "Q3 planning notes" in body
     assert "In progress" in body
@@ -189,6 +192,8 @@ def _comments_handler() -> Callable[[httpx.Request], httpx.Response]:
 async def test_comments_fan_out_per_page_and_render_the_body() -> None:
     result = await _fetch("comments", _comments_handler())
     assert {page.source_ref for page in result.pages} == {"comments/cm1"}
+    assert result.pages[0].created_at == "2026-02-02T00:00:00.000000+00:00"
+    assert result.pages[0].updated_at is None
     assert "Looks good to me" in result.pages[0].body
     assert result.pages[0].title == "Looks good to me"
 

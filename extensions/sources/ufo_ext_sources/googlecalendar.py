@@ -148,6 +148,8 @@ def _flatten_event(raw: dict[str, Any]) -> dict[str, Any]:
     ]
     return {
         "id": raw["id"],
+        "created_at": raw.get("created"),
+        "updated_at": raw.get("updated"),
         "title": raw.get("summary"),
         "description": raw.get("description"),
         "location": raw.get("location"),
@@ -188,6 +190,8 @@ def _flatten_attendees(raw: dict[str, Any]) -> list[dict[str, Any]]:
         rows.append(
             {
                 "id": f"{event_id}:{handle}",
+                "created_at": raw.get("created"),
+                "updated_at": raw.get("updated"),
                 "event_id": event_id,
                 "role": _attendee_role(attendee, is_organizer=handle == organizer_handle),
                 "handle": handle,

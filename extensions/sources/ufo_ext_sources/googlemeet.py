@@ -40,6 +40,8 @@ GOOGLE_MEET_STREAMS: list[StreamSpec] = [
         source_object="conferenceRecords",
         primary_key="id",
         cursor_field="start_time",
+        created_at_field="start_time",
+        updated_at_field=None,
     ),
 ]
 

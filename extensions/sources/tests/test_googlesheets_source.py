@@ -85,6 +85,8 @@ async def test_lists_spreadsheets_and_render_lists_the_tab_titles() -> None:
     assert {page.source_ref for page in result.pages} == {"spreadsheets/s1"}
     assert result.snapshot is False
     assert result.next_cursor == "2026-02-05T00:00:00.000Z"
+    assert result.pages[0].created_at == "2026-01-01T00:00:00.000000+00:00"
+    assert result.pages[0].updated_at == "2026-02-05T00:00:00.000000+00:00"
 
     body = result.pages[0].body
     assert "Q3 Metrics" in body

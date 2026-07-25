@@ -143,7 +143,11 @@ async def test_users_flatten_derives_name_from_username() -> None:
 
 
 async def test_tasks_flatten_stringifies_status_dict_and_lifts_created_at() -> None:
-    record = _flat(await _fetch("tasks", _shaped_handler()), "tasks/tk1")
+    result = await _fetch("tasks", _shaped_handler())
+    page = result.pages[0]
+    assert page.created_at == "1970-01-01T00:26:40.000000+00:00"
+    assert page.updated_at == "1970-01-01T00:03:20.000000+00:00"
+    record = _flat(result, "tasks/tk1")
     assert record["status"] == "in progress"
     assert record["due_date"] == "1700"
     assert record["created_at"] == "1600"

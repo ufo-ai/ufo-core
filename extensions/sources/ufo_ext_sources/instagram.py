@@ -39,6 +39,8 @@ MEDIA = StreamSpec(
     source_object="media",
     primary_key="id",
     cursor_field="timestamp",
+    created_at_field="timestamp",
+    updated_at_field=None,
 )
 MEDIA_INSIGHTS = StreamSpec(
     name="media_insights",
@@ -51,6 +53,8 @@ STORIES = StreamSpec(
     source_object="stories",
     primary_key="id",
     cursor_field="timestamp",
+    created_at_field="timestamp",
+    updated_at_field=None,
     canonical=False,
 )
 STORY_INSIGHTS = StreamSpec(
@@ -64,6 +68,8 @@ USER_INSIGHTS = StreamSpec(
     source_object="user_insights",
     primary_key="id",
     cursor_field="end_time",
+    created_at_field="end_time",
+    updated_at_field=None,
     canonical=False,
 )
 

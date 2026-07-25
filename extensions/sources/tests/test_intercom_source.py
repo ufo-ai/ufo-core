@@ -89,8 +89,9 @@ async def test_search_paginates_and_normalizes_the_cursor() -> None:
     assert result.next_cursor == "1700000100"
     assert seen[0] == 0
 
-    body = next(page.body for page in result.pages if page.source_ref == "conversations/c1")
-    assert "Login issue" in body
+    page = next(page for page in result.pages if page.source_ref == "conversations/c1")
+    assert page.updated_at == "2023-11-14T22:13:20.000000+00:00"
+    assert "Login issue" in page.body
 
 
 async def test_incremental_passes_the_cursor_as_a_number() -> None:

@@ -158,6 +158,8 @@ async def test_meeting_artifacts_render_transcripts_and_ai_summaries() -> None:
     assert {page.source_ref for page in result.pages} == {"meeting_artifacts/conf-1"}
     assert result.next_cursor == "2026-02-01T10:00:00.000Z"
     assert result.snapshot is False
+    assert result.pages[0].created_at == "2026-02-01T10:00:00.000000+00:00"
+    assert result.pages[0].updated_at is None
     body = result.pages[0].body
     assert "# googlemeet meeting_artifacts: Google Meet conf-1" in body
     assert "conference: conferenceRecords/conf-1" in body

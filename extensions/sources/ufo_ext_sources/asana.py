@@ -21,12 +21,19 @@ PAGE_SIZE = 100
 _MODIFIED_SINCE_STREAMS = frozenset({"tasks", "projects"})
 
 
-def _stream(name: str, *, cursor_field: str | None = None, canonical: bool = False) -> StreamSpec:
+def _stream(
+    name: str,
+    *,
+    cursor_field: str | None = None,
+    updated_at_field: str | None = None,
+    canonical: bool = False,
+) -> StreamSpec:
     return StreamSpec(
         name=name,
         source_object=name,
         primary_key="gid",
         cursor_field=cursor_field,
+        updated_at_field=updated_at_field,
         canonical=canonical,
     )
 
@@ -35,8 +42,13 @@ def _stream(name: str, *, cursor_field: str | None = None, canonical: bool = Fal
 # streams (projects, tasks, stories, users) plus the workspace-taxonomy and metadata collections.
 # Asana documents `?modified_since` on tasks + projects only; every other stream full-refreshes.
 ASANA_STREAMS: list[StreamSpec] = [
-    _stream("projects", cursor_field="modified_at", canonical=True),
-    _stream("tasks", cursor_field="modified_at", canonical=True),
+    _stream(
+        "projects",
+        cursor_field="modified_at",
+        updated_at_field="modified_at",
+        canonical=True,
+    ),
+    _stream("tasks", cursor_field="modified_at", updated_at_field="modified_at", canonical=True),
     _stream("stories", cursor_field="created_at", canonical=True),
     _stream("users", canonical=True),
     _stream("attachments"),

@@ -60,6 +60,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from ufo.o11y import warn
 from ufo.sources.connector import Connector, StreamPage, StreamSpec
+from ufo.sources.rest import get_path
 from ufo.sources.sync import Page, SourceAuth, SyncResult, normalize_page_timestamp
 
 MAX_RECORDS_PER_RUN = 5_000
@@ -225,24 +226,18 @@ class ConnectorBackend:
         entry all settle on the same page."""
         ref = _record_ref(stream, record)
         title, body = self.connector.render(record, stream)
-        created_at = _optional_string(record, "created_at")
-        raw_updated_at = record.get("updated_at")
-        updated_at: str | None
-        if isinstance(raw_updated_at, str):
-            updated_at = raw_updated_at
-        elif raw_updated_at is not None:
-            raise ValueError("record field 'updated_at' must be a string")
-        elif stream.cursor_field:
-            candidate = _optional_string(record, stream.cursor_field)
-            if candidate is None:
-                updated_at = None
-            else:
-                try:
-                    updated_at = normalize_page_timestamp(candidate)
-                except ValueError:
-                    updated_at = None
-        else:
-            updated_at = None
+        created_at = _record_timestamp(
+            record,
+            stream.created_at_field,
+            connector=self.connector.name,
+            stream=stream.name,
+        )
+        updated_at = _record_timestamp(
+            record,
+            stream.updated_at_field,
+            connector=self.connector.name,
+            stream=stream.name,
+        )
         return Page(
             source_ref=f"{stream.name}/{ref}",
             digest="sha256:" + hashlib.sha256(body.encode()).hexdigest(),
@@ -254,13 +249,38 @@ class ConnectorBackend:
         )
 
 
-def _optional_string(record: dict[str, Any], field: str) -> str | None:
-    value = record.get(field)
+def _record_timestamp(
+    record: dict[str, Any],
+    field: str | None,
+    *,
+    connector: str,
+    stream: str,
+) -> str | None:
+    if field is None:
+        return None
+    value = record[field] if field in record else get_path(record, field)
     if value is None:
         return None
-    if isinstance(value, str):
-        return value
-    raise ValueError(f"record field {field!r} must be a string")
+    try:
+        if isinstance(value, str):
+            return normalize_page_timestamp(value)
+        if isinstance(value, int) and not isinstance(value, bool):
+            return normalize_page_timestamp(str(value))
+    except ValueError:
+        warn(
+            "source_sync.malformed_timestamp",
+            connector=connector,
+            stream=stream,
+            field=field,
+        )
+        return None
+    warn(
+        "source_sync.malformed_timestamp",
+        connector=connector,
+        stream=stream,
+        field=field,
+    )
+    return None
 
 
 def _record_ref(stream: StreamSpec, record: dict[str, Any]) -> str:

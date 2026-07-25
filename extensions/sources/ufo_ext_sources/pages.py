@@ -89,8 +89,8 @@ class _Page:
     backend: str
     stream: str
     title: str
-    source_created_at: str | None
-    source_updated_at: str | None
+    record_created_at: str | None
+    record_updated_at: str | None
     subject: str
     digest: str
     body_ref: str
@@ -107,8 +107,8 @@ class _Page:
             source=self.backend,
             stream=self.stream,
             title=self.title,
-            created_at=_page_timestamp(self.source_created_at, self.created_at),
-            updated_at=_page_timestamp(self.source_updated_at, self.updated_at),
+            created_at=_page_timestamp(self.record_created_at, self.created_at),
+            updated_at=_page_timestamp(self.record_updated_at, self.updated_at),
             subject=self.subject,
             digest=self.digest,
             body_ref=self.body_ref,
@@ -125,8 +125,8 @@ class _Page:
             "source": self.backend,
             "stream": self.stream,
             "title": self.title,
-            "created_at": _page_timestamp(self.source_created_at, self.created_at),
-            "updated_at": _page_timestamp(self.source_updated_at, self.updated_at),
+            "created_at": _page_timestamp(self.record_created_at, self.created_at),
+            "updated_at": _page_timestamp(self.record_updated_at, self.updated_at),
         }
 
 
@@ -212,8 +212,8 @@ class PageObjects:
                 backend=backends.get(record.source_id, ""),
                 stream=record.stream,
                 title=record.title,
-                source_created_at=record.source_created_at,
-                source_updated_at=record.source_updated_at,
+                record_created_at=record.record_created_at,
+                record_updated_at=record.record_updated_at,
                 subject=record.subject,
                 digest=record.digest,
                 body_ref=record.body_ref,

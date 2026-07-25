@@ -37,18 +37,21 @@ BOARDS = StreamSpec(
     source_object="boards",
     primary_key="id",
     cursor_field="updated_at",
+    updated_at_field="updated_at",
 )
 ITEMS = StreamSpec(
     name="items",
     source_object="items",
     primary_key="id",
     cursor_field="updated_at",
+    updated_at_field="updated_at",
 )
 UPDATES = StreamSpec(
     name="updates",
     source_object="updates",
     primary_key="id",
     cursor_field="created_at",
+    updated_at_field=None,
     canonical=False,
 )
 ACTIVITY_LOGS = StreamSpec(
@@ -56,6 +59,7 @@ ACTIVITY_LOGS = StreamSpec(
     source_object="activity_logs",
     primary_key="id",
     cursor_field="created_at",
+    updated_at_field=None,
     canonical=False,
 )
 TAGS = StreamSpec(name="tags", source_object="tags", primary_key="id", canonical=False)
@@ -144,7 +148,7 @@ class MondayConnector(RestConnector):
             client,
             field="boards",
             selection=(
-                "id name description state board_kind type updated_at url "
+                "id name description state board_kind type created_at updated_at url "
                 "workspace{id name kind description}"
             ),
         ):
@@ -268,7 +272,7 @@ class MondayConnector(RestConnector):
                 async for page in self._paged_root(
                     client,
                     field="workspaces",
-                    selection="id name kind description",
+                    selection="id name kind description created_at",
                 ):
                     yield page
                 return
@@ -277,7 +281,7 @@ class MondayConnector(RestConnector):
                     client,
                     field="boards",
                     selection=(
-                        "id name description state board_kind type updated_at url "
+                        "id name description state board_kind type created_at updated_at url "
                         "workspace{id name kind description}"
                     ),
                     cursor=cursor,

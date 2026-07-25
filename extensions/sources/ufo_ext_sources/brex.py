@@ -38,6 +38,8 @@ def _stream(
         source_object=name,
         primary_key=primary_key,
         cursor_field=cursor_field,
+        created_at_field=cursor_field,
+        updated_at_field=None,
         canonical=canonical,
     )
 

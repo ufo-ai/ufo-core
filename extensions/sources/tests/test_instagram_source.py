@@ -67,6 +67,18 @@ def _handler() -> Callable[[httpx.Request], httpx.Response]:
                     "paging": {},
                 },
             )
+        if path.endswith("/iga1/insights"):
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {
+                            "name": "reach",
+                            "values": [{"value": 10, "end_time": "2026-02-02T00:00:00+0000"}],
+                        }
+                    ]
+                },
+            )
         return httpx.Response(404, json={"path": path})
 
     return handle
@@ -82,6 +94,17 @@ async def test_media_fans_out_and_advances_timestamp_watermark() -> None:
     result = await _fetch("media", _handler())
     assert {page.source_ref for page in result.pages} == {"media/m1"}
     assert result.next_cursor == "2026-02-01T00:00:00+0000"
+    assert result.pages[0].created_at == "2026-02-01T00:00:00.000000+00:00"
+    assert result.pages[0].updated_at is None
+
+
+async def test_user_insights_use_the_daily_snapshot_end_time() -> None:
+    result = await _fetch("user_insights", _handler())
+    assert {page.source_ref for page in result.pages} == {
+        "user_insights/iga1:reach:2026-02-02T00:00:00+0000"
+    }
+    assert result.pages[0].created_at == "2026-02-02T00:00:00.000000+00:00"
+    assert result.pages[0].updated_at is None
 
 
 async def test_refusal_at_account_walk_maps_to_stream_skipped() -> None:

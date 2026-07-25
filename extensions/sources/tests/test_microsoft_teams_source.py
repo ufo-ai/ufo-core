@@ -43,6 +43,7 @@ CHANNEL = {"id": "chan1", "displayName": "General"}
 MESSAGE = {
     "id": "msg1",
     "subject": "Launch",
+    "createdDateTime": "2026-01-01T00:00:00Z",
     "lastModifiedDateTime": "2026-02-01T00:00:00Z",
     "body": {"contentType": "html", "content": "<p>Ship the launch <b>Friday</b></p>"},
 }
@@ -69,6 +70,8 @@ async def test_channel_messages_fan_out_watermark_and_render() -> None:
     assert {page.source_ref for page in result.pages} == {"channel_messages/msg1"}
     assert result.snapshot is False
     assert result.next_cursor == "2026-02-01T00:00:00Z"
+    assert result.pages[0].created_at == "2026-01-01T00:00:00.000000+00:00"
+    assert result.pages[0].updated_at == "2026-02-01T00:00:00.000000+00:00"
 
     body = result.pages[0].body
     assert body.startswith("# microsoft_teams channel_messages: Launch")

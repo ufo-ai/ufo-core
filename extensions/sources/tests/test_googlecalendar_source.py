@@ -44,6 +44,8 @@ async def _fetch(
 EVENT = {
     "id": "e1",
     "status": "confirmed",
+    "created": "2026-01-15T10:00:00Z",
+    "updated": "2026-01-20T11:00:00Z",
     "summary": "Sprint review",
     "description": "Demo the build.",
     "location": "Room 4",
@@ -72,6 +74,8 @@ async def test_bootstrap_lists_events_captures_sync_token_and_renders() -> None:
     assert result.deletes == ("calendar_events/e2",)
     assert result.next_cursor == "sync-1"
     assert result.snapshot is False
+    assert result.pages[0].created_at == "2026-01-15T10:00:00.000000+00:00"
+    assert result.pages[0].updated_at == "2026-01-20T11:00:00.000000+00:00"
     assert seen and "timeMin" in seen[0] and seen[0].get("showDeleted") == "true"
     assert "syncToken" not in seen[0]
     assert "singleEvents" not in seen[0]
@@ -99,6 +103,8 @@ async def test_event_attendees_stream_explodes_events_into_per_attendee_rows() -
     assert result.deletes == ()
     assert result.next_cursor == "sync-1"
     assert result.snapshot is False
+    assert {page.created_at for page in result.pages} == {"2026-01-15T10:00:00.000000+00:00"}
+    assert {page.updated_at for page in result.pages} == {"2026-01-20T11:00:00.000000+00:00"}
 
     body = next(
         page.body for page in result.pages if page.source_ref == "event_attendees/e1:a@example.com"

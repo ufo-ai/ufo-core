@@ -42,6 +42,7 @@ FILE_1 = {
     "name": "Roadmap",
     "mimeType": "application/vnd.google-apps.document",
     "webViewLink": "https://drive.google.com/file/f1",
+    "createdTime": "2026-01-01T00:00:00.000Z",
     "modifiedTime": "2026-02-01T00:00:00.000Z",
     "owners": [{"displayName": "Alex", "emailAddress": "alex@example.com"}],
 }
@@ -50,6 +51,7 @@ FILE_2 = {
     "name": "Budget",
     "mimeType": "application/vnd.google-apps.spreadsheet",
     "webViewLink": "https://drive.google.com/file/f2",
+    "createdTime": "2026-01-02T00:00:00.000Z",
     "modifiedTime": "2026-02-05T00:00:00.000Z",
     "owners": [{"emailAddress": "sam@example.com"}],
 }
@@ -57,6 +59,7 @@ FILE_3 = {
     "id": "f3",
     "name": "New Deck",
     "mimeType": "application/vnd.google-apps.presentation",
+    "createdTime": "2026-01-03T00:00:00.000Z",
     "modifiedTime": "2026-02-10T00:00:00.000Z",
     "owners": [],
 }
@@ -76,7 +79,10 @@ async def test_first_run_lists_files_and_seeds_the_changes_token_cursor() -> Non
     assert result.snapshot is False
     assert result.next_cursor == "tok-100"
 
-    body = next(page.body for page in result.pages if page.source_ref == "files/f1")
+    page = next(page for page in result.pages if page.source_ref == "files/f1")
+    assert page.created_at == "2026-01-01T00:00:00.000000+00:00"
+    assert page.updated_at == "2026-02-01T00:00:00.000000+00:00"
+    body = page.body
     assert "Roadmap" in body
     assert "mimeType: application/vnd.google-apps.document" in body
     assert "owners: Alex" in body
@@ -111,12 +117,23 @@ async def test_shared_drives_lists_the_collection() -> None:
     def handle(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/drive/v3/drives":
             return httpx.Response(
-                200, json={"drives": [{"id": "d1", "name": "Engineering"}], "nextPageToken": None}
+                200,
+                json={
+                    "drives": [
+                        {
+                            "id": "d1",
+                            "name": "Engineering",
+                            "createdTime": "2026-01-01T00:00:00.000Z",
+                        }
+                    ],
+                    "nextPageToken": None,
+                },
             )
         return httpx.Response(404, json={"path": request.url.path})
 
     result = await _fetch("shared_drives", handle)
     assert {page.source_ref for page in result.pages} == {"shared_drives/d1"}
+    assert result.pages[0].created_at == "2026-01-01T00:00:00.000000+00:00"
     assert "Engineering" in result.pages[0].body
 
 
@@ -127,12 +144,24 @@ async def test_comments_fan_out_per_file() -> None:
         if request.url.path == "/drive/v3/files/f1/comments":
             return httpx.Response(
                 200,
-                json={"comments": [{"id": "c1", "content": "Looks good"}], "nextPageToken": None},
+                json={
+                    "comments": [
+                        {
+                            "id": "c1",
+                            "content": "Looks good",
+                            "createdTime": "2026-01-01T00:00:00.000Z",
+                            "modifiedTime": "2026-02-01T00:00:00.000Z",
+                        }
+                    ],
+                    "nextPageToken": None,
+                },
             )
         return httpx.Response(404, json={"path": request.url.path})
 
     result = await _fetch("comments", handle)
     assert {page.source_ref for page in result.pages} == {"comments/c1"}
+    assert result.pages[0].created_at == "2026-01-01T00:00:00.000000+00:00"
+    assert result.pages[0].updated_at == "2026-02-01T00:00:00.000000+00:00"
     assert "Looks good" in result.pages[0].body
 
 

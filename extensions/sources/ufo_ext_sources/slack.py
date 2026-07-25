@@ -68,6 +68,8 @@ ALL_STREAMS: list[StreamSpec] = [
         name="messages",
         source_object="conversations.history",
         primary_key="id",
+        created_at_field="sent_at",
+        updated_at_field=None,
         ordering=Ordering.newest_first,
     ),
     StreamSpec(
@@ -477,6 +479,7 @@ def _participant_for_message(
         "email": user.get("email") if user else None,
         "slack_user_id": user_id,
         "display_name": user.get("display_name") if user else message.get("from_display_name"),
+        "created_at": message.get("sent_at"),
     }
 
 

@@ -1,13 +1,13 @@
 """The QuickBooks Online connector — AR/AP and general-ledger entities synced as recallable pages.
 
 QBO has no per-entity list endpoint: every read is a SQL-like query against `/query`
-(`SELECT * FROM <Entity> [WHERE Metadata.LastUpdatedTime > '<cursor>' ORDER BY
-Metadata.LastUpdatedTime] STARTPOSITION <N> MAXRESULTS 100`), and the response wraps the rows under
+(`SELECT * FROM <Entity> [WHERE MetaData.LastUpdatedTime > '<cursor>' ORDER BY
+MetaData.LastUpdatedTime] STARTPOSITION <N> MAXRESULTS 100`), and the response wraps the rows under
 `QueryResponse.<Entity>`. `paginate` advances `STARTPOSITION` by the page size until a short page.
 An
 incremental stream rides the `WHERE` clause on `Metadata.LastUpdatedTime`; the reference entities
 without that cursor (`payment_methods`, `tax_agencies`) full-refresh. Because the cursor is nested
-(`Metadata.LastUpdatedTime`), `flatten` lifts it to a flat key so the adapter advances the watermark
+(`MetaData.LastUpdatedTime`), `flatten` lifts it to a flat key so the adapter advances the watermark
 over it. `Id` is the primary key for every entity. A refusal (401/403) raises `StreamSkipped`. The
 credential is resolved through the auth proxy the runner threads (Composio also supplies the
 per-realm base URL); this connector holds no token. The write path is intentionally absent — the
@@ -21,7 +21,7 @@ import httpx
 from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec, get_path
 
 PAGE_SIZE = 100
-CURSOR_FIELD = "Metadata.LastUpdatedTime"
+CURSOR_FIELD = "MetaData.LastUpdatedTime"
 _REFUSAL_STATUS = frozenset({401, 403})
 
 
@@ -37,6 +37,8 @@ def _stream(
         source_object=source_object,
         primary_key="Id",
         cursor_field=cursor_field,
+        created_at_field="MetaData.CreateTime",
+        updated_at_field=CURSOR_FIELD,
         canonical=canonical,
     )
 

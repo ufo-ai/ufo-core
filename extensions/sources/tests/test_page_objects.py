@@ -174,7 +174,7 @@ async def _seed_page(
     *,
     stream: str = "issues",
     title: str = "Fix the flux capacitor",
-    source_created_at: str | None = "2026-07-09T00:00:00Z",
+    record_created_at: str | None = "2026-07-09T00:00:00Z",
     body: str | None = None,
     subject: str = "shared",
     tombstone: bool = False,
@@ -194,8 +194,8 @@ async def _seed_page(
                 body_ref=body_ref,
                 stream=stream,
                 title=title,
-                source_created_at=source_created_at,
-                source_updated_at=source_created_at,
+                record_created_at=record_created_at,
+                record_updated_at=record_created_at,
                 subject=subject,
                 tombstone=tombstone,
                 created_at=datetime(2026, 7, 9, tzinfo=UTC),
@@ -292,7 +292,7 @@ async def test_pages_list_filter_order_and_read_body_through_the_verbs(
             source_id,
             blob,
             title="Newest issue",
-            source_created_at="2026-07-11T00:00:00Z",
+            record_created_at="2026-07-11T00:00:00Z",
             page_id=UUID(int=1),
         )
         await _seed_page(
@@ -300,7 +300,7 @@ async def test_pages_list_filter_order_and_read_body_through_the_verbs(
             source_id,
             blob,
             title="Older issue",
-            source_created_at="2026-07-10T00:00:00Z",
+            record_created_at="2026-07-10T00:00:00Z",
             page_id=UUID(int=2),
         )
         await _seed_page(
@@ -309,7 +309,7 @@ async def test_pages_list_filter_order_and_read_body_through_the_verbs(
             blob,
             stream="pull_requests",
             title="Newest pull request",
-            source_created_at="2026-07-12T00:00:00Z",
+            record_created_at="2026-07-12T00:00:00Z",
             page_id=UUID(int=3),
         )
         other_source_id = await _seed_source(state, "github", source_id=UUID(int=1))
@@ -318,7 +318,7 @@ async def test_pages_list_filter_order_and_read_body_through_the_verbs(
             other_source_id,
             blob,
             title="Other source issue",
-            source_created_at="2026-07-08T00:00:00Z",
+            record_created_at="2026-07-08T00:00:00Z",
             page_id=UUID(int=4),
         )
         ctx = _context(state, blob)
@@ -399,14 +399,14 @@ async def test_pages_order_timestamp_variants_chronologically(db: None, tmp_path
             source_id,
             blob,
             title="Whole second",
-            source_created_at="2026-07-23T18:30:00Z",
+            record_created_at="2026-07-23T18:30:00Z",
         )
         newer = await _seed_page(
             state,
             source_id,
             blob,
             title="Half second later",
-            source_created_at="2026-07-23T14:30:00.500000-04:00",
+            record_created_at="2026-07-23T14:30:00.500000-04:00",
         )
         listing = json.loads(
             await _text(
@@ -431,7 +431,7 @@ async def test_pages_without_provider_timestamps_use_row_timestamps(
     blob = FilesystemBlobStore(root=tmp_path)
     with ws(state.workspace_id):
         source_id = await _seed_source(state, "probe")
-        page_id = await _seed_page(state, source_id, blob, source_created_at=None)
+        page_id = await _seed_page(state, source_id, blob, record_created_at=None)
         ctx = _context(state, blob)
 
         listing = json.loads(await _text(_TOOLS["object_list"], ctx, kind=PAGE_KIND))

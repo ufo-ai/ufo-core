@@ -49,6 +49,46 @@ async def test_directory_single_shot_hits_the_tenant_gateway_host() -> None:
     assert result.snapshot is False
 
 
+async def test_time_off_creation_is_not_reported_as_an_update() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/v1/time_off/requests/")
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "id": "request-1",
+                    "created": "2026-01-01T00:00:00Z",
+                }
+            ],
+        )
+
+    result = await _fetch("time_off_requests", handle)
+    assert result.next_cursor == "2026-01-01T00:00:00Z"
+    assert result.pages[0].created_at == "2026-01-01T00:00:00.000000+00:00"
+    assert result.pages[0].updated_at is None
+
+
+async def test_timesheet_start_projects_as_record_creation_time() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/v1/time_tracking/timesheet_entries")
+        return httpx.Response(
+            200,
+            json={
+                "entries": [
+                    {
+                        "id": "entry-1",
+                        "start": "2026-01-01T09:00:00Z",
+                    }
+                ]
+            },
+        )
+
+    result = await _fetch("timesheet_entries", handle)
+    assert result.next_cursor == "2026-01-01T09:00:00Z"
+    assert result.pages[0].created_at == "2026-01-01T09:00:00.000000+00:00"
+    assert result.pages[0].updated_at is None
+
+
 async def test_basic_auth_built_from_a_direct_key() -> None:
     client = BambooHRConnector()._make_client(BASE_URL, Credential(bearer="key-123"))
     authed = next(client.auth.auth_flow(httpx.Request("GET", BASE_URL)))

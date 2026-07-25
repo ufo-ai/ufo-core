@@ -37,6 +37,7 @@ GOOGLE_DOCS_STREAMS: list[StreamSpec] = [
         source_object="documents",
         primary_key="documentId",
         cursor_field="updated_at",
+        updated_at_field="updated_at",
     ),
 ]
 

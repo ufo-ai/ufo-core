@@ -40,6 +40,8 @@ def _stream(
         source_object=path,
         primary_key=primary_key,
         cursor_field=cursor_field,
+        created_at_field="createdAt",
+        updated_at_field=cursor_field or "updatedAt",
         canonical=canonical,
     )
 

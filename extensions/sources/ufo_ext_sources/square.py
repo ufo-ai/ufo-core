@@ -26,11 +26,18 @@ _CATALOG_OBJECT_TYPES = {"catalog_items": "ITEM", "catalog_categories": "CATEGOR
 
 SQUARE_STREAMS: list[StreamSpec] = [
     StreamSpec(
-        name="customers", source_object="customers", primary_key="id", cursor_field="updated_at"
+        name="customers",
+        source_object="customers",
+        primary_key="id",
+        cursor_field="updated_at",
+        updated_at_field="updated_at",
     ),
     StreamSpec(name="locations", source_object="locations", primary_key="id"),
     StreamSpec(
-        name="payments", source_object="payments", primary_key="id", cursor_field="created_at"
+        name="payments",
+        source_object="payments",
+        primary_key="id",
+        cursor_field="created_at",
     ),
     StreamSpec(
         name="refunds",
@@ -44,6 +51,7 @@ SQUARE_STREAMS: list[StreamSpec] = [
         source_object="catalog_items",
         primary_key="id",
         cursor_field="updated_at",
+        updated_at_field="updated_at",
         canonical=False,
     ),
     StreamSpec(
@@ -51,6 +59,7 @@ SQUARE_STREAMS: list[StreamSpec] = [
         source_object="catalog_categories",
         primary_key="id",
         cursor_field="updated_at",
+        updated_at_field="updated_at",
         canonical=False,
     ),
     StreamSpec(

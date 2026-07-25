@@ -55,6 +55,7 @@ def _issue(issue_id: str, title: str, updated: str) -> dict[str, object]:
         "state": {"id": "s1", "type": "started"},
         "priorityLabel": "High",
         "assignee": {"id": "u1"},
+        "createdAt": "2026-01-01T00:00:00.000Z",
         "updatedAt": updated,
     }
 
@@ -105,7 +106,10 @@ async def test_issues_paginate_over_pageinfo_and_render_lifts_readable_body() ->
     assert result.next_cursor == "2026-02-05T00:00:00.000Z"
     assert any((body.get("variables") or {}).get("after") == "c2" for body in bodies)
 
-    body = next(page.body for page in result.pages if page.source_ref == "issues/i1")
+    page = next(page for page in result.pages if page.source_ref == "issues/i1")
+    assert page.created_at == "2026-01-01T00:00:00.000000+00:00"
+    assert page.updated_at == "2026-02-01T00:00:00.000000+00:00"
+    body = page.body
     assert "First" in body
     assert "Do the First work" in body
     assert "started" in body

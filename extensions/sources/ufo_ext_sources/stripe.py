@@ -60,6 +60,15 @@ _SUBSTREAM_PARENT_STAMP: dict[str, str] = {
     "transfer_reversals": "transfer_id",
     "usage_records": "subscription_item_id",
 }
+_SUBSTREAM_PARENT_FIELDS: dict[str, dict[str, str]] = {
+    "checkout_sessions_line_items": {
+        "checkout_session_created": "created",
+        "checkout_session_expires_at": "expires_at",
+    },
+    "invoice_line_items": {
+        "invoice_created": "created",
+    },
+}
 
 _SUBSTREAM_QUERY_PARENTS: dict[str, tuple[str, str, str]] = {
     "subscription_items": ("subscriptions", "subscription", "/v1/subscription_items"),
@@ -80,6 +89,8 @@ def _stream(
     source_object: str | None = None,
     primary_key: str = "id",
     cursor_field: str | None = "created",
+    created_at_field: str | None = "created",
+    updated_at_field: str | None = None,
     canonical: bool = False,
 ) -> StreamSpec:
     return StreamSpec(
@@ -87,6 +98,8 @@ def _stream(
         source_object=source_object or name,
         primary_key=primary_key,
         cursor_field=cursor_field,
+        created_at_field=created_at_field,
+        updated_at_field=updated_at_field,
         canonical=canonical,
     )
 
@@ -101,6 +114,7 @@ STRIPE_STREAMS: list[StreamSpec] = [
         "usage_records",
         source_object="subscription_items",
         cursor_field="timestamp",
+        created_at_field="timestamp",
         canonical=True,
     ),
     _stream("accounts", cursor_field=None),
@@ -115,7 +129,8 @@ STRIPE_STREAMS: list[StreamSpec] = [
     _stream(
         "checkout_sessions_line_items",
         source_object="checkout/sessions",
-        cursor_field="checkout_session_updated",
+        cursor_field="checkout_session_created",
+        created_at_field="checkout_session_created",
     ),
     _stream("coupons"),
     _stream("credit_notes"),
@@ -128,7 +143,12 @@ STRIPE_STREAMS: list[StreamSpec] = [
     _stream("file_links"),
     _stream("files"),
     _stream("invoice_items", source_object="invoiceitems"),
-    _stream("invoice_line_items", source_object="invoices", cursor_field="invoice_updated"),
+    _stream(
+        "invoice_line_items",
+        source_object="invoices",
+        cursor_field="invoice_created",
+        created_at_field="invoice_created",
+    ),
     _stream("payment_intents"),
     _stream("payment_methods", source_object="customers", cursor_field=None),
     _stream("payout_balance_transactions", source_object="balance_transactions"),
@@ -278,8 +298,14 @@ class StripeConnector(RestConnector):
                     continue
                 child_path = child_path_template.format(id=pid)
                 async for child_page in self._page_loop(client, child_path, stream, cursor=None):
+                    parent_fields = {
+                        target: parent.get(source)
+                        for target, source in _SUBSTREAM_PARENT_FIELDS.get(stream.name, {}).items()
+                    }
                     if stamp_key:
-                        yield [{**row, stamp_key: str(pid)} for row in child_page]
+                        parent_fields[stamp_key] = str(pid)
+                    if parent_fields:
+                        yield [{**row, **parent_fields} for row in child_page]
                     else:
                         yield child_page
 

@@ -73,6 +73,7 @@ def _stream(
         source_object=source_object,
         primary_key="id",
         cursor_field=cursor_field,
+        updated_at_field="UpdatedDateUTC",
         canonical=canonical,
     )
 

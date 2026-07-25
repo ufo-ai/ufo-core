@@ -49,7 +49,15 @@ async def test_customers_lift_envelope_and_advance_watermark() -> None:
         return httpx.Response(
             200,
             json={
-                "list": [{"customer": {"id": "c1", "updated_at": "2026-02-01T00:00:00Z"}}],
+                "list": [
+                    {
+                        "customer": {
+                            "id": "c1",
+                            "created_at": "2026-01-01T00:00:00Z",
+                            "updated_at": "2026-02-01T00:00:00Z",
+                        }
+                    }
+                ],
                 "next_offset": None,
             },
         )
@@ -57,6 +65,8 @@ async def test_customers_lift_envelope_and_advance_watermark() -> None:
     result = await _fetch("customer", handle)
     assert _refs(result) == {"customer/c1"}
     assert result.next_cursor == "2026-02-01T00:00:00Z"
+    assert result.pages[0].created_at == "2026-01-01T00:00:00.000000+00:00"
+    assert result.pages[0].updated_at == "2026-02-01T00:00:00.000000+00:00"
     body = result.pages[0].body
     assert "c1" in body
 
@@ -70,6 +80,56 @@ async def test_incremental_after_param_sent_when_a_cursor_is_stored() -> None:
 
     await _fetch("customer", handle, cursor="2026-01-01T00:00:00Z")
     assert seen and seen[0] == "2026-01-01T00:00:00Z"
+
+
+@pytest.mark.parametrize(
+    ("stream", "path", "record", "source_ref", "created_at"),
+    [
+        (
+            "event",
+            "/api/v2/events",
+            {"id": "ev1", "occurred_at": 100},
+            "event/ev1",
+            "1970-01-01T00:01:40.000000+00:00",
+        ),
+        (
+            "comment",
+            "/api/v2/comments",
+            {"id": "co1", "created_at": 100},
+            "comment/co1",
+            "1970-01-01T00:01:40.000000+00:00",
+        ),
+        (
+            "promotional_credit",
+            "/api/v2/promotional_credits",
+            {"id": "pc1", "created_at": 100},
+            "promotional_credit/pc1",
+            "1970-01-01T00:01:40.000000+00:00",
+        ),
+        (
+            "site_migration_detail",
+            "/api/v2/site_migration_details",
+            {"entity_id": "sm1", "migrated_at": 100},
+            "site_migration_detail/sm1",
+            "1970-01-01T00:01:40.000000+00:00",
+        ),
+    ],
+)
+async def test_occurrence_streams_project_provider_time_as_creation(
+    stream: str,
+    path: str,
+    record: dict,
+    source_ref: str,
+    created_at: str,
+) -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == path
+        return httpx.Response(200, json={"list": [{stream: record}], "next_offset": None})
+
+    result = await _fetch(stream, handle)
+    assert _refs(result) == {source_ref}
+    assert result.pages[0].created_at == created_at
+    assert result.pages[0].updated_at is None
 
 
 async def test_basic_auth_built_from_a_direct_key() -> None:

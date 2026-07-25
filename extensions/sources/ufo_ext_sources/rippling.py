@@ -27,6 +27,8 @@ RIPPLING_STREAMS: list[StreamSpec] = [
         source_object="workers",
         primary_key="id",
         cursor_field="updatedAt",
+        created_at_field="createdAt",
+        updated_at_field="updatedAt",
         canonical=True,
     ),
     StreamSpec(
@@ -34,6 +36,8 @@ RIPPLING_STREAMS: list[StreamSpec] = [
         source_object="teams",
         primary_key="id",
         cursor_field="updatedAt",
+        created_at_field="createdAt",
+        updated_at_field="updatedAt",
         canonical=True,
     ),
 ]

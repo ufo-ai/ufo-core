@@ -22,6 +22,7 @@ PROFILE_1 = {
     "id": "p1",
     "attributes": {
         "email": "ada@example.com",
+        "created": "2023-01-01T00:00:00+00:00",
         "updated": "2024-01-01T00:00:00+00:00",
         "subscriptions": {"email": {"marketing": {"consent": "SUBSCRIBED"}}},
     },
@@ -31,6 +32,7 @@ PROFILE_2 = {
     "id": "p2",
     "attributes": {
         "email": "grace@example.com",
+        "created": "2023-02-01T00:00:00+00:00",
         "updated": "2024-02-01T00:00:00+00:00",
         "subscriptions": {"email": {"marketing": {"consent": "UNSUBSCRIBED"}}},
     },
@@ -70,7 +72,10 @@ async def test_profiles_lift_attributes_and_advance_the_watermark() -> None:
     assert result.snapshot is False
     assert result.next_cursor == "2024-02-01T00:00:00+00:00"
 
-    body = next(page.body for page in result.pages if page.source_ref == "profiles/p1")
+    page = next(page for page in result.pages if page.source_ref == "profiles/p1")
+    assert page.created_at == "2023-01-01T00:00:00.000000+00:00"
+    assert page.updated_at == "2024-01-01T00:00:00.000000+00:00"
+    body = page.body
     assert "ada@example.com" in body
     assert "SUBSCRIBED" in body
     assert "attributes" not in body
@@ -95,6 +100,46 @@ async def test_links_next_pagination_follows_the_cursor() -> None:
     result = await _fetch("lists", handle)
     assert {page.source_ref for page in result.pages} == {"lists/l1", "lists/l2"}
     assert result.next_cursor == "2024-01-02"
+
+
+@pytest.mark.parametrize(
+    ("stream", "resource_type", "created_field", "updated_field"),
+    [
+        ("lists", "list", "created", "updated"),
+        ("segments", "segment", "created", "updated"),
+        ("campaigns", "campaign", "created_at", "updated_at"),
+        ("forms", "form", "created_at", "updated_at"),
+        ("images", "image", "created_at", "updated_at"),
+    ],
+)
+async def test_mutable_streams_project_provider_record_timestamps(
+    stream: str,
+    resource_type: str,
+    created_field: str,
+    updated_field: str,
+) -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == f"/api/{stream}"
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "type": resource_type,
+                        "id": "r1",
+                        "attributes": {
+                            created_field: "2026-01-01T00:00:00Z",
+                            updated_field: "2026-02-01T00:00:00Z",
+                        },
+                    }
+                ],
+                "links": {"next": None},
+            },
+        )
+
+    result = await _fetch(stream, handle)
+    assert result.pages[0].created_at == "2026-01-01T00:00:00.000000+00:00"
+    assert result.pages[0].updated_at == "2026-02-01T00:00:00.000000+00:00"
 
 
 @pytest.mark.parametrize(("stream", "resource_type"), [("lists", "list"), ("segments", "segment")])
@@ -158,6 +203,8 @@ async def test_events_stamp_metric_name_from_the_included_sidecar() -> None:
     result = await _fetch("events", handle)
     assert {page.source_ref for page in result.pages} == {"events/e1"}
     assert result.next_cursor == "2024-03-01T00:00:00+00:00"
+    assert result.pages[0].created_at == "2024-03-01T00:00:00.000000+00:00"
+    assert result.pages[0].updated_at is None
     body = result.pages[0].body
     assert "Opened Email" in body
     assert "pr1" in body

@@ -92,6 +92,7 @@ _INCREMENTAL_FILTER_STREAMS: dict[str, str] = {
     "sms": "mdate",
     "scores": "mdate",
 }
+_UPDATED_AT_FIELDS = frozenset({"mdate", "udate", "updated_timestamp"})
 
 
 def _stream(
@@ -107,6 +108,8 @@ def _stream(
         source_object=source_object or name,
         primary_key=primary_key,
         cursor_field=cursor_field,
+        created_at_field="cdate",
+        updated_at_field=cursor_field if cursor_field in _UPDATED_AT_FIELDS else None,
         canonical=canonical,
     )
 

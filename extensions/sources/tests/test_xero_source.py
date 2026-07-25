@@ -55,6 +55,7 @@ async def test_accounts_lift_typed_id_and_advance_watermark() -> None:
     assert _refs(result) == {"accounts/A1"}
     assert result.snapshot is False
     assert result.next_cursor == "2026-02-01T00:00:00Z"
+    assert result.pages[0].updated_at == "2026-02-01T00:00:00.000000+00:00"
 
 
 async def test_accounts_incremental_sends_if_modified_since() -> None:

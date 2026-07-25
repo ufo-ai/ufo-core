@@ -32,6 +32,8 @@ def _stream(name: str, *, sobject: str, canonical: bool = True) -> StreamSpec:
         source_object=sobject,
         primary_key="Id",
         cursor_field="SystemModstamp",
+        created_at_field="CreatedDate",
+        updated_at_field="SystemModstamp",
         canonical=canonical,
     )
 

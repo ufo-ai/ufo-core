@@ -47,6 +47,7 @@ def _message(message_id: str, subject: str, body: str) -> dict:
         "id": message_id,
         "threadId": f"t-{message_id}",
         "historyId": "9001",
+        "internalDate": "1769904000000",
         "labelIds": ["INBOX"],
         "snippet": "a short preview",
         "payload": {
@@ -95,6 +96,7 @@ async def test_backfill_lists_messages_seeds_the_history_cursor_and_renders() ->
     assert result.snapshot is False
     assert result.deletes == ()
     assert result.next_cursor == "9001"
+    assert {page.created_at for page in result.pages} == {"2026-02-01T00:00:00.000000+00:00"}
 
     body = next(page.body for page in result.pages if page.source_ref == "messages/m1")
     assert "From: Ada Lovelace <ada@example.com>" in body

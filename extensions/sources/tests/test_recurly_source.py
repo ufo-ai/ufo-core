@@ -62,6 +62,10 @@ async def test_accounts_walk_next_and_advance_watermark() -> None:
     assert _refs(result) == {"accounts/a1", "accounts/a2"}
     assert result.snapshot is False
     assert result.next_cursor == "2026-02-02T00:00:00Z"
+    assert {page.updated_at for page in result.pages} == {
+        "2026-02-01T00:00:00.000000+00:00",
+        "2026-02-02T00:00:00.000000+00:00",
+    }
 
 
 async def test_account_notes_fan_out_per_parent() -> None:
@@ -81,6 +85,7 @@ async def test_account_notes_fan_out_per_parent() -> None:
     result = await _fetch("account_notes", handle)
     assert _refs(result) == {"account_notes/n1"}
     assert result.next_cursor == "2026-02-01T00:00:00Z"
+    assert result.pages[0].created_at == "2026-02-01T00:00:00.000000+00:00"
 
 
 async def test_stream_skipped_on_refusal() -> None:

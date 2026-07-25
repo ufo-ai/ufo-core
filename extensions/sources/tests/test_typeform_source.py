@@ -55,6 +55,7 @@ async def test_forms_page_count_loop_and_watermark() -> None:
     assert _refs(result) == {"forms/f1"}
     assert result.snapshot is False
     assert result.next_cursor == "2026-02-01T00:00:00Z"
+    assert result.pages[0].updated_at == "2026-02-01T00:00:00.000000+00:00"
 
 
 async def test_responses_fan_out_per_form() -> None:
@@ -72,6 +73,8 @@ async def test_responses_fan_out_per_form() -> None:
     result = await _fetch("responses", handle)
     assert _refs(result) == {"responses/t1"}
     assert result.next_cursor == "2026-02-01T00:00:00Z"
+    assert result.pages[0].created_at == "2026-02-01T00:00:00.000000+00:00"
+    assert result.pages[0].updated_at is None
 
 
 async def test_stream_skipped_on_refusal() -> None:

@@ -261,6 +261,8 @@ def _stream(name: str, *, object_type: str, canonical: bool = True) -> StreamSpe
         source_object=object_type,
         primary_key="id",
         cursor_field="hs_lastmodifieddate",
+        created_at_field="createdAt",
+        updated_at_field="hs_lastmodifieddate",
         canonical=canonical,
     )
 
@@ -271,6 +273,8 @@ def _product_api_stream(
     source_object: str,
     primary_key: str = "id",
     cursor_field: str | None = None,
+    created_at_field: str | None = "createdAt",
+    updated_at_field: str | None = "updatedAt",
     pagination: Pagination | None = None,
 ) -> StreamSpec:
     return StreamSpec(
@@ -278,6 +282,8 @@ def _product_api_stream(
         source_object=source_object,
         primary_key=primary_key,
         cursor_field=cursor_field,
+        created_at_field=created_at_field,
+        updated_at_field=updated_at_field,
         canonical=False,
         pagination=pagination,
     )
@@ -326,7 +332,12 @@ OWNERS = _product_api_stream(
     cursor_field="updatedAt",
     pagination=_hubspot_get_pagination("/crm/v3/owners"),
 )
-OWNER_TEAMS = _product_api_stream("owner_teams", source_object="owner_teams")
+OWNER_TEAMS = _product_api_stream(
+    "owner_teams",
+    source_object="owner_teams",
+    created_at_field=None,
+    updated_at_field=None,
+)
 
 APPOINTMENTS = _stream("appointments", object_type="appointments", canonical=False)
 NOTES = _stream("notes", object_type="notes", canonical=False)
@@ -389,6 +400,8 @@ FORM_SUBMISSIONS = _product_api_stream(
     source_object="form_submissions",
     primary_key="id",
     cursor_field="submittedAt",
+    created_at_field="submittedAt",
+    updated_at_field=None,
 )
 CONVERSATIONS = _product_api_stream(
     "conversations",
@@ -413,18 +426,24 @@ SITE_PAGES = _product_api_stream(
     "site_pages",
     source_object="site_pages",
     cursor_field="updated",
+    created_at_field="created",
+    updated_at_field="updated",
     pagination=_hubspot_get_pagination("/cms/pages/2026-03/site-pages"),
 )
 LANDING_PAGES = _product_api_stream(
     "landing_pages",
     source_object="landing_pages",
     cursor_field="updated",
+    created_at_field="created",
+    updated_at_field="updated",
     pagination=_hubspot_get_pagination("/cms/pages/2026-03/landing-pages"),
 )
 BLOG_POSTS = _product_api_stream(
     "blog_posts",
     source_object="blog_posts",
-    cursor_field="updatedAt",
+    cursor_field="updated",
+    created_at_field="created",
+    updated_at_field="updated",
     pagination=_hubspot_get_pagination("/cms/blogs/2026-03/posts"),
 )
 FILES = _product_api_stream(
@@ -443,6 +462,8 @@ ANALYTICS_VIEWS = _product_api_stream(
     "analytics_views",
     source_object="analytics_views",
     cursor_field="updated_at",
+    created_at_field="created_at",
+    updated_at_field="updated_at",
 )
 ANALYTICS_REPORTS = _product_api_stream(
     "analytics_reports",
@@ -457,11 +478,15 @@ EVENT_OCCURRENCES = _product_api_stream(
     "event_occurrences",
     source_object="event_occurrences",
     cursor_field="occurredAt",
+    created_at_field="occurredAt",
+    updated_at_field=None,
 )
 EMAIL_EVENTS = _product_api_stream(
     "email_events",
     source_object="email_events",
     cursor_field="created",
+    created_at_field="created",
+    updated_at_field=None,
 )
 
 ASSOCIATION_LABELS = _product_api_stream(
@@ -484,6 +509,8 @@ CONSENT_STATES = _product_api_stream(
     "consent_states",
     source_object="consent_states",
     cursor_field="captured_at",
+    created_at_field="captured_at",
+    updated_at_field=None,
 )
 
 SEQUENCES = _product_api_stream(
@@ -972,6 +999,8 @@ class HubSpotConnector(RestConnector):
                 source_object=object_type_id,
                 primary_key="id",
                 cursor_field="hs_lastmodifieddate",
+                created_at_field="createdAt",
+                updated_at_field="hs_lastmodifieddate",
                 canonical=False,
             )
             async for page in self._paginate_custom_object_records(

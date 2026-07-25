@@ -404,8 +404,8 @@ class PageRecord:
     source_id: UUID
     stream: str
     title: str
-    source_created_at: str | None
-    source_updated_at: str | None
+    record_created_at: str | None
+    record_updated_at: str | None
     subject: str
     digest: str
     body_ref: str
@@ -600,8 +600,8 @@ class ExtensionContext:
                 tables.page.c.source_id,
                 tables.page.c.stream,
                 tables.page.c.title,
-                tables.page.c.source_created_at,
-                tables.page.c.source_updated_at,
+                tables.page.c.record_created_at,
+                tables.page.c.record_updated_at,
                 tables.page.c.subject,
                 tables.page.c.digest,
                 tables.page.c.body_ref,
@@ -624,8 +624,8 @@ class ExtensionContext:
                 source_id=row["source_id"],
                 stream=row["stream"],
                 title=row["title"],
-                source_created_at=row["source_created_at"],
-                source_updated_at=row["source_updated_at"],
+                record_created_at=row["record_created_at"],
+                record_updated_at=row["record_updated_at"],
                 subject=row["subject"],
                 digest=row["digest"],
                 body_ref=row["body_ref"],

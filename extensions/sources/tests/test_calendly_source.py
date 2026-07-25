@@ -79,6 +79,7 @@ async def test_event_types_scope_to_org_thread_updated_since_and_advance_waterma
     assert {page.source_ref for page in result.pages} == {"event_types/et1"}
     assert result.snapshot is False
     assert result.next_cursor == "2026-02-05"
+    assert result.pages[0].updated_at == "2026-02-05T00:00:00.000000+00:00"
 
 
 async def test_scheduled_events_flatten_derives_title_times_and_location() -> None:
@@ -94,6 +95,8 @@ async def test_scheduled_events_flatten_derives_title_times_and_location() -> No
                         "uri": "ev1",
                         "name": "Standup",
                         "description": "Daily sync",
+                        "created_at": "2026-01-01T00:00:00Z",
+                        "updated_at": "2026-01-02T00:00:00Z",
                         "start_time": "2026-02-05T09:00:00Z",
                         "end_time": "2026-02-05T09:15:00Z",
                         "location": {"type": "zoom", "location": "https://zoom.us/j/1"},
@@ -103,7 +106,11 @@ async def test_scheduled_events_flatten_derives_title_times_and_location() -> No
             },
         )
 
-    record = _flat(await _fetch("scheduled_events", handle), "scheduled_events/ev1")
+    result = await _fetch("scheduled_events", handle)
+    page = result.pages[0]
+    assert page.created_at == "2026-01-01T00:00:00.000000+00:00"
+    assert page.updated_at == "2026-01-02T00:00:00.000000+00:00"
+    record = _flat(result, "scheduled_events/ev1")
     assert record["title"] == "Standup"
     assert record["start_at"] == "2026-02-05T09:00:00Z"
     assert record["end_at"] == "2026-02-05T09:15:00Z"

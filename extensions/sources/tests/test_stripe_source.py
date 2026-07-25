@@ -57,10 +57,7 @@ async def test_charges_walk_has_more_with_starting_after() -> None:
     assert _refs(result) == {"charges/ch_1", "charges/ch_2"}
     assert result.snapshot is False
     assert seen and all(version == STRIPE_VERSION for version in seen)
-    assert {page.updated_at for page in result.pages} == {
-        "1970-01-01T00:01:40.000000+00:00",
-        "1970-01-01T00:03:20.000000+00:00",
-    }
+    assert {page.updated_at for page in result.pages} == {None}
     assert {page.created_at for page in result.pages} == {
         "1970-01-01T00:01:40.000000+00:00",
         "1970-01-01T00:03:20.000000+00:00",
@@ -90,6 +87,64 @@ async def test_events_sync_as_plain_records() -> None:
     result = await _fetch("events", handle)
     assert _refs(result) == {"events/evt_1"}
     assert result.deletes == ()
+
+
+@pytest.mark.parametrize(
+    ("stream", "parent_path", "child_path", "record", "created_at", "updated_at"),
+    [
+        (
+            "usage_records",
+            "/v1/subscription_items",
+            "/v1/subscription_items/si_1/usage_record_summaries",
+            {"id": "ur_1", "timestamp": 100},
+            "1970-01-01T00:01:40.000000+00:00",
+            None,
+        ),
+        (
+            "checkout_sessions_line_items",
+            "/v1/checkout/sessions",
+            "/v1/checkout/sessions/cs_1/line_items",
+            {"id": "li_1"},
+            "1970-01-01T00:01:40.000000+00:00",
+            None,
+        ),
+        (
+            "invoice_line_items",
+            "/v1/invoices",
+            "/v1/invoices/in_1/lines",
+            {"id": "il_1"},
+            "1970-01-01T00:01:40.000000+00:00",
+            None,
+        ),
+    ],
+)
+async def test_substream_record_timestamps(
+    stream: str,
+    parent_path: str,
+    child_path: str,
+    record: dict,
+    created_at: str,
+    updated_at: str | None,
+) -> None:
+    parent_id = {"usage_records": "si_1", "checkout_sessions_line_items": "cs_1"}.get(
+        stream, "in_1"
+    )
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == parent_path:
+            return httpx.Response(
+                200,
+                json={
+                    "data": [{"id": parent_id, "created": 100}],
+                    "has_more": False,
+                },
+            )
+        assert request.url.path == child_path
+        return httpx.Response(200, json={"data": [record], "has_more": False})
+
+    result = await _fetch(stream, handle)
+    assert result.pages[0].created_at == created_at
+    assert result.pages[0].updated_at == updated_at
 
 
 async def test_stream_skipped_on_refusal() -> None:

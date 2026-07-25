@@ -33,6 +33,8 @@ CHANNEL_MESSAGES = StreamSpec(
     source_object="messages",
     primary_key="id",
     cursor_field="lastModifiedDateTime",
+    created_at_field="createdDateTime",
+    updated_at_field="lastModifiedDateTime",
 )
 CHATS = StreamSpec(name="chats", source_object="chats", primary_key="id", canonical=False)
 CHAT_MESSAGES = StreamSpec(
@@ -40,6 +42,8 @@ CHAT_MESSAGES = StreamSpec(
     source_object="messages",
     primary_key="id",
     cursor_field="lastModifiedDateTime",
+    created_at_field="createdDateTime",
+    updated_at_field="lastModifiedDateTime",
     canonical=False,
 )
 

@@ -60,6 +60,8 @@ def _stream(
     source_object: str | None = None,
     primary_key: str = "id",
     cursor_field: str | None = "updated_at",
+    created_at_field: str | None = "created_at",
+    updated_at_field: str | None = "updated_at",
     canonical: bool = False,
 ) -> StreamSpec:
     return StreamSpec(
@@ -67,6 +69,8 @@ def _stream(
         source_object=source_object or name,
         primary_key=primary_key,
         cursor_field=cursor_field,
+        created_at_field=created_at_field,
+        updated_at_field=updated_at_field,
         canonical=canonical,
     )
 
@@ -79,12 +83,17 @@ CHARGEBEE_STREAMS: list[StreamSpec] = [
     _stream("transaction", canonical=True),
     _stream("addon"),
     _stream("attached_item", cursor_field=None),
-    _stream("comment", cursor_field="created_at"),
+    _stream("comment", cursor_field="created_at", updated_at_field=None),
     _stream("contact", cursor_field=None),
     _stream("coupon"),
     _stream("credit_note"),
     _stream("differential_price"),
-    _stream("event", cursor_field="occurred_at"),
+    _stream(
+        "event",
+        cursor_field="occurred_at",
+        created_at_field="occurred_at",
+        updated_at_field=None,
+    ),
     _stream("gift"),
     _stream("hosted_page"),
     _stream("item"),
@@ -92,10 +101,16 @@ CHARGEBEE_STREAMS: list[StreamSpec] = [
     _stream("order"),
     _stream("payment_source"),
     _stream("plan"),
-    _stream("promotional_credit", cursor_field="created_at"),
+    _stream("promotional_credit", cursor_field="created_at", updated_at_field=None),
     _stream("quote"),
     _stream("quote_line_group", cursor_field=None),
-    _stream("site_migration_detail", primary_key="entity_id", cursor_field="migrated_at"),
+    _stream(
+        "site_migration_detail",
+        primary_key="entity_id",
+        cursor_field="migrated_at",
+        created_at_field="migrated_at",
+        updated_at_field=None,
+    ),
     _stream(
         "subscription_with_scheduled_changes", primary_key="subscription_id", cursor_field=None
     ),

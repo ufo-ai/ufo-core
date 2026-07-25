@@ -84,18 +84,22 @@ class Ordering(StrEnum):
 class StreamSpec:
     """One stream a connector knows how to sync: its registry `name`, the source-side object, the
     `primary_key` inside each record (the stable id the page is keyed by), and the optional
-    `cursor_field` an incremental stream advances a watermark over. `delete_missing` marks a stream
+    `cursor_field` an incremental stream advances a watermark over. `created_at_field` and
+    `updated_at_field` are independent provider-record paths projected onto each page; they default
+    to the conventional `created_at` and `updated_at` keys. `delete_missing` marks a stream
     whose run enumerates the complete current collection — the adapter returns it as an
-    authoritative snapshot so vanished records are tombstoned; left False, the stream is incremental
-    and the adapter only upserts and names explicit removals. `ordering` tells `PartitionWalk` how
-    a partitioned stream's `cursor_field` is ordered, so a fan-out over repos/channels checkpoints
-    and resumes each partition soundly. `pagination` routes a declared strategy; None means the
-    connector's `paginate` handles the stream directly."""
+    authoritative snapshot so vanished records are tombstoned; left False, the stream is
+    incremental and the adapter only upserts and names explicit removals. `ordering` tells
+    `PartitionWalk` how a partitioned stream's `cursor_field` is ordered, so a fan-out over
+    repos/channels checkpoints and resumes each partition soundly. `pagination` routes a declared
+    strategy; None means the connector's `paginate` handles the stream directly."""
 
     name: str
     source_object: str
     primary_key: str = "id"
     cursor_field: str | None = None
+    created_at_field: str | None = "created_at"
+    updated_at_field: str | None = "updated_at"
     delete_missing: bool = False
     canonical: bool = True
     ordering: Ordering = Ordering.none

@@ -55,6 +55,8 @@ async def test_contracts_walk_offset_pages_and_advance_the_watermark() -> None:
     assert "contracts/c-last" in {page.source_ref for page in result.pages}
     assert result.snapshot is False
     assert result.next_cursor == "2026-02-09"
+    last = next(page for page in result.pages if page.source_ref == "contracts/c-last")
+    assert last.updated_at == "2026-02-09T00:00:00.000000+00:00"
 
 
 async def test_cursor_streams_thread_updated_after_and_forms_never_do() -> None:

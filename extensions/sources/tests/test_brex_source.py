@@ -66,6 +66,11 @@ async def test_transactions_follow_cursor_pagination_and_advance_watermark() -> 
     assert result.deletes == ()
     assert result.next_cursor == "2026-01-05"
     assert seen_limits == ["100", "100"]
+    assert {page.created_at for page in result.pages} == {
+        "2026-01-01T00:00:00.000000+00:00",
+        "2026-01-05T00:00:00.000000+00:00",
+    }
+    assert {page.updated_at for page in result.pages} == {None}
 
     body = next(page.body for page in result.pages if page.source_ref == "transactions/tx2")
     assert "tx2" in body

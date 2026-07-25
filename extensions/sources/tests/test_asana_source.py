@@ -103,3 +103,6 @@ async def test_full_refresh_stream_never_sends_the_modified_since_filter() -> No
     # no cursor_field to advance over — the watermark stays put rather than moving
     assert result.next_cursor == "2026-02-01T00:00:00.000Z"
     assert {page.source_ref for page in result.pages} == {"users/u1"}
+    assert result.pages[0].updated_at is None
+    stream = next(stream for stream in AsanaConnector.streams_list if stream.name == "users")
+    assert stream.updated_at_field is None

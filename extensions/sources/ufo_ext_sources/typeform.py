@@ -23,13 +23,19 @@ _REFUSAL_STATUS = frozenset({401, 403})
 
 TYPEFORM_STREAMS: list[StreamSpec] = [
     StreamSpec(
-        name="forms", source_object="forms", primary_key="id", cursor_field="last_updated_at"
+        name="forms",
+        source_object="forms",
+        primary_key="id",
+        cursor_field="last_updated_at",
+        updated_at_field="last_updated_at",
     ),
     StreamSpec(
         name="responses",
         source_object="responses",
         primary_key="token",
         cursor_field="submitted_at",
+        created_at_field="submitted_at",
+        updated_at_field=None,
     ),
     StreamSpec(name="workspaces", source_object="workspaces", primary_key="id"),
     StreamSpec(name="images", source_object="images", primary_key="id", canonical=False),

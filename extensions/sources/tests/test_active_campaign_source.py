@@ -47,7 +47,13 @@ async def test_contacts_offset_walk_hits_the_tenant_host_and_advances_watermark(
         return httpx.Response(
             200,
             json={
-                "contacts": [{"id": "1", "udate": "2026-02-01T00:00:00Z"}],
+                "contacts": [
+                    {
+                        "id": "1",
+                        "cdate": "2026-01-01T00:00:00Z",
+                        "udate": "2026-02-01T00:00:00Z",
+                    }
+                ],
                 "meta": {"total": "1"},
             },
         )
@@ -56,6 +62,8 @@ async def test_contacts_offset_walk_hits_the_tenant_host_and_advances_watermark(
     assert _refs(result) == {"contacts/1"}
     assert result.snapshot is False
     assert result.next_cursor == "2026-02-01T00:00:00Z"
+    assert result.pages[0].created_at == "2026-01-01T00:00:00.000000+00:00"
+    assert result.pages[0].updated_at == "2026-02-01T00:00:00.000000+00:00"
 
 
 async def test_incremental_filter_param_sent_when_a_cursor_is_stored() -> None:
@@ -67,6 +75,25 @@ async def test_incremental_filter_param_sent_when_a_cursor_is_stored() -> None:
 
     await _fetch("contacts", handle, cursor="2026-01-01T00:00:00Z")
     assert seen and seen[0] == "2026-01-01T00:00:00Z"
+
+
+async def test_full_refresh_stream_has_no_false_update_timestamp() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "segments": [{"id": "1", "cdate": "2026-01-01T00:00:00Z"}],
+                "meta": {"total": "1"},
+            },
+        )
+
+    result = await _fetch("segments", handle)
+    assert result.pages[0].created_at == "2026-01-01T00:00:00.000000+00:00"
+    assert result.pages[0].updated_at is None
+    stream = next(
+        stream for stream in ActiveCampaignConnector.streams_list if stream.name == "segments"
+    )
+    assert stream.updated_at_field is None
 
 
 async def test_api_token_header_built_from_a_direct_key() -> None:

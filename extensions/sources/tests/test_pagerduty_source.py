@@ -89,6 +89,7 @@ async def test_incidents_advance_watermark() -> None:
     result = await _fetch("incidents", _incidents_handler())
     assert {page.source_ref for page in result.pages} == {"incidents/i1"}
     assert result.next_cursor == "2026-02-01T00:00:00Z"
+    assert result.pages[0].updated_at == "2026-02-01T00:00:00.000000+00:00"
 
 
 async def test_refusal_maps_to_stream_skipped() -> None:

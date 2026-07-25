@@ -1,8 +1,9 @@
 """The Attio connector over a mock transport: the records-query offset loop, the `flatten` that
 lifts a nested composite id and reduces each `values` value-cell to its primitive (the point of this
-provider — without it a record has no top-level primary key), the full-snapshot `delete_missing`
-semantics, and the two refuse-paths (`standard_object_disabled` on objects, `403 unauthorized` on
-meetings) mapping to `StreamSkipped`. Offline — a canned transport, no DB, no token, no broker."""
+provider — without it a record has no top-level primary key), its record timestamps reaching the
+page projection, the full-snapshot `delete_missing` semantics, and the two refuse-paths
+(`standard_object_disabled` on objects, `403 unauthorized` on meetings) mapping to `StreamSkipped`.
+Offline — a canned transport, no DB, no token, no broker."""
 
 from collections.abc import Callable
 from uuid import UUID, uuid4
@@ -38,6 +39,8 @@ async def _fetch(
 async def test_people_flatten_lifts_the_composite_id_and_value_cells() -> None:
     person = {
         "id": {"record_id": "r1", "object_id": "o1", "workspace_id": "w1"},
+        "created_at": "2026-01-15T10:00:00Z",
+        "updated_at": "2026-01-20T11:00:00Z",
         "values": {
             "name": [{"first_name": "Ada", "last_name": "Lovelace", "full_name": "Ada Lovelace"}],
             "email_addresses": [{"email_address": "ada@example.com"}],
@@ -56,6 +59,8 @@ async def test_people_flatten_lifts_the_composite_id_and_value_cells() -> None:
     # a full records-query run is an authoritative snapshot
     assert result.snapshot is True
     assert result.next_cursor is None
+    assert result.pages[0].created_at == "2026-01-15T10:00:00.000000+00:00"
+    assert result.pages[0].updated_at == "2026-01-20T11:00:00.000000+00:00"
 
     body = result.pages[0].body
     assert "Ada Lovelace" in body

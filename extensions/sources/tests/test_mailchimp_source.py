@@ -54,6 +54,8 @@ async def test_lists_top_level_walk_hits_the_dc_host_and_advances_watermark() ->
     assert _refs(result) == {"lists/l1"}
     assert result.snapshot is False
     assert result.next_cursor == "2026-02-01T00:00:00Z"
+    assert result.pages[0].created_at == "2026-02-01T00:00:00.000000+00:00"
+    assert result.pages[0].updated_at is None
 
 
 async def test_list_members_fan_out_stamps_the_parent_list_id() -> None:
@@ -64,11 +66,22 @@ async def test_list_members_fan_out_stamps_the_parent_list_id() -> None:
         assert request.url.path == "/3.0/lists/l1/members"
         return httpx.Response(
             200,
-            json={"members": [{"id": "m1", "last_changed": "2026-02-02T00:00:00Z"}]},
+            json={
+                "members": [
+                    {
+                        "id": "m1",
+                        "timestamp_signup": "",
+                        "timestamp_opt": "2026-01-01T00:00:00Z",
+                        "last_changed": "2026-02-02T00:00:00Z",
+                    }
+                ]
+            },
         )
 
     result = await _fetch("list_members", handle)
     assert _refs(result) == {"list_members/m1"}
+    assert result.pages[0].created_at == "2026-01-01T00:00:00.000000+00:00"
+    assert result.pages[0].updated_at == "2026-02-02T00:00:00.000000+00:00"
     assert '"list_id": "l1"' in result.pages[0].body
 
 

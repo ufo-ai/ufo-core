@@ -32,7 +32,14 @@ _REFUSAL_STATUS = frozenset({401, 403})
 def _stream(
     name: str, *, cursor_field: str | None = ORDER_BY_UPDATED_AT, canonical: bool = False
 ) -> StreamSpec:
-    return StreamSpec(name=name, source_object=name, cursor_field=cursor_field, canonical=canonical)
+    return StreamSpec(
+        name=name,
+        source_object=name,
+        cursor_field=cursor_field,
+        created_at_field="createdAt",
+        updated_at_field=ORDER_BY_UPDATED_AT,
+        canonical=canonical,
+    )
 
 
 # Stream set mirrors Airbyte's source-linear catalog (16 streams): the five canonical content

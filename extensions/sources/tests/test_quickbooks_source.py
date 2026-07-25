@@ -1,5 +1,5 @@
 """The QuickBooks connector over a mock transport: the `/query` loop, the `QueryResponse.<Entity>`
-envelope unwrap, the nested `Metadata.LastUpdatedTime` cursor lifted to a flat watermark, the
+envelope unwrap, the nested `MetaData.LastUpdatedTime` cursor lifted to a flat watermark, the
 incremental `WHERE` clause, and a refusal as `StreamSkipped`. Offline — a canned transport,
 no DB, no token."""
 
@@ -50,7 +50,10 @@ def _handler(seen: list[str]) -> Callable[[httpx.Request], httpx.Response]:
                         {
                             "Id": "1",
                             "DisplayName": "Acme",
-                            "Metadata": {"LastUpdatedTime": "2026-02-01T00:00:00Z"},
+                            "MetaData": {
+                                "CreateTime": "2026-01-01T00:00:00Z",
+                                "LastUpdatedTime": "2026-02-01T00:00:00Z",
+                            },
                         }
                     ]
                 }
@@ -67,6 +70,8 @@ async def test_query_unwrap_and_nested_cursor_lift() -> None:
     assert result.snapshot is False
     assert result.deletes == ()
     assert result.next_cursor == "2026-02-01T00:00:00Z"
+    assert result.pages[0].created_at == "2026-01-01T00:00:00.000000+00:00"
+    assert result.pages[0].updated_at == "2026-02-01T00:00:00.000000+00:00"
     assert "FROM Customer" in seen[0]
     assert "WHERE" not in seen[0]
 
@@ -74,7 +79,32 @@ async def test_query_unwrap_and_nested_cursor_lift() -> None:
 async def test_incremental_sends_where_clause() -> None:
     seen: list[str] = []
     await _fetch("customers", _handler(seen), cursor="2026-01-01T00:00:00Z")
-    assert "WHERE Metadata.LastUpdatedTime > '2026-01-01T00:00:00Z'" in seen[0]
+    assert "WHERE MetaData.LastUpdatedTime > '2026-01-01T00:00:00Z'" in seen[0]
+
+
+async def test_full_refresh_reference_entity_preserves_metadata_timestamps() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "QueryResponse": {
+                    "PaymentMethod": [
+                        {
+                            "Id": "1",
+                            "MetaData": {
+                                "CreateTime": "2026-01-01T00:00:00Z",
+                                "LastUpdatedTime": "2026-02-01T00:00:00Z",
+                            },
+                        }
+                    ]
+                }
+            },
+        )
+
+    result = await _fetch("payment_methods", handle)
+    assert result.next_cursor is None
+    assert result.pages[0].created_at == "2026-01-01T00:00:00.000000+00:00"
+    assert result.pages[0].updated_at == "2026-02-01T00:00:00.000000+00:00"
 
 
 async def test_stream_skipped_on_refusal() -> None:

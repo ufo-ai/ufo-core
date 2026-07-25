@@ -198,6 +198,8 @@ class AttioConnector(RestConnector):
             "record_id": ident.get("record_id") if isinstance(ident, dict) else ident,
             "object_id": ident.get("object_id") if isinstance(ident, dict) else None,
             "workspace_id": ident.get("workspace_id") if isinstance(ident, dict) else None,
+            "created_at": record.get("created_at"),
+            "updated_at": record.get("updated_at"),
         }
         if stream.cursor_field:
             flat[stream.cursor_field] = record.get(stream.cursor_field) or record.get(

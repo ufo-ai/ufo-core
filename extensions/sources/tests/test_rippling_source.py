@@ -42,12 +42,27 @@ async def test_workers_follow_next_and_advance_watermark() -> None:
         assert request.url.path == "/workers"
         if request.url.params.get("cursor") == "c2":
             return httpx.Response(
-                200, json={"workers": [{"id": "w2", "updatedAt": "2026-02-02T00:00:00Z"}]}
+                200,
+                json={
+                    "workers": [
+                        {
+                            "id": "w2",
+                            "createdAt": "2026-01-02T00:00:00Z",
+                            "updatedAt": "2026-02-02T00:00:00Z",
+                        }
+                    ]
+                },
             )
         return httpx.Response(
             200,
             json={
-                "workers": [{"id": "w1", "updatedAt": "2026-02-01T00:00:00Z"}],
+                "workers": [
+                    {
+                        "id": "w1",
+                        "createdAt": "2026-01-01T00:00:00Z",
+                        "updatedAt": "2026-02-01T00:00:00Z",
+                    }
+                ],
                 "next": "https://rest.ripplingapis.com/workers?cursor=c2",
             },
         )
@@ -56,6 +71,9 @@ async def test_workers_follow_next_and_advance_watermark() -> None:
     assert _refs(result) == {"workers/w1", "workers/w2"}
     assert result.snapshot is False
     assert result.next_cursor == "2026-02-02T00:00:00Z"
+    page = next(page for page in result.pages if page.source_ref == "workers/w1")
+    assert page.created_at == "2026-01-01T00:00:00.000000+00:00"
+    assert page.updated_at == "2026-02-01T00:00:00.000000+00:00"
 
 
 async def test_workers_incremental_sends_updated_after() -> None:

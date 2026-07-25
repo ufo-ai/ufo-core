@@ -89,14 +89,16 @@ async def test_lists_documents_and_render_walks_body_paragraphs_into_prose() -> 
     assert result.deletes == ()
     assert result.next_cursor == "2026-02-05T00:00:00.000Z"
 
-    body = next(page.body for page in result.pages if page.source_ref == "documents/doc1")
-    assert "Q3 Plan" in body
-    assert "Ship the launch by Friday." in body
+    page = next(page for page in result.pages if page.source_ref == "documents/doc1")
+    assert page.created_at == "2026-01-01T00:00:00.000000+00:00"
+    assert page.updated_at == "2026-02-01T00:00:00.000000+00:00"
+    assert "Q3 Plan" in page.body
+    assert "Ship the launch by Friday." in page.body
     # non-paragraph structural elements (tables) carry no paragraph runs → they fall through
-    assert "Owner" not in body
+    assert "Owner" not in page.body
     # the raw Docs structure never leaks into the recallable body
-    assert "textRun" not in body
-    assert "tableRows" not in body
+    assert "textRun" not in page.body
+    assert "tableRows" not in page.body
 
 
 async def test_incremental_threads_the_watermark_into_the_drive_query() -> None:

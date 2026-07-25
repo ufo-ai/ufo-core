@@ -37,12 +37,10 @@ def downgrade() -> None:
 """
 
 
-def test_apply_migrations_rejects_a_stamp_short_of_the_graph_heads(
+def test_apply_migrations_rejects_duplicate_revision_ids(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Two files claiming one revision id are one graph node, so alembic stamps one head where the
-    graph declares two and `upgrade heads` still exits 0. The run must not report success on a
-    schema missing the losing file's DDL."""
+    """Two files claiming one revision id are one graph node, so the losing DDL would be skipped."""
     probe = tmp_path / "probe_versions"
     probe.mkdir()
     for name in ("first", "second"):
@@ -74,10 +72,13 @@ def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None
     config.set_main_option("path_separator", "os")
     with warnings.catch_warnings():
         warnings.simplefilter("error", UserWarning)
-        heads = ScriptDirectory.from_config(config).get_heads()
+        scripts = ScriptDirectory.from_config(config)
+        heads = scripts.get_heads()
+    assert scripts.get_revision("memory_0008").dependencies == "0049"
     assert {
+        "0049",
         "index_default_0002",
-        "memory_0007",
+        "memory_0008",
         "sample_ext_note_0001",
         "skill_create_0001",
         "knowledge_graph_0001",
@@ -87,7 +88,8 @@ def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None
 
 
 def test_memory_as_of_migration_repairs_page_derived_rows(tmp_path: Path) -> None:
-    url = f"sqlite+aiosqlite:///{tmp_path / 'memory-as-of.db'}"
+    database_path = tmp_path / "memory-as-of.db"
+    url = f"sqlite+aiosqlite:///{database_path}"
     config = Config()
     config.set_main_option("script_location", str(MIGRATIONS_DIR))
     config.set_main_option(
@@ -98,8 +100,9 @@ def test_memory_as_of_migration_repairs_page_derived_rows(tmp_path: Path) -> Non
     config.set_main_option("sqlalchemy.url", url)
     command.upgrade(config, "0048")
     command.upgrade(config, "memory_0006")
+    command.upgrade(config, "memory_0007")
 
-    engine = sa.create_engine(f"sqlite:///{tmp_path / 'memory-as-of.db'}")
+    engine = sa.create_engine(f"sqlite:///{database_path}")
     workspace_id, source_id, page_id, memory_id, manual_id = (uuid4() for _ in range(5))
     ingested = datetime(2026, 7, 24, tzinfo=UTC)
     source_as_of = datetime(2025, 7, 24, tzinfo=UTC)
@@ -123,8 +126,8 @@ def test_memory_as_of_migration_repairs_page_derived_rows(tmp_path: Path) -> Non
             sa.text(
                 "insert into page "
                 "(id, workspace_id, source_id, digest, body_ref, subject, tombstone, "
-                "stream, title, "
-                "source_created_at, source_updated_at, created_at, updated_at) values "
+                "stream, title, source_created_at, source_updated_at, "
+                "created_at, updated_at) values "
                 "(:id, :workspace_id, :source_id, 'sha256:page', 'pages/page', 'shared', false, "
                 "'issues', 'Old issue', :source_as_of, null, :ingested, :ingested)"
             ),
@@ -157,7 +160,8 @@ def test_memory_as_of_migration_repairs_page_derived_rows(tmp_path: Path) -> Non
             )
         connection.commit()
 
-    command.upgrade(config, "memory_0007")
+    command.upgrade(config, "0049")
+    command.upgrade(config, "memory_0008")
     with engine.connect() as connection:
         repaired = connection.execute(
             sa.text("select as_of from memory_item where id = :id"), {"id": memory_id.hex}

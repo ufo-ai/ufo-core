@@ -47,7 +47,15 @@ def _handler(seen: list[str]) -> Callable[[httpx.Request], httpx.Response]:
         path = request.url.path
         if path.endswith("/sobjects/Account/describe"):
             return httpx.Response(
-                200, json={"fields": [{"name": "Id"}, {"name": "Name"}, {"name": "SystemModstamp"}]}
+                200,
+                json={
+                    "fields": [
+                        {"name": "Id"},
+                        {"name": "Name"},
+                        {"name": "CreatedDate"},
+                        {"name": "SystemModstamp"},
+                    ]
+                },
             )
         if path.endswith("/query"):
             seen.append(request.url.params.get("q") or "")
@@ -60,6 +68,7 @@ def _handler(seen: list[str]) -> Callable[[httpx.Request], httpx.Response]:
                             "attributes": {"type": "Account"},
                             "Id": "a1",
                             "Name": "Acme",
+                            "CreatedDate": "2026-01-01T00:00:00Z",
                             "SystemModstamp": "2026-02-01T00:00:00Z",
                         }
                     ],
@@ -85,8 +94,11 @@ async def test_query_flattens_attributes_and_advances_watermark() -> None:
     assert result.snapshot is False
     assert result.deletes == ()
     assert result.next_cursor == "2026-02-01T00:00:00Z"
-    assert "SELECT Id, Name, SystemModstamp FROM Account" in seen[0]
-    body = next(page.body for page in result.pages if page.source_ref == "accounts/a1")
+    assert "SELECT Id, Name, CreatedDate, SystemModstamp FROM Account" in seen[0]
+    page = next(page for page in result.pages if page.source_ref == "accounts/a1")
+    assert page.created_at == "2026-01-01T00:00:00.000000+00:00"
+    assert page.updated_at == "2026-02-01T00:00:00.000000+00:00"
+    body = page.body
     assert "attributes" not in body
     assert "Acme" in body
 

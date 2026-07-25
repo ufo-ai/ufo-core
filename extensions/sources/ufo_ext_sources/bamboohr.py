@@ -33,6 +33,8 @@ def _stream(
     source_object: str | None = None,
     primary_key: str = "id",
     cursor_field: str | None = None,
+    created_at_field: str | None = None,
+    updated_at_field: str | None = None,
     canonical: bool = False,
 ) -> StreamSpec:
     return StreamSpec(
@@ -40,15 +42,22 @@ def _stream(
         source_object=source_object or name,
         primary_key=primary_key,
         cursor_field=cursor_field,
+        created_at_field=created_at_field,
+        updated_at_field=updated_at_field,
         canonical=canonical,
     )
 
 
 BAMBOOHR_STREAMS: list[StreamSpec] = [
     _stream("employees_directory", canonical=True),
-    _stream("time_off_requests", cursor_field="created", canonical=True),
+    _stream(
+        "time_off_requests",
+        cursor_field="created",
+        created_at_field="created",
+        canonical=True,
+    ),
     _stream("employees"),
-    _stream("timesheet_entries", cursor_field="start"),
+    _stream("timesheet_entries", cursor_field="start", created_at_field="start"),
     _stream("meta_fields"),
     _stream("custom_reports"),
 ]

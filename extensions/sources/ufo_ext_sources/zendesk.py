@@ -61,6 +61,8 @@ def _stream(
     source_object: str | None = None,
     primary_key: str = "id",
     cursor_field: str | None = "updated_at",
+    created_at_field: str | None = "created_at",
+    updated_at_field: str | None = "updated_at",
     canonical: bool = False,
 ) -> StreamSpec:
     return StreamSpec(
@@ -68,6 +70,8 @@ def _stream(
         source_object=source_object or name,
         primary_key=primary_key,
         cursor_field=cursor_field,
+        created_at_field=created_at_field,
+        updated_at_field=updated_at_field,
         canonical=canonical,
     )
 
@@ -101,7 +105,12 @@ ZENDESK_STREAMS: list[StreamSpec] = [
     _stream("sla_policies", source_object="slas/policies"),
     _stream("ticket_audits", cursor_field="created_at"),
     _stream("ticket_metrics"),
-    _stream("ticket_metric_events", cursor_field="time"),
+    _stream(
+        "ticket_metric_events",
+        cursor_field="time",
+        created_at_field="time",
+        updated_at_field=None,
+    ),
     _stream("ticket_activities", source_object="activities"),
     _stream("ticket_skips", source_object="skips"),
     _stream("satisfaction_ratings"),

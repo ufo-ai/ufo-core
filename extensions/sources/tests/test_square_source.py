@@ -51,18 +51,25 @@ async def test_customers_body_cursor_and_version_header() -> None:
     assert _refs(result) == {"customers/c1"}
     assert result.snapshot is False
     assert result.next_cursor == "2026-02-01T00:00:00Z"
+    assert result.pages[0].updated_at == "2026-02-01T00:00:00.000000+00:00"
     assert seen and all(version == SQUARE_VERSION for version in seen)
 
 
-async def test_catalog_items_post_search() -> None:
+@pytest.mark.parametrize(
+    ("stream", "object_type"),
+    [("catalog_items", "ITEM"), ("catalog_categories", "CATEGORY")],
+)
+async def test_catalog_streams_project_updated_at(stream: str, object_type: str) -> None:
     def handle(request: httpx.Request) -> httpx.Response:
         assert request.method == "POST" and request.url.path.endswith("/catalog/search")
+        assert object_type.encode() in request.content
         return httpx.Response(
             200, json={"objects": [{"id": "o1", "updated_at": "2026-02-01T00:00:00Z"}]}
         )
 
-    result = await _fetch("catalog_items", handle)
-    assert _refs(result) == {"catalog_items/o1"}
+    result = await _fetch(stream, handle)
+    assert _refs(result) == {f"{stream}/o1"}
+    assert result.pages[0].updated_at == "2026-02-01T00:00:00.000000+00:00"
 
 
 async def test_orders_fan_out_over_locations() -> None:
@@ -77,6 +84,8 @@ async def test_orders_fan_out_over_locations() -> None:
 
     result = await _fetch("orders", handle)
     assert _refs(result) == {"orders/or1"}
+    assert result.pages[0].created_at == "2026-02-01T00:00:00.000000+00:00"
+    assert result.pages[0].updated_at is None
 
 
 async def test_stream_skipped_on_refusal() -> None:

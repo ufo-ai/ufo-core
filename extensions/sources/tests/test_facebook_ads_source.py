@@ -45,7 +45,17 @@ def _accounts_only() -> Callable[[httpx.Request], httpx.Response]:
         assert request.url.host == "graph.facebook.com"
         assert request.url.path.endswith("/me/adaccounts")
         return httpx.Response(
-            200, json={"data": [{"id": "act_1", "name": "Acme Ads"}], "paging": {}}
+            200,
+            json={
+                "data": [
+                    {
+                        "id": "act_1",
+                        "name": "Acme Ads",
+                        "created_time": "2026-01-01T00:00:00+0000",
+                    }
+                ],
+                "paging": {},
+            },
         )
 
     return handle
@@ -55,6 +65,7 @@ async def test_ad_accounts_list_the_grants_accounts() -> None:
     result = await _fetch("ad_accounts", _accounts_only())
     assert {page.source_ref for page in result.pages} == {"ad_accounts/act_1"}
     assert result.snapshot is False
+    assert result.pages[0].created_at == "2026-01-01T00:00:00.000000+00:00"
     assert "Acme Ads" in result.pages[0].body
 
 
@@ -120,10 +131,41 @@ async def test_campaigns_flatten_derives_status_name_and_created_at() -> None:
             },
         )
 
-    record = _flat(await _fetch("campaigns", handle), "campaigns/c1")
+    result = await _fetch("campaigns", handle)
+    record = _flat(result, "campaigns/c1")
     assert record["status"] == "ACTIVE"
     assert record["name"] == "Launch"
     assert record["created_at"] == "2026-01-01T00:00:00+0000"
+    assert result.pages[0].created_at == "2026-01-01T00:00:00.000000+00:00"
+    assert result.pages[0].updated_at == "2026-02-05T00:00:00.000000+00:00"
+
+
+@pytest.mark.parametrize(
+    ("stream", "path"),
+    [("ad_sets", "/act_1/adsets"), ("ads", "/act_1/ads")],
+)
+async def test_ad_children_preserve_created_and_updated_times(stream: str, path: str) -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/me/adaccounts"):
+            return httpx.Response(200, json={"data": [{"id": "act_1"}], "paging": {}})
+        assert request.url.path.endswith(path)
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "id": "item-1",
+                        "created_time": "2026-01-01T00:00:00+0000",
+                        "updated_time": "2026-02-05T00:00:00+0000",
+                    }
+                ],
+                "paging": {},
+            },
+        )
+
+    result = await _fetch(stream, handle)
+    assert result.pages[0].created_at == "2026-01-01T00:00:00.000000+00:00"
+    assert result.pages[0].updated_at == "2026-02-05T00:00:00.000000+00:00"
 
 
 async def test_a_forbidden_account_listing_fails_the_run() -> None:

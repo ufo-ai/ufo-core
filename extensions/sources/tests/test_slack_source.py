@@ -62,7 +62,14 @@ async def test_users_snapshot_follows_cursor_pagination() -> None:
             return _ok({"members": [{"id": "U2", "name": "bob"}]})
         return _ok(
             {
-                "members": [{"id": "U1", "name": "alice", "profile": {"email": "A@X.com"}}],
+                "members": [
+                    {
+                        "id": "U1",
+                        "name": "alice",
+                        "updated": 1_700_000_000,
+                        "profile": {"email": "A@X.com"},
+                    }
+                ],
                 "response_metadata": {"next_cursor": "page2"},
             }
         )
@@ -72,18 +79,31 @@ async def test_users_snapshot_follows_cursor_pagination() -> None:
     assert result.next_cursor is None
     assert result.deletes == ()
     assert _refs(result) == {"users/U1", "users/U2"}
+    assert result.pages[0].updated_at == "2023-11-14T22:13:20.000000+00:00"
 
 
 async def test_conversations_returns_a_snapshot() -> None:
     def handle(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/conversations.list"
-        return _ok({"channels": [{"id": "C1", "name": "general", "is_channel": True}]})
+        return _ok(
+            {
+                "channels": [
+                    {
+                        "id": "C1",
+                        "name": "general",
+                        "is_channel": True,
+                        "created": 1_700_000_001,
+                    }
+                ]
+            }
+        )
 
     result = await _fetch("conversations", handle)
     assert result.snapshot is True
     assert result.next_cursor is None
     assert _refs(result) == {"conversations/C1"}
     assert "general" in result.pages[0].body
+    assert result.pages[0].created_at == "2023-11-14T22:13:21.000000+00:00"
 
 
 def _message_handler(
@@ -135,12 +155,16 @@ async def test_messages_send_the_stored_channel_cursor_as_oldest_and_advance_it(
     assert history and history[0].get("oldest") == "1700000000.000000"
     assert history[0].get("inclusive") == "false"
     assert result.next_cursor == json.dumps({"C1": "1700000003.000200"}, sort_keys=True)
+    assert {page.created_at for page in result.pages} == {
+        "2023-11-14T22:13:22.000100+00:00",
+    }
 
 
 async def test_message_participants_derive_from_the_history_walk() -> None:
     result = await _fetch("message_participants", _message_handler([]))
     assert result.snapshot is False
     assert _refs(result) == {"message_participants/C1:1700000002.000100:from:a@x.com"}
+    assert result.pages[0].created_at == "2023-11-14T22:13:22.000100+00:00"
 
 
 async def test_conversation_threads_derive_a_thread_root() -> None:

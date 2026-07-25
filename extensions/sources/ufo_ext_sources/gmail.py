@@ -57,7 +57,13 @@ _BLOCK_TAGS = frozenset(
 )
 
 GMAIL_STREAMS: list[StreamSpec] = [
-    StreamSpec(name="messages", source_object="messages", primary_key="id"),
+    StreamSpec(
+        name="messages",
+        source_object="messages",
+        primary_key="id",
+        created_at_field="internal_date",
+        updated_at_field=None,
+    ),
 ]
 
 

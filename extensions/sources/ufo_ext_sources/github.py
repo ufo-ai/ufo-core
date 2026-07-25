@@ -42,12 +42,13 @@ from ufo.sdk.sources import (
     StreamSkipped,
     StreamSpec,
     WalkPage,
+    get_path,
 )
 
 PAGE_SIZE = 100
 _REPO_LIST_PARAMS = {"per_page": PAGE_SIZE, "type": "all", "sort": "pushed", "direction": "desc"}
 _USERS_ENRICH_CONCURRENCY = 8
-_GITHUB_ACCEPT = "application/vnd.github+json"
+_GITHUB_ACCEPT = "application/vnd.github+json, application/vnd.github.star+json"
 _GITHUB_API_VERSION = "2022-11-28"
 _STATE_ALL_STREAMS = frozenset({"issues", "pull_requests"})
 _UNTIL_STREAMS = frozenset({"commits"})
@@ -62,6 +63,7 @@ def _stream(
     source_object: str | None = None,
     primary_key: str = "id",
     cursor_field: str | None = None,
+    created_at_field: str | None = "created_at",
     ordering: Ordering = Ordering.none,
     canonical: bool = False,
 ) -> StreamSpec:
@@ -70,6 +72,7 @@ def _stream(
         source_object=source_object or name,
         primary_key=primary_key,
         cursor_field=cursor_field,
+        created_at_field=created_at_field,
         ordering=ordering,
         canonical=canonical,
     )
@@ -91,7 +94,11 @@ ALL_STREAMS: list[StreamSpec] = [
     _stream("commit_comment_reactions", cursor_field=None),
     _stream("commit_comments", cursor_field="updated_at"),
     _stream(
-        "commits", primary_key="sha", cursor_field="created_at", ordering=Ordering.newest_first
+        "commits",
+        primary_key="sha",
+        cursor_field="commit.committer.date",
+        created_at_field="commit.committer.date",
+        ordering=Ordering.newest_first,
     ),
     _stream("contributor_activity", cursor_field=None),
     _stream("deployments", cursor_field="updated_at"),
@@ -112,7 +119,7 @@ ALL_STREAMS: list[StreamSpec] = [
     _stream("releases", cursor_field="created_at"),
     _stream("review_comments", cursor_field="updated_at"),
     _stream("reviews", cursor_field=None),
-    _stream("stargazers", cursor_field="starred_at"),
+    _stream("stargazers", cursor_field="starred_at", created_at_field="starred_at"),
     _stream("tags", primary_key="name", cursor_field=None),
     _stream("team_members", cursor_field=None),
     _stream("team_memberships", cursor_field=None),
@@ -173,6 +180,9 @@ class GitHubConnector(RestConnector):
         return client
 
     def flatten(self, record: dict[str, Any], stream: StreamSpec) -> dict[str, Any]:
+        if stream.name == "stargazers":
+            user = record.get("user")
+            return {**user, **record} if isinstance(user, dict) else record
         if stream.name != "pull_requests":
             return record
         head = record.get("head")
@@ -414,7 +424,7 @@ def _cursor_bounds(
     tracking. None when the stream carries no cursor field."""
     if not cursor_field:
         return None, None
-    values = [record[cursor_field] for record in page if isinstance(record.get(cursor_field), str)]
+    values = [value for record in page if isinstance(value := get_path(record, cursor_field), str)]
     if not values:
         return None, None
     return max(values), min(values)

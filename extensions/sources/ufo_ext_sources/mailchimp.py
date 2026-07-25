@@ -65,6 +65,8 @@ def _stream(
     source_object: str | None = None,
     primary_key: str = "id",
     cursor_field: str | None = None,
+    created_at_field: str = "created_at",
+    updated_at_field: str | None = "updated_at",
     canonical: bool = False,
 ) -> StreamSpec:
     return StreamSpec(
@@ -72,23 +74,69 @@ def _stream(
         source_object=source_object or name,
         primary_key=primary_key,
         cursor_field=cursor_field,
+        created_at_field=created_at_field,
+        updated_at_field=updated_at_field,
         canonical=canonical,
     )
 
 
 MAILCHIMP_STREAMS: list[StreamSpec] = [
-    _stream("lists", cursor_field="date_created", canonical=True),
-    _stream("list_members", source_object="members", cursor_field="last_changed", canonical=True),
+    _stream(
+        "lists",
+        cursor_field="date_created",
+        created_at_field="date_created",
+        updated_at_field=None,
+        canonical=True,
+    ),
+    _stream(
+        "list_members",
+        source_object="members",
+        cursor_field="last_changed",
+        updated_at_field="last_changed",
+        canonical=True,
+    ),
     _stream("segments", cursor_field="updated_at", canonical=True),
-    _stream("campaigns", cursor_field="create_time", canonical=True),
-    _stream("automations", cursor_field="create_time", canonical=True),
-    _stream("email_activity", source_object="emails", cursor_field="timestamp", canonical=True),
-    _stream("reports", cursor_field="send_time"),
+    _stream(
+        "campaigns",
+        cursor_field="create_time",
+        created_at_field="create_time",
+        updated_at_field=None,
+        canonical=True,
+    ),
+    _stream(
+        "automations",
+        cursor_field="create_time",
+        created_at_field="create_time",
+        updated_at_field=None,
+        canonical=True,
+    ),
+    _stream(
+        "email_activity",
+        source_object="emails",
+        cursor_field="timestamp",
+        created_at_field="timestamp",
+        updated_at_field=None,
+        canonical=True,
+    ),
+    _stream(
+        "reports", cursor_field="send_time", created_at_field="send_time", updated_at_field=None
+    ),
     _stream("tags"),
     _stream("interest_categories"),
     _stream("interests"),
-    _stream("segment_members", source_object="members", cursor_field="last_changed"),
-    _stream("unsubscribes", cursor_field="timestamp", primary_key="email_id"),
+    _stream(
+        "segment_members",
+        source_object="members",
+        cursor_field="last_changed",
+        updated_at_field="last_changed",
+    ),
+    _stream(
+        "unsubscribes",
+        cursor_field="timestamp",
+        created_at_field="timestamp",
+        updated_at_field=None,
+        primary_key="email_id",
+    ),
 ]
 
 
@@ -96,6 +144,14 @@ class MailchimpConnector(RestConnector):
     name = "mailchimp"
     base_url = ""
     streams_list = MAILCHIMP_STREAMS
+
+    def flatten(self, record: dict[str, Any], stream: StreamSpec) -> dict[str, Any]:
+        if stream.name in {"list_members", "segment_members"}:
+            return {
+                **record,
+                "created_at": record.get("timestamp_signup") or record.get("timestamp_opt"),
+            }
+        return record
 
     @staticmethod
     def _data_field(stream: StreamSpec) -> str:

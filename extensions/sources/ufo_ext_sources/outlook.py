@@ -65,24 +65,32 @@ CONTACTS = StreamSpec(
     source_object="contacts",
     primary_key="id",
     cursor_field="lastModifiedDateTime",
+    created_at_field="createdDateTime",
+    updated_at_field="lastModifiedDateTime",
 )
 MESSAGES = StreamSpec(
     name="messages",
     source_object="messages",
     primary_key="id",
     cursor_field="lastModifiedDateTime",
+    created_at_field="createdDateTime",
+    updated_at_field="lastModifiedDateTime",
 )
 CONVERSATIONS = StreamSpec(
     name="conversations",
     source_object="messages",
     primary_key="id",
     cursor_field="updated_at",
+    created_at_field="created_at",
+    updated_at_field="updated_at",
 )
 EVENTS = StreamSpec(
     name="events",
     source_object="events",
     primary_key="id",
     cursor_field="lastModifiedDateTime",
+    created_at_field="createdDateTime",
+    updated_at_field="lastModifiedDateTime",
 )
 MAIL_FOLDERS = StreamSpec(
     name="mail_folders",
@@ -140,8 +148,8 @@ class OutlookConnector(RestConnector):
         params: dict[str, Any] = {"$top": 100, "$orderby": "lastModifiedDateTime asc"}
         if cursor:
             params["$filter"] = f"lastModifiedDateTime gt {cursor}"
+        conversations: dict[str, dict[str, Any]] = {}
         async for messages in self._get_odata_pages(client, "/me/messages", params=params):
-            conversations: dict[str, dict[str, Any]] = {}
             for message in messages:
                 conversation_id = message.get("conversationId")
                 if not isinstance(conversation_id, str) or not conversation_id:
@@ -149,9 +157,17 @@ class OutlookConnector(RestConnector):
                 sent_at = message.get("sentDateTime") or message.get("createdDateTime")
                 updated_at = message.get("lastModifiedDateTime") or sent_at
                 existing = conversations.get(conversation_id)
+                created_at = sent_at
+                if existing is not None:
+                    existing_created_at = existing.get("created_at")
+                    if existing_created_at and (
+                        not created_at or str(existing_created_at) < str(created_at)
+                    ):
+                        created_at = existing_created_at
                 if existing is not None and str(existing.get("updated_at") or "") >= str(
                     updated_at or ""
                 ):
+                    existing["created_at"] = created_at
                     continue
                 conversations[conversation_id] = {
                     "id": conversation_id,
@@ -160,10 +176,11 @@ class OutlookConnector(RestConnector):
                     "subject": message.get("subject"),
                     "snippet": message.get("bodyPreview"),
                     "last_message_at": sent_at,
+                    "created_at": created_at,
                     "updated_at": updated_at,
                 }
-            if conversations:
-                yield list(conversations.values())
+        if conversations:
+            yield list(conversations.values())
 
     async def _graph_delta_pages(
         self,

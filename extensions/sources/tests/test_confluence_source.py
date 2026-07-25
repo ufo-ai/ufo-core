@@ -57,20 +57,33 @@ PAGE_1_BODY = (
 )
 
 
-def _page(page_id: str, title: str, body_html: str, created: str) -> dict:
+def _page(page_id: str, title: str, body_html: str, created_at: str, updated_at: str) -> dict:
     return {
         "id": page_id,
         "status": "current",
         "title": title,
         "spaceId": "s1",
-        "version": {"number": 3, "createdAt": created},
+        "createdAt": created_at,
+        "version": {"number": 3, "createdAt": updated_at},
         "body": {"storage": {"value": body_html, "representation": "storage"}},
         "_links": {"webui": f"/pages/{page_id}"},
     }
 
 
-PAGE_1 = _page("p1", "Release Plan", PAGE_1_BODY, "2026-02-01T00:00:00.000Z")
-PAGE_2 = _page("p2", "Backlog", "<p>Second page</p>", "2026-02-05T00:00:00.000Z")
+PAGE_1 = _page(
+    "p1",
+    "Release Plan",
+    PAGE_1_BODY,
+    "2026-01-01T00:00:00.000Z",
+    "2026-02-01T00:00:00.000Z",
+)
+PAGE_2 = _page(
+    "p2",
+    "Backlog",
+    "<p>Second page</p>",
+    "2026-01-05T00:00:00.000Z",
+    "2026-02-05T00:00:00.000Z",
+)
 
 
 def _paginated_pages_handler() -> Callable[[httpx.Request], httpx.Response]:
@@ -98,13 +111,15 @@ async def test_pages_follow_offset_pagination_and_render_lifts_readable_prose() 
     assert result.deletes == ()
     assert result.next_cursor == "2026-02-05T00:00:00.000Z"
 
-    body = next(p.body for p in result.pages if p.source_ref == "pages/cloud-1:p1")
-    assert "Release Plan" in body
-    assert "Ship the launch by & Friday." in body
-    assert "Draft the email" in body
-    assert "Heads up" in body
-    assert "<" not in body
-    assert "storage" not in body
+    page = next(p for p in result.pages if p.source_ref == "pages/cloud-1:p1")
+    assert page.created_at == "2026-01-01T00:00:00.000000+00:00"
+    assert page.updated_at == "2026-02-01T00:00:00.000000+00:00"
+    assert "Release Plan" in page.body
+    assert "Ship the launch by & Friday." in page.body
+    assert "Draft the email" in page.body
+    assert "Heads up" in page.body
+    assert "<" not in page.body
+    assert "storage" not in page.body
 
 
 async def test_pages_incremental_filters_past_the_watermark() -> None:
@@ -168,6 +183,7 @@ async def test_comments_render_the_body() -> None:
     comment = {
         "id": "cm1",
         "pageId": "p1",
+        "createdAt": "2026-01-02T00:00:00.000Z",
         "version": {"number": 1, "createdAt": "2026-02-02T00:00:00.000Z"},
         "body": {
             "storage": {"value": "<p>Looks good &amp; ready</p>", "representation": "storage"}
@@ -183,6 +199,8 @@ async def test_comments_render_the_body() -> None:
 
     result = await _fetch("comments", handle)
     assert _refs(result) == {"comments/cloud-1:cm1"}
+    assert result.pages[0].created_at == "2026-01-02T00:00:00.000000+00:00"
+    assert result.pages[0].updated_at == "2026-02-02T00:00:00.000000+00:00"
     assert "Looks good & ready" in result.pages[0].body
     assert result.pages[0].title == "Looks good & ready"
 
@@ -199,7 +217,10 @@ async def test_groups_and_audit_streams_are_runnable() -> None:
         if path == "/ex/confluence/cloud-1/wiki/rest/api/audit":
             return httpx.Response(
                 200,
-                json={"results": [{"creationDate": "20260201", "summary": "login"}], "_links": {}},
+                json={
+                    "results": [{"creationDate": "1769904000000", "summary": "login"}],
+                    "_links": {},
+                },
             )
         return httpx.Response(404, json={"path": path})
 
@@ -209,7 +230,9 @@ async def test_groups_and_audit_streams_are_runnable() -> None:
 
     audit = await _fetch("audit", handle)
     assert audit.snapshot is False
-    assert _refs(audit) == {"audit/20260201"}
+    assert _refs(audit) == {"audit/1769904000000"}
+    assert audit.pages[0].created_at == "2026-02-01T00:00:00.000000+00:00"
+    assert audit.pages[0].updated_at is None
 
 
 def test_pages_flatten_carries_canonical_fields_and_preserves_scoping_and_cursor_lift() -> None:
@@ -218,6 +241,7 @@ def test_pages_flatten_carries_canonical_fields_and_preserves_scoping_and_cursor
         "cloud_id": "cloud-1",
         "site_url": "https://x.atlassian.net",
         "title": "Release Plan",
+        "createdAt": "2026-01-01T00:00:00.000Z",
         "version": {"createdAt": "2026-02-01T00:00:00.000Z", "authorId": "u1"},
         "body": {"storage": {"value": "<p>hi</p>"}},
         "_links": {"webui": "/pages/p1"},
@@ -227,7 +251,7 @@ def test_pages_flatten_carries_canonical_fields_and_preserves_scoping_and_cursor
     assert flat["kind"] == "page"
     assert flat["url"] == "https://x.atlassian.net/pages/p1"
     assert flat["body"] == "<p>hi</p>"
-    assert flat["created_at"] == "2026-02-01T00:00:00.000Z"
+    assert flat["created_at"] == "2026-01-01T00:00:00.000Z"
     assert flat["updated_at"] == "2026-02-01T00:00:00.000Z"
     assert flat["id"] == "cloud-1:p1"
     assert flat["version.createdAt"] == "2026-02-01T00:00:00.000Z"
@@ -254,6 +278,7 @@ def test_comments_flatten_derive_body_author_and_parent() -> None:
         "cloud_id": "cloud-1",
         "site_url": "https://x.atlassian.net",
         "pageId": "p1",
+        "createdAt": "2026-01-02T00:00:00.000Z",
         "version": {"createdAt": "2026-02-02T00:00:00.000Z", "authorId": "u9"},
         "body": {"storage": {"value": "<p>ok</p>"}},
         "_links": {"webui": "/pages/p1?focusedCommentId=cm1"},
@@ -263,6 +288,7 @@ def test_comments_flatten_derive_body_author_and_parent() -> None:
     assert flat["author"] == "u9"
     assert flat["parent_external_id"] == "p1"
     assert flat["url"] == "https://x.atlassian.net/pages/p1?focusedCommentId=cm1"
+    assert flat["created_at"] == "2026-01-02T00:00:00.000Z"
     assert flat["id"] == "cloud-1:cm1"
     assert flat["version.createdAt"] == "2026-02-02T00:00:00.000Z"
 

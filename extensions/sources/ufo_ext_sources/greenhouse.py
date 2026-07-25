@@ -68,6 +68,8 @@ def _stream(
     source_object: str | None = None,
     primary_key: str = "id",
     cursor_field: str | None = None,
+    created_at_field: str | None = "created_at",
+    updated_at_field: str | None = "updated_at",
     canonical: bool = False,
 ) -> StreamSpec:
     return StreamSpec(
@@ -75,6 +77,8 @@ def _stream(
         source_object=source_object or name,
         primary_key=primary_key,
         cursor_field=cursor_field,
+        created_at_field=created_at_field,
+        updated_at_field=updated_at_field,
         canonical=canonical,
     )
 
@@ -84,7 +88,9 @@ def _stream(
 # endpoints and the per-parent substreams. Cursors track Airbyte's manifest exactly.
 CANDIDATES = _stream("candidates", cursor_field="updated_at", canonical=True)
 JOBS = _stream("jobs", cursor_field="updated_at", canonical=True)
-APPLICATIONS = _stream("applications", cursor_field="applied_at", canonical=True)
+APPLICATIONS = _stream(
+    "applications", cursor_field="applied_at", created_at_field="applied_at", canonical=True
+)
 INTERVIEWS = _stream(
     "interviews", source_object="scheduled_interviews", cursor_field="updated_at", canonical=True
 )
@@ -134,7 +140,7 @@ DEMOGRAPHICS_QUESTION_SETS = _stream(
 DEMOGRAPHICS_QUESTIONS = _stream("demographics_questions", source_object="demographics/questions")
 DEPARTMENTS = _stream("departments")
 DISCIPLINES = _stream("disciplines")
-EEOC = _stream("eeoc", cursor_field="submitted_at")
+EEOC = _stream("eeoc", cursor_field="submitted_at", created_at_field="submitted_at")
 EMAIL_TEMPLATES = _stream("email_templates", cursor_field="updated_at")
 JOB_POSTS = _stream("job_posts", cursor_field="updated_at")
 JOB_STAGES = _stream("job_stages", cursor_field="updated_at")

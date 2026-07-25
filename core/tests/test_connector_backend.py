@@ -12,6 +12,7 @@ tombstone correctness requires the complete enumeration, so it is never sliced. 
 reads the adapter's `SyncResult`."""
 
 import json
+import logging
 from collections.abc import AsyncIterator
 from typing import Any, ClassVar
 from uuid import UUID, uuid4
@@ -124,11 +125,41 @@ async def test_connector_backend_rejects_an_empty_rendered_title() -> None:
 
 
 async def test_cursor_field_supplies_updated_at_when_provider_value_is_absent() -> None:
-    stream = StreamSpec(name="items", source_object="items", cursor_field="watermark")
+    stream = StreamSpec(
+        name="items",
+        source_object="items",
+        cursor_field="watermark",
+        updated_at_field="watermark",
+    )
     result = await _fetch(
         stream,
         [[{"id": 1, "watermark": "2026-07-23T18:30:00Z"}]],
     )
+    assert result.pages[0].updated_at == "2026-07-23T18:30:00.000000+00:00"
+
+
+async def test_record_timestamp_fields_resolve_nested_provider_paths() -> None:
+    stream = StreamSpec(
+        name="items",
+        source_object="items",
+        created_at_field="timestamps.created",
+        updated_at_field="timestamps.updated",
+    )
+    result = await _fetch(
+        stream,
+        [
+            [
+                {
+                    "id": 1,
+                    "timestamps": {
+                        "created": "2026-07-22T18:30:00Z",
+                        "updated": "2026-07-23T18:30:00Z",
+                    },
+                }
+            ]
+        ],
+    )
+    assert result.pages[0].created_at == "2026-07-22T18:30:00.000000+00:00"
     assert result.pages[0].updated_at == "2026-07-23T18:30:00.000000+00:00"
 
 
@@ -150,25 +181,58 @@ async def test_default_render_rejects_record_without_title_or_identity() -> None
         await _fetch(stream, [[{"body": "untitled"}]])
 
 
-@pytest.mark.parametrize(
-    ("record", "field"),
-    [
-        ({"id": 1, "created_at": 1_753_296_600}, "created_at"),
-        (
-            {
-                "id": 1,
-                "updated_at": 1_753_296_600,
-                "watermark": "2026-07-23T18:30:00Z",
-            },
-            "updated_at",
-        ),
-        ({"id": 1, "watermark": 1_753_296_600}, "watermark"),
-    ],
-)
-async def test_connector_rejects_non_string_timestamps(record: dict[str, Any], field: str) -> None:
-    stream = StreamSpec(name="items", source_object="items", cursor_field="watermark")
-    with pytest.raises(ValueError, match=field):
-        await _fetch(stream, [[record]])
+async def test_connector_normalizes_integer_timestamps() -> None:
+    stream = StreamSpec(
+        name="items",
+        source_object="items",
+        cursor_field="watermark",
+        updated_at_field="watermark",
+    )
+    result = await _fetch(
+        stream,
+        [[{"id": 1, "created_at": 1_753_296_600, "watermark": 1_753_300_200_000}]],
+    )
+    assert result.pages[0].created_at == "2025-07-23T18:50:00.000000+00:00"
+    assert result.pages[0].updated_at == "2025-07-23T19:50:00.000000+00:00"
+
+
+async def test_malformed_record_timestamp_warns_without_dropping_pages(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    stream = StreamSpec(
+        name="items",
+        source_object="items",
+        created_at_field="provider_created",
+        updated_at_field="provider_updated",
+    )
+    with caplog.at_level(logging.WARNING, logger="ufo"):
+        result = await _fetch(
+            stream,
+            [
+                [
+                    {"id": 1, "provider_created": True, "provider_updated": "not-a-time"},
+                    {
+                        "id": 2,
+                        "provider_created": "2025-07-23T18:50:00Z",
+                        "provider_updated": "2025-07-23T19:50:00Z",
+                    },
+                ]
+            ],
+        )
+    assert len(result.pages) == 2
+    assert result.pages[0].created_at is None
+    assert result.pages[0].updated_at is None
+    assert result.pages[1].created_at == "2025-07-23T18:50:00.000000+00:00"
+    assert result.pages[1].updated_at == "2025-07-23T19:50:00.000000+00:00"
+    warnings = [
+        record
+        for record in caplog.records
+        if record.getMessage() == "source_sync.malformed_timestamp"
+    ]
+    assert [record.ufo for record in warnings] == [
+        {"connector": "probe", "stream": "items", "field": "provider_created"},
+        {"connector": "probe", "stream": "items", "field": "provider_updated"},
+    ]
 
 
 async def test_capped_run_without_checkpoint_stores_the_envelope(

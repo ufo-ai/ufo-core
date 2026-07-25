@@ -13,6 +13,7 @@ enumerate through — never a scoped read, and the caller re-binds each row unde
 import asyncio
 import os
 import threading
+import warnings
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
@@ -29,7 +30,6 @@ from sqlalchemy.pool import NullPool
 
 MIGRATIONS_DIR = Path(__file__).parent / "schema" / "migrations"
 SQLITE_BUSY_TIMEOUT_MS = 5_000
-STAMPED_HEADS = "stamped_heads"
 WORKSPACE_GUC = "app.workspace_id"
 
 _engine: AsyncEngine | None = None
@@ -149,9 +149,8 @@ def apply_migrations(url: str, pack: str | None = None) -> None:
     the db↔loader↔context cycle (the loader reaches core through the same context that binds to this
     module).
 
-    `upgrade heads` reports success when it plans nothing, so the run ends by holding what `env.py`
-    stamped against the graph's heads. Two files claiming one revision id are one graph node: the
-    losing file's DDL is skipped, and every later deploy reads a schema the chain calls head."""
+    Two files claiming one revision id are one graph node, so the graph is validated before any DDL
+    runs."""
     from ufo.ext.loader import migration_locations
 
     config = AlembicConfig()
@@ -160,14 +159,13 @@ def apply_migrations(url: str, pack: str | None = None) -> None:
     config.set_main_option("version_locations", os.pathsep.join(locations))
     config.set_main_option("path_separator", "os")
     config.set_main_option("sqlalchemy.url", url.replace("%", "%%"))
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", UserWarning)
+            ScriptDirectory.from_config(config).get_heads()
+    except UserWarning as error:
+        raise RuntimeError("a duplicate migration revision collapses into one node") from error
     command.upgrade(config, "heads")
-    stamped = sorted(config.attributes[STAMPED_HEADS])
-    heads = sorted(ScriptDirectory.from_config(config).get_heads())
-    if stamped != heads:
-        raise RuntimeError(
-            f"migration stamped {stamped}, not the graph's heads {heads} — a revision id claimed "
-            "by two files collapses into one node, so `upgrade heads` skips the losing file's DDL"
-        )
 
 
 def _sqlite_on_connect(dbapi_connection: Any, _connection_record: Any) -> None:

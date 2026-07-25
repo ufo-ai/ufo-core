@@ -22,17 +22,43 @@ _REFUSAL_STATUS = frozenset({401, 403})
 _SENTRY_NEXT_RE = re.compile(r'rel="next";\s*results="true";\s*cursor="([^"]+)"')
 
 SENTRY_STREAMS: list[StreamSpec] = [
-    StreamSpec(name="organizations", source_object="organizations", primary_key="slug"),
-    StreamSpec(name="members", source_object="members", primary_key="id"),
     StreamSpec(
-        name="projects", source_object="projects", primary_key="id", cursor_field="dateCreated"
+        name="organizations",
+        source_object="organizations",
+        primary_key="slug",
+        created_at_field="dateCreated",
+        updated_at_field=None,
     ),
-    StreamSpec(name="issues", source_object="issues", primary_key="id", cursor_field="lastSeen"),
+    StreamSpec(
+        name="members",
+        source_object="members",
+        primary_key="id",
+        created_at_field="dateCreated",
+        updated_at_field=None,
+    ),
+    StreamSpec(
+        name="projects",
+        source_object="projects",
+        primary_key="id",
+        cursor_field="dateCreated",
+        created_at_field="dateCreated",
+        updated_at_field=None,
+    ),
+    StreamSpec(
+        name="issues",
+        source_object="issues",
+        primary_key="id",
+        cursor_field="lastSeen",
+        created_at_field="firstSeen",
+        updated_at_field="lastSeen",
+    ),
     StreamSpec(
         name="events",
         source_object="events",
         primary_key="id",
         cursor_field="dateCreated",
+        created_at_field="dateCreated",
+        updated_at_field=None,
         canonical=False,
     ),
     StreamSpec(
@@ -40,6 +66,8 @@ SENTRY_STREAMS: list[StreamSpec] = [
         source_object="releases",
         primary_key="version",
         cursor_field="dateCreated",
+        created_at_field="dateCreated",
+        updated_at_field=None,
         canonical=False,
     ),
 ]

@@ -59,6 +59,7 @@ async def test_tickets_incremental_cursor_with_sideload_email() -> None:
     assert _refs(result) == {"tickets/1"}
     assert result.snapshot is False
     assert result.next_cursor == "2026-02-01T00:00:00Z"
+    assert result.pages[0].updated_at == "2026-02-01T00:00:00.000000+00:00"
     body = result.pages[0].body
     assert "ada@example.com" in body
 

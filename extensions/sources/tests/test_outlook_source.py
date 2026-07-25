@@ -74,7 +74,51 @@ async def test_conversations_collapse_and_watermark() -> None:
     assert {page.source_ref for page in result.pages} == {"conversations/c1"}
     assert result.snapshot is False
     assert result.next_cursor == "2026-02-02T00:00:00Z"
+    assert result.pages[0].created_at == "2026-02-01T00:00:00.000000+00:00"
+    assert result.pages[0].updated_at == "2026-02-02T00:00:00.000000+00:00"
     assert "Roadmap" in result.pages[0].body
+
+
+async def test_conversations_preserve_creation_time_across_odata_pages() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path != "/v1.0/me/messages":
+            return httpx.Response(404, json={"path": request.url.path})
+        if request.url.params.get("page") == "2":
+            return httpx.Response(
+                200,
+                json={
+                    "value": [
+                        {
+                            "id": "m2",
+                            "conversationId": "c1",
+                            "subject": "Latest",
+                            "sentDateTime": "2026-02-03T00:00:00Z",
+                            "lastModifiedDateTime": "2026-02-04T00:00:00Z",
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "value": [
+                    {
+                        "id": "m1",
+                        "conversationId": "c1",
+                        "subject": "First",
+                        "sentDateTime": "2026-02-01T00:00:00Z",
+                        "lastModifiedDateTime": "2026-02-02T00:00:00Z",
+                    }
+                ],
+                "@odata.nextLink": "https://graph.microsoft.com/v1.0/me/messages?page=2",
+            },
+        )
+
+    result = await _fetch("conversations", handle)
+    assert len(result.pages) == 1
+    assert result.pages[0].created_at == "2026-02-01T00:00:00.000000+00:00"
+    assert result.pages[0].updated_at == "2026-02-04T00:00:00.000000+00:00"
+    assert "Latest" in result.pages[0].body
 
 
 def _mail_folders_delta_handler() -> Callable[[httpx.Request], httpx.Response]:
@@ -132,7 +176,9 @@ def _contacts_handler() -> Callable[[httpx.Request], httpx.Response]:
 
 
 async def test_contacts_flatten_derives_name_email_and_phone() -> None:
-    record = _flat(await _fetch("contacts", _contacts_handler()), "contacts/ct1")
+    result = await _fetch("contacts", _contacts_handler())
+    record = _flat(result, "contacts/ct1")
+    assert result.pages[0].created_at == "2026-01-01T00:00:00.000000+00:00"
     assert record["name"] == "Ada Lovelace"
     assert record["first_name"] == "Ada"
     assert record["email"] == "ada@example.com"
@@ -154,7 +200,9 @@ def _messages_handler() -> Callable[[httpx.Request], httpx.Response]:
                             "subject": "Roadmap",
                             "bodyPreview": "Q3 planning",
                             "from": {"emailAddress": {"address": "boss@example.com"}},
+                            "createdDateTime": "2026-01-31T00:00:00Z",
                             "sentDateTime": "2026-02-01T00:00:00Z",
+                            "lastModifiedDateTime": "2026-02-02T00:00:00Z",
                             "conversationId": "conv1",
                         }
                     ],
@@ -167,7 +215,10 @@ def _messages_handler() -> Callable[[httpx.Request], httpx.Response]:
 
 
 async def test_messages_flatten_derives_subject_snippet_and_from_handle() -> None:
-    record = _flat(await _fetch("messages", _messages_handler()), "messages/m1")
+    result = await _fetch("messages", _messages_handler())
+    record = _flat(result, "messages/m1")
+    assert result.pages[0].created_at == "2026-01-31T00:00:00.000000+00:00"
+    assert result.pages[0].updated_at == "2026-02-02T00:00:00.000000+00:00"
     assert record["subject"] == "Roadmap"
     assert record["snippet"] == "Q3 planning"
     assert record["from_handle"] == "boss@example.com"
@@ -185,6 +236,8 @@ def _events_handler() -> Callable[[httpx.Request], httpx.Response]:
                         {
                             "id": "e1",
                             "subject": "Weekly Sync",
+                            "createdDateTime": "2026-02-01T00:00:00Z",
+                            "lastModifiedDateTime": "2026-02-02T00:00:00Z",
                             "body": {"contentType": "html", "content": "<p>Weekly <b>sync</b></p>"},
                             "start": {"dateTime": "2026-02-05T09:00:00"},
                             "end": {"dateTime": "2026-02-05T09:30:00"},
@@ -200,7 +253,10 @@ def _events_handler() -> Callable[[httpx.Request], httpx.Response]:
 
 
 async def test_events_flatten_derives_title_start_and_strips_html_description() -> None:
-    record = _flat(await _fetch("events", _events_handler()), "events/e1")
+    result = await _fetch("events", _events_handler())
+    record = _flat(result, "events/e1")
+    assert result.pages[0].created_at == "2026-02-01T00:00:00.000000+00:00"
+    assert result.pages[0].updated_at == "2026-02-02T00:00:00.000000+00:00"
     assert record["title"] == "Weekly Sync"
     assert record["start_at"] == "2026-02-05T09:00:00"
     assert record["location"] == "Room 1"

@@ -94,6 +94,7 @@ def _boards_handler() -> Callable[[httpx.Request], httpx.Response]:
                                 "id": "b1",
                                 "name": "Roadmap",
                                 "state": "active",
+                                "created_at": "2026-01-01T00:00:00Z",
                                 "updated_at": "2026-02-01T00:00:00Z",
                             }
                         ]
@@ -109,6 +110,8 @@ async def test_boards_incremental_advances_watermark() -> None:
     result = await _fetch("boards", _boards_handler())
     assert {page.source_ref for page in result.pages} == {"boards/b1"}
     assert result.next_cursor == "2026-02-01T00:00:00Z"
+    assert result.pages[0].created_at == "2026-01-01T00:00:00.000000+00:00"
+    assert result.pages[0].updated_at == "2026-02-01T00:00:00.000000+00:00"
 
 
 async def test_boards_flatten_derives_api_url() -> None:
@@ -141,6 +144,7 @@ def _items_handler() -> Callable[[httpx.Request], httpx.Response]:
                                             "name": "Task A",
                                             "state": "done",
                                             "created_at": "2026-01-01T00:00:00Z",
+                                            "updated_at": "2026-02-01T00:00:00Z",
                                             "column_values": [],
                                         }
                                     ],
@@ -156,10 +160,13 @@ def _items_handler() -> Callable[[httpx.Request], httpx.Response]:
 
 
 async def test_items_flatten_derives_name_and_status_from_state() -> None:
-    record = _flat(await _fetch("items", _items_handler()), "items/it1")
+    result = await _fetch("items", _items_handler())
+    record = _flat(result, "items/it1")
     assert record["name"] == "Task A"
     assert record["status"] == "done"
     assert record["created_at"] == "2026-01-01T00:00:00Z"
+    assert result.pages[0].created_at == "2026-01-01T00:00:00.000000+00:00"
+    assert result.pages[0].updated_at == "2026-02-01T00:00:00.000000+00:00"
 
 
 def _updates_handler() -> Callable[[httpx.Request], httpx.Response]:

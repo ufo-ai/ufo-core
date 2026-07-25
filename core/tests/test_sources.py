@@ -208,8 +208,8 @@ async def _pages() -> list[sa.RowMapping]:
                         tables.page.c.source_id,
                         tables.page.c.stream,
                         tables.page.c.title,
-                        tables.page.c.source_created_at,
-                        tables.page.c.source_updated_at,
+                        tables.page.c.record_created_at,
+                        tables.page.c.record_updated_at,
                         tables.page.c.subject,
                         tables.page.c.digest,
                         tables.page.c.body_ref,
@@ -1115,8 +1115,8 @@ async def test_sync_persists_backend_page_browse_metadata(
     stored = (await _pages())[0]
     assert stored["stream"] == page.stream
     assert stored["title"] == page.title
-    assert stored["source_created_at"] == page.created_at
-    assert stored["source_updated_at"] == page.updated_at
+    assert stored["record_created_at"] == page.created_at
+    assert stored["record_updated_at"] == page.updated_at
     feed = CorePageFeed(blob=FilesystemBlobStore(root=tmp_path / "blobs"))
     with ws(workspace_id):
         change = (await feed.pages_changed_since(None, 1)).changes[0]
@@ -1152,7 +1152,7 @@ async def test_sync_refreshes_browse_metadata_without_replaying_unchanged_conten
 
     stored = (await _pages())[0]
     assert stored["title"] == refreshed.title
-    assert stored["source_updated_at"] == refreshed.updated_at
+    assert stored["record_updated_at"] == refreshed.updated_at
     assert stored["updated_at"] == stamped
 
 

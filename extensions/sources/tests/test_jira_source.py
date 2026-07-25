@@ -137,7 +137,10 @@ async def test_issues_paginate_advance_watermark_and_render_readable_body() -> N
     assert result.deletes == ()
     assert result.next_cursor == "2026-02-05T00:00:00.000+0000"
 
-    body = next(page.body for page in result.pages if page.source_ref == "issues/10001")
+    page = next(page for page in result.pages if page.source_ref == "issues/10001")
+    assert page.created_at == "2026-01-01T00:00:00.000000+00:00"
+    assert page.updated_at == "2026-02-01T00:00:00.000000+00:00"
+    body = page.body
     assert "Fix login bug" in body
     assert "Status: In Progress" in body
     assert "Assignee: Alice" in body
@@ -152,6 +155,48 @@ async def test_issues_incremental_filters_with_jql_and_advances_the_watermark() 
     assert seen and seen[0] == 'updated > "2026-02-03T00:00:00.000+0000" ORDER BY updated ASC'
     assert _refs(result) == {"issues/10002"}
     assert result.next_cursor == "2026-02-05T00:00:00.000+0000"
+
+
+async def test_issue_comments_preserve_comment_creation_time() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/oauth/token/accessible-resources":
+            return httpx.Response(200, json=[SITE])
+        if path == f"/ex/jira/{CLOUD_ID}/rest/api/3/search":
+            return httpx.Response(
+                200, json={"issues": [ISSUE_1], "startAt": 0, "maxResults": 100, "total": 1}
+            )
+        if path == f"/ex/jira/{CLOUD_ID}/rest/api/3/issue/10001/comment":
+            return httpx.Response(
+                200,
+                json={
+                    "comments": [
+                        {
+                            "id": "c1",
+                            "author": {"displayName": "Ada"},
+                            "body": {
+                                "type": "doc",
+                                "content": [
+                                    {
+                                        "type": "paragraph",
+                                        "content": [{"type": "text", "text": "Investigating"}],
+                                    }
+                                ],
+                            },
+                            "created": "2026-01-02T00:00:00.000+0000",
+                            "updated": "2026-01-03T00:00:00.000+0000",
+                        }
+                    ],
+                    "startAt": 0,
+                    "maxResults": 100,
+                    "total": 1,
+                },
+            )
+        return httpx.Response(404, json={"path": path})
+
+    result = await _fetch("issue_comments", handle)
+    assert result.pages[0].created_at == "2026-01-02T00:00:00.000000+00:00"
+    assert result.pages[0].updated_at == "2026-01-03T00:00:00.000000+00:00"
 
 
 async def test_projects_are_incremental_not_a_snapshot() -> None:

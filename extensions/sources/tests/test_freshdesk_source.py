@@ -52,6 +52,7 @@ async def test_tickets_page_number_walk_hits_the_tenant_host_and_advances_waterm
     assert _refs(result) == {"tickets/1"}
     assert result.snapshot is False
     assert result.next_cursor == "2026-02-01T00:00:00Z"
+    assert result.pages[0].updated_at == "2026-02-01T00:00:00.000000+00:00"
 
 
 async def test_groups_follow_the_link_header_default() -> None:

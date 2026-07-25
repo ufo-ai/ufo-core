@@ -90,7 +90,10 @@ async def test_tasks_flatten_derives_name_status_due_date_and_created_at() -> No
             },
         )
 
-    record = _flat(await _fetch("tasks", handle), "tasks/t1")
+    result = await _fetch("tasks", handle)
+    assert result.pages[0].created_at == "2026-01-01T00:00:00.000000+00:00"
+    assert result.pages[0].updated_at == "2026-02-02T00:00:00.000000+00:00"
+    record = _flat(result, "tasks/t1")
     assert record["name"] == "Ship"
     assert record["status"] == "Completed"
     assert record["due_date"] == "2026-03-01"

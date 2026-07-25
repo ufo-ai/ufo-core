@@ -266,8 +266,8 @@ class PageBrowse:
     id: UUID
     stream: str
     title: str
-    source_created_at: str | None
-    source_updated_at: str | None
+    record_created_at: str | None
+    record_updated_at: str | None
 
 
 @dataclass(frozen=True)
@@ -405,8 +405,8 @@ class SyncDriver:
                 id=page_id,
                 stream=page.stream,
                 title=page.title,
-                source_created_at=page.created_at,
-                source_updated_at=page.updated_at,
+                record_created_at=page.created_at,
+                record_updated_at=page.updated_at,
             )
             if existing is None or existing[:2] != (page.digest, False):
                 body_ref = f"{SOURCE_BLOB_PREFIX}/{source.source_id}/{page_id}"
@@ -442,8 +442,8 @@ class SyncDriver:
                             tables.page.c.tombstone,
                             tables.page.c.stream,
                             tables.page.c.title,
-                            tables.page.c.source_created_at,
-                            tables.page.c.source_updated_at,
+                            tables.page.c.record_created_at,
+                            tables.page.c.record_updated_at,
                         ).where(tables.page.c.source_id == source_id)
                     )
                 )
@@ -458,8 +458,8 @@ class SyncDriver:
                     id=row["id"],
                     stream=row["stream"],
                     title=row["title"],
-                    source_created_at=row["source_created_at"],
-                    source_updated_at=row["source_updated_at"],
+                    record_created_at=row["record_created_at"],
+                    record_updated_at=row["record_updated_at"],
                 ),
             )
             for row in rows
@@ -490,8 +490,8 @@ class SyncDriver:
                         body_ref=changed_page.body_ref,
                         stream=changed_page.browse.stream,
                         title=changed_page.browse.title,
-                        source_created_at=changed_page.browse.source_created_at,
-                        source_updated_at=changed_page.browse.source_updated_at,
+                        record_created_at=changed_page.browse.record_created_at,
+                        record_updated_at=changed_page.browse.record_updated_at,
                         subject=source.subject,
                         tombstone=False,
                         updated_at=now,
@@ -508,8 +508,8 @@ class SyncDriver:
                             body_ref=changed_page.body_ref,
                             stream=changed_page.browse.stream,
                             title=changed_page.browse.title,
-                            source_created_at=changed_page.browse.source_created_at,
-                            source_updated_at=changed_page.browse.source_updated_at,
+                            record_created_at=changed_page.browse.record_created_at,
+                            record_updated_at=changed_page.browse.record_updated_at,
                             subject=source.subject,
                             tombstone=False,
                             created_at=now,
@@ -522,8 +522,8 @@ class SyncDriver:
                     .values(
                         stream=browse_page.stream,
                         title=browse_page.title,
-                        source_created_at=browse_page.source_created_at,
-                        source_updated_at=browse_page.source_updated_at,
+                        record_created_at=browse_page.record_created_at,
+                        record_updated_at=browse_page.record_updated_at,
                     )
                     .where(tables.page.c.id == browse_page.id)
                 )
@@ -660,8 +660,8 @@ class CorePageFeed:
                 tables.page.c.body_ref,
                 tables.page.c.digest,
                 tables.page.c.tombstone,
-                tables.page.c.source_created_at,
-                tables.page.c.source_updated_at,
+                tables.page.c.record_created_at,
+                tables.page.c.record_updated_at,
                 tables.page.c.created_at,
                 tables.page.c.updated_at,
             )
@@ -682,7 +682,7 @@ class CorePageFeed:
         changes: list[PageChange] = []
         for row in rows:
             body = "" if row["tombstone"] else (await self.blob.get(row["body_ref"])).decode()
-            source_as_of = row["source_updated_at"] or row["source_created_at"]
+            record_as_of = row["record_updated_at"] or row["record_created_at"]
             changes.append(
                 PageChange(
                     page_id=row["id"],
@@ -693,8 +693,8 @@ class CorePageFeed:
                     tombstone=bool(row["tombstone"]),
                     created_at=row["created_at"],
                     as_of=(
-                        datetime.fromisoformat(source_as_of)
-                        if source_as_of is not None
+                        datetime.fromisoformat(record_as_of)
+                        if record_as_of is not None
                         else row["created_at"]
                     ),
                     changed_at=row["updated_at"],
