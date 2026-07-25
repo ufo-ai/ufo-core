@@ -5,8 +5,10 @@ on:
     types: [opened, synchronize, reopened, ready_for_review]
   pull_request_review:
     types: [submitted, edited, dismissed]
+  # The pull_request_target and pull_request_review triggers above drive this in real time;
+  # the cron is only a backstop for a missed event, so every 30 minutes is plenty.
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: '*/30 * * * *'
   workflow_dispatch:
     inputs:
       pr:

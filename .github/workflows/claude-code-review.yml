@@ -17,8 +17,17 @@ on:
         description: Pull request number to review
         required: true
 
+# A new push to a PR supersedes the in-flight review; cancel it so review runs never stack.
+# workflow_dispatch runs group by the input pr, so a manual re-review is never cancelled by another PR.
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number || inputs.pr || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   claude-review:
+    # Skip drafts: a PR is reviewed once marked ready (the ready_for_review trigger above).
+    # workflow_dispatch carries no pull_request payload, so draft is empty there and the review runs.
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     permissions:
       contents: read
