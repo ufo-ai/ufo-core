@@ -517,7 +517,8 @@ class Manifest:
     names the sub-seams this extension consumes from another (a browser extension `requires` the
     `cdp_providers` seam); `serve` eagerly resolves each at boot and fails loud — naming the
     extension and the seam — if the backend is absent or unkeyed, so a missing dependency stops the
-    process at startup rather than on the first tool call."""
+    process at startup rather than on the first tool call. `sandbox_internet` derives metered public
+    egress for live turns when the extension's sandbox tools require it."""
 
     name: str
     version: str
@@ -547,6 +548,7 @@ class Manifest:
     auth_proxies: tuple[AuthProxySpec, ...] = ()
     search_providers: tuple[SearchProviderSpec, ...] = ()
     memory_search: tuple[MemorySearchProviderSpec, ...] = ()
+    sandbox_internet: bool = False
     requires: tuple[str, ...] = field(default_factory=tuple)
 
 

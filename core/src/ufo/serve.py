@@ -85,7 +85,7 @@ from ufo.runtime_instance import (
 )
 from ufo.sandbox.fs_creds import DEFAULT_S3_REGION, AwsStsClient, SandboxFsCredentialMinter
 from ufo.sandbox.local import LocalCarrier
-from ufo.sandbox.proxy.rules import Rule, connector_transfer_hosts
+from ufo.sandbox.proxy.rules import Rule, connector_transfer_hosts, derive_manifest_rules
 from ufo.sandbox.proxy.server import EgressProxy, PerAgentRules, generate_ca
 from ufo.sandbox.session import EGRESS_CA_CERT_ENV, Carrier, ProxyEndpoint
 from ufo.schema.records import DBOS_APP_NAME, DBOS_APP_VERSION, DBOS_MAX_EXECUTOR_THREADS
@@ -830,6 +830,7 @@ def _local_egress_proxy(
     resolver = PerAgentRules(
         base=_local_rule_base(config, manifests),
         grants=GrantStore() if credentials is not None else None,
+        internet=derive_manifest_rules(manifests),
         transfer_hosts=connector_transfer_hosts(manifests),
         clis=connector_clis(manifests),
     )

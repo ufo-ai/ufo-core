@@ -10,17 +10,19 @@ from ufo.ext.manifest import ConnectorProvider, Manifest
 from ufo.grants import Grant, grant_sentinel
 from ufo.sandbox.proxy.rules import (
     ANTHROPIC_HOST,
-    GRANT_METER_DIMENSION,
     OPENAI_HOST,
+    REQUEST_METER_DIMENSION,
     SENTINEL_MODEL_KEY,
     ConnectorTransferHosts,
     ForwardRule,
     InjectionRule,
+    InternetRule,
     MeterRule,
     ScopeRule,
     connector_transfer_hosts,
     derive_cli_rules,
     derive_grant_rules,
+    derive_manifest_rules,
     derive_model_rules,
     provider_host,
 )
@@ -29,6 +31,13 @@ from ufo.sandbox.proxy.rules import (
 def test_provider_host_by_prefix() -> None:
     assert provider_host("claude-opus-4-8") == ANTHROPIC_HOST
     assert provider_host("gpt-5.4") == OPENAI_HOST
+
+
+def test_manifest_derives_public_internet_only_when_declared() -> None:
+    closed = Manifest(name="closed", version="0")
+    open_ = Manifest(name="open", version="0", sandbox_internet=True)
+    assert derive_manifest_rules((closed,)) == ()
+    assert derive_manifest_rules((closed, open_)) == (InternetRule(),)
 
 
 def test_unknown_model_has_no_host() -> None:
@@ -93,7 +102,7 @@ def test_grant_with_a_provider_host_admits_and_meters_it() -> None:
     rules = derive_grant_rules((_grant(),))
     scope = next(r for r in rules if isinstance(r, ScopeRule))
     assert scope.allowed_hosts == frozenset({CLI_HOST})
-    assert MeterRule(host=CLI_HOST, dimension=GRANT_METER_DIMENSION) in rules
+    assert MeterRule(host=CLI_HOST, dimension=REQUEST_METER_DIMENSION) in rules
 
 
 def test_brokered_grant_admits_only_its_transfer_hosts_never_an_empty_host() -> None:
@@ -106,7 +115,7 @@ def test_brokered_grant_admits_only_its_transfer_hosts_never_an_empty_host() -> 
     scope = next(r for r in rules if isinstance(r, ScopeRule))
     assert scope.allowed_hosts == frozenset(TRANSFER)
     assert "" not in scope.allowed_hosts
-    assert MeterRule(host=TRANSFER[0], dimension=GRANT_METER_DIMENSION) in rules
+    assert MeterRule(host=TRANSFER[0], dimension=REQUEST_METER_DIMENSION) in rules
 
 
 def test_brokered_grant_without_any_host_derives_no_scope_rule() -> None:

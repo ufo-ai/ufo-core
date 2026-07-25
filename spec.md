@@ -114,13 +114,17 @@ plaintext transport.
 
 **The sandbox proxy is core, not an extension** — it is the enforcement point for three core
 invariants: **sentinel swap** (processes inside see placeholder credentials; the proxy swaps real
-values onto the wire, so raw secrets never enter the sandbox), **grant scoping** (an outbound call
-is allowed only for hosts/accounts the agent's grants cover — principle 4 enforced at the wire),
-and **wire metering** (every model/API call made from inside the sandbox lands in the ledger).
+values onto the wire, so raw secrets never enter the sandbox), **grant scoping** (authenticated
+calls use only accounts the agent's grants cover — principle 4 enforced at the wire), and **wire
+metering** (every model/API call made from inside the sandbox lands in the ledger). An extension may
+declare `sandbox_internet`; its deploy's live turns may then reach globally routable public IPv4
+through a metered opaque tunnel. DNS is pinned and every IPv6, loopback, private, link-local,
+reserved, multicast, or shared-space answer is refused. Tokenless and ended turns cannot use public
+internet.
 Extensions never register raw network rules; the proxy's rewrite rules are *derived* from their
-manifests — a credential slot, a connector, a model provider each imply their injection and scoping
-rules. Declare, don't open. The enterprise k8s layer later ships its apiserver-rewrite / token-mint
-module through this same rewriter seam.
+manifests — sandbox internet, a credential slot, a connector, or a model provider implies its
+scoping, injection, and metering rules. Declare, don't open. The enterprise k8s layer later ships
+its apiserver-rewrite / token-mint module through this same rewriter seam.
 
 The working directory mounts
 from the blob store — a bind mount on the filesystem backend, the sandbox-fs design on S3 — and the

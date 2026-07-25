@@ -2,9 +2,8 @@
 
 Rules are values the proxy reads, not an API extensions call: a credential slot implies its
 sentinel→real injection, a granted host implies its scope, a metered host implies its dimension.
-Two derivations produce them — the deploy's model provider from its key, and each OAuth grant from
-its host — and derivation is the only path in. A grant injects nothing: the broker holds the
-account's token and executes server-side, so a grant only admits and meters its host."""
+A live turn adds public internet. A grant injects nothing: the broker holds the account's token
+and executes server-side, so a grant only admits and meters its host."""
 
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -15,7 +14,7 @@ from ufo.ext.manifest import Manifest, open_connector_namespace
 from ufo.grants import Grant, grant_sentinel
 from ufo.sandbox.session import SENTINEL_MODEL_KEY
 
-GRANT_METER_DIMENSION = "requests"
+REQUEST_METER_DIMENSION = "requests"
 
 ANTHROPIC_HOST = "api.anthropic.com"
 OPENAI_HOST = "api.openai.com"
@@ -35,10 +34,14 @@ PROVIDER_AUTH = {
 
 @dataclass(frozen=True)
 class ScopeRule:
-    """The container may open a connection only to a host on this allowlist; everything else is
-    refused at CONNECT. Default-deny is the absence of a matching ScopeRule."""
+    """An exact host allowlist for model and connector traffic."""
 
     allowed_hosts: frozenset[str]
+
+
+@dataclass(frozen=True)
+class InternetRule:
+    """A live turn may reach metered public internet."""
 
 
 @dataclass(frozen=True)
@@ -74,7 +77,7 @@ class ForwardRule:
     forward: RequestForwarder
 
 
-Rule = ScopeRule | InjectionRule | MeterRule | ForwardRule
+Rule = ScopeRule | InternetRule | InjectionRule | MeterRule | ForwardRule
 
 
 def provider_host(model: str) -> str:
@@ -86,8 +89,8 @@ def provider_host(model: str) -> str:
 
 def derive_model_rules(model: str, real_key: str) -> tuple[Rule, ...]:
     """The U2 rule set: the deploy's model provider is reachable and its key is injected from the
-    sentinel the sandbox sees; nothing else is allowed out. The auth header is provider-shaped —
-    Anthropic reads a raw key from `x-api-key`, OpenAI a `Bearer` token from `authorization`."""
+    sentinel the sandbox sees. The auth header is provider-shaped — Anthropic reads a raw key from
+    `x-api-key`, OpenAI a `Bearer` token from `authorization`."""
     host = provider_host(model)
     header, prefix = PROVIDER_AUTH[host]
     return (
@@ -102,6 +105,11 @@ def derive_model_rules(model: str, real_key: str) -> tuple[Rule, ...]:
     )
 
 
+def derive_manifest_rules(manifests: tuple[Manifest, ...]) -> tuple[InternetRule, ...]:
+    """A deploy with an extension that needs sandbox internet admits its live turns."""
+    return (InternetRule(),) if any(manifest.sandbox_internet for manifest in manifests) else ()
+
+
 def derive_grant_rules(
     grants: tuple[Grant, ...], transfer_hosts: "ConnectorTransferHosts | None" = None
 ) -> tuple[Rule, ...]:
@@ -111,14 +119,14 @@ def derive_grant_rules(
     granted host shows in `ufoctl spend`. A grant injects nothing — the broker holds the account's
     token and runs connector tools server-side, so no secret is on the wire. A brokered grant admits
     no provider host of its own (its `host` is empty), so only its transfer hosts scope; an
-    ungranted host derives no ScopeRule, so the proxy refuses it at CONNECT."""
+    ungranted host derives no exact ScopeRule, MeterRule, or authenticated path."""
     rules: list[Rule] = []
     for grant in grants:
         extra = transfer_hosts.of(grant.provider) if transfer_hosts is not None else ()
         hosts = tuple(dict.fromkeys(host for host in (grant.host, *extra) if host))
         if hosts:
             rules.append(ScopeRule(allowed_hosts=frozenset(hosts)))
-            rules.extend(MeterRule(host=host, dimension=GRANT_METER_DIMENSION) for host in hosts)
+            rules.extend(MeterRule(host=host, dimension=REQUEST_METER_DIMENSION) for host in hosts)
     return tuple(rules)
 
 

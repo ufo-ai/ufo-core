@@ -25,7 +25,7 @@ from ufo.config import Config
 from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.grants import ConnectHandoff, GrantStore, install_connect_flow
-from ufo.sandbox.proxy.rules import GRANT_METER_DIMENSION, MeterRule, ScopeRule
+from ufo.sandbox.proxy.rules import REQUEST_METER_DIMENSION, MeterRule, ScopeRule
 from ufo.sandbox.proxy.server import EgressProxy, PerAgentRules, generate_ca
 from ufo.sandbox.session import RunToken
 from ufo.schema import tables
@@ -167,7 +167,7 @@ async def test_connect_binds_a_grant_and_the_proxy_admits_and_meters_the_host(
         assert any(
             isinstance(r, ScopeRule) and sample.CONNECTOR_HOST in r.allowed_hosts for r in rules
         )
-        assert MeterRule(host=sample.CONNECTOR_HOST, dimension=GRANT_METER_DIMENSION) in rules
+        assert MeterRule(host=sample.CONNECTOR_HOST, dimension=REQUEST_METER_DIMENSION) in rules
         proxy._meter_ledger(sample.CONNECTOR_HOST, _basic(run), rules)
     finally:
         await proxy.stop()

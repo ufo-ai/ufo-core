@@ -1,6 +1,6 @@
 """Grants: an OAuth account bound to an agent through `/connect` — a connection won in chat rather
-than a BYOK value set at deploy. The proxy's egress scope is derived from the workspace's grants, so
-a granted host is reachable and metered and every ungranted host is refused at CONNECT.
+than a BYOK value set at deploy. The proxy derives authenticated egress from the workspace's
+grants, so only a granted account can inject or forward credentials to its provider.
 
 `ConnectFlow` runs the two-legged OAuth handoff: `authorize` opens a provider's link carrying sealed
 state; `complete` verifies that state, exchanges the code for the connected account, and records the

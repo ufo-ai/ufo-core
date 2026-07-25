@@ -114,6 +114,7 @@ def test_manifest_declares_both_repls_with_verbatim_descriptions() -> None:
     assert tools["js_repl"].description.startswith("Persistent Node.js REPL for Playwright")
     assert "openpyxl" in tools["xlsx_repl"].description
     assert "code" in tools["js_repl"].input_model.model_json_schema()["properties"]
+    assert manifest.sandbox_internet is True
 
 
 def test_data_skills_parse_and_index() -> None:

@@ -7,13 +7,15 @@ model and credential rules plus that agent's OAuth grants, derived fresh (never 
 cached per turn. A run with no or unknown token resolves to the model and credential base alone —
 never a broad allow.
 
-Default-deny is a CONNECT the proxy refuses: a host no resolved ScopeRule admits gets a 403 and
-never leaves the machine. An admitted host carrying an InjectionRule or ForwardRule is MITM'd — but
-only for a turn the DB still reports running: the injection swaps in the real model or credential
-key, so a tokenless, unknown-turn, or terminal-turn CONNECT to a keyed host is refused (403) and
-the key never reaches the wire (the gate the local carrier leans on — a host process can reach the
-proxy directly). Authorized, the proxy terminates TLS with a leaf minted from the per-process CA
-(in the container's trust store) and dispatches on what the request carries: a grant sentinel in a
+Default-deny is a CONNECT the proxy refuses: ScopeRule admits exact model and grant hosts.
+InternetRule admits a live turn's globally routable IPv4 after resolving and pinning DNS;
+tokenless, ended-turn, private, and IPv6 destinations are refused. An admitted host carrying an
+InjectionRule or ForwardRule is MITM'd — but only for a turn the DB still reports running: the
+injection swaps in the real model or credential key, so a tokenless, unknown-turn, or terminal-turn
+CONNECT to a keyed host is refused (403) and the key never reaches the wire (the gate the local
+carrier leans on — a host process can reach the proxy directly). Authorized, the proxy terminates
+TLS with a leaf minted from the per-process CA (in the container's trust store) and dispatches on
+what the request carries: a grant sentinel in a
 ForwardRule's header executes through the grant's broker under the granted account (the credential
 exists only broker-side — the wire analog of a connector tool call); otherwise the sentinel
 Authorization value is swapped for the real credential (selecting by the exact sentinel, so two
@@ -28,8 +30,10 @@ model host, whose teed SSE response is parsed for its token usage and metered un
 host-side and never touches the proxy)."""
 
 import asyncio
+import ipaddress
 import json
 import ssl
+import struct
 import tempfile
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
@@ -37,6 +41,9 @@ from http import HTTPStatus
 from pathlib import Path
 from uuid import UUID
 
+import dns.asyncresolver
+import dns.exception
+import dns.name
 import sqlalchemy as sa
 
 from ufo.accounting import (
@@ -53,9 +60,11 @@ from ufo.o11y import emit_metric, log
 from ufo.sandbox.proxy.rules import (
     ANTHROPIC_HOST,
     OPENAI_HOST,
+    REQUEST_METER_DIMENSION,
     ConnectorTransferHosts,
     ForwardRule,
     InjectionRule,
+    InternetRule,
     MeterRule,
     Rule,
     ScopeRule,
@@ -71,6 +80,8 @@ RELAY_CHUNK_BYTES = 65536
 MAX_HEADER_BYTES = 65536
 CONNECT_UPSTREAM_TIMEOUT_SECONDS = 30
 DEFAULT_HTTPS_PORT = 443
+MIN_CONNECT_PORT = 1
+MAX_CONNECT_PORT = 65535
 CA_VALID_DAYS = "3650"
 LEAF_VALID_DAYS = "365"
 RULE_CACHE_MAX = 4096
@@ -79,6 +90,7 @@ MAX_FORWARD_BODY_BYTES = 1_048_576
 
 RuleResolver = Callable[["RunToken | None"], Awaitable[tuple[Rule, ...]]]
 TurnAuthorizer = Callable[["RunToken"], Awaitable[bool]]
+PublicAddressResolver = Callable[[str, int], Awaitable[str]]
 
 
 async def generate_ca() -> tuple[str, str]:
@@ -120,30 +132,33 @@ async def _openssl(*argv: str) -> None:
 class PerAgentRules:
     """Resolve the proxy's rule set for one turn's agent, derived from the run token each call: the
     workspace-wide model and credential base plus that agent's own OAuth grant rules. Per-agent
-    scoping is the wire's isolation — agent A's turn resolves only A's grants, so A can neither
-    reach (no ScopeRule) nor inject (no matching sentinel) another agent's granted account. A run
-    with no or unknown token yields the base alone; a resolution error raises to the proxy, which
-    fails closed to the base without caching it — never a broad allow, never another agent's grant.
-    Deriving each call (not once at boot) is the liveness: a grant recorded mid-serve is live for
-    the next turn."""
+    authentication is the wire's isolation — agent A's turn resolves only A's grants, so A cannot
+    inject or forward through another agent's account. A run with no or unknown token yields the
+    base alone; a resolution error raises to the proxy, which fails closed to the base without
+    caching it — never a broad allow, never another agent's grant. Deriving each call (not once at
+    boot) is the liveness: a grant recorded mid-serve is live for the next turn."""
 
     base: tuple[Rule, ...]
     grants: GrantStore | None
+    internet: tuple[InternetRule, ...] = ()
     transfer_hosts: ConnectorTransferHosts = field(
         default_factory=lambda: ConnectorTransferHosts(explicit={})
     )
     clis: Mapping[str, CliCredential] = field(default_factory=dict)
 
     async def resolve(self, run: RunToken | None) -> tuple[Rule, ...]:
-        if run is None or self.grants is None:
+        if run is None:
             return self.base
         turn = await self._turn_of(run)
         if turn is None:
             return self.base
         agent_id, acting_member_id = turn
+        rules = (*self.base, *self.internet)
+        if self.grants is None:
+            return rules
         granted = await self.grants.active_grants(run.workspace_id, agent_id)
         return (
-            *self.base,
+            *rules,
             *derive_grant_rules(granted, self.transfer_hosts),
             *derive_cli_rules(granted, acting_member_id, self.clis),
         )
@@ -200,6 +215,7 @@ class EgressProxy:
     authorize: TurnAuthorizer
     ca_cert: str
     ca_key: str
+    resolve_public: PublicAddressResolver | None = None
     pricing: Pricing = CORE_PRICING
     _server: asyncio.Server | None = field(default=None, init=False)
     _workdir: tempfile.TemporaryDirectory | None = field(default=None, init=False)
@@ -257,14 +273,42 @@ class EgressProxy:
                 return
             run = _run_token(proxy_auth)
             rules = await self._rules_for(run)
-            if not any(isinstance(r, ScopeRule) and host in r.allowed_hosts for r in rules):
+            connect_host = host
+            exactly_scoped = any(
+                isinstance(rule, ScopeRule) and host in rule.allowed_hosts for rule in rules
+            )
+            if not exactly_scoped and (
+                run is None
+                or not any(isinstance(rule, InternetRule) for rule in rules)
+                or not await self.authorize(run)
+            ):
                 await _respond(writer, 403, f"egress to {host} is not permitted")
                 return
-            port = int(port_text or DEFAULT_HTTPS_PORT)
+            try:
+                port = int(port_text or DEFAULT_HTTPS_PORT)
+            except ValueError:
+                await _respond(writer, 400, "invalid CONNECT port")
+                return
+            if not MIN_CONNECT_PORT <= port <= MAX_CONNECT_PORT:
+                await _respond(writer, 400, "invalid CONNECT port")
+                return
+            if not exactly_scoped:
+                try:
+                    resolver = self.resolve_public or self._resolve_public_address
+                    connect_host = await resolver(host, port)
+                except PermissionError:
+                    await _respond(writer, 403, f"egress to {host} is not permitted")
+                    return
+                except (OSError, TimeoutError):
+                    await _respond(writer, 502, f"cannot reach {host}")
+                    return
+                rules = (*rules, MeterRule(host=host, dimension=REQUEST_METER_DIMENSION))
             injections = [r for r in rules if isinstance(r, InjectionRule) and r.host == host]
             forwards = [r for r in rules if isinstance(r, ForwardRule) and r.host == host]
             if not injections and not forwards:
-                await self._tunnel(reader, writer, host, port, proxy_auth, rules)
+                await self._tunnel(
+                    reader, writer, host, port, proxy_auth, rules, connect_host=connect_host
+                )
             elif run is None or not await self.authorize(run):
                 await _respond(writer, 403, f"egress to {host} requires a live turn")
             else:
@@ -296,6 +340,40 @@ class EgressProxy:
         self._rule_cache[key] = rules
         return rules
 
+    async def _resolve_public_address(self, host: str, port: int) -> str:
+        """Resolve and pin globally routable IPv4 with cancellable async DNS."""
+        if ":" in host:
+            raise PermissionError(host)
+        addresses: tuple[ipaddress.IPv4Address, ...]
+        try:
+            addresses = (ipaddress.IPv4Address(host),)
+        except ipaddress.AddressValueError:
+            try:
+                name = dns.name.from_text(host)
+                answers = await dns.asyncresolver.resolve(
+                    name,
+                    "A",
+                    lifetime=CONNECT_UPSTREAM_TIMEOUT_SECONDS,
+                    search=False,
+                )
+            except (
+                UnicodeError,
+                struct.error,
+                dns.exception.SyntaxError,
+                dns.name.NameTooLong,
+            ) as error:
+                raise PermissionError(host) from error
+            except dns.exception.DNSException as error:
+                raise OSError(host) from error
+            addresses = tuple(
+                dict.fromkeys(ipaddress.IPv4Address(str(answer)) for answer in answers)
+            )
+        if not addresses or any(
+            not address.is_global or address.is_multicast for address in addresses
+        ):
+            raise PermissionError(host)
+        return str(addresses[0])
+
     async def _tunnel(
         self,
         reader: asyncio.StreamReader,
@@ -304,6 +382,7 @@ class EgressProxy:
         port: int,
         proxy_auth: str,
         rules: tuple[Rule, ...],
+        connect_host: str,
     ) -> None:
         """An admitted host with no key to inject (a grant holds its token server-side): relay bytes
         opaquely, never terminating TLS. A MeterRule host is counted once the tunnel is
@@ -312,7 +391,8 @@ class EgressProxy:
         to the turn off the relay path. A connection that never opens (502) is not counted."""
         try:
             upstream_reader, upstream_writer = await asyncio.wait_for(
-                asyncio.open_connection(host, port), timeout=CONNECT_UPSTREAM_TIMEOUT_SECONDS
+                asyncio.open_connection(connect_host, port),
+                timeout=CONNECT_UPSTREAM_TIMEOUT_SECONDS,
             )
         except (OSError, TimeoutError):
             await _respond(writer, 502, f"cannot reach {host}")

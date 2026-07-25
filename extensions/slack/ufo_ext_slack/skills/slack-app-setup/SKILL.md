@@ -27,8 +27,6 @@ Slack's own pages and enters two values privately in their terminal.
   Slack's `url_verification` body has no team id, so its bounded challenge echoes without binding
   a workspace or marking setup connected. If verification fails anyway, the deploy isn't reachable
   at the URL — the URL is wrong.
-- **Don't probe the URL.** The sandbox egress proxy denies arbitrary hosts, so `curl`/`dig`
-  against the deploy or Slack proves nothing. The URL is correct by construction; use it.
 - **Secrets never enter this chat.** The bot token and signing secret travel through
   `request_credentials` — the member's terminal prompts for each value privately. Never ask for a
   secret in chat prose, and never accept one pasted here; if a member pastes one, tell them to

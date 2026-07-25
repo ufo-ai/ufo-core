@@ -24,6 +24,7 @@ from ufo.sandbox.proxy.rules import (
     Rule,
     ScopeRule,
     connector_transfer_hosts,
+    derive_manifest_rules,
     derive_model_rules,
 )
 from ufo.sandbox.proxy.server import EgressProxy, PerAgentRules
@@ -124,6 +125,7 @@ class ProxyServe:
         resolver = PerAgentRules(
             base=self._base(),
             grants=GrantStore(),
+            internet=derive_manifest_rules(self.manifests),
             transfer_hosts=connector_transfer_hosts(self.manifests),
             clis=connector_clis(self.manifests),
         )

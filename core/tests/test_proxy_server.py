@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import NamedTuple
 from uuid import UUID, uuid4
 
+import dns.asyncresolver
+import pytest
 import sqlalchemy as sa
 from cryptography import x509
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -21,6 +23,7 @@ from ufo.sandbox.proxy.rules import (
     OPENAI_HOST,
     ForwardRule,
     InjectionRule,
+    InternetRule,
     MeterRule,
     ScopeRule,
 )
@@ -110,7 +113,7 @@ def _basic(run_token: str) -> str:
     return "Basic " + base64.b64encode(f"{run_token}:".encode()).decode()
 
 
-async def _connect(port: int, host: str, run_token: str = "", target_port: int = 443) -> int:
+async def _connect(port: int, host: str, run_token: str = "", target_port: int | str = 443) -> int:
     """Drive one CONNECT through the proxy over its bound socket and return the status code,
     draining to EOF so any off-relay metering the exchange schedules is queued before the caller
     stops the proxy."""
@@ -408,6 +411,104 @@ async def test_keyed_host_connect_denied_without_a_live_turn(db: None) -> None:
         assert await _connect(endpoint.port, MODEL_HOST, unknown) == 403
         assert await proxy.authorize(RunToken(workspace_id, running_turn)) is True
         assert await proxy.authorize(RunToken(workspace_id, ended_turn)) is False
+    finally:
+        await proxy.stop()
+
+
+async def test_public_internet_rejects_private_addresses_and_ended_turns(db: None) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, running_turn, *_ = await _seed_turn(connection)
+        ended_workspace, ended_turn, *_ = await _seed_turn(connection, status="done")
+    cert, key = await generate_ca()
+    resolver = PerAgentRules(base=(), grants=None, internet=(InternetRule(),))
+    proxy = _egress(resolver, ca_cert=cert, ca_key=key)
+    endpoint = await proxy.start(bind_host="127.0.0.1")
+    try:
+        running = RunToken(workspace_id, running_turn).encode()
+        ended = RunToken(ended_workspace, ended_turn).encode()
+        assert await resolver.resolve(RunToken(workspace_id, running_turn)) == (InternetRule(),)
+        assert await resolver.resolve(RunToken(workspace_id, uuid4())) == ()
+        assert await _connect(endpoint.port, "169.254.169.254", running) == 403
+        assert await _connect(endpoint.port, "8.8.8.8", ended) == 403
+        assert await _connect(endpoint.port, "example.com", target_port="abc") == 403
+        assert await _connect(endpoint.port, "example.com", running, "abc") == 400
+        assert await _connect(endpoint.port, "example.com", running, 65536) == 400
+        assert await _connect(endpoint.port, "a..b", running) == 403
+        assert await _connect(endpoint.port, r"a\999z.com", running) == 403
+    finally:
+        await proxy.stop()
+
+
+async def test_public_internet_tunnels_and_meters_a_live_turn(db: None) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, turn_id, *_ = await _seed_turn(connection)
+
+    async def local_public(_host: str, _port: int) -> str:
+        return "127.0.0.1"
+
+    stub = await asyncio.start_server(lambda _reader, writer: writer.close(), "127.0.0.1", 0)
+    stub_port = stub.sockets[0].getsockname()[1]
+    cert, key = await generate_ca()
+    resolver = PerAgentRules(base=(), grants=None, internet=(InternetRule(),))
+    proxy = EgressProxy(
+        resolve=resolver.resolve,
+        authorize=resolver.turn_live,
+        ca_cert=cert,
+        ca_key=key,
+        resolve_public=local_public,
+    )
+    endpoint = await proxy.start(bind_host="127.0.0.1")
+    token = RunToken(workspace_id, turn_id).encode()
+    try:
+        assert await _connect(endpoint.port, SEARCH_HOST, token, stub_port) == 200
+    finally:
+        await proxy.stop()
+        stub.close()
+        await stub.wait_closed()
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(tables.ledger.c.dimension, tables.ledger.c.amount).where(
+                    tables.ledger.c.turn_id == turn_id
+                )
+            )
+        ).one()
+    assert (row.dimension, int(row.amount)) == ("egress", 1)
+
+
+async def test_public_internet_accepts_only_globally_routable_ipv4(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proxy = _egress(_fixed())
+    try:
+        assert await proxy._resolve_public_address("8.8.8.8", 443) == "8.8.8.8"
+        blocked = (
+            "127.0.0.1",
+            "10.0.0.1",
+            "169.254.169.254",
+            "100.64.0.1",
+            "224.0.0.1",
+            "64:ff9b::a9fe:a9fe",
+            "::7f00:1",
+        )
+        for host in blocked:
+            with pytest.raises(PermissionError):
+                await proxy._resolve_public_address(host, 443)
+
+        async def resolve(host: object, *_args: object, **_kwargs: object) -> tuple[str, ...]:
+            text = str(host).rstrip(".")
+            addresses = {
+                "localhost": ("127.0.0.1",),
+                "mixed.test": ("8.8.8.8", "127.0.0.1"),
+            }.get(text, ("8.8.8.8",))
+            return addresses
+
+        monkeypatch.setattr(dns.asyncresolver, "resolve", resolve)
+        with pytest.raises(PermissionError):
+            await proxy._resolve_public_address("localhost", 443)
+        with pytest.raises(PermissionError):
+            await proxy._resolve_public_address("mixed.test", 443)
+        assert await proxy._resolve_public_address("example.com", 443) == "8.8.8.8"
     finally:
         await proxy.stop()
 

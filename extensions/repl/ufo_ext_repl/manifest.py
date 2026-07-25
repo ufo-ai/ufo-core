@@ -245,4 +245,5 @@ def manifest() -> Manifest:
             ),
         ),
         skills=tuple(SkillSpec(path=SKILLS_ROOT / name) for name in SKILL_NAMES),
+        sandbox_internet=True,
     )
