@@ -1,13 +1,12 @@
 """The core-registered `agent` object kind: the workspace's agent as a workspace object.
 
 Each agent field has exactly one write path, so this kind and the governance proposal path can
-never conflict. Spec is `model` alone — the knob nothing could update before — applied directly,
-owner-gated, over the `agent` table; `prompt` belongs to `Governance`'s proposal CAS and appears
-here read-only in status beside its digest (the `from_digest` a proposal presents, so
-`object_get agent` is the read half of the proposal flow). One agent exists per workspace,
-created at `ufoctl init`, so the kind is update-only: the next turn runs under the new model (the
-loop reads agent config fresh from the row when it claims each turn). Create and delete raise
-with that reason; a non-owner mutation raises `OwnerRequired`."""
+never conflict. Spec holds the model and public-internet policy, applied directly and owner-gated
+over the `agent` table; `prompt` belongs to `Governance`'s proposal CAS and appears here read-only
+in status beside its digest (the `from_digest` a proposal presents, so `object_get agent` is the
+read half of the proposal flow). One agent exists per workspace, created at `ufoctl init`, so the
+kind is update-only: changes take effect on the next turn. Create and delete raise with that
+reason; a non-owner mutation raises `OwnerRequired`."""
 
 from dataclasses import dataclass
 
@@ -45,26 +44,41 @@ class AgentSpec(BaseModel):
             "and its digest from status."
         )
     )
+    internet_access_allowed: bool = Field(
+        description=(
+            "Whether this agent may use the deploy's sandbox public-internet capability. False "
+            "still permits exact model, credential, connector, and transfer-host egress."
+        )
+    )
 
 
 @dataclass(frozen=True)
 class AgentObjects:
-    """Update-only handlers over the `agent` table: apply rewrites the model in place,
-    owner-gated; the prompt is proposal-owned and rendered read-only in status; the row's name is
-    the object's name."""
+    """Update-only handlers over the `agent` table: apply rewrites the model and internet policy
+    in place, owner-gated; the prompt is proposal-owned and rendered read-only in status."""
 
     async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage:
         async with workspace_tx() as connection:
             rows = (
                 await connection.execute(
-                    sa.select(tables.agent.c.name, tables.agent.c.model)
+                    sa.select(
+                        tables.agent.c.name,
+                        tables.agent.c.model,
+                        tables.agent.c.internet_access_allowed,
+                    )
                     .where(tables.agent.c.workspace_id == ws_current().workspace_id)
                     .order_by(tables.agent.c.name)
                 )
             ).all()
         return object_page(
             rows=tuple(
-                ObjectRow(name=row.name, summary=f"the workspace agent, on {row.model}")
+                ObjectRow(
+                    name=row.name,
+                    summary=(
+                        f"the workspace agent, on {row.model}, public internet "
+                        f"{'allowed' if row.internet_access_allowed else 'blocked'}"
+                    ),
+                )
                 for row in rows
             ),
             query=query,
@@ -72,7 +86,14 @@ class AgentObjects:
 
     async def get(self, ctx: ToolContext, name: str) -> AgentSpec | None:
         row = await self._row(name)
-        return None if row is None else AgentSpec(model=row.model)
+        return (
+            None
+            if row is None
+            else AgentSpec(
+                model=row.model,
+                internet_access_allowed=row.internet_access_allowed,
+            )
+        )
 
     async def status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None:
         row = await self._row(name)
@@ -94,7 +115,11 @@ class AgentObjects:
         async with workspace_tx() as connection:
             await connection.execute(
                 sa.update(tables.agent)
-                .values(model=spec.model, updated_at=sa.func.now())
+                .values(
+                    model=spec.model,
+                    internet_access_allowed=spec.internet_access_allowed,
+                    updated_at=sa.func.now(),
+                )
                 .where(
                     tables.agent.c.workspace_id == ws_current().workspace_id,
                     tables.agent.c.name == name,
@@ -111,6 +136,7 @@ class AgentObjects:
                     sa.select(
                         tables.agent.c.prompt,
                         tables.agent.c.model,
+                        tables.agent.c.internet_access_allowed,
                         tables.agent.c.updated_at,
                     ).where(
                         tables.agent.c.workspace_id == ws_current().workspace_id,
@@ -123,16 +149,16 @@ class AgentObjects:
 AGENT_OBJECT = ObjectKind(
     name=AGENT_KIND,
     description=(
-        "The workspace's agent: its model, updatable by the workspace owner. The system prompt "
-        "is proposal-owned and read-only here; the agent cannot be created or deleted."
+        "The workspace's agent: its model and public-internet policy, readable by all members and "
+        "updatable by the workspace owner. It cannot be created or deleted."
     ),
     guidance=(
-        "The workspace's main agent as an object. Apply {model} to switch what it runs on — "
-        "workspace owner only, and the update takes effect on the next turn, never mid-turn. "
-        "The system prompt is not writable here: prompt changes go through the governed "
-        "proposal path, and status shows the current prompt with the digest a proposal is "
-        "pinned against. Create and delete are refused: one agent per workspace today. Confirm "
-        "with the member before switching models."
+        "The workspace's main agent as an object. Apply {model, internet_access_allowed} to change "
+        "its model or public-internet access — workspace owner only, taking effect on the next "
+        "turn. Blocking public internet leaves exact model, credential, connector, and transfer "
+        "hosts available. The system prompt is read-only here: prompt changes use the governed "
+        "proposal path, and status carries its current value and digest. Create and delete are "
+        "refused: one agent per workspace today. Confirm before changing either setting."
     ),
     spec_model=AgentSpec,
     store=AgentObjects(),

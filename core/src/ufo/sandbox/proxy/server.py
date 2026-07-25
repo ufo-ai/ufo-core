@@ -162,8 +162,8 @@ class PerAgentRules:
         turn = await self._turn_of(run)
         if turn is None:
             return self.base
-        agent_id, acting_member_id = turn
-        rules = (*self.base, *self.internet)
+        agent_id, acting_member_id, internet_access_allowed = turn
+        rules = (*self.base, *self.internet) if internet_access_allowed else self.base
         if self.grants is None:
             return rules
         granted = await self.grants.active_grants(run.workspace_id, agent_id)
@@ -173,11 +173,9 @@ class PerAgentRules:
             *derive_cli_rules(granted, acting_member_id, self.clis),
         )
 
-    async def _turn_of(self, run: RunToken) -> tuple[UUID, UUID | None] | None:
-        """The turn's agent and acting member — the speaker when one authored the turn, else the
-        member it acts on behalf of (a scheduled fire, a subagent chain) — in one indexed read.
-        CLI-credential use gates on the acting member exactly as connector tools do, so a member's
-        private grant forwards only on their own turns."""
+    async def _turn_of(self, run: RunToken) -> tuple[UUID, UUID | None, bool] | None:
+        """The turn's agent, acting member, and snapshotted internet policy in one indexed read.
+        CLI-credential use gates on the acting member exactly as connector tools do."""
         async with workspace_tx() as connection:
             row = (
                 await connection.execute(
@@ -185,9 +183,18 @@ class PerAgentRules:
                         tables.turn.c.agent_id,
                         tables.turn.c.speaker_member_id,
                         tables.turn.c.on_behalf_of_member_id,
-                    ).where(
+                        tables.agent.c.internet_access_allowed,
+                    )
+                    .select_from(
+                        tables.turn.join(
+                            tables.agent,
+                            tables.agent.c.id == tables.turn.c.agent_id,
+                        )
+                    )
+                    .where(
                         tables.turn.c.id == run.turn_id,
                         tables.turn.c.workspace_id == run.workspace_id,
+                        tables.agent.c.workspace_id == run.workspace_id,
                     )
                 )
             ).one_or_none()
@@ -198,7 +205,7 @@ class PerAgentRules:
             if row.speaker_member_id is not None
             else row.on_behalf_of_member_id
         )
-        return row.agent_id, acting
+        return row.agent_id, acting, row.internet_access_allowed
 
     async def turn_live(self, run: RunToken) -> bool:
         """The egress-authorization gate: True only while the run token names a turn the DB still

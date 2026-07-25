@@ -558,6 +558,7 @@ async def _agent_row(
     name: str = "assistant",
     prompt: str = "be brief",
     model: str = "claude-opus-4-8",
+    internet_access_allowed: bool = True,
 ) -> UUID:
     agent_id = uuid4()
     async with workspace_tx() as connection:
@@ -568,6 +569,7 @@ async def _agent_row(
                 name=name,
                 prompt=prompt,
                 model=model,
+                internet_access_allowed=internet_access_allowed,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -587,27 +589,53 @@ async def test_agent_kind_updates_model_owner_gated_and_shows_prompt_readonly(db
         fetched = yaml.safe_load(
             await _text(tools, "object_get", owner_ctx, kind=AGENT_KIND, name="assistant")
         )
-        assert fetched["spec"] == {"model": "claude-opus-4-8"}
+        assert fetched["spec"] == {
+            "model": "claude-opus-4-8",
+            "internet_access_allowed": True,
+        }
         assert fetched["status"]["prompt"] == "be brief"
         assert fetched["status"]["prompt_digest"] == prompt_digest("be brief")
 
         manifest = yaml.safe_dump(
-            {"kind": AGENT_KIND, "name": "assistant", "spec": {"model": "claude-fable-5"}}
+            {
+                "kind": AGENT_KIND,
+                "name": "assistant",
+                "spec": {
+                    "model": "claude-fable-5",
+                    "internet_access_allowed": False,
+                },
+            }
         )
         applied = json.loads(await _text(tools, "object_apply", owner_ctx, manifest=manifest))
         assert applied["result"] == "updated"
         async with workspace_tx() as connection:
             row = (
                 await connection.execute(
-                    sa.select(tables.agent.c.prompt, tables.agent.c.model).where(
-                        tables.agent.c.workspace_id == workspace_id
-                    )
+                    sa.select(
+                        tables.agent.c.prompt,
+                        tables.agent.c.model,
+                        tables.agent.c.internet_access_allowed,
+                    ).where(tables.agent.c.workspace_id == workspace_id)
                 )
             ).one()
-        assert (row.prompt, row.model) == ("be brief", "claude-fable-5")
+        assert (row.prompt, row.model, row.internet_access_allowed) == (
+            "be brief",
+            "claude-fable-5",
+            False,
+        )
 
         listing = json.loads(await _text(tools, "object_list", owner_ctx, kind=AGENT_KIND))
         assert [entry["name"] for entry in listing["objects"]] == ["assistant"]
+        joiner_fetched = yaml.safe_load(
+            await _text(
+                tools,
+                "object_get",
+                _tool_context(workspace_id, speaker_member_id=joiner),
+                kind=AGENT_KIND,
+                name="assistant",
+            )
+        )
+        assert joiner_fetched["spec"]["internet_access_allowed"] is False
 
         apply_tool = tools["object_apply"]
         args = apply_tool.input_model.model_validate({"manifest": manifest})
@@ -622,7 +650,11 @@ async def test_agent_kind_updates_model_owner_gated_and_shows_prompt_readonly(db
                     {
                         "kind": AGENT_KIND,
                         "name": "assistant",
-                        "spec": {"prompt": "injected", "model": "claude-fable-5"},
+                        "spec": {
+                            "prompt": "injected",
+                            "model": "claude-fable-5",
+                            "internet_access_allowed": False,
+                        },
                     }
                 )
             }
@@ -646,7 +678,7 @@ async def test_agent_kind_refuses_create_and_delete(db: None) -> None:
                     {
                         "kind": AGENT_KIND,
                         "name": "second-agent",
-                        "spec": {"model": "m"},
+                        "spec": {"model": "m", "internet_access_allowed": True},
                     }
                 )
             }
@@ -685,7 +717,14 @@ async def test_agent_apply_and_pending_proposal_write_disjoint_fields(db: None) 
             "object_apply",
             ctx,
             manifest=yaml.safe_dump(
-                {"kind": AGENT_KIND, "name": "assistant", "spec": {"model": "claude-fable-5"}}
+                {
+                    "kind": AGENT_KIND,
+                    "name": "assistant",
+                    "spec": {
+                        "model": "claude-fable-5",
+                        "internet_access_allowed": True,
+                    },
+                }
             ),
         )
         await Governance(workspace_id=workspace_id, extension="probe").approve_proposal(

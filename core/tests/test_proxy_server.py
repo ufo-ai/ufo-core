@@ -297,7 +297,10 @@ class _Seeded(NamedTuple):
 
 
 async def _seed_turn(
-    connection: AsyncConnection, status: str = "running", speaker: bool = False
+    connection: AsyncConnection,
+    status: str = "running",
+    speaker: bool = False,
+    internet_access_allowed: bool = True,
 ) -> _Seeded:
     workspace_id, member_id, agent_id, conversation_id, turn_id = (uuid4() for _ in range(5))
     await connection.execute(
@@ -321,6 +324,7 @@ async def _seed_turn(
             name="assistant",
             prompt="p",
             model="claude-opus-4-8",
+            internet_access_allowed=internet_access_allowed,
             created_at=sa.func.now(),
             updated_at=sa.func.now(),
         )
@@ -569,6 +573,45 @@ async def test_public_internet_rejects_private_addresses_and_ended_turns(db: Non
         assert await _connect(endpoint.port, "example.com", running, 65536) == 400
         assert await _connect(endpoint.port, "a..b", running) == 403
         assert await _connect(endpoint.port, r"a\999z.com", running) == 403
+    finally:
+        await proxy.stop()
+
+
+async def test_agent_internet_policy_is_cached_for_the_turn(db: None) -> None:
+    async with workspace_tx() as connection:
+        seeded = await _seed_turn(connection)
+    resolver = PerAgentRules(base=(), grants=None, internet=(InternetRule(),))
+    proxy = _egress(resolver)
+    endpoint = await proxy.start(bind_host="127.0.0.1")
+    first_run = RunToken(seeded.workspace_id, seeded.turn_id)
+    try:
+        assert await proxy._rules_for(first_run) == (InternetRule(),)
+
+        second_turn = uuid4()
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.agent)
+                .values(internet_access_allowed=False)
+                .where(tables.agent.c.id == seeded.agent_id)
+            )
+            await connection.execute(
+                sa.insert(tables.turn).values(
+                    id=second_turn,
+                    workspace_id=seeded.workspace_id,
+                    conversation_id=seeded.conversation_id,
+                    agent_id=seeded.agent_id,
+                    seq=2,
+                    status="running",
+                    inbound="again",
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+
+        second_run = RunToken(seeded.workspace_id, second_turn)
+        assert await proxy._rules_for(first_run) == (InternetRule(),)
+        assert await proxy._rules_for(second_run) == ()
+        assert await _connect(endpoint.port, "8.8.8.8", second_run.encode()) == 403
     finally:
         await proxy.stop()
 

@@ -76,7 +76,7 @@ def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None
         heads = scripts.get_heads()
     assert scripts.get_revision("memory_0008").dependencies == "0049"
     assert {
-        "0049",
+        "0050",
         "index_default_0002",
         "memory_0008",
         "sample_ext_note_0001",

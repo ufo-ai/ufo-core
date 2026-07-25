@@ -120,7 +120,8 @@ metering** (every model/API call made from inside the sandbox lands in the ledge
 declare `sandbox_internet`; its deploy's live turns may then reach globally routable public IPv4
 through a metered opaque tunnel. DNS is pinned and every IPv6, loopback, private, link-local,
 reserved, multicast, or shared-space answer is refused. Tokenless and ended turns cannot use public
-internet.
+internet. The owner may narrow that deploy capability per agent through the agent object's
+`internet_access_allowed`; the proxy snapshots it into that turn's cached rules.
 Extensions never register raw network rules; the proxy's rewrite rules are *derived* from their
 manifests — sandbox internet, a credential slot, a connector, or a model provider implies its
 scoping, injection, and metering rules. Declare, don't open. The enterprise k8s layer later ships
