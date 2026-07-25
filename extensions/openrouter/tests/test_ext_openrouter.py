@@ -194,9 +194,17 @@ async def test_length_finish_raises_truncated() -> None:
 def test_manifest_registers_slug_pinned_specs() -> None:
     manifest = openrouter.manifest()
     by_id = {spec.id: spec for spec in manifest.models}
-    assert set(by_id) == {"google/gemini-2.5-pro", "z-ai/glm-5.2"}
+    assert set(by_id) == {"google/gemini-2.5-pro", "z-ai/glm-5.2", "moonshotai/kimi-k3"}
     assert by_id["z-ai/glm-5.2"].price.output == 3_000_000
     assert by_id["z-ai/glm-5.2"].knowledge_cutoff == "2026-03"
+
+
+def test_kimi_k3_spec_carries_its_price_cache_rate_and_million_token_window() -> None:
+    spec = {s.id: s for s in openrouter.manifest().models}["moonshotai/kimi-k3"]
+    assert spec.price.input == 3_000_000
+    assert spec.price.output == 15_000_000
+    assert spec.price.cache_read == 300_000
+    assert spec.context_window == 1_000_000
 
 
 async def test_model_client_requires_its_key(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:

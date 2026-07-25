@@ -206,14 +206,19 @@ def _model_client(spec: ModelSpec, key: str) -> OpenRouterModelClient:
     )
 
 
-def _openrouter(id: str, price: ModelPrice, cutoff: str) -> ModelSpec:
+def _openrouter(
+    id: str,
+    price: ModelPrice,
+    cutoff: str,
+    context_window: int = OPENROUTER_CONTEXT_WINDOW,
+) -> ModelSpec:
     return ModelSpec(
         id=id,
         provider=PROVIDER_NAME,
         client=_model_client,
         price=price,
         knowledge_cutoff=cutoff,
-        context_window=OPENROUTER_CONTEXT_WINDOW,
+        context_window=context_window,
         reasoning=_REASONS,
         api_surface="chat",
         key_slot=OPENROUTER_KEY_SLOT,
@@ -231,6 +236,12 @@ OPENROUTER_MODEL_SPECS = (
         "z-ai/glm-5.2",
         ModelPrice(input=1_000_000, output=3_000_000, cache_read=0, cache_write=0),
         "2026-03",
+    ),
+    _openrouter(
+        "moonshotai/kimi-k3",
+        ModelPrice(input=3_000_000, output=15_000_000, cache_read=300_000, cache_write=0),
+        "2026-04",
+        context_window=1_000_000,
     ),
 )
 
