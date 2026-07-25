@@ -107,19 +107,6 @@ async def turn_status_frame(turn_id: UUID) -> LiveFrame | None:
     return Parked(message=PARK_NOTICE)
 
 
-async def terminal_frame(turn_id: UUID) -> TerminalFrame | None:
-    """The durable terminal frame a turn committed, or None while it is still queued or running."""
-    async with workspace_tx() as connection:
-        row = (
-            await connection.execute(
-                sa.select(tables.turn.c.terminal).where(tables.turn.c.id == turn_id)
-            )
-        ).one_or_none()
-    if row is None or row.terminal is None:
-        return None
-    return TerminalFrame.model_validate(row.terminal)
-
-
 @dataclass(frozen=True)
 class HubTailer:
     """The live-surface seam's tail primitive bound to the process hub: tails one turn's frames off
