@@ -10,6 +10,7 @@ proxy, so an injecting slot in the shared pack fails loud."""
 
 import asyncio
 import os
+import signal
 from dataclasses import dataclass
 
 from ufo.config import Config, load_config
@@ -74,6 +75,7 @@ def run() -> None:
         ca_cert=ca_cert,
         ca_key=ca_key,
         pricing=model_registry(config, manifests).pricing,
+        shutdown=asyncio.Event(),
     )
     log("proxy.starting", port=config.sandbox.proxy_port)
     asyncio.run(server.serve())
@@ -120,8 +122,12 @@ class ProxyServe:
     ca_cert: str
     ca_key: str
     pricing: Pricing
+    shutdown: asyncio.Event
 
     async def serve(self) -> None:
+        loop = asyncio.get_running_loop()
+        for shutdown_signal in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(shutdown_signal, self.shutdown.set)
         init_db(self.owner_dsn)
         resolver = PerAgentRules(
             base=self._base(),
@@ -143,7 +149,10 @@ class ProxyServe:
             port=self.config.sandbox.proxy_port, public_url=self.config.sandbox.proxy_public_url
         )
         log("proxy.listening", port=self.config.sandbox.proxy_port)
-        await asyncio.Event().wait()
+        try:
+            await self.shutdown.wait()
+        finally:
+            await proxy.stop(self.config.serve.graceful_shutdown_seconds)
 
     def _base(self) -> tuple[Rule, ...]:
         """The proxy's static rule base: the shared model-provider egress (`model_rule_base`) and

@@ -239,6 +239,7 @@ class EgressProxy:
     _workdir: tempfile.TemporaryDirectory | None = field(default=None, init=False)
     _contexts: dict[str, ssl.SSLContext] = field(default_factory=dict, init=False)
     _mint_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
+    _connection_tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False)
     _meter_tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False)
     _rule_cache: dict[str, tuple[Rule, ...]] = field(default_factory=dict, init=False)
 
@@ -258,9 +259,23 @@ class EgressProxy:
         bound = self._server.sockets[0].getsockname()[1]
         return ProxyEndpoint(port=bound, ca_cert=self.ca_cert, public_url=public_url)
 
-    async def stop(self) -> None:
+    async def stop(self, graceful_shutdown_seconds: int = 0) -> None:
+        """Close the listener, drain live connections for the grace window, cancel stragglers,
+        then wait the server down — in that order, because `wait_closed()` blocks until every
+        handler task finishes and would park an unbounded shutdown ahead of the bounded drain.
+        A connection accepted just before the listener closed schedules its handler after the
+        drain snapshot; `_handle` refuses service once the listener stops, so a late handler
+        finishes immediately instead of parking `wait_closed()` past the window."""
         if self._server is not None:
             self._server.close()
+        if self._connection_tasks:
+            _, pending = await asyncio.wait(
+                self._connection_tasks, timeout=graceful_shutdown_seconds
+            )
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+        if self._server is not None:
             await self._server.wait_closed()
             self._server = None
         if self._meter_tasks:
@@ -271,6 +286,13 @@ class EgressProxy:
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         """One client connection: dispatch an s3fs credential fetch or proxy CONNECT."""
+        if self._server is None or not self._server.is_serving():
+            writer.close()
+            return
+        task = asyncio.current_task()
+        if task is None:
+            raise RuntimeError("proxy connection has no asyncio task")
+        self._connection_tasks.add(task)
         try:
             try:
                 request_line = await reader.readline()
@@ -336,6 +358,7 @@ class EgressProxy:
                 )
         finally:
             writer.close()
+            self._connection_tasks.discard(task)
 
     async def _serve_workspace_credentials(self, writer: asyncio.StreamWriter, target: str) -> None:
         if self.workspace_credentials is None or not target.startswith(SANDBOX_FS_CREDENTIAL_PATH):
@@ -824,10 +847,12 @@ async def _relay(
     reads the stream without ever holding the client's bytes back."""
     down = asyncio.create_task(_pump(upstream_reader, client_writer, on_downstream))
     up = asyncio.create_task(_pump(client_reader, upstream_writer))
-    await asyncio.wait({down, up}, return_when=asyncio.FIRST_COMPLETED)
-    for task in (down, up):
-        task.cancel()
-    upstream_writer.close()
+    try:
+        await asyncio.wait({down, up}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for task in (down, up):
+            task.cancel()
+        upstream_writer.close()
 
 
 async def _pump(

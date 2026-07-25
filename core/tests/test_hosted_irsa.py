@@ -32,6 +32,8 @@ SERVE_DEPLOYMENT = (
     .split("kind: Deployment\nmetadata:\n  name: ufo-serve", maxsplit=1)[1]
     .split("---", maxsplit=1)[0]
 )
+TESTING_CONFIG = Path(__file__).resolve().parents[2] / "infra/envs/testing/ufo.tf"
+PROD_CONFIG = Path(__file__).resolve().parents[2] / "infra/envs/prod/ufo.tf"
 
 
 def test_app_s3_trusts_serve_in_every_ufo_namespace() -> None:
@@ -55,6 +57,40 @@ def test_sandbox_proxy_identity_can_only_assume_the_mount_role() -> None:
 
 def test_hosted_serve_receives_the_bedrock_region() -> None:
     assert '- {name: AWS_REGION, value: "${region}"}' in HOSTED_TEMPLATE.read_text()
+
+
+def test_hosted_serve_rolls_all_replacements_before_draining() -> None:
+    assert "maxSurge: 100%" in SERVE_DEPLOYMENT
+    assert "maxUnavailable: 0" in SERVE_DEPLOYMENT
+    assert "terminationGracePeriodSeconds: ${termination_grace_period_seconds}" in SERVE_DEPLOYMENT
+    assert 'command: [sleep, "${prestop_seconds}"]' in SERVE_DEPLOYMENT
+
+
+def test_hosted_proxy_rolls_all_replacements_and_drains_connections() -> None:
+    assert "maxSurge: 100%" in PROXY_DEPLOYMENT
+    assert "maxUnavailable: 0" in PROXY_DEPLOYMENT
+    assert "terminationGracePeriodSeconds: ${termination_grace_period_seconds}" in PROXY_DEPLOYMENT
+    assert 'command: [sleep, "${prestop_seconds}"]' in PROXY_DEPLOYMENT
+
+
+def test_hosted_shutdown_grace_is_environment_specific() -> None:
+    """The env local is the single source for each drain window: the rendered `[serve]` config
+    interpolates the local (never a second literal), and the pod's termination grace is computed
+    from both sequential shutdown phases — so no value can drift from its enforcement."""
+    testing = TESTING_CONFIG.read_text()
+    prod = PROD_CONFIG.read_text()
+    assert "  graceful_shutdown_seconds = 0\n" in testing
+    assert "  graceful_shutdown_seconds = 600\n" in prod
+    for config in (testing, prod):
+        assert "  prestop_seconds           = 10\n" in config
+        assert "  request_shutdown_seconds  = 30\n" in config
+        assert "prestop_seconds                  = local.prestop_seconds" in config
+        assert "request_shutdown_seconds = ${local.request_shutdown_seconds}" in config
+        assert "graceful_shutdown_seconds = ${local.graceful_shutdown_seconds}" in config
+        assert (
+            "termination_grace_period_seconds = local.prestop_seconds + "
+            "local.request_shutdown_seconds + local.graceful_shutdown_seconds + 60"
+        ) in config
 
 
 def test_hosted_serve_receives_the_bedrock_mantle_api_key() -> None:

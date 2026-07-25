@@ -22,6 +22,8 @@ def test_load_config_with_defaults(tmp_path: Path) -> None:
     assert config.database.system_url == "sqlite:///ufo_dbos.db"
     assert config.blob.root == Path("./blobs")
     assert config.serve.port == 8710
+    assert config.serve.request_shutdown_seconds == 30
+    assert config.serve.graceful_shutdown_seconds == 0
     assert config.models.anthropic_api_key_env == "ANTHROPIC_API_KEY"
     assert config.o11y.otlp_endpoint is None
 
@@ -34,6 +36,20 @@ def test_missing_file_raises(tmp_path: Path) -> None:
 def test_unknown_key_rejected(tmp_path: Path) -> None:
     path = tmp_path / "ufo.toml"
     path.write_text(VALID + "\n[mystery]\nknob = 1\n")
+    with pytest.raises(ValidationError):
+        load_config(path)
+
+
+def test_negative_graceful_shutdown_rejected(tmp_path: Path) -> None:
+    path = tmp_path / "ufo.toml"
+    path.write_text(VALID + "\n[serve]\ngraceful_shutdown_seconds = -1\n")
+    with pytest.raises(ValidationError):
+        load_config(path)
+
+
+def test_negative_request_shutdown_rejected(tmp_path: Path) -> None:
+    path = tmp_path / "ufo.toml"
+    path.write_text(VALID + "\n[serve]\nrequest_shutdown_seconds = -1\n")
     with pytest.raises(ValidationError):
         load_config(path)
 

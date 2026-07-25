@@ -23,7 +23,10 @@ locals {
     "131.0.72.0/22",
   ]
 
-  system_namespace = module.platform.system_namespace
+  system_namespace          = module.platform.system_namespace
+  prestop_seconds           = 10
+  request_shutdown_seconds  = 30
+  graceful_shutdown_seconds = 600
 
   # The digest-pinned runtime image used by migration, proxy, and serve.
   bundle_image = "${module.platform.ecr_registry}/ufo@${data.aws_ecr_image.ufo.image_digest}"
@@ -93,6 +96,8 @@ locals {
     [serve]
     host = "0.0.0.0"
     port = 8710
+    request_shutdown_seconds = ${local.request_shutdown_seconds}
+    graceful_shutdown_seconds = ${local.graceful_shutdown_seconds}
 
     [database]
     url = "${module.platform.serve_dsn}"
@@ -182,16 +187,18 @@ data "aws_ecr_image" "ufo" {
 
 data "kubectl_file_documents" "hosted" {
   content = templatefile("${path.module}/../../templates/hosted.yaml.tpl", {
-    registry       = module.platform.ecr_registry
-    image_tag      = var.image_tag
-    namespace      = local.system_namespace
-    apex_host      = module.platform.hostname
-    shared_host    = local.shared_host
-    cluster_issuer = "letsencrypt"
-    ingress_class  = "nginx"
-    bundle_image   = local.bundle_image
-    serve_role_arn = module.platform.app_s3_role_arn
-    proxy_role_arn = module.platform.sandbox_proxy_role_arn
+    registry                         = module.platform.ecr_registry
+    image_tag                        = var.image_tag
+    namespace                        = local.system_namespace
+    apex_host                        = module.platform.hostname
+    shared_host                      = local.shared_host
+    cluster_issuer                   = "letsencrypt"
+    ingress_class                    = "nginx"
+    bundle_image                     = local.bundle_image
+    serve_role_arn                   = module.platform.app_s3_role_arn
+    proxy_role_arn                   = module.platform.sandbox_proxy_role_arn
+    prestop_seconds                  = local.prestop_seconds
+    termination_grace_period_seconds = local.prestop_seconds + local.request_shutdown_seconds + local.graceful_shutdown_seconds + 60
 
     region        = var.region
     otlp_endpoint = "http://otel-collector.${local.system_namespace}.svc.cluster.local:4318"

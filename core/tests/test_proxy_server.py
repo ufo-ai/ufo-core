@@ -144,6 +144,51 @@ async def _get(port: int, path: str) -> tuple[int, bytes]:
     return int(head.split()[1]), body
 
 
+async def test_stop_waits_for_active_connection_tasks() -> None:
+    proxy = _egress(_fixed())
+    release = asyncio.Event()
+    connection = asyncio.create_task(release.wait())
+    proxy._connection_tasks.add(connection)
+    stopping = asyncio.create_task(proxy.stop(graceful_shutdown_seconds=1))
+    await asyncio.sleep(0)
+    assert not stopping.done()
+    release.set()
+    await stopping
+
+
+async def test_handle_refuses_connections_once_the_listener_closed() -> None:
+    """The accept race: a connection accepted just before the listener closes schedules its
+    handler after stop's drain snapshot, invisible to the timed wait and the cancel sweep. Entry
+    refuses service the moment the listener stops, so a late handler finishes at once instead of
+    parking `wait_closed()` beyond the drain window."""
+    proxy = _egress(_fixed())
+    await proxy.start(bind_host="127.0.0.1")
+    assert proxy._server is not None
+    proxy._server.close()
+    ours, theirs = socket.socketpair()
+    reader, writer = await asyncio.open_connection(sock=ours)
+    await proxy._handle(reader, writer)
+    assert not proxy._connection_tasks
+    theirs.close()
+    await proxy.stop(graceful_shutdown_seconds=0)
+
+
+async def test_stop_cancels_a_started_servers_live_connection() -> None:
+    """A handler parked on a live socket keeps `wait_closed()` pending forever, so stop must
+    drain and cancel connections before waiting the server down — not after."""
+    proxy = _egress(_fixed())
+    endpoint = await proxy.start(bind_host="127.0.0.1")
+    _, writer = await asyncio.open_connection("127.0.0.1", endpoint.port)
+    for _ in range(100):
+        if proxy._connection_tasks:
+            break
+        await asyncio.sleep(0)
+    assert proxy._connection_tasks
+    await asyncio.wait_for(proxy.stop(graceful_shutdown_seconds=0), timeout=5)
+    assert not proxy._connection_tasks
+    writer.close()
+
+
 async def test_workspace_credential_endpoint_serves_only_while_the_turn_is_live(db: None) -> None:
     class Sts:
         async def assume_role(
@@ -833,6 +878,22 @@ async def test_relay_tees_the_full_body_to_the_client_while_metering_usage() -> 
     assert accumulator.usage() == ("claude-opus-4-8", FULL_TOKEN_USAGE)
     proxy_client_w.close()
     peer_client_w.close()
+
+
+async def test_relay_cancellation_tears_down_pumps_and_upstream() -> None:
+    """stop()'s drain cancels the outer connection task at `_relay`'s await; `asyncio.wait` does
+    not cascade to the pump tasks it was waiting on, so the teardown must run on the way out —
+    or a live tunnel's pumps and upstream socket outlive the drained signal."""
+    (proxy_client_r, proxy_client_w), (_peer_client_r, peer_client_w) = await _stream_pair()
+    (proxy_up_r, proxy_up_w), (_peer_up_r, peer_up_w) = await _stream_pair()
+    relay = asyncio.create_task(_relay(proxy_client_r, proxy_client_w, proxy_up_r, proxy_up_w))
+    await asyncio.sleep(0)
+    relay.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await relay
+    assert proxy_up_w.is_closing()
+    for writer in (proxy_client_w, peer_client_w, peer_up_w):
+        writer.close()
 
 
 async def test_model_host_relay_meters_sandbox_tokens_to_the_turn(db: None) -> None:

@@ -2,6 +2,10 @@ output "kubeconfig_command" {
   value = module.platform.kubeconfig_command
 }
 
+output "cluster_name" {
+  value = module.platform.cluster_name
+}
+
 output "ecr_repository_urls" {
   value = module.platform.ecr_repository_urls
 }
@@ -35,4 +39,8 @@ output "api_keys_secret_arn" {
 
 output "hostname" {
   value = module.platform.hostname
+}
+
+output "system_namespace" {
+  value = module.platform.system_namespace
 }

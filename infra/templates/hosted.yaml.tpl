@@ -144,12 +144,17 @@ metadata:
   labels: {app: ufo-sandbox-proxy}
 spec:
   replicas: 2
+  strategy:
+    rollingUpdate:
+      maxSurge: 100%
+      maxUnavailable: 0
   selector:
     matchLabels: {app: ufo-sandbox-proxy}
   template:
     metadata:
       labels: {app: ufo-sandbox-proxy}
     spec:
+      terminationGracePeriodSeconds: ${termination_grace_period_seconds}
       serviceAccountName: ufo-sandbox-proxy
       enableServiceLinks: false
       containers:
@@ -157,6 +162,12 @@ spec:
           image: ${bundle_image}
           # ENTRYPOINT ["ufoctl"] is baked in; `proxy` reads the shared fleet config mounted below.
           args: [proxy]
+          # Endpoint/NLB-target deregistration propagates for a beat after the pod turns
+          # Terminating; keep the listener accepting until it lands, then SIGTERM starts the drain.
+          lifecycle:
+            preStop:
+              exec:
+                command: [sleep, "${prestop_seconds}"]
           ports:
             - {name: proxy, containerPort: 8888}
           env:
@@ -225,12 +236,17 @@ metadata:
   labels: {app: ufo-serve}
 spec:
   replicas: 2
+  strategy:
+    rollingUpdate:
+      maxSurge: 100%
+      maxUnavailable: 0
   selector:
     matchLabels: {app: ufo-serve}
   template:
     metadata:
       labels: {app: ufo-serve}
     spec:
+      terminationGracePeriodSeconds: ${termination_grace_period_seconds}
       serviceAccountName: ufo-serve
       enableServiceLinks: false
       containers:
@@ -238,6 +254,12 @@ spec:
           image: ${bundle_image}
           # ENTRYPOINT ["ufoctl"] is baked in; `serve` runs the shared fleet.
           args: [serve]
+          # Endpoint/NLB-target deregistration propagates for a beat after the pod turns
+          # Terminating; keep the listener accepting until it lands, then SIGTERM starts the drain.
+          lifecycle:
+            preStop:
+              exec:
+                command: [sleep, "${prestop_seconds}"]
           ports:
             - {name: http, containerPort: 8710}
           # Model/provider keys the fleet shares across workspaces (ANTHROPIC/OPENAI/OPENROUTER, EXA,

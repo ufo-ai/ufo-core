@@ -5,7 +5,7 @@ import tomllib
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ufo.models.interface import AUTO_MODEL
 from ufo.schema.records import DEFAULT_REASONING_EFFORT, ReasoningEffort
@@ -105,6 +105,8 @@ class ServeConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     host: str = "127.0.0.1"
     port: int = 8710
+    request_shutdown_seconds: int = Field(default=30, ge=0)
+    graceful_shutdown_seconds: int = Field(default=0, ge=0)
 
 
 class ConnectConfig(BaseModel):

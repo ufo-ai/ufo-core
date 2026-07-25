@@ -50,19 +50,16 @@ jobs:
       - name: Select deployment work
         id: select
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before || 'origin/main' }}
           DEPLOY_PATHS_PATTERN: ^(\.github/workflows/deploy\.yml$|infra/(envs/(testing|edge)|modules/(platform|edge)|templates)/)
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
-          if [ "$GITHUB_EVENT_NAME" != "pull_request" ]; then
+          git diff --name-only --no-renames "$BASE_SHA...$HEAD_SHA" > "$RUNNER_TEMP/deploy-paths"
+          python .github/scripts/deploy_change_gate.py "$RUNNER_TEMP/deploy-paths"
+          if [ "$GITHUB_EVENT_NAME" != "pull_request" ] || grep -Eq "$DEPLOY_PATHS_PATTERN" "$RUNNER_TEMP/deploy-paths"; then
             echo "deploy=true" >> "$GITHUB_OUTPUT"
           else
-            git diff --name-only --no-renames "$BASE_SHA...$HEAD_SHA" > "$RUNNER_TEMP/deploy-paths"
-            if grep -Eq "$DEPLOY_PATHS_PATTERN" "$RUNNER_TEMP/deploy-paths"; then
-              echo "deploy=true" >> "$GITHUB_OUTPUT"
-            else
-              echo "deploy=false" >> "$GITHUB_OUTPUT"
-            fi
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
           fi
 
   rollout:
@@ -164,6 +161,16 @@ jobs:
         env:
           TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: terraform apply -auto-approve -input=false -var "image_tag=$IMAGE_TAG"
+
+      - name: Wait for runtime rollout
+        if: github.event_name != 'pull_request'
+        run: |
+          aws eks update-kubeconfig \
+            --region "$AWS_REGION" \
+            --name "$(terraform -chdir="$TF_DIR" output -raw cluster_name)"
+          NAMESPACE="$(terraform -chdir="$TF_DIR" output -raw system_namespace)"
+          kubectl --namespace "$NAMESPACE" rollout status deployment/ufo-sandbox-proxy --timeout=15m
+          kubectl --namespace "$NAMESPACE" rollout status deployment/ufo-serve --timeout=15m
 
       # Mount gate: the published template + this environment's IAM and bucket must serve a live
       # workspace mount — mint, s3fs mount, write/list/read/chmod/delete — or the deploy goes red

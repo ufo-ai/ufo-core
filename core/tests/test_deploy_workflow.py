@@ -1,10 +1,14 @@
+import importlib.util
 import json
 import os
 import re
+import shutil
 import subprocess
+import sys
 from pathlib import Path
 from urllib.parse import urlparse
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).parents[2]
@@ -14,6 +18,15 @@ DEPLOY_ENVIRONMENTS = ("testing", "prod")
 RUN_URL = "https://github.com/metalcraftai/ufo/actions/runs/30120902872"
 DATADOG_STATUS_OK = 0
 DATADOG_STATUS_CRITICAL = 2
+
+
+def _deploy_change_gate():
+    path = ROOT / ".github" / "scripts" / "deploy_change_gate.py"
+    spec = importlib.util.spec_from_file_location("deploy_change_gate", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _workflow(path: Path) -> dict[str, object]:
@@ -144,6 +157,133 @@ def test_pull_request_plans_active_deployment_inputs() -> None:
     script = selector["run"]
     assert isinstance(script, str)
     assert 'git diff --name-only --no-renames "$BASE_SHA...$HEAD_SHA"' in script
+    assert 'python .github/scripts/deploy_change_gate.py "$RUNNER_TEMP/deploy-paths"' in script
+    assert 'if [ "$GITHUB_EVENT_NAME" != "pull_request" ]' in script
+    assert "exit 0" not in script
+
+
+def test_runtime_authorization_changes_are_split_across_deploys() -> None:
+    gate = _deploy_change_gate()
+    gate.validate_deploy_change(("infra/modules/platform/iam.tf",))
+    gate.validate_deploy_change(("infra/modules/platform/ses.tf",))
+    gate.validate_deploy_change(("core/src/ufo/serve.py",))
+    gate.validate_deploy_change(
+        ("infra/modules/platform/iam.tf", "core/tests/test_deploy_workflow.py")
+    )
+    with pytest.raises(ValueError, match="expand IAM, roll and drain"):
+        gate.validate_deploy_change(
+            ("infra/modules/platform/ses.tf", "control/src/ufo_control/gateway_email.py")
+        )
+
+    for runtime_path in (
+        ".github/scripts/deploy_change_gate.py",
+        "core/src/ufo/serve.py",
+        "extensions/e2b/ufo_ext_e2b.py",
+        "infra/envs/prod/ufo.tf",
+        "infra/templates/hosted.yaml.tpl",
+        "sandbox/build_template.py",
+    ):
+        with pytest.raises(ValueError, match="expand IAM, roll and drain"):
+            gate.validate_deploy_change(("infra/modules/platform/iam.tf", runtime_path))
+
+
+def test_select_step_executes_the_gate_for_non_pull_request_triggers(tmp_path: Path) -> None:
+    """The `BASE_SHA`/`HEAD_SHA` fallbacks exist for push and `workflow_dispatch` — the triggers
+    where a real IAM+runtime deploy lands — so prove the script the runner executes: it resolves
+    the fallbacks (including the literal `main` base), runs the real gate over the real diff, and
+    a boundary-spanning dispatch dies before any deploy output. String assertions on the YAML
+    cannot prove execution."""
+    step = _step("changes", "Select deployment work")
+    environment = step["env"]
+    assert isinstance(environment, dict)
+    assert "'origin/main'" in str(environment["BASE_SHA"])
+    script = step["run"]
+    assert isinstance(script, str)
+
+    repo = tmp_path / "repo"
+    scripts = repo / ".github" / "scripts"
+    scripts.mkdir(parents=True)
+    shutil.copy(ROOT / ".github" / "scripts" / "deploy_change_gate.py", scripts)
+    shim = tmp_path / "bin"
+    shim.mkdir()
+    (shim / "python").symlink_to(sys.executable)
+
+    def git(*args: str) -> None:
+        subprocess.run(
+            ["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t", *args],
+            check=True,
+            capture_output=True,
+        )
+
+    def commit(*paths: str) -> str:
+        for path in paths:
+            target = repo / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(path)
+        git("add", "-A")
+        git("commit", "-m", paths[0] if paths else "seed")
+        return subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    def run_select(event: str, base: str, head: str) -> tuple[int, str, str]:
+        output = tmp_path / "github-output"
+        output.write_text("")
+        run = subprocess.run(
+            ["bash", "-e", "-c", script],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            env={
+                "PATH": f"{shim}:{os.environ['PATH']}",
+                "RUNNER_TEMP": str(tmp_path),
+                "GITHUB_OUTPUT": str(output),
+                "GITHUB_EVENT_NAME": event,
+                "BASE_SHA": base,
+                "HEAD_SHA": head,
+                "DEPLOY_PATHS_PATTERN": str(environment["DEPLOY_PATHS_PATTERN"]),
+            },
+        )
+        return run.returncode, output.read_text(), run.stderr
+
+    git("init", "-b", "main")
+    seed = commit()
+    runtime_head = commit("core/src/ufo/serve.py")
+
+    code, output, stderr = run_select("push", seed, runtime_head)
+    assert code == 0, stderr
+    assert "deploy=true" in output
+
+    git("checkout", "-b", "boundary")
+    boundary_head = commit("infra/modules/platform/iam.tf", "core/src/ufo/loop/engine.py")
+    git("update-ref", "refs/remotes/origin/main", runtime_head)
+    git("branch", "-D", "main")
+    code, output, stderr = run_select("workflow_dispatch", "origin/main", boundary_head)
+    assert code == 1
+    assert "expand IAM, roll and drain" in stderr
+    assert "deploy=" not in output
+
+
+def test_deploy_change_gate_entrypoint_exits_nonzero_on_the_boundary(tmp_path: Path) -> None:
+    """The gate's CI contract is its exit code: the argv-read → validate → exit path CI actually
+    invokes, not the imported function."""
+    gate = ROOT / ".github" / "scripts" / "deploy_change_gate.py"
+    paths = tmp_path / "deploy-paths"
+    paths.write_text("infra/modules/platform/iam.tf\ncore/src/ufo/serve.py\n")
+    rejected = subprocess.run(
+        [sys.executable, str(gate), str(paths)], capture_output=True, text=True
+    )
+    assert rejected.returncode == 1
+    assert "expand IAM, roll and drain" in rejected.stderr
+    paths.write_text("core/src/ufo/serve.py\n")
+    allowed = subprocess.run(
+        [sys.executable, str(gate), str(paths)], capture_output=True, text=True
+    )
+    assert allowed.returncode == 0
+    assert allowed.stderr == ""
 
 
 def test_plans_run_only_for_selected_deployment_inputs() -> None:
@@ -199,6 +339,24 @@ def test_hosted_namespaces_hold_rollouts_until_nlb_targets_are_ready() -> None:
             re.MULTILINE,
         )
         assert readiness and readiness.group(1) == "enabled", environment
+
+
+def test_runtime_rollout_drains_before_mount_gate() -> None:
+    rollout = _workflow(WORKFLOWS / "deploy.yml")["jobs"]["rollout"]
+    assert isinstance(rollout, dict)
+    steps = rollout["steps"]
+    assert isinstance(steps, list)
+    names = [step.get("name") for step in steps if isinstance(step, dict)]
+    wait = names.index("Wait for runtime rollout")
+    assert names.index("Terraform apply") < wait < names.index("Gate sandbox workspace mount")
+    step = steps[wait]
+    assert isinstance(step, dict)
+    script = step["run"]
+    assert isinstance(script, str)
+    assert "output -raw cluster_name" in script
+    assert 'NAMESPACE="$(terraform -chdir="$TF_DIR" output -raw system_namespace)"' in script
+    assert '--namespace "$NAMESPACE" rollout status deployment/ufo-sandbox-proxy' in script
+    assert '--namespace "$NAMESPACE" rollout status deployment/ufo-serve' in script
 
 
 def test_deployment_gate_joins_platform_and_edge_results() -> None:

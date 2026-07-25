@@ -184,7 +184,7 @@ def run() -> None:
     )
     init_runtime(runtime)
     install_connect_flow(_connect_flow(credentials, config, manifests))
-    DBOS(
+    dbos = DBOS(
         config={
             "name": DBOS_APP_NAME,
             "application_version": DBOS_APP_VERSION,
@@ -227,10 +227,32 @@ def run() -> None:
     _assert_no_reserved_routes(app)
     log("serve.started", host=config.serve.host, port=config.serve.port)
     try:
-        uvicorn.run(app, host=config.serve.host, port=config.serve.port, log_level="warning")
+        uvicorn.run(
+            app,
+            host=config.serve.host,
+            port=config.serve.port,
+            log_level="warning",
+            timeout_graceful_shutdown=config.serve.request_shutdown_seconds,
+        )
     finally:
-        DBOS.destroy()
-        asyncio.run(heartbeat.retire())
+        _stop_executor(dbos, heartbeat, config.serve.graceful_shutdown_seconds)
+
+
+def _stop_executor(dbos: DBOS, heartbeat: Heartbeat, graceful_shutdown_seconds: int) -> None:
+    """Drain, then retire the seat only when the executor emptied. `DBOS.destroy` waits out the
+    drain window, then force-cancels surviving workflow coroutines — a cancelled workflow writes
+    no outcome and stays PENDING, and retiring the seat is exactly what lets a peer resume it.
+    But destroy bounds even that cancellation with a ten-second join, so a cancellation-resistant
+    workflow can outlive it — and an active-set entry is released only when its workflow task
+    finishes, so a non-empty set here means work still executes in this process: retiring the
+    seat would let a peer's recovery sweep start a second concurrent execution. A kept seat
+    stays fresh under the daemon heartbeat and ages out with the process."""
+    DBOS.destroy(workflow_completion_timeout_sec=graceful_shutdown_seconds)
+    active = dbos._active_workflows_set.activeList()
+    if active:
+        log("serve.seat_kept_for_active_workflows", workflows=len(active))
+        return
+    asyncio.run(heartbeat.retire())
 
 
 def _shared_owner_dsn(config: Config) -> str:

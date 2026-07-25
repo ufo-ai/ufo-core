@@ -1,3 +1,6 @@
+import asyncio
+import os
+import signal
 from pathlib import Path
 from types import MethodType
 
@@ -22,7 +25,9 @@ def _config(owner_url: str | None = "postgresql://owner@db/ufo") -> Config:
     )
 
 
-def _proxy_serve(config: Config, manifests: tuple[Manifest, ...]) -> ProxyServe:
+def _proxy_serve(
+    config: Config, manifests: tuple[Manifest, ...], shutdown: asyncio.Event | None = None
+) -> ProxyServe:
     return ProxyServe(
         config=config,
         manifests=manifests,
@@ -30,6 +35,7 @@ def _proxy_serve(config: Config, manifests: tuple[Manifest, ...]) -> ProxyServe:
         ca_cert="CA",
         ca_key="KEY",
         pricing=CORE_PRICING,
+        shutdown=shutdown or asyncio.Event(),
     )
 
 
@@ -183,3 +189,68 @@ async def test_proxy_serve_wires_workspace_credential_refresh(
     refresh = captured["workspace_credentials"]
     assert isinstance(refresh, MethodType)
     assert refresh.__self__ is workspace_fs
+
+
+async def test_proxy_serve_drains_connections_on_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[int] = []
+
+    class Proxy:
+        def __init__(self, **kwargs: object) -> None:
+            pass
+
+        async def start(self, **kwargs: object) -> None:
+            pass
+
+        async def stop(self, graceful_shutdown_seconds: int) -> None:
+            captured.append(graceful_shutdown_seconds)
+
+    config = _config()
+    config.serve.graceful_shutdown_seconds = 600
+    shutdown = asyncio.Event()
+    shutdown.set()
+    monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr(proxy_serve_module, "init_db", lambda dsn: None)
+    monkeypatch.setattr(proxy_serve_module, "sandbox_fs_minter", lambda blob: None)
+    monkeypatch.setattr(proxy_serve_module, "EgressProxy", Proxy)
+
+    await _proxy_serve(config, (), shutdown).serve()
+
+    assert captured == [600]
+
+
+async def test_proxy_serve_sigterm_wakes_the_idle_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A process-level `signal.signal` handler never wakes a loop parked in its selector; the
+    proxy's steady state is exactly that park, so the drain must hang off the loop's own
+    signal machinery."""
+    captured: list[int] = []
+
+    class Proxy:
+        def __init__(self, **kwargs: object) -> None:
+            pass
+
+        async def start(self, **kwargs: object) -> None:
+            pass
+
+        async def stop(self, graceful_shutdown_seconds: int) -> None:
+            captured.append(graceful_shutdown_seconds)
+
+    config = _config()
+    config.serve.graceful_shutdown_seconds = 600
+    monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr(proxy_serve_module, "init_db", lambda dsn: None)
+    monkeypatch.setattr(proxy_serve_module, "sandbox_fs_minter", lambda blob: None)
+    monkeypatch.setattr(proxy_serve_module, "EgressProxy", Proxy)
+
+    serving = asyncio.create_task(_proxy_serve(config, ()).serve())
+    await asyncio.sleep(0)
+    assert signal.getsignal(signal.SIGTERM) is not signal.SIG_DFL
+    os.kill(os.getpid(), signal.SIGTERM)
+    await asyncio.wait_for(serving, timeout=5)
+
+    assert captured == [600]

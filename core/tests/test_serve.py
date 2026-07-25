@@ -1,4 +1,7 @@
 import asyncio
+import json
+import subprocess
+import sys
 from pathlib import Path
 from types import MethodType, SimpleNamespace
 from typing import cast
@@ -146,6 +149,86 @@ async def test_serve_lifespan_propagates_a_background_failure(
         isinstance(error, RuntimeError) and str(error) == "background failed"
         for error in raised.value.exceptions
     )
+
+
+class StubActiveWorkflows:
+    def __init__(self, active: list[str]) -> None:
+        self._active = active
+
+    def activeList(self) -> list[str]:
+        return self._active
+
+
+class StubDbosInstance:
+    def __init__(self, active: list[str]) -> None:
+        self._active_workflows_set = StubActiveWorkflows(active)
+
+
+def test_stop_executor_drains_before_retiring_heartbeat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[object] = []
+
+    class StubDbos:
+        @classmethod
+        def destroy(cls, *, workflow_completion_timeout_sec: int = 0) -> None:
+            calls.append(("destroy", workflow_completion_timeout_sec))
+
+    class StubHeartbeat:
+        async def retire(self) -> None:
+            calls.append("retire")
+
+    monkeypatch.setattr(serve, "DBOS", StubDbos)
+    serve._stop_executor(StubDbosInstance([]), StubHeartbeat(), 600)
+    assert calls == [("destroy", 600), "retire"]
+
+
+def test_stop_executor_keeps_the_seat_when_workflows_outlive_the_drain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`DBOS.destroy` bounds its post-drain force-cancel with a ten-second join, so a
+    cancellation-resistant workflow can outlive it with its active-set entry retained — the entry
+    is released only when the workflow task finishes. Retiring the seat then would let a peer
+    re-dispatch a workflow this process is still executing."""
+    calls: list[object] = []
+
+    class StubDbos:
+        @classmethod
+        def destroy(cls, *, workflow_completion_timeout_sec: int = 0) -> None:
+            calls.append(("destroy", workflow_completion_timeout_sec))
+
+    class StubHeartbeat:
+        async def retire(self) -> None:
+            calls.append("retire")
+
+    monkeypatch.setattr(serve, "DBOS", StubDbos)
+    serve._stop_executor(StubDbosInstance(["wf-live"]), StubHeartbeat(), 600)
+    assert calls == [("destroy", 600)]
+
+
+def test_dbos_destroy_contract_for_the_executor_drain(tmp_path: Path) -> None:
+    """The real interaction `_stop_executor` retires the seat on, no stubs: queued async
+    workflows run on DBOS's background loop — off the main thread, beyond any main-thread
+    `asyncio.run` teardown (uvicorn's shutdown) — so `DBOS.destroy`'s bounded drain is what ends
+    them. A cooperatively-parked workflow is cancelled and released; a cancellation-absorbing one
+    outlives destroy with its active-set entry retained — the keep-seat branch's case. The
+    stubbed tests above assert `_stop_executor`'s branch on that contract; this proves the
+    contract against the installed dbos, in a subprocess because DBOS is a process-global
+    singleton."""
+    probe = Path(__file__).parent / "executor_drain_probe.py"
+    run = subprocess.run(
+        [sys.executable, str(probe), str(tmp_path / "drain_sys.db")],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert run.returncode == 0, run.stderr
+    evidence = json.loads(run.stdout.splitlines()[-1])
+    assert evidence["on_main_thread"] is False
+    assert evidence["active_while_parked"] == 2
+    assert evidence["active_after_main_loop_teardown"] == 2
+    assert evidence["retained_is_stubborn"] is True
+    assert evidence["destroy_seconds"] < 30
 
 
 def test_hosted_proxy_endpoint_is_built_from_config_and_the_shared_ca(
