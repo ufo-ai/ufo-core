@@ -155,8 +155,7 @@ spec:
       containers:
         - name: proxy
           image: ${bundle_image}
-          # ENTRYPOINT ["ufoctl"] is baked in; `proxy` reads the bundle's own baked /app/ufo.toml
-          # (the config serve starts from) and takes its owner DSN, CA, and model keys from env below.
+          # ENTRYPOINT ["ufoctl"] is baked in; `proxy` reads the shared fleet config mounted below.
           args: [proxy]
           ports:
             - {name: proxy, containerPort: 8888}
@@ -187,6 +186,8 @@ spec:
             - name: COMPOSIO_API_KEY
               valueFrom:
                 secretKeyRef: {name: ufo-platform-secrets, key: COMPOSIO_API_KEY}
+          volumeMounts:
+            - {name: config, mountPath: /app/ufo.toml, subPath: ufo.toml}
           # No /healthz on the raw CONNECT proxy; a TCP probe confirms the bind after fail-loud boot.
           readinessProbe:
             tcpSocket: {port: proxy}
@@ -196,6 +197,12 @@ spec:
             tcpSocket: {port: proxy}
             initialDelaySeconds: 30
             periodSeconds: 20
+      volumes:
+        - name: config
+          secret:
+            secretName: ufo-serve
+            items:
+              - {key: ufo.toml, path: ufo.toml}
 ---
 # The shared serve fleet is one Deployment serving turns for every workspace. It runs the
 # bundle image (`ufoctl serve`) over the ufo-serve Secret's ufo.toml (mounted over the image's baked

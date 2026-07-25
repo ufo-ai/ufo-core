@@ -27,6 +27,11 @@ PROXY_DEPLOYMENT = (
     .split("kind: Deployment\nmetadata:\n  name: ufo-sandbox-proxy", maxsplit=1)[1]
     .split("---", maxsplit=1)[0]
 )
+SERVE_DEPLOYMENT = (
+    HOSTED_TEMPLATE.read_text()
+    .split("kind: Deployment\nmetadata:\n  name: ufo-serve", maxsplit=1)[1]
+    .split("---", maxsplit=1)[0]
+)
 
 
 def test_app_s3_trusts_serve_in_every_ufo_namespace() -> None:
@@ -99,3 +104,11 @@ def test_hosted_proxy_mints_scoped_sandbox_credentials() -> None:
     assert "eks.amazonaws.com/role-arn: ${proxy_role_arn}" in HOSTED_TEMPLATE.read_text()
     assert "name: UFO_SANDBOX_FS_TOKEN_SECRET" in PROXY_DEPLOYMENT
     assert "secretKeyRef: {name: ufo-serve, key: UFO_SANDBOX_FS_TOKEN_SECRET}" in PROXY_DEPLOYMENT
+
+
+def test_hosted_proxy_and_serve_share_the_rendered_config() -> None:
+    config_mount = "{name: config, mountPath: /app/ufo.toml, subPath: ufo.toml}"
+    for deployment in (PROXY_DEPLOYMENT, SERVE_DEPLOYMENT):
+        assert config_mount in deployment
+        assert "secretName: ufo-serve" in deployment
+        assert "{key: ufo.toml, path: ufo.toml}" in deployment
