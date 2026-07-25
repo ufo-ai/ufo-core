@@ -837,7 +837,8 @@ async def test_next_turn_sees_a_failed_turns_inbound(surface: Turns) -> None:
     assert _bodies(stored)[:2] == ["explode", "ok"]
 
 
-EVAL_DEADLINE_SECONDS = 1.0
+EVAL_OVERDUE_DEADLINE_SECONDS = 1.0
+EVAL_FOLLOWUP_WAIT_SECONDS = 60.0
 
 
 async def test_eval_settle_deadline_cancels_the_turn_before_the_runner_advances(
@@ -855,15 +856,16 @@ async def test_eval_settle_deadline_cancels_the_turn_before_the_runner_advances(
         agent_id = (await connection.execute(sa.select(tables.agent.c.id))).scalar_one()
     runtime = loop_queue._runtime
     assert runtime is not None
-    driver = WorkspaceDriver(
+    overdue_driver = WorkspaceDriver(
         workspace_id,
         agent_id,
         "be brief",
         blob,
         runtime.dbos,
         poll_interval_seconds=0.05,
-        workflow_wait_seconds=EVAL_DEADLINE_SECONDS,
+        workflow_wait_seconds=EVAL_OVERDUE_DEADLINE_SECONDS,
     )
+    followup_driver = replace(overdue_driver, workflow_wait_seconds=EVAL_FOLLOWUP_WAIT_SECONDS)
     target = InProcessTarget(
         ctx=context_for(
             "evals",
@@ -874,13 +876,15 @@ async def test_eval_settle_deadline_cancels_the_turn_before_the_runner_advances(
             ),
         ),
         agent_id=agent_id,
-        conversations=driver,
-        outcome=driver,
+        conversations=overdue_driver,
+        outcome=overdue_driver,
     )
 
     with ws(workspace_id):
         overdue = await target.run(CapabilityCase("deadline", "slow", exact_scorer("unused")))
-        followup = await target.run(CapabilityCase("follow-up", "ping", exact_scorer("unused")))
+        followup = await replace(target, outcome=followup_driver).run(
+            CapabilityCase("follow-up", "ping", exact_scorer("unused"))
+        )
 
     assert not overdue.clean
     assert overdue.failure_reason == "turn produced no terminal transcript"
