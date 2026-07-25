@@ -2,8 +2,8 @@
 
 Activating it (config `[pack] name = "assistant"`) narrows the deploy to exactly the extensions it
 names — durable memory and recall over the base-pinned local index and OpenAI embeddings, web
-research (the research tools over the Exa search backend), brokered connectors (Composio, plus
-Pipedream for Gmail) and MCP,
+research (the research tools over the Exa search backend), brokered connectors (Composio's open
+namespace plus the Pipedream allowlist) and MCP,
 the sandbox browser/computer-use tools with Chrome driven inside each conversation's sandbox (the
 sandbox-chrome cdp provider), website building and the code REPL, document generation,
 todos, scheduled tasks, member-authored skills, the web chat surface, the operator session debugger

@@ -3,10 +3,11 @@ Pipedream-backed OAuth descriptor behind `/connect`, the member-facing label, an
 `PipedreamBroker` serving its actions, server-side execution, and feed-sync credential — plus the
 browser bridge route the consent leg redirects through. `serve` folds every connector into the
 connect registry and the `ConnectorRegistry` the dynamic connector tools (the `connectors`
-extension) and the sync runner route through, beside Composio's providers; Pipedream carries Gmail
-because Google blocks restricted Gmail scopes on Composio's shared client, while a deploy's own
-Google OAuth client rides Pipedream Connect. Pipedream holds each account's token server-side, so
-no secret ever reaches this deploy."""
+extension) and the sync runner route through, beside Composio's providers. This allowlist holds
+connectors Composio's open namespace cannot broker: a provider Composio has no managed auth config
+for (Datadog), or one whose consent Composio's shared client cannot pass (Gmail: Google blocks
+restricted Gmail scopes, so a deploy's own Google OAuth client rides Pipedream Connect). Pipedream
+holds each account's token server-side, so no secret ever reaches this deploy."""
 
 from ufo.sdk.connectors import ConnectorBroker, connect_bridge_workspace
 from ufo.sdk.manifest import ConnectorProvider, Manifest, RouteSpec
