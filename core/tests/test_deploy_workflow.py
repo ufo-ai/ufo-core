@@ -10,6 +10,7 @@ import yaml
 ROOT = Path(__file__).parents[2]
 WORKFLOWS = ROOT / ".github" / "workflows"
 MONITORS = ROOT / "infra" / "envs" / "testing" / "monitors.tf"
+DEPLOY_ENVIRONMENTS = ("testing", "prod")
 RUN_URL = "https://github.com/metalcraftai/ufo/actions/runs/30120902872"
 DATADOG_STATUS_OK = 0
 DATADOG_STATUS_CRITICAL = 2
@@ -169,6 +170,35 @@ def test_mount_gate_exercises_the_refreshing_credential_endpoint() -> None:
     assert "output -raw sandbox_fs_token" in script
     assert "output -raw sandbox_proxy_url" in script
     assert "--role-arn" not in script
+
+
+def test_hosted_namespaces_hold_rollouts_until_nlb_targets_are_ready() -> None:
+    for environment in DEPLOY_ENVIRONMENTS:
+        terraform = (ROOT / "infra" / "envs" / environment / "ufo.tf").read_text()
+        resource = re.search(
+            r'^resource "kubernetes_namespace_v1" "ufo_system" \{\n(.*?)^}\n',
+            terraform,
+            re.DOTALL | re.MULTILINE,
+        )
+        assert resource, environment
+        metadata = re.search(
+            r"^  metadata \{\n(.*?)^  }\n",
+            resource.group(1),
+            re.DOTALL | re.MULTILINE,
+        )
+        assert metadata, environment
+        labels = re.search(
+            r"^    labels = \{\n(.*?)^    }\n",
+            metadata.group(1),
+            re.DOTALL | re.MULTILINE,
+        )
+        assert labels, environment
+        readiness = re.search(
+            r'^\s+"elbv2\.k8s\.aws/pod-readiness-gate-inject"\s*=\s*"([^"]+)"$',
+            labels.group(1),
+            re.MULTILINE,
+        )
+        assert readiness and readiness.group(1) == "enabled", environment
 
 
 def test_deployment_gate_joins_platform_and_edge_results() -> None:

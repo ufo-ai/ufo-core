@@ -166,8 +166,11 @@ resource "helm_release" "ingress_nginx" {
 # The hosted service namespace.
 resource "kubernetes_namespace_v1" "ufo_system" {
   metadata {
-    name   = local.system_namespace
-    labels = { "app.kubernetes.io/managed-by" = "ufo-control" }
+    name = local.system_namespace
+    labels = {
+      "app.kubernetes.io/managed-by"            = "ufo-control"
+      "elbv2.k8s.aws/pod-readiness-gate-inject" = "enabled"
+    }
   }
   depends_on = [module.platform]
 }
