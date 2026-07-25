@@ -14,7 +14,6 @@ from typing import Protocol
 from uuid import UUID
 
 from ufo.blob import BlobStore
-from ufo.sandbox.fs_creds import SandboxFsCredentials
 
 WORKSPACE_DIR = "/workspace"
 TOOL_OUTPUT_DIRNAME = ".tool-output"
@@ -62,7 +61,7 @@ class MountSpec:
 
     - `filesystem`: the carrier bind-mounts the host directory at `host_path` into `/workspace`.
     - `s3`: the carrier mounts the `bucket`/`key_prefix` S3 prefix over s3fs at `/workspace`,
-      writing the prefix-scoped `credentials` as the sandbox's AWS credentials and reaching S3 at
+      redeeming the mount-user-only `credential_token` through the sandbox proxy and reaching S3 at
       `s3_url` (`region`, `path_style` shape the s3fs request).
 
     Either way the container sees only the conversation's `workspace/`, never the transcript above
@@ -72,7 +71,7 @@ class MountSpec:
     host_path: str | None = None
     bucket: str | None = None
     key_prefix: str | None = None
-    credentials: SandboxFsCredentials | None = None
+    credential_token: str | None = None
     s3_url: str | None = None
     region: str | None = None
     path_style: bool = False

@@ -44,7 +44,7 @@ from ufo.models.interface import (
     ToolResultBlock,
 )
 from ufo.models.registry import ModelRegistry
-from ufo.sandbox.session import ExecResult, ProxyEndpoint, SandboxHandle, SandboxSpec
+from ufo.sandbox.session import ExecResult, ProxyEndpoint, RunToken, SandboxHandle, SandboxSpec
 from ufo.schema import tables
 from ufo.schema.records import TerminalFrame, Turn, Usage
 from ufo.surfaces import hub_tail
@@ -521,7 +521,9 @@ async def test_workspace_mount_source_is_absolute_for_a_relative_blob_root(
     turn would otherwise fail at container create under the shipped default config."""
     monkeypatch.chdir(tmp_path)
     blob = FilesystemBlobStore(root=Path("blobs"))
-    mount = await loop_queue._workspace_mount(blob, None, uuid4())
+    mount = await loop_queue._workspace_mount(
+        blob, None, uuid4(), RunToken(workspace_id=uuid4(), turn_id=uuid4())
+    )
     assert Path(mount.host_path).is_absolute()
     assert await asyncio.to_thread(Path(mount.host_path).is_dir)
 

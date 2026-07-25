@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+"""Relay s3fs ECS metadata requests to the sandbox proxy's credential endpoint."""
+
+import http.server
+import hmac
+import os
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+MAX_CREDENTIAL_BYTES = 65536
+RELAY_HOST = "127.0.0.1"
+UPSTREAM_TIMEOUT_SECONDS = 30
+
+
+class CredentialRelay(http.server.BaseHTTPRequestHandler):
+    upstream = ""
+    token_path = Path()
+    relay_secret_path = Path()
+
+    def do_GET(self) -> None:
+        try:
+            relay_secret = self.relay_secret_path.read_text().strip()
+        except OSError:
+            self.send_error(500)
+            return
+        if not relay_secret:
+            self.send_error(500)
+            return
+        if not hmac.compare_digest(self.path, f"/{relay_secret}"):
+            self.send_error(404)
+            return
+        try:
+            token = self.token_path.read_text().strip()
+        except OSError:
+            self.send_error(500)
+            return
+        try:
+            with urllib.request.urlopen(
+                f"{self.upstream}/{token}", timeout=UPSTREAM_TIMEOUT_SECONDS
+            ) as response:
+                body = response.read(MAX_CREDENTIAL_BYTES + 1)
+                if len(body) > MAX_CREDENTIAL_BYTES:
+                    self.send_error(502)
+                    return
+                self.send_response(response.status)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+        except urllib.error.HTTPError as error:
+            self.send_error(error.code)
+        except (OSError, TimeoutError):
+            self.send_error(502)
+
+    def log_message(self, format: str, *args: object) -> None:
+        return
+
+
+def main() -> None:
+    if len(sys.argv) != 6:
+        raise SystemExit(
+            "usage: sbxcred <credential-endpoint> <token-path> <relay-port> "
+            "<relay-secret-path> <pid-path>"
+        )
+    CredentialRelay.upstream = sys.argv[1].rstrip("/")
+    CredentialRelay.token_path = Path(sys.argv[2])
+    CredentialRelay.relay_secret_path = Path(sys.argv[4])
+    server = http.server.ThreadingHTTPServer((RELAY_HOST, int(sys.argv[3])), CredentialRelay)
+    ready_read, ready_write = os.pipe()
+    child = os.fork()
+    if child:
+        os.close(ready_write)
+        ready = os.read(ready_read, 1)
+        os.close(ready_read)
+        server.server_close()
+        if ready != b"1":
+            os.waitpid(child, 0)
+            raise RuntimeError("credential relay failed to start")
+        return
+    os.close(ready_read)
+    try:
+        os.setsid()
+        Path(sys.argv[5]).write_text(str(os.getpid()))
+        os.write(ready_write, b"1")
+    except Exception:
+        os.write(ready_write, b"0")
+        raise
+    finally:
+        os.close(ready_write)
+    server.serve_forever()
+
+
+if __name__ == "__main__":
+    main()

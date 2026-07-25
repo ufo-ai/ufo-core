@@ -173,10 +173,11 @@ jobs:
         env:
           E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
         run: |
-          uv run python sandbox/mount_gate.py \
-            --role-arn "$(terraform -chdir="$TF_DIR" output -raw sandbox_fs_role_arn)" \
+          UFO_SANDBOX_FS_TOKEN_SECRET="$(terraform -chdir="$TF_DIR" output -raw sandbox_fs_token)" \
+            uv run python sandbox/mount_gate.py \
             --bucket "$(terraform -chdir="$TF_DIR" output -raw blob_bucket)" \
-            --region "$AWS_REGION"
+            --region "$AWS_REGION" \
+            --proxy-url "$(terraform -chdir="$TF_DIR" output -raw sandbox_proxy_url)"
 
       - name: Gate sandbox egress proxy TLS
         if: github.event_name != 'pull_request'

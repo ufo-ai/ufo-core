@@ -40,7 +40,6 @@ from ufo_ext_e2b import (
 
 from ufo.blob import FilesystemBlobStore
 from ufo.config import BlobConfig, Config, DatabaseConfig, SandboxConfig
-from ufo.sandbox.fs_creds import SandboxFsCredentials
 from ufo.sandbox.session import (
     WORKSPACE_DIR,
     ExecResult,
@@ -49,7 +48,12 @@ from ufo.sandbox.session import (
     SandboxHandle,
     SandboxSpec,
 )
-from ufo.sdk.sandbox import AWS_CREDENTIALS_PATH, aws_credentials_file, mount_health_check
+from ufo.sdk.sandbox import (
+    SANDBOX_FS_TOKEN_STAGING_PATH,
+    install_token_command,
+    mount_health_check,
+    prepare_token_staging_command,
+)
 from ufo.serve import _select_carrier
 
 
@@ -70,6 +74,7 @@ class _Commands:
     fail_on: tuple[str, ...] = ()
     fail_counts: dict[str, int] = field(default_factory=dict)
     timeout_on: tuple[str, ...] = ()
+    timeout_counts: dict[str, int] = field(default_factory=dict)
 
     def run(
         self,
@@ -93,6 +98,10 @@ class _Commands:
                 )
         if any(token in cmd for token in self.timeout_on):
             raise TimeoutException("probe hung")
+        for token, remaining in self.timeout_counts.items():
+            if token in cmd and remaining > 0:
+                self.timeout_counts[token] -= 1
+                raise TimeoutException("probe hung")
         if self.raises is not None:
             raise self.raises
         return self.result
@@ -144,6 +153,7 @@ class _Sdk:
     command_fail_on: tuple[str, ...] = ()
     command_fail_counts: dict[str, int] = field(default_factory=dict)
     command_timeout_on: tuple[str, ...] = ()
+    command_timeout_counts: dict[str, int] = field(default_factory=dict)
     not_found: frozenset[str] = frozenset()
 
     def create(
@@ -163,6 +173,7 @@ class _Sdk:
                 fail_on=self.command_fail_on,
                 fail_counts=dict(self.command_fail_counts),
                 timeout_on=self.command_timeout_on,
+                timeout_counts=dict(self.command_timeout_counts),
             ),
         )
         self.sandboxes[sandbox_id] = sandbox
@@ -197,7 +208,7 @@ def _spec(conversation: UUID) -> SandboxSpec:
     )
 
 
-_S3_CREDS = SandboxFsCredentials("AKIASBX", "sbx-secret", "sbx-token")
+_S3_TOKEN = "signed-conversation-token"
 
 
 def _s3_spec(conversation: UUID) -> SandboxSpec:
@@ -208,7 +219,7 @@ def _s3_spec(conversation: UUID) -> SandboxSpec:
             kind="s3",
             bucket="ufo-blobs",
             key_prefix=f"conversations/{conversation}/workspace",
-            credentials=_S3_CREDS,
+            credential_token=_S3_TOKEN,
             s3_url="https://minio:9000",
             region="us-east-1",
             path_style=True,
@@ -219,10 +230,8 @@ def _s3_spec(conversation: UUID) -> SandboxSpec:
 
 
 async def test_create_mounts_the_s3_workspace_prefix_over_s3fs() -> None:
-    """On an s3 mount the carrier writes the prefix-scoped credential, then runs the root `prepare`
-    and the agent `mount` — the privileged FUSE prep never runs as the agent, and s3fs mounts this
-    conversation's prefix at /workspace with the config's endpoint and path-style."""
-    sdk = _Sdk(command_fail_on=("mountpoint",))  # fresh sandbox: /workspace not yet mounted
+    """The carrier writes a private endpoint token and mounts through an unprivileged s3fs."""
+    sdk = _Sdk(command_fail_counts={"mountpoint": 1})
     carrier = E2BCarrier(api_key="k", template="t", sdk=sdk)
     conversation = uuid4()
 
@@ -231,59 +240,77 @@ async def test_create_mounts_the_s3_workspace_prefix_over_s3fs() -> None:
     sandbox = sdk.sandboxes["sbx-1"]
     assert sandbox.files.written == [
         (CA_STAGING_PATH, "ca-pem"),
-        (AWS_CREDENTIALS_PATH, aws_credentials_file(_S3_CREDS)),
+        (SANDBOX_FS_TOKEN_STAGING_PATH, _S3_TOKEN),
     ]
-    assert sandbox.files.write_users == ["root", None]
+    assert sandbox.files.write_users == ["root", "root"]
     commands = [cmd for cmd, _, _ in sandbox.commands.runs]
     assert commands[0] == INSTALL_CA_COMMAND
-    assert commands[1] == mount_health_check(WORKSPACE_DIR)
-    assert "chmod 666 /dev/fuse" in commands[2]
-    assert commands[3].startswith(
-        f"mkdir -p {WORKSPACE_DIR} && chmod 600 {AWS_CREDENTIALS_PATH} && "
-    )
-    assert f"s3fs ufo-blobs:/conversations/{conversation}/workspace {WORKSPACE_DIR}" in commands[3]
-    assert "-o url=https://minio:9000" in commands[3]
-    assert "-o use_path_request_style" in commands[3]
-    assert sandbox.commands.users == ["root", None, "root", None]
+    assert commands[1] == prepare_token_staging_command()
+    assert commands[2] == install_token_command()
+    assert commands[3] == mount_health_check(WORKSPACE_DIR)
+    assert "chmod 666 /dev/fuse" in commands[4]
+    assert commands[5].startswith(f"mkdir -p {WORKSPACE_DIR} && chown nobody")
+    assert commands[6] == mount_health_check(WORKSPACE_DIR)
+    assert "sbxcred https://sandbox-proxy.test/sandbox-fs-credentials" in commands[5]
+    assert "-o ecs" in commands[5]
+    assert f"s3fs ufo-blobs:/conversations/{conversation}/workspace {WORKSPACE_DIR}" in commands[5]
+    assert "-o url=https://minio:9000" in commands[5]
+    assert "-o use_path_request_style" in commands[5]
+    assert "runuser -u nobody -- sh -c" in commands[5]
+    assert sandbox.commands.users == ["root", "root", "root", "root", "root", "root", "root"]
     # The mount steps carry no egress env — s3fs reaches S3 directly, never through the proxy.
-    assert sandbox.commands.envs == [None, None, None, None]
+    assert sandbox.commands.envs == [None, None, None, None, None, None, None]
     assert handle.mount is not None and handle.mount.kind == "s3"
+
+
+async def test_create_rejects_a_mount_that_disconnects_after_s3fs_returns() -> None:
+    sdk = _Sdk(command_fail_counts={"mountpoint": 2})
+    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk)
+
+    with pytest.raises(RuntimeError, match="mount failed its health check"):
+        await carrier.create(_s3_spec(uuid4()))
 
 
 async def test_create_skips_the_s3_mount_when_already_healthy() -> None:
     """Idempotent-if-healthy: a subagent's create over a live mount health-checks and returns
     without remounting, so it never yanks the mount out from under an in-flight dispatch."""
-    sdk = _Sdk()  # the probe succeeds → mounted, serving S3, credential inside its window
+    sdk = _Sdk()
     carrier = E2BCarrier(api_key="k", template="t", sdk=sdk)
 
     await carrier.create(_s3_spec(uuid4()))
 
     sandbox = sdk.sandboxes["sbx-1"]
-    assert sandbox.files.written == [(CA_STAGING_PATH, "ca-pem")]
-    assert sandbox.files.write_users == ["root"]
+    assert sandbox.files.written == [
+        (CA_STAGING_PATH, "ca-pem"),
+        (SANDBOX_FS_TOKEN_STAGING_PATH, _S3_TOKEN),
+    ]
+    assert sandbox.files.write_users == ["root", "root"]
     assert [cmd for cmd, _, _ in sandbox.commands.runs] == [
         INSTALL_CA_COMMAND,
+        prepare_token_staging_command(),
+        install_token_command(),
         mount_health_check(WORKSPACE_DIR),
     ]
 
 
 async def test_create_remounts_when_the_health_probe_times_out() -> None:
     """A wedged FUSE mount hangs the probe rather than failing it; the carrier reads the timeout
-    as unhealthy and remounts with the bring-up's fresh credential instead of surfacing the hang —
-    the resumed-after-pause sandbox whose s3fs daemon outlived its STS token."""
-    sdk = _Sdk(command_timeout_on=("mountpoint",))
+    as unhealthy and rebuilds the mount from its durable S3 workspace."""
+    sdk = _Sdk(command_timeout_counts={"mountpoint": 1})
     carrier = E2BCarrier(api_key="k", template="t", sdk=sdk)
     conversation = uuid4()
 
     await carrier.create(_s3_spec(conversation))
 
     sandbox = sdk.sandboxes["sbx-1"]
-    assert (AWS_CREDENTIALS_PATH, aws_credentials_file(_S3_CREDS)) in sandbox.files.written
+    assert (SANDBOX_FS_TOKEN_STAGING_PATH, _S3_TOKEN) in sandbox.files.written
     commands = [cmd for cmd, _, _ in sandbox.commands.runs]
     assert commands[0] == INSTALL_CA_COMMAND
-    assert commands[1] == mount_health_check(WORKSPACE_DIR)
-    assert "umount -l" in commands[2]
-    assert f"s3fs ufo-blobs:/conversations/{conversation}/workspace {WORKSPACE_DIR}" in commands[3]
+    assert commands[1] == prepare_token_staging_command()
+    assert commands[2] == install_token_command()
+    assert commands[3] == mount_health_check(WORKSPACE_DIR)
+    assert "umount -l" in commands[4]
+    assert f"s3fs ufo-blobs:/conversations/{conversation}/workspace {WORKSPACE_DIR}" in commands[5]
 
 
 async def test_create_opens_a_sandbox_on_the_template_and_returns_its_handle() -> None:

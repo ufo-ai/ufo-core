@@ -1,7 +1,9 @@
 from pathlib import Path
+from types import MethodType
 
 import pytest
 
+from ufo import proxy_serve as proxy_serve_module
 from ufo.config import BlobConfig, Config, DatabaseConfig, load_config
 from ufo.ext.loader import load_manifests
 from ufo.ext.manifest import CredentialSlot, InjectionTarget, Manifest
@@ -147,3 +149,37 @@ def test_bundle_baked_config_satisfies_the_proxy(monkeypatch: pytest.MonkeyPatch
     manifests = load_manifests(config.pack.name)
     base = _proxy_serve(config, manifests)._base()
     assert any(isinstance(rule, ScopeRule) for rule in base)
+
+
+async def test_proxy_serve_wires_workspace_credential_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class StopServe(Exception):
+        pass
+
+    class WorkspaceFs:
+        async def refresh(self, token: str) -> object:
+            return token
+
+    class Proxy:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+        async def start(self, **kwargs: object) -> None:
+            raise StopServe
+
+    workspace_fs = WorkspaceFs()
+    monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr(proxy_serve_module, "init_db", lambda dsn: None)
+    monkeypatch.setattr(proxy_serve_module, "sandbox_fs_minter", lambda blob: workspace_fs)
+    monkeypatch.setattr(proxy_serve_module, "EgressProxy", Proxy)
+
+    with pytest.raises(StopServe):
+        await _proxy_serve(_config(), ()).serve()
+
+    refresh = captured["workspace_credentials"]
+    assert isinstance(refresh, MethodType)
+    assert refresh.__self__ is workspace_fs

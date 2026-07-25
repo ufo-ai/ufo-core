@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import json
 import socket
 import ssl
 import struct
@@ -19,6 +20,11 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from ufo.connectors import CliCredential, ForwardedResponse
 from ufo.db import workspace_tx
 from ufo.grants import GrantStore, grant_sentinel
+from ufo.sandbox.fs_creds import (
+    SANDBOX_FS_CREDENTIAL_PATH,
+    SandboxFsCredentialMinter,
+    SandboxFsCredentials,
+)
 from ufo.sandbox.proxy.rules import (
     OPENAI_HOST,
     ForwardRule,
@@ -127,6 +133,134 @@ async def _connect(port: int, host: str, run_token: str = "", target_port: int |
     await reader.read()
     writer.close()
     return int(status_line.split()[1])
+
+
+async def _get(port: int, path: str) -> tuple[int, bytes]:
+    reader, writer = await asyncio.open_connection("127.0.0.1", port)
+    writer.write(f"GET {path} HTTP/1.1\r\nhost: localhost\r\n\r\n".encode())
+    await writer.drain()
+    head, _, body = (await reader.read()).partition(b"\r\n\r\n")
+    writer.close()
+    return int(head.split()[1]), body
+
+
+async def test_workspace_credential_endpoint_serves_only_while_the_turn_is_live(db: None) -> None:
+    class Sts:
+        async def assume_role(
+            self, *, RoleArn: str, RoleSessionName: str, Policy: str, DurationSeconds: int
+        ) -> dict[str, object]:
+            return {
+                "Credentials": {
+                    "AccessKeyId": "AKIA",
+                    "SecretAccessKey": "secret",
+                    "SessionToken": "token",
+                    "Expiration": datetime(2026, 1, 2, tzinfo=UTC),
+                }
+            }
+
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    minter = SandboxFsCredentialMinter(
+        sts=Sts(),
+        role_arn="arn:aws:iam::0:role/sbxfs",
+        bucket="ufo-blobs",
+        s3_url="https://s3.test",
+        region="us-east-1",
+        path_style=False,
+        token_secret=b"mount-secret",
+        now=lambda: now,
+    )
+    async with workspace_tx() as connection:
+        seeded = await _seed_turn(connection)
+    live_run = RunToken(workspace_id=seeded.workspace_id, turn_id=seeded.turn_id)
+    token = minter.issue(seeded.conversation_id, live_run)
+
+    cert, key = await generate_ca()
+    resolver = _fixed()
+    proxy = EgressProxy(
+        resolve=resolver.resolve,
+        authorize=resolver.turn_live,
+        ca_cert=cert,
+        ca_key=key,
+        workspace_credentials=minter.refresh,
+    )
+    endpoint = await proxy.start(bind_host="127.0.0.1")
+    try:
+        status, body = await _get(endpoint.port, f"{SANDBOX_FS_CREDENTIAL_PATH}{token}")
+        refused, _ = await _get(endpoint.port, f"{SANDBOX_FS_CREDENTIAL_PATH}{token}x")
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.turn)
+                .values(status="done", terminal={"status": "done"})
+                .where(tables.turn.c.id == seeded.turn_id)
+            )
+        ended_status, _ = await _get(endpoint.port, f"{SANDBOX_FS_CREDENTIAL_PATH}{token}")
+    finally:
+        await proxy.stop()
+
+    assert status == 200
+    assert json.loads(body) == {
+        "AccessKeyId": "AKIA",
+        "SecretAccessKey": "secret",
+        "Token": "token",
+        "Expiration": "2026-01-02T00:00:00Z",
+        "RoleArn": "arn:aws:iam::0:role/sbxfs",
+    }
+    assert refused == 403
+    assert ended_status == 403
+
+
+@pytest.mark.parametrize(
+    ("path", "wired"),
+    [
+        ("/other", True),
+        (SANDBOX_FS_CREDENTIAL_PATH, True),
+        (f"{SANDBOX_FS_CREDENTIAL_PATH}signed/extra", True),
+        (f"{SANDBOX_FS_CREDENTIAL_PATH}signed", False),
+    ],
+)
+async def test_workspace_credential_endpoint_rejects_non_token_paths(
+    path: str, wired: bool
+) -> None:
+    async def unused(token: str, _authorize: object) -> SandboxFsCredentials:
+        raise AssertionError(token)
+
+    cert, key = await generate_ca()
+    proxy = EgressProxy(
+        resolve=_fixed().resolve,
+        authorize=_fixed().turn_live,
+        ca_cert=cert,
+        ca_key=key,
+        workspace_credentials=unused if wired else None,
+    )
+    endpoint = await proxy.start(bind_host="127.0.0.1")
+    try:
+        status, _ = await _get(endpoint.port, path)
+    finally:
+        await proxy.stop()
+
+    assert status == 404
+
+
+async def test_workspace_credential_validation_failure_is_a_mint_failure() -> None:
+    async def refresh(token: str, _authorize: object) -> SandboxFsCredentials:
+        return SandboxFsCredentials.model_validate({})
+
+    cert, key = await generate_ca()
+    proxy = EgressProxy(
+        resolve=_fixed().resolve,
+        authorize=_fixed().turn_live,
+        ca_cert=cert,
+        ca_key=key,
+        workspace_credentials=refresh,
+    )
+    endpoint = await proxy.start(bind_host="127.0.0.1")
+    try:
+        status, body = await _get(endpoint.port, f"{SANDBOX_FS_CREDENTIAL_PATH}signed")
+    finally:
+        await proxy.stop()
+
+    assert status == 502
+    assert body == b""
 
 
 async def test_a_resolution_error_fails_closed_to_base_and_is_not_cached() -> None:

@@ -1,31 +1,39 @@
 #!/usr/bin/env python3
 """Deploy gate: prove the deployed environment serves a sandbox workspace mount end-to-end.
 
-Boots a sandbox from the published template, mints a prefix-scoped credential through the same
-minter production uses (STS AssumeRole on the sandbox-fs role), brings /workspace up with the same
-prepare/mount recipe the carriers run, then exercises the mount the way an agent does — create,
-list, read back, chmod, delete — and proves the carriers' health probe passes on the fresh mount.
-Any failure exits non-zero, so a deploy onto a broken storage chain (template FUSE/s3fs, IAM trust
-or policy, bucket) goes red in the pipeline instead of surfacing later as a wedged agent. The
-workspace prefix is a throwaway conversation id, emptied again by the exercise's own delete; the
-sandbox is killed either way."""
+Boots a sandbox from the published template, issues a short-lived operator probe token, brings
+/workspace up through the production credential endpoint and carrier recipe, then exercises the
+mount the way an agent does — create, list, read back, chmod, delete — and proves the health probe
+passes. Any failure exits non-zero, so a deploy onto a broken storage chain (template FUSE/s3fs,
+credential endpoint, IAM trust or policy, bucket) goes red in the pipeline. The workspace prefix
+is a throwaway conversation id, emptied again by the exercise's own delete; the sandbox is killed
+either way."""
 
 from __future__ import annotations
 
 import argparse
-import asyncio
-from uuid import uuid4
+import os
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from uuid import UUID, uuid4
 
 from e2b import Sandbox
 from ufo_ext_e2b import E2B_TEMPLATE_NAME
 
-from ufo.sandbox.fs_creds import AwsStsClient, SandboxFsCredentialMinter, workspace_key_prefix
+from ufo.sandbox.fs_creds import (
+    SANDBOX_FS_CREDENTIAL_PATH,
+    SANDBOX_FS_GATE_TOKEN_TTL_SECONDS,
+    SANDBOX_FS_TOKEN_SECRET_ENV,
+    issue_sandbox_fs_gate_token,
+    workspace_key_prefix,
+)
 from ufo.sandbox.fs_mount import (
-    AWS_CREDENTIALS_PATH,
     MOUNT_TIMEOUT_SECONDS,
-    aws_credentials_file,
+    SANDBOX_FS_TOKEN_STAGING_PATH,
+    install_token_command,
     mount_health_check,
     mount_scripts,
+    prepare_token_staging_command,
     s3fs_command,
 )
 from ufo.sandbox.session import WORKSPACE_DIR
@@ -43,34 +51,77 @@ rm gate.txt
 """.strip()
 
 
+@dataclass(frozen=True)
+class _MountGateRecipe:
+    token: str
+    prepare_token_staging: str
+    root_commands: tuple[str, ...]
+
+
+def _mount_gate_recipe(
+    *,
+    bucket: str,
+    region: str,
+    proxy_url: str,
+    token_secret: str | None,
+    conversation: UUID,
+    now: datetime,
+) -> _MountGateRecipe:
+    if not token_secret:
+        raise RuntimeError(f"{SANDBOX_FS_TOKEN_SECRET_ENV} is required")
+    token = issue_sandbox_fs_gate_token(
+        conversation,
+        token_secret.encode(),
+        now + timedelta(seconds=SANDBOX_FS_GATE_TOKEN_TTL_SECONDS),
+    )
+    s3fs = s3fs_command(
+        bucket,
+        workspace_key_prefix(conversation),
+        WORKSPACE_DIR,
+        f"https://s3.{region}.amazonaws.com",
+        region,
+        False,
+    )
+    credential_url = f"{proxy_url.rstrip('/')}{SANDBOX_FS_CREDENTIAL_PATH.rstrip('/')}"
+    prepare, mount = mount_scripts(WORKSPACE_DIR, s3fs, credential_url)
+    return _MountGateRecipe(
+        token=token,
+        prepare_token_staging=prepare_token_staging_command(),
+        root_commands=(
+            install_token_command(),
+            prepare,
+            mount,
+            mount_health_check(WORKSPACE_DIR),
+        ),
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="mount-gate")
-    parser.add_argument("--role-arn", required=True)
     parser.add_argument("--bucket", required=True)
     parser.add_argument("--region", required=True)
+    parser.add_argument("--proxy-url", required=True)
     args = parser.parse_args()
-    s3_url = f"https://s3.{args.region}.amazonaws.com"
     conversation = uuid4()
-    minter = SandboxFsCredentialMinter(
-        sts=AwsStsClient(endpoint_url=None, region=args.region),
-        role_arn=args.role_arn,
+    recipe = _mount_gate_recipe(
         bucket=args.bucket,
-        s3_url=s3_url,
         region=args.region,
-        path_style=False,
+        proxy_url=args.proxy_url,
+        token_secret=os.environ.get(SANDBOX_FS_TOKEN_SECRET_ENV),
+        conversation=conversation,
+        now=datetime.now(UTC),
     )
-    credentials = asyncio.run(minter.mint(conversation))
-    s3fs = s3fs_command(
-        args.bucket, workspace_key_prefix(conversation), WORKSPACE_DIR, s3_url, args.region, False
-    )
-    prepare, mount = mount_scripts(WORKSPACE_DIR, s3fs)
     sandbox = Sandbox.create(template=E2B_TEMPLATE_NAME, timeout=SANDBOX_TIMEOUT_SECONDS)
     try:
         sandbox.files.make_dir(WORKSPACE_DIR)
-        sandbox.files.write(AWS_CREDENTIALS_PATH, aws_credentials_file(credentials))
-        sandbox.commands.run(prepare, user="root", timeout=MOUNT_TIMEOUT_SECONDS)
-        sandbox.commands.run(mount, timeout=MOUNT_TIMEOUT_SECONDS)
-        sandbox.commands.run(mount_health_check(WORKSPACE_DIR), timeout=MOUNT_TIMEOUT_SECONDS)
+        sandbox.commands.run(
+            recipe.prepare_token_staging,
+            user="root",
+            timeout=MOUNT_TIMEOUT_SECONDS,
+        )
+        sandbox.files.write(SANDBOX_FS_TOKEN_STAGING_PATH, recipe.token, user="root")
+        for command in recipe.root_commands:
+            sandbox.commands.run(command, user="root", timeout=MOUNT_TIMEOUT_SECONDS)
         exercised = sandbox.commands.run(EXERCISE, timeout=EXERCISE_TIMEOUT_SECONDS)
         print(exercised.stdout)
     finally:

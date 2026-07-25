@@ -20,6 +20,7 @@ from ufo.grants import GrantStore
 from ufo.models.pricing import Pricing
 from ufo.models.registry import model_registry
 from ufo.o11y import init_o11y, log
+from ufo.sandbox.fs_creds import sandbox_fs_minter
 from ufo.sandbox.proxy.rules import (
     Rule,
     ScopeRule,
@@ -129,12 +130,14 @@ class ProxyServe:
             transfer_hosts=connector_transfer_hosts(self.manifests),
             clis=connector_clis(self.manifests),
         )
+        workspace_fs = sandbox_fs_minter(self.config.blob)
         proxy = EgressProxy(
             resolve=resolver.resolve,
             authorize=resolver.turn_live,
             ca_cert=self.ca_cert,
             ca_key=self.ca_key,
             pricing=self.pricing,
+            workspace_credentials=None if workspace_fs is None else workspace_fs.refresh,
         )
         await proxy.start(
             port=self.config.sandbox.proxy_port, public_url=self.config.sandbox.proxy_public_url

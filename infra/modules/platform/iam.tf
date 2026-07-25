@@ -37,9 +37,6 @@ module "irsa_external_secrets" {
 }
 
 
-# Serve pods read/write the blob bucket and assume sandbox-fs to mint per-conversation
-# mount credentials. The runtime reads/writes blobs + conversation files via boto3 with these ambient
-# creds; the sandbox's s3fs mount uses the assumed role.
 data "aws_iam_policy_document" "app_s3" {
   statement {
     sid       = "ListBucket"
@@ -51,30 +48,17 @@ data "aws_iam_policy_document" "app_s3" {
     actions   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
     resources = ["${aws_s3_bucket.blob.arn}/*"]
   }
-  statement {
-    sid       = "AssumeSandboxFsRole"
-    actions   = ["sts:AssumeRole"]
-    resources = [aws_iam_role.sandbox_fs.arn]
-  }
 }
 
-# The sandbox-fs mount role: the serve pod assumes this per conversation with an inline
-# session policy scoping s3 to that conversation's prefix, then writes the short-lived credential into
-# the sandbox for s3fs. The role grants s3 on the whole bucket; the per-conversation session policy
-# minted at AssumeRole narrows it. Trust names the app-s3 role by its COMPUTED arn — referencing
-# module.irsa_app_s3.iam_role_arn would cycle (irsa_app_s3 → app_s3 policy → this role → irsa_app_s3).
-# github-deploy is trusted so the deploy pipeline's mount gate (sandbox/mount_gate.py) mints the
-# same scoped credential and proves a live mount before the deploy goes green — it already
-# administers this role through terraform, so the trust adds no reach.
+# The sandbox-fs mount role: the proxy assumes this per credential fetch with an inline session
+# policy scoping S3 to that conversation's prefix. The role grants S3 on the whole bucket; the
+# per-conversation session policy minted at AssumeRole narrows it.
 data "aws_iam_policy_document" "sandbox_fs_trust" {
   statement {
     actions = ["sts:AssumeRole"]
     principals {
-      type = "AWS"
-      identifiers = [
-        "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${local.name}-app-s3",
-        "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/github-deploy",
-      ]
+      type        = "AWS"
+      identifiers = [module.irsa_sandbox_proxy.iam_role_arn]
     }
   }
 }
@@ -123,6 +107,36 @@ module "irsa_app_s3" {
     main = {
       provider_arn               = module.eks.oidc_provider_arn
       namespace_service_accounts = ["ufo-*:ufo-serve"]
+    }
+  }
+  tags = local.tags
+}
+
+data "aws_iam_policy_document" "sandbox_proxy" {
+  statement {
+    actions   = ["sts:AssumeRole"]
+    resources = ["arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${local.name}-sandbox-fs"]
+  }
+}
+
+resource "aws_iam_policy" "sandbox_proxy" {
+  name   = "${local.name}-sandbox-proxy"
+  policy = data.aws_iam_policy_document.sandbox_proxy.json
+  tags   = local.tags
+}
+
+module "irsa_sandbox_proxy" {
+  source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
+  version = "~> 5.48"
+
+  role_name        = "${local.name}-sandbox-proxy"
+  role_policy_arns = { assume = aws_iam_policy.sandbox_proxy.arn }
+
+  assume_role_condition_test = "StringLike"
+  oidc_providers = {
+    main = {
+      provider_arn               = module.eks.oidc_provider_arn
+      namespace_service_accounts = ["ufo-*:ufo-sandbox-proxy"]
     }
   }
   tags = local.tags

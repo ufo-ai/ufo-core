@@ -28,6 +28,7 @@ EXPECTED_APT = (
     "jq",
     "ripgrep",
     "s3fs",
+    "util-linux",
     "poppler-utils",
     "chromium",
     "libreoffice-writer",
@@ -95,8 +96,10 @@ def test_ready_probe_checks_every_baked_entrypoint() -> None:
         "node",
         "sbx",
         "sbxfs",
+        "sbxcred",
         "rg",
         "s3fs",
+        "runuser",
         "pdftotext",
         "pdftoppm",
         "soffice",
@@ -106,8 +109,8 @@ def test_ready_probe_checks_every_baked_entrypoint() -> None:
     assert "chromium" in SANDBOX_TEMPLATE_READY_COMMAND
 
 
-def test_scripts_are_sbx_and_sbxfs() -> None:
-    assert tuple(name for name, _ in SANDBOX_SCRIPTS) == ("sbx", "sbxfs")
+def test_scripts_include_the_credential_relay() -> None:
+    assert tuple(name for name, _ in SANDBOX_SCRIPTS) == ("sbx", "sbxfs", "sbxcred")
 
 
 def test_rendered_dockerfile_carries_the_full_install_sequence() -> None:
@@ -126,6 +129,7 @@ def test_rendered_dockerfile_carries_the_full_install_sequence() -> None:
         assert package in dockerfile
     assert "/usr/local/bin/sbx" in dockerfile
     assert "/usr/local/bin/sbxfs" in dockerfile
+    assert "/usr/local/bin/sbxcred" in dockerfile
 
 
 def test_rendered_dockerfile_runs_as_the_non_root_user() -> None:

@@ -7,13 +7,12 @@ signature. `mint_artifact_token` signs and `verify_artifact_token` checks the sa
 round-trip agrees by construction: the `share_file` builtin mints, core's artifact route verifies,
 and both read the one deploy secret."""
 
-import base64
-import hashlib
-import hmac
 import json
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import PurePosixPath
+
+from ufo.token_signing import SignedTokenError, sign_token, verify_token
 
 ARTIFACT_KEY_PREFIX = "artifacts/"
 ARTIFACT_TOKEN_TTL_SECONDS = 3600
@@ -33,36 +32,20 @@ class ArtifactClaims:
     expires_at: int
 
 
-def _sign(secret: str, body: str) -> str:
-    digest = hmac.new(secret.encode(), body.encode(), hashlib.sha256).digest()
-    return base64.urlsafe_b64encode(digest).decode().rstrip("=")
-
-
 def mint_artifact_token(secret: str, blob_key: str, filename: str, expires_at: int) -> str:
     if not secret:
         raise ArtifactTokenError("artifact token secret is not configured")
-    body = (
-        base64.urlsafe_b64encode(
-            json.dumps({"key": blob_key, "filename": filename, "expires_at": expires_at}).encode()
-        )
-        .decode()
-        .rstrip("=")
-    )
-    return f"{body}.{_sign(secret, body)}"
+    payload = json.dumps({"key": blob_key, "filename": filename, "expires_at": expires_at}).encode()
+    return sign_token(secret.encode(), payload)
 
 
 def verify_artifact_token(token: str, secret: str, now: datetime) -> ArtifactClaims:
     if not secret:
         raise ArtifactTokenError("artifact token secret is not configured")
-    body, _, signature = token.partition(".")
-    if not signature:
-        raise ArtifactTokenError("artifact token is malformed")
-    if not hmac.compare_digest(signature, _sign(secret, body)):
-        raise ArtifactTokenError("artifact token signature does not match")
     try:
-        payload = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
-    except ValueError as error:
-        raise ArtifactTokenError("artifact token payload is unreadable") from error
+        payload = json.loads(verify_token(token, secret.encode()))
+    except (SignedTokenError, ValueError) as error:
+        raise ArtifactTokenError("artifact token is invalid") from error
     if not isinstance(payload, dict):
         raise ArtifactTokenError("artifact token payload is not an object")
     claims = ArtifactClaims(

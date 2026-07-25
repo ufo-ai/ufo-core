@@ -131,7 +131,13 @@ from the blob store — a bind mount on the filesystem backend, the sandbox-fs d
 invariant holds on every backend: the sandbox reaches only the conversation's `workspace/` subtree;
 transcripts and compaction records live above it, framework-only. The workspace is the truth and
 the container is disposable cache — carriers create-or-attach, and a reaper reclaims idle
-containers. Carrier interface:
+containers. On S3, a dedicated unprivileged s3fs daemon refreshes through its ECS metadata
+interface: a local relay forwards its opaque mount token to the sandbox proxy over the carrier's
+isolated bridge or TLS route, which mints a one-hour STS session with an inline policy for that
+conversation's `workspace/` prefix. The signed token names the current turn; every refresh checks
+that the turn remains live, so one turn can outlive any STS session while an ended turn cannot mint
+another. The token and redeemed credentials never enter an agent process.
+Carrier interface:
 `create / exec / mount / route / destroy` — a local temp-dir carrier is core's default; Docker and
 E2B implement it as extensions on the `carriers` point.
 

@@ -22,7 +22,6 @@ from ufo.blob import BlobStore, blob_store_for
 from ufo.browser import CdpProvider
 from ufo.config import (
     IN_PROCESS_BACKEND,
-    BlobConfig,
     Config,
     load_config,
 )
@@ -83,7 +82,7 @@ from ufo.runtime_instance import (
     Heartbeat,
     record_fleet_seat,
 )
-from ufo.sandbox.fs_creds import DEFAULT_S3_REGION, AwsStsClient, SandboxFsCredentialMinter
+from ufo.sandbox.fs_creds import SandboxFsCredentialMinter, sandbox_fs_minter
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.proxy.rules import Rule, connector_transfer_hosts, derive_manifest_rules
 from ufo.sandbox.proxy.server import EgressProxy, PerAgentRules, generate_ca
@@ -160,16 +159,17 @@ def run() -> None:
     index = index_backend(manifests, config.memory.index_backend, credentials)
     memory = memory_search(manifests, credentials, index, embed)
     connectors = _connector_registry(config, manifests, credentials)
+    workspace_fs = sandbox_fs_minter(config.blob)
     runtime = Runtime(
         config=config,
         blob=blob,
-        workspace_fs=_sandbox_fs_minter(config.blob),
+        workspace_fs=workspace_fs,
         hub=hub,
         carrier=carrier,
         cdp_provider=_select_cdp_provider(config, manifests, credentials),
         search_provider=_select_search_provider(config, manifests, credentials),
         connectors=connectors,
-        proxy=_proxy_endpoint(config, manifests, credentials, registry.pricing),
+        proxy=_proxy_endpoint(config, manifests, credentials, registry.pricing, workspace_fs),
         dbos=dbos_client,
         subagents=SubagentRegistry((*CORE_SUBAGENT_PROFILES, *turn_subagents(manifests))),
         subagent_grants=turn_subagent_grants(manifests),
@@ -294,25 +294,6 @@ def _launch_jobs(
         blob=runtime.blob,
         registry=runtime.registry,
     ).launch()
-
-
-def _sandbox_fs_minter(blob: BlobConfig) -> SandboxFsCredentialMinter | None:
-    """The STS-scoped-credential minter the S3-backed workspace mount needs, or None on the local
-    filesystem backend (a bind mount needs no minter). BlobConfig's validator guarantees the S3
-    backend carries bucket/s3_url/sts_role_arn; the None-checks re-read them for the type checker
-    and fail loud the same way `blob_store_for` does."""
-    if blob.backend != "s3":
-        return None
-    if blob.bucket is None or blob.s3_url is None or blob.sts_role_arn is None:
-        raise ValueError("the s3 blob backend requires bucket, s3_url, and sts_role_arn")
-    return SandboxFsCredentialMinter(
-        sts=AwsStsClient(endpoint_url=blob.sts_endpoint, region=blob.region),
-        role_arn=blob.sts_role_arn,
-        bucket=blob.bucket,
-        s3_url=blob.s3_url,
-        region=blob.region or DEFAULT_S3_REGION,
-        path_style=blob.path_style,
-    )
 
 
 def _select_carrier(config: Config, manifests: tuple[Manifest, ...]) -> Carrier:
@@ -789,6 +770,7 @@ def _proxy_endpoint(
     manifests: tuple[Manifest, ...],
     credentials: CredentialStore | None,
     pricing: Pricing,
+    workspace_fs: SandboxFsCredentialMinter | None = None,
 ) -> ProxyEndpoint:
     """The egress proxy endpoint the carrier threads into every sandbox, in the shape this deploy
     takes. With `[sandbox] proxy_public_url` set (hosted, multi-node) the proxy runs as a standalone
@@ -799,7 +781,7 @@ def _proxy_endpoint(
     in-process, minting its own ephemeral CA — no shared trust material to source, no separate
     service to run alongside."""
     if config.sandbox.proxy_public_url is None:
-        return _local_egress_proxy(config, manifests, credentials, pricing)
+        return _local_egress_proxy(config, manifests, credentials, pricing, workspace_fs)
     ca_cert = os.environ.get(EGRESS_CA_CERT_ENV)
     if not ca_cert:
         raise RuntimeError(
@@ -818,6 +800,7 @@ def _local_egress_proxy(
     manifests: tuple[Manifest, ...],
     credentials: CredentialStore | None,
     pricing: Pricing,
+    workspace_fs: SandboxFsCredentialMinter | None,
 ) -> ProxyEndpoint:
     """The single-node sandbox's sole route out, run in-process on its own event loop — a
     standalone network service, not part of the turn loop, that outlives every turn for the
@@ -845,6 +828,7 @@ def _local_egress_proxy(
             ca_cert=ca_cert,
             ca_key=ca_key,
             pricing=pricing,
+            workspace_credentials=None if workspace_fs is None else workspace_fs.refresh,
         ).start(port=config.sandbox.proxy_port)
 
     return asyncio.run_coroutine_threadsafe(_boot(), loop).result(PROXY_STARTUP_TIMEOUT_SECONDS)

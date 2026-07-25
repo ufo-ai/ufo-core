@@ -9,12 +9,43 @@ CLUSTER_SERVICES_TEMPLATE = (
     Path(__file__).resolve().parents[2] / "infra/templates/cluster-services.yaml.tpl"
 )
 PLATFORM_SECRETS = Path(__file__).resolve().parents[2] / "infra/modules/platform/secrets.tf"
+PLATFORM_OUTPUTS = Path(__file__).resolve().parents[2] / "infra/modules/platform/outputs.tf"
 APP_S3_MODULE = IAM_MODULE.read_text().split('module "irsa_app_s3" {', maxsplit=1)[1]
+APP_S3_POLICY = (
+    IAM_MODULE.read_text()
+    .split('data "aws_iam_policy_document" "app_s3" {', maxsplit=1)[1]
+    .split('data "aws_iam_policy_document" "sandbox_fs_trust"', maxsplit=1)[0]
+)
+SANDBOX_PROXY_POLICY = (
+    IAM_MODULE.read_text()
+    .split('data "aws_iam_policy_document" "sandbox_proxy" {', maxsplit=1)[1]
+    .split('resource "aws_iam_policy" "sandbox_proxy"', maxsplit=1)[0]
+)
+SANDBOX_PROXY_IRSA = IAM_MODULE.read_text().split('module "irsa_sandbox_proxy" {', maxsplit=1)[1]
+PROXY_DEPLOYMENT = (
+    HOSTED_TEMPLATE.read_text()
+    .split("kind: Deployment\nmetadata:\n  name: ufo-sandbox-proxy", maxsplit=1)[1]
+    .split("---", maxsplit=1)[0]
+)
 
 
 def test_app_s3_trusts_serve_in_every_ufo_namespace() -> None:
     assert 'assume_role_condition_test = "StringLike"' in APP_S3_MODULE
     assert 'namespace_service_accounts = ["ufo-*:ufo-serve"]' in APP_S3_MODULE
+    assert "sts:AssumeRole" not in APP_S3_POLICY
+
+
+def test_sandbox_proxy_identity_can_only_assume_the_mount_role() -> None:
+    assert 'actions   = ["sts:AssumeRole"]' in SANDBOX_PROXY_POLICY
+    assert "role/${local.name}-sandbox-fs" in SANDBOX_PROXY_POLICY
+    assert "s3:" not in SANDBOX_PROXY_POLICY
+    assert 'namespace_service_accounts = ["ufo-*:ufo-sandbox-proxy"]' in SANDBOX_PROXY_IRSA
+    assert "identifiers = [module.irsa_sandbox_proxy.iam_role_arn]" in IAM_MODULE.read_text()
+    proxy_output = PLATFORM_OUTPUTS.read_text().split(
+        'output "sandbox_proxy_role_arn" {', maxsplit=1
+    )[1]
+    assert 'role/${local.name}-sandbox-proxy"' in proxy_output
+    assert "module.irsa_sandbox_proxy.iam_role_arn" not in proxy_output
 
 
 def test_hosted_serve_receives_the_bedrock_region() -> None:
@@ -59,10 +90,12 @@ def test_app_host_ingress_routes_login_to_gateway_and_product_to_serve() -> None
 def test_hosted_proxy_receives_the_composio_broker_key() -> None:
     """The shared egress proxy forwards sentinel CLI requests through Composio's proxy-execute, so
     its pod needs the broker key exactly as it needs the model keys it swaps."""
-    proxy = (
-        HOSTED_TEMPLATE.read_text()
-        .split("name: ufo-sandbox-proxy", maxsplit=1)[1]
-        .split("---", maxsplit=1)[0]
-    )
-    assert "name: COMPOSIO_API_KEY" in proxy
-    assert "secretKeyRef: {name: ufo-platform-secrets, key: COMPOSIO_API_KEY}" in proxy
+    assert "name: COMPOSIO_API_KEY" in PROXY_DEPLOYMENT
+    assert "secretKeyRef: {name: ufo-platform-secrets, key: COMPOSIO_API_KEY}" in PROXY_DEPLOYMENT
+
+
+def test_hosted_proxy_mints_scoped_sandbox_credentials() -> None:
+    assert "serviceAccountName: ufo-sandbox-proxy" in PROXY_DEPLOYMENT
+    assert "eks.amazonaws.com/role-arn: ${proxy_role_arn}" in HOSTED_TEMPLATE.read_text()
+    assert "name: UFO_SANDBOX_FS_TOKEN_SECRET" in PROXY_DEPLOYMENT
+    assert "secretKeyRef: {name: ufo-serve, key: UFO_SANDBOX_FS_TOKEN_SECRET}" in PROXY_DEPLOYMENT

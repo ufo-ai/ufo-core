@@ -16,8 +16,8 @@ reachable public URL (not a host-local address): every command runs with `HTTP(S
 that URL, the turn's run token as the proxy basic-auth username so each metered request keys to the
 turn, the model sentinels the proxy swaps for the real key on the wire, and the proxy CA written
 into the sandbox so it terminates TLS the sandbox trusts. The s3fs mount step runs without that env
-— it talks to S3 directly with its own prefix-scoped credential, never through the agent's egress
-proxy. The reaper reclaims a sandbox a prior process created by reconnecting the stored id and
+— it refreshes a prefix-scoped credential through the proxy's credential endpoint, then talks to S3
+directly. The reaper reclaims a sandbox a prior process created by reconnecting the stored id and
 pausing it — the conversation's durable `sandbox_handle` is the map, so idle reclaim no longer
 leans on the provider's own timeout alone."""
 
@@ -38,9 +38,10 @@ from e2b.sandbox.sandbox_api import SandboxLifecycle
 
 from ufo.sdk.manifest import Manifest
 from ufo.sdk.sandbox import (
-    AWS_CREDENTIALS_PATH,
     MOUNT_HEALTH_CHECK_TIMEOUT_SECONDS,
     MOUNT_TIMEOUT_SECONDS,
+    SANDBOX_FS_CREDENTIAL_PATH,
+    SANDBOX_FS_TOKEN_STAGING_PATH,
     SENTINEL_MODEL_KEY,
     WORKSPACE_DIR,
     BlobStore,
@@ -50,9 +51,10 @@ from ufo.sdk.sandbox import (
     ProxyEndpoint,
     SandboxHandle,
     SandboxSpec,
-    aws_credentials_file,
+    install_token_command,
     mount_health_check,
     mount_scripts,
+    prepare_token_staging_command,
     s3fs_command,
 )
 
@@ -176,6 +178,8 @@ class E2BCarrier:
     _live: dict[UUID, E2BSandbox] = field(default_factory=dict)
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
+        egress_env = _egress_env(spec.proxy, spec.run_token)
+        public_url = cast(str, spec.proxy.public_url)
         live = self._live.get(spec.conversation_id)
         resume_id = live.sandbox_id if live is not None else spec.resume_id
         if resume_id is not None:
@@ -197,13 +201,17 @@ class E2BCarrier:
             await asyncio.to_thread(sandbox.files.make_dir, WORKSPACE_DIR)
         self._live[spec.conversation_id] = sandbox
         await self._install_ca(sandbox, spec.proxy.ca_cert)
-        await self._mount_s3(sandbox, spec.mount)
+        await self._mount_s3(
+            sandbox,
+            spec.mount,
+            f"{public_url.rstrip('/')}{SANDBOX_FS_CREDENTIAL_PATH.rstrip('/')}",
+        )
         return SandboxHandle(
             conversation_id=spec.conversation_id,
             container_id=sandbox.sandbox_id,
             mount=spec.mount,
             traffic_token=sandbox.traffic_access_token,
-            egress_env={**_egress_env(spec.proxy, spec.run_token), **spec.env},
+            egress_env={**egress_env, **spec.env},
         )
 
     async def _install_ca(self, sandbox: E2BSandbox, ca_cert: str) -> None:
@@ -219,28 +227,43 @@ class E2BCarrier:
             detail = (error.stderr or error.stdout or "").strip()
             raise RuntimeError(f"sandbox CA install failed: {detail}") from error
 
-    async def _mount_s3(self, sandbox: E2BSandbox, mount: MountSpec) -> None:
+    async def _mount_s3(self, sandbox: E2BSandbox, mount: MountSpec, credential_url: str) -> None:
         """Bring the conversation's workspace S3 prefix up at /workspace over s3fs. Runs on every
-        create/resume and is idempotent: skips a mount the health probe passes — mounted, answering
-        S3, credential inside its refresh window — so a subagent sharing the sandbox never remounts
-        under an in-flight dispatch, while a stale mount (a resumed sandbox whose credential aged
-        out while paused) is remounted with this bring-up's fresh credential. Writes it, then runs
-        the root `prepare` and the agent `mount` through the sync SDK off the loop — the privileged
-        prepare runs as root, the s3fs mount as the agent. These steps pass no egress env, so s3fs
-        reaches S3 directly with its own scoped credential — never through the agent's egress proxy,
-        whose default-deny rules would refuse the S3 host at CONNECT."""
+        create/resume and skips a mount the health probe passes, so a shared sandbox never remounts
+        under an in-flight dispatch. Writes the private endpoint token, then runs mount
+        orchestration as root through the sync SDK off the loop. The s3fs daemon drops to its
+        dedicated user, refreshes scoped credentials through the local relay, and reaches S3
+        directly; neither path carries the agent's egress env."""
         if mount.kind != "s3":
             return
-        if await self._mount_healthy(sandbox):
-            return
         if (
-            mount.credentials is None
+            mount.credential_token is None
             or mount.bucket is None
             or mount.key_prefix is None
             or mount.s3_url is None
             or mount.region is None
         ):
-            raise RuntimeError("s3 workspace mount is missing its scoped credential or endpoint")
+            raise RuntimeError("s3 workspace mount is missing its credential token or endpoint")
+        await asyncio.to_thread(
+            sandbox.commands.run,
+            prepare_token_staging_command(),
+            user="root",
+            timeout=MOUNT_TIMEOUT_SECONDS,
+        )
+        await asyncio.to_thread(
+            sandbox.files.write,
+            SANDBOX_FS_TOKEN_STAGING_PATH,
+            mount.credential_token,
+            user="root",
+        )
+        await asyncio.to_thread(
+            sandbox.commands.run,
+            install_token_command(),
+            user="root",
+            timeout=MOUNT_TIMEOUT_SECONDS,
+        )
+        if await self._mount_healthy(sandbox):
+            return
         s3fs = s3fs_command(
             mount.bucket,
             mount.key_prefix,
@@ -249,24 +272,29 @@ class E2BCarrier:
             mount.region,
             mount.path_style,
         )
-        prepare, mount_cmd = mount_scripts(WORKSPACE_DIR, s3fs)
+        prepare, mount_cmd = mount_scripts(WORKSPACE_DIR, s3fs, credential_url)
         try:
-            await asyncio.to_thread(
-                sandbox.files.write, AWS_CREDENTIALS_PATH, aws_credentials_file(mount.credentials)
-            )
             await asyncio.to_thread(
                 sandbox.commands.run, prepare, user="root", timeout=MOUNT_TIMEOUT_SECONDS
             )
-            await asyncio.to_thread(sandbox.commands.run, mount_cmd, timeout=MOUNT_TIMEOUT_SECONDS)
+            await asyncio.to_thread(
+                sandbox.commands.run,
+                mount_cmd,
+                user="root",
+                timeout=MOUNT_TIMEOUT_SECONDS,
+            )
         except CommandExitException as error:
             detail = (error.stderr or error.stdout or "").strip()
             raise RuntimeError(f"sandbox-fs mount failed: {detail}") from error
+        if not await self._mount_healthy(sandbox):
+            raise RuntimeError("sandbox-fs mount failed its health check")
 
     async def _mount_healthy(self, sandbox: E2BSandbox) -> bool:
         try:
             await asyncio.to_thread(
                 sandbox.commands.run,
                 mount_health_check(WORKSPACE_DIR),
+                user="root",
                 timeout=MOUNT_HEALTH_CHECK_TIMEOUT_SECONDS,
             )
             return True

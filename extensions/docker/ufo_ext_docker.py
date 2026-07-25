@@ -15,12 +15,15 @@ import asyncio
 import shlex
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from urllib.parse import urlsplit
+from uuid import UUID
 
 from ufo.sdk.manifest import Manifest
 from ufo.sdk.sandbox import (
-    AWS_CREDENTIALS_PATH,
     MOUNT_HEALTH_CHECK_TIMEOUT_SECONDS,
     MOUNT_TIMEOUT_SECONDS,
+    SANDBOX_FS_CREDENTIAL_PATH,
+    SANDBOX_FS_TOKEN_STAGING_PATH,
     SENTINEL_MODEL_KEY,
     WORKSPACE_DIR,
     BlobStore,
@@ -29,9 +32,10 @@ from ufo.sdk.sandbox import (
     MountSpec,
     SandboxHandle,
     SandboxSpec,
-    aws_credentials_file,
+    install_token_command,
     mount_health_check,
     mount_scripts,
+    prepare_token_staging_command,
     s3fs_command,
 )
 
@@ -41,6 +45,7 @@ CREATE_TIMEOUT_SECONDS = 120
 DEFAULT_NETWORK = "ufo-sandbox"
 HOST_GATEWAY_NAME = "host.docker.internal"
 HOST_GATEWAY_MAPPING = f"{HOST_GATEWAY_NAME}:host-gateway"
+DROP_NET_RAW_ARGS = ("--cap-drop", "NET_RAW")
 # s3fs mounts the workspace prefix over FUSE, which needs the fuse device plus CAP_SYS_ADMIN and an
 # unconfined apparmor profile to mount inside the container. Added only for an s3 mount — a
 # filesystem bind mount (local dev) needs no FUSE and keeps the tighter default isolation.
@@ -99,9 +104,10 @@ class DockerCarrier:
                 mount=spec.mount,
                 egress_env=egress_env,
             )
-            await self._mount_s3(handle, spec.mount)
+            await self._mount_s3(handle, spec.mount, self._credential_url(spec))
             return handle
-        await self._ensure_network()
+        network = self._network_name(spec.conversation_id)
+        await self._ensure_network(network)
         argv = [
             "run",
             "-d",
@@ -109,27 +115,35 @@ class DockerCarrier:
             "--name",
             name,
             "--network",
-            self.network,
+            network,
             "--add-host",
             HOST_GATEWAY_MAPPING,
+            *DROP_NET_RAW_ARGS,
             *(FUSE_RUN_ARGS if spec.mount.kind == "s3" else ()),
         ]
         if spec.mount.kind == "filesystem" and spec.mount.host_path is not None:
             argv += ["-v", f"{spec.mount.host_path}:/workspace"]
         argv += [spec.image_ref, "sleep", "infinity"]
-        code, stdout, stderr = await _docker(*argv, timeout_s=CREATE_TIMEOUT_SECONDS)
-        if code != 0:
-            raise RuntimeError(f"docker run failed: {stderr.decode().strip()}")
-        container_id = stdout.decode().strip()
-        await self._install_ca(container_id, spec.proxy.ca_cert)
-        handle = SandboxHandle(
-            conversation_id=spec.conversation_id,
-            container_id=container_id,
-            mount=spec.mount,
-            egress_env=egress_env,
-        )
-        await self._mount_s3(handle, spec.mount)
-        return handle
+        container_id: str | None = None
+        try:
+            code, stdout, stderr = await _docker(*argv, timeout_s=CREATE_TIMEOUT_SECONDS)
+            if code != 0:
+                raise RuntimeError(f"docker run failed: {stderr.decode().strip()}")
+            container_id = stdout.decode().strip()
+            await self._install_ca(container_id, spec.proxy.ca_cert)
+            handle = SandboxHandle(
+                conversation_id=spec.conversation_id,
+                container_id=container_id,
+                mount=spec.mount,
+                egress_env=egress_env,
+            )
+            await self._mount_s3(handle, spec.mount, self._credential_url(spec))
+            return handle
+        except BaseException:
+            if container_id is not None:
+                await _docker("rm", "-f", container_id)
+            await _docker("network", "rm", network)
+            raise
 
     async def exec(
         self, handle: SandboxHandle, argv: tuple[str, ...], stdin: bytes, timeout_s: int
@@ -165,38 +179,36 @@ class DockerCarrier:
             raise RuntimeError("docker export requires a filesystem or s3 workspace mount")
         await blob.put_file(key, Path(mount.host_path) / rel)
 
-    async def _mount_s3(self, handle: SandboxHandle, mount: MountSpec) -> None:
+    async def _mount_s3(self, handle: SandboxHandle, mount: MountSpec, credential_url: str) -> None:
         """Bring the conversation's workspace S3 prefix up at /workspace over s3fs. Idempotent:
-        skips a mount the health probe passes — mounted, answering S3, credential inside its
-        refresh window — so a later turn attaching to a still-running container skips a redundant
-        remount (same-conversation turns serialize under the queue partition, so no dispatch races
-        another's in-flight reads), while a stale or aged-out mount is torn down and remounted with
-        this bring-up's fresh credential. Writes the prefix-scoped credential, then runs
-        the root `prepare` (open /dev/fuse, enable user_allow_other, detach any stale mount) and the
-        agent `mount` through the two docker-exec users — the privileged prepare never runs as the
-        agent, and neither step carries the agent's egress env, so s3fs talks straight to the
-        object store with its scoped credential (the default-deny proxy would refuse the S3 host
-        at CONNECT)."""
+        skips a mount the health probe passes, so a later turn attaching to a live container never
+        remounts under an in-flight dispatch. Writes the private endpoint token, then runs mount
+        orchestration as root. The s3fs daemon drops to its dedicated user, refreshes scoped
+        credentials through the local relay, and talks directly to S3; neither path carries the
+        agent's egress environment."""
         if mount.kind != "s3":
             return
-        if await self._mount_healthy(handle):
-            return
         if (
-            mount.credentials is None
+            mount.credential_token is None
             or mount.bucket is None
             or mount.key_prefix is None
             or mount.s3_url is None
             or mount.region is None
         ):
-            raise RuntimeError("s3 workspace mount is missing its scoped credential or endpoint")
-        creds = aws_credentials_file(mount.credentials).encode()
-        parent = shlex.quote(str(PurePosixPath(AWS_CREDENTIALS_PATH).parent))
-        write = f"mkdir -p {parent} && cat > {shlex.quote(AWS_CREDENTIALS_PATH)}"
+            raise RuntimeError("s3 workspace mount is missing its credential token or endpoint")
+        token = mount.credential_token.encode()
+        staging = shlex.quote(SANDBOX_FS_TOKEN_STAGING_PATH)
+        write = (
+            f"{prepare_token_staging_command()} && umask 077 && cat > {staging} "
+            f"&& {install_token_command()}"
+        )
         code, _, stderr = await _docker(
-            "exec", "-i", handle.container_id, "sh", "-c", write, stdin=creds
+            "exec", "-i", "-u", "root", handle.container_id, "sh", "-c", write, stdin=token
         )
         if code != 0:
-            raise RuntimeError(f"sandbox-fs credential write failed: {stderr.decode().strip()}")
+            raise RuntimeError(f"sandbox-fs token write failed: {stderr.decode().strip()}")
+        if await self._mount_healthy(handle):
+            return
         s3fs = s3fs_command(
             mount.bucket,
             mount.key_prefix,
@@ -205,7 +217,7 @@ class DockerCarrier:
             mount.region,
             mount.path_style,
         )
-        prepare, mount_cmd = mount_scripts(WORKSPACE_DIR, s3fs)
+        prepare, mount_cmd = mount_scripts(WORKSPACE_DIR, s3fs, credential_url)
         code, _, stderr = await _docker(
             "exec",
             "-i",
@@ -222,6 +234,8 @@ class DockerCarrier:
         code, _, stderr = await _docker(
             "exec",
             "-i",
+            "-u",
+            "root",
             handle.container_id,
             "sh",
             "-c",
@@ -230,11 +244,28 @@ class DockerCarrier:
         )
         if code != 0:
             raise RuntimeError(f"sandbox-fs mount failed: {stderr.decode().strip()}")
+        if not await self._mount_healthy(handle):
+            raise RuntimeError("sandbox-fs mount failed its health check")
+
+    def _credential_url(self, spec: SandboxSpec) -> str:
+        if spec.proxy.public_url is not None:
+            parsed = urlsplit(spec.proxy.public_url)
+            if parsed.scheme != "https" or parsed.hostname is None:
+                raise RuntimeError(
+                    "the docker carrier requires an HTTPS [sandbox] proxy_public_url so mount "
+                    "credentials are encrypted in transit"
+                )
+            return f"{spec.proxy.public_url.rstrip('/')}{SANDBOX_FS_CREDENTIAL_PATH.rstrip('/')}"
+        return (
+            f"http://{HOST_GATEWAY_NAME}:{spec.proxy.port}{SANDBOX_FS_CREDENTIAL_PATH.rstrip('/')}"
+        )
 
     async def _mount_healthy(self, handle: SandboxHandle) -> bool:
         code, _, _ = await _docker(
             "exec",
             "-i",
+            "-u",
+            "root",
             handle.container_id,
             "sh",
             "-c",
@@ -249,6 +280,7 @@ class DockerCarrier:
         that no longer exists is a no-op, so destroying an already-gone or never-created sandbox
         never raises."""
         await _docker("rm", "-f", f"{CONTAINER_NAME_PREFIX}{handle.conversation_id}")
+        await _docker("network", "rm", self._network_name(handle.conversation_id))
 
     async def host(self, handle: SandboxHandle, port: int) -> str:
         """The docker carrier publishes no per-port host, so an in-sandbox service (a browser's CDP
@@ -272,10 +304,18 @@ class DockerCarrier:
         found = stdout.decode().strip()
         return found or None
 
-    async def _ensure_network(self) -> None:
-        code, _, _ = await _docker("network", "inspect", self.network)
+    def _network_name(self, conversation_id: UUID) -> str:
+        return f"{self.network}-{conversation_id.hex}"
+
+    async def _ensure_network(self, network: str) -> None:
+        code, stdout, stderr = await _docker("network", "ls", "-q", "--filter", f"name=^{network}$")
         if code != 0:
-            await _docker("network", "create", self.network)
+            raise RuntimeError(f"docker network ls failed: {stderr.decode().strip()}")
+        if stdout.strip():
+            return
+        code, _, stderr = await _docker("network", "create", network)
+        if code != 0:
+            raise RuntimeError(f"docker network create failed: {stderr.decode().strip()}")
 
     async def _install_ca(self, container_id: str, ca_cert: str) -> None:
         write = await _docker(

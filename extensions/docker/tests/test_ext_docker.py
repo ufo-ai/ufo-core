@@ -16,19 +16,22 @@ from ufo_ext_docker import DockerCarrier
 
 from ufo.blob import FilesystemBlobStore
 from ufo.config import BlobConfig, Config, DatabaseConfig, SandboxConfig
-from ufo.sandbox.fs_creds import SandboxFsCredentials
 from ufo.sdk.sandbox import (
+    SANDBOX_FS_TOKEN_PATH,
+    SANDBOX_FS_TOKEN_STAGING_PATH,
     SENTINEL_MODEL_KEY,
     WORKSPACE_DIR,
     MountSpec,
     ProxyEndpoint,
     SandboxHandle,
     SandboxSpec,
+    install_token_command,
     mount_health_check,
+    prepare_token_staging_command,
 )
 from ufo.serve import _select_carrier
 
-_S3_CREDS = SandboxFsCredentials("AKIASBX", "sbx-secret", "sbx-token")
+_S3_TOKEN = "signed-conversation-token"
 
 
 @dataclass
@@ -72,7 +75,9 @@ async def test_export_s3_mount_copies_server_side_within_the_store(tmp_path: Pat
     prefix to the artifact key — never a read-through-the-pod re-upload."""
     conversation = uuid4()
     key_prefix = f"conversations/{conversation}/workspace"
-    mount = MountSpec(kind="s3", bucket="ufo-blobs", key_prefix=key_prefix, credentials=_S3_CREDS)
+    mount = MountSpec(
+        kind="s3", bucket="ufo-blobs", key_prefix=key_prefix, credential_token=_S3_TOKEN
+    )
     handle = SandboxHandle(conversation_id=conversation, container_id="c1", mount=mount)
     blob = _RecordingBlob(inner=FilesystemBlobStore(root=tmp_path))
     await blob.inner.put(f"{key_prefix}/report.pdf", b"pdf-bytes")
@@ -133,8 +138,8 @@ async def test_attach_skips_the_remount_only_when_the_shared_probe_passes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The skip decision rides on the shared mount_health_check recipe — a real readdir through
-    s3fs plus the credential-age bound, not a bare `mountpoint` that stays green on an
-    expired-credential mount — and a pass makes _mount_s3 a no-op."""
+    s3fs plus a relay fetch, not a bare `mountpoint` that stays green on a dead credential path.
+    The fresh per-turn token is written before the probe, and a pass skips the remount."""
     calls: list[tuple[str, ...]] = []
 
     async def fake_docker(*argv: str, stdin: bytes = b"", timeout_s: int = 60):
@@ -147,16 +152,33 @@ async def test_attach_skips_the_remount_only_when_the_shared_probe_passes(
         kind="s3",
         bucket="ufo-blobs",
         key_prefix=f"conversations/{conversation}/workspace",
-        credentials=_S3_CREDS,
+        credential_token=_S3_TOKEN,
         s3_url="https://minio:9000",
         region="us-east-1",
         path_style=True,
     )
     handle = SandboxHandle(conversation_id=conversation, container_id="c1", mount=mount)
 
-    await DockerCarrier()._mount_s3(handle, mount)
+    await DockerCarrier()._mount_s3(
+        handle, mount, "http://host.docker.internal:8080/sandbox-fs-credentials"
+    )
 
-    assert calls == [("exec", "-i", "c1", "sh", "-c", mount_health_check(WORKSPACE_DIR))]
+    assert len(calls) == 2
+    assert calls[0][:5] == ("exec", "-i", "-u", "root", "c1")
+    assert prepare_token_staging_command() in calls[0][-1]
+    assert "umask 077" in calls[0][-1]
+    assert f"cat > {SANDBOX_FS_TOKEN_STAGING_PATH}" in calls[0][-1]
+    assert install_token_command() in calls[0][-1]
+    assert calls[1] == (
+        "exec",
+        "-i",
+        "-u",
+        "root",
+        "c1",
+        "sh",
+        "-c",
+        mount_health_check(WORKSPACE_DIR),
+    )
 
 
 async def test_s3fs_mount_execs_run_without_the_agent_egress_env(
@@ -168,10 +190,15 @@ async def test_s3fs_mount_execs_run_without_the_agent_egress_env(
     assertion is non-vacuous: it would fail if `_mount_s3` ever threaded `handle.egress_env` onto a
     mount exec the way `exec` does."""
     calls: list[tuple[str, ...]] = []
+    mount_probes = 0
 
     async def fake_docker(*argv: str, stdin: bytes = b"", timeout_s: int = 60):
+        nonlocal mount_probes
         calls.append(argv)
-        return (1 if any("mountpoint" in arg for arg in argv) else 0), b"", b""
+        if any("mountpoint" in arg for arg in argv):
+            mount_probes += 1
+            return (1 if mount_probes == 1 else 0), b"", b""
+        return 0, b"", b""
 
     monkeypatch.setattr(docker_ext, "_docker", fake_docker)
     conversation = uuid4()
@@ -179,7 +206,7 @@ async def test_s3fs_mount_execs_run_without_the_agent_egress_env(
         kind="s3",
         bucket="ufo-blobs",
         key_prefix=f"conversations/{conversation}/workspace",
-        credentials=_S3_CREDS,
+        credential_token=_S3_TOKEN,
         s3_url="https://minio:9000",
         region="us-east-1",
         path_style=True,
@@ -194,12 +221,18 @@ async def test_s3fs_mount_execs_run_without_the_agent_egress_env(
         },
     )
 
-    await DockerCarrier()._mount_s3(handle, mount)
+    await DockerCarrier()._mount_s3(
+        handle, mount, "http://host.docker.internal:8080/sandbox-fs-credentials"
+    )
 
     flat = [arg for argv in calls for arg in argv]
     assert any("s3fs" in arg for arg in flat)
     assert "--env" not in flat
     assert not any("HTTPS_PROXY" in arg or "GH_TOKEN" in arg for arg in flat)
+    token_write = next(argv for argv in calls if SANDBOX_FS_TOKEN_PATH in argv[-1])
+    assert token_write[:5] == ("exec", "-i", "-u", "root", "c1")
+    assert prepare_token_staging_command() in token_write[-1]
+    assert install_token_command() in token_write[-1]
 
 
 async def test_exec_carries_the_turn_env_and_run_bakes_none(
@@ -231,6 +264,8 @@ async def test_exec_carries_the_turn_env_and_run_bakes_none(
 
     run_argv = next(argv for argv in calls if argv[0] == "run")
     assert "--env" not in run_argv
+    assert run_argv[run_argv.index("--network") + 1] == (f"ufo-sandbox-{spec.conversation_id.hex}")
+    assert run_argv[run_argv.index("--cap-drop") + 1] == "NET_RAW"
 
     await carrier.exec(handle, ("bash", "-lc", "gh api user"), b"", 30)
 
@@ -241,6 +276,284 @@ async def test_exec_carries_the_turn_env_and_run_bakes_none(
     assert f"ANTHROPIC_API_KEY={SENTINEL_MODEL_KEY}" in exec_argv
     assert "GH_TOKEN=UFO_SENTINEL_GRANT_acct-1" in exec_argv
     assert exec_argv.index("cid1") > exec_argv.index(f"HTTPS_PROXY={proxy_url}")
+
+
+def test_hosted_mount_credentials_use_the_https_public_proxy() -> None:
+    spec = SandboxSpec(
+        conversation_id=uuid4(),
+        image_ref="ufo-sandbox:latest",
+        mount=MountSpec(kind="filesystem", host_path="/tmp/ws"),
+        proxy=ProxyEndpoint(port=8080, ca_cert="ca-pem", public_url="https://sandbox-proxy.test"),
+        run_token="turn-a",
+    )
+
+    assert DockerCarrier()._credential_url(spec) == (
+        "https://sandbox-proxy.test/sandbox-fs-credentials"
+    )
+
+
+def test_hosted_mount_credentials_reject_a_plaintext_public_proxy() -> None:
+    spec = SandboxSpec(
+        conversation_id=uuid4(),
+        image_ref="ufo-sandbox:latest",
+        mount=MountSpec(kind="filesystem", host_path="/tmp/ws"),
+        proxy=ProxyEndpoint(port=8080, ca_cert="ca-pem", public_url="http://sandbox-proxy.test"),
+        run_token="turn-a",
+    )
+
+    with pytest.raises(RuntimeError, match="HTTPS"):
+        DockerCarrier()._credential_url(spec)
+
+
+@pytest.mark.parametrize(
+    ("public_url", "credential_url"),
+    [
+        (None, "http://host.docker.internal:8080/sandbox-fs-credentials"),
+        ("https://sandbox-proxy.test", "https://sandbox-proxy.test/sandbox-fs-credentials"),
+    ],
+)
+async def test_create_wires_s3_mount_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+    public_url: str | None,
+    credential_url: str,
+) -> None:
+    calls: list[tuple[str, ...]] = []
+    mount_probes = 0
+
+    async def fake_docker(*argv: str, stdin: bytes = b"", timeout_s: int = 60):
+        nonlocal mount_probes
+        calls.append(argv)
+        if argv[0] == "run":
+            return 0, b"cid1\n", b""
+        if argv[0] == "exec" and "mountpoint" in argv[-1]:
+            mount_probes += 1
+            return (1 if mount_probes == 1 else 0), b"", b""
+        return 0, b"", b""
+
+    monkeypatch.setattr(docker_ext, "_docker", fake_docker)
+    conversation = uuid4()
+    spec = SandboxSpec(
+        conversation_id=conversation,
+        image_ref="ufo-sandbox:latest",
+        mount=MountSpec(
+            kind="s3",
+            bucket="ufo-blobs",
+            key_prefix=f"conversations/{conversation}/workspace",
+            credential_token=_S3_TOKEN,
+            s3_url="https://s3.test",
+            region="us-east-1",
+        ),
+        proxy=ProxyEndpoint(
+            port=8080,
+            ca_cert="ca-pem",
+            public_url=public_url,
+        ),
+        run_token="turn-a",
+    )
+
+    handle = await DockerCarrier().create(spec)
+
+    run = next(argv for argv in calls if argv[0] == "run")
+    mount = next(argv[-1] for argv in calls if argv[0] == "exec" and "sbxcred" in argv[-1])
+    assert handle.container_id == "cid1"
+    assert "--cap-add" in run
+    assert credential_url in mount
+    assert "runuser -u nobody -- sh -c" in mount
+
+
+async def test_create_rejects_a_mount_that_disconnects_after_s3fs_returns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    async def fake_docker(*argv: str, stdin: bytes = b"", timeout_s: int = 60):
+        calls.append(argv)
+        if argv[0] == "run":
+            return 0, b"cid1\n", b""
+        if argv[0] == "exec" and "mountpoint" in argv[-1]:
+            return 1, b"", b""
+        return 0, b"", b""
+
+    monkeypatch.setattr(docker_ext, "_docker", fake_docker)
+    conversation = uuid4()
+    spec = SandboxSpec(
+        conversation_id=conversation,
+        image_ref="ufo-sandbox:latest",
+        mount=MountSpec(
+            kind="s3",
+            bucket="ufo-blobs",
+            key_prefix=f"conversations/{conversation}/workspace",
+            credential_token=_S3_TOKEN,
+            s3_url="https://s3.test",
+            region="us-east-1",
+        ),
+        proxy=ProxyEndpoint(port=8080, ca_cert="ca-pem"),
+        run_token="turn-a",
+    )
+
+    with pytest.raises(RuntimeError, match="mount failed its health check"):
+        await DockerCarrier().create(spec)
+
+    assert ("rm", "-f", "cid1") in calls
+    assert ("network", "rm", f"ufo-sandbox-{conversation.hex}") in calls
+
+
+async def test_failed_s3_mount_removes_the_container_and_network(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    async def fake_docker(*argv: str, stdin: bytes = b"", timeout_s: int = 60):
+        calls.append(argv)
+        if argv[0] == "run":
+            return 0, b"cid1\n", b""
+        if argv[0] == "exec" and "mountpoint" in argv[-1]:
+            return 1, b"", b""
+        if argv[0] == "exec" and "runuser" in argv[-1]:
+            return 1, b"", b"mount denied"
+        return 0, b"", b""
+
+    monkeypatch.setattr(docker_ext, "_docker", fake_docker)
+    conversation = uuid4()
+    spec = SandboxSpec(
+        conversation_id=conversation,
+        image_ref="ufo-sandbox:latest",
+        mount=MountSpec(
+            kind="s3",
+            bucket="ufo-blobs",
+            key_prefix=f"conversations/{conversation}/workspace",
+            credential_token=_S3_TOKEN,
+            s3_url="https://s3.test",
+            region="us-east-1",
+        ),
+        proxy=ProxyEndpoint(port=8080, ca_cert="ca-pem"),
+        run_token="turn-a",
+    )
+
+    with pytest.raises(RuntimeError, match="mount denied"):
+        await DockerCarrier().create(spec)
+
+    assert calls[-2:] == [
+        ("rm", "-f", "cid1"),
+        ("network", "rm", f"ufo-sandbox-{conversation.hex}"),
+    ]
+
+
+async def test_missing_conversation_network_is_created(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    async def fake_docker(*argv: str, stdin: bytes = b"", timeout_s: int = 60):
+        calls.append(argv)
+        return 0, b"", b""
+
+    monkeypatch.setattr(docker_ext, "_docker", fake_docker)
+
+    await DockerCarrier()._ensure_network("ufo-sandbox-c1")
+
+    assert calls == [
+        ("network", "ls", "-q", "--filter", "name=^ufo-sandbox-c1$"),
+        ("network", "create", "ufo-sandbox-c1"),
+    ]
+
+
+@pytest.mark.parametrize("failed_command", ["ls", "create"])
+async def test_conversation_network_failure_is_reported(
+    monkeypatch: pytest.MonkeyPatch, failed_command: str
+) -> None:
+    async def fake_docker(*argv: str, stdin: bytes = b"", timeout_s: int = 60):
+        failed = argv[1] == failed_command
+        return (1 if failed else 0), b"", (b"daemon unavailable" if failed else b"")
+
+    monkeypatch.setattr(docker_ext, "_docker", fake_docker)
+
+    with pytest.raises(RuntimeError, match=f"network {failed_command} failed"):
+        await DockerCarrier()._ensure_network("ufo-sandbox-c1")
+
+
+async def test_destroy_removes_the_container_and_conversation_network(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    async def fake_docker(*argv: str, stdin: bytes = b"", timeout_s: int = 60):
+        calls.append(argv)
+        return 0, b"", b""
+
+    monkeypatch.setattr(docker_ext, "_docker", fake_docker)
+    conversation = uuid4()
+    handle = SandboxHandle(
+        conversation_id=conversation,
+        container_id="cid1",
+        mount=MountSpec(kind="filesystem", host_path="/tmp/ws"),
+    )
+
+    await DockerCarrier().destroy(handle)
+
+    assert calls == [
+        ("rm", "-f", f"ufo-sbx-{conversation}"),
+        ("network", "rm", f"ufo-sandbox-{conversation.hex}"),
+    ]
+
+
+async def test_failed_create_removes_the_conversation_network(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    async def fake_docker(*argv: str, stdin: bytes = b"", timeout_s: int = 60):
+        calls.append(argv)
+        if argv[0] == "run":
+            return 1, b"", b"image unavailable"
+        return 0, b"", b""
+
+    monkeypatch.setattr(docker_ext, "_docker", fake_docker)
+    conversation = uuid4()
+    spec = SandboxSpec(
+        conversation_id=conversation,
+        image_ref="ufo-sandbox:latest",
+        mount=MountSpec(kind="filesystem", host_path="/tmp/ws"),
+        proxy=ProxyEndpoint(port=8080, ca_cert="ca-pem"),
+        run_token="turn-a",
+    )
+
+    with pytest.raises(RuntimeError, match="image unavailable"):
+        await DockerCarrier().create(spec)
+
+    assert calls[-1] == ("network", "rm", f"ufo-sandbox-{conversation.hex}")
+
+
+async def test_failed_provision_removes_the_container_and_network(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    async def fake_docker(*argv: str, stdin: bytes = b"", timeout_s: int = 60):
+        calls.append(argv)
+        if argv[0] == "run":
+            return 0, b"cid1\n", b""
+        if argv[0] == "exec":
+            return 1, b"", b"trust update failed"
+        return 0, b"", b""
+
+    monkeypatch.setattr(docker_ext, "_docker", fake_docker)
+    conversation = uuid4()
+    spec = SandboxSpec(
+        conversation_id=conversation,
+        image_ref="ufo-sandbox:latest",
+        mount=MountSpec(kind="filesystem", host_path="/tmp/ws"),
+        proxy=ProxyEndpoint(port=8080, ca_cert="ca-pem"),
+        run_token="turn-a",
+    )
+
+    with pytest.raises(RuntimeError, match="trust update failed"):
+        await DockerCarrier().create(spec)
+
+    assert calls[-2:] == [
+        ("rm", "-f", "cid1"),
+        ("network", "rm", f"ufo-sandbox-{conversation.hex}"),
+    ]
 
 
 async def test_attach_to_a_running_container_carries_the_second_turns_env(

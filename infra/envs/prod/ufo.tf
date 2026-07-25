@@ -127,10 +127,11 @@ resource "kubernetes_secret_v1" "ufo_serve" {
     namespace = local.system_namespace
   }
   data = {
-    "ufo.toml"                = local.serve_config
-    UFO_CONTROL_SERVE_DSN     = module.platform.serve_dsn
-    UFO_CREDENTIAL_KEY        = module.platform.serve_credential_key
-    UFO_ARTIFACT_TOKEN_SECRET = module.platform.serve_artifact_token
+    "ufo.toml"                  = local.serve_config
+    UFO_CONTROL_SERVE_DSN       = module.platform.serve_dsn
+    UFO_CREDENTIAL_KEY          = module.platform.serve_credential_key
+    UFO_ARTIFACT_TOKEN_SECRET   = module.platform.serve_artifact_token
+    UFO_SANDBOX_FS_TOKEN_SECRET = module.platform.sandbox_fs_token
   }
   depends_on = [kubernetes_namespace_v1.ufo_system]
 }
@@ -187,9 +188,10 @@ data "kubectl_file_documents" "hosted" {
     ingress_class  = "nginx"
     bundle_image   = local.bundle_image
     serve_role_arn = module.platform.app_s3_role_arn
+    proxy_role_arn = module.platform.sandbox_proxy_role_arn
 
-    region         = var.region
-    otlp_endpoint  = "http://otel-collector.${local.system_namespace}.svc.cluster.local:4318"
+    region        = var.region
+    otlp_endpoint = "http://otel-collector.${local.system_namespace}.svc.cluster.local:4318"
 
     ses_sender           = var.ses_sender
     ses_region           = var.region
@@ -259,5 +261,5 @@ resource "kubectl_manifest" "ufo" {
   for_each  = local.ufo_workload_manifests
   yaml_body = each.value
 
-  depends_on = [kubectl_manifest.ufo_migrate]
+  depends_on = [kubectl_manifest.ufo_migrate, module.platform]
 }

@@ -8,32 +8,52 @@ stand-in dependency — every assertion is the minter's and the mount-builder's 
 stand-in's canned response."""
 
 import json
+from datetime import UTC, datetime, timedelta
 from fnmatch import fnmatchcase
 from uuid import uuid4
 
 import pytest
+from pydantic import ValidationError
 
 from ufo.blob import S3BlobStore
+from ufo.config import BlobConfig
 from ufo.loop.queue import _workspace_mount
 from ufo.sandbox.fs_creds import (
     SANDBOX_FS_CRED_TTL_SECONDS,
+    SANDBOX_FS_CREDENTIAL_PATH,
+    SANDBOX_FS_GATE_TOKEN_TTL_SECONDS,
+    SANDBOX_FS_TOKEN_SECRET_ENV,
+    InvalidSandboxFsToken,
     SandboxFsCredentialMinter,
     SandboxFsCredentials,
+    issue_sandbox_fs_gate_token,
+    sandbox_fs_minter,
     workspace_key_prefix,
     workspace_prefix_policy,
 )
 from ufo.sandbox.fs_mount import (
-    AWS_CREDENTIALS_PATH,
-    MOUNT_CREDENTIAL_MAX_AGE_SECONDS,
-    aws_credentials_file,
+    SANDBOX_FS_RELAY_PID,
+    SANDBOX_FS_RELAY_PORT,
+    SANDBOX_FS_RELAY_SECRET_PATH,
+    SANDBOX_FS_RELAY_SECRET_STAGING_PATH,
+    SANDBOX_FS_TOKEN_PATH,
+    SANDBOX_FS_TOKEN_STAGING_PATH,
+    install_token_command,
     mount_health_check,
     mount_scripts,
+    prepare_token_staging_command,
     s3fs_command,
 )
-from ufo.sandbox.session import MountSpec
+from ufo.sandbox.session import MountSpec, RunToken
 from ufo.transcript import transcript_key
 
 BUCKET = "ufo-blobs"
+NOW = datetime(2026, 1, 1, tzinfo=UTC)
+RUN = RunToken(workspace_id=uuid4(), turn_id=uuid4())
+
+
+async def _live_turn(run: RunToken) -> bool:
+    return run == RUN
 
 
 class _StubSts:
@@ -43,16 +63,19 @@ class _StubSts:
 
     def __init__(self) -> None:
         self.seen_policy: str | None = None
+        self.calls = 0
 
     async def assume_role(
         self, *, RoleArn: str, RoleSessionName: str, Policy: str, DurationSeconds: int
     ) -> dict[str, dict[str, str]]:
+        self.calls += 1
         self.seen_policy = Policy
         return {
             "Credentials": {
                 "AccessKeyId": "AKIASBX",
                 "SecretAccessKey": "sbx-secret",
                 "SessionToken": "sbx-token",
+                "Expiration": datetime(2026, 1, 2, tzinfo=UTC),
             }
         }
 
@@ -104,8 +127,8 @@ def test_s3fs_command_construction() -> None:
     )
     assert command == (
         "s3fs ufo-blobs:/conversations/c1/workspace /workspace "
-        "-o profile=default -o url=https://s3.example:9000 -o endpoint=us-east-1 "
-        "-o compat_dir -o allow_other"
+        "-o ecs -o url=https://s3.example:9000 -o endpoint=us-east-1 "
+        "-o compat_dir -o allow_other -o uid=1000 -o gid=1000"
     )
 
 
@@ -113,44 +136,59 @@ def test_s3fs_command_adds_path_style_for_minio() -> None:
     command = s3fs_command(
         BUCKET, "conversations/c1/workspace", "/workspace", "https://minio:9000", "us-east-1", True
     )
-    assert command.endswith("-o compat_dir -o allow_other -o use_path_request_style")
-
-
-def test_aws_credentials_file_is_the_default_profile() -> None:
-    rendered = aws_credentials_file(SandboxFsCredentials("AKIA", "secret", "token"))
-    assert rendered == (
-        "[default]\naws_access_key_id=AKIA\naws_secret_access_key=secret\naws_session_token=token\n"
+    assert command.endswith(
+        "-o compat_dir -o allow_other -o uid=1000 -o gid=1000 -o use_path_request_style"
     )
 
 
 def test_mount_scripts_prepare_and_mount() -> None:
-    prepare, mount = mount_scripts("/workspace", "s3fs bucket:/p /workspace -o x")
+    prepare, mount = mount_scripts(
+        "/workspace", "s3fs bucket:/p /workspace -o x", "https://proxy.test/credentials"
+    )
     assert "chmod 666 /dev/fuse" in prepare
     assert "user_allow_other" in prepare
     assert "umount -l /workspace" in prepare
-    assert mount == (
-        f"mkdir -p /workspace && chmod 600 {AWS_CREDENTIALS_PATH} && s3fs bucket:/p /workspace -o x"
+    assert "chown nobody /workspace" in mount
+    assert f"chown root {SANDBOX_FS_TOKEN_PATH}" in mount
+    assert f"chmod 600 {SANDBOX_FS_TOKEN_PATH}" in mount
+    assert "od -An -N32 -tx1 /dev/urandom" in mount
+    assert f"> {SANDBOX_FS_RELAY_SECRET_STAGING_PATH}" in mount
+    assert f"mv -f {SANDBOX_FS_RELAY_SECRET_STAGING_PATH} {SANDBOX_FS_RELAY_SECRET_PATH}" in mount
+    assert (
+        f"sbxcred https://proxy.test/credentials {SANDBOX_FS_TOKEN_PATH} "
+        f"{SANDBOX_FS_RELAY_PORT} {SANDBOX_FS_RELAY_SECRET_PATH} {SANDBOX_FS_RELAY_PID}"
+    ) in mount
+    assert (
+        f'export AWS_CONTAINER_CREDENTIALS_RELATIVE_URI="@127.0.0.1:'
+        f'{SANDBOX_FS_RELAY_PORT}/$relay_secret"'
+    ) in mount
+    assert f"cat {SANDBOX_FS_RELAY_SECRET_PATH} | runuser -u nobody -- sh -c" in mount
+    assert "relay_secret=$(cat" not in mount
+    assert "s3fs bucket:/p /workspace -o x" in mount
+
+
+def test_token_install_replaces_the_root_owned_file_atomically() -> None:
+    prepare = prepare_token_staging_command()
+    command = install_token_command()
+
+    assert "install -d -m 700 -o root -g root" in prepare
+    assert f"chown root {SANDBOX_FS_TOKEN_STAGING_PATH}" in command
+    assert f"chmod 600 {SANDBOX_FS_TOKEN_STAGING_PATH}" in command
+    assert f"mv -f {SANDBOX_FS_TOKEN_STAGING_PATH} {SANDBOX_FS_TOKEN_PATH}" in command
+
+
+def test_mount_health_check_probes_the_relay_and_readdir() -> None:
+    assert (
+        mount_health_check("/workspace") == "mountpoint -q /workspace && "
+        f"{{ IFS= read -r relay_secret < {SANDBOX_FS_RELAY_SECRET_PATH}; "
+        'printf \'url = "http://127.0.0.1:8791/%s"\\n\' "$relay_secret"; } | '
+        "curl --fail --silent --max-time 10 "
+        "--config - >/dev/null && "
+        "ls /workspace >/dev/null 2>&1"
     )
 
 
-def test_mount_health_check_probes_readdir_and_bounds_credential_age() -> None:
-    """The skip-vs-remount probe is a real proof of service, not a bare `mountpoint`: readdir
-    forces a ListObjects through s3fs (an expired credential or wedged daemon fails it with EIO
-    while the mountpoint alone stays green), and the credential-age bound remounts before the
-    minted session can expire under a turn — the wedge a pause/resume carrier otherwise pins
-    forever, since the daemon survives the pause but its credential does not."""
-    probe = mount_health_check("/workspace")
-    assert probe == (
-        "mountpoint -q /workspace && ls /workspace >/dev/null 2>&1 && "
-        f"[ $(( $(date +%s) - $(stat -c %Y {AWS_CREDENTIALS_PATH} 2>/dev/null || echo 0) )) "
-        f"-lt {MOUNT_CREDENTIAL_MAX_AGE_SECONDS} ]"
-    )
-    # Refresh strictly inside the TTL: a mount that passes the probe holds a credential with at
-    # least half its lifetime left for the session it serves.
-    assert MOUNT_CREDENTIAL_MAX_AGE_SECONDS <= SANDBOX_FS_CRED_TTL_SECONDS // 2
-
-
-async def test_workspace_mount_mints_a_scoped_s3_mount() -> None:
+async def test_workspace_mount_issues_a_scoped_s3_mount_token() -> None:
     sts = _StubSts()
     conversation = uuid4()
     minter = SandboxFsCredentialMinter(
@@ -160,22 +198,151 @@ async def test_workspace_mount_mints_a_scoped_s3_mount() -> None:
         s3_url="https://s3.example:9000",
         region="us-east-1",
         path_style=True,
+        token_secret=b"mount-secret",
+        now=lambda: NOW,
     )
-    mount = await _workspace_mount(S3BlobStore(bucket=BUCKET), minter, conversation)
+    mount = await _workspace_mount(S3BlobStore(bucket=BUCKET), minter, conversation, RUN)
 
     assert mount == MountSpec(
         kind="s3",
         bucket=BUCKET,
         key_prefix=f"conversations/{conversation}/workspace",
-        credentials=SandboxFsCredentials("AKIASBX", "sbx-secret", "sbx-token"),
+        credential_token=minter.issue(conversation, RUN),
         s3_url="https://s3.example:9000",
         region="us-east-1",
         path_style=True,
     )
-    # The session it minted was scoped to this conversation's workspace prefix, nothing wider.
+    assert sts.seen_policy is None
+
+
+async def test_mount_token_redeems_repeatedly_to_scoped_ecs_credentials() -> None:
+    sts = _StubSts()
+    conversation = uuid4()
+    minter = SandboxFsCredentialMinter(
+        sts=sts,
+        role_arn="arn:aws:iam::0:role/sbxfs",
+        bucket=BUCKET,
+        s3_url="https://s3.example:9000",
+        region="us-east-1",
+        path_style=False,
+        token_secret=b"mount-secret",
+        now=lambda: NOW,
+    )
+    token = minter.issue(conversation, RUN)
+
+    first = await minter.refresh(token, _live_turn)
+    second = await minter.refresh(token, _live_turn)
+
+    assert (
+        first
+        == second
+        == SandboxFsCredentials(
+            access_key_id="AKIASBX",
+            secret_access_key="sbx-secret",
+            session_token="sbx-token",
+            expiration=datetime(2026, 1, 2, tzinfo=UTC),
+            role_arn="arn:aws:iam::0:role/sbxfs",
+        )
+    )
+    assert json.loads(first.ecs_json()) == {
+        "AccessKeyId": "AKIASBX",
+        "SecretAccessKey": "sbx-secret",
+        "Token": "sbx-token",
+        "Expiration": "2026-01-02T00:00:00Z",
+        "RoleArn": "arn:aws:iam::0:role/sbxfs",
+    }
     assert sts.seen_policy == workspace_prefix_policy(BUCKET, workspace_key_prefix(conversation))
+    assert "." in token
+    with pytest.raises(InvalidSandboxFsToken, match="invalid sandbox-fs token"):
+        await minter.refresh(token + "x", _live_turn)
+
+
+async def test_mount_token_refresh_requires_a_live_turn_without_a_wall_clock_deadline() -> None:
+    sts = _StubSts()
+    current_time = [NOW]
+    minter = SandboxFsCredentialMinter(
+        sts=sts,
+        role_arn="arn:aws:iam::0:role/sbxfs",
+        bucket=BUCKET,
+        s3_url="https://s3.example:9000",
+        region="us-east-1",
+        path_style=False,
+        token_secret=b"mount-secret",
+        now=lambda: current_time[0],
+    )
+    token = minter.issue(uuid4(), RUN)
+    current_time[0] += timedelta(days=365)
+
+    assert await minter.refresh(token, _live_turn)
+    assert sts.calls == 1
+
+    async def ended_turn(run: RunToken) -> bool:
+        assert run == RUN
+        return False
+
+    with pytest.raises(InvalidSandboxFsToken, match="invalid sandbox-fs token"):
+        await minter.refresh(token, ended_turn)
+    assert sts.calls == 1
+
+
+def test_sandbox_fs_credential_path_is_stable_for_the_relay() -> None:
+    assert SANDBOX_FS_CREDENTIAL_PATH == "/sandbox-fs-credentials/"
+    assert SANDBOX_FS_CRED_TTL_SECONDS == 3600
+    assert SANDBOX_FS_GATE_TOKEN_TTL_SECONDS == 600
+
+
+async def test_expired_deploy_gate_token_is_rejected() -> None:
+    sts = _StubSts()
+    minter = SandboxFsCredentialMinter(
+        sts=sts,
+        role_arn="arn:aws:iam::0:role/sbxfs",
+        bucket=BUCKET,
+        s3_url="https://s3.example:9000",
+        region="us-east-1",
+        path_style=False,
+        token_secret=b"mount-secret",
+        now=lambda: NOW,
+    )
+    token = issue_sandbox_fs_gate_token(uuid4(), minter.token_secret, NOW - timedelta(seconds=1))
+
+    with pytest.raises(InvalidSandboxFsToken, match="invalid sandbox-fs token"):
+        await minter.refresh(token, _live_turn)
+    assert sts.seen_policy is None
+
+
+def test_sandbox_fs_credentials_reject_extra_wire_fields() -> None:
+    with pytest.raises(ValidationError):
+        SandboxFsCredentials.model_validate(
+            {
+                "access_key_id": "AKIA",
+                "secret_access_key": "secret",
+                "session_token": "token",
+                "expiration": datetime(2026, 1, 2, tzinfo=UTC),
+                "role_arn": "arn:aws:iam::0:role/sbxfs",
+                "unexpected": True,
+            }
+        )
+
+
+def test_s3_minter_requires_the_shared_mount_token_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    blob = BlobConfig(
+        backend="s3",
+        bucket=BUCKET,
+        s3_url="https://s3.example",
+        sts_role_arn="arn:aws:iam::0:role/sbxfs",
+    )
+    monkeypatch.delenv(SANDBOX_FS_TOKEN_SECRET_ENV, raising=False)
+    with pytest.raises(RuntimeError, match=SANDBOX_FS_TOKEN_SECRET_ENV):
+        sandbox_fs_minter(blob)
+
+    monkeypatch.setenv(SANDBOX_FS_TOKEN_SECRET_ENV, "shared-secret")
+    minter = sandbox_fs_minter(blob)
+    assert minter is not None
+    assert minter.token_secret == b"shared-secret"
 
 
 async def test_workspace_mount_on_s3_without_a_minter_fails_loud() -> None:
     with pytest.raises(RuntimeError, match="minter"):
-        await _workspace_mount(S3BlobStore(bucket=BUCKET), None, uuid4())
+        await _workspace_mount(S3BlobStore(bucket=BUCKET), None, uuid4(), RUN)

@@ -155,6 +155,21 @@ def test_plans_run_only_for_selected_deployment_inputs() -> None:
         assert job["if"] == "needs.changes.outputs.deploy == 'true'"
 
 
+def test_mount_gate_exercises_the_refreshing_credential_endpoint() -> None:
+    jobs = _workflow(WORKFLOWS / "deploy.yml")["jobs"]
+    assert isinstance(jobs, dict)
+    rollout = jobs["rollout"]
+    assert isinstance(rollout, dict)
+    steps = rollout["steps"]
+    assert isinstance(steps, list)
+    gate = next(step for step in steps if step.get("name") == "Gate sandbox workspace mount")
+    script = gate["run"]
+    assert isinstance(script, str)
+    assert "output -raw sandbox_fs_token" in script
+    assert "output -raw sandbox_proxy_url" in script
+    assert "--role-arn" not in script
+
+
 def test_deployment_gate_joins_platform_and_edge_results() -> None:
     jobs = _workflow(WORKFLOWS / "deploy.yml")["jobs"]
     assert isinstance(jobs, dict)

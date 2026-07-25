@@ -34,7 +34,7 @@ output "blob_bucket" {
 }
 
 output "sandbox_fs_role_arn" {
-  description = "STS role the serve fleet assumes to mint per-conversation sandbox mount credentials."
+  description = "STS role the sandbox proxy assumes to mint per-conversation mount credentials."
   value       = aws_iam_role.sandbox_fs.arn
 }
 
@@ -49,8 +49,13 @@ output "egress_ca_cert" {
 }
 
 output "app_s3_role_arn" {
-  description = "IRSA role annotated on the ufo-serve ServiceAccount — the pod's boto3 reaches the blob bucket and assumes sandbox-fs for the s3fs mount (serve_role_arn)."
+  description = "IRSA role annotated on the ufo-serve ServiceAccount for blob bucket access."
   value       = module.irsa_app_s3.iam_role_arn
+}
+
+output "sandbox_proxy_role_arn" {
+  description = "IRSA role annotated on the sandbox proxy ServiceAccount for scoped credential minting."
+  value       = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${local.name}-sandbox-proxy"
 }
 
 output "gateway_ses_role_arn" {
@@ -73,6 +78,11 @@ output "serve_credential_key" {
 
 output "serve_artifact_token" {
   value     = random_password.serve_artifact_token.result
+  sensitive = true
+}
+
+output "sandbox_fs_token" {
+  value     = random_password.sandbox_fs_token.result
   sensitive = true
 }
 

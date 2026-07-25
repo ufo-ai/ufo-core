@@ -37,6 +37,11 @@ resource "random_password" "serve_artifact_token" {
   special = false
 }
 
+resource "random_password" "sandbox_fs_token" {
+  length  = 64
+  special = false
+}
+
 locals {
   rds_endpoint = module.rds.db_instance_endpoint # host:port
 

@@ -2,7 +2,7 @@
 """Build the ufo sandbox image — one definition, two targets that stay in sync.
 
 The E2B sandbox template and the Docker carrier's container image share the same layers
-(``apply_layers``: apt packages, the pip/npm toolchain, the ``sbx``/``sbxfs`` scripts, the start
+(``apply_layers``: apt packages, the pip/npm toolchain, the sandbox scripts, the start
 command, the baked env). Only the base differs:
 
 - E2B builds from the ``code-interpreter-v1`` template, which carries E2B's own provisioning layers,
@@ -75,6 +75,7 @@ APT_PACKAGES = (
     "jq",
     "ripgrep",
     "s3fs",
+    "util-linux",
     "poppler-utils",
     "chromium",
     "libreoffice-writer",
@@ -133,16 +134,17 @@ NPM_PACKAGES = (
 # cwd, PLAYWRIGHT_BROWSERS_PATH so scripts find the Chromium baked at build time. The Docker
 # carrier inherits it from the image ENV (docker exec keeps it); the E2B carrier merges it into
 # every exec's envs, since e2b commands do not inherit the template ENV.
-# The scripts baked into the image and installed by the local carrier, with a version bumped on any
-# content change so the digest moves. sbxfs is the in-sandbox file-op CLI; sbx is the egress CLI.
-SANDBOX_SCRIPTS: tuple[tuple[str, int], ...] = (("sbx", 2), ("sbxfs", 2))
+# The scripts baked into the image, with a version bumped on any content change so the digest moves.
+SANDBOX_SCRIPTS: tuple[tuple[str, int], ...] = (("sbx", 2), ("sbxfs", 2), ("sbxcred", 1))
 SANDBOX_TEMPLATE_READY_COMMAND = """
 command -v python3 >/dev/null
 command -v node >/dev/null
 command -v sbx >/dev/null
 command -v sbxfs >/dev/null
+command -v sbxcred >/dev/null
 command -v rg >/dev/null
 command -v s3fs >/dev/null
+command -v runuser >/dev/null
 command -v pdftotext >/dev/null
 command -v pdftoppm >/dev/null
 command -v soffice >/dev/null

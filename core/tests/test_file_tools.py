@@ -3,6 +3,7 @@ image, the real `sbxfs` CLI on PATH, real ripgrep/poppler, and — for `share_fi
 bind mount the carrier streams out of. These are Docker-gated like test_sandbox_session; nothing
 here asserts a fake."""
 
+import asyncio
 import base64
 import hashlib
 import json
@@ -13,15 +14,16 @@ import zlib
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 import pytest
 import sqlalchemy as sa
 from pydantic import BaseModel
-from ufo_ext_docker import DockerCarrier
+from ufo_ext_docker import DockerCarrier, _docker
 
 from ufo.artifact_token import verify_artifact_token
-from ufo.blob import FilesystemBlobStore
+from ufo.blob import FilesystemBlobStore, S3BlobStore
 from ufo.connectors import ConnectorRegistry
 from ufo.db import workspace_tx
 from ufo.ext.loader import HookChain
@@ -36,12 +38,23 @@ from ufo.loop.engine import (
 from ufo.loop.prompts.render import rendered_prompt
 from ufo.loop.transcript import Transcript
 from ufo.models.interface import ModelEvent, ModelRequest, ToolUseBlock
+from ufo.sandbox.fs_creds import (
+    AwsStsClient,
+    SandboxFsCredentialMinter,
+    workspace_key_prefix,
+)
+from ufo.sandbox.fs_mount import SANDBOX_FS_RELAY_SECRET_PATH, SANDBOX_FS_TOKEN_PATH
+from ufo.sandbox.proxy.rules import Rule
+from ufo.sandbox.proxy.server import EgressProxy, generate_ca
 from ufo.sandbox.session import (
     SANDBOX_GID,
     SANDBOX_UID,
     MountSpec,
+    ProxyEndpoint,
+    RunToken,
     SandboxHandle,
     SandboxSession,
+    SandboxSpec,
 )
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn, Usage
@@ -228,6 +241,165 @@ def file_ctx(sandbox_image: str, tmp_path: Path) -> Iterator[tuple[ToolContext, 
             check=False,
             timeout=CONTAINER_OP_TIMEOUT_S,
         )
+
+
+async def test_s3_mount_runs_s3fs_as_nobody_without_exposing_relay_secret(
+    sandbox_image: str, s3_store: S3BlobStore
+) -> None:
+    conversation_id = uuid4()
+    assert s3_store.endpoint_url is not None
+    assert s3_store.region is not None
+
+    async def resolve(_: RunToken | None) -> tuple[Rule, ...]:
+        return ()
+
+    async def authorize(_: RunToken) -> bool:
+        return True
+
+    parsed_s3_url = urlsplit(s3_store.endpoint_url)
+    assert parsed_s3_url.port is not None
+    sandbox_s3_url = f"http://host.docker.internal:{parsed_s3_url.port}"
+    minter = SandboxFsCredentialMinter(
+        sts=AwsStsClient(endpoint_url=s3_store.endpoint_url, region=s3_store.region),
+        role_arn="arn:aws:iam::0:role/sbxfs",
+        bucket=s3_store.bucket,
+        s3_url=sandbox_s3_url,
+        region=s3_store.region,
+        path_style=True,
+        token_secret=b"integration-secret",
+    )
+    ca_cert, ca_key = await generate_ca()
+    run = RunToken(workspace_id=uuid4(), turn_id=uuid4())
+    proxy = EgressProxy(
+        resolve=resolve,
+        authorize=authorize,
+        ca_cert=ca_cert,
+        ca_key=ca_key,
+        workspace_credentials=minter.refresh,
+    )
+    endpoint = await proxy.start()
+    carrier = DockerCarrier()
+    handle: SandboxHandle | None = None
+    try:
+        handle = await carrier.create(
+            SandboxSpec(
+                conversation_id=conversation_id,
+                image_ref=sandbox_image,
+                mount=MountSpec(
+                    kind="s3",
+                    bucket=s3_store.bucket,
+                    key_prefix=workspace_key_prefix(conversation_id),
+                    credential_token=minter.issue(conversation_id, run),
+                    s3_url=sandbox_s3_url,
+                    region=s3_store.region,
+                    path_style=True,
+                ),
+                proxy=endpoint,
+                run_token="integration-run",
+            )
+        )
+
+        process = await carrier.exec(handle, ("ps", "-o", "user=", "-C", "s3fs"), b"", 30)
+        assert process.exit_code == 0
+        assert process.stdout.strip() == "nobody"
+
+        code, secret, _ = await _docker(
+            "exec",
+            "-i",
+            "-u",
+            "root",
+            handle.container_id,
+            "cat",
+            SANDBOX_FS_RELAY_SECRET_PATH,
+        )
+        assert code == 0
+        process_args = await carrier.exec(
+            handle,
+            (
+                "sh",
+                "-c",
+                "for pid in $(pgrep -x s3fs) "
+                "$(pgrep -f '[s]bxcred'); "
+                "do tr '\\0' ' ' < /proc/$pid/cmdline; printf '\\n'; done",
+            ),
+            b"",
+            30,
+        )
+        assert process_args.exit_code == 0
+        assert "s3fs" in process_args.stdout
+        assert "sbxcred" in process_args.stdout
+        assert secret.decode().strip() not in process_args.stdout
+
+        written = await carrier.exec(
+            handle,
+            ("sh", "-c", "printf mounted > /workspace/proof.txt && cat /workspace/proof.txt"),
+            b"",
+            30,
+        )
+        assert written.exit_code == 0
+        assert written.stdout == "mounted"
+        assert (
+            await s3_store.get(f"{workspace_key_prefix(conversation_id)}/proof.txt") == b"mounted"
+        )
+
+        token_read = await carrier.exec(handle, ("cat", SANDBOX_FS_TOKEN_PATH), b"", 30)
+        assert token_read.exit_code != 0
+    finally:
+        if handle is not None:
+            await carrier.destroy(handle)
+        await proxy.stop()
+
+
+async def test_cancelled_docker_create_removes_its_real_container_and_network(
+    sandbox_image: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    installing = asyncio.Event()
+
+    async def wait_during_install(carrier: DockerCarrier, container_id: str, ca_cert: str) -> None:
+        installing.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(DockerCarrier, "_install_ca", wait_during_install)
+    conversation = uuid4()
+    task = asyncio.create_task(
+        DockerCarrier().create(
+            SandboxSpec(
+                conversation_id=conversation,
+                image_ref=sandbox_image,
+                mount=MountSpec(kind="filesystem", host_path=str(tmp_path)),
+                proxy=ProxyEndpoint(port=8080, ca_cert="ca-pem"),
+                run_token="integration-run",
+            )
+        )
+    )
+    await asyncio.wait_for(installing.wait(), timeout=30)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    container = await asyncio.create_subprocess_exec(
+        "docker",
+        "container",
+        "inspect",
+        f"ufo-sbx-{conversation}",
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    network = await asyncio.create_subprocess_exec(
+        "docker",
+        "network",
+        "inspect",
+        f"ufo-sandbox-{conversation.hex}",
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    container_code = await asyncio.wait_for(container.wait(), timeout=CONTAINER_OP_TIMEOUT_S)
+    network_code = await asyncio.wait_for(network.wait(), timeout=CONTAINER_OP_TIMEOUT_S)
+    assert container_code != 0
+    assert network_code != 0
 
 
 async def _seed_turn_rows(turn: Turn) -> None:

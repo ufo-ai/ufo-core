@@ -6,14 +6,21 @@ code in any `__init__.py`), so the public surface lives in named modules like th
 
 from ufo.blob import BlobStore as BlobStore
 from ufo.ext.manifest import CarrierSpec as CarrierSpec
-from ufo.sandbox.fs_mount import AWS_CREDENTIALS_PATH as AWS_CREDENTIALS_PATH
+from ufo.sandbox.fs_creds import SANDBOX_FS_CREDENTIAL_PATH as SANDBOX_FS_CREDENTIAL_PATH
 from ufo.sandbox.fs_mount import (
     MOUNT_HEALTH_CHECK_TIMEOUT_SECONDS as MOUNT_HEALTH_CHECK_TIMEOUT_SECONDS,
 )
 from ufo.sandbox.fs_mount import MOUNT_TIMEOUT_SECONDS as MOUNT_TIMEOUT_SECONDS
-from ufo.sandbox.fs_mount import aws_credentials_file as aws_credentials_file
+from ufo.sandbox.fs_mount import SANDBOX_FS_TOKEN_PATH as SANDBOX_FS_TOKEN_PATH
+from ufo.sandbox.fs_mount import (
+    SANDBOX_FS_TOKEN_STAGING_PATH as SANDBOX_FS_TOKEN_STAGING_PATH,
+)
+from ufo.sandbox.fs_mount import install_token_command as install_token_command
 from ufo.sandbox.fs_mount import mount_health_check as mount_health_check
 from ufo.sandbox.fs_mount import mount_scripts as mount_scripts
+from ufo.sandbox.fs_mount import (
+    prepare_token_staging_command as prepare_token_staging_command,
+)
 from ufo.sandbox.fs_mount import s3fs_command as s3fs_command
 from ufo.sandbox.session import SENTINEL_MODEL_KEY as SENTINEL_MODEL_KEY
 from ufo.sandbox.session import WORKSPACE_DIR as WORKSPACE_DIR

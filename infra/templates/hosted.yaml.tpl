@@ -128,6 +128,14 @@ spec:
 # rule query by the run token's own workspace_id, signs sandbox leaves from a stable platform CA
 # (UFO_EGRESS_CA_*), and injects only the platform model-provider key. An off-cluster sandbox (e2b)
 # dials it through the internet-facing TLS service managed by the environment.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ufo-sandbox-proxy
+  namespace: ${namespace}
+  annotations:
+    eks.amazonaws.com/role-arn: ${proxy_role_arn}
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -142,6 +150,7 @@ spec:
     metadata:
       labels: {app: ufo-sandbox-proxy}
     spec:
+      serviceAccountName: ufo-sandbox-proxy
       enableServiceLinks: false
       containers:
         - name: proxy
@@ -157,6 +166,9 @@ spec:
             - name: UFO_OWNER_DSN
               valueFrom:
                 secretKeyRef: {name: ufo-control-secrets, key: postgres-admin-dsn}
+            - name: UFO_SANDBOX_FS_TOKEN_SECRET
+              valueFrom:
+                secretKeyRef: {name: ufo-serve, key: UFO_SANDBOX_FS_TOKEN_SECRET}
             # The stable platform CA the proxy signs every per-host sandbox leaf from.
             - name: UFO_EGRESS_CA_CERT
               valueFrom:
@@ -196,7 +208,6 @@ metadata:
   name: ufo-serve
   namespace: ${namespace}
   annotations:
-    # IRSA: the pod's boto3 assumes this role for blob-bucket access and the sandbox-fs mount mint —
     eks.amazonaws.com/role-arn: ${serve_role_arn}
 ---
 apiVersion: apps/v1
@@ -239,6 +250,9 @@ spec:
             - name: UFO_ARTIFACT_TOKEN_SECRET
               valueFrom:
                 secretKeyRef: {name: ufo-serve, key: UFO_ARTIFACT_TOKEN_SECRET}
+            - name: UFO_SANDBOX_FS_TOKEN_SECRET
+              valueFrom:
+                secretKeyRef: {name: ufo-serve, key: UFO_SANDBOX_FS_TOKEN_SECRET}
             # The RLS-bypassing owner DSN owner_tx enumerates every workspace through for the
             # fleet-wide job sweeps — the same secret the migrate Job + shared proxy open. Without it
             # owner_tx falls back to the RLS-subject engine and the enumeration reads an unset

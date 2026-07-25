@@ -434,13 +434,14 @@ async def _open_sandbox(
     and the next process read this same column."""
     stored = await _stored_sandbox_handle(turn.conversation_id, turn.workspace_id)
     resume_id = None if stored is None else sandbox_handle_id(backend, stored)
+    run = RunToken(workspace_id=turn.workspace_id, turn_id=turn.id)
     handle = await carrier.create(
         SandboxSpec(
             conversation_id=turn.conversation_id,
             image_ref=SANDBOX_IMAGE_REF,
-            mount=await _workspace_mount(blob, workspace_fs, turn.conversation_id),
+            mount=await _workspace_mount(blob, workspace_fs, turn.conversation_id, run),
             proxy=proxy,
-            run_token=RunToken(workspace_id=turn.workspace_id, turn_id=turn.id).encode(),
+            run_token=run.encode(),
             resume_id=resume_id,
             env=await _grant_cli_env(grants, clis, turn),
         )
@@ -515,7 +516,10 @@ async def _persist_sandbox_handle(conversation_id: UUID, workspace_id: UUID, han
 
 
 async def _workspace_mount(
-    blob: BlobStore, workspace_fs: SandboxFsCredentialMinter | None, conversation_id: UUID
+    blob: BlobStore,
+    workspace_fs: SandboxFsCredentialMinter | None,
+    conversation_id: UUID,
+    run: RunToken,
 ) -> MountSpec:
     """The workspace is only the conversation's `workspace/` subtree — a sibling of the transcript
     under `conversations/<id>/`, never the transcript itself. The filesystem backend reaches it as a
@@ -530,9 +534,9 @@ async def _workspace_mount(
     as root (the bundle default) it holds CAP_CHOWN and hands the dir to the sandbox user. Off root
     — dev, where the mount is not uid-enforced — the chown is skipped.
 
-    s3: mint a fresh credential scoped to `conversations/<id>/workspace/*` and carry it, with the
-    prefix and the sandbox-reachable endpoint, into the MountSpec the carrier writes as the
-    sandbox's AWS credentials before running s3fs."""
+    s3: issue an opaque turn-bound token for `conversations/<id>/workspace/*` and carry it, with the
+    prefix and sandbox-reachable endpoint, into the MountSpec. The dedicated s3fs daemon redeems it
+    through the sandbox proxy initially and whenever its short-lived credential nears expiry."""
     match blob:
         case FilesystemBlobStore():
             host_path = (blob.root / "conversations" / str(conversation_id) / "workspace").resolve()
@@ -546,12 +550,11 @@ async def _workspace_mount(
                     "the s3 blob backend requires the sandbox-fs credential minter "
                     "(set blob.sts_role_arn, blob.s3_url)"
                 )
-            credentials = await workspace_fs.mint(conversation_id)
             return MountSpec(
                 kind="s3",
                 bucket=workspace_fs.bucket,
                 key_prefix=workspace_key_prefix(conversation_id),
-                credentials=credentials,
+                credential_token=workspace_fs.issue(conversation_id, run),
                 s3_url=workspace_fs.s3_url,
                 region=workspace_fs.region,
                 path_style=workspace_fs.path_style,

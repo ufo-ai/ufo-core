@@ -1,6 +1,7 @@
 import asyncio
 from pathlib import Path
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
+from typing import cast
 
 import pytest
 from fastapi import FastAPI
@@ -10,6 +11,7 @@ from ufo.config import BlobConfig, Config, DatabaseConfig, SandboxConfig
 from ufo.ext.manifest import CredentialSlot, InjectionTarget, Manifest
 from ufo.models.catalog import CORE_PRICING
 from ufo.proxy_serve import OWNER_DSN_ENV, model_rule_base
+from ufo.sandbox.fs_creds import SandboxFsCredentialMinter
 from ufo.sandbox.proxy.rules import ANTHROPIC_HOST, ScopeRule
 from ufo.sandbox.session import EGRESS_CA_CERT_ENV
 
@@ -182,6 +184,44 @@ def test_local_proxy_mints_an_ephemeral_ca_and_needs_no_shared_ca_env(
     assert endpoint.public_url is None
     assert endpoint.port != 0
     assert endpoint.ca_cert.startswith(LEAF_PEM_PREFIX)
+
+
+def test_local_proxy_wires_workspace_credential_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    async def generate_ca() -> tuple[str, str]:
+        return "CERT", "KEY"
+
+    class Proxy:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+        async def start(self, port: int) -> object:
+            return SimpleNamespace(port=port, ca_cert="CERT", public_url=None)
+
+    class WorkspaceFs:
+        async def refresh(self, token: str) -> object:
+            return token
+
+    workspace_fs = WorkspaceFs()
+    monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr(serve, "generate_ca", generate_ca)
+    monkeypatch.setattr(serve, "EgressProxy", Proxy)
+
+    serve._proxy_endpoint(
+        _local_config(),
+        (),
+        None,
+        CORE_PRICING,
+        cast(SandboxFsCredentialMinter, workspace_fs),
+    )
+
+    refresh = captured["workspace_credentials"]
+    assert isinstance(refresh, MethodType)
+    assert refresh.__self__ is workspace_fs
 
 
 def test_local_rule_base_is_the_model_base_when_no_slot_injects(
