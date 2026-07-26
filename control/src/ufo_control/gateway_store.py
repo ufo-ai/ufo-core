@@ -1,12 +1,4 @@
-"""Postgres custody of the hosted onboarding claim ledger.
-
-`create schema | table | index if not exists` is not atomic against a concurrent creator: two
-gateway replicas booting together both find the object absent, both issue it, and the loser raises a
-`pg_class`/`pg_namespace` unique violation that kills its startup. So every boot-time DDL statement
-in this schema — this ledger's, the invite ledger's, the Slack Connect ledger's — runs inside a
-transaction holding `BOOT_DDL_LOCK`. One key covers all three because they share the schema
-statement, and the replica that waits then finds everything present and writes nothing.
-"""
+"""Postgres custody of the hosted onboarding claim ledger. `ufo_control.schema` shapes `DDL`."""
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -18,10 +10,7 @@ SCHEMA = "ufo_control"
 TABLE = f"{SCHEMA}.onboard_claim"
 ACTIVE_INDEX = "onboard_claim_active_session"
 
-BOOT_DDL_LOCK = f"select pg_advisory_xact_lock(hashtext('{SCHEMA} boot ddl'))"
-
 DDL = (
-    f"create schema if not exists {SCHEMA}",
     f"create table if not exists {TABLE} ("
     "  id uuid primary key,"
     "  email text not null,"
@@ -63,14 +52,6 @@ def _aware(value: datetime | None) -> datetime | None:
 @dataclass(frozen=True)
 class OnboardStore:
     pool: asyncpg.Pool
-
-    async def ensure_table(self) -> None:
-        """Create the claim ledger under `BOOT_DDL_LOCK` — one booting replica shapes at a time."""
-        async with self.pool.acquire() as connection:
-            async with connection.transaction():
-                await connection.execute(BOOT_DDL_LOCK)
-                for statement in DDL:
-                    await connection.execute(statement)
 
     async def insert_claim(self, claim: OnboardClaim) -> None:
         async with self.pool.acquire() as connection:

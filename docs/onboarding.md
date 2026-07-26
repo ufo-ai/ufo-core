@@ -367,6 +367,7 @@ control/src/ufo_control/
   gateway_token.py        bearer minting
   gateway_shared.py       workspace/member/default-agent writes
   gateway_store.py        claim custody
+  schema.py               the ufo_control schema, shaped by the deploy's `ufo-control migrate`
   rls.py                  shared serve role and workspace policies
   client/ufo              the POSIX terminal client (renders `secret` prompts)
 

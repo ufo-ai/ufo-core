@@ -30,7 +30,8 @@ docker compose up
 ```
 
 One image (`dev/Dockerfile`, the whole workspace via uv) runs as four roles (`dev/entrypoint.sh`):
-`init` migrates and runs `rls-bootstrap` (the `ufo_serve` role + RLS policies);
+`init` migrates, shapes the `ufo_control` gateway ledgers (`ufo-control migrate`), and runs
+`rls-bootstrap` (the `ufo_serve` role + RLS policies);
 `gateway` serves `/login` on :8080 with the code emailed to the log (`UFO_CONTROL_EMAIL_MODE=console`
 — read it from `docker compose logs gateway`); `serve` runs the shared fleet on :8710 over the
 `assistant` pack with local backends (filesystem blobs, in-process hub, the built-in `local` sandbox

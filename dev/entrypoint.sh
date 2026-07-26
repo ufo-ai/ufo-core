@@ -33,6 +33,8 @@ case "${1:-}" in
       -c "do \$\$ begin if not exists (select from pg_roles where rolname = 'ufo_owner') then create role ufo_owner; end if; end \$\$;"
     echo "[dev] migrating the schema to head …"
     UFO_OWNER_DSN="$UFO_CONTROL_POSTGRES_OWNER_DSN" ufoctl migrate
+    echo "[dev] shaping the ufo_control gateway ledgers …"
+    ufo-control migrate
     echo "[dev] bootstrapping the ufo_serve role, ufo_dbos database, and RLS policies …"
     ufo-control rls-bootstrap
     echo "[dev] init complete."

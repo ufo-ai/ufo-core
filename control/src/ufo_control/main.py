@@ -19,6 +19,7 @@ from ufo_control.gateway_email import invite_email, public_apex_host
 from ufo_control.gateway_invite import InviteCodes, InviteError
 from ufo_control.gateway_slack_connect import rearm_failed_delivery
 from ufo_control.rls import bootstrap_policies, ensure_serve_role, owner_dsn
+from ufo_control.schema import require_control_schema, shape_control_schema
 
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8080
@@ -66,6 +67,13 @@ def gateway() -> None:
 
 
 @main.command()
+def migrate() -> None:
+    """Shape the platform control schema — every gateway ledger, as the database owner."""
+    asyncio.run(shape_control_schema(owner_dsn()))
+    click.echo("control schema at head")
+
+
+@main.command()
 @click.argument("object_number", type=click.IntRange(min=1))
 def invite(object_number: int) -> None:
     """Mint a one-time new-workspace invite and print its email, code included, once."""
@@ -77,11 +85,11 @@ def invite(object_number: int) -> None:
 
 async def _mint_invite(object_number: int) -> str:
     apex_host = public_apex_host()
-    pool = await asyncpg.create_pool(dsn=owner_dsn(), min_size=1, max_size=1)
+    dsn = owner_dsn()
+    await require_control_schema(dsn)
+    pool = await asyncpg.create_pool(dsn=dsn, min_size=1, max_size=1)
     try:
-        invites = InviteCodes(pool=pool)
-        await invites.ensure_table()
-        minted = await invites.mint(object_number)
+        minted = await InviteCodes(pool=pool).mint(object_number)
     finally:
         await pool.close()
     subject, body = invite_email(minted.object_number, minted.code, minted.expires_at, apex_host)
@@ -100,7 +108,9 @@ def slack_connect_retry(onboard_claim_id: uuid.UUID) -> None:
 
 
 async def _rearm_slack_connect(onboard_claim_id: uuid.UUID) -> datetime | None:
-    pool = await asyncpg.create_pool(dsn=owner_dsn(), min_size=1, max_size=1)
+    dsn = owner_dsn()
+    await require_control_schema(dsn)
+    pool = await asyncpg.create_pool(dsn=dsn, min_size=1, max_size=1)
     try:
         return await rearm_failed_delivery(pool, onboard_claim_id)
     finally:

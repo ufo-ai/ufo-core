@@ -2,7 +2,7 @@
 #
 #   postgres ─┐
 #   redis ────┤
-#   init ─────┤  ufoctl migrate → ufo-control rls-bootstrap (one-shot)
+#   init ─────┤  ufoctl migrate → ufo-control migrate → ufo-control rls-bootstrap (one-shot)
 #   gateway ──┤  ufo-control gateway   :8080   onboarding/login (console email)
 #   serve ────┘  ufoctl serve          :8710   surfaces + DBOS workers + embedded egress proxy
 #

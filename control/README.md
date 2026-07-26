@@ -12,6 +12,7 @@ workspace and default agent, and returns the bearer consumed by the `ufo` surfac
 | Command | Role |
 |---|---|
 | `ufo-control gateway` | Serves `/ufo`, `/fleet`, and `/v1/onboard/{channel}`. |
+| `ufo-control migrate` | Shapes the `ufo_control` schema — the ledgers below — as the database owner. |
 | `ufo-control invite <object-number>` | Mints a one-time new-workspace invite for a waitlist object and prints its email once. |
 | `ufo-control rls-bootstrap` | Creates the `ufo_serve` role, its DBOS database, grants, and workspace policies. |
 
@@ -27,6 +28,7 @@ workspace and default agent, and returns the bearer consumed by the `ufo` surfac
 | `gateway_store.py` | The platform onboarding ledger. |
 | `gateway_token.py` | Bearer minting; the ufo surface owns verification. |
 | `rls.py` | Shared database role and policy bootstrap. |
+| `schema.py` | The `ufo_control` schema, shaped by the deploy; the gateway only requires it. |
 | `client/ufo` | The POSIX terminal client served by the gateway. |
 
 ## Required environment

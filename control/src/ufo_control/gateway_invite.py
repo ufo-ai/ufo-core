@@ -27,7 +27,6 @@ CODE_GROUP_LEN = 4
 INVITE_TTL = timedelta(days=14)
 
 DDL = (
-    f"create schema if not exists {gateway_store.SCHEMA}",
     f"create table if not exists {TABLE} ("
     "  id uuid primary key,"
     "  code_hash text not null unique,"
@@ -88,26 +87,6 @@ class InviteAccepted:
 class InviteCodes:
     pool: asyncpg.Pool
     ttl: timedelta = INVITE_TTL
-
-    async def ensure_table(self) -> None:
-        """Create the ledger under `gateway_store.BOOT_DDL_LOCK` — one booting replica reshapes at a
-        time. A table that cannot name objects is rebuilt and its codes are void: every ledger reply
-        names an object, so an unnameable code could never be honored."""
-        async with self.pool.acquire() as connection:
-            async with connection.transaction():
-                await connection.execute(gateway_store.BOOT_DDL_LOCK)
-                unnumbered = await connection.fetchval(
-                    "select exists (select from information_schema.tables"
-                    "  where table_schema = $1 and table_name = 'invite_code')"
-                    " and not exists (select from information_schema.columns"
-                    "  where table_schema = $1 and table_name = 'invite_code'"
-                    "  and column_name = 'object_number')",
-                    gateway_store.SCHEMA,
-                )
-                if unnumbered:
-                    await connection.execute(f"drop table if exists {TABLE}")
-                for statement in DDL:
-                    await connection.execute(statement)
 
     async def mint(self, object_number: int) -> MintedInvite:
         code = mint_code()

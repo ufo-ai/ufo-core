@@ -18,11 +18,10 @@ from ufo_control.gateway_email import (
     AWS_WEB_IDENTITY_TOKEN_FILE_ENV,
     SES_SENDER_ENV,
 )
-from ufo_control.gateway_invite import InviteCodes
 from ufo_control.gateway_shared import SERVE_DSN_ENV
-from ufo_control.gateway_store import OnboardStore
 from ufo_control.gateway_token import TOKEN_SECRET_ENV
 from ufo_control.rls import POSTGRES_OWNER_DSN_ENV
+from ufo_control.schema import shape_control_schema
 
 CONTAINER = "ufo-gateway-pool-budget-test-pg"
 PORT = 5549
@@ -74,12 +73,7 @@ def constrained_postgres() -> Iterator[str]:
 
 
 async def _prepare_schema() -> None:
-    pool = await asyncpg.create_pool(OWNER_DSN, min_size=1, max_size=1)
-    try:
-        await OnboardStore(pool=pool).ensure_table()
-        await InviteCodes(pool=pool).ensure_table()
-    finally:
-        await pool.close()
+    await shape_control_schema(OWNER_DSN)
 
 
 def _await_ready(timeout: float = 60.0) -> None:

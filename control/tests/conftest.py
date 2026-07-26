@@ -13,10 +13,9 @@ from collections.abc import AsyncIterator, Iterator
 import asyncpg
 import pytest
 
-from ufo_control.gateway_invite import InviteCodes
-from ufo_control.gateway_slack_connect import ensure_delivery_table
 from ufo_control.gateway_store import OnboardStore
 from ufo_control.rls import POSTGRES_OWNER_DSN_ENV
+from ufo_control.schema import shape_control_schema
 
 CONTAINER = "ufo-gateway-test-pg"
 PORT = 5548
@@ -52,6 +51,8 @@ RUNTIME_SCHEMA = (
 
 
 async def _prepare_schema() -> None:
+    """The control schema arrives the way a deploy brings it: the one-shot verb, never a replica."""
+    await shape_control_schema(OWNER_DSN)
     pool = await asyncpg.create_pool(OWNER_DSN)
     try:
         async with pool.acquire() as connection:
@@ -61,9 +62,6 @@ async def _prepare_schema() -> None:
                 "insert into workspace (id) values ($1) on conflict do nothing",
                 uuid.UUID(WORKSPACE_ID),
             )
-        await OnboardStore(pool=pool).ensure_table()
-        await InviteCodes(pool=pool).ensure_table()
-        await ensure_delivery_table(pool)
     finally:
         await pool.close()
 

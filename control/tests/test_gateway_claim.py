@@ -198,19 +198,3 @@ async def test_a_consumed_code_reports_consumed_even_after_expiry(store: Onboard
         "update ufo_control.invite_code set expires_at = now() - interval '1 day'"
     )
     assert isinstance(await invites.redeem(minted.code, uuid4()), InviteConsumed)
-
-
-async def test_ensure_table_rebuilds_an_unnumbered_ledger(store: OnboardStore) -> None:
-    async with store.pool.acquire() as connection:
-        await connection.execute("drop table ufo_control.invite_code")
-        await connection.execute(
-            "create table ufo_control.invite_code ("
-            "  id uuid primary key,"
-            "  code_hash text not null unique,"
-            "  used_at timestamptz,"
-            "  created_at timestamptz not null default now())"
-        )
-    invites = InviteCodes(pool=store.pool)
-    await invites.ensure_table()
-    minted = await invites.mint(3)
-    assert isinstance(await invites.redeem(minted.code, uuid4()), InviteAccepted)

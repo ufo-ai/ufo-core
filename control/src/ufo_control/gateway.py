@@ -33,11 +33,12 @@ from ufo_control.gateway_invite import (
     InviteExpired,
 )
 from ufo_control.gateway_shared import EnsuredWorkspace, SharedWorkspaces, serve_dsn
-from ufo_control.gateway_slack_connect import ensure_delivery_table, slack_connect_from_env
+from ufo_control.gateway_slack_connect import slack_connect_from_env
 from ufo_control.gateway_store import OnboardClaim, OnboardStore
 from ufo_control.gateway_token import TOKEN_SECRET_ENV, mint_token
 from ufo_control.gateway_web import LOGIN_PAGE, WEB_CHANNEL, parse_directives
 from ufo_control.rls import owner_dsn
+from ufo_control.schema import require_control_schema
 
 logger = logging.getLogger(__name__)
 
@@ -269,20 +270,20 @@ def gateway_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         """Every environment read precedes `init_db`, so a misconfigured deploy fails startup before
-        the shared engine exists and never leaves one half-initialized. The Slack Connect inviter
+        the shared engine exists and never leaves one half-initialized. The schema the deploy shaped
+        is a precondition of the same kind — a replica issues no DDL, so an absent ledger fails
+        startup naming the verb that shapes it. The Slack Connect inviter
         then runs as a task beside the request path, never inside it: onboarding resolves a
         workspace and signs the member in whether or not Slack is reachable."""
         nonlocal state
         owner_url = owner_dsn()
         serve_url = serve_dsn()
+        await require_control_schema(owner_url)
         pool = await asyncpg.create_pool(
             dsn=owner_url, min_size=GATEWAY_POOL_MIN_SIZE, max_size=GATEWAY_POOL_MAX_SIZE
         )
         store = OnboardStore(pool=pool)
-        await store.ensure_table()
         invites = InviteCodes(pool=pool)
-        await invites.ensure_table()
-        await ensure_delivery_table(pool)
         invite_required = _invite_required()
         if not invite_required:
             logger.warning("gateway.invite_gate.disabled")

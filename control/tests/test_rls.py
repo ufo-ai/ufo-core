@@ -45,6 +45,7 @@ from ufo_control.rls import (
     ensure_serve_role,
     serve_dsn,
 )
+from ufo_control.schema import shape_control_schema
 
 SHARED_TOKEN_SECRET = "shared-service-secret"
 SHARED_WORKSPACE_URL = "https://app.flyingobject.ai"
@@ -152,6 +153,7 @@ def shared_role_env() -> Iterator[SharedRoleEnv]:
     asyncio.run(_reset(APP_DATABASE))
     apply_migrations(_owner_app_dsn("postgresql+asyncpg", APP_DATABASE), PACK)
     owner_dsn = _owner_app_dsn("postgresql", APP_DATABASE)
+    asyncio.run(shape_control_schema(owner_dsn))
     asyncio.run(bootstrap_policies(owner_dsn))
     asyncio.run(ensure_serve_role(ADMIN_APP_DSN))
     workspaces = (str(uuid4()), str(uuid4()))
@@ -460,11 +462,9 @@ async def test_shared_onboard_creates_then_joins_a_workspace(
     monkeypatch.setenv("UFO_TOKEN_SECRET", SHARED_TOKEN_SECRET)
     pool = await asyncpg.create_pool(shared_role_env.owner_dsn)
     store = OnboardStore(pool=pool)
-    await store.ensure_table()
     invites = InviteCodes(pool=pool)
-    await invites.ensure_table()
     async with pool.acquire() as connection:
-        await connection.execute("truncate ufo_control.onboard_claim")
+        await connection.execute("truncate ufo_control.onboard_claim cascade")
         await connection.execute("truncate ufo_control.invite_code")
     sender = RecordingSender()
     flow = Onboarding(

@@ -21,6 +21,16 @@ spec:
             - name: UFO_OWNER_DSN
               valueFrom:
                 secretKeyRef: {name: ufo-control-secrets, key: postgres-admin-dsn}
+        # The gateway ledgers live in the `ufo_control` schema, outside core's revision graph, and
+        # are shaped here so no replica ever issues DDL: initContainers run to completion in order,
+        # so this lands before rls-bootstrap and the whole Job before any gateway pod starts.
+        - name: control-schema
+          image: ${registry}/ufo-control:${image_tag}
+          args: [migrate]
+          env:
+            - name: UFO_CONTROL_POSTGRES_OWNER_DSN
+              valueFrom:
+                secretKeyRef: {name: ufo-control-secrets, key: postgres-admin-dsn}
       containers:
         - name: rls-bootstrap
           image: ${registry}/ufo-control:${image_tag}

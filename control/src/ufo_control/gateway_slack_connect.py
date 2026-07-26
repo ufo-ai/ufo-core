@@ -108,7 +108,6 @@ CHANNEL_NAME_SQL = (
 )
 
 DDL = (
-    f"create schema if not exists {gateway_store.SCHEMA}",
     f"create table if not exists {TABLE} ("
     f"  onboard_claim_id uuid primary key references {gateway_store.TABLE} (id) on delete cascade,"
     f"  state text not null check (state in ({STATE_LITERALS})),"
@@ -184,16 +183,6 @@ class SlackConnectConfigError(SlackTerminalError):
     """The configured token does not belong to the expected operator team. Terminal for the row it
     was found on — no channel is mutated and the poller stays alive, so correcting the deploy is all
     it takes for the next signup to deliver and `slack-connect-retry` to re-arm the rows it hit."""
-
-
-async def ensure_delivery_table(pool: asyncpg.Pool) -> None:
-    """Create the delivery ledger under `gateway_store.BOOT_DDL_LOCK` — one booting replica shapes
-    at a time."""
-    async with pool.acquire() as connection:
-        async with connection.transaction():
-            await connection.execute(gateway_store.BOOT_DDL_LOCK)
-            for statement in DDL:
-                await connection.execute(statement)
 
 
 async def rearm_failed_delivery(pool: asyncpg.Pool, onboard_claim_id: UUID) -> datetime | None:
