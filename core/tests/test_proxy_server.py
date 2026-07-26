@@ -1029,6 +1029,10 @@ def test_json_body_usage_reassembles_across_chunk_boundaries() -> None:
     assert accumulator.usage() == ("claude-opus-4-8", FULL_TOKEN_USAGE)
 
 
+RELAY_EXCHANGE_TIMEOUT_SECONDS = 10
+RELAY_IDLE_TEST_TIMEOUT_SECONDS = 0.2
+
+
 async def _stream_pair() -> tuple[
     tuple[asyncio.StreamReader, asyncio.StreamWriter],
     tuple[asyncio.StreamReader, asyncio.StreamWriter],
@@ -1057,6 +1061,92 @@ async def test_relay_tees_the_full_body_to_the_client_while_metering_usage() -> 
     assert accumulator.usage() == ("claude-opus-4-8", FULL_TOKEN_USAGE)
     proxy_client_w.close()
     peer_client_w.close()
+
+
+async def test_relay_keeps_streaming_after_the_client_half_closes() -> None:
+    request = b"git-upload-pack request"
+    response = (
+        b"HTTP/1.1 200 OK\r\n"
+        b"content-type: application/x-git-upload-pack-result\r\n"
+        b"transfer-encoding: chunked\r\n"
+        b"connection: close\r\n\r\n"
+        b"9\r\npack-data\r\n"
+        b"0\r\n\r\n"
+    )
+    (proxy_client_r, proxy_client_w), (peer_client_r, peer_client_w) = await _stream_pair()
+    (proxy_up_r, proxy_up_w), (peer_up_r, peer_up_w) = await _stream_pair()
+    relay = asyncio.create_task(_relay(proxy_client_r, proxy_client_w, proxy_up_r, proxy_up_w))
+    try:
+        async with asyncio.timeout(RELAY_EXCHANGE_TIMEOUT_SECONDS):
+            peer_client_w.write(request)
+            await peer_client_w.drain()
+            peer_client_w.write_eof()
+            assert await peer_up_r.read() == request
+            peer_up_w.write(response)
+            await peer_up_w.drain()
+            peer_up_w.write_eof()
+            assert await peer_client_r.readexactly(len(response)) == response
+            await relay
+    finally:
+        relay.cancel()
+        await asyncio.gather(relay, return_exceptions=True)
+        for writer in (proxy_client_w, peer_client_w, peer_up_w):
+            writer.close()
+
+
+async def test_relay_keeps_streaming_when_tls_upstream_cannot_half_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = b"git-upload-pack request"
+    response = b"pack-data"
+    (proxy_client_r, proxy_client_w), (peer_client_r, peer_client_w) = await _stream_pair()
+    (proxy_up_r, proxy_up_w), (peer_up_r, peer_up_w) = await _stream_pair()
+    request_finished = asyncio.Event()
+
+    def cannot_write_eof() -> bool:
+        request_finished.set()
+        return False
+
+    monkeypatch.setattr(proxy_up_w, "can_write_eof", cannot_write_eof)
+    relay = asyncio.create_task(_relay(proxy_client_r, proxy_client_w, proxy_up_r, proxy_up_w))
+    try:
+        async with asyncio.timeout(RELAY_EXCHANGE_TIMEOUT_SECONDS):
+            peer_client_w.write(request)
+            await peer_client_w.drain()
+            peer_client_w.write_eof()
+            assert await peer_up_r.readexactly(len(request)) == request
+            await request_finished.wait()
+            peer_up_w.write(response)
+            await peer_up_w.drain()
+            peer_up_w.write_eof()
+            assert await peer_client_r.readexactly(len(response)) == response
+            await relay
+    finally:
+        relay.cancel()
+        await asyncio.gather(relay, return_exceptions=True)
+        for writer in (proxy_client_w, peer_client_w, peer_up_w):
+            writer.close()
+
+
+async def test_relay_closes_a_silent_upstream_after_client_half_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(proxy_server, "RELAY_RESPONSE_IDLE_TIMEOUT_SECONDS", 0.01)
+    (proxy_client_r, proxy_client_w), (_peer_client_r, peer_client_w) = await _stream_pair()
+    (proxy_up_r, proxy_up_w), (peer_up_r, peer_up_w) = await _stream_pair()
+    relay = asyncio.create_task(_relay(proxy_client_r, proxy_client_w, proxy_up_r, proxy_up_w))
+    try:
+        peer_client_w.write_eof()
+        assert await peer_up_r.read() == b""
+        completed, _ = await asyncio.wait({relay}, timeout=RELAY_IDLE_TEST_TIMEOUT_SECONDS)
+        assert relay in completed
+        await relay
+        assert proxy_up_w.is_closing()
+    finally:
+        relay.cancel()
+        await asyncio.gather(relay, return_exceptions=True)
+        for writer in (proxy_client_w, peer_client_w, peer_up_w):
+            writer.close()
 
 
 async def test_relay_cancellation_tears_down_pumps_and_upstream() -> None:

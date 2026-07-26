@@ -91,6 +91,7 @@ PROXY_BIND_HOST = "0.0.0.0"
 RELAY_CHUNK_BYTES = 65536
 MAX_HEADER_BYTES = 65536
 CONNECT_UPSTREAM_TIMEOUT_SECONDS = 30
+RELAY_RESPONSE_IDLE_TIMEOUT_SECONDS = 300
 DEFAULT_HTTPS_PORT = 443
 MIN_CONNECT_PORT = 1
 MAX_CONNECT_PORT = 65535
@@ -921,14 +922,30 @@ async def _relay(
     upstream_writer: asyncio.StreamWriter,
     on_downstream: Callable[[bytes], None] | None = None,
 ) -> None:
-    """Pump both directions until either closes; the response (upstream→client) reaching EOF ends
-    the exchange, so a streamed response relays chunk by chunk and stops when the upstream shuts.
-    `on_downstream`, when given, tees each response chunk after it is forwarded — the token meter
-    reads the stream without ever holding the client's bytes back."""
-    down = asyncio.create_task(_pump(upstream_reader, client_writer, on_downstream))
+    """Keep a progressing response alive after request EOF.
+
+    on_downstream receives each response chunk after it is forwarded.
+    """
+    downstream_progress = asyncio.Event()
+    down = asyncio.create_task(
+        _pump(upstream_reader, client_writer, on_downstream, downstream_progress.set)
+    )
+    down.add_done_callback(lambda _task: downstream_progress.set())
     up = asyncio.create_task(_pump(client_reader, upstream_writer))
     try:
-        await asyncio.wait({down, up}, return_when=asyncio.FIRST_COMPLETED)
+        completed, _ = await asyncio.wait({down, up}, return_when=asyncio.FIRST_COMPLETED)
+        if up in completed and down not in completed:
+            if upstream_writer.can_write_eof():
+                upstream_writer.write_eof()
+            while not down.done():
+                downstream_progress.clear()
+                try:
+                    async with asyncio.timeout(RELAY_RESPONSE_IDLE_TIMEOUT_SECONDS):
+                        await downstream_progress.wait()
+                except TimeoutError:
+                    break
+            if down.done():
+                await down
     finally:
         for task in (down, up):
             task.cancel()
@@ -939,11 +956,14 @@ async def _pump(
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
     on_chunk: Callable[[bytes], None] | None = None,
+    on_progress: Callable[[], None] | None = None,
 ) -> None:
     try:
         while chunk := await reader.read(RELAY_CHUNK_BYTES):
             writer.write(chunk)
             await writer.drain()
+            if on_progress is not None:
+                on_progress()
             if on_chunk is not None:
                 on_chunk(chunk)
     except (OSError, asyncio.CancelledError):
