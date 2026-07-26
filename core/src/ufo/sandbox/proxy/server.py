@@ -99,6 +99,8 @@ LEAF_VALID_DAYS = "365"
 RULE_CACHE_MAX = 4096
 MAX_SSE_BUFFER_BYTES = 1_048_576
 MAX_FORWARD_BODY_BYTES = 1_048_576
+MAX_REFUSAL_DRAIN_BYTES = 8 * 1_048_576
+REFUSAL_DRAIN_TIMEOUT_SECONDS = 5
 
 RuleResolver = Callable[["RunToken | None"], Awaitable[tuple[Rule, ...]]]
 TurnAuthorizer = Callable[["RunToken"], Awaitable[bool]]
@@ -563,8 +565,10 @@ class EgressProxy:
         method, _, rest = request_line.decode(errors="replace").partition(" ")
         path = rest.split(" ", 1)[0]
         body = await _read_request_body(client_reader, headers)
-        if body is None:
-            await _respond(client_writer, 413, "forwarded request body is chunked or too large")
+        if isinstance(body, _Refusal):
+            log("egress.forward_refused", host=host, status=int(body.status), reason=body.message)
+            await _respond(client_writer, body.status, body.message)
+            await _drain_refused_body(client_reader, body.pending)
             return
         self._meter(host, rules)
         self._meter_ledger(host, proxy_auth, rules)
@@ -741,12 +745,30 @@ def _forward_match(headers: list[bytes], candidates: list[ForwardRule]) -> Forwa
     return None
 
 
-async def _read_request_body(reader: asyncio.StreamReader, headers: list[bytes]) -> bytes | None:
+@dataclass(frozen=True)
+class _Refusal:
+    """Why a forwarded request body was not read, and an upper bound on the body bytes still
+    inbound: the declared remainder when content-length named it, the drain cap when the length is
+    undeclared or untrusted (chunked, unparseable, negative — decided from the header alone, so the
+    wire is not known to be dry), zero only when the reader already saw EOF. The client is
+    mid-upload when the refusal is decided, so it cannot read the answer until it finishes
+    writing — `pending` is what the proxy drains and discards to let it get there."""
+
+    status: HTTPStatus
+    message: str
+    pending: int
+
+
+async def _read_request_body(
+    reader: asyncio.StreamReader, headers: list[bytes]
+) -> bytes | _Refusal:
     """The whole body of a broker-forwarded request, bounded next to the one external call that
     sends it — the broker takes an enveloped API request, never a stream. A chunked, over-bound,
-    negative-length, or truncated body answers None and the request is refused, never silently
-    clipped — a negative length would otherwise reach `readexactly`, whose ValueError escapes the
-    caller's IncompleteReadError guard and drops the connection with no response."""
+    negative-length, or truncated body answers a `_Refusal` naming that exact condition and its
+    numbers, never a silent clip and never one status standing for four causes — the size ceiling is
+    otherwise discoverable only by bisection. A negative length is caught here because it would
+    otherwise reach `readexactly`, whose ValueError escapes the caller's IncompleteReadError guard
+    and drops the connection with no response."""
     length = 0
     for line in headers:
         name, _, value = line.partition(b":")
@@ -755,17 +777,62 @@ async def _read_request_body(reader: asyncio.StreamReader, headers: list[bytes])
                 try:
                     length = int(value.strip())
                 except ValueError:
-                    return None
+                    return _Refusal(
+                        HTTPStatus.LENGTH_REQUIRED,
+                        "forwarded request declares an unparseable content-length",
+                        MAX_REFUSAL_DRAIN_BYTES,
+                    )
             case b"transfer-encoding":
-                return None
+                return _Refusal(
+                    HTTPStatus.LENGTH_REQUIRED,
+                    "forwarded request body must declare a content-length; chunked is not forwarded"
+                    " — the broker takes one enveloped request, never a stream",
+                    MAX_REFUSAL_DRAIN_BYTES,
+                )
     if length == 0:
         return b""
-    if length < 0 or length > MAX_FORWARD_BODY_BYTES:
-        return None
+    if length < 0:
+        return _Refusal(
+            HTTPStatus.BAD_REQUEST,
+            f"forwarded request declares a negative content-length {length}",
+            MAX_REFUSAL_DRAIN_BYTES,
+        )
+    if length > MAX_FORWARD_BODY_BYTES:
+        return _Refusal(
+            HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+            f"forwarded request body is {length} bytes, over the"
+            f" {MAX_FORWARD_BODY_BYTES} byte limit — a base64 payload inflates by 4/3, so the"
+            " raw ceiling is lower",
+            length,
+        )
     try:
         return await reader.readexactly(length)
-    except asyncio.IncompleteReadError:
-        return None
+    except asyncio.IncompleteReadError as error:
+        return _Refusal(
+            HTTPStatus.BAD_REQUEST,
+            f"forwarded request body ended after {len(error.partial)} of {length} bytes",
+            0,
+        )
+
+
+async def _drain_refused_body(reader: asyncio.StreamReader, pending: int) -> None:
+    """Discard the body a refused client is still writing, so its send completes and it reads the
+    refusal already on the wire instead of failing on a socket the proxy closed under it — the
+    difference between a 413 that names the limit and `use of closed network connection`. Bytes are
+    discarded as they arrive, never buffered, and the drain is bounded three ways: past
+    `MAX_REFUSAL_DRAIN_BYTES`, past `REFUSAL_DRAIN_TIMEOUT_SECONDS` of a stalled peer, or at the
+    client's own close, the connection closes and the client's own write error stands — a peer that
+    stops sending without closing cannot park this task past the deadline."""
+    remaining = min(pending, MAX_REFUSAL_DRAIN_BYTES)
+    try:
+        async with asyncio.timeout(REFUSAL_DRAIN_TIMEOUT_SECONDS):
+            while remaining > 0:
+                chunk = await reader.read(min(remaining, RELAY_CHUNK_BYTES))
+                if not chunk:
+                    return
+                remaining -= len(chunk)
+    except TimeoutError:
+        return
 
 
 def _forward_headers(headers: list[bytes], rule: ForwardRule) -> dict[str, str]:
@@ -1015,10 +1082,21 @@ class SseTokenUsage:
 
 
 async def _respond(writer: asyncio.StreamWriter, status: int, message: str) -> None:
-    """Write a terminal refusal to the client; a peer that vanished before reading it is routine —
-    the connection is closing either way."""
+    """Write a terminal refusal to the client: the standard reason phrase on the status line and the
+    proxy's own reason as a plain-text body. A reason carried only in the phrase reaches almost no
+    caller — an HTTP client surfaces the status and the body, so a refusal written that way is
+    indistinguishable from a bare status. `content-length` and `connection: close` frame it, so the
+    client never reads on for a body that will not come. A peer that vanished before reading it is
+    routine — the connection is closing either way."""
+    body = message.encode()
     try:
-        writer.write(f"HTTP/1.1 {status} {message}\r\n\r\n".encode())
+        writer.write(
+            f"HTTP/1.1 {int(status)} {HTTPStatus(status).phrase}\r\n"
+            "content-type: text/plain; charset=utf-8\r\n"
+            f"content-length: {len(body)}\r\n"
+            "connection: close\r\n\r\n".encode()
+            + body
+        )
         await writer.drain()
     except OSError:
         pass

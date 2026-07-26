@@ -8,6 +8,7 @@ import struct
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from http import HTTPStatus
 from pathlib import Path
 from typing import NamedTuple
 from uuid import UUID, uuid4
@@ -19,6 +20,7 @@ from cryptography import x509
 from cryptography.fernet import Fernet
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+import ufo.sandbox.proxy.server as proxy_server
 from ufo.connectors import CliCredential, ForwardedResponse
 from ufo.credentials import CredentialStore, HostChoice
 from ufo.db import workspace_tx
@@ -41,13 +43,18 @@ from ufo.sandbox.proxy.rules import (
     derive_manifest_rules,
 )
 from ufo.sandbox.proxy.server import (
+    MAX_FORWARD_BODY_BYTES,
+    MAX_REFUSAL_DRAIN_BYTES,
+    RELAY_CHUNK_BYTES,
     EgressProxy,
     PerAgentRules,
     SseTokenUsage,
+    _drain_refused_body,
     _forward_match,
     _forward_response_bytes,
     _inject,
     _read_request_body,
+    _Refusal,
     _relay,
     generate_ca,
 )
@@ -312,7 +319,8 @@ async def test_workspace_credential_validation_failure_is_a_mint_failure() -> No
         await proxy.stop()
 
     assert status == 502
-    assert body == b""
+    assert body == b"credential mint failed"
+    assert b"AccessKeyId" not in body
 
 
 async def test_a_resolution_error_fails_closed_to_base_and_is_not_cached() -> None:
@@ -1146,6 +1154,8 @@ async def test_model_host_relay_skips_when_no_usage_is_reported(db: None) -> Non
 
 
 FORWARD_HOST = "api.hub.test"
+REFUSAL_EXCHANGE_TIMEOUT_SECONDS = 10
+OVER_CAP_BODY_BYTES = 4 * MAX_FORWARD_BODY_BYTES
 
 
 @dataclass
@@ -1272,13 +1282,220 @@ def test_forward_match_selects_by_exact_or_scheme_prefixed_sentinel() -> None:
     assert _forward_match([b"authorization:\r\n"], [rule]) is None
 
 
-async def test_read_request_body_refuses_a_negative_content_length() -> None:
-    """A negative Content-Length parses as an int and clears the upper bound, but `readexactly` on
-    it raises ValueError (not IncompleteReadError) — which would escape uncaught and drop the
-    connection with no response. It is refused up front (None), so the forward path answers the
-    client instead of dying silently."""
-    body = await _read_request_body(asyncio.StreamReader(), [b"content-length: -1\r\n"])
-    assert body is None
+async def test_an_over_cap_forward_body_answers_a_readable_413(db: None) -> None:
+    """The refusal the sandbox never saw. The proxy decided an over-cap body before reading any of
+    it, then answered and closed while the client was still uploading — so the client's own write
+    died on a closed socket (`use of closed network connection`, or a truncated read the caller
+    reports as `unexpected end of JSON input`) and the 413 never arrived. The size ceiling was
+    reachable only by bisection. The client now completes its send and reads a framed 413 naming
+    both the limit and what it sent, and the broker is never called.
+
+    The body clears the cap several times over because a marginal one is swallowed whole by
+    loopback socket buffers, which hides the stall this asserts. The bound covers teardown as well
+    as the exchange: an undrained refusal does not only lose the message, it leaves the client
+    writing into a socket the proxy has stopped reading, so the proxy's own TLS close cannot
+    complete and asyncio parks that connection on its 30s SSL shutdown timeout — one wedged task per
+    refusal in a pod shared by every workspace."""
+    async with workspace_tx() as connection:
+        workspace_id, turn_id, *_ = await _seed_turn(connection)
+    forwarder = _RecordingForwarder()
+    sentinel = grant_sentinel("acct-1")
+    rules = (
+        ScopeRule(allowed_hosts=frozenset({FORWARD_HOST})),
+        _forward_rule(forwarder),
+    )
+    cert, key = await generate_ca()
+    proxy = _egress(_fixed(rules), ca_cert=cert, ca_key=key)
+    endpoint = await proxy.start(bind_host="127.0.0.1")
+    token = RunToken(workspace_id, turn_id).encode()
+    body = b"x" * OVER_CAP_BODY_BYTES
+    async with asyncio.timeout(REFUSAL_EXCHANGE_TIMEOUT_SECONDS):
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", endpoint.port)
+            writer.write(
+                f"CONNECT {FORWARD_HOST}:443 HTTP/1.1\r\n"
+                f"Proxy-Authorization: {_basic(token)}\r\n\r\n".encode()
+            )
+            await writer.drain()
+            assert b"200" in await reader.readline()
+            while (await reader.readline()) not in (b"\r\n", b""):
+                pass
+            context = ssl.create_default_context(cadata=cert)
+            await writer.start_tls(context, server_hostname=FORWARD_HOST)
+            writer.write(
+                b"POST /repos/o/r/issues HTTP/1.1\r\n"
+                b"host: " + FORWARD_HOST.encode() + b"\r\n"
+                b"authorization: token " + sentinel.encode() + b"\r\n"
+                b"content-type: application/json\r\n"
+                b"content-length: " + str(len(body)).encode() + b"\r\n\r\n" + body
+            )
+            await writer.drain()
+            response = await reader.read()
+            writer.close()
+        finally:
+            await proxy.stop()
+    head, _, refusal = response.partition(b"\r\n\r\n")
+    assert head.startswith(b"HTTP/1.1 413 Request Entity Too Large")
+    assert b"content-length: " + str(len(refusal)).encode() in head
+    assert str(MAX_FORWARD_BODY_BYTES).encode() in refusal
+    assert str(len(body)).encode() in refusal
+    assert not forwarder.calls
+
+
+async def test_a_mid_stream_chunked_forward_body_answers_a_readable_411(db: None) -> None:
+    """A chunked client streams its body right after the headers without waiting for a response, so
+    the refusal is decided while it is mid-write — closing under it would repeat the over-cap wedge
+    for this cause: its send dies on a closed socket and the 411 is never read. The body is drained
+    to the client's own close instead, so the send completes and the framed 411 naming chunked
+    arrives. The chunks clear loopback socket buffers several times over, which would stall this
+    send against an undrained refusal, and the broker is never called."""
+    async with workspace_tx() as connection:
+        workspace_id, turn_id, *_ = await _seed_turn(connection)
+    forwarder = _RecordingForwarder()
+    sentinel = grant_sentinel("acct-1")
+    rules = (
+        ScopeRule(allowed_hosts=frozenset({FORWARD_HOST})),
+        _forward_rule(forwarder),
+    )
+    cert, key = await generate_ca()
+    proxy = _egress(_fixed(rules), ca_cert=cert, ca_key=key)
+    endpoint = await proxy.start(bind_host="127.0.0.1")
+    token = RunToken(workspace_id, turn_id).encode()
+    chunk = b"y" * RELAY_CHUNK_BYTES
+    async with asyncio.timeout(REFUSAL_EXCHANGE_TIMEOUT_SECONDS):
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", endpoint.port)
+            writer.write(
+                f"CONNECT {FORWARD_HOST}:443 HTTP/1.1\r\n"
+                f"Proxy-Authorization: {_basic(token)}\r\n\r\n".encode()
+            )
+            await writer.drain()
+            assert b"200" in await reader.readline()
+            while (await reader.readline()) not in (b"\r\n", b""):
+                pass
+            context = ssl.create_default_context(cadata=cert)
+            await writer.start_tls(context, server_hostname=FORWARD_HOST)
+            writer.write(
+                b"POST /repos/o/r/issues HTTP/1.1\r\n"
+                b"host: " + FORWARD_HOST.encode() + b"\r\n"
+                b"authorization: token " + sentinel.encode() + b"\r\n"
+                b"content-type: application/json\r\n"
+                b"transfer-encoding: chunked\r\n\r\n"
+            )
+            for _ in range(64):
+                writer.write(f"{len(chunk):x}\r\n".encode() + chunk + b"\r\n")
+                await writer.drain()
+            head = await reader.readuntil(b"\r\n\r\n")
+            content_length = next(
+                int(line.partition(b":")[2])
+                for line in head.split(b"\r\n")
+                if line.lower().startswith(b"content-length:")
+            )
+            refusal = await reader.readexactly(content_length)
+            writer.close()
+        finally:
+            await proxy.stop()
+    assert head.startswith(b"HTTP/1.1 411 Length Required")
+    assert b"chunked" in refusal
+    assert not forwarder.calls
+
+
+async def test_read_request_body_names_the_cause_of_each_refusal() -> None:
+    """Four causes answered one None, so a size ceiling was indistinguishable from a chunked body
+    and neither named its numbers. Each answers its own status now, and each reports the `pending`
+    bytes to drain — all four are decided from the headers alone, before a body byte is read, so a
+    client streaming right behind its headers is mid-upload whichever cause refused it: over-cap
+    reports its declared remainder, the three whose length is undeclared or untrusted report the
+    drain cap and only the client's own close ends their drain. A negative Content-Length is caught
+    here rather than at `readexactly`, whose ValueError (not IncompleteReadError) would escape
+    uncaught and drop the connection with no response."""
+    reader = asyncio.StreamReader()
+    refusals = {
+        name: await _read_request_body(reader, [header])
+        for name, header in (
+            ("negative", b"content-length: -1\r\n"),
+            ("unparseable", b"content-length: nope\r\n"),
+            ("chunked", b"transfer-encoding: chunked\r\n"),
+            ("oversized", f"content-length: {MAX_FORWARD_BODY_BYTES + 1}\r\n".encode()),
+        )
+    }
+    assert all(isinstance(refusal, _Refusal) for refusal in refusals.values())
+    assert [refusal.status for refusal in refusals.values()] == [
+        HTTPStatus.BAD_REQUEST,
+        HTTPStatus.LENGTH_REQUIRED,
+        HTTPStatus.LENGTH_REQUIRED,
+        HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+    ]
+    assert [refusal.pending for refusal in refusals.values()] == [
+        MAX_REFUSAL_DRAIN_BYTES,
+        MAX_REFUSAL_DRAIN_BYTES,
+        MAX_REFUSAL_DRAIN_BYTES,
+        MAX_FORWARD_BODY_BYTES + 1,
+    ]
+    assert "negative" in refusals["negative"].message
+    assert "unparseable" in refusals["unparseable"].message
+    assert "chunked" in refusals["chunked"].message
+    assert str(MAX_FORWARD_BODY_BYTES) in refusals["oversized"].message
+
+
+async def test_read_request_body_names_a_truncated_body() -> None:
+    """The fifth refusal: a client that declares more than it sends leaves `readexactly` short of
+    its count. The message names how far the body actually got, so a client that died mid-upload is
+    not read as one that hit the size ceiling."""
+    reader = asyncio.StreamReader()
+    reader.feed_data(b"x" * 10)
+    reader.feed_eof()
+    refusal = await _read_request_body(reader, [b"content-length: 20\r\n"])
+    assert isinstance(refusal, _Refusal)
+    assert refusal.status == HTTPStatus.BAD_REQUEST
+    assert refusal.pending == 0
+    assert "10 of 20" in refusal.message
+
+
+async def test_drain_refused_body_consumes_the_pending_bytes() -> None:
+    """The refused client is mid-upload, so its send only completes once these bytes are taken off
+    the wire — until then it cannot get to the refusal already written to it."""
+    reader = asyncio.StreamReader()
+    reader.feed_data(b"y" * 4096)
+    await _drain_refused_body(reader, 4096)
+    reader.feed_eof()
+    assert await reader.read() == b""
+
+
+async def test_drain_refused_body_stops_at_its_bound() -> None:
+    """Draining is a courtesy to the client, not an obligation to read whatever it declared: a body
+    past the bound leaves the rest unread and the connection closes under it."""
+    reader = asyncio.StreamReader()
+    reader.feed_data(b"y" * (MAX_REFUSAL_DRAIN_BYTES + 4096))
+    await _drain_refused_body(reader, MAX_REFUSAL_DRAIN_BYTES + 4096)
+    reader.feed_eof()
+    assert len(await reader.read()) == 4096
+
+
+async def test_drain_refused_body_gives_up_on_a_stalled_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The drain is bounded in time as well as bytes: a peer that stops sending without closing —
+    its refusal already on the wire — would otherwise park `read` forever, holding the connection
+    task for as long as it holds the socket. Past the deadline the connection closes and the
+    client's own write error stands."""
+    monkeypatch.setattr(proxy_server, "REFUSAL_DRAIN_TIMEOUT_SECONDS", 0.05)
+    reader = asyncio.StreamReader()
+    reader.feed_data(b"y" * 100)
+    async with asyncio.timeout(REFUSAL_EXCHANGE_TIMEOUT_SECONDS):
+        await _drain_refused_body(reader, 4096)
+
+
+async def test_drain_refused_body_ends_at_the_clients_close() -> None:
+    """A chunked refusal declares no count, so its `pending` is the drain cap and the real
+    terminator is the client's own close once it has read the refusal — EOF ends the drain, never
+    a byte tally."""
+    reader = asyncio.StreamReader()
+    reader.feed_data(b"y" * 100)
+    reader.feed_eof()
+    async with asyncio.timeout(REFUSAL_EXCHANGE_TIMEOUT_SECONDS):
+        await _drain_refused_body(reader, MAX_REFUSAL_DRAIN_BYTES)
+    assert await reader.read() == b""
 
 
 def test_forward_response_bytes_drops_headers_carrying_crlf() -> None:

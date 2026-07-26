@@ -91,6 +91,79 @@ async def test_forwarder_carries_a_json_body(monkeypatch: pytest.MonkeyPatch) ->
     assert captured[0]["method"] == "POST"
 
 
+R2_URL = "https://temp.store.r2.cloudflarestorage.test/zipball/abc?X-Amz-Signature=deadbeef"
+
+
+@pytest.mark.parametrize(
+    "envelope",
+    [
+        {
+            "data": {},
+            "binary_data": {
+                "url": R2_URL,
+                "content_type": "application/zip",
+                "size": 4_194_304,
+                "expires_at": "2026-07-26T00:00:00Z",
+            },
+            "status": 200,
+            "headers": {"x-github-request-id": "r1"},
+        },
+        {
+            "data": {
+                "data": {},
+                "binary_data": {"url": R2_URL},
+                "status": 200,
+                "headers": {"x-github-request-id": "r1"},
+            }
+        },
+    ],
+    ids=["flat", "nested"],
+)
+async def test_forwarder_redirects_a_binary_response_to_its_presigned_url(
+    monkeypatch: pytest.MonkeyPatch, envelope: dict[str, object]
+) -> None:
+    """A non-JSON provider body never rides in `data` — Composio puts the bytes on its file store
+    and names them under `binary_data`, leaving `data` an empty object. Reconstructing from `data`
+    alone hands back the two bytes `{}` under the provider's own 200, so a zipball, PDF, or image
+    arrives empty with nothing looking wrong. The presigned URL is answered as a redirect instead,
+    through both envelope shapes: the caller draws the bytes from the store over its own connection
+    and the shared proxy pod never buffers them."""
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=envelope)
+
+    client = composio.ComposioClient(api_key="test", transport=httpx.MockTransport(handle))
+    monkeypatch.setattr(composio, "composio_client", lambda: client)
+
+    response = await ComposioRequestForwarder().forward(
+        ACCOUNT, "GET", "https://api.github.com/repos/o/r/zipball/main", {}, b""
+    )
+
+    assert response.status == 302
+    assert response.headers["location"] == R2_URL
+    assert b"binary provider response" in response.body
+    assert response.headers["x-github-request-id"] == "r1"
+
+
+async def test_forwarder_refuses_binary_data_it_cannot_redirect_to(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A `binary_data` envelope carrying no url has no bytes to return and nowhere to send the
+    caller. It fails loud rather than falling through to the empty `data` beside it, which is the
+    silent two-byte body."""
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": {}, "binary_data": {"size": 12}, "status": 200})
+
+    client = composio.ComposioClient(api_key="test", transport=httpx.MockTransport(handle))
+    monkeypatch.setattr(composio, "composio_client", lambda: client)
+
+    with pytest.raises(composio.ComposioError, match="binary_data"):
+        await ComposioRequestForwarder().forward(
+            ACCOUNT, "GET", "https://api.github.com/repos/o/r/zipball/main", {}, b""
+        )
+
+
 async def test_forwarder_refuses_an_oversized_broker_response(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -22,6 +22,10 @@ from ufo_ext_composio import client as composio
 
 PROXY_EXECUTE_PATH = "/tools/execute/proxy"
 MAX_FORWARD_RESPONSE_BYTES = 10 * 1024 * 1024
+BINARY_REDIRECT_STATUS = 302
+BINARY_REDIRECT_BODY = (
+    b"binary provider response; the bytes live on the broker file store, follow the location header"
+)
 
 _BODY_HEADERS = frozenset({"content-encoding", "content-length", "transfer-encoding"})
 _SKIP_REQUEST_HEADERS = frozenset(
@@ -116,7 +120,14 @@ class ComposioProxyTransport(httpx.AsyncBaseTransport):
 
     def _provider_response(self, payload: dict[str, Any], request: httpx.Request) -> httpx.Response:
         """Reconstruct the provider's response from a proxy-execute payload, unwrapping Composio's
-        `data` envelope down to the innermost provider status/body/headers."""
+        `data` envelope down to the innermost provider status/body/headers. A provider body that is
+        not JSON never rides in `data` — Composio puts it on its file store and names it under
+        `binary_data`, leaving `data` empty — so that case answers a redirect to the presigned URL.
+        The caller draws the bytes from the store over its own connection, which is what keeps a
+        multi-MB payload out of the shared proxy pod (`MAX_FORWARD_RESPONSE_BYTES` would cap it) and
+        off this event loop. The redirect's own body names the condition, so the one channel that
+        follows no redirect — feed-sync, whose pages are JSON, never files — fails loud with the
+        reason instead of a bare 302."""
         while True:
             nested = payload.get("data")
             if not (isinstance(nested, dict) and "data" in nested and "status" in nested):
@@ -128,6 +139,21 @@ class ComposioProxyTransport(httpx.AsyncBaseTransport):
             for key, value in (payload.get("headers") or {}).items()
             if isinstance(key, str) and value is not None and key.lower() not in _BODY_HEADERS
         }
+        binary = payload.get("binary_data")
+        if binary is not None:
+            url = binary.get("url") if isinstance(binary, dict) else None
+            if not isinstance(url, str) or not url:
+                raise composio.ComposioError(
+                    502, "proxy-execute returned binary_data without a presigned url"
+                )
+            headers["location"] = url
+            headers["content-type"] = "text/plain; charset=utf-8"
+            return httpx.Response(
+                status_code=BINARY_REDIRECT_STATUS,
+                headers=headers,
+                content=BINARY_REDIRECT_BODY,
+                request=request,
+            )
         data = payload.get("data")
         if isinstance(data, (dict, list)):
             content = json.dumps(data).encode("utf-8")

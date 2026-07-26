@@ -70,6 +70,61 @@ async def test_composio_broker_yields_a_transport_that_proxies_provider_http(
     assert response.json() == body
 
 
+R2_URL = "https://temp.store.r2.cloudflarestorage.test/export/abc?X-Amz-Signature=deadbeef"
+
+
+async def test_composio_broker_transport_answers_binary_data_as_a_named_redirect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The proxying channel's binary case end to end: proxy-execute answers `binary_data` with the
+    bytes on Composio's file store, and the transport hands the feed-sync client a 302 whose body
+    names the condition. That client follows no redirect and a feed page is JSON, never a file, so
+    the sync run fails loud on the non-success response — `is_success` is what the source
+    framework's status check keys on — with the reason in the body it reports, instead of ingesting
+    the empty `data` beside `binary_data`. The store bytes never enter the serve process."""
+    workspace_id = uuid4()
+    owner = f"{composio.EXTERNAL_USER_PREFIX}{workspace_id}"
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and "/connected_accounts/" in request.url.path:
+            return httpx.Response(
+                200,
+                json={
+                    "id": ACCOUNT,
+                    "user_id": owner,
+                    "status": "ACTIVE",
+                    "toolkit": {"slug": "asana"},
+                },
+            )
+        if request.method == "POST" and request.url.path.endswith(
+            composio_proxy.PROXY_EXECUTE_PATH
+        ):
+            return httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "data": {},
+                        "binary_data": {"url": R2_URL},
+                        "status": 200,
+                        "headers": {},
+                    }
+                },
+            )
+        return httpx.Response(404, json={})
+
+    client = composio.ComposioClient(api_key="test", transport=httpx.MockTransport(handle))
+    monkeypatch.setattr(composio, "composio_client", lambda: client)
+
+    credential = await ComposioBroker().credential(workspace_id, "asana", ACCOUNT)
+    async with httpx.AsyncClient(base_url=ASANA_BASE, transport=credential.transport) as http:
+        response = await http.get("/project_exports/123")
+
+    assert response.status_code == 302
+    assert response.headers["location"] == R2_URL
+    assert not response.is_success
+    assert b"binary provider response" in response.content
+
+
 async def test_composio_broker_refuses_a_foreign_account(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
