@@ -11,7 +11,7 @@ from anthropic import Anthropic
 
 client = Anthropic()  # reads ANTHROPIC_API_KEY from the sandbox env
 message = client.messages.create(
-    model="claude-opus-4-8",
+    model="claude-opus-5",
     max_tokens=1024,
     messages=[{"role": "user", "content": "Hello"}],
 )
@@ -19,6 +19,6 @@ message = client.messages.create(
 
 Install the SDK in your server's dependencies (`anthropic` / `@anthropic-ai/sdk`) — it is not baked into the image.
 
-Use a current model ID (`claude-opus-4-8` is the deploy default) rather than hardcoding a list that drifts.
+Use a current model ID (`claude-opus-5` is the deploy default) rather than hardcoding a list that drifts.
 
 **Egress is live only while the turn is running.** Outbound calls from the served app work during the active turn; once the turn ends, the sandbox's egress authorization is revoked. Build runtime-LLM features for in-session use, not for a site that must keep calling the API after you hand back.

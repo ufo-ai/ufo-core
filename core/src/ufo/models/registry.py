@@ -72,8 +72,9 @@ class ModelRegistry:
     def model_key_env(self, model: str, config: Config) -> str | None:
         """The env var onboarding requires set before this model's first turn: a core provider's
         configured key, or None for a contributed spec that resolves its own key lazily at turn
-        time — an env core cannot name to check eagerly."""
-        provider = self.spec(model).provider
+        time — an env core cannot name to check eagerly. Resolves the `auto` sentinel first, because
+        the key the first turn needs is the key of the model that turn will actually run."""
+        provider = self.spec(self.resolve(model)).provider
         if provider == PROVIDER_ANTHROPIC:
             return config.models.anthropic_api_key_env
         if provider == PROVIDER_OPENAI:
@@ -84,13 +85,20 @@ class ModelRegistry:
 def model_registry(config: Config, manifests: tuple[Manifest, ...]) -> ModelRegistry:
     """Core's direct specs followed by every extension-contributed spec, indexed by id, and the
     price table their entries build. A duplicate id — two specs claiming one slug — fails loud, so a
-    contributed model never silently shadows a core one."""
+    contributed model never silently shadows a core one, and so does an `auto_model` naming no
+    registered spec: an agent that defers its model resolves through that knob every turn, so a typo
+    there is one boot failure rather than a mid-turn failure per workspace."""
     core = core_model_specs(config.models.anthropic_api_key_env, config.models.openai_api_key_env)
     specs: dict[str, ModelSpec] = {}
     for spec in (*core, *(spec for manifest in manifests for spec in manifest.models)):
         if spec.id in specs:
             raise ValueError(f"two model specs registered for id {spec.id!r}")
         specs[spec.id] = spec
+    if config.models.auto_model not in specs:
+        raise ValueError(
+            f"models.auto_model {config.models.auto_model!r} is not a registered model id — "
+            "every agent that defers its model resolves through it"
+        )
     return ModelRegistry(
         specs=specs,
         pricing=pricing_from({model: spec.price for model, spec in specs.items()}),

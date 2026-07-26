@@ -872,6 +872,13 @@ def test_registry_spec_is_keyed_by_exact_id_and_fails_loud(tmp_path: Path) -> No
         registry.spec("nope")
 
 
+def test_registry_rejects_an_auto_model_no_spec_describes(tmp_path: Path) -> None:
+    """Every agent that defers its model resolves through `auto_model` on every turn, so a knob
+    naming no registered spec is a boot failure — not one mid-turn failure per workspace."""
+    with pytest.raises(ValueError, match=r"models\.auto_model 'claude-opus-6' is not a registered"):
+        model_registry(_config(tmp_path, ModelsConfig(auto_model="claude-opus-6")), ())
+
+
 def test_registry_rejects_two_specs_for_one_id(tmp_path: Path) -> None:
     clash = core_model_specs("ANTHROPIC_API_KEY", "OPENAI_API_KEY")[0]
     dup = Manifest(name="dup", version="1", models=(clash,))

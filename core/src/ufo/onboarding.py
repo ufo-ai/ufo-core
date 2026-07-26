@@ -20,6 +20,7 @@ from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.context import context_for
 from ufo.ext.manifest import Manifest
+from ufo.models.interface import AUTO_MODEL
 from ufo.models.registry import model_registry
 from ufo.o11y import log
 from ufo.schema import tables
@@ -28,7 +29,7 @@ from ufo.seats import create_member
 from ufo.workspace import ws
 
 DEFAULT_AGENT_PROMPT = "You are a helpful assistant."
-DEFAULT_AGENT_MODEL = "claude-opus-4-8"
+DEFAULT_AGENT_MODEL = AUTO_MODEL
 
 
 class AlreadyInitialized(RuntimeError):

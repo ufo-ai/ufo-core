@@ -122,7 +122,11 @@ async def _member(workspace_id: UUID, created_at: datetime) -> UUID:
     return member_id
 
 
-def _tool_context(workspace_id: UUID, speaker_member_id: UUID | None = None) -> ToolContext:
+def _tool_context(
+    workspace_id: UUID,
+    speaker_member_id: UUID | None = None,
+    agent_model: str = "claude-opus-4-8",
+) -> ToolContext:
     return ToolContext(
         sandbox=SandboxSession(
             carrier=_UntouchedCarrier(),
@@ -139,7 +143,7 @@ def _tool_context(workspace_id: UUID, speaker_member_id: UUID | None = None) -> 
             inbound="hi",
             created_at=datetime(2026, 7, 16, tzinfo=UTC),
         ),
-        agent=Agent(prompt="p", model="claude-opus-4-8"),
+        agent=Agent(prompt="p", model=agent_model),
         spawn=_unavailable_spawn,
         speaker_member_id=speaker_member_id,
         audience_member_id=None,
@@ -663,6 +667,29 @@ async def test_agent_kind_updates_model_owner_gated_and_shows_prompt_readonly(db
         )
         with pytest.raises(SpecValidationFailed, match="prompt"):
             await apply_tool.handler(owner_ctx, prompt_write)
+
+
+async def test_agent_kind_reports_the_model_an_auto_agent_actually_runs(db: None) -> None:
+    """An agent deferring to the deploy stores the `auto` sentinel, which names a choice rather than
+    a model. Everything a member reads for information — the listing line, status — reports the
+    concrete model the turn resolved, so "what model am I on" is answerable. The spec keeps the
+    sentinel, so a read-then-apply round trip cannot silently pin the agent to today's model."""
+    workspace_id = await _workspace()
+    tools = _object_tools()
+    with ws(workspace_id):
+        owner = await _member(workspace_id, OWNER_CREATED_AT)
+        await _agent_row(workspace_id, model="auto")
+        ctx = _tool_context(workspace_id, speaker_member_id=owner, agent_model="claude-opus-5")
+
+        fetched = yaml.safe_load(
+            await _text(tools, "object_get", ctx, kind=AGENT_KIND, name="assistant")
+        )
+        listing = json.loads(await _text(tools, "object_list", ctx, kind=AGENT_KIND))
+
+    assert fetched["spec"]["model"] == "auto"
+    assert fetched["status"]["model"] == "claude-opus-5"
+    assert "claude-opus-5" in listing["objects"][0]["summary"]
+    assert "auto" not in listing["objects"][0]["summary"]
 
 
 async def test_agent_kind_refuses_create_and_delete(db: None) -> None:

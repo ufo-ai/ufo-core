@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from ufo.db import workspace_tx
 from ufo.ext.context import JsonValue
 from ufo.governance import prompt_digest
+from ufo.models.interface import AUTO_MODEL
 from ufo.objects import (
     ObjectKind,
     ObjectListQuery,
@@ -35,13 +36,22 @@ AGENT_UNDELETABLE = "one agent per workspace today — the agent cannot be delet
 AGENT_EDIT_GATE = "only the workspace owner can edit the agent"
 
 
+def _effective_model(ctx: ToolContext, stored: str) -> str:
+    """The model this agent actually runs, for anything a member reads. The stored value may be the
+    `auto` sentinel, which names the deploy's choice rather than a model; the turn already resolved
+    it onto `ctx.agent`, so that is the concrete id to report. The spec keeps the stored value, so a
+    read-then-apply round trip cannot silently pin an `auto` agent to today's model."""
+    return ctx.agent.model if stored == AUTO_MODEL else stored
+
+
 class AgentSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
     model: str = Field(
         description=(
-            "The model id the agent runs on. The system prompt is not part of this spec — "
-            "prompt changes go through the governed proposal path; read the current prompt "
-            "and its digest from status."
+            "The model id the agent runs on, or 'auto' to follow the deploy's configured model — "
+            "status reports the concrete model an 'auto' agent resolves to. The system prompt is "
+            "not part of this spec — prompt changes go through the governed proposal path; read "
+            "the current prompt and its digest from status."
         )
     )
     internet_access_allowed: bool = Field(
@@ -75,8 +85,8 @@ class AgentObjects:
                 ObjectRow(
                     name=row.name,
                     summary=(
-                        f"the workspace agent, on {row.model}, public internet "
-                        f"{'allowed' if row.internet_access_allowed else 'blocked'}"
+                        f"the workspace agent, on {_effective_model(ctx, row.model)}, public "
+                        f"internet {'allowed' if row.internet_access_allowed else 'blocked'}"
                     ),
                 )
                 for row in rows
@@ -102,6 +112,7 @@ class AgentObjects:
         return {
             "prompt": row.prompt,
             "prompt_digest": prompt_digest(row.prompt),
+            "model": _effective_model(ctx, row.model),
             "updated_at": row.updated_at.isoformat(),
         }
 

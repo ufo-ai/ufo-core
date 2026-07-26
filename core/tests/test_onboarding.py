@@ -20,7 +20,13 @@ from ufo.db import workspace_tx
 from ufo.ext.context import CredentialAccess, ExtensionContext, ScopedStore
 from ufo.ext.loader import load_manifests
 from ufo.ext.manifest import CredentialSlot, Manifest, OnboardingStep
-from ufo.onboarding import DEFAULT_AGENT_PROMPT, AlreadyInitialized, Onboarding
+from ufo.models.interface import AUTO_MODEL
+from ufo.onboarding import (
+    DEFAULT_AGENT_MODEL,
+    DEFAULT_AGENT_PROMPT,
+    AlreadyInitialized,
+    Onboarding,
+)
 from ufo.schema import tables
 from ufo.schema.records import DEFAULT_AGENT_NAME
 from ufo.workspace import init_workspace_credentials, ws
@@ -96,6 +102,31 @@ async def test_onboarding_requires_the_chosen_models_key_before_touching_the_db(
             await connection.execute(sa.select(sa.func.count()).select_from(tables.workspace))
         ).scalar_one()
     assert workspaces == 0
+
+
+async def test_default_agent_defers_its_model_to_the_deploy_knob(
+    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The agent onboarding creates carries the `auto` sentinel, not a model id, so
+    `models.auto_model` is the one place a deploy names its model — a concrete id here would pin
+    every new workspace past the knob. The key check still resolves the sentinel, because the key
+    the first turn needs belongs to the model that turn actually runs."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-onboard")
+    onboarding = Onboarding(
+        config=Config(
+            database=DatabaseConfig(url=database_url),
+            blob=BlobConfig(backend="filesystem", root=tmp_path),
+        ),
+        email=OWNER_EMAIL,
+        model=DEFAULT_AGENT_MODEL,
+        credentials=None,
+        manifests=(),
+    )
+    await onboarding.run()
+    async with workspace_tx() as connection:
+        agent = (await connection.execute(sa.select(tables.agent))).one()
+    assert agent.model == AUTO_MODEL
+    assert onboarding.config.models.auto_model != AUTO_MODEL
 
 
 async def test_onboarding_runs_each_installed_extensions_steps(
