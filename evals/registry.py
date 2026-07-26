@@ -10,6 +10,7 @@ from evals import (
     memory_hygiene,
     object_tools,
     pdf_build,
+    response_register,
     scenario_smoke,
     semantic_quality,
     site_build,
@@ -31,6 +32,7 @@ VISUAL_JUDGE_MODEL = "claude-sonnet-4-6"
 DEFAULT_TASKS: tuple[EvalTask, ...] = (
     capability_task("basics", basics.CASES),
     capability_task("semantic_quality", semantic_quality.CASES, judge_model=SEMANTIC_JUDGE_MODEL),
+    capability_task("response_register", response_register.CASES, judge_model=SEMANTIC_JUDGE_MODEL),
     capability_task("skill_routing", skill_routing.CASES),
     capability_task("tool_calling", tool_calling.CASES),
     capability_task("object_tools", object_tools.CASES, judge_model=SEMANTIC_JUDGE_MODEL),

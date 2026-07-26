@@ -103,6 +103,14 @@ from evals.registry import (
     VISUAL_JUDGE_MODEL,
     selected_run_tasks,
 )
+from evals.response_register import CASES as REGISTER_CASES
+from evals.response_register import (
+    Shape,
+    conversational_scorer,
+    measure,
+    report_scorer,
+    substantive_scorer,
+)
 from ufo.accounting import Pricing
 from ufo.blob import FilesystemBlobStore, S3BlobStore
 from ufo.config import BlobConfig, Config, DatabaseConfig
@@ -172,6 +180,8 @@ def test_registry_pins_judge_and_simulator_models_by_workload() -> None:
     assert tasks["object_tools_flows"].simulator_model == SCENARIO_SIMULATOR_MODEL
     assert tasks["document_visual"].judge_model == VISUAL_JUDGE_MODEL
     assert tasks["document_visual"].simulator_model is None
+    assert tasks["response_register"].judge_model == SEMANTIC_JUDGE_MODEL
+    assert tasks["response_register"].simulator_model is None
     assert all(
         task.judge_model is None and task.simulator_model is None
         for name, task in tasks.items()
@@ -184,6 +194,7 @@ def test_registry_pins_judge_and_simulator_models_by_workload() -> None:
             "object_tools",
             "object_tools_flows",
             "document_visual",
+            "response_register",
         }
     )
 
@@ -1749,6 +1760,117 @@ async def test_restraint_scorer_flags_an_unnecessary_web_call() -> None:
     clean = CapabilityOutput("Paris", ())
     assert not (await restraint_scorer(WEB_TOOLS)(used)).passed
     assert (await restraint_scorer(WEB_TOOLS)(clean)).passed
+
+
+async def test_conversational_scorer_passes_a_chat_reply_and_flags_report_shape() -> None:
+    chat = CapabilityOutput("Done, per-member local. I'll set the jobs up.", ())
+    verdict = await conversational_scorer(max_words=40, max_lines=3)(chat)
+    assert verdict.passed
+    assert verdict.evidence == {"words": 8, "lines": 1, "headers": 0, "bullets": 0}
+    sectioned = CapabilityOutput("## Decision\nPer-member local.\n\n- one job per timezone", ())
+    rejected = await conversational_scorer(max_words=40, max_lines=3)(sectioned)
+    assert not rejected.passed
+    assert "1 section headers" in rejected.reason
+    assert "1 bullet lines" in rejected.reason
+
+
+async def test_conversational_scorer_flags_bullets_without_any_header() -> None:
+    listed = CapabilityOutput("Per-member local.\n- one job per timezone\n- DST re-points", ())
+    verdict = await conversational_scorer(max_words=40, max_lines=4)(listed)
+    assert not verdict.passed
+    assert "2 bullet lines" in verdict.reason
+    assert "section headers" not in verdict.reason
+
+
+async def test_measure_ignores_structure_inside_a_fenced_block() -> None:
+    """A SQL or diff snippet is content, not sections: counting it would fail a concise reply that
+    happens to show code, and would let phantom headers satisfy a report's header floor."""
+    fenced = "NULLs are distinct.\n\n```diff\n- old_default = 30\n# note\n+ new_default = 0\n```"
+    shape = measure(fenced)
+    assert (shape.headers, shape.bullets) == (0, 0)
+    assert shape.words == 15
+    outside = measure("## Real\ntext\n\n- real bullet\n\n```\n- fake\n# fake\n```")
+    assert (outside.headers, outside.bullets) == (1, 1)
+
+
+async def test_measure_ignores_structure_in_an_unterminated_fence() -> None:
+    shape = measure("here it is:\n```sh\n# comment\n- item")
+    assert (shape.headers, shape.bullets) == (0, 0)
+
+
+async def test_conversational_scorer_counts_a_bold_line_as_a_header() -> None:
+    faked = CapabilityOutput("**Decision**\nPer-member local time.", ())
+    verdict = await conversational_scorer(max_words=40, max_lines=3)(faked)
+    assert not verdict.passed
+    assert verdict.evidence["headers"] == 1
+
+
+async def test_conversational_scorer_flags_an_over_budget_reply() -> None:
+    verbose = CapabilityOutput(" ".join(["word"] * 41), ())
+    verdict = await conversational_scorer(max_words=40, max_lines=3)(verbose)
+    assert not verdict.passed
+    assert "41 words over the 40 budget" in verdict.reason
+
+
+async def test_conversational_scorer_flags_a_reply_spread_over_too_many_lines() -> None:
+    spread = CapabilityOutput("Locked in.\n\nOne job per timezone.\n\nDST drifts.\n\nAsk me.", ())
+    verdict = await conversational_scorer(max_words=40, max_lines=3)(spread)
+    assert not verdict.passed
+    assert "4 lines over the 3 budget" in verdict.reason
+    assert "words over" not in verdict.reason
+
+
+async def test_substantive_scorer_rejects_a_clipped_contradiction() -> None:
+    clipped = CapabilityOutput("No, that's wrong. NULLs are distinct.", ())
+    verdict = await substantive_scorer(min_words=90)(clipped)
+    assert not verdict.passed
+    assert "clipped to 6 words, under the 90 floor" in verdict.reason
+    assert verdict.evidence == {"words": 6, "lines": 1, "headers": 0, "bullets": 0}
+    argued = CapabilityOutput(" ".join(["because"] * 90), ())
+    passing = await substantive_scorer(min_words=90)(argued)
+    assert passing.passed
+    assert "substantive: 90 words" in passing.reason
+
+
+async def test_report_scorer_requires_length_and_sections() -> None:
+    unsectioned = CapabilityOutput(" ".join(["word"] * 250), ())
+    verdict = await report_scorer(min_words=250, min_headers=3)(unsectioned)
+    assert not verdict.passed
+    assert "0 headers under the 3 floor" in verdict.reason
+    assert "words under" not in verdict.reason
+    body = " ".join(["word"] * 84)
+    sectioned = CapabilityOutput(f"## One\n{body}\n\n## Two\n{body}\n\n## Three\n{body}", ())
+    assert (await report_scorer(min_words=250, min_headers=3)(sectioned)).passed
+
+
+async def test_report_scorer_flags_a_sectioned_reply_that_is_too_short() -> None:
+    """Headers over a stub is the shape a report register must not be scored as satisfying."""
+    stub = CapabilityOutput("## One\nshort\n\n## Two\nshort\n\n## Three\nshort", ())
+    verdict = await report_scorer(min_words=250, min_headers=3)(stub)
+    assert not verdict.passed
+    assert "9 words under the 250 floor" in verdict.reason
+    assert "headers under" not in verdict.reason
+
+
+async def test_report_scorer_reports_both_floors_when_both_fall_short() -> None:
+    chatty = CapabilityOutput("## One\n" + " ".join(["word"] * 20), ())
+    verdict = await report_scorer(min_words=250, min_headers=3)(chatty)
+    assert not verdict.passed
+    assert "22 words under the 250 floor" in verdict.reason
+    assert "1 headers under the 3 floor" in verdict.reason
+
+
+def test_measure_counts_every_structure_marker() -> None:
+    shape = measure("### Findings\n\n- first\n2. second\n• third\n\nplain tail line")
+    assert shape == Shape(words=11, lines=5, headers=1, bullets=3)
+
+
+def test_the_register_suite_keeps_its_opposing_pairs() -> None:
+    """The suite is only meaningful while both directions are graded: strip the length floors and
+    it becomes a pure-brevity eval that rewards clipping a disagreement."""
+    gradings = [grading_statement(case.grader) for case in REGISTER_CASES]
+    assert sum("at most" in grading for grading in gradings) == 5
+    assert sum("at least" in grading for grading in gradings) == 4
 
 
 async def test_rubric_parser_accepts_an_exactly_fenced_verdict() -> None:
