@@ -215,6 +215,21 @@ spec:
             - name: COMPOSIO_API_KEY
               valueFrom:
                 secretKeyRef: {name: ufo-platform-secrets, key: COMPOSIO_API_KEY}
+            # The GitHub App source mints each workspace's installation token in this process.
+            # The coding manifest treats the registration as all-or-none, so the proxy receives
+            # the same four values serve uses even though minting consumes only the id and PEM.
+            - name: GITHUB_APP_ID
+              valueFrom:
+                secretKeyRef: {name: ufo-platform-secrets, key: GITHUB_APP_ID}
+            - name: GITHUB_APP_CLIENT_ID
+              valueFrom:
+                secretKeyRef: {name: ufo-platform-secrets, key: GITHUB_APP_CLIENT_ID}
+            - name: GITHUB_APP_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef: {name: ufo-platform-secrets, key: GITHUB_APP_CLIENT_SECRET}
+            - name: GITHUB_APP_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef: {name: ufo-platform-secrets, key: GITHUB_APP_PRIVATE_KEY}
             # The one Fernet the fleet stores workspace credentials under: the proxy decrypts each
             # workspace's keyed-provider secrets per turn to swap them onto the wire. A pack with a
             # keyed provider fails loud without it, so proxy and serve read the same secret.

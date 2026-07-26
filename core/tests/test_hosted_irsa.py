@@ -135,6 +135,25 @@ def test_hosted_proxy_receives_the_composio_broker_key() -> None:
     assert "secretKeyRef: {name: ufo-platform-secrets, key: COMPOSIO_API_KEY}" in PROXY_DEPLOYMENT
 
 
+def test_hosted_proxy_receives_the_github_app_registration() -> None:
+    """The proxy loads the coding manifest itself and mints GitHub installation tokens there, so
+    its process must see the same projected all-or-none App registration that makes the source
+    exist."""
+    platform_secrets = CLUSTER_SERVICES_TEMPLATE.read_text()
+    for name, remote_property in (
+        ("GITHUB_APP_ID", "github-app-id"),
+        ("GITHUB_APP_CLIENT_ID", "github-app-client-id"),
+        ("GITHUB_APP_CLIENT_SECRET", "github-app-client-secret"),
+        ("GITHUB_APP_PRIVATE_KEY", "github-app-private-key"),
+    ):
+        assert (
+            f"{{secretKey: {name}, remoteRef: "
+            f"{{key: ${{secret_api_keys}}, property: {remote_property}}}}}" in platform_secrets
+        )
+        assert f"name: {name}" in PROXY_DEPLOYMENT
+        assert f"secretKeyRef: {{name: ufo-platform-secrets, key: {name}}}" in PROXY_DEPLOYMENT
+
+
 def test_hosted_proxy_receives_the_fleet_credential_key() -> None:
     """A keyed provider's secret is decrypted by the proxy itself, per workspace per turn, so its
     pod opens the same Fernet serve does. Without it the proxy fails loud at boot and every keyed
