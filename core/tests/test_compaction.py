@@ -5,10 +5,12 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from connector_payload import CONNECTOR_WINDOW_TOKENS, connector_window
 
 from ufo.blob import FilesystemBlobStore
 from ufo.loop.compaction import (
     AUTOCOMPACT_BUFFER_TOKENS,
+    CHARS_PER_TOKEN,
     COMPACTED_CONTEXT_PREFIX,
     COMPACTION_FORMAT_RESTATEMENT,
     COMPACTION_SUMMARY_MAX_TOKENS,
@@ -443,18 +445,38 @@ async def test_trigger_derives_from_the_model_window(tmp_path: Path) -> None:
         DEFAULT_CONTEXT_WINDOW_TOKENS - compaction.summary_max_tokens - AUTOCOMPACT_BUFFER_TOKENS
     )
     under = (
-        Message(role="user", content="a " + "x" * (derived - 200) * 4),
+        Message(role="user", content="a " + "x" * (derived - 200) * CHARS_PER_TOKEN),
         Message(role="assistant", content="b"),
         Message(role="user", content="c"),
     )
     result, usage = await compaction.maybe_compact(under)
     assert result is under and usage == ()
     over = (
-        Message(role="user", content="a " + "x" * (derived + 200) * 4),
+        Message(role="user", content="a " + "x" * (derived + 200) * CHARS_PER_TOKEN),
         Message(role="assistant", content="b"),
         Message(role="user", content="c"),
     )
     result, usage = await compaction.maybe_compact(over)
+    assert len(usage) == 1
+    assert str(result[0].content).startswith(COMPACTED_CONTEXT_PREFIX)
+
+
+async def test_a_connector_heavy_window_over_the_real_trigger_compacts(tmp_path: Path) -> None:
+    """The live failure behind #282: a turn re-ingested a connector search result every round and
+    never compacted, because URL-dense connector JSON tokenizes at 2.2 characters per token — read
+    the window as any sparser and the trigger lands past the provider's own limit, so the provider,
+    not the guard, ends the turn. This window really costs CONNECTOR_WINDOW_TOKENS (Anthropic's
+    `count_tokens` on `claude-opus-4-8`), which is past the derived trigger, so the guard must fire;
+    and the estimate must land near the measured cost in both directions, since a wildly high
+    estimate compacts a turn that had room to run."""
+    compaction = _compaction(tmp_path)
+    derived = (
+        DEFAULT_CONTEXT_WINDOW_TOKENS - compaction.summary_max_tokens - AUTOCOMPACT_BUFFER_TOKENS
+    )
+    window = connector_window()
+    assert CONNECTOR_WINDOW_TOKENS > derived
+    assert 0.9 <= compaction._tokens(window) / CONNECTOR_WINDOW_TOKENS <= 1.2
+    result, usage = await compaction.maybe_compact(window)
     assert len(usage) == 1
     assert str(result[0].content).startswith(COMPACTED_CONTEXT_PREFIX)
 

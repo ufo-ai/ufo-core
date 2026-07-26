@@ -45,7 +45,7 @@ from ufo.transcript import (
     decode_compaction,
 )
 
-CHARS_PER_TOKEN = 4
+CHARS_PER_TOKEN = 2
 IMAGE_TOKEN_ESTIMATE = 1_600
 DEFAULT_CONTEXT_WINDOW_TOKENS = 200_000
 AUTOCOMPACT_BUFFER_TOKENS = 30_000
@@ -432,9 +432,17 @@ class Compaction:
         return compaction_key(self.conversation_id, index, half)
 
     def _tokens(self, messages: tuple[Message, ...]) -> int:
-        """Estimate the window's token cost: text length plus a flat cost per inline image. Images
-        carry no text, so without IMAGE_TOKEN_ESTIMATE an image-heavy window counts as ~0 tokens and
-        never trips the compaction trigger, ballooning the stored conversation."""
+        """Estimate the window's token cost: text length over CHARS_PER_TOKEN plus a flat cost per
+        inline image. Images carry no text, so without IMAGE_TOKEN_ESTIMATE an image-heavy window
+        counts as ~0 tokens and never trips the compaction trigger, ballooning the stored
+        conversation.
+
+        Both constants are measured against Anthropic's `count_tokens` on real windows, never
+        assumed. What a real window is made of tokenizes dense: connector JSON at 2.2 characters per
+        token, tool-call arguments at 2.1, file reads at 2.7, model prose at 2.8 — and 80% of the
+        characters in a real transcript are tool results. So the ratio sits at the dense end:
+        over-estimating compacts a little early, while under-estimating sails a connector-heavy turn
+        past the trigger to overflow the provider instead (#282)."""
         return sum(
             (len(message.role) + len(self._text(message)) + CHARS_PER_TOKEN - 1) // CHARS_PER_TOKEN
             + IMAGE_TOKEN_ESTIMATE * self._image_count(message)

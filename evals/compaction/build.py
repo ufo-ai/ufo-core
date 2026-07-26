@@ -492,18 +492,14 @@ class SnapshotBuild:
             closer,
         )
         total = estimate_tokens(fixed)
+        guard = (COMPACTION_KEEP_MESSAGES + 1) // 2
         pieces: list[Slice] = []
-        while total < self.target_tokens:
+        while total < self.target_tokens or len(pieces) <= guard:
             piece = slices[cursor % len(slices)]
             cursor += 1
             pieces.append(piece)
             total += estimate_tokens(self._filler_unit(spec.id, len(pieces) - 1, piece, piece.text))
-        guard = (COMPACTION_KEEP_MESSAGES + 1) // 2
         span = len(pieces) - guard
-        if span < 1:
-            raise ValueError(
-                f"case {spec.id!r} filler is too small to keep planted facts out of the tail"
-            )
         injected: tuple[tuple[tuple[str, ...], list[FactSeed]], ...] = (
             (DISTRACTOR_POOL, [seed for seed in seeds if seed.fact.kind == "distractor"]),
             (BURIED_POOL, [seed for seed in seeds if seed.fact.kind == "buried"]),
