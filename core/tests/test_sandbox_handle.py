@@ -421,8 +421,8 @@ async def test_open_sandbox_configures_git_to_authenticate_to_the_proxy(
     db: None, tmp_path: Path
 ) -> None:
     """git is the one sandbox client that will not present the run token unprompted: its default
-    `anyauth` waits for a `407` challenge the default-deny proxy never sends, so its CONNECT arrives
-    unattributed and is refused. Every turn — holding a grant or a key or neither — gets
+    `anyauth` waits for a `407` challenge the proxy never sends, so its CONNECT arrives unattributed
+    and resolves to the base rules. Every turn — holding a grant or a key or neither — gets
     `http.proxyAuthMethod=basic`, so git presents the token on the first CONNECT."""
     workspace_id, conversation_id = await _conversation()
     carrier = _ResumeRecordingCarrier(container_id="sbx-1")

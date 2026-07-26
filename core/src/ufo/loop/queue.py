@@ -455,11 +455,11 @@ async def _open_sandbox(
     and the next process read this same column.
 
     git is the one sandbox client that will not present the run token unprompted: its default
-    `http.proxyAuthMethod=anyauth` waits for a `407` challenge the default-deny proxy never sends
-    (an unadmitted host is refused `403`), so its CONNECT arrives unattributed and is refused before
-    a rule is read. `GIT_PROXY_AUTH_ENV` sends the token on the first CONNECT as every other client
-    already does, and rides every turn whether or not it holds a grant or a key — reaching the proxy
-    at all precedes authenticating to anything beyond it."""
+    `http.proxyAuthMethod=anyauth` waits for a `407` challenge the proxy never sends, so its CONNECT
+    arrives unattributed. The proxy keys every rule on that token, so an unattributed connection
+    resolves to the base rules and reaches none of the turn's own egress — not the agent's internet
+    policy, not its grants. `GIT_PROXY_AUTH_ENV` presents the token on the first CONNECT as every
+    other client already does, and rides every turn whether or not it holds a grant or a key."""
     stored = await _stored_sandbox_handle(turn.conversation_id, turn.workspace_id)
     resume_id = None if stored is None else sandbox_handle_id(backend, stored)
     run = RunToken(workspace_id=turn.workspace_id, turn_id=turn.id)

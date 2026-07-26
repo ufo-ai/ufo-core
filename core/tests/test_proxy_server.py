@@ -737,9 +737,9 @@ async def test_real_git_reaches_the_public_internet_only_with_the_proxy_auth_con
     per-host ScopeRule exists or is needed — and the turn's `GIT_PROXY_AUTH_ENV` is what lets git
     present the run token that reaches that rule at all.
 
-    git's default `http.proxyAuthMethod=anyauth` waits for a `407` challenge this default-deny proxy
-    never sends, so an unconfigured CONNECT arrives unattributed, resolves to the base rules, and is
-    refused `403` before the internet rule is read. Configured, the tunnel opens and meters."""
+    git's default `http.proxyAuthMethod=anyauth` waits for a `407` challenge the proxy never sends,
+    so an unconfigured CONNECT arrives unattributed and resolves to the base rules — the turn's own
+    internet policy is keyed on the token it never sent. Configured, the tunnel opens and meters."""
     async with workspace_tx() as connection:
         seeded = await _seed_turn(connection)
 
