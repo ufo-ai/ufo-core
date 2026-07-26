@@ -2,11 +2,14 @@
 # One entrypoint, three roles (the compose command picks): `init` brings the schema and roles to
 # head once, `gateway` and `serve` are the long-running surfaces. The RLS-subject ufo_serve DSN is
 # derived here from UFO_CONTROL_PG_ROLE_SEED (the config toml carries no env interpolation) and
-# rendered into the serve config + exported for the gateway.
+# rendered into the serve config + exported for the gateway. The pack is rendered the same way:
+# `assistant` is the local default, and UFO_DEV_PACK selects a wider bundle (assistant_billing
+# adds Metronome so the billing chain can be driven locally).
 set -euo pipefail
 
 PG_HOST="${PG_HOST:-postgres:5432}"
 APP_DB="${APP_DB:-ufo}"
+DEV_PACK="${UFO_DEV_PACK:-assistant}"
 RENDERED_CONFIG="/tmp/ufo.toml"
 
 render_config() {
@@ -16,7 +19,8 @@ from ufo_control.rls import serve_dsn
 print(serve_dsn("${PG_HOST}", "${APP_DB}"))
 PY
 )"
-  sed "s#__SERVE_DSN__#${dsn}#g" /app/dev/ufo.toml > "$RENDERED_CONFIG"
+  sed -e "s#__SERVE_DSN__#${dsn}#g" -e "s#__PACK__#${DEV_PACK}#g" \
+    /app/dev/ufo.toml > "$RENDERED_CONFIG"
   export UFO_CONFIG="$RENDERED_CONFIG"
   export UFO_CONTROL_SERVE_DSN="$dsn"
 }

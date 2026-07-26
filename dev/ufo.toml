@@ -3,8 +3,10 @@
 # sandbox carrier (so the egress proxy runs embedded in serve). `__SERVE_DSN__` is rendered at
 # container start by dev/entrypoint.sh from UFO_CONTROL_PG_ROLE_SEED — the RLS-subject ufo_serve
 # role that rls-bootstrap creates.
+# Rendered by dev/entrypoint.sh from UFO_DEV_PACK (default `assistant`). Set
+# UFO_DEV_PACK=assistant_billing to add Metronome and drive the billing chain locally.
 [pack]
-name = "assistant"
+name = "__PACK__"
 
 # The assistant pack's extensions that require a named seam (the provider must be registered; the
 # API key itself is a per-workspace BYOK credential, fetched lazily, so serve boots without it).

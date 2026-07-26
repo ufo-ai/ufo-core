@@ -32,7 +32,7 @@ from ufo_control.gateway_invite import (
     InviteConsumed,
     InviteExpired,
 )
-from ufo_control.gateway_shared import SharedWorkspaces, serve_dsn
+from ufo_control.gateway_shared import EnsuredWorkspace, SharedWorkspaces, serve_dsn
 from ufo_control.gateway_slack_connect import ensure_delivery_table, slack_connect_from_env
 from ufo_control.gateway_store import OnboardClaim, OnboardStore
 from ufo_control.gateway_token import TOKEN_SECRET_ENV, mint_token
@@ -44,6 +44,9 @@ logger = logging.getLogger(__name__)
 WORKSPACE_BASE_URL_ENV = "UFO_WORKSPACE_BASE_URL"
 INVITE_REQUIRED_ENV = "UFO_INVITE_REQUIRED"
 DEBUG_SURFACE_PATH = "/surface/debug"
+FIRST_MOVE_PROMPT = "what first?"
+BILLING_CHOICE = "Set up billing"
+TOUR_CHOICE = "Show me what you can do"
 SCRIPT_URL_DEFAULT = 'UFO_URL="${UFO_URL:-https://flyingobject.ai}"'
 SHELLSCRIPT_MEDIA_TYPE = "text/x-shellscript"
 MAX_CHANNEL_BYTES = 64
@@ -129,9 +132,9 @@ class Onboarding:
                     accepted = directive(
                         "say", f"code {code} accepted. object #{number} identified. {stamp}"
                     )
-        workspace_id = await self.workspaces.ensure(claim.email_domain, claim.email)
-        await self.store.complete(claim.claim_id, workspace_id)
-        return self._signed_in(claim, workspace_id, install, accepted)
+        ensured = await self.workspaces.ensure(claim.email_domain, claim.email)
+        await self.store.complete(claim.claim_id, ensured.workspace_id)
+        return self._signed_in(claim, ensured, install, accepted)
 
     async def _invite_gate(
         self, claim: OnboardClaim, answer: str | None, install: bytes
@@ -177,13 +180,20 @@ class Onboarding:
                 )
 
     def _signed_in(
-        self, claim: OnboardClaim, workspace_id: str, install: bytes, accepted: bytes
+        self, claim: OnboardClaim, ensured: EnsuredWorkspace, install: bytes, accepted: bytes
     ) -> bytes:
         """The signed-in cap: token and workspace for every member, plus the `debugger` directive
         — the operator session debugger's base URL — only when the claim's channel-verified email
         domain is the operator's. The gate is server-side policy; every renderer (the terminal
-        client drops unknown verbs) simply carries or ignores the extra line."""
-        token = mint_token(self.token_secret, workspace_id, claim.email)
+        client drops unknown verbs) simply carries or ignores the extra line.
+
+        A terminal owner caps on `choose` rather than `ask`, so setting up billing costs one
+        selection: the workspace directive has already landed, so whichever option they pick
+        posts to `/surface/ufo` as their first message and the agent drives it from there. A
+        joined teammate caps on the ordinary prompt — billing is not theirs to set up. The web
+        renderer ends on its signed-in card rather than a prompt, so it is never handed a menu
+        it cannot drive."""
+        token = mint_token(self.token_secret, ensured.workspace_id, claim.email)
         operator = claim.email_domain == OPERATOR_EMAIL_DOMAIN
         return render(
             install,
@@ -194,7 +204,9 @@ class Onboarding:
             if operator
             else b"",
             directive("say", f"signed in: {claim.email}"),
-            directive("ask", PROMPT),
+            directive("choose", FIRST_MOVE_PROMPT, BILLING_CHOICE, TOUR_CHOICE)
+            if ensured.owner and claim.surface != WEB_CHANNEL
+            else directive("ask", PROMPT),
         )
 
 

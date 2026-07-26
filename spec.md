@@ -359,6 +359,14 @@ intent freezes a `byok` label at mint: host `tokens` whose model's serving provi
 (`ModelRegistry.key_slot_for` — the same resolution `client_for` applies, any provider) is stored
 by the workspace, so the rate card bills only pass-through usage.
 
+Buying the plan is a chat act like every other member action: the owner asks in their own private
+conversation, an extension tool returns a short-lived provider portal link for the payment method,
+and one of the extension's jobs activates the plan once the payment provider reports a card —
+provider ids and the pending package intent live in the extension's own store, so core gains no
+billing table, callback, webhook, or route (`metronome`'s `manage_billing` + `billing_activation`
+over Stripe and Metronome). Hosted onboarding only offers the owner the choice; the chat transport
+carries it.
+
 ## Model abstraction
 
 `ModelClient`: `complete(messages, tools, stream)` + token accounting + provider image/content

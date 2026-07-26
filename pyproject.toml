@@ -78,6 +78,7 @@ yc_cli = "ufo_ext_yc.manifest:manifest"
 
 [project.entry-points."ufo.pack"]
 assistant = "ufo_pack_assistant:pack"
+assistant_billing = "ufo_pack_assistant_billing:pack"
 assistant_eval = "ufo_pack_assistant_eval:pack"
 assistant_hosted = "ufo_pack_assistant_hosted:pack"
 chief_of_staff = "ufo_pack_chief_of_staff:pack"
@@ -181,6 +182,7 @@ exclude = ["**/__pycache__", "**/*.pyc"]
 "extensions/todos/ufo_ext_todos.py" = "ufo_ext_todos/__init__.py"
 "extensions/todos/todo_list_section.md" = "ufo_ext_todos/todo_list_section.md"
 "packs/assistant_dev/ufo_pack_assistant.py" = "ufo_pack_assistant.py"
+"packs/assistant_billing/ufo_pack_assistant_billing.py" = "ufo_pack_assistant_billing.py"
 "packs/assistant_eval/ufo_pack_assistant_eval.py" = "ufo_pack_assistant_eval.py"
 "packs/assistant_hosted/ufo_pack_assistant_hosted.py" = "ufo_pack_assistant_hosted.py"
 "packs/chief_of_staff/ufo_pack_chief_of_staff.py" = "ufo_pack_chief_of_staff/__init__.py"

@@ -28,9 +28,10 @@ from ufo.schema import tables
 from ufo.schema.records import DEFAULT_AGENT_NAME
 from ufo.workspace import ws
 
-from ufo_control import rls
+from ufo_control import gateway, rls
 from ufo_control.gateway import Onboarding
 from ufo_control.gateway_claim import ClaimWorkflow
+from ufo_control.gateway_directives import PROMPT
 from ufo_control.gateway_email import WorkEmailPolicy
 from ufo_control.gateway_invite import InviteAccepted, InviteCodes
 from ufo_control.gateway_shared import SharedWorkspaces
@@ -361,11 +362,15 @@ async def test_shared_ensure_writes_workspace_and_members(
     shared = SharedWorkspaces(workspace_url=SHARED_WORKSPACE_URL, pool=pool)
     try:
         assert not await shared.exists("sharedco.io")
-        workspace_id = await shared.ensure("sharedco.io", "Founder@Sharedco.io")
+        founder = await shared.ensure("sharedco.io", "Founder@Sharedco.io")
+        workspace_id = founder.workspace_id
         assert await shared.exists("sharedco.io")
         assert workspace_id == str(uuid5(NAMESPACE_DNS, "sharedco.io"))
-        assert await shared.ensure("sharedco.io", "founder@sharedco.io") == workspace_id
-        assert await shared.ensure("sharedco.io", "colleague@sharedco.io") == workspace_id
+        assert founder.owner
+        assert await shared.ensure("sharedco.io", "founder@sharedco.io") == founder
+        colleague = await shared.ensure("sharedco.io", "colleague@sharedco.io")
+        assert colleague.workspace_id == workspace_id
+        assert not colleague.owner
         assert await _members_in(workspace_id) == ["colleague@sharedco.io", "founder@sharedco.io"]
         with ws(UUID(workspace_id)):
             async with workspace_tx() as connection:
@@ -374,7 +379,9 @@ async def test_shared_ensure_writes_workspace_and_members(
                     .values(seat_limit=2, updated_at=sa.func.now())
                     .where(tables.workspace.c.id == UUID(workspace_id))
                 )
-        assert await shared.ensure("sharedco.io", "third@sharedco.io") == workspace_id
+        assert (await shared.ensure("sharedco.io", "third@sharedco.io")).workspace_id == (
+            workspace_id
+        )
         with ws(UUID(workspace_id)):
             async with workspace_tx() as connection:
                 seated = (
@@ -410,10 +417,12 @@ async def test_shared_ensure_seeds_the_default_agent(shared_role_env: SharedRole
     pool = await asyncpg.create_pool(shared_role_env.owner_dsn)
     shared = SharedWorkspaces(workspace_url=SHARED_WORKSPACE_URL, pool=pool)
     try:
-        workspace_id = await shared.ensure("agentco.io", "founder@agentco.io")
+        workspace_id = (await shared.ensure("agentco.io", "founder@agentco.io")).workspace_id
         expected = [(DEFAULT_AGENT_NAME, DEFAULT_AGENT_PROMPT, DEFAULT_AGENT_MODEL)]
         assert await _default_agents_in(workspace_id) == expected
-        assert await shared.ensure("agentco.io", "founder@agentco.io") == workspace_id
+        assert (
+            await shared.ensure("agentco.io", "founder@agentco.io")
+        ).workspace_id == workspace_id
         assert await _default_agents_in(workspace_id) == expected
     finally:
         await pool.close()
@@ -490,6 +499,12 @@ async def test_shared_onboard_creates_then_joins_a_workspace(
     assert "invite" not in joined.decode()
     assert verify_token(joined_directives["token"], UUID(workspace_id)) == "mate@sharedtwo.io"
     assert await _members_in(workspace_id) == ["boss@sharedtwo.io", "mate@sharedtwo.io"]
+    assert directives["choose"] == "\t".join(
+        (gateway.FIRST_MOVE_PROMPT, gateway.BILLING_CHOICE, gateway.TOUR_CHOICE)
+    )
+    assert "ask" not in directives
+    assert joined_directives["ask"] == PROMPT
+    assert "choose" not in joined_directives
 
 
 def test_invite_cli_rejects_a_nonpositive_object_number() -> None:

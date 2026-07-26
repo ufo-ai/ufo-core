@@ -26,7 +26,7 @@ from ufo_control.gateway import (
     WORKSPACE_BASE_URL_ENV,
     gateway_app,
 )
-from ufo_control.gateway_directives import directive, render
+from ufo_control.gateway_directives import PROMPT, directive, render
 from ufo_control.gateway_email import (
     AWS_ROLE_ARN_ENV,
     AWS_WEB_IDENTITY_TOKEN_FILE_ENV,
@@ -128,6 +128,10 @@ def _fields(directives: list[dict[str, object]], verb: str) -> list[str]:
 def test_web_channel_walks_email_code_invite_to_the_signed_in_card(
     gateway_postgres: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    """The web renderer end to end, and the one directive it must never receive: this member owns
+    the workspace they just created, but the page ends on its signed-in card rather than a prompt,
+    so it is never handed a `choose` menu it has no way to drive. The terminal owner's billing
+    choice is asserted in test_rls."""
     _configure(monkeypatch, tmp_path, gateway_postgres)
     sender = RecordingSender()
     monkeypatch.setattr(gateway, "email_sender_from_env", lambda: sender)
@@ -154,6 +158,8 @@ def test_web_channel_walks_email_code_invite_to_the_signed_in_card(
     assert workspace == WORKSPACE_URL
     assert not _fields(signed_in, "debugger")
     assert all(token not in text for text in _fields(signed_in, "say"))
+    assert not _fields(signed_in, "choose")
+    assert _fields(signed_in, "ask") == [PROMPT]
 
 
 def test_disabled_invite_gate_opens_a_new_workspace_without_a_code(

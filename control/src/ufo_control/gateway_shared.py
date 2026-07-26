@@ -11,7 +11,7 @@ from ufo.db import workspace_tx
 from ufo.onboarding import DEFAULT_AGENT_MODEL, DEFAULT_AGENT_PROMPT
 from ufo.schema import tables
 from ufo.schema.records import DEFAULT_AGENT_NAME
-from ufo.seats import create_member
+from ufo.seats import create_member, owner_member_id
 from ufo.workspace import ws
 
 SERVE_DSN_ENV = "UFO_CONTROL_SERVE_DSN"
@@ -28,6 +28,16 @@ def serve_dsn() -> str:
 
 
 @dataclass(frozen=True)
+class EnsuredWorkspace:
+    """The binding hosted onboarding just made: the workspace this member belongs to, and whether
+    they own it — the workspace's earliest member. The owner flag is what lets the concluding
+    prompt offer billing to the one member who can act on it."""
+
+    workspace_id: str
+    owner: bool
+
+
+@dataclass(frozen=True)
 class SharedWorkspaces:
     """Create or join the one workspace owned by a verified domain."""
 
@@ -37,7 +47,7 @@ class SharedWorkspaces:
     async def exists(self, domain: str) -> bool:
         return await self._existing(domain) is not None
 
-    async def ensure(self, domain: str, email: str) -> str:
+    async def ensure(self, domain: str, email: str) -> EnsuredWorkspace:
         workspace_id = await self._existing(domain) or uuid5(NAMESPACE_DNS, domain.lower())
         member = email.strip().lower()
         with ws(workspace_id):
@@ -47,7 +57,7 @@ class SharedWorkspaces:
                     .values(id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now())
                     .on_conflict_do_nothing(index_elements=[tables.workspace.c.id])
                 )
-                await create_member(connection, workspace_id, member)
+                member_id = await create_member(connection, workspace_id, member)
                 await connection.execute(
                     insert(tables.agent)
                     .values(
@@ -63,7 +73,8 @@ class SharedWorkspaces:
                         index_elements=[tables.agent.c.workspace_id, tables.agent.c.name]
                     )
                 )
-        return str(workspace_id)
+                owner = await owner_member_id(connection, workspace_id)
+        return EnsuredWorkspace(workspace_id=str(workspace_id), owner=owner == member_id)
 
     async def _existing(self, domain: str) -> UUID | None:
         normalized = domain.lower()

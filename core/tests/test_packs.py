@@ -10,6 +10,7 @@ collision cases stub discovery — the real dependency — to drive the real nar
 
 import pytest
 import ufo_pack_assistant as assistant
+import ufo_pack_assistant_billing as assistant_billing
 import ufo_pack_assistant_eval as assistant_eval
 import ufo_pack_assistant_hosted as assistant_hosted
 import ufo_pack_chief_of_staff as chief_of_staff
@@ -34,6 +35,29 @@ def test_activating_the_assistant_pack_makes_exactly_its_bundle_active() -> None
     followed by the pack's own (here empty) manifest — the coherent config a serve brings up."""
     names = [manifest.name for manifest in load_manifests(assistant.NAME)]
     assert names == [*assistant.EXTENSIONS, assistant.NAME]
+
+
+def test_assistant_billing_pack_is_the_local_bundle_plus_metronome() -> None:
+    """The opt-in local billing bundle: everything the assistant pack has, plus the one extension
+    that owns the billing chain — so `manage_billing` and the activation job exist on a laptop
+    without dragging in the managed backends `assistant_hosted` needs."""
+    packs = discovered_packs()
+    assert assistant_billing.NAME in packs
+    assert packs[assistant_billing.NAME].extensions == assistant_billing.EXTENSIONS
+    assert set(assistant.EXTENSIONS) < set(assistant_billing.EXTENSIONS)
+    assert set(assistant_billing.EXTENSIONS) - set(assistant.EXTENSIONS) == {"metronome"}
+    assert "metronome" not in assistant.EXTENSIONS
+
+
+def test_activating_the_assistant_billing_pack_brings_up_the_billing_surface() -> None:
+    """Naming it makes the billing tool, job, and prompt section active — the proof that a local
+    deploy can service the `Set up billing` choice hosted onboarding offers the owner."""
+    manifests = load_manifests(assistant_billing.NAME)
+    assert [m.name for m in manifests] == [*assistant_billing.EXTENSIONS, assistant_billing.NAME]
+    metronome = next(m for m in manifests if m.name == "metronome")
+    assert "manage_billing" in {tool.name for tool in metronome.tools}
+    assert "billing_activation" in {job.name for job in metronome.jobs}
+    assert "billing" in {section.name for section in metronome.prompt_sections}
 
 
 def test_assistant_eval_pack_is_discovered_with_its_bundle() -> None:

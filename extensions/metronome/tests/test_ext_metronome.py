@@ -13,6 +13,7 @@ import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from urllib.parse import parse_qsl
 from uuid import UUID, uuid4
 
 import httpx
@@ -204,10 +205,10 @@ async def _acked() -> set[tuple[UUID, int]]:
         return {(row.ledger_id, row.from_amount) for row in result.all()}
 
 
-def test_manifest_declares_three_cron_jobs_three_tools_one_section() -> None:
+def test_manifest_declares_four_cron_jobs_four_tools_two_sections() -> None:
     declared = metronome.manifest()
     assert declared.name == "metronome"
-    usage, seats, approvals = declared.jobs
+    usage, seats, approvals, billing = declared.jobs
     assert usage.name == "usage_shipper"
     assert usage.schedule == "0 * * * * *"
     assert usage.handler is metronome._ship
@@ -217,11 +218,19 @@ def test_manifest_declares_three_cron_jobs_three_tools_one_section() -> None:
     assert approvals.name == "seat_approvals"
     assert approvals.schedule == "30 * * * * *"
     assert approvals.handler is metronome._ask_seat_approvals
-    assert [tool.name for tool in declared.tools] == ["grant_seat", "revoke_seat", "list_seats"]
+    assert billing.name == "billing_activation"
+    assert billing.schedule == "45 * * * * *"
+    assert billing.handler is metronome._activate_billing
+    assert [tool.name for tool in declared.tools] == [
+        "grant_seat",
+        "revoke_seat",
+        "list_seats",
+        "manage_billing",
+    ]
     assert all(tool.side_effecting for tool in declared.tools[:2])
     assert not declared.tools[2].side_effecting
-    (section,) = declared.prompt_sections
-    assert section.name == "seats"
+    assert declared.tools[3].side_effecting
+    assert [section.name for section in declared.prompt_sections] == ["seats", "billing"]
     (slot,) = declared.credentials
     assert slot.name == "anthropic_api_key"
     assert slot.injection is None
@@ -515,7 +524,11 @@ def _seat_tools() -> tuple[dict[str, ToolDef], dict[str, ExtensionContext]]:
 
 
 def _tool_context(
-    workspace_id: UUID, ext: ExtensionContext, tmp_path: Path, member_id: UUID | None
+    workspace_id: UUID,
+    ext: ExtensionContext,
+    tmp_path: Path,
+    member_id: UUID | None,
+    audience_member_id: UUID | None,
 ) -> ToolContext:
     return ToolContext(
         sandbox=SandboxSession(
@@ -536,7 +549,7 @@ def _tool_context(
         agent=Agent(prompt="p", model=MODEL),
         spawn=_unavailable_spawn,
         speaker_member_id=member_id,
-        audience_member_id=member_id,
+        audience_member_id=audience_member_id,
         artifact_token_secret="",
         ext=ext,
     )
@@ -547,7 +560,7 @@ async def _run_tool(
 ) -> dict[str, object]:
     registry, ext_by_tool = _seat_tools()
     tool = registry[name]
-    ctx = _tool_context(workspace_id, ext_by_tool[name], tmp_path, member_id)
+    ctx = _tool_context(workspace_id, ext_by_tool[name], tmp_path, member_id, member_id)
     with ws(workspace_id):
         result = await tool.handler(ctx, tool.input_model.model_validate(args))
     return json.loads(result.content[0].text)
@@ -1059,3 +1072,915 @@ async def test_revoke_marks_the_member_as_decided_for_the_approval_job(
     with ws(workspace_id):
         marker = await ext.store.get(f"{metronome.SEAT_APPROVAL_KEY_PREFIX}late@example.com")
     assert marker is not None
+
+
+STRIPE_KEY = "sk_test_0xfeedface"
+PORTAL_CONFIGURATION = "bpc_test_config"
+PACKAGE_ALIAS = "Base Plan"
+SAVED_CARD = "pm_card_visa"
+
+
+def _billing_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(metronome.METRONOME_BEARER_TOKEN_ENV, TOKEN)
+    monkeypatch.setenv(metronome.STRIPE_SECRET_KEY_ENV, STRIPE_KEY)
+    monkeypatch.setenv(metronome.STRIPE_PORTAL_CONFIGURATION_ENV, PORTAL_CONFIGURATION)
+    monkeypatch.setenv(metronome.METRONOME_PACKAGE_ALIAS_ENV, PACKAGE_ALIAS)
+
+
+class _Providers:
+    """Stripe and Metronome behind one MockTransport: it records every request and answers from
+    provider state the test drives — whether a card is on file, whether the ingest alias is already
+    taken, which path is failing. The stand-in is never the thing asserted; the assertions read the
+    recorded requests, the returned links, and the durable record."""
+
+    def __init__(self) -> None:
+        self.requests: list[httpx.Request] = []
+        self.default_payment_method: str | None = None
+        self.stripe_customers: dict[str, str] = {}
+        self.metronome_customers: dict[str, str] = {}
+        self.contracts: dict[str, list[dict[str, str]]] = {}
+        self.uniqueness_keys: set[str] = set()
+        self.hidden_aliases: set[str] = set()
+        self.hidden_contracts: set[str] = set()
+        self.failing: set[str] = set()
+        self.sessions = 0
+
+    @property
+    def transport(self) -> httpx.MockTransport:
+        return httpx.MockTransport(self.handle)
+
+    def handle(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        path = request.url.path
+        if path in self.failing:
+            return httpx.Response(500, json={"message": "provider is down"})
+        if request.url.host == "api.stripe.com":
+            return self._stripe(request, path)
+        return self._metronome(request, path)
+
+    def _stripe(self, request: httpx.Request, path: str) -> httpx.Response:
+        if path == "/v1/customers" and request.method == "POST":
+            customer_id = self.stripe_customers.setdefault(
+                request.headers["idempotency-key"], f"cus_{len(self.stripe_customers) + 1}"
+            )
+            return httpx.Response(200, json={"id": customer_id})
+        if path.startswith("/v1/customers/") and request.method == "GET":
+            return httpx.Response(
+                200,
+                json={
+                    "id": path.rsplit("/", 1)[-1],
+                    "invoice_settings": {"default_payment_method": self.default_payment_method},
+                },
+            )
+        if path == "/v1/billing_portal/sessions" and request.method == "POST":
+            self.sessions += 1
+            return httpx.Response(
+                200, json={"url": f"https://billing.stripe.com/session/{self.sessions}"}
+            )
+        raise AssertionError(f"unexpected stripe call {request.method} {path}")
+
+    def _metronome(self, request: httpx.Request, path: str) -> httpx.Response:
+        body = json.loads(request.content) if request.content else {}
+        if path == "/v1/customers" and request.method == "GET":
+            alias = request.url.params["ingest_alias"]
+            found = self.metronome_customers.get(alias)
+            hidden = alias in self.hidden_aliases
+            self.hidden_aliases.discard(alias)
+            data = [] if found is None or hidden else [{"id": found}]
+            return httpx.Response(200, json={"data": data})
+        if path == "/v1/customers" and request.method == "POST":
+            (alias,) = body["ingest_aliases"]
+            if alias in self.metronome_customers:
+                return httpx.Response(409, json={"message": "ingest alias already in use"})
+            customer_id = f"mc_{len(self.metronome_customers) + 1}"
+            self.metronome_customers[alias] = customer_id
+            return httpx.Response(200, json={"data": {"id": customer_id}})
+        if path == metronome.CONTRACTS_LIST_PATH and request.method == "POST":
+            customer_id = body["customer_id"]
+            listed = [
+                contract
+                for contract in self.contracts.get(customer_id, ())
+                if contract["uniqueness_key"] not in self.hidden_contracts
+            ]
+            self.hidden_contracts.clear()
+            return httpx.Response(200, json={"data": listed})
+        if path == "/v1/contracts/create" and request.method == "POST":
+            key = body["uniqueness_key"]
+            if key in self.uniqueness_keys:
+                return httpx.Response(
+                    409, json={"message": "This uniqueness key has already been used."}
+                )
+            contract_id = f"ct_{sum(len(held) for held in self.contracts.values()) + 1}"
+            self.hold_contract(body["customer_id"], contract_id, key)
+            return httpx.Response(200, json={"data": {"id": contract_id}})
+        raise AssertionError(f"unexpected metronome call {request.method} {path}")
+
+    def hold_contract(self, customer_id: str, contract_id: str, uniqueness_key: str) -> None:
+        """Record a contract the way Metronome does: on the customer, carrying the uniqueness key
+        that created it — the field a later read identifies its owner by. Tests seed pre-existing
+        contracts through this too, so a seeded one is indistinguishable from a created one."""
+        self.uniqueness_keys.add(uniqueness_key)
+        self.contracts.setdefault(customer_id, []).append(
+            {"id": contract_id, "uniqueness_key": uniqueness_key}
+        )
+
+
+def _calls(providers: _Providers, method: str, path: str) -> list[httpx.Request]:
+    return [r for r in providers.requests if r.method == method and r.url.path == path]
+
+
+def _form(request: httpx.Request) -> dict[str, str]:
+    return {key: value for key, value in parse_qsl(request.content.decode())}
+
+
+async def _billing_seed() -> tuple[UUID, UUID, UUID, UUID]:
+    """A workspace with an owner, a teammate, the default agent, and the owner's own conversation —
+    the venue the activation job notifies into."""
+    workspace_id, owner_id, mate_id = uuid4(), uuid4(), uuid4()
+    agent_id, conversation_id = uuid4(), uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.workspace).values(
+                id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
+            )
+        )
+        for member_id, email, created in (
+            (owner_id, "owner@example.com", datetime(2026, 1, 1, tzinfo=UTC)),
+            (mate_id, "mate@example.com", datetime(2026, 6, 1, tzinfo=UTC)),
+        ):
+            await connection.execute(
+                sa.insert(tables.member).values(
+                    id=member_id,
+                    workspace_id=workspace_id,
+                    email=email,
+                    seated_at=created,
+                    created_at=created,
+                    updated_at=created,
+                )
+            )
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=agent_id,
+                workspace_id=workspace_id,
+                name="assistant",
+                prompt="p",
+                model=MODEL,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=conversation_id,
+                workspace_id=workspace_id,
+                surface="ufo",
+                queue_key="dm-owner",
+                member_id=owner_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return workspace_id, owner_id, mate_id, conversation_id
+
+
+def _billing_tool() -> tuple[ToolDef, ExtensionContext]:
+    declared, ext_by_tool = turn_tools(
+        (metronome.manifest(),), CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    )
+    tool = next(t for t in declared if t.name == metronome.MANAGE_BILLING_TOOL)
+    return tool, ext_by_tool[metronome.MANAGE_BILLING_TOOL]
+
+
+async def _manage_billing(
+    workspace_id: UUID,
+    tmp_path: Path,
+    speaker: UUID | None,
+    audience: UUID | None,
+    action: str,
+) -> dict[str, object]:
+    tool, ext = _billing_tool()
+    ctx = _tool_context(workspace_id, ext, tmp_path, speaker, audience)
+    with ws(workspace_id):
+        result = await tool.handler(ctx, tool.input_model.model_validate({"action": action}))
+    return json.loads(result.content[0].text)
+
+
+async def _stored_record(workspace_id: UUID) -> metronome.BillingRecord | None:
+    ctx = context_for(metronome.NAME, frozenset())
+    with ws(workspace_id):
+        stored = await ctx.store.get(metronome.BILLING_KEY)
+    return None if stored is None else metronome.BillingRecord.model_validate(stored)
+
+
+def _activation(workspace_id: UUID, providers: _Providers) -> metronome.BillingActivation:
+    return metronome.BillingActivation(
+        ctx=context_for(metronome.NAME, frozenset(), invoker=_RecordingInvoker(workspace_id)),
+        transport=providers.transport,
+    )
+
+
+async def _owner_turns(conversation_id: UUID) -> list[str]:
+    async with workspace_tx() as connection:
+        rows = (
+            await connection.execute(
+                sa.select(tables.turn.c.inbound).where(
+                    tables.turn.c.conversation_id == conversation_id
+                )
+            )
+        ).all()
+    return [row.inbound for row in rows]
+
+
+async def test_setup_returns_the_payment_method_portal_link_and_records_pending_work(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole owner-facing act: one Stripe Customer under a workspace-deterministic idempotency
+    key, one portal session narrowed to the payment-method flow, and a durable pending record the
+    activation job owns — all before the owner is handed the link."""
+    _billing_env(monkeypatch)
+    workspace_id, owner_id, _mate_id, _conversation_id = await _billing_seed()
+    providers = _Providers()
+    monkeypatch.setattr(metronome, "BILLING_TRANSPORT", providers.transport)
+
+    payload = await _manage_billing(workspace_id, tmp_path, owner_id, owner_id, "setup")
+
+    (customer_call,) = _calls(providers, "POST", "/v1/customers")
+    assert customer_call.url.host == "api.stripe.com"
+    assert customer_call.headers["authorization"] == f"Bearer {STRIPE_KEY}"
+    assert customer_call.headers["idempotency-key"] == f"ufo-stripe-customer:{workspace_id}"
+    assert _form(customer_call)["metadata[workspace_id]"] == str(workspace_id)
+
+    (session_call,) = _calls(providers, "POST", "/v1/billing_portal/sessions")
+    assert _form(session_call) == {
+        "customer": "cus_1",
+        "configuration": PORTAL_CONFIGURATION,
+        "flow_data[type]": "payment_method_update",
+    }
+    assert payload == {
+        "portal_url": "https://billing.stripe.com/session/1",
+        "stripe_customer_id": "cus_1",
+        "package": PACKAGE_ALIAS,
+    }
+
+    record = await _stored_record(workspace_id)
+    assert record is not None
+    assert record.stripe_customer_id == "cus_1"
+    assert record.package_alias == PACKAGE_ALIAS
+    assert record.metronome_customer_id is None
+    assert record.metronome_contract_id is None
+    assert record.activated_at is None
+    assert not [r for r in providers.requests if "subscription" in r.url.path]
+
+
+async def test_billing_is_refused_off_the_owners_private_conversation(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every gate runs before any provider call: a teammate, a speakerless turn, and the owner
+    speaking to a shared audience are all refused with nothing sent and nothing recorded."""
+    _billing_env(monkeypatch)
+    workspace_id, owner_id, mate_id, _conversation_id = await _billing_seed()
+    providers = _Providers()
+    monkeypatch.setattr(metronome, "BILLING_TRANSPORT", providers.transport)
+
+    with pytest.raises(ValueError, match="only the workspace owner"):
+        await _manage_billing(workspace_id, tmp_path, mate_id, mate_id, "setup")
+    with pytest.raises(ValueError, match="speaking member"):
+        await _manage_billing(workspace_id, tmp_path, None, None, "setup")
+    with pytest.raises(ValueError, match="private conversation"):
+        await _manage_billing(workspace_id, tmp_path, owner_id, None, "setup")
+    with pytest.raises(ValueError, match="private conversation"):
+        await _manage_billing(workspace_id, tmp_path, owner_id, mate_id, "portal")
+
+    assert providers.requests == []
+    assert await _stored_record(workspace_id) is None
+
+
+async def test_the_job_waits_for_a_saved_card_then_provisions_customer_and_contract(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing happens on Metronome until Stripe reports a default payment method; once it does, the
+    customer carries the workspace UUID as its ingest alias with the Stripe automatic-collection
+    configuration, the contract comes from the configured package under a stable uniqueness key, and
+    the owner hears once."""
+    _billing_env(monkeypatch)
+    workspace_id, owner_id, _mate_id, conversation_id = await _billing_seed()
+    providers = _Providers()
+    monkeypatch.setattr(metronome, "BILLING_TRANSPORT", providers.transport)
+    await _manage_billing(workspace_id, tmp_path, owner_id, owner_id, "setup")
+
+    with ws(workspace_id):
+        await _activation(workspace_id, providers).run()
+    assert [r.url.host for r in providers.requests if r.url.host == "api.metronome.com"] == []
+    record = await _stored_record(workspace_id)
+    assert record is not None
+    assert record.metronome_customer_id is None
+    assert await _owner_turns(conversation_id) == []
+
+    providers.default_payment_method = SAVED_CARD
+    with ws(workspace_id):
+        await _activation(workspace_id, providers).run()
+
+    (created,) = _calls(providers, "POST", "/v1/customers")[1:]
+    body = json.loads(created.content)
+    assert created.headers["idempotency-key"] == f"ufo-metronome-customer:{workspace_id}"
+    assert body["ingest_aliases"] == [str(workspace_id)]
+    assert body["customer_billing_provider_configurations"] == [
+        {
+            "billing_provider": "stripe",
+            "delivery_method": "direct_to_billing_provider",
+            "configuration": {
+                "stripe_customer_id": "cus_1",
+                "stripe_collection_method": "charge_automatically",
+            },
+        }
+    ]
+    (contract,) = _calls(providers, "POST", "/v1/contracts/create")
+    contract_body = json.loads(contract.content)
+    assert contract_body["customer_id"] == "mc_1"
+    assert contract_body["package_alias"] == PACKAGE_ALIAS
+    assert contract_body["uniqueness_key"] == f"ufo-contract:{workspace_id}"
+    assert "package_id" not in contract_body
+
+    record = await _stored_record(workspace_id)
+    assert record is not None
+    assert contract_body["starting_at"] == record.contract_starting_at.isoformat()
+    assert record.metronome_customer_id == "mc_1"
+    assert record.metronome_contract_id == "ct_1"
+    assert record.activated_at is not None
+    (told,) = await _owner_turns(conversation_id)
+    assert "billing activated" in told
+    assert PACKAGE_ALIAS in told
+
+
+async def test_repeated_setups_and_ticks_never_duplicate_a_customer_or_contract(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The idempotence proof: two setups and four ticks leave exactly one Stripe customer, one
+    Metronome customer, one contract, and one notification."""
+    _billing_env(monkeypatch)
+    workspace_id, owner_id, _mate_id, conversation_id = await _billing_seed()
+    providers = _Providers()
+    providers.default_payment_method = SAVED_CARD
+    monkeypatch.setattr(metronome, "BILLING_TRANSPORT", providers.transport)
+
+    await _manage_billing(workspace_id, tmp_path, owner_id, owner_id, "setup")
+    with ws(workspace_id):
+        await _activation(workspace_id, providers).run()
+        await _activation(workspace_id, providers).run()
+    await _manage_billing(workspace_id, tmp_path, owner_id, owner_id, "setup")
+    with ws(workspace_id):
+        await _activation(workspace_id, providers).run()
+        await _activation(workspace_id, providers).run()
+
+    stripe_creates = [
+        r for r in _calls(providers, "POST", "/v1/customers") if r.url.host == "api.stripe.com"
+    ]
+    metronome_creates = [
+        r for r in _calls(providers, "POST", "/v1/customers") if r.url.host == "api.metronome.com"
+    ]
+    assert len(stripe_creates) == 1
+    assert stripe_creates[0].headers["idempotency-key"] == f"ufo-stripe-customer:{workspace_id}"
+    assert providers.stripe_customers == {f"ufo-stripe-customer:{workspace_id}": "cus_1"}
+    assert len(metronome_creates) == 1
+    assert len(_calls(providers, "POST", "/v1/contracts/create")) == 1
+    assert len(_calls(providers, "POST", "/v1/billing_portal/sessions")) == 2
+    assert len(await _owner_turns(conversation_id)) == 1
+    record = await _stored_record(workspace_id)
+    assert record is not None
+    assert (record.metronome_customer_id, record.metronome_contract_id) == ("mc_1", "ct_1")
+
+
+async def test_a_conflicting_create_reconciles_to_the_object_that_already_exists(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A racing tick already holds the ingest alias: the create 409s and the job settles on the
+    existing customer, under the same key it first tried — a key is never rotated past a
+    conflict."""
+    _billing_env(monkeypatch)
+    workspace_id, owner_id, _mate_id, _conversation_id = await _billing_seed()
+    providers = _Providers()
+    providers.default_payment_method = SAVED_CARD
+    providers.metronome_customers[str(workspace_id)] = "mc_racer"
+    providers.hidden_aliases.add(str(workspace_id))
+    monkeypatch.setattr(metronome, "BILLING_TRANSPORT", providers.transport)
+    await _manage_billing(workspace_id, tmp_path, owner_id, owner_id, "setup")
+
+    with ws(workspace_id):
+        await _activation(workspace_id, providers).run()
+
+    metronome_creates = [
+        r for r in _calls(providers, "POST", "/v1/customers") if r.url.host == "api.metronome.com"
+    ]
+    assert len(metronome_creates) == 1
+    assert metronome_creates[0].headers["idempotency-key"] == (
+        f"ufo-metronome-customer:{workspace_id}"
+    )
+    record = await _stored_record(workspace_id)
+    assert record is not None
+    assert record.metronome_customer_id == "mc_racer"
+    assert record.metronome_contract_id == "ct_1"
+
+
+async def test_an_existing_contract_is_adopted_rather_than_created_twice(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A workspace whose record was lost after provisioning: both provider objects already exist, so
+    a tick adopts them and creates nothing."""
+    _billing_env(monkeypatch)
+    workspace_id, owner_id, _mate_id, _conversation_id = await _billing_seed()
+    providers = _Providers()
+    providers.default_payment_method = SAVED_CARD
+    providers.metronome_customers[str(workspace_id)] = "mc_old"
+    providers.hold_contract("mc_old", "ct_old", f"ufo-contract:{workspace_id}")
+    monkeypatch.setattr(metronome, "BILLING_TRANSPORT", providers.transport)
+    await _manage_billing(workspace_id, tmp_path, owner_id, owner_id, "setup")
+
+    with ws(workspace_id):
+        await _activation(workspace_id, providers).run()
+
+    assert [
+        r for r in _calls(providers, "POST", "/v1/customers") if r.url.host == "api.metronome.com"
+    ] == []
+    assert _calls(providers, "POST", "/v1/contracts/create") == []
+    record = await _stored_record(workspace_id)
+    assert record is not None
+    assert (record.metronome_customer_id, record.metronome_contract_id) == ("mc_old", "ct_old")
+
+
+async def test_a_failed_provider_call_leaves_pending_work_for_the_next_tick(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Contract creation fails: the customer already recorded survives, activation does not happen,
+    the owner is not told, and the next healthy tick finishes from exactly there."""
+    _billing_env(monkeypatch)
+    workspace_id, owner_id, _mate_id, conversation_id = await _billing_seed()
+    providers = _Providers()
+    providers.default_payment_method = SAVED_CARD
+    providers.failing.add("/v1/contracts/create")
+    monkeypatch.setattr(metronome, "BILLING_TRANSPORT", providers.transport)
+    await _manage_billing(workspace_id, tmp_path, owner_id, owner_id, "setup")
+
+    with ws(workspace_id), pytest.raises(metronome.MetronomeError):
+        await _activation(workspace_id, providers).run()
+    record = await _stored_record(workspace_id)
+    assert record is not None
+    assert record.metronome_customer_id == "mc_1"
+    assert record.metronome_contract_id is None
+    assert record.activated_at is None
+    assert await _owner_turns(conversation_id) == []
+
+    providers.failing.clear()
+    with ws(workspace_id):
+        await _activation(workspace_id, providers).run()
+    record = await _stored_record(workspace_id)
+    assert record is not None
+    assert record.metronome_contract_id == "ct_1"
+    assert record.activated_at is not None
+    assert len(await _owner_turns(conversation_id)) == 1
+    assert (
+        len(
+            [
+                r
+                for r in _calls(providers, "POST", "/v1/customers")
+                if r.url.host == "api.metronome.com"
+            ]
+        )
+        == 1
+    )
+
+
+async def test_activation_waits_for_an_owner_conversation_before_marking_active(
+    db: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No venue to speak into yet: the providers are provisioned but the record stays pending, so
+    the owner is told on a later tick instead of never."""
+    _billing_env(monkeypatch)
+    workspace_id, owner_id, _mate_id, _conversation_id = await _billing_seed()
+    providers = _Providers()
+    providers.default_payment_method = SAVED_CARD
+    monkeypatch.setattr(metronome, "BILLING_TRANSPORT", providers.transport)
+    await _manage_billing(workspace_id, tmp_path, owner_id, owner_id, "setup")
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.conversation)
+            .values(member_id=None, updated_at=sa.func.now())
+            .where(tables.conversation.c.workspace_id == workspace_id)
+        )
+
+    with ws(workspace_id):
+        await _activation(workspace_id, providers).run()
+
+    record = await _stored_record(workspace_id)
+    assert record is not None
+    assert record.metronome_contract_id == "ct_1"
+    assert record.activated_at is None
+
+
+async def test_status_reads_provider_truth_and_portal_opens_a_full_session(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`status` answers from the providers, not from our record — an unconfigured workspace, then a
+    card-less one, then a live plan — and `portal` mints a fresh unnarrowed session."""
+    _billing_env(monkeypatch)
+    workspace_id, owner_id, _mate_id, _conversation_id = await _billing_seed()
+    providers = _Providers()
+    monkeypatch.setattr(metronome, "BILLING_TRANSPORT", providers.transport)
+
+    assert await _manage_billing(workspace_id, tmp_path, owner_id, owner_id, "status") == {
+        "configured": False
+    }
+    with pytest.raises(ValueError, match="not set up"):
+        await _manage_billing(workspace_id, tmp_path, owner_id, owner_id, "portal")
+
+    await _manage_billing(workspace_id, tmp_path, owner_id, owner_id, "setup")
+    pending = await _manage_billing(workspace_id, tmp_path, owner_id, owner_id, "status")
+    assert pending == {
+        "configured": True,
+        "stripe_customer_id": "cus_1",
+        "payment_method_on_file": False,
+        "package": PACKAGE_ALIAS,
+        "metronome_customer_id": None,
+        "metronome_contract_id": None,
+        "plan_active": False,
+    }
+
+    providers.default_payment_method = SAVED_CARD
+    with ws(workspace_id):
+        await _activation(workspace_id, providers).run()
+    live = await _manage_billing(workspace_id, tmp_path, owner_id, owner_id, "status")
+    assert live == {
+        "configured": True,
+        "stripe_customer_id": "cus_1",
+        "payment_method_on_file": True,
+        "package": PACKAGE_ALIAS,
+        "metronome_customer_id": "mc_1",
+        "metronome_contract_id": "ct_1",
+        "plan_active": True,
+    }
+
+    portal = await _manage_billing(workspace_id, tmp_path, owner_id, owner_id, "portal")
+    session_calls = _calls(providers, "POST", "/v1/billing_portal/sessions")
+    assert _form(session_calls[-1]) == {
+        "customer": "cus_1",
+        "configuration": PORTAL_CONFIGURATION,
+    }
+    assert portal == {"portal_url": f"https://billing.stripe.com/session/{providers.sessions}"}
+
+
+async def test_billing_job_fires_through_job_runner(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The manifest's job over the real JobRunner: candidates find the workspace, the dispatcher
+    binds it, and a workspace with no billing record is a silent no-op."""
+    _billing_env(monkeypatch)
+    workspace_id, owner_id, _mate_id, conversation_id = await _billing_seed()
+    providers = _Providers()
+    providers.default_payment_method = SAVED_CARD
+    monkeypatch.setattr(metronome, "BILLING_TRANSPORT", providers.transport)
+    unconfigured, _, _ = await _seed()
+
+    await _manage_billing(workspace_id, tmp_path, owner_id, owner_id, "setup")
+    runner = JobRunner(
+        bindings=bindings_from((metronome.manifest(),), ()),
+        registry=_registry(),
+        invoker_factory=_RecordingInvoker,
+    )
+    job = f"{metronome.NAME}:{metronome.BILLING_JOB_NAME}"
+    candidates = await runner.candidates(job)
+    assert {workspace_id, unconfigured} <= set(candidates)
+    for candidate in candidates:
+        await runner.fire(job, candidate)
+
+    record = await _stored_record(workspace_id)
+    assert record is not None
+    assert record.metronome_contract_id == "ct_1"
+    assert len(await _owner_turns(conversation_id)) == 1
+    assert await _stored_record(unconfigured) is None
+
+
+async def test_a_lost_activation_mark_re_notifies_into_the_same_turn(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The notify-once claim under the failure it is built for: the invoke landed but the mark that
+    records it did not. The next tick re-invokes under the same idempotency key, so real admission
+    collapses it onto the turn the owner already has instead of telling them twice."""
+    _billing_env(monkeypatch)
+    workspace_id, owner_id, _mate_id, conversation_id = await _billing_seed()
+    providers = _Providers()
+    providers.default_payment_method = SAVED_CARD
+    monkeypatch.setattr(metronome, "BILLING_TRANSPORT", providers.transport)
+    await _manage_billing(workspace_id, tmp_path, owner_id, owner_id, "setup")
+    with ws(workspace_id):
+        await _activation(workspace_id, providers).run()
+    told = await _owner_turns(conversation_id)
+    assert len(told) == 1
+
+    activated = await _stored_record(workspace_id)
+    assert activated is not None
+    ctx = context_for(metronome.NAME, frozenset())
+    with ws(workspace_id):
+        await ctx.store.put(
+            metronome.BILLING_KEY,
+            activated.model_copy(update={"activated_at": None}).model_dump(mode="json"),
+        )
+        await _activation(workspace_id, providers).run()
+
+    assert await _owner_turns(conversation_id) == told
+    remarked = await _stored_record(workspace_id)
+    assert remarked is not None
+    assert remarked.activated_at is not None
+    assert len(_calls(providers, "POST", "/v1/contracts/create")) == 1
+
+
+async def test_a_foreign_contract_on_the_customer_is_never_adopted_as_the_plan(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The counterexample to "one customer, one contract": a Metronome customer can already carry a
+    contract this workspace never asked for — an operator-provisioned trial, a hand-built plan.
+    Adopting it by position would record a plan the workspace does not have AND suppress the create
+    that would give it one, so the owner is told billing is live while nothing was bought. The
+    workspace's own contract is the one carrying our uniqueness key, and nothing else is."""
+    _billing_env(monkeypatch)
+    workspace_id, owner_id, _mate_id, conversation_id = await _billing_seed()
+    providers = _Providers()
+    providers.default_payment_method = SAVED_CARD
+    providers.metronome_customers[str(workspace_id)] = "mc_shared"
+    providers.hold_contract("mc_shared", "ct_operator_trial", "operator:hand-built-trial")
+    monkeypatch.setattr(metronome, "BILLING_TRANSPORT", providers.transport)
+    await _manage_billing(workspace_id, tmp_path, owner_id, owner_id, "setup")
+
+    with ws(workspace_id):
+        await _activation(workspace_id, providers).run()
+
+    (created,) = _calls(providers, "POST", "/v1/contracts/create")
+    assert json.loads(created.content)["uniqueness_key"] == f"ufo-contract:{workspace_id}"
+    record = await _stored_record(workspace_id)
+    assert record is not None
+    assert record.metronome_contract_id != "ct_operator_trial"
+    assert record.metronome_contract_id == "ct_2"
+    assert record.activated_at is not None
+    assert len(await _owner_turns(conversation_id)) == 1
+
+    status = await _manage_billing(workspace_id, tmp_path, owner_id, owner_id, "status")
+    assert status["metronome_contract_id"] == "ct_2"
+    assert status["plan_active"] is True
+
+    with ws(workspace_id):
+        await _activation(workspace_id, providers).run()
+    assert len(_calls(providers, "POST", "/v1/contracts/create")) == 1
+
+
+async def test_status_reports_no_plan_while_only_a_foreign_contract_exists(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The read half of the same counterexample: a foreign contract must never make `status` claim
+    the workspace has a plan."""
+    _billing_env(monkeypatch)
+    workspace_id, owner_id, _mate_id, _conversation_id = await _billing_seed()
+    providers = _Providers()
+    providers.default_payment_method = SAVED_CARD
+    providers.metronome_customers[str(workspace_id)] = "mc_shared"
+    providers.hold_contract("mc_shared", "ct_operator_trial", "operator:hand-built-trial")
+    monkeypatch.setattr(metronome, "BILLING_TRANSPORT", providers.transport)
+    await _manage_billing(workspace_id, tmp_path, owner_id, owner_id, "setup")
+    ctx = context_for(metronome.NAME, frozenset())
+    stored = await _stored_record(workspace_id)
+    assert stored is not None
+    with ws(workspace_id):
+        await ctx.store.put(
+            metronome.BILLING_KEY,
+            stored.model_copy(update={"metronome_customer_id": "mc_shared"}).model_dump(
+                mode="json"
+            ),
+        )
+
+    status = await _manage_billing(workspace_id, tmp_path, owner_id, owner_id, "status")
+    assert status["metronome_contract_id"] is None
+    assert status["plan_active"] is False
+
+
+async def test_a_conflicting_contract_create_reconciles_to_our_own_contract(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A racing tick already created our contract but the list read has not caught up: the create
+    409s on our permanent uniqueness key and the retry read resolves to that same contract, beside a
+    foreign one it must not confuse it with. The key is never rotated to get past the conflict."""
+    _billing_env(monkeypatch)
+    workspace_id, owner_id, _mate_id, _conversation_id = await _billing_seed()
+    providers = _Providers()
+    providers.default_payment_method = SAVED_CARD
+    providers.metronome_customers[str(workspace_id)] = "mc_shared"
+    providers.hold_contract("mc_shared", "ct_operator_trial", "operator:hand-built-trial")
+    providers.hold_contract("mc_shared", "ct_ours", f"ufo-contract:{workspace_id}")
+    providers.hidden_contracts.add(f"ufo-contract:{workspace_id}")
+    monkeypatch.setattr(metronome, "BILLING_TRANSPORT", providers.transport)
+    await _manage_billing(workspace_id, tmp_path, owner_id, owner_id, "setup")
+
+    with ws(workspace_id):
+        await _activation(workspace_id, providers).run()
+
+    (attempt,) = _calls(providers, "POST", "/v1/contracts/create")
+    assert json.loads(attempt.content)["uniqueness_key"] == f"ufo-contract:{workspace_id}"
+    record = await _stored_record(workspace_id)
+    assert record is not None
+    assert record.metronome_contract_id == "ct_ours"
+    assert record.activated_at is not None
+
+
+async def test_a_failed_stripe_customer_create_records_nothing(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other side of durable-pending-work: when Stripe itself fails there is nothing to resume
+    from, so setup must leave no record at all rather than a half-built one the job would act on."""
+    _billing_env(monkeypatch)
+    workspace_id, owner_id, _mate_id, _conversation_id = await _billing_seed()
+    providers = _Providers()
+    providers.failing.add("/v1/customers")
+    monkeypatch.setattr(metronome, "BILLING_TRANSPORT", providers.transport)
+
+    with pytest.raises(metronome.StripeError, match="500"):
+        await _manage_billing(workspace_id, tmp_path, owner_id, owner_id, "setup")
+    assert await _stored_record(workspace_id) is None
+    assert _calls(providers, "POST", "/v1/billing_portal/sessions") == []
+
+    providers.failing.clear()
+    payload = await _manage_billing(workspace_id, tmp_path, owner_id, owner_id, "setup")
+    assert payload["stripe_customer_id"] == "cus_1"
+    record = await _stored_record(workspace_id)
+    assert record is not None
+    assert record.stripe_customer_id == "cus_1"
+
+
+def test_billing_config_names_every_missing_setting_at_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A half-configured deploy learns all four names in one error, not one per attempt."""
+    for name in (
+        metronome.STRIPE_SECRET_KEY_ENV,
+        metronome.STRIPE_PORTAL_CONFIGURATION_ENV,
+        metronome.METRONOME_BEARER_TOKEN_ENV,
+        metronome.METRONOME_PACKAGE_ALIAS_ENV,
+    ):
+        monkeypatch.delenv(name, raising=False)
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            "billing requires STRIPE_SECRET_KEY, STRIPE_BILLING_PORTAL_CONFIGURATION_ID, "
+            "METRONOME_BEARER_TOKEN, METRONOME_PACKAGE_ALIAS"
+        ),
+    ):
+        metronome.BillingConfig.from_env()
+    monkeypatch.setenv(metronome.STRIPE_SECRET_KEY_ENV, STRIPE_KEY)
+    monkeypatch.setenv(metronome.METRONOME_BEARER_TOKEN_ENV, TOKEN)
+    with pytest.raises(
+        RuntimeError,
+        match="billing requires STRIPE_BILLING_PORTAL_CONFIGURATION_ID, METRONOME_PACKAGE_ALIAS",
+    ):
+        metronome.BillingConfig.from_env()
+
+
+async def test_a_half_configured_deploy_creates_no_provider_object(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Configuration is validated before the first provider call, so a deploy missing only the
+    portal configuration cannot strand a Stripe Customer it will never hand a link for."""
+    _billing_env(monkeypatch)
+    monkeypatch.delenv(metronome.STRIPE_PORTAL_CONFIGURATION_ENV)
+    workspace_id, owner_id, _mate_id, _conversation_id = await _billing_seed()
+    providers = _Providers()
+    monkeypatch.setattr(metronome, "BILLING_TRANSPORT", providers.transport)
+
+    with pytest.raises(RuntimeError, match="STRIPE_BILLING_PORTAL_CONFIGURATION_ID"):
+        await _manage_billing(workspace_id, tmp_path, owner_id, owner_id, "setup")
+    assert providers.requests == []
+    assert await _stored_record(workspace_id) is None
+
+
+async def test_an_unconfigured_deploy_leaves_the_billing_job_silent(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A deploy that meters usage without selling a plan has no billing record, so the job returns
+    before it ever reads a billing setting — no alarm every minute for a fleet that never opted in.
+    The usage shipper keeps working on the bearer token alone."""
+    for name in (
+        metronome.STRIPE_SECRET_KEY_ENV,
+        metronome.STRIPE_PORTAL_CONFIGURATION_ENV,
+        metronome.METRONOME_PACKAGE_ALIAS_ENV,
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(metronome.METRONOME_BEARER_TOKEN_ENV, TOKEN)
+    workspace_id, _owner_id, _mate_id, _conversation_id = await _billing_seed()
+    providers = _Providers()
+    with ws(workspace_id):
+        await _activation(workspace_id, providers).run()
+    assert providers.requests == []
+
+
+async def test_every_stripe_call_pins_the_api_version(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Stripe-side default-version bump can never reshape a response under us."""
+    _billing_env(monkeypatch)
+    workspace_id, owner_id, _mate_id, _conversation_id = await _billing_seed()
+    providers = _Providers()
+    providers.default_payment_method = SAVED_CARD
+    monkeypatch.setattr(metronome, "BILLING_TRANSPORT", providers.transport)
+    await _manage_billing(workspace_id, tmp_path, owner_id, owner_id, "setup")
+    with ws(workspace_id):
+        await _activation(workspace_id, providers).run()
+    await _manage_billing(workspace_id, tmp_path, owner_id, owner_id, "status")
+
+    stripe_calls = [r for r in providers.requests if r.url.host == "api.stripe.com"]
+    assert stripe_calls
+    assert {r.headers["stripe-version"] for r in stripe_calls} == {metronome.STRIPE_API_VERSION}
+    assert not any(
+        "stripe-version" in r.headers for r in providers.requests if r not in stripe_calls
+    )
+
+
+async def test_the_contract_start_is_fixed_at_setup_and_replayed_verbatim(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The contract start is captured once, at setup, so a provisioning attempt days later sends the
+    same `starting_at` the first attempt would have — a retry can never trip the uniqueness key on
+    mismatched parameters, however far apart the attempts fall. It is captured already truncated
+    because both constraints are provider-enforced — a package contract must begin on an hour
+    boundary and Metronome rejects microsecond precision — so what is stored and what is sent are
+    one string; the live provider smoke is what proved those two rules."""
+    _billing_env(monkeypatch)
+    workspace_id, owner_id, _mate_id, _conversation_id = await _billing_seed()
+    providers = _Providers()
+    monkeypatch.setattr(metronome, "BILLING_TRANSPORT", providers.transport)
+    await _manage_billing(workspace_id, tmp_path, owner_id, owner_id, "setup")
+
+    record = await _stored_record(workspace_id)
+    assert record is not None
+    fixed = record.contract_starting_at
+    assert (fixed.minute, fixed.second, fixed.microsecond) == (0, 0, 0)
+    assert fixed.isoformat().endswith(":00:00+00:00")
+    ctx = context_for(metronome.NAME, frozenset())
+    long_ago = datetime(2026, 3, 1, 9, 30, tzinfo=UTC)
+    with ws(workspace_id):
+        await ctx.store.put(
+            metronome.BILLING_KEY,
+            record.model_copy(update={"contract_starting_at": long_ago}).model_dump(mode="json"),
+        )
+    assert fixed >= datetime(2026, 1, 1, tzinfo=UTC)
+
+    providers.default_payment_method = SAVED_CARD
+    with ws(workspace_id):
+        await _activation(workspace_id, providers).run()
+
+    (created,) = _calls(providers, "POST", "/v1/contracts/create")
+    assert json.loads(created.content)["starting_at"] == long_ago.isoformat()
+
+    await _manage_billing(workspace_id, tmp_path, owner_id, owner_id, "setup")
+    replayed = await _stored_record(workspace_id)
+    assert replayed is not None
+    assert replayed.contract_starting_at == long_ago
+
+
+async def test_a_setup_overlapping_the_job_never_reverts_provisioned_ids(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The race a read-modify-write invites: the activation job's write lands in the window between
+    setup reading the record and setup writing it back, so writing back would revert provider ids
+    setup never saw. Setup writes only when creating the record, so the window holds nothing to
+    revert — the ids and the activation mark survive, and the owner still gets a fresh link."""
+    _billing_env(monkeypatch)
+    workspace_id, owner_id, _mate_id, _conversation_id = await _billing_seed()
+    providers = _Providers()
+    providers.default_payment_method = SAVED_CARD
+    monkeypatch.setattr(metronome, "BILLING_TRANSPORT", providers.transport)
+    await _manage_billing(workspace_id, tmp_path, owner_id, owner_id, "setup")
+
+    provisioned = await _stored_record(workspace_id)
+    assert provisioned is not None
+    landed = provisioned.model_copy(
+        update={
+            "metronome_customer_id": "mc_job",
+            "metronome_contract_id": "ct_job",
+            "activated_at": datetime(2026, 7, 25, 23, 30, tzinfo=UTC),
+        }
+    )
+    ctx = context_for(metronome.NAME, frozenset())
+    read_record = metronome._billing_record
+
+    async def _job_lands_after_the_read(
+        ext: ExtensionContext,
+    ) -> metronome.BillingRecord | None:
+        record = await read_record(ext)
+        if record is not None and record.metronome_customer_id is None:
+            await ctx.store.put(metronome.BILLING_KEY, landed.model_dump(mode="json"))
+        return record
+
+    monkeypatch.setattr(metronome, "_billing_record", _job_lands_after_the_read)
+    payload = await _manage_billing(workspace_id, tmp_path, owner_id, owner_id, "setup")
+
+    assert payload["stripe_customer_id"] == provisioned.stripe_customer_id
+    monkeypatch.setattr(metronome, "_billing_record", read_record)
+    after = await _stored_record(workspace_id)
+    assert after is not None
+    assert after.metronome_customer_id == "mc_job"
+    assert after.metronome_contract_id == "ct_job"
+    assert after.activated_at is not None

@@ -88,10 +88,40 @@ Onboarding.advance(channel, session, body, install)
   |
   +-- workspace ready -------------------> mint bearer token
                                             emit token + workspace directives
+                                            owner: choose (billing) · teammate: ask
 ```
 
 The earliest member's email domain owns the workspace. Resolution fails if that domain owns more
-than one; creation derives the workspace UUID from the domain.
+than one; creation derives the workspace UUID from the domain. `SharedWorkspaces.ensure` reports
+which of the two the member is (`EnsuredWorkspace.owner`), and the last screen turns on it: the
+owner is offered `Set up billing` as a `choose`, a joined teammate gets the ordinary `ask` prompt.
+The `workspace` directive has already landed by then, so whichever option the owner picks posts to
+`/surface/ufo` as their first chat message and the agent drives billing from there — the gateway
+mints no billing link and adds no billing directive.
+
+### Driving billing locally
+
+Billing lives in the `metronome` extension, which `assistant_hosted` bundles and the local
+`assistant` pack does not — a dev stack has no business shipping usage to a billing vendor. The
+`assistant_billing` pack is the local assistant bundle plus that one extension, selected through
+`UFO_DEV_PACK`, so the owner's `Set up billing` choice has something to service on a laptop:
+
+```
+export STRIPE_SECRET_KEY=sk_test_…                     # Stripe TEST mode
+export STRIPE_BILLING_PORTAL_CONFIGURATION_ID=bpc_…    # portal config, subscription_update off
+export METRONOME_BEARER_TOKEN=…                        # Metronome SANDBOX token
+export METRONOME_PACKAGE_ALIAS=base-plan               # an existing Package's alias
+UFO_DEV_PACK=assistant_billing docker compose up
+```
+
+Sign in at `:8080` (the code prints to `docker compose logs gateway`); the first member of a fresh
+domain owns the workspace and gets the billing choice. The four settings are read host-side by the
+tool and the job — never in the sandbox — and the flow creates real objects in whichever account
+they name, so keep it pointed at test mode and sandbox. Without them the chain still runs to the
+tool and refuses there, naming each missing setting; with them it continues into the portal link and
+the activation job provisions the contract on the next tick.
+`extensions/metronome/tests/integration/test_billing_providers.py` drives the same providers from
+pytest under the same four settings.
 
 The client is a pure renderer of tab-separated directive lines (`gateway_directives.py`): `say`,
 `ask`, `choose`, `status`, `ufo` (the animation), `poll`, `token`, `workspace`, `install`,
