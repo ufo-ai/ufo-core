@@ -13,6 +13,7 @@ from evals.__main__ import _tasks as selected_eval_tasks
 from evals.harness.capability import CapabilityCase, CapabilityOutput, TurnLog
 from evals.harness.harness import EvalCaseResult, EvalReport
 from evals.harness.judge import MAX_CRITERIA, MAX_CRITERION_CHARS
+from evals.harness.recall import MemoryRecallEvent, with_recall_aggregates
 from evals.harness.target import TargetResult
 from evals.harness.viewer import EvalRun, render_viewer
 from evals.memory_100.models import SnapshotCase, SnapshotMemory
@@ -20,9 +21,7 @@ from evals.memory_100.runner import (
     MEMORY_JUDGE_MODEL,
     ExpectedEvidence,
     Memory100Grader,
-    MemoryRecallEvent,
     _answer_rubric,
-    _with_memory_recall_aggregates,
     load_memory_100,
 )
 from evals.memory_100.snapshot import content_digest, write_snapshot
@@ -290,7 +289,7 @@ def test_memory_100_report_surfaces_recall_observations_without_gating_pass() ->
             },
         ),
     )
-    report = _with_memory_recall_aggregates(
+    report = with_recall_aggregates(
         EvalReport(name="memory_100", suite="capability", digest=DIGEST, cases=cases)
     )
 

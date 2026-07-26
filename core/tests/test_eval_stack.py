@@ -1,3 +1,4 @@
+import asyncio
 import tomllib
 from pathlib import Path
 
@@ -9,6 +10,7 @@ from sqlalchemy import make_url
 from ufo_testsupport.plugin import POSTGRES_TEST_URL, postgres_reachable
 
 from evals.stack import (
+    STACK_OWNER_EMAIL,
     EvalStack,
     Matrix,
     RunSpec,
@@ -310,6 +312,93 @@ def test_memory_100_spec_requires_postgres_and_a_collector_endpoint(
         RunSpec(label="memory", config=postgres_template, memory_100=snapshot, model="claude")
     assert not (tmp_path / "a").exists()
     assert not (tmp_path / "b").exists()
+
+
+class _DoneProcess:
+    """A finished subprocess: `_checked` reads its exit status and nothing else."""
+
+    returncode = 0
+
+    async def wait(self) -> int:
+        return 0
+
+
+def test_issue_recall_spec_needs_a_collector_endpoint_but_no_postgres(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fixture is 23 pages, so SQLite serves it — unlike memory_100, which needs Postgres. The
+    collector endpoint is still required: the leaf is graded on the recall event."""
+    monkeypatch.delenv("UFO_CREDENTIAL_KEY", raising=False)
+    sqlite_template = tmp_path / "sqlite.toml"
+    sqlite_template.write_text(SQLITE_TEMPLATE)
+    observed = tmp_path / "observed.toml"
+    observed.write_text(SQLITE_TEMPLATE + '\n[o11y]\notlp_endpoint = "http://127.0.0.1:4318"\n')
+
+    with pytest.raises(ValueError, match="otlp_endpoint"):
+        EvalStack.provision(
+            RunSpec(label="issues", config=sqlite_template, issue_recall=True),
+            root=tmp_path / "a",
+            out=tmp_path / "archive",
+            repo_root=tmp_path,
+        )
+    with pytest.raises(ValidationError, match="two corpora"):
+        RunSpec(
+            label="issues",
+            config=observed,
+            issue_recall=True,
+            memory_100=tmp_path / "snapshot",
+        )
+    stack = EvalStack.provision(
+        RunSpec(label="issues", config=observed, issue_recall=True),
+        root=tmp_path / "b",
+        out=tmp_path / "archive",
+        repo_root=tmp_path,
+    )
+    for log in (stack.seed_log, stack.serve_log, stack.eval_log):
+        log.close()
+
+    assert not (tmp_path / "a").exists()
+    assert stack.config.o11y.otlp_endpoint != "http://127.0.0.1:4318"
+
+
+def test_issue_recall_seeds_a_workspace_then_materializes_and_passes_the_readiness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`issue_recall` materializes into an initialized workspace, so seeding runs `ufoctl init` and
+    then the corpus materializer — where memory_100 runs `migrate` and owns the workspace itself."""
+    monkeypatch.delenv("UFO_CREDENTIAL_KEY", raising=False)
+    template = tmp_path / "template.toml"
+    template.write_text(SQLITE_TEMPLATE + '\n[o11y]\notlp_endpoint = "http://127.0.0.1:4318"\n')
+    stack = EvalStack.provision(
+        RunSpec(label="issues", config=template, issue_recall=True),
+        root=tmp_path / "run",
+        out=tmp_path / "archive",
+        repo_root=tmp_path,
+    )
+    for log in (stack.seed_log, stack.serve_log, stack.eval_log):
+        log.close()
+    ufoctl: list[tuple[str, ...]] = []
+    materialized: list[tuple[str, ...]] = []
+    readiness = tmp_path / "run" / "state" / "abc" / "readiness.json"
+
+    async def fake_ufoctl(self: EvalStack, *argv: str, log: object) -> object:
+        ufoctl.append(argv)
+        return _DoneProcess()
+
+    async def fake_materialize(self: EvalStack, module: str, *corpus_args: str) -> Path:
+        materialized.append((module, *corpus_args))
+        return readiness
+
+    monkeypatch.setattr(EvalStack, "_ufoctl", fake_ufoctl)
+    monkeypatch.setattr(EvalStack, "_materialize", fake_materialize)
+
+    seeded = asyncio.run(stack._seed())
+
+    assert seeded == readiness
+    assert ufoctl == [("init", "--email", STACK_OWNER_EMAIL)]
+    assert materialized == [("evals.issue_recall.materialize",)]
+    assert stack._child_args(readiness)[-2:] == ("--issue-recall", str(readiness))
+    assert "--issue-recall" not in stack._child_args(None)
 
 
 def test_memory_100_child_args_carry_the_snapshot_and_readiness(

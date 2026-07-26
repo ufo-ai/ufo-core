@@ -64,6 +64,7 @@ from evals.harness.viewer import (
     write_viewer,
 )
 from evals.hle_gold.runner import HLEGoldRun, load_hle_gold
+from evals.issue_recall.runner import IssueRecallRun, load_issue_recall
 from evals.jobbench.runner import (
     JOBBENCH_PACKS,
     SUBMISSIONS_ROOT,
@@ -158,6 +159,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument("--memory-100", type=Path, metavar="SNAPSHOT")
     parser.add_argument("--memory-100-state", type=Path, metavar="READINESS")
+    parser.add_argument("--issue-recall", type=Path, metavar="READINESS")
     parser.add_argument("--hle-gold", type=Path, metavar="GOLD_JSONL")
     parser.add_argument("--hle-gold-smoke", action="store_true")
     parser.add_argument("--dsqa-100", type=Path, metavar="SNAPSHOT")
@@ -235,6 +237,7 @@ def main(argv: list[str] | None = None) -> None:
             args.hle_gold,
             args.compaction,
             args.wandr,
+            args.issue_recall,
         )
     )
     if requested_runs > 1:
@@ -254,6 +257,7 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("MCP-Atlas options require --only mcp_atlas_100")
     hle_run = load_hle_gold(args.hle_gold, args.hle_gold_smoke) if args.hle_gold else None
     try:
+        issue_run = load_issue_recall(args.issue_recall) if args.issue_recall is not None else None
         gdpval_run = (
             load_calibration(
                 args.gdpval_100,
@@ -278,6 +282,7 @@ def main(argv: list[str] | None = None) -> None:
         tasks = _tasks(
             names,
             memory_run,
+            issue_run,
             dsqa_run,
             compaction_run,
             gdpval_run,
@@ -375,16 +380,21 @@ def main(argv: list[str] | None = None) -> None:
     if wandr_tasks is not None and config.pack.name not in WANDR_PACKS:
         parser.error(f"wandr requires [pack] name in {WANDR_PACKS}, found {config.pack.name!r}")
     workspace_id = args.workspace
-    if memory_run is not None:
-        if workspace_id is not None and workspace_id != memory_run.readiness.workspace_id:
-            parser.error("--workspace does not match the memory_100 readiness workspace")
-        workspace_id = memory_run.readiness.workspace_id
+    recall_workspace_id = (
+        memory_run.readiness.workspace_id
+        if memory_run is not None
+        else (issue_run.readiness.workspace_id if issue_run is not None else None)
+    )
+    if recall_workspace_id is not None:
+        if workspace_id is not None and workspace_id != recall_workspace_id:
+            parser.error("--workspace does not match the recall readiness workspace")
+        workspace_id = recall_workspace_id
     collector = (
         None
-        if memory_run is None
+        if recall_workspace_id is None
         else TurnLogCollector.from_endpoint(
             config.o11y.otlp_endpoint,
-            memory_run.readiness.workspace_id,
+            recall_workspace_id,
             MEMORY_RECALL_EVENT,
         )
     )
@@ -737,6 +747,7 @@ def _skill_loading_subset(names: tuple[str, ...]) -> EvalTask:
 def _tasks(
     names: tuple[str, ...],
     memory_run: Memory100Run | None,
+    issue_run: IssueRecallRun | None = None,
     dsqa_run: DSQA100Run | None = None,
     compaction_run: CompactionRun | None = None,
     gdpval_run: GDPvalCalibration | None = None,
@@ -763,6 +774,11 @@ def _tasks(
         return selected_tasks(
             (*TASKS, *compaction_run.tasks, *mcp_atlas),
             names or tuple(task.name for task in compaction_run.tasks),
+        )
+    if issue_run is not None:
+        return selected_tasks(
+            (*TASKS, *issue_run.tasks, *mcp_atlas),
+            names or tuple(task.name for task in issue_run.tasks),
         )
     if memory_run is None and dsqa_run is None:
         return selected_tasks((*TASKS, *mcp_atlas), names) if names else selected_run_tasks()

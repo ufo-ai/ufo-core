@@ -45,6 +45,7 @@ ORCHESTRATOR_ARGS = (
     "--list",
     "--memory-100",
     "--memory-100-state",
+    "--issue-recall",
 )
 ORCHESTRATOR_ENV = ("UFO_CONFIG", "UFOCTL_DIR")
 
@@ -105,6 +106,7 @@ class RunSpec(BaseModel):
     env: dict[str, str] = {}
     model: str | None = None
     memory_100: Path | None = None
+    issue_recall: bool = False
 
     @field_validator("label")
     @classmethod
@@ -126,6 +128,8 @@ class RunSpec(BaseModel):
             raise ValueError(
                 f"run {self.label!r} sets model with memory_100 — materialization owns the agent"
             )
+        if self.memory_100 is not None and self.issue_recall:
+            raise ValueError(f"run {self.label!r} materializes two corpora — run them separately")
         return self
 
 
@@ -180,14 +184,15 @@ class EvalStack:
     @classmethod
     def provision(cls, spec: RunSpec, root: Path, out: Path, repo_root: Path) -> Self:
         template = template_config(spec.config.read_text())
-        if spec.memory_100 is not None:
-            if not template.database.url.startswith("postgresql"):
-                raise ValueError(f"run {spec.label!r}: memory_100 requires a Postgres template")
-            if template.o11y.otlp_endpoint is None:
-                raise ValueError(
-                    f"run {spec.label!r}: memory_100 requires a template [o11y] otlp_endpoint — "
-                    "the recall collector binds it"
-                )
+        if spec.memory_100 is not None and not template.database.url.startswith("postgresql"):
+            raise ValueError(f"run {spec.label!r}: memory_100 requires a Postgres template")
+        if (
+            spec.memory_100 is not None or spec.issue_recall
+        ) and template.o11y.otlp_endpoint is None:
+            raise ValueError(
+                f"run {spec.label!r}: a recall-graded corpus requires a template [o11y] "
+                "otlp_endpoint — the collector binds it"
+            )
         root.mkdir(parents=True, exist_ok=False)
         serve_probe, serve_port = _port_probe()
         proxy_probe, proxy_port = _port_probe()
@@ -280,16 +285,22 @@ class EvalStack:
             await connection.close()
 
     async def _seed(self) -> Path | None:
-        if self.spec.memory_100 is None:
-            await self._checked(await self._ufoctl(*self._seed_args(), log=self.seed_log), "seed")
+        if self.spec.memory_100 is not None:
+            await self._checked(await self._ufoctl("migrate", log=self.seed_log), "seed")
+            return await self._materialize(
+                "evals.memory_100.materialize", "--snapshot", str(self.spec.memory_100.resolve())
+            )
+        await self._checked(await self._ufoctl(*self._seed_args(), log=self.seed_log), "seed")
+        if not self.spec.issue_recall:
             return None
-        await self._checked(await self._ufoctl("migrate", log=self.seed_log), "seed")
+        return await self._materialize("evals.issue_recall.materialize")
+
+    async def _materialize(self, module: str, *corpus_args: str) -> Path:
         materialize = await asyncio.create_subprocess_exec(
             sys.executable,
             "-m",
-            "evals.memory_100.materialize",
-            "--snapshot",
-            str(self.spec.memory_100.resolve()),
+            module,
+            *corpus_args,
             "--state",
             str(self.root.resolve() / "state"),
             cwd=self.repo_root,
@@ -393,6 +404,8 @@ class EvalStack:
                 "--memory-100-state",
                 str(readiness),
             ]
+        if readiness is not None and self.spec.issue_recall:
+            argv += ["--issue-recall", str(readiness)]
         return tuple(argv)
 
     async def _shutdown(self, serve: asyncio.subprocess.Process) -> None:

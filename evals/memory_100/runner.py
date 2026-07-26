@@ -1,25 +1,20 @@
-import asyncio
 import json
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
-from ufo_ext_memory.events import (
-    MAX_RECALL_ERROR_CLASS_CHARS,
-    MAX_RECALLED_MEMORY_IDS,
-    MEMORY_RECALL_EVENT,
-)
+from pydantic import ValidationError
+from ufo_ext_memory.events import MEMORY_RECALL_EVENT
 
 from evals.harness.capability import (
     CapabilityCase,
     CapabilityOutput,
     CapabilityVerdict,
 )
-from evals.harness.harness import EvalReport, Json, JsonObject
+from evals.harness.harness import Json, JsonObject
 from evals.harness.judge import MAX_CRITERIA, MAX_CRITERION_CHARS
+from evals.harness.recall import MemoryRecallEvent, recall_graded
 from evals.harness.registry import EvalTask, capability_task
-from evals.harness.target import CapabilityTarget
 from evals.memory_100.models import Corpus, SnapshotCase
 from evals.memory_100.snapshot import load_snapshot
 from evals.memory_100.state import CorpusReadiness
@@ -81,23 +76,6 @@ MEMORY_100_LEAVES = (
         3,
     ),
 )
-
-
-class MemoryRecallEvent(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    memory_ids: tuple[UUID, ...] = Field(max_length=MAX_RECALLED_MEMORY_IDS)
-    error_class: str | None = Field(
-        default=None, min_length=1, max_length=MAX_RECALL_ERROR_CLASS_CHARS
-    )
-
-    @model_validator(mode="after")
-    def _valid_outcome(self) -> "MemoryRecallEvent":
-        if len(set(self.memory_ids)) != len(self.memory_ids):
-            raise ValueError("memory recall IDs must be unique")
-        if self.error_class is not None and self.memory_ids:
-            raise ValueError("failed memory recall cannot contain IDs")
-        return self
 
 
 @dataclass(frozen=True)
@@ -181,65 +159,10 @@ def load_memory_100(snapshot_root: Path, readiness_path: Path) -> Memory100Run:
                 f"memory_100 leaf {leaf.name!r} requires {leaf.expected_cases} cases, "
                 f"found {len(leaf_cases)}"
             )
-        tasks.append(_memory_task(leaf.name, leaf_cases))
+        tasks.append(
+            recall_graded(capability_task(leaf.name, leaf_cases, judge_model=MEMORY_JUDGE_MODEL))
+        )
     return Memory100Run(tuple(tasks), readiness)
-
-
-def _memory_task(name: str, cases: tuple[CapabilityCase, ...]) -> EvalTask:
-    task = capability_task(name, cases, judge_model=MEMORY_JUDGE_MODEL)
-
-    async def run(target: CapabilityTarget, slots: asyncio.Semaphore) -> EvalReport:
-        report = await task.run(target, slots)
-        return _with_memory_recall_aggregates(report)
-
-    return replace(task, run=run)
-
-
-def _with_memory_recall_aggregates(report: EvalReport) -> EvalReport:
-    coverages: list[float] = []
-    degraded_recall_count = 0
-    unmapped_evidence_count = 0
-    for case in report.cases:
-        selected_attempt = case.evidence.get("selectedAttempt")
-        attempts = case.evidence.get("attempts")
-        if (
-            isinstance(selected_attempt, bool)
-            or not isinstance(selected_attempt, int)
-            or not isinstance(attempts, list)
-            or not 0 <= selected_attempt < len(attempts)
-        ):
-            raise TypeError("memory_100 selected attempt evidence is invalid")
-        attempt = attempts[selected_attempt]
-        if not isinstance(attempt, dict):
-            raise TypeError("memory_100 selected attempt must be an object")
-        grader = attempt.get("grader")
-        if grader is None:
-            continue
-        if not isinstance(grader, dict):
-            raise TypeError("memory_100 grader evidence must be an object")
-        coverage = grader.get("coverage")
-        if coverage is not None:
-            if isinstance(coverage, bool) or not isinstance(coverage, (int, float)):
-                raise TypeError("memory_100 coverage must be a number or null")
-            coverages.append(float(coverage))
-        recall_error = grader.get("recallError")
-        if recall_error is not None:
-            if not isinstance(recall_error, str):
-                raise TypeError("memory_100 recall error must be a string or null")
-            degraded_recall_count += 1
-        unmapped = grader.get("unmappedEvidence")
-        if not isinstance(unmapped, list) or not all(isinstance(item, str) for item in unmapped):
-            raise TypeError("memory_100 unmapped evidence must be a list of source refs")
-        unmapped_evidence_count += len(unmapped)
-    mean_coverage = sum(coverages) / len(coverages) if coverages else None
-    return report.model_copy(
-        update={
-            "mean_mapped_evidence_coverage": mean_coverage,
-            "min_mapped_evidence_coverage": min(coverages) if coverages else None,
-            "degraded_recall_count": degraded_recall_count,
-            "unmapped_evidence_count": unmapped_evidence_count,
-        }
-    )
 
 
 def _answer_rubric(case: SnapshotCase) -> tuple[str, ...]:
