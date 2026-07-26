@@ -17,13 +17,14 @@ import pytest
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
 
-from ufo.blob import FilesystemBlobStore
+from ufo.blob import FilesystemBlobStore, S3BlobStore
 from ufo.connectors import CliCredential, ForwardedResponse
 from ufo.credentials import CredentialStore, HostChoice
 from ufo.db import workspace_tx
 from ufo.ext.manifest import CredentialSlot, InjectionTarget
 from ufo.grants import GrantStore, grant_sentinel
 from ufo.loop.queue import GIT_PROXY_AUTH_CONFIG, _git_config_env, _open_sandbox
+from ufo.sandbox.fs_creds import SandboxFsCredentialMinter
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import ProxyEndpoint, SandboxHandle, SandboxSpec
 from ufo.schema import tables
@@ -144,6 +145,109 @@ async def test_open_sandbox_resumes_from_the_stored_handle_without_rewriting(
 
     assert carrier.specs[0].resume_id == "sbx-1"
     assert await _stored_handle(conversation_id) == "e2b:sbx-1"
+
+
+@dataclass(frozen=True)
+class _MarkerRecordingS3BlobStore(S3BlobStore):
+    """The S3 store with its network put recorded: the marker write is asserted as
+    `_open_sandbox`'s own act, keyed off the stored handle it read."""
+
+    marker_puts: list[str] = field(default_factory=list, compare=False)
+
+    async def put(self, key: str, data: bytes) -> None:
+        self.marker_puts.append(key)
+
+
+class _NeverSts:
+    async def assume_role(self, **kwargs: object) -> object:
+        raise AssertionError("open_sandbox never redeems credentials")
+
+
+async def test_open_sandbox_writes_the_workspace_marker_only_on_first_create(db: None) -> None:
+    """`fresh_sandbox` is wired from the stored handle: the first create (no row handle) writes the
+    workspace directory marker, and the resume (row handle present) skips it — the prefix invariant
+    rides sandbox creation, never the per-turn path."""
+    workspace_id, conversation_id = await _conversation()
+    carrier = _ResumeRecordingCarrier(container_id="sbx-9")
+    blob = _MarkerRecordingS3BlobStore(bucket="ufo-blobs")
+    minter = SandboxFsCredentialMinter(
+        sts=_NeverSts(),
+        role_arn="arn:aws:iam::0:role/sbxfs",
+        bucket="ufo-blobs",
+        s3_url="https://s3.example:9000",
+        region="us-east-1",
+        path_style=False,
+        token_secret=b"mount-secret",
+    )
+
+    await _open_sandbox(
+        carrier,
+        "e2b",
+        blob,
+        minter,
+        PROXY,
+        _turn(workspace_id, conversation_id),
+        None,
+        {},
+        None,
+        (),
+    )
+
+    assert carrier.specs[0].resume_id is None
+    assert blob.marker_puts == [f"conversations/{conversation_id}/workspace/"]
+
+    await _open_sandbox(
+        carrier,
+        "e2b",
+        blob,
+        minter,
+        PROXY,
+        _turn(workspace_id, conversation_id),
+        None,
+        {},
+        None,
+        (),
+    )
+
+    assert carrier.specs[1].resume_id == "sbx-9"
+    assert blob.marker_puts == [f"conversations/{conversation_id}/workspace/"]
+
+
+async def test_open_sandbox_writes_the_marker_when_taking_over_a_foreign_backend_handle(
+    db: None,
+) -> None:
+    """The other path to `resume_id is None`: a stored handle another backend wrote is ignored and
+    the sandbox is created fresh — on the S3 backend that fresh create must also write the marker
+    (idempotent when a prior backend's mount already did)."""
+    workspace_id, conversation_id = await _conversation(handle="local:elsewhere")
+    carrier = _ResumeRecordingCarrier(container_id="sbx-2")
+    blob = _MarkerRecordingS3BlobStore(bucket="ufo-blobs")
+    minter = SandboxFsCredentialMinter(
+        sts=_NeverSts(),
+        role_arn="arn:aws:iam::0:role/sbxfs",
+        bucket="ufo-blobs",
+        s3_url="https://s3.example:9000",
+        region="us-east-1",
+        path_style=False,
+        token_secret=b"mount-secret",
+    )
+
+    await _open_sandbox(
+        carrier,
+        "e2b",
+        blob,
+        minter,
+        PROXY,
+        _turn(workspace_id, conversation_id),
+        None,
+        {},
+        None,
+        (),
+    )
+
+    assert carrier.specs[0].resume_id is None
+    assert blob.marker_puts == [f"conversations/{conversation_id}/workspace/"]
+    assert await _stored_handle(conversation_id) == "e2b:sbx-2"
 
 
 async def test_open_sandbox_ignores_a_handle_another_backend_wrote_and_overwrites_it(

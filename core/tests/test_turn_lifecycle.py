@@ -523,7 +523,7 @@ async def test_workspace_mount_source_is_absolute_for_a_relative_blob_root(
     monkeypatch.chdir(tmp_path)
     blob = FilesystemBlobStore(root=Path("blobs"))
     mount = await loop_queue._workspace_mount(
-        blob, None, uuid4(), RunToken(workspace_id=uuid4(), turn_id=uuid4())
+        blob, None, uuid4(), RunToken(workspace_id=uuid4(), turn_id=uuid4()), fresh_sandbox=True
     )
     assert Path(mount.host_path).is_absolute()
     assert await asyncio.to_thread(Path(mount.host_path).is_dir)

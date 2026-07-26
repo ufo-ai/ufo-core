@@ -8,6 +8,7 @@ stand-in dependency — every assertion is the minter's and the mount-builder's 
 stand-in's canned response."""
 
 import json
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from fnmatch import fnmatchcase
 from uuid import uuid4
@@ -78,6 +79,17 @@ class _StubSts:
                 "Expiration": datetime(2026, 1, 2, tzinfo=UTC),
             }
         }
+
+
+@dataclass(frozen=True)
+class _RecordingS3BlobStore(S3BlobStore):
+    """The S3 store with its network put recorded: the workspace directory marker is asserted as
+    `_workspace_mount`'s own act, and nothing asserts the store's behavior."""
+
+    marker_puts: list[tuple[str, bytes]] = field(default_factory=list, compare=False)
+
+    async def put(self, key: str, data: bytes) -> None:
+        self.marker_puts.append((key, data))
 
 
 def _object_resource(policy: dict) -> str:
@@ -202,8 +214,13 @@ async def test_workspace_mount_issues_a_scoped_s3_mount_token() -> None:
         token_secret=b"mount-secret",
         now=lambda: NOW,
     )
-    mount = await _workspace_mount(S3BlobStore(bucket=BUCKET), minter, conversation, RUN)
+    blob = _RecordingS3BlobStore(bucket=BUCKET)
+    mount = await _workspace_mount(blob, minter, conversation, RUN, fresh_sandbox=True)
 
+    assert blob.marker_puts == [(f"conversations/{conversation}/workspace/", b"")]
+    resumed = await _workspace_mount(blob, minter, conversation, RUN, fresh_sandbox=False)
+    assert resumed == mount
+    assert len(blob.marker_puts) == 1
     assert mount == MountSpec(
         kind="s3",
         bucket=BUCKET,
@@ -346,4 +363,4 @@ def test_s3_minter_requires_the_shared_mount_token_secret(
 
 async def test_workspace_mount_on_s3_without_a_minter_fails_loud() -> None:
     with pytest.raises(RuntimeError, match="minter"):
-        await _workspace_mount(S3BlobStore(bucket=BUCKET), None, uuid4(), RUN)
+        await _workspace_mount(S3BlobStore(bucket=BUCKET), None, uuid4(), RUN, fresh_sandbox=True)

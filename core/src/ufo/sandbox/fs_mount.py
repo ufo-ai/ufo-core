@@ -26,10 +26,10 @@ SANDBOX_FS_MOUNT_USER = "nobody"
 def s3fs_command(
     bucket: str, key_prefix: str, mountpoint: str, s3_url: str, region: str, path_style: bool
 ) -> str:
-    # compat_dir lets s3fs mount a prefix that has no explicit directory-marker object — a fresh
-    # conversation's prefix is empty at first mount, and without it s3fs's mount-time directory
-    # check 404s and aborts. It also treats keys created by boto3 (the framework's writes, which
-    # leave no directory markers) as a navigable tree.
+    # compat_dir treats keys created by boto3 (the framework's writes, which leave no directory
+    # markers) as a navigable tree. It does not rescue a prefix with no objects at all — s3fs's
+    # mount-time directory check aborts on one — so `_workspace_mount` (queue.py) and the deploy
+    # gate write the workspace directory marker once before s3fs dials.
     # allow_other lets a user other than the mounting agent (uid 1000) reach the mount — the file
     # tools' helper stats and serves paths under /workspace, so without it those ops get EACCES.
     # Requires `user_allow_other` in /etc/fuse.conf, set in the mount prepare step.

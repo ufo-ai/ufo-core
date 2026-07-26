@@ -24,6 +24,7 @@ from uuid import UUID
 from aiobotocore.session import ClientCreatorContext, get_session
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
+from ufo.blob import BlobStore
 from ufo.config import BlobConfig
 from ufo.sandbox.session import RunToken
 from ufo.token_signing import SignedTokenError, sign_token, verify_token
@@ -95,6 +96,18 @@ def workspace_key_prefix(conversation_id: UUID) -> str:
     return f"conversations/{conversation_id}/{WORKSPACE_SEGMENT}"
 
 
+async def ensure_workspace_marker(blob: BlobStore, conversation_id: UUID) -> str:
+    """Write the conversation's workspace directory-marker object, so the prefix holds an object
+    before s3fs ever dials it: mounting an object-less prefix mountpoint mis-keys the s3fs daemon's
+    stat cache during its startup check and aborts (compat_dir does not recover that), and a fresh
+    conversation's prefix is otherwise empty at first mount. Both mount preparers call this —
+    `_workspace_mount` on a conversation's first sandbox create, the deploy gate for its throwaway
+    conversation. Returns the marker key, so the gate can delete exactly what it wrote."""
+    key = f"{workspace_key_prefix(conversation_id)}/"
+    await blob.put(key, b"")
+    return key
+
+
 def workspace_prefix_policy(bucket: str, key_prefix: str) -> str:
     """An inline session policy that confines the sandbox's mount credential to one prefix: both
     object access (read/write/delete) and `ListBucket` are scoped to `key_prefix` (the
@@ -103,8 +116,8 @@ def workspace_prefix_policy(bucket: str, key_prefix: str) -> str:
     it, another conversation's, or another tenant's.
 
     `ListBucket` is prefix-scoped via an `s3:prefix` condition, so s3fs readdir stays within the
-    mounted prefix without the condition breaking the mount — a fresh, empty prefix is handled by
-    the mount's `compat_dir`, not by loosening the condition."""
+    mounted prefix without the condition breaking the mount — a fresh prefix exists before the
+    mount via the mount preparer's directory marker, not by loosening the condition."""
     return json.dumps(
         {
             "Version": "2012-10-17",
@@ -143,10 +156,9 @@ def _utc_now() -> datetime:
 
 @dataclass(frozen=True)
 class AwsStsClient:
-    """The real STS client: a fresh aiobotocore client per AssumeRole call, mirroring the blob
-    store's per-call client, against AWS STS or a MinIO STS endpoint (`endpoint_url`). The host
-    process's own credentials sign the AssumeRole call; the inline session policy narrows the
-    result."""
+    """The real STS client: a fresh aiobotocore client per AssumeRole call, against AWS STS or a
+    MinIO STS endpoint (`endpoint_url`). The host process's own credentials sign the AssumeRole
+    call; the inline session policy narrows the result."""
 
     endpoint_url: str | None
     region: str | None

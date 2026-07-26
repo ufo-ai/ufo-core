@@ -36,6 +36,7 @@ from ufo.loop.engine import (
     TurnEngine,
 )
 from ufo.loop.prompts.render import rendered_prompt
+from ufo.loop.queue import _workspace_mount
 from ufo.loop.transcript import Transcript
 from ufo.models.interface import ModelEvent, ModelRequest, ToolUseBlock
 from ufo.sandbox.fs_creds import (
@@ -285,14 +286,8 @@ async def test_s3_mount_runs_s3fs_as_nobody_without_exposing_relay_secret(
             SandboxSpec(
                 conversation_id=conversation_id,
                 image_ref=sandbox_image,
-                mount=MountSpec(
-                    kind="s3",
-                    bucket=s3_store.bucket,
-                    key_prefix=workspace_key_prefix(conversation_id),
-                    credential_token=minter.issue(conversation_id, run),
-                    s3_url=sandbox_s3_url,
-                    region=s3_store.region,
-                    path_style=True,
+                mount=await _workspace_mount(
+                    s3_store, minter, conversation_id, run, fresh_sandbox=True
                 ),
                 proxy=endpoint,
                 run_token="integration-run",

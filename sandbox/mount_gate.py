@@ -7,13 +7,15 @@ mount the way an agent does — create, list, read back, chmod, delete, and the 
 a file unlinked while open, the file-handle requests libfuse delivers with no path (which
 segfaulted every packaged s3fs, s3fs-fuse#2903) — and proves the health probe passes. Any failure
 exits non-zero, so a deploy onto a broken storage chain (template FUSE/s3fs, credential endpoint,
-IAM trust or policy, bucket) goes red in the pipeline. The workspace prefix
-is a throwaway conversation id, emptied again by the exercise's own delete; the sandbox is killed
-either way."""
+IAM trust or policy, bucket) goes red in the pipeline. The gate stands in for serve as the mount
+preparer, so like `_workspace_mount` it writes the workspace directory marker before mounting —
+s3fs refuses an object-less prefix. The workspace prefix is a throwaway conversation id, emptied
+again by the gate's own deletes; the sandbox is killed either way."""
 
 from __future__ import annotations
 
 import argparse
+import asyncio
 import os
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -27,10 +29,12 @@ from ufo_ext_e2b import (
     INSTALL_CA_COMMAND,
 )
 
+from ufo.blob import S3BlobStore
 from ufo.sandbox.fs_creds import (
     SANDBOX_FS_CREDENTIAL_PATH,
     SANDBOX_FS_GATE_TOKEN_TTL_SECONDS,
     SANDBOX_FS_TOKEN_SECRET_ENV,
+    ensure_workspace_marker,
     issue_sandbox_fs_gate_token,
     workspace_key_prefix,
 )
@@ -136,8 +140,12 @@ def main() -> None:
         conversation=conversation,
         now=datetime.now(UTC),
     )
-    sandbox = Sandbox.create(template=E2B_TEMPLATE_NAME, timeout=SANDBOX_TIMEOUT_SECONDS)
+    store = S3BlobStore(bucket=args.bucket, region=args.region)
+    marker_key: str | None = None
+    sandbox: Sandbox | None = None
     try:
+        marker_key = asyncio.run(ensure_workspace_marker(store, conversation))
+        sandbox = Sandbox.create(template=E2B_TEMPLATE_NAME, timeout=SANDBOX_TIMEOUT_SECONDS)
         sandbox.files.write(CA_STAGING_PATH, recipe.ca_cert, user="root")
         sandbox.commands.run(
             INSTALL_CA_COMMAND,
@@ -155,8 +163,26 @@ def main() -> None:
             sandbox.commands.run(command, user="root", timeout=MOUNT_TIMEOUT_SECONDS)
         exercised = sandbox.commands.run(EXERCISE, timeout=EXERCISE_TIMEOUT_SECONDS)
         print(exercised.stdout)
-    finally:
+    except BaseException:
+        # The exception that surfaces from a red gate must be the deploy defect itself, so on this
+        # path cleanup failures only print. On the success path below they raise — a leaked
+        # sandbox or marker is then the failure.
+        try:
+            if sandbox is not None:
+                sandbox.kill()
+        except Exception as error:
+            print(f"sandbox cleanup failed: {error}")
+        finally:
+            if marker_key is not None:
+                try:
+                    asyncio.run(store.delete(marker_key))
+                except Exception as error:
+                    print(f"marker cleanup failed, {marker_key} leaked: {error}")
+        raise
+    try:
         sandbox.kill()
+    finally:
+        asyncio.run(store.delete(marker_key))
     print(f"workspace mount gate passed (conversation {conversation})")
 
 

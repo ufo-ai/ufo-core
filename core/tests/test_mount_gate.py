@@ -52,6 +52,7 @@ class _Commands:
 @dataclass
 class _Sandbox:
     events: list[tuple[object, ...]] = field(default_factory=list)
+    kill_error: Exception | None = None
     files: _Files = field(init=False)
     commands: _Commands = field(init=False)
     killed: bool = False
@@ -62,17 +63,39 @@ class _Sandbox:
 
     def kill(self) -> None:
         self.killed = True
+        self.events.append(("kill",))
+        if self.kill_error is not None:
+            raise self.kill_error
+
+
+@dataclass
+class _Store:
+    """Stands in for the S3 blob store, recording into the same event list as the sandbox fake so
+    the marker's ordering against the mount commands is assertable."""
+
+    events: list[tuple[object, ...]]
+    delete_error: Exception | None = None
+
+    async def put(self, key: str, data: bytes) -> None:
+        self.events.append(("marker_put", key, data))
+
+    async def delete(self, key: str) -> None:
+        self.events.append(("marker_delete", key))
+        if self.delete_error is not None:
+            raise self.delete_error
 
 
 def test_mount_gate_installs_proxy_ca_before_mounting(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     sandbox = _Sandbox()
+    store = _Store(sandbox.events)
     monkeypatch.setattr(
         mount_gate,
         "Sandbox",
         SimpleNamespace(create=lambda **kwargs: sandbox),
     )
+    monkeypatch.setattr(mount_gate, "S3BlobStore", lambda **kwargs: store)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -91,15 +114,128 @@ def test_mount_gate_installs_proxy_ca_before_mounting(
 
     mount_gate.main()
 
-    assert sandbox.events[0] == ("write", CA_STAGING_PATH, "ca-pem", "root")
-    assert sandbox.events[1] == (
+    kind, marker_key, marker_body = sandbox.events[0]
+    assert kind == "marker_put"
+    assert marker_key.startswith("conversations/") and marker_key.endswith("/workspace/")
+    assert marker_body == b""
+    assert sandbox.events[1] == ("write", CA_STAGING_PATH, "ca-pem", "root")
+    assert sandbox.events[2] == (
         "run",
         INSTALL_CA_COMMAND,
         "root",
         CA_INSTALL_TIMEOUT_SECONDS,
     )
-    assert sandbox.events[2] == ("make_dir", WORKSPACE_DIR)
+    assert sandbox.events[3] == ("make_dir", WORKSPACE_DIR)
     assert sandbox.killed
+    assert sandbox.events[-2:] == [("kill",), ("marker_delete", marker_key)]
+    assert [e for e in sandbox.events if e[0] == "marker_put"] == [sandbox.events[0]]
+
+
+def test_mount_gate_deletes_the_marker_when_sandbox_create_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed Sandbox.create — the fault class the gate exists to catch — must not leak the
+    marker: the delete runs unconditionally, and no kill fires for a sandbox never assigned."""
+    events: list[tuple[object, ...]] = []
+    store = _Store(events)
+
+    def refuse(**kwargs: object) -> object:
+        raise RuntimeError("no sandbox capacity")
+
+    monkeypatch.setattr(mount_gate, "Sandbox", SimpleNamespace(create=refuse))
+    monkeypatch.setattr(mount_gate, "S3BlobStore", lambda **kwargs: store)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["mount-gate", "--bucket", "bucket", "--region", "us-east-1", "--proxy-url", "https://p"],
+    )
+    monkeypatch.setenv(EGRESS_CA_CERT_ENV, "ca-pem")
+    monkeypatch.setenv(SANDBOX_FS_TOKEN_SECRET_ENV, "secret")
+
+    with pytest.raises(RuntimeError, match="no sandbox capacity"):
+        mount_gate.main()
+
+    assert [event[0] for event in events] == ["marker_put", "marker_delete"]
+    assert events[0][1] == events[1][1]
+
+
+def test_mount_gate_cleanup_failure_does_not_mask_the_deploy_defect(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A failing marker delete during cleanup prints instead of raising, so the exception that
+    surfaces from a red gate is the actual deploy defect, never the cleanup's own."""
+    events: list[tuple[object, ...]] = []
+    store = _Store(events, delete_error=RuntimeError("s3 blip"))
+
+    def refuse(**kwargs: object) -> object:
+        raise RuntimeError("no sandbox capacity")
+
+    monkeypatch.setattr(mount_gate, "Sandbox", SimpleNamespace(create=refuse))
+    monkeypatch.setattr(mount_gate, "S3BlobStore", lambda **kwargs: store)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["mount-gate", "--bucket", "bucket", "--region", "us-east-1", "--proxy-url", "https://p"],
+    )
+    monkeypatch.setenv(EGRESS_CA_CERT_ENV, "ca-pem")
+    monkeypatch.setenv(SANDBOX_FS_TOKEN_SECRET_ENV, "secret")
+
+    with pytest.raises(RuntimeError, match="no sandbox capacity"):
+        mount_gate.main()
+
+    assert "marker cleanup failed" in capsys.readouterr().out
+
+
+def test_mount_gate_goes_red_when_cleanup_fails_on_a_passing_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On the success path cleanup is load-bearing: a failing marker delete after a healthy
+    exercise must fail the gate, not print-and-pass — a leak on a green run is the failure."""
+    sandbox = _Sandbox()
+    store = _Store(sandbox.events, delete_error=RuntimeError("s3 blip"))
+    monkeypatch.setattr(
+        mount_gate,
+        "Sandbox",
+        SimpleNamespace(create=lambda **kwargs: sandbox),
+    )
+    monkeypatch.setattr(mount_gate, "S3BlobStore", lambda **kwargs: store)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["mount-gate", "--bucket", "bucket", "--region", "us-east-1", "--proxy-url", "https://p"],
+    )
+    monkeypatch.setenv(EGRESS_CA_CERT_ENV, "ca-pem")
+    monkeypatch.setenv(SANDBOX_FS_TOKEN_SECRET_ENV, "secret")
+
+    with pytest.raises(RuntimeError, match="s3 blip"):
+        mount_gate.main()
+    assert sandbox.killed
+
+
+def test_mount_gate_deletes_the_marker_when_the_success_path_kill_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A kill failure after a healthy exercise must not skip the marker delete: the delete runs in
+    a finally, the gate still goes red on the kill's own exception."""
+    sandbox = _Sandbox(kill_error=RuntimeError("kill refused"))
+    store = _Store(sandbox.events)
+    monkeypatch.setattr(
+        mount_gate,
+        "Sandbox",
+        SimpleNamespace(create=lambda **kwargs: sandbox),
+    )
+    monkeypatch.setattr(mount_gate, "S3BlobStore", lambda **kwargs: store)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["mount-gate", "--bucket", "bucket", "--region", "us-east-1", "--proxy-url", "https://p"],
+    )
+    monkeypatch.setenv(EGRESS_CA_CERT_ENV, "ca-pem")
+    monkeypatch.setenv(SANDBOX_FS_TOKEN_SECRET_ENV, "secret")
+
+    with pytest.raises(RuntimeError, match="kill refused"):
+        mount_gate.main()
+    assert sandbox.events[-2:] == [("kill",), ("marker_delete", sandbox.events[0][1])]
 
 
 def test_mount_gate_recipe_wires_the_expiring_token_proxy_and_root_mount_steps() -> None:

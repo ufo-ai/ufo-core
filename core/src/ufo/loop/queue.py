@@ -47,7 +47,11 @@ from ufo.loop.transcript import Transcript
 from ufo.memory import MemorySearch
 from ufo.models.registry import ModelRegistry
 from ufo.o11y import log, warn
-from ufo.sandbox.fs_creds import SandboxFsCredentialMinter, workspace_key_prefix
+from ufo.sandbox.fs_creds import (
+    SandboxFsCredentialMinter,
+    ensure_workspace_marker,
+    workspace_key_prefix,
+)
 from ufo.sandbox.session import (
     SANDBOX_GID,
     SANDBOX_UID,
@@ -465,7 +469,9 @@ async def _open_sandbox(
         SandboxSpec(
             conversation_id=turn.conversation_id,
             image_ref=SANDBOX_IMAGE_REF,
-            mount=await _workspace_mount(blob, workspace_fs, turn.conversation_id, run),
+            mount=await _workspace_mount(
+                blob, workspace_fs, turn.conversation_id, run, fresh_sandbox=resume_id is None
+            ),
             proxy=proxy,
             run_token=run.encode(),
             resume_id=resume_id,
@@ -630,6 +636,7 @@ async def _workspace_mount(
     workspace_fs: SandboxFsCredentialMinter | None,
     conversation_id: UUID,
     run: RunToken,
+    fresh_sandbox: bool,
 ) -> MountSpec:
     """The workspace is only the conversation's `workspace/` subtree — a sibling of the transcript
     under `conversations/<id>/`, never the transcript itself. The filesystem backend reaches it as a
@@ -660,6 +667,11 @@ async def _workspace_mount(
                     "the s3 blob backend requires the sandbox-fs credential minter "
                     "(set blob.sts_role_arn, blob.s3_url)"
                 )
+            # The directory marker is this backend's form of the filesystem branch's mkdir.
+            # Only a conversation's first sandbox can face an empty prefix — the marker outlives
+            # every later mount — so a resume skips the write.
+            if fresh_sandbox:
+                await ensure_workspace_marker(blob, conversation_id)
             return MountSpec(
                 kind="s3",
                 bucket=workspace_fs.bucket,
