@@ -176,3 +176,59 @@ class CredentialStore:
                 )
             )
         return updated.rowcount == 1
+
+
+@dataclass(frozen=True)
+class HostChoice:
+    """A provider whose API host varies per account, declared as the closed set of hosts it can be:
+    the companion `slot` a member fills, the `hosts` that slot may name, the `default` an unchosen
+    workspace gets, the `env` the resolved host is exported as, and the `description` the member is
+    prompted with.
+
+    The stored value is a **choice, never a hostname** — `credential_host` answers the matching
+    declared literal or nothing at all, so the host that reaches a proxy `ScopeRule` is always a
+    string this declaration wrote. That is what keeps a member-filled host as trustworthy as a
+    code-declared one: an exact `ScopeRule` bypasses the proxy's private-address check (that check
+    guards the open-internet path), and free text there would let a stored address or internal name
+    decide where the shared proxy dials. A closed set has nothing to validate, so there is no
+    pattern, no length cap, no case fold and no suffix bound to get wrong."""
+
+    slot: str
+    description: str
+    hosts: tuple[str, ...]
+    default: str
+    env: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.default not in self.hosts:
+            raise ValueError(
+                f"host choice on slot {self.slot!r} defaults to {self.default!r}, which its own "
+                f"hosts {self.hosts} do not offer"
+            )
+
+    def resolve(self, selected: str) -> str | None:
+        """The declared host a stored selection names, matched case-insensitively as DNS is — the
+        canonical literal, never the member's spelling — or None for anything the set does not
+        offer."""
+        wanted = selected.strip().lower()
+        return next((host for host in self.hosts if host.lower() == wanted), None)
+
+
+async def credential_host(
+    store: CredentialStore, workspace_id: UUID, host: str | HostChoice
+) -> str | None:
+    """The provider host an injecting slot's secret rides to for this workspace: a fixed declared
+    host as-is, or — for a provider whose host varies per account — the one this workspace selected,
+    falling back to the declared default while nothing is selected. None only for a stored value the
+    declaration does not offer, which opens no egress at all. The egress proxy resolves the host it
+    admits through here and the engine resolves the host it exports into the sandbox through here,
+    from the same declaration: two roles, one answer, no registration between them."""
+    match host:
+        case str():
+            return host
+        case HostChoice():
+            try:
+                selected = await store.get(workspace_id, host.slot)
+            except CredentialSlotUnset:
+                return host.default
+            return host.resolve(selected)

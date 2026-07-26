@@ -35,6 +35,7 @@ from ufo.ext.loader import (
     durable_surfaces,
     embed_backend,
     index_backend,
+    injecting_slots,
     load_manifests,
     memory_search,
     skill_registry,
@@ -84,7 +85,7 @@ from ufo.runtime_instance import (
 )
 from ufo.sandbox.fs_creds import SandboxFsCredentialMinter, sandbox_fs_minter
 from ufo.sandbox.local import LocalCarrier
-from ufo.sandbox.proxy.rules import Rule, connector_transfer_hosts, derive_manifest_rules
+from ufo.sandbox.proxy.rules import connector_transfer_hosts, derive_manifest_rules
 from ufo.sandbox.proxy.server import EgressProxy, PerAgentRules, generate_ca
 from ufo.sandbox.session import EGRESS_CA_CERT_ENV, Carrier, ProxyEndpoint
 from ufo.schema.records import DBOS_APP_NAME, DBOS_APP_VERSION, DBOS_MAX_EXECUTOR_THREADS
@@ -826,15 +827,16 @@ def _local_egress_proxy(
 ) -> ProxyEndpoint:
     """The single-node sandbox's sole route out, run in-process on its own event loop — a
     standalone network service, not part of the turn loop, that outlives every turn for the
-    process's life. It mints an ephemeral CA with no shared trust material to carry; like the shared
-    `ufoctl proxy` it carries no injectable credential secrets (an injecting slot fails loud in
-    `_local_rule_base`). The resolver reads the turn's agent and grants per turn through
-    `workspace_tx`, binding each request's own workspace, and authorizes each granted-host CONNECT
+    process's life. It mints an ephemeral CA with no shared trust material to carry. The resolver
+    reads the turn's agent, its workspace's keyed credentials, and its grants per turn through
+    `workspace_tx`, binding each request's own workspace, and authorizes each keyed-host CONNECT
     against the turn's live status. It binds `proxy_port` and carries no `public_url`: a local
     carrier forms a process-local address from the port alone."""
     resolver = PerAgentRules(
-        base=_local_rule_base(config, manifests),
+        base=model_rule_base(config),
         grants=GrantStore() if credentials is not None else None,
+        credentials=credentials,
+        slots=injecting_slots(manifests),
         internet=derive_manifest_rules(manifests),
         transfer_hosts=connector_transfer_hosts(manifests),
         clis=connector_clis(manifests),
@@ -854,23 +856,6 @@ def _local_egress_proxy(
         ).start(port=config.sandbox.proxy_port)
 
     return asyncio.run_coroutine_threadsafe(_boot(), loop).result(PROXY_STARTUP_TIMEOUT_SECONDS)
-
-
-def _local_rule_base(config: Config, manifests: tuple[Manifest, ...]) -> tuple[Rule, ...]:
-    """The in-process proxy's static base: the shared model-provider egress alone. The shared fleet
-    serves every workspace, so no single workspace's stored secrets can be baked into a rule base —
-    an injecting credential slot needs the standalone `ufoctl proxy`'s per-request, per-workspace
-    resolution and fails loud here, exactly as `ProxyServe._base` refuses it."""
-    injecting = sorted(
-        slot.name for manifest in manifests for slot in manifest.credentials if slot.injection
-    )
-    if injecting:
-        raise RuntimeError(
-            f"the in-process egress proxy cannot inject workspace credential secrets on the "
-            f"shared fleet, but the active pack declares injecting credential slot(s) {injecting}; "
-            "run the standalone `ufoctl proxy` for a deploy that needs credential injection"
-        )
-    return model_rule_base(config)
 
 
 BIND_ADDRESSES = frozenset({"0.0.0.0", "127.0.0.1", "localhost", "::", "::1"})

@@ -215,6 +215,12 @@ spec:
             - name: COMPOSIO_API_KEY
               valueFrom:
                 secretKeyRef: {name: ufo-platform-secrets, key: COMPOSIO_API_KEY}
+            # The one Fernet the fleet stores workspace credentials under: the proxy decrypts each
+            # workspace's keyed-provider secrets per turn to swap them onto the wire. A pack with a
+            # keyed provider fails loud without it, so proxy and serve read the same secret.
+            - name: UFO_CREDENTIAL_KEY
+              valueFrom:
+                secretKeyRef: {name: ufo-serve, key: UFO_CREDENTIAL_KEY}
           volumeMounts:
             - {name: config, mountPath: /app/ufo.toml, subPath: ufo.toml}
           # No /healthz on the raw CONNECT proxy; a TCP probe confirms the bind after fail-loud boot.

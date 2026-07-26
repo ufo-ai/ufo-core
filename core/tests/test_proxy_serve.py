@@ -2,16 +2,25 @@ import asyncio
 import os
 import signal
 from pathlib import Path
-from types import MethodType
+from types import MethodType, SimpleNamespace
 
 import pytest
+from cryptography.fernet import Fernet
 
 from ufo import proxy_serve as proxy_serve_module
 from ufo.config import BlobConfig, Config, DatabaseConfig, load_config
-from ufo.ext.loader import load_manifests
+from ufo.credentials import CredentialStore
+from ufo.ext.loader import injecting_slots, load_manifests
 from ufo.ext.manifest import CredentialSlot, InjectionTarget, Manifest
 from ufo.models.catalog import CORE_PRICING
-from ufo.proxy_serve import OWNER_DSN_ENV, ProxyServe, _egress_ca, _owner_dsn, model_rule_base
+from ufo.proxy_serve import (
+    OWNER_DSN_ENV,
+    ProxyServe,
+    _credential_store,
+    _egress_ca,
+    _owner_dsn,
+    model_rule_base,
+)
 from ufo.sandbox.proxy.rules import ANTHROPIC_HOST, ScopeRule, derive_model_rules
 from ufo.sandbox.session import EGRESS_CA_CERT_ENV, EGRESS_CA_KEY_ENV
 
@@ -34,6 +43,7 @@ def _proxy_serve(
         owner_dsn="postgresql://owner@db/ufo",
         ca_cert="CA",
         ca_key="KEY",
+        credentials=None,
         pricing=CORE_PRICING,
         shutdown=shutdown or asyncio.Event(),
     )
@@ -53,46 +63,63 @@ def test_model_rule_base_derives_provider_egress_from_the_env_key(
         model_rule_base(_config())
 
 
-def test_base_is_model_rules_only(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_static_base_carries_no_workspace_secret(monkeypatch: pytest.MonkeyPatch) -> None:
     """The shared proxy's static base is exactly the model-provider egress derived from the process
     key in env — one ScopeRule for the provider host plus its sentinel→real injection and token
-    meter, and no workspace-specific secret."""
+    meter. A workspace's keyed-provider secret never joins it: it is resolved per turn against the
+    run token's workspace, so nothing one workspace stored can be baked into what every workspace
+    shares."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    base = _proxy_serve(_config(), ())._base()
+    base = model_rule_base(_config())
     assert base == derive_model_rules("claude-opus-4-8", ANTHROPIC_KEY)
     scopes = {rule.allowed_hosts for rule in base if isinstance(rule, ScopeRule)}
     assert scopes == {frozenset({ANTHROPIC_HOST})}
 
 
-def test_base_raises_on_an_injecting_slot(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An injecting credential slot in the active pack means workspace secret injection, which the
-    one shared proxy cannot do — it fails loud naming the slot, checked before the model base so the
-    diagnosis is the injection, not a missing key."""
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    injecting = Manifest(
+def _injecting_manifest() -> Manifest:
+    return Manifest(
         name="inj",
         version="1",
         credentials=(
             CredentialSlot(
                 name="byok",
-                description="a workspace key the proxy would swap onto the wire",
+                description="a workspace key the proxy swaps onto the wire",
                 injection=InjectionTarget(
                     host="api.inj.test", header="authorization", sentinel="S"
                 ),
             ),
         ),
     )
+
+
+def test_a_keyed_pack_opens_the_credential_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The shared proxy decrypts each workspace's keyed-provider secrets itself, so a pack with an
+    injecting slot opens the same Fernet `serve` does, read from the configured key env."""
+    monkeypatch.setenv("UFO_CREDENTIAL_KEY", Fernet.generate_key().decode())
+    slots = injecting_slots((_injecting_manifest(),))
+    store = _credential_store(_config(), slots)
+    assert store is not None
+    assert store.fernet.decrypt(store.fernet.encrypt(b"round-trip")) == b"round-trip"
+
+
+def test_a_keyed_pack_without_the_credential_key_fails_loud(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No key means every keyed host would be unreachable for every workspace — a silently
+    capability-less deploy — so boot fails naming the slot. A pack with no injecting slot needs no
+    key and opens no store."""
+    monkeypatch.delenv("UFO_CREDENTIAL_KEY", raising=False)
     with pytest.raises(RuntimeError, match="byok"):
-        _proxy_serve(_config(), (injecting,))._base()
+        _credential_store(_config(), injecting_slots((_injecting_manifest(),)))
+    assert _credential_store(_config(), ()) is None
 
 
 def test_base_raises_when_no_model_key_is_set(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     with pytest.raises(RuntimeError, match="no model provider key"):
-        _proxy_serve(_config(), ())._base()
+        model_rule_base(_config())
 
 
 def test_egress_ca_reads_the_stable_pem_pair(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -145,16 +172,20 @@ def test_owner_dsn_fails_loud_when_env_and_config_are_unset(
 
 def test_bundle_baked_config_satisfies_the_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
     """The proxy carries no bespoke config — it runs on the same `hosted.toml` the bundle bakes to
-    /app/ufo.toml. That baked base must load and satisfy `ProxyServe`: the pack resolves, declares
-    no injecting slot the shared proxy cannot honor, and the model base derives. The crashloop this
-    replaces (a hand-written proxy.toml missing a required section) had no test at all."""
+    /app/ufo.toml. That baked base must load and satisfy `ProxyServe`: the pack resolves, the model
+    base derives, and every keyed provider the pack declares opens its store from the credential key
+    the deploy sets — the hosted proxy needs that env, so a pack that grows a keyed provider without
+    it crashloops here instead. The crashloop this replaces (a hand-written proxy.toml missing a
+    required section) had no test at all."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("UFO_CREDENTIAL_KEY", Fernet.generate_key().decode())
     baked = Path(__file__).parents[2] / "hosted.toml"
     config = load_config(baked)
     manifests = load_manifests(config.pack.name)
-    base = _proxy_serve(config, manifests)._base()
-    assert any(isinstance(rule, ScopeRule) for rule in base)
+    assert any(isinstance(rule, ScopeRule) for rule in model_rule_base(config))
+    assert injecting_slots(manifests)
+    assert _credential_store(config, injecting_slots(manifests)) is not None
 
 
 async def test_proxy_serve_wires_workspace_credential_refresh(
@@ -189,6 +220,58 @@ async def test_proxy_serve_wires_workspace_credential_refresh(
     refresh = captured["workspace_credentials"]
     assert isinstance(refresh, MethodType)
     assert refresh.__self__ is workspace_fs
+
+
+async def test_proxy_serve_resolves_keyed_slots_per_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The standalone `ufoctl proxy` is the process that actually injects on the shared fleet, so
+    its resolver carries the store it decrypts with and the slots it derives from — threaded, never
+    baked into the base, which stays the model-provider egress every workspace shares. The sibling
+    proof for serve's in-process proxy is `test_the_local_proxy_resolves_keyed_slots_per_workspace`;
+    without this one, dropping either kwarg here would leave every keyed host unreachable fleet-wide
+    with nothing red."""
+    captured: dict[str, object] = {}
+
+    class StopServe(Exception):
+        pass
+
+    class Proxy:
+        def __init__(self, **kwargs: object) -> None: ...
+
+        async def start(self, **kwargs: object) -> None:
+            raise StopServe
+
+    def rules(**kwargs: object) -> object:
+        captured.update(kwargs)
+        return SimpleNamespace(resolve=None, turn_live=None)
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr(proxy_serve_module, "init_db", lambda dsn: None)
+    monkeypatch.setattr(proxy_serve_module, "sandbox_fs_minter", lambda blob: None)
+    monkeypatch.setattr(proxy_serve_module, "EgressProxy", Proxy)
+    monkeypatch.setattr(proxy_serve_module, "PerAgentRules", rules)
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    manifest = _injecting_manifest()
+    config = _config()
+    server = ProxyServe(
+        config=config,
+        manifests=(manifest,),
+        owner_dsn="postgresql://owner@db/ufo",
+        ca_cert="CA",
+        ca_key="KEY",
+        credentials=store,
+        pricing=CORE_PRICING,
+        shutdown=asyncio.Event(),
+    )
+
+    with pytest.raises(StopServe):
+        await server.serve()
+
+    assert captured["credentials"] is store
+    assert captured["slots"] == injecting_slots((manifest,))
+    assert captured["base"] == model_rule_base(config)
 
 
 async def test_proxy_serve_drains_connections_on_shutdown(

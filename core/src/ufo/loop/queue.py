@@ -14,10 +14,22 @@ from ufo.blob import BlobStore, FilesystemBlobStore, S3BlobStore
 from ufo.browser import CdpProvider
 from ufo.config import Config
 from ufo.connectors import CliCredential, ConnectorRegistry
-from ufo.credentials import CredentialRequests, CredentialStore
+from ufo.credentials import (
+    CredentialRequests,
+    CredentialSlotUnset,
+    CredentialStore,
+    HostChoice,
+    credential_host,
+)
 from ufo.db import workspace_tx
-from ufo.ext.loader import connector_clis, turn_hooks, turn_runtime_skills, turn_tools
-from ufo.ext.manifest import Manifest
+from ufo.ext.loader import (
+    connector_clis,
+    injecting_slots,
+    turn_hooks,
+    turn_runtime_skills,
+    turn_tools,
+)
+from ufo.ext.manifest import CredentialSlot, Manifest
 from ufo.grants import GrantStore, grant_sentinel
 from ufo.hub import Hub, Terminal
 from ufo.indexing import EmbedClient, IndexBackend
@@ -34,7 +46,7 @@ from ufo.loop.subagents import SubagentRegistry, Subagents, subagent_system_prom
 from ufo.loop.transcript import Transcript
 from ufo.memory import MemorySearch
 from ufo.models.registry import ModelRegistry
-from ufo.o11y import log
+from ufo.o11y import log, warn
 from ufo.sandbox.fs_creds import SandboxFsCredentialMinter, workspace_key_prefix
 from ufo.sandbox.session import (
     SANDBOX_GID,
@@ -255,6 +267,8 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             turn,
             GrantStore() if runtime.credentials is not None else None,
             connector_clis(runtime.manifests),
+            runtime.credentials,
+            injecting_slots(runtime.manifests),
         )
         sandbox = SandboxSession(carrier=runtime.carrier, handle=handle)
         for skill in preload:
@@ -424,6 +438,8 @@ async def _open_sandbox(
     turn: Turn,
     grants: GrantStore | None,
     clis: Mapping[str, CliCredential],
+    credentials: CredentialStore | None,
+    slots: tuple[CredentialSlot, ...],
 ) -> SandboxHandle:
     """Create-or-resume the conversation's sandbox and keep its durable handle on the conversation
     row. A prior process's handle survives there, so a fresh serve reattaches the same sandbox from
@@ -443,13 +459,54 @@ async def _open_sandbox(
             proxy=proxy,
             run_token=run.encode(),
             resume_id=resume_id,
-            env=await _grant_cli_env(grants, clis, turn),
+            env={
+                **await _grant_cli_env(grants, clis, turn),
+                **await _keyed_provider_env(credentials, slots, turn.workspace_id),
+            },
         )
     )
     persisted = format_sandbox_handle(backend, handle.container_id)
     if persisted != stored:
         await _persist_sandbox_handle(turn.conversation_id, turn.workspace_id, persisted)
     return handle
+
+
+async def _keyed_provider_env(
+    credentials: CredentialStore | None,
+    slots: tuple[CredentialSlot, ...],
+    workspace_id: UUID,
+) -> dict[str, str]:
+    """Each keyed provider this workspace has a secret for, as the sandbox sees it: the declared env
+    var set to the slot's sentinel — never the secret, which the egress proxy swaps in on the wire —
+    and the resolved provider host, so the agent's own client authenticates and addresses the right
+    region without holding or guessing either. A slot with nothing stored exports nothing, so the
+    agent finds no half-usable variable for a provider the member has not keyed yet. A selection the
+    declaration does not offer exports nothing and warns here as well as at the proxy, because the
+    two roles withhold at different moments — the export when the sandbox opens, the egress when a
+    request is made — and the member would otherwise see a variable that never appeared."""
+    if credentials is None:
+        return {}
+    env: dict[str, str] = {}
+    for slot in slots:
+        target = slot.injection
+        if target is None:
+            continue
+        host_env = target.host.env if isinstance(target.host, HostChoice) else None
+        if target.env is None and host_env is None:
+            continue
+        try:
+            await credentials.get(workspace_id, slot.name)
+        except CredentialSlotUnset:
+            continue
+        host = await credential_host(credentials, workspace_id, target.host)
+        if host is None:
+            warn("sandbox.keyed_host_unavailable", slot=slot.name)
+            continue
+        if target.env is not None:
+            env[target.env] = target.sentinel
+        if host_env is not None:
+            env[host_env] = host
+    return env
 
 
 async def _grant_cli_env(

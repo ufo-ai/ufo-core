@@ -1,10 +1,14 @@
+import logging
+import re
 import time
+from dataclasses import replace
 from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
 
+from ufo.connectors import CliCredential
 from ufo.credentials import (
     CREDENTIAL_REQUEST_TTL_SECONDS,
     CredentialRequestInvalid,
@@ -12,11 +16,86 @@ from ufo.credentials import (
     CredentialRequestState,
     CredentialSlotUnset,
     CredentialStore,
+    HostChoice,
+    credential_host,
     open_credential_request,
     seal_credential_request,
 )
 from ufo.db import workspace_tx
+from ufo.ext.loader import injecting_slots
+from ufo.ext.manifest import (
+    ConnectorProvider,
+    CredentialSlot,
+    InjectionTarget,
+    Manifest,
+)
+from ufo.sandbox.proxy.rules import (
+    InjectionRule,
+    MeterRule,
+    ScopeRule,
+    derive_credential_rules,
+)
 from ufo.schema import tables
+
+
+class _StubOAuth:
+    """The connector's OAuth descriptor is irrelevant here — only its declared CLI env name is."""
+
+    provider = "github"
+    host = "api.github.com"
+
+
+class _StubBroker:
+    """Neither the broker nor the forwarder is called: the assertion is on boot-time name claims."""
+
+
+DATADOG_HOST = "api.datadoghq.com"
+US5_HOST = "api.us5.datadoghq.com"
+
+
+DATADOG_SITES = HostChoice(
+    slot="datadog_api_host",
+    description="Datadog site for this org.",
+    hosts=(DATADOG_HOST, US5_HOST, "api.datadoghq.eu"),
+    default=DATADOG_HOST,
+    env="DD_HOST",
+)
+
+
+def _keyed_manifest() -> Manifest:
+    """A two-key provider on one host with a companion host slot — the Datadog shape exactly as the
+    real table declares it: one slot per header, both metering the same host, plus the non-secret
+    slot that pins this workspace's site. Both carry `dimension`, because a fixture that metered on
+    only one slot would hide what two slots sharing a host do to the host's rules."""
+    return Manifest(
+        name="keyed",
+        version="1",
+        credentials=(
+            CredentialSlot(
+                name="datadog_api_key",
+                description="api key",
+                injection=InjectionTarget(
+                    host=DATADOG_SITES,
+                    header="DD-API-KEY",
+                    sentinel="SENTINEL_DD_API",
+                    env="DD_API_KEY",
+                    dimension="requests",
+                ),
+            ),
+            CredentialSlot(
+                name="datadog_application_key",
+                description="application key",
+                injection=InjectionTarget(
+                    host=DATADOG_SITES,
+                    header="DD-APPLICATION-KEY",
+                    sentinel="SENTINEL_DD_APP",
+                    env="DD_APP_KEY",
+                    dimension="requests",
+                ),
+            ),
+            CredentialSlot(name="datadog_api_host", description="site host"),
+        ),
+    )
 
 
 def _store() -> CredentialStore:
@@ -124,3 +203,421 @@ async def test_credential_requests_open_an_owner_bound_authorization(db: None) -
         requests.open_authorization(sealed, workspace_id, uuid4(), "yc")
     with pytest.raises(CredentialRequestInvalid, match="slot"):
         requests.open_authorization(sealed, workspace_id, member_id, "other")
+
+
+async def test_two_keys_on_one_host_each_inject_their_own_header(db: None) -> None:
+    """A provider taking more than one key on the wire is two injecting slots on one host: each
+    swaps its own header from its own stored secret, while the host is scoped and metered exactly
+    once — one physical request carries both keys, so metering per slot would double-count every
+    Datadog call in `sandbox_egress_total`. The `DD-API-KEY` + `DD-APPLICATION-KEY` case, with no
+    composite target."""
+    workspace_id = await _workspace()
+    store = _store()
+    await store.put(workspace_id, "datadog_api_key", "dd-api-real")
+    await store.put(workspace_id, "datadog_application_key", "dd-app-real")
+    slots = injecting_slots((_keyed_manifest(),))
+    rules = await derive_credential_rules(slots, workspace_id, store)
+    injections = {rule.header: rule for rule in rules if isinstance(rule, InjectionRule)}
+    assert injections["DD-API-KEY"] == InjectionRule(
+        host=DATADOG_HOST, header="DD-API-KEY", sentinel="SENTINEL_DD_API", real="dd-api-real"
+    )
+    assert injections["DD-APPLICATION-KEY"] == InjectionRule(
+        host=DATADOG_HOST,
+        header="DD-APPLICATION-KEY",
+        sentinel="SENTINEL_DD_APP",
+        real="dd-app-real",
+    )
+    assert [rule for rule in rules if isinstance(rule, ScopeRule)] == [
+        ScopeRule(allowed_hosts=frozenset({DATADOG_HOST}))
+    ]
+    assert [rule for rule in rules if isinstance(rule, MeterRule)] == [
+        MeterRule(host=DATADOG_HOST, dimension="requests")
+    ]
+
+
+async def test_the_host_slot_pins_the_workspace_site(db: None) -> None:
+    """The non-secret companion slot is what makes a per-account host correct: with it set, every
+    rule the provider derives — scope, injection, meter — names that workspace's own host, so a US5
+    org's key is admitted to US5 and never rides to the US1 default."""
+    workspace_id = await _workspace()
+    store = _store()
+    await store.put(workspace_id, "datadog_api_key", "dd-api-real")
+    await store.put(workspace_id, "datadog_api_host", "API.US5.datadoghq.com ")
+    rules = await derive_credential_rules(
+        injecting_slots((_keyed_manifest(),)), workspace_id, store
+    )
+    assert {rule.host for rule in rules if not isinstance(rule, ScopeRule)} == {US5_HOST}
+    assert ScopeRule(allowed_hosts=frozenset({US5_HOST})) in rules
+    assert not any(
+        isinstance(rule, ScopeRule) and DATADOG_HOST in rule.allowed_hosts for rule in rules
+    )
+
+
+async def test_an_unfilled_slot_opens_no_egress_and_a_code_only_slot_never_rides(db: None) -> None:
+    workspace_id = await _workspace()
+    store = _store()
+    assert (
+        await derive_credential_rules(injecting_slots((_keyed_manifest(),)), workspace_id, store)
+        == ()
+    )
+    code_only = Manifest(
+        name="s", version="1", credentials=(CredentialSlot(name="code_only", description="x"),)
+    )
+    await store.put(workspace_id, "code_only", "in-process-only")
+    assert injecting_slots((code_only,)) == ()
+
+
+async def test_one_workspace_never_derives_anothers_secret(db: None) -> None:
+    """Per-workspace resolution is the tenant isolation the one shared proxy leans on: the same
+    declaration resolved for a second workspace yields that workspace's own secret, or nothing."""
+    first, second = await _workspace(), await _workspace()
+    store = _store()
+    await store.put(first, "datadog_api_key", "first-secret")
+    slots = injecting_slots((_keyed_manifest(),))
+    assert [
+        rule.real
+        for rule in await derive_credential_rules(slots, first, store)
+        if isinstance(rule, InjectionRule)
+    ] == ["first-secret"]
+    assert await derive_credential_rules(slots, second, store) == ()
+
+
+async def test_a_selection_resolves_to_the_declared_literal_or_nothing(db: None) -> None:
+    """The resolver's whole contract. A fixed host answers itself. A choice answers the declared
+    literal a selection names — case-insensitively, as DNS is, and canonicalised to the row's own
+    spelling — the default while nothing is selected, and None for anything the set does not offer.
+    Nothing a member types reaches the wire, so there is no pattern, bound or fold to get wrong."""
+    workspace_id = await _workspace()
+    store = _store()
+    assert await credential_host(store, workspace_id, "api.fixed.test") == "api.fixed.test"
+    assert await credential_host(store, workspace_id, DATADOG_SITES) == DATADOG_HOST
+    for selected, expected in (
+        (US5_HOST, US5_HOST),
+        (f"  {US5_HOST.upper()} ", US5_HOST),
+        ("api.datadoghq.eu", "api.datadoghq.eu"),
+        ("169.254.169.254", None),
+        ("10.0.0.5", None),
+        ("metadata.google.internal", None),
+        ("api.us5.datadoghq.com.evil.test", None),
+        ("sub.api.us5.datadoghq.com", None),
+        ("https://api.us5.datadoghq.com", None),
+        ("us5", None),
+    ):
+        await store.put(workspace_id, "datadog_api_host", selected)
+        assert await credential_host(store, workspace_id, DATADOG_SITES) == expected, selected
+
+
+def test_a_host_choice_must_name_a_declared_slot() -> None:
+    """Every writer gates on the declared set — the sealed chat handoff and `ufoctl credential set`
+    both refuse an unknown slot — so a companion nothing declares can never be filled and the host
+    would sit on the default forever, reading exactly like a member who has not chosen yet. A
+    companion declared by another installed extension is fine: the set spans the deploy."""
+    companion = CredentialSlot(name="datadog_api_host", description="site")
+    keyed = CredentialSlot(
+        name="dd_key",
+        description="k",
+        injection=InjectionTarget(host=DATADOG_SITES, header="DD-API-KEY", sentinel="S_DD"),
+    )
+    typo = replace(
+        keyed,
+        injection=replace(keyed.injection, host=replace(DATADOG_SITES, slot="datadog_api_hostt")),
+    )
+    with pytest.raises(RuntimeError, match="datadog_api_hostt"):
+        injecting_slots((Manifest(name="t", version="1", credentials=(typo, companion)),))
+    assert injecting_slots((Manifest(name="ok", version="1", credentials=(keyed, companion)),))
+    elsewhere = Manifest(name="other", version="1", credentials=(companion,))
+    assert injecting_slots((Manifest(name="k", version="1", credentials=(keyed,)), elsewhere))
+
+
+def test_two_slots_claiming_one_sentinel_or_env_fail_loud() -> None:
+    """A shared sentinel would draw whichever secret matched first and a shared env would leave one
+    provider's variable holding the other's sentinel — both silent at boot and wrong at the wire, so
+    collecting them refuses it across every installed extension."""
+    first = Manifest(
+        name="a",
+        version="1",
+        credentials=(
+            CredentialSlot(
+                name="a_key",
+                description="key",
+                injection=InjectionTarget(
+                    host="api.a.test", header="x-key", sentinel="SHARED", env="A_KEY"
+                ),
+            ),
+        ),
+    )
+    same_sentinel = Manifest(
+        name="b",
+        version="1",
+        credentials=(
+            CredentialSlot(
+                name="b_key",
+                description="key",
+                injection=InjectionTarget(
+                    host="api.b.test", header="x-key", sentinel="SHARED", env="B_KEY"
+                ),
+            ),
+        ),
+    )
+    with pytest.raises(RuntimeError, match="sentinel"):
+        injecting_slots((first, same_sentinel))
+    same_env = Manifest(
+        name="c",
+        version="1",
+        credentials=(
+            CredentialSlot(
+                name="c_key",
+                description="key",
+                injection=InjectionTarget(
+                    host="api.c.test", header="x-key", sentinel="OWN", env="A_KEY"
+                ),
+            ),
+        ),
+    )
+    with pytest.raises(RuntimeError, match="env"):
+        injecting_slots((first, same_env))
+
+
+def test_one_sandbox_variable_carries_one_value_whichever_field_claims_it() -> None:
+    """Every exported name lands in one dict per sandbox, so the namespace is one: a slot's `env`, a
+    host choice's `env`, and a connector CLI's env all compete. Two claims on one name carrying
+    different values would let the later export win the merge silently, leaving a client reading a
+    hostname where its auth belongs, and the same holds inside one slot naming a variable twice."""
+
+    def keyed(name: str, **injection: object) -> Manifest:
+        return Manifest(
+            name=name,
+            version="1",
+            credentials=(
+                CredentialSlot(
+                    name=f"{name}_key",
+                    description="key",
+                    injection=InjectionTarget(
+                        header="x-key",
+                        sentinel=f"S_{name}",
+                        **injection,  # type: ignore[arg-type]
+                    ),
+                ),
+                CredentialSlot(name="datadog_api_host", description="site"),
+            ),
+        )
+
+    clash = replace(DATADOG_SITES, env="X")
+    with pytest.raises(RuntimeError, match="env 'X'"):
+        injecting_slots((keyed("alpha", host="api.a.test", env="X"), keyed("beta", host=clash)))
+    with pytest.raises(RuntimeError, match="env 'Y'"):
+        injecting_slots((keyed("solo", host=replace(DATADOG_SITES, env="Y"), env="Y"),))
+    assert injecting_slots(
+        (
+            keyed("alpha", host="api.a.test", env="X"),
+            keyed(
+                "beta",
+                host=clash.__class__(
+                    slot="datadog_api_host",
+                    description="d",
+                    hosts=DATADOG_SITES.hosts,
+                    default=DATADOG_HOST,
+                    env="H",
+                ),
+            ),
+        )
+    )
+
+
+def test_two_slots_claiming_one_sentinel_fail_loud() -> None:
+    """A shared sentinel draws whichever secret matched first, so it is refused across every
+    installed extension."""
+
+    def keyed(name: str, sentinel: str) -> Manifest:
+        return Manifest(
+            name=name,
+            version="1",
+            credentials=(
+                CredentialSlot(
+                    name=f"{name}_key",
+                    description="key",
+                    injection=InjectionTarget(
+                        host=f"api.{name}.test", header="x-key", sentinel=sentinel
+                    ),
+                ),
+            ),
+        )
+
+    with pytest.raises(RuntimeError, match="sentinel"):
+        injecting_slots((keyed("a", "SHARED"), keyed("b", "SHARED")))
+    assert injecting_slots((keyed("a", "OWN_A"), keyed("b", "OWN_B")))
+
+
+def test_slots_sharing_a_host_env_must_select_through_one_choice() -> None:
+    """Sharing one host variable is safe exactly while its sharers resolve it identically, and a
+    frozen value object settles that by equality over every field it has — not a tuple of the fields
+    someone remembered to list, which is what let a divergent bound through before. Two keys naming
+    one choice is the point; two different choices claiming one variable is refused."""
+    together = Manifest(
+        name="together",
+        version="1",
+        credentials=(
+            CredentialSlot(
+                name="a_key",
+                description="k",
+                injection=InjectionTarget(host=DATADOG_SITES, header="A", sentinel="S_A"),
+            ),
+            CredentialSlot(
+                name="b_key",
+                description="k",
+                injection=InjectionTarget(host=DATADOG_SITES, header="B", sentinel="S_B"),
+            ),
+            CredentialSlot(name="datadog_api_host", description="site"),
+        ),
+    )
+    assert len(injecting_slots((together,))) == 2
+    diverged = replace(DATADOG_SITES, default=US5_HOST)
+    apart = Manifest(
+        name="apart",
+        version="1",
+        credentials=(
+            CredentialSlot(
+                name="c_key",
+                description="k",
+                injection=InjectionTarget(host=diverged, header="C", sentinel="S_C"),
+            ),
+        ),
+    )
+    with pytest.raises(RuntimeError, match="DD_HOST"):
+        injecting_slots((together, apart))
+
+
+def test_a_keyed_export_cannot_take_a_connector_clis_env_name() -> None:
+    """The sandbox env has two producers — a grant's CLI sentinel and a keyed slot's — merged into
+    one dict with the keyed half last, so a row naming `GH_TOKEN` would overwrite the github grant's
+    sentinel and leave that CLI authenticating as nothing. Adding a keyed provider is meant to cost
+    no code and no test, so nothing but this refusal stops the next row taking a name in use."""
+    connector = Manifest(
+        name="broker",
+        version="1",
+        connectors=(
+            ConnectorProvider(
+                oauth=_StubOAuth(),
+                label="GitHub",
+                broker=_StubBroker(),
+                cli=CliCredential(env="GH_TOKEN", header="authorization", forward=_StubBroker()),
+            ),
+        ),
+    )
+
+    def keyed(host: str | HostChoice, env: str | None) -> Manifest:
+        return Manifest(
+            name="keyed",
+            version="1",
+            credentials=(
+                CredentialSlot(
+                    name="k",
+                    description="key",
+                    injection=InjectionTarget(host=host, header="x-key", sentinel="S", env=env),
+                ),
+                CredentialSlot(name="datadog_api_host", description="site"),
+            ),
+        )
+
+    with pytest.raises(RuntimeError, match="GH_TOKEN"):
+        injecting_slots((connector, keyed("api.k.test", "GH_TOKEN")))
+    with pytest.raises(RuntimeError, match="GH_TOKEN"):
+        injecting_slots((connector, keyed(replace(DATADOG_SITES, env="GH_TOKEN"), None)))
+    assert injecting_slots((connector, keyed("api.k.test", "K_TOKEN")))
+
+
+async def test_the_proxy_withholds_every_rule_for_a_selection_the_row_does_not_offer(
+    db: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The proxy's own withhold branch, reached through the derivation rather than asserted of the
+    resolver alone: a stored selection the declaration does not offer emits no rule at all — not the
+    default host, not a bare scope — and warns once per filled slot. Its engine-side twin has the
+    same proof, and this pair has drifted apart once already."""
+    workspace_id = await _workspace()
+    store = _store()
+    slots = injecting_slots((_keyed_manifest(),))
+    await store.put(workspace_id, "datadog_api_key", "dd-api-real")
+    await store.put(workspace_id, "datadog_application_key", "dd-app-real")
+    await store.put(workspace_id, "datadog_api_host", "169.254.169.254")
+
+    with caplog.at_level(logging.WARNING, logger="ufo"):
+        rules = await derive_credential_rules(slots, workspace_id, store)
+
+    assert rules == ()
+    warned = [
+        record.ufo
+        for record in caplog.records
+        if record.getMessage() == "egress.credential_host_unavailable"
+    ]
+    assert {entry["slot"] for entry in warned} == {
+        "datadog_api_key",
+        "datadog_application_key",
+    }
+    assert not any("169.254" in str(entry) for entry in warned)
+
+    await store.put(workspace_id, "datadog_api_host", US5_HOST)
+    assert {
+        rule.host
+        for rule in await derive_credential_rules(slots, workspace_id, store)
+        if isinstance(rule, InjectionRule)
+    } == {US5_HOST}
+
+
+def test_slots_reaching_one_host_must_meter_it_the_same_way() -> None:
+    """A host is metered once however many keys reach it, so the derivation emits one meter per host
+    — and a second dimension would simply be dropped. Every other cross-slot claim here fails loud;
+    this one would have been the silent exception. The claim spans every host a declaration can
+    reach, not the declaration itself: a fixed host and an unrelated choice offering that same
+    literal resolve to one host at runtime, and keying on the declaration missed exactly that."""
+
+    def keyed(name: str, dimension: str) -> CredentialSlot:
+        return CredentialSlot(
+            name=name,
+            description="key",
+            injection=InjectionTarget(
+                host="api.one.test",
+                header=f"X-{name}",
+                sentinel=f"S_{name}",
+                dimension=dimension,
+            ),
+        )
+
+    agreed = Manifest(
+        name="agreed",
+        version="1",
+        credentials=(keyed("a_key", "requests"), keyed("b_key", "requests")),
+    )
+    assert len(injecting_slots((agreed,))) == 2
+    diverged = Manifest(
+        name="diverged",
+        version="1",
+        credentials=(keyed("c_key", "requests"), keyed("d_key", "tokens")),
+    )
+    with pytest.raises(RuntimeError, match="metered once"):
+        injecting_slots((diverged,))
+
+    aliased = Manifest(
+        name="aliased",
+        version="1",
+        credentials=(
+            CredentialSlot(
+                name="e_key",
+                description="key",
+                injection=InjectionTarget(
+                    host=HostChoice(
+                        slot="e_host",
+                        description="site",
+                        hosts=("api.one.test", "api.other.test"),
+                        default="api.other.test",
+                        env="E_HOST",
+                    ),
+                    header="X-E",
+                    sentinel="S_E",
+                    dimension="tokens",
+                ),
+            ),
+            CredentialSlot(name="e_host", description="site"),
+        ),
+    )
+    with pytest.raises(RuntimeError, match=re.escape("api.one.test")):
+        injecting_slots((agreed, aliased))

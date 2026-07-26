@@ -10,8 +10,10 @@ from dataclasses import dataclass
 from uuid import UUID
 
 from ufo.connectors import CliCredential, RequestForwarder
-from ufo.ext.manifest import Manifest, open_connector_namespace
+from ufo.credentials import CredentialSlotUnset, CredentialStore, credential_host
+from ufo.ext.manifest import CredentialSlot, Manifest, open_connector_namespace
 from ufo.grants import Grant, grant_sentinel
+from ufo.o11y import warn
 from ufo.sandbox.session import SENTINEL_MODEL_KEY
 
 REQUEST_METER_DIMENSION = "requests"
@@ -108,6 +110,47 @@ def derive_model_rules(model: str, real_key: str) -> tuple[Rule, ...]:
 def derive_manifest_rules(manifests: tuple[Manifest, ...]) -> tuple[InternetRule, ...]:
     """A deploy with an extension that needs sandbox internet admits its live turns."""
     return (InternetRule(),) if any(manifest.sandbox_internet for manifest in manifests) else ()
+
+
+async def derive_credential_rules(
+    slots: tuple[CredentialSlot, ...], workspace_id: UUID, store: CredentialStore
+) -> tuple[Rule, ...]:
+    """This workspace's keyed providers: each injecting slot holding a secret swaps that secret in
+    for the sentinel the sandbox sees, and every host so reached is admitted and metered. Resolved
+    per workspace against the run token's own `workspace_id`, so one shared proxy serves every
+    workspace and no workspace's secret enters a static base; a slot with nothing stored opens no
+    egress, and one whose stored host selection the declaration does not offer opens none either.
+
+    An injection is per slot, because each key rides its own header; scope and metering are per
+    host, because a request is one request however many keys it carries. Grouping by the resolved
+    host is what makes that true — a provider taking two keys reaches one host, so it admits and
+    meters it once, and the egress metric counts requests rather than headers."""
+    grouped: dict[str, list[InjectionRule]] = {}
+    dimensions: dict[str, str] = {}
+    for slot in slots:
+        target = slot.injection
+        if target is None:
+            continue
+        try:
+            real = await store.get(workspace_id, slot.name)
+        except CredentialSlotUnset:
+            continue
+        host = await credential_host(store, workspace_id, target.host)
+        if host is None:
+            warn("egress.credential_host_unavailable", slot=slot.name)
+            continue
+        grouped.setdefault(host, []).append(
+            InjectionRule(host=host, header=target.header, sentinel=target.sentinel, real=real)
+        )
+        if target.dimension is not None:
+            dimensions[host] = target.dimension
+    rules: list[Rule] = []
+    for host, injections in sorted(grouped.items()):
+        rules.append(ScopeRule(allowed_hosts=frozenset({host})))
+        rules.extend(injections)
+        if host in dimensions:
+            rules.append(MeterRule(host=host, dimension=dimensions[host]))
+    return tuple(rules)
 
 
 def derive_grant_rules(

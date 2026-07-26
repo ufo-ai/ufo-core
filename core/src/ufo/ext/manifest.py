@@ -21,6 +21,7 @@ from starlette.responses import Response
 from ufo.browser import CdpProvider
 from ufo.candidates import WorkspaceCandidates
 from ufo.connectors import AuthProxy, CliCredential, ConnectorBroker, ConnectorResolver
+from ufo.credentials import HostChoice
 from ufo.ext.context import CredentialAccess, ExtensionContext
 from ufo.ext.surface import SurfaceSpec
 from ufo.grants import OAuthProvider, OAuthProviderResolver
@@ -40,11 +41,21 @@ from ufo.tools.registry import ToolDef
 @dataclass(frozen=True)
 class InjectionTarget:
     """The wire-injection descriptor a credential slot may carry: on the wire to `host`, the proxy
-    swaps the `sentinel` value of `header` for the real secret. A set `dimension` also meters it."""
+    swaps the `sentinel` value of `header` for the real secret, per workspace and only for a live
+    turn. A set `dimension` also meters the host.
 
-    host: str
+    `env` is the sandbox variable the sentinel is exported as, so the agent's own HTTP client
+    authenticates the provider by sending it as ordinary auth — the GitHub `GH_TOKEN` pattern, for a
+    key this deploy holds rather than a broker. `host` is a fixed hostname, or a `HostChoice` for a
+    provider that pins its API host per account (a Datadog site, an OpsGenie region): the member
+    selects from the closed set the declaration offers, so what reaches the wire is always a literal
+    the row wrote. Two slots naming one host each inject their own header, which is how a provider
+    taking more than one key on the wire is expressed."""
+
+    host: str | HostChoice
     header: str
     sentinel: str
+    env: str | None = None
     dimension: str | None = None
 
 

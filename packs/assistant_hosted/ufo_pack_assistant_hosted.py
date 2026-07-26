@@ -2,7 +2,7 @@
 
 Activating it (config `[pack] name = "assistant_hosted"`) brings up the assistant capabilities —
 memory and recall, Exa research, brokered connectors (Composio's open namespace plus the Pipedream
-allowlist) and MCP,
+allowlist), keyed connectors (a workspace API key injected at the egress proxy) and MCP,
 the browser/computer-use tools,
 website building and the code REPL, document generation, todos, scheduled tasks, member-authored
 skills, the ufo terminal
@@ -41,6 +41,7 @@ EXTENSIONS = (
     "documents",
     "connectors",
     "composio",
+    "keyed_connectors",
     "pipedream",
     "sources",
     "coding",

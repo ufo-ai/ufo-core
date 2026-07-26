@@ -7,15 +7,16 @@ from types import MethodType, SimpleNamespace
 from typing import cast
 
 import pytest
+from cryptography.fernet import Fernet
 from fastapi import FastAPI
 
 from ufo import serve
 from ufo.config import BlobConfig, Config, DatabaseConfig, SandboxConfig
+from ufo.credentials import CredentialStore
 from ufo.ext.manifest import CredentialSlot, InjectionTarget, Manifest
 from ufo.models.catalog import CORE_PRICING
 from ufo.proxy_serve import OWNER_DSN_ENV, model_rule_base
 from ufo.sandbox.fs_creds import SandboxFsCredentialMinter
-from ufo.sandbox.proxy.rules import ANTHROPIC_HOST, ScopeRule
 from ufo.sandbox.session import EGRESS_CA_CERT_ENV
 
 CA_PEM = "-----BEGIN CERTIFICATE-----\nshared\n-----END CERTIFICATE-----\n"
@@ -307,21 +308,6 @@ def test_local_proxy_wires_workspace_credential_refresh(
     assert refresh.__self__ is workspace_fs
 
 
-def test_local_rule_base_is_the_model_base_when_no_slot_injects(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The in-process proxy's base is exactly the shared model-provider egress — on the shared fleet
-    it carries no workspace credential rules at all."""
-    monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    config = _local_config()
-    base = serve._local_rule_base(config, ())
-    assert base == model_rule_base(config)
-    assert {rule.allowed_hosts for rule in base if isinstance(rule, ScopeRule)} == {
-        frozenset({ANTHROPIC_HOST})
-    }
-
-
 def test_shared_owner_dsn_from_env_pins_the_async_driver(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -353,12 +339,12 @@ def test_shared_owner_dsn_fails_loud_when_unset(monkeypatch: pytest.MonkeyPatch)
         serve._shared_owner_dsn(_local_config())
 
 
-def test_local_rule_base_fails_loud_on_an_injecting_slot(
+def test_the_local_proxy_resolves_keyed_slots_per_workspace(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The in-process proxy serves every workspace on the shared fleet, so it cannot bake one
-    workspace's secrets into its rule base — an injecting credential slot fails loud, directing the
-    deploy to the standalone `ufoctl proxy` that injects per request."""
+    """The in-process proxy serves every workspace on the shared fleet, so a keyed slot cannot be
+    baked into its static base — it is threaded to the resolver instead, which reads each secret
+    against the run token's own workspace. The base itself stays the model-provider egress alone."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     slot = CredentialSlot(
@@ -367,8 +353,30 @@ def test_local_rule_base_fails_loud_on_an_injecting_slot(
         injection=InjectionTarget(host="api.inj.test", header="authorization", sentinel="S"),
     )
     manifest = Manifest(name="inj", version="1", credentials=(slot,))
-    with pytest.raises(RuntimeError, match="cannot inject workspace credential secrets"):
-        serve._local_rule_base(_local_config(), (manifest,))
+    captured: dict[str, object] = {}
+
+    async def generate_ca() -> tuple[str, str]:
+        return "CERT", "KEY"
+
+    class Proxy:
+        def __init__(self, **kwargs: object) -> None: ...
+
+        async def start(self, port: int) -> object:
+            return SimpleNamespace(port=port, ca_cert="CERT", public_url=None)
+
+    def rules(**kwargs: object) -> object:
+        captured.update(kwargs)
+        return SimpleNamespace(resolve=None, turn_live=None)
+
+    monkeypatch.setattr(serve, "generate_ca", generate_ca)
+    monkeypatch.setattr(serve, "EgressProxy", Proxy)
+    monkeypatch.setattr(serve, "PerAgentRules", rules)
+    credentials = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    config = _local_config()
+    serve._proxy_endpoint(config, (manifest,), credentials, CORE_PRICING)
+    assert captured["credentials"] is credentials
+    assert captured["slots"] == (slot,)
+    assert captured["base"] == model_rule_base(config)
 
 
 def test_reserved_host_prefixes_guard_fails_loud_on_a_gateway_route() -> None:

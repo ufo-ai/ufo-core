@@ -37,9 +37,10 @@ from ufo.credential_kind import (
     CredentialSpec,
     DeclaredSlot,
 )
-from ufo.credentials import CredentialStore
+from ufo.credentials import CredentialStore, HostChoice
 from ufo.ext.context import ExtensionContext, context_for
 from ufo.ext.manifest import (
+    CredentialSlot,
     Deny,
     HookContext,
     HookEvent,
@@ -303,6 +304,82 @@ def connector_clis(manifests: tuple[Manifest, ...]) -> dict[str, CliCredential]:
     }
 
 
+def injecting_slots(manifests: tuple[Manifest, ...]) -> tuple[CredentialSlot, ...]:
+    """Every declared slot the egress proxy swaps onto the wire — the deploy's keyed providers, read
+    live from the current manifests by the proxy's rule resolver and by the engine that exports each
+    filled slot's sentinel into the sandbox. Both roles collect them through here, so what would
+    silently mis-authenticate is refused in one place, because a row is meant to cost no code and no
+    test: nothing else would stop the next one from taking a name already in use.
+
+    A `sentinel` two slots share draws whichever secret matches first. **One sandbox variable
+    carries one value**, so every exported name — a slot's `env`, a host choice's `env`, and a
+    connector's `CliCredential.env`, all merged into one dict per sandbox — is claimed in a single
+    namespace beside what it carries; a second claimant carrying anything else is refused, since the
+    later export silently wins the merge. Claims carrying the *same* value stay legal, which is what
+    lets both Datadog keys export `DD_HOST`: they name one `HostChoice`, and a frozen value object
+    compares by every field it has rather than by a tuple someone listed. A host choice must also
+    name a slot some installed extension declares, since no writer fills an undeclared slot — every
+    one gates on the declared set — so a typo would pin the host to the default forever. A host is
+    metered once however many keys reach it, so slots that can reach one host must agree on the
+    dimension. The claim spans every host a declaration could resolve to — a fixed host, or every
+    host in a choice — because the derivation groups by the host it *resolved*: two rows aliasing
+    one literal through different declarations would otherwise drop the later dimension silently."""
+    slots = tuple(
+        slot
+        for manifest in manifests
+        for slot in manifest.credentials
+        if slot.injection is not None
+    )
+    declared = {slot.name for manifest in manifests for slot in manifest.credentials}
+    exported: dict[str, tuple[str, object]] = {
+        cli.env: (f"connector {provider!r}'s CLI credential", f"the {provider!r} grant sentinel")
+        for provider, cli in connector_clis(manifests).items()
+    }
+    sentinels: dict[str, str] = {}
+    dimensions: dict[str, tuple[str, str]] = {}
+    for slot in slots:
+        target = slot.injection
+        if target is None:
+            continue
+        owner = sentinels.setdefault(target.sentinel, slot.name)
+        if owner != slot.name:
+            raise RuntimeError(
+                f"credential slots {owner!r} and {slot.name!r} both declare sentinel "
+                f"{target.sentinel!r}; a shared sentinel draws whichever secret matches first"
+            )
+        if target.dimension is not None:
+            reachable = (target.host,) if isinstance(target.host, str) else target.host.hosts
+            for host in reachable:
+                metered = dimensions.setdefault(host, (slot.name, target.dimension))
+                if metered[1] != target.dimension:
+                    raise RuntimeError(
+                        f"credential slots {metered[0]!r} and {slot.name!r} can both reach "
+                        f"{host!r} but meter it as {metered[1]!r} and {target.dimension!r}; a host "
+                        "is metered once, so the later dimension would be dropped"
+                    )
+        claims: list[tuple[str, object]] = []
+        if target.env is not None:
+            claims.append((target.env, f"the sentinel of slot {slot.name!r}"))
+        if isinstance(target.host, HostChoice):
+            if target.host.slot not in declared:
+                raise RuntimeError(
+                    f"credential slot {slot.name!r} selects its host through slot "
+                    f"{target.host.slot!r}, which no installed extension declares; nothing can "
+                    "fill it, so the host would stay the declared default forever"
+                )
+            if target.host.env is not None:
+                claims.append((target.host.env, target.host))
+        for name, carries in claims:
+            holder, held = exported.setdefault(name, (f"credential slot {slot.name!r}", carries))
+            if held != carries:
+                raise RuntimeError(
+                    f"{holder} exports env {name!r} into the sandbox carrying {held}, and "
+                    f"credential slot {slot.name!r} exports it carrying {carries}; one variable "
+                    "carries one value, and the later export would silently win the merge"
+                )
+    return slots
+
+
 def turn_tools(
     manifests: tuple[Manifest, ...],
     credential_store: CredentialStore | None,
@@ -349,20 +426,23 @@ def turn_tools(
             BoundKind(kind=kind, extension=manifest.name, context=context)
             for kind in manifest.objects
         )
-    bound_kinds.extend(core_object_kinds(manifests))
+    bound_kinds.extend(core_object_kinds(manifests, credential_store))
     tools.extend(ObjectVerbs(object_registry(tuple(bound_kinds))).tools())
     return tuple(tools), ext_by_tool
 
 
-def core_object_kinds(manifests: tuple[Manifest, ...]) -> tuple[BoundKind, ...]:
+def core_object_kinds(
+    manifests: tuple[Manifest, ...], credential_store: CredentialStore | None = None
+) -> tuple[BoundKind, ...]:
     """The kinds core itself registers, bound with no extension context — their handlers read the
-    ambient workspace directly. `credential` projects every active manifest's declared slots."""
+    ambient workspace directly. `credential` projects every active manifest's declared slots, and
+    reads a keyed slot's live host through the store so a read reports the host the wire uses."""
     slots = tuple(
         DeclaredSlot(
             name=slot.name,
             description=slot.description,
             extension=manifest.name,
-            injection_host="" if slot.injection is None else slot.injection.host,
+            host=None if slot.injection is None else slot.injection.host,
         )
         for manifest in manifests
         for slot in manifest.credentials
@@ -372,7 +452,7 @@ def core_object_kinds(manifests: tuple[Manifest, ...]) -> tuple[BoundKind, ...]:
         description=CREDENTIAL_DESCRIPTION,
         guidance=CREDENTIAL_GUIDANCE,
         spec_model=CredentialSpec,
-        store=CredentialObjects(slots=slots),
+        store=CredentialObjects(slots=slots, credentials=credential_store),
     )
     return (BoundKind(kind=kind, extension=None, context=None),)
 

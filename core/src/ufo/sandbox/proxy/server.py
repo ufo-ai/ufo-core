@@ -56,7 +56,9 @@ from ufo.accounting import (
     record_sandbox_tokens,
 )
 from ufo.connectors import CliCredential, ForwardedResponse
+from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
+from ufo.ext.manifest import CredentialSlot
 from ufo.grants import GrantStore
 from ufo.models.catalog import CORE_PRICING
 from ufo.models.pricing import Pricing
@@ -78,6 +80,7 @@ from ufo.sandbox.proxy.rules import (
     Rule,
     ScopeRule,
     derive_cli_rules,
+    derive_credential_rules,
     derive_grant_rules,
 )
 from ufo.sandbox.session import ProxyEndpoint, RunToken
@@ -141,15 +144,20 @@ async def _openssl(*argv: str) -> None:
 @dataclass(frozen=True)
 class PerAgentRules:
     """Resolve the proxy's rule set for one turn's agent, derived from the run token each call: the
-    workspace-wide model and credential base plus that agent's own OAuth grant rules. Per-agent
-    authentication is the wire's isolation — agent A's turn resolves only A's grants, so A cannot
-    inject or forward through another agent's account. A run with no or unknown token yields the
-    base alone; a resolution error raises to the proxy, which fails closed to the base without
-    caching it — never a broad allow, never another agent's grant. Deriving each call (not once at
-    boot) is the liveness: a grant recorded mid-serve is live for the next turn."""
+    workspace-wide model base, that workspace's own keyed-credential rules, and that agent's own
+    OAuth grant rules. Per-agent authentication is the wire's isolation — agent A's turn resolves
+    only A's grants, so A cannot inject or forward through another agent's account — and
+    per-workspace resolution is the tenant's: a stored secret is read against the run token's own
+    `workspace_id`, so one shared proxy injects for every workspace and none of them holds another's
+    key. A run with no or unknown token yields the base alone; a resolution error raises to the
+    proxy, which fails closed to the base without caching it — never a broad allow, never another
+    workspace's secret. Deriving each call (not once at boot) is the liveness: a grant recorded or a
+    slot filled mid-serve is live for the next turn."""
 
     base: tuple[Rule, ...]
     grants: GrantStore | None
+    credentials: CredentialStore | None = None
+    slots: tuple[CredentialSlot, ...] = ()
     internet: tuple[InternetRule, ...] = ()
     transfer_hosts: ConnectorTransferHosts = field(
         default_factory=lambda: ConnectorTransferHosts(explicit={})
@@ -164,6 +172,11 @@ class PerAgentRules:
             return self.base
         agent_id, acting_member_id, internet_access_allowed = turn
         rules = (*self.base, *self.internet) if internet_access_allowed else self.base
+        if self.credentials is not None and self.slots:
+            rules = (
+                *rules,
+                *await derive_credential_rules(self.slots, run.workspace_id, self.credentials),
+            )
         if self.grants is None:
             return rules
         granted = await self.grants.active_grants(run.workspace_id, agent_id)

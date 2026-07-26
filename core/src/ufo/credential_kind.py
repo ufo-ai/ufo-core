@@ -18,6 +18,7 @@ from dataclasses import dataclass
 import sqlalchemy as sa
 from pydantic import BaseModel, ConfigDict
 
+from ufo.credentials import CredentialStore, HostChoice, credential_host
 from ufo.db import workspace_tx
 from ufo.ext.context import JsonValue
 from ufo.objects import (
@@ -44,20 +45,27 @@ NAME_DIGEST_LENGTH = 8
 @dataclass(frozen=True)
 class DeclaredSlot:
     """One declared BYOK slot as the kind projects it: the slot name, its documentation, the
-    extension that declares it, and the injection host when the slot carries a wire target."""
+    extension that declares it, and `host` — the wire target when the slot carries one, either a
+    fixed hostname or the `HostChoice` a member selects within."""
 
     name: str
     description: str
     extension: str
-    injection_host: str = ""
+    host: str | HostChoice | None = None
 
 
 class CredentialSpec(BaseModel):
+    """The declaration a read renders. `host` is the fixed injection host; a slot whose provider
+    pins its host per account instead carries `host_slot` and the `host_options` a member may
+    select, so the agent asks with the real answers rather than inviting a hostname."""
+
     model_config = ConfigDict(extra="forbid")
     slot: str
     description: str = ""
     extension: str = ""
-    injection_host: str = ""
+    host: str = ""
+    host_slot: str = ""
+    host_options: tuple[str, ...] = ()
 
 
 def _slug(raw: str) -> str:
@@ -71,6 +79,7 @@ class CredentialObjects:
     delete clears the stored value. No handler reads the ciphertext column."""
 
     slots: tuple[DeclaredSlot, ...]
+    credentials: CredentialStore | None = None
 
     async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage:
         named = self._named()
@@ -95,7 +104,9 @@ class CredentialObjects:
             slot=slot.name,
             description=slot.description,
             extension=slot.extension,
-            injection_host=slot.injection_host,
+            host=slot.host if isinstance(slot.host, str) else "",
+            host_slot=slot.host.slot if isinstance(slot.host, HostChoice) else "",
+            host_options=slot.host.hosts if isinstance(slot.host, HostChoice) else (),
         )
 
     async def status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None:
@@ -111,10 +122,15 @@ class CredentialObjects:
                     )
                 )
             ).one_or_none()
-        return {
+        status: dict[str, JsonValue] = {
             "filled": row is not None,
             "updated_at": None if row is None else row.updated_at.isoformat(),
         }
+        if slot.host is not None and self.credentials is not None:
+            status["host"] = await credential_host(
+                self.credentials, ws_current().workspace_id, slot.host
+            )
+        return status
 
     async def apply(
         self, ctx: ToolContext, name: str, spec: CredentialSpec, old: CredentialSpec | None

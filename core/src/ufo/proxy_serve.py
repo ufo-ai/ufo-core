@@ -1,22 +1,24 @@
 """Composition root for the shared egress proxy: one standalone service for every workspace.
 
-Dedicated `serve` runs its proxy in-process. The shared proxy resolves
-everything from the run token, which carries `workspace_id`, and every query filters by it — so one
-`ufoctl proxy` process serves all workspaces. It opens the RLS-bypassing owner DSN (the resolver's
-explicit `workspace_id` filters do the scoping), signs sandbox leaves from a stable shared CA (so a
-sandbox's trust store validates one chain across restarts), and injects only model-provider keys
-from the process environment. Workspace credential injection requires a dedicated in-process
-proxy, so an injecting slot in the shared pack fails loud."""
+The shared proxy resolves everything from the run token, which carries `workspace_id`, and every
+query filters by it — so one `ufoctl proxy` process serves all workspaces. It opens the
+RLS-bypassing owner DSN (the resolver's explicit `workspace_id` filters do the scoping), signs
+sandbox leaves from a stable shared CA (so a sandbox's trust store validates one chain across
+restarts), injects model-provider keys from the process environment, and injects each workspace's
+own keyed-provider secrets read per turn from the credential store under that token's workspace."""
 
 import asyncio
 import os
 import signal
 from dataclasses import dataclass
 
+from cryptography.fernet import Fernet
+
 from ufo.config import Config, load_config
+from ufo.credentials import CredentialStore
 from ufo.db import init_db
-from ufo.ext.loader import connector_clis, load_manifests
-from ufo.ext.manifest import Manifest
+from ufo.ext.loader import connector_clis, injecting_slots, load_manifests
+from ufo.ext.manifest import CredentialSlot, Manifest
 from ufo.grants import GrantStore
 from ufo.models.pricing import Pricing
 from ufo.models.registry import model_registry
@@ -60,10 +62,11 @@ def model_rule_base(config: Config) -> tuple[Rule, ...]:
 
 
 def run() -> None:
-    """Boot the shared egress proxy: load config the way `serve` does, source the owner DSN and the
-    stable CA (failing loud on either unset), export telemetry to the configured collector
-    (`UFO_OTLP_ENDPOINT` over the baked config, like the owner DSN), meter model usage against the
-    deploy's merged price table, and serve forever."""
+    """Boot the shared egress proxy: load config the way `serve` does, source the owner DSN, the
+    stable CA, and — for a pack with keyed providers — the credential key (failing loud on any
+    unset), export telemetry to the configured collector (`UFO_OTLP_ENDPOINT` over the baked config,
+    like the owner DSN), meter model usage against the deploy's merged price table, and serve
+    forever."""
     config = load_config()
     init_o11y(os.environ.get(OTLP_ENDPOINT_ENV) or config.o11y.otlp_endpoint)
     manifests = load_manifests(config.pack.name)
@@ -74,6 +77,7 @@ def run() -> None:
         owner_dsn=_owner_dsn(config),
         ca_cert=ca_cert,
         ca_key=ca_key,
+        credentials=_credential_store(config, injecting_slots(manifests)),
         pricing=model_registry(config, manifests).pricing,
         shutdown=asyncio.Event(),
     )
@@ -111,16 +115,35 @@ def _owner_dsn(config: Config) -> str:
     return dsn.replace("postgresql://", "postgresql+psycopg://", 1)
 
 
+def _credential_store(config: Config, slots: tuple[CredentialSlot, ...]) -> CredentialStore | None:
+    """The store the proxy decrypts each workspace's keyed-provider secrets through, sourced from
+    the same credential key env `serve` reads so both processes open the one Fernet. A pack that
+    declares an injecting slot with no key set would serve a sandbox reaching no keyed host, so it
+    fails loud; a pack with no injecting slot needs no key and opens none."""
+    key = os.environ.get(config.credentials.key_env)
+    if key:
+        return CredentialStore(fernet=Fernet(key.encode()))
+    if slots:
+        raise RuntimeError(
+            f"credential key env {config.credentials.key_env!r} is unset but the active pack "
+            f"declares injecting credential slot(s) {sorted(slot.name for slot in slots)}, whose "
+            "secrets the proxy swaps onto the wire per workspace"
+        )
+    return None
+
+
 @dataclass(frozen=True)
 class ProxyServe:
-    """The shared egress proxy run: open the owner DSN, build the workspace-wide model-rule base,
-    and bind one proxy that resolves every workspace's per-turn rules from the run token."""
+    """The shared egress proxy run: open the owner DSN and bind one proxy that resolves every
+    workspace's per-turn rules from the run token — the workspace-wide model base plus that
+    workspace's own keyed-provider secrets, decrypted per turn through `credentials`."""
 
     config: Config
     manifests: tuple[Manifest, ...]
     owner_dsn: str
     ca_cert: str
     ca_key: str
+    credentials: CredentialStore | None
     pricing: Pricing
     shutdown: asyncio.Event
 
@@ -130,8 +153,10 @@ class ProxyServe:
             loop.add_signal_handler(shutdown_signal, self.shutdown.set)
         init_db(self.owner_dsn)
         resolver = PerAgentRules(
-            base=self._base(),
+            base=model_rule_base(self.config),
             grants=GrantStore(),
+            credentials=self.credentials,
+            slots=injecting_slots(self.manifests),
             internet=derive_manifest_rules(self.manifests),
             transfer_hosts=connector_transfer_hosts(self.manifests),
             clis=connector_clis(self.manifests),
@@ -153,20 +178,3 @@ class ProxyServe:
             await self.shutdown.wait()
         finally:
             await proxy.stop(self.config.serve.graceful_shutdown_seconds)
-
-    def _base(self) -> tuple[Rule, ...]:
-        """The proxy's static rule base: the shared model-provider egress (`model_rule_base`) and
-        no workspace-specific secrets. An injecting credential slot requires a dedicated proxy and
-        fails here before model rules are built."""
-        injecting = sorted(
-            slot.name
-            for manifest in self.manifests
-            for slot in manifest.credentials
-            if slot.injection
-        )
-        if injecting:
-            raise RuntimeError(
-                f"the shared egress proxy cannot inject workspace credential secrets, but the "
-                f"active pack declares injecting credential slot(s) {injecting}"
-            )
-        return model_rule_base(self.config)

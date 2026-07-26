@@ -6,17 +6,22 @@ one a prior process created. Persist-on-create is proven against the real local 
 resume-read (the id core seeds and the write it skips when nothing changed) is asserted through the
 conversation row, with a stand-in carrier recording the spec core built for it."""
 
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
 
+import pytest
 import sqlalchemy as sa
+from cryptography.fernet import Fernet
 
 from ufo.blob import FilesystemBlobStore
 from ufo.connectors import CliCredential, ForwardedResponse
+from ufo.credentials import CredentialStore, HostChoice
 from ufo.db import workspace_tx
+from ufo.ext.manifest import CredentialSlot, InjectionTarget
 from ufo.grants import GrantStore, grant_sentinel
 from ufo.loop.queue import _open_sandbox
 from ufo.sandbox.local import LocalCarrier
@@ -107,7 +112,16 @@ async def test_open_sandbox_persists_the_backend_prefixed_handle(db: None, tmp_p
     blob = FilesystemBlobStore(root=tmp_path)
 
     handle = await _open_sandbox(
-        LocalCarrier(), "local", blob, None, PROXY, _turn(workspace_id, conversation_id), None, {}
+        LocalCarrier(),
+        "local",
+        blob,
+        None,
+        PROXY,
+        _turn(workspace_id, conversation_id),
+        None,
+        {},
+        None,
+        (),
     )
 
     assert handle.container_id == "local"
@@ -124,7 +138,7 @@ async def test_open_sandbox_resumes_from_the_stored_handle_without_rewriting(
     blob = FilesystemBlobStore(root=tmp_path)
 
     await _open_sandbox(
-        carrier, "e2b", blob, None, PROXY, _turn(workspace_id, conversation_id), None, {}
+        carrier, "e2b", blob, None, PROXY, _turn(workspace_id, conversation_id), None, {}, None, ()
     )
 
     assert carrier.specs[0].resume_id == "sbx-1"
@@ -141,7 +155,7 @@ async def test_open_sandbox_ignores_a_handle_another_backend_wrote_and_overwrite
     blob = FilesystemBlobStore(root=tmp_path)
 
     await _open_sandbox(
-        carrier, "e2b", blob, None, PROXY, _turn(workspace_id, conversation_id), None, {}
+        carrier, "e2b", blob, None, PROXY, _turn(workspace_id, conversation_id), None, {}, None, ()
     )
 
     assert carrier.specs[0].resume_id is None
@@ -210,7 +224,9 @@ async def test_open_sandbox_exports_the_acting_members_grant_sentinels(
         update={"agent_id": agent_id, "speaker_member_id": member_id}
     )
 
-    await _open_sandbox(carrier, "e2b", blob, None, PROXY, turn, GrantStore(), {"hub": HUB_CLI})
+    await _open_sandbox(
+        carrier, "e2b", blob, None, PROXY, turn, GrantStore(), {"hub": HUB_CLI}, None, ()
+    )
 
     assert carrier.specs[0].env == {"HUB_TOKEN": grant_sentinel("acct-1")}
 
@@ -227,7 +243,9 @@ async def test_open_sandbox_exports_nothing_for_a_foreign_private_grant(
     blob = FilesystemBlobStore(root=tmp_path)
     turn = _turn(workspace_id, conversation_id).model_copy(update={"agent_id": agent_id})
 
-    await _open_sandbox(carrier, "e2b", blob, None, PROXY, turn, GrantStore(), {"hub": HUB_CLI})
+    await _open_sandbox(
+        carrier, "e2b", blob, None, PROXY, turn, GrantStore(), {"hub": HUB_CLI}, None, ()
+    )
 
     assert carrier.specs[0].env == {}
 
@@ -257,6 +275,141 @@ async def test_open_sandbox_exports_nothing_when_the_account_is_ambiguous(
         update={"agent_id": agent_id, "speaker_member_id": member_id}
     )
 
-    await _open_sandbox(carrier, "e2b", blob, None, PROXY, turn, GrantStore(), {"hub": HUB_CLI})
+    await _open_sandbox(
+        carrier, "e2b", blob, None, PROXY, turn, GrantStore(), {"hub": HUB_CLI}, None, ()
+    )
 
     assert carrier.specs[0].env == {}
+
+
+DATADOG_SITES = HostChoice(
+    slot="datadog_api_host",
+    description="Datadog site for this org.",
+    hosts=("api.datadoghq.com", "api.us5.datadoghq.com"),
+    default="api.datadoghq.com",
+    env="DD_HOST",
+)
+
+DATADOG_SLOTS = (
+    CredentialSlot(
+        name="datadog_api_key",
+        description="api key",
+        injection=InjectionTarget(
+            host=DATADOG_SITES,
+            header="DD-API-KEY",
+            sentinel="SENTINEL_DD_API",
+            env="DD_API_KEY",
+        ),
+    ),
+    CredentialSlot(
+        name="datadog_application_key",
+        description="application key",
+        injection=InjectionTarget(
+            host=DATADOG_SITES,
+            header="DD-APPLICATION-KEY",
+            sentinel="SENTINEL_DD_APP",
+            env="DD_APP_KEY",
+        ),
+    ),
+    CredentialSlot(name="datadog_api_host", description="site host"),
+)
+
+
+async def test_open_sandbox_exports_keyed_provider_sentinels_not_secrets(
+    db: None, tmp_path: Path
+) -> None:
+    """A keyed provider the workspace has filled reaches the sandbox as sentinels and a host — never
+    the secret, which only the egress proxy swaps in on the wire. The host is this workspace's own,
+    so the agent addresses the site its key is valid for."""
+    workspace_id, conversation_id = await _conversation()
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    await store.put(workspace_id, "datadog_api_key", "dd-api-real")
+    await store.put(workspace_id, "datadog_application_key", "dd-app-real")
+    await store.put(workspace_id, "datadog_api_host", "api.us5.datadoghq.com")
+    carrier = _ResumeRecordingCarrier(container_id="sbx-1")
+
+    await _open_sandbox(
+        carrier,
+        "e2b",
+        FilesystemBlobStore(root=tmp_path),
+        None,
+        PROXY,
+        _turn(workspace_id, conversation_id),
+        None,
+        {},
+        store,
+        DATADOG_SLOTS,
+    )
+
+    assert carrier.specs[0].env == {
+        "DD_API_KEY": "SENTINEL_DD_API",
+        "DD_APP_KEY": "SENTINEL_DD_APP",
+        "DD_HOST": "api.us5.datadoghq.com",
+    }
+
+
+async def test_open_sandbox_exports_nothing_for_an_unfilled_keyed_slot(
+    db: None, tmp_path: Path
+) -> None:
+    """An empty slot exports no variable at all, so the agent finds nothing half-usable for a
+    provider the member has not keyed and asks them to fill it instead of guessing."""
+    workspace_id, conversation_id = await _conversation()
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    await store.put(workspace_id, "datadog_api_key", "dd-api-real")
+    carrier = _ResumeRecordingCarrier(container_id="sbx-1")
+
+    await _open_sandbox(
+        carrier,
+        "e2b",
+        FilesystemBlobStore(root=tmp_path),
+        None,
+        PROXY,
+        _turn(workspace_id, conversation_id),
+        None,
+        {},
+        store,
+        DATADOG_SLOTS,
+    )
+
+    assert carrier.specs[0].env == {
+        "DD_API_KEY": "SENTINEL_DD_API",
+        "DD_HOST": "api.datadoghq.com",
+    }
+
+
+async def test_open_sandbox_withholds_and_warns_on_a_selection_the_row_does_not_offer(
+    db: None, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A stored selection the declaration does not offer is refused by both roles alike, so the
+    sandbox gets no half-usable credential — not the sentinel, not the host. The engine warns as the
+    proxy does: the export is withheld when the sandbox opens, well before any request would fail,
+    and the member would otherwise see only a variable that never appeared."""
+    workspace_id, conversation_id = await _conversation()
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    await store.put(workspace_id, "datadog_api_key", "dd-api-real")
+    await store.put(workspace_id, "datadog_application_key", "dd-app-real")
+    await store.put(workspace_id, "datadog_api_host", "169.254.169.254")
+    carrier = _ResumeRecordingCarrier(container_id="sbx-1")
+
+    with caplog.at_level(logging.WARNING, logger="ufo"):
+        await _open_sandbox(
+            carrier,
+            "e2b",
+            FilesystemBlobStore(root=tmp_path),
+            None,
+            PROXY,
+            _turn(workspace_id, conversation_id),
+            None,
+            {},
+            store,
+            DATADOG_SLOTS,
+        )
+
+    assert carrier.specs[0].env == {}
+    warned = [
+        record.ufo
+        for record in caplog.records
+        if record.getMessage() == "sandbox.keyed_host_unavailable"
+    ]
+    assert {entry["slot"] for entry in warned} == {"datadog_api_key", "datadog_application_key"}
+    assert not any("169.254" in str(entry) for entry in warned)

@@ -135,6 +135,15 @@ def test_hosted_proxy_receives_the_composio_broker_key() -> None:
     assert "secretKeyRef: {name: ufo-platform-secrets, key: COMPOSIO_API_KEY}" in PROXY_DEPLOYMENT
 
 
+def test_hosted_proxy_receives_the_fleet_credential_key() -> None:
+    """A keyed provider's secret is decrypted by the proxy itself, per workspace per turn, so its
+    pod opens the same Fernet serve does. Without it the proxy fails loud at boot and every keyed
+    host goes unreachable fleet-wide — a live outage rather than a red check — so the rendered
+    manifest is what has to carry it, not only the Python config path."""
+    assert "name: UFO_CREDENTIAL_KEY" in PROXY_DEPLOYMENT
+    assert "secretKeyRef: {name: ufo-serve, key: UFO_CREDENTIAL_KEY}" in PROXY_DEPLOYMENT
+
+
 def test_hosted_proxy_mints_scoped_sandbox_credentials() -> None:
     assert "serviceAccountName: ufo-sandbox-proxy" in PROXY_DEPLOYMENT
     assert "eks.amazonaws.com/role-arn: ${proxy_role_arn}" in HOSTED_TEMPLATE.read_text()

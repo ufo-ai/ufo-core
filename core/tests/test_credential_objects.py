@@ -16,9 +16,10 @@ from cryptography.fernet import Fernet
 
 from ufo.blob import FilesystemBlobStore
 from ufo.credential_kind import CREDENTIAL_KIND
-from ufo.credentials import CredentialStore
+from ufo.credentials import CredentialStore, HostChoice
 from ufo.db import workspace_tx
 from ufo.ext.loader import load_manifests, turn_tools
+from ufo.ext.manifest import CredentialSlot, InjectionTarget, Manifest
 from ufo.objects import OwnerRequired, VerbNotSupported
 from ufo.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
 from ufo.schema import tables
@@ -150,9 +151,12 @@ async def test_declared_slot_lists_reads_and_clears_without_the_value(db: None) 
             "slot": sample.API_SLOT,
             "description": "BYOK key the egress proxy swaps onto the sample host.",
             "extension": sample.NAME,
-            "injection_host": sample.INJECTION_HOST,
+            "host": sample.INJECTION_HOST,
+            "host_slot": "",
+            "host_options": [],
         }
         assert fetched["status"]["filled"] is True
+        assert fetched["status"]["host"] == sample.INJECTION_HOST
         assert isinstance(fetched["status"]["updated_at"], str)
 
         outputs.append(await _text(_object_tool("object_explain"), ctx, kind=CREDENTIAL_KIND))
@@ -168,7 +172,11 @@ async def test_declared_slot_lists_reads_and_clears_without_the_value(db: None) 
         )
         outputs.append(cleared_text)
         cleared = yaml.safe_load(cleared_text)
-        assert cleared["status"] == {"filled": False, "updated_at": None}
+        assert cleared["status"] == {
+            "filled": False,
+            "updated_at": None,
+            "host": sample.INJECTION_HOST,
+        }
 
         async with workspace_tx() as connection:
             ciphertexts = (
@@ -244,3 +252,50 @@ async def test_clearing_a_slot_is_owner_gated(db: None) -> None:
                 await connection.execute(sa.select(sa.func.count()).select_from(tables.credential))
             ).scalar_one()
     assert remaining == 0
+
+
+async def test_a_host_choice_slot_renders_its_options_through_tool_dispatch(db: None) -> None:
+    """The agent reads a slot through `object_get`, so what matters is the text the verb
+    serializes — and until now the only slot driven through dispatch had a plain-string host, so
+    `host_slot` and `host_options` were always empty there. This drives a real choice-bearing slot
+    through the real tool, so the options the member picks from and the host this workspace resolved
+    both have to survive serialization, not merely exist on the dataclass."""
+    workspace_id = await _workspace()
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    choice = HostChoice(
+        slot="probe_api_host",
+        description="Probe site for this org.",
+        hosts=("api.one.test", "api.two.test"),
+        default="api.one.test",
+        env="PROBE_HOST",
+    )
+    probe = Manifest(
+        name="probe",
+        version="1",
+        credentials=(
+            CredentialSlot(
+                name="probe_api_key",
+                description="Probe API key.",
+                injection=InjectionTarget(
+                    host=choice, header="X-Probe-Key", sentinel="S_PROBE", env="PROBE_KEY"
+                ),
+            ),
+            CredentialSlot(name="probe_api_host", description="Probe site."),
+        ),
+    )
+    tools, _ = turn_tools((probe,), store)
+    get_tool = next(tool for tool in tools if tool.name == "object_get")
+    with ws(workspace_id):
+        owner = await _member(workspace_id, OWNER_CREATED_AT)
+        ctx = _tool_context(workspace_id, speaker_member_id=owner)
+        await store.put(workspace_id, "probe_api_key", "probe-secret")
+        default_text = await _text(get_tool, ctx, kind=CREDENTIAL_KIND, name="probe-api-key")
+        await store.put(workspace_id, "probe_api_host", "api.two.test")
+        chosen_text = await _text(get_tool, ctx, kind=CREDENTIAL_KIND, name="probe-api-key")
+
+    unchosen = yaml.safe_load(default_text)
+    assert unchosen["spec"]["host_slot"] == "probe_api_host"
+    assert unchosen["spec"]["host_options"] == ["api.one.test", "api.two.test"]
+    assert unchosen["spec"]["host"] == ""
+    assert unchosen["status"]["host"] == "api.one.test"
+    assert yaml.safe_load(chosen_text)["status"]["host"] == "api.two.test"

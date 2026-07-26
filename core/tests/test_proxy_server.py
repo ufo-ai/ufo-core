@@ -15,10 +15,13 @@ import dns.asyncresolver
 import pytest
 import sqlalchemy as sa
 from cryptography import x509
+from cryptography.fernet import Fernet
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ufo.connectors import CliCredential, ForwardedResponse
+from ufo.credentials import CredentialStore, HostChoice
 from ufo.db import workspace_tx
+from ufo.ext.manifest import CredentialSlot, InjectionTarget
 from ufo.grants import GrantStore, grant_sentinel
 from ufo.sandbox.fs_creds import (
     SANDBOX_FS_CREDENTIAL_PATH,
@@ -27,6 +30,7 @@ from ufo.sandbox.fs_creds import (
 )
 from ufo.sandbox.proxy.rules import (
     OPENAI_HOST,
+    REQUEST_METER_DIMENSION,
     ForwardRule,
     InjectionRule,
     InternetRule,
@@ -787,6 +791,80 @@ def test_inject_swaps_only_the_matching_sentinel_and_forces_close() -> None:
     assert b"R1" not in out
     assert b"keep-alive" not in out
     assert out.endswith(b"connection: close\r\n")
+
+
+def test_inject_swaps_every_key_a_provider_takes_on_one_request() -> None:
+    """A provider that authenticates with two keys is two InjectionRules on one host, and one
+    request carries both: each header is swapped from its own sentinel, so `DD-API-KEY` and
+    `DD-APPLICATION-KEY` reach Datadog together while the sandbox held neither."""
+    out = _inject(
+        [b"DD-API-KEY: SENTINEL_DD_API\r\n", b"DD-APPLICATION-KEY: SENTINEL_DD_APP\r\n"],
+        [
+            InjectionRule(
+                host="api.us5.datadoghq.com",
+                header="DD-API-KEY",
+                sentinel="SENTINEL_DD_API",
+                real="dd-api-real",
+            ),
+            InjectionRule(
+                host="api.us5.datadoghq.com",
+                header="DD-APPLICATION-KEY",
+                sentinel="SENTINEL_DD_APP",
+                real="dd-app-real",
+            ),
+        ],
+    )
+    assert b"DD-API-KEY: dd-api-real\r\n" in out
+    assert b"DD-APPLICATION-KEY: dd-app-real\r\n" in out
+    assert b"SENTINEL" not in out
+
+
+DATADOG_SITES = HostChoice(
+    slot="datadog_api_host",
+    description="Datadog site for this org.",
+    hosts=("api.datadoghq.com", "api.us5.datadoghq.com"),
+    default="api.datadoghq.com",
+    env="DD_HOST",
+)
+
+
+async def test_resolve_injects_the_run_tokens_own_workspace_secret(db: None) -> None:
+    """The keyed-provider path end to end at the resolver: one shared proxy, two workspaces, one
+    declaration. Each turn's rules carry that workspace's own stored secret on the host its own
+    companion slot pins, and a workspace that stored nothing gets no keyed egress at all — so
+    nothing about workspace A is reachable from a run token for workspace B."""
+    async with workspace_tx() as connection:
+        first_workspace, first_turn, *_ = await _seed_turn(connection)
+        second_workspace, second_turn, *_ = await _seed_turn(connection)
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    await store.put(first_workspace, "datadog_api_key", "first-real-key")
+    await store.put(first_workspace, "datadog_api_host", "api.us5.datadoghq.com")
+    slot = CredentialSlot(
+        name="datadog_api_key",
+        description="api key",
+        injection=InjectionTarget(
+            host=DATADOG_SITES,
+            header="DD-API-KEY",
+            sentinel="SENTINEL_DD_API",
+            env="DD_API_KEY",
+            dimension=REQUEST_METER_DIMENSION,
+        ),
+    )
+    resolver = PerAgentRules(base=(), grants=None, credentials=store, slots=(slot,))
+    keyed = await resolver.resolve(RunToken(first_workspace, first_turn))
+    assert (
+        InjectionRule(
+            host="api.us5.datadoghq.com",
+            header="DD-API-KEY",
+            sentinel="SENTINEL_DD_API",
+            real="first-real-key",
+        )
+        in keyed
+    )
+    assert ScopeRule(allowed_hosts=frozenset({"api.us5.datadoghq.com"})) in keyed
+    assert MeterRule(host="api.us5.datadoghq.com", dimension=REQUEST_METER_DIMENSION) in keyed
+    unkeyed = await resolver.resolve(RunToken(second_workspace, second_turn))
+    assert not [rule for rule in unkeyed if isinstance(rule, InjectionRule)]
 
 
 def test_inject_passes_a_foreign_sentinel_upstream_untouched() -> None:
