@@ -31,6 +31,7 @@ from ufo.hub import InProcessHub
 from ufo.loop.compaction import Compaction
 from ufo.loop.engine import (
     MAX_TOOL_RESULT_CHARS,
+    OFFLOAD_NOTICE,
     TOOL_OUTPUT_DIR,
     TOOL_RESULT_PREVIEW_CHARS,
     TurnEngine,
@@ -736,20 +737,15 @@ class _QuietModel:
         yield Usage(input_tokens=0, output_tokens=0)
 
 
-def _oversize_tool(name: str, content: str) -> ToolDef:
+def _fixed_result_tool(name: str, content: str) -> ToolDef:
     async def handler(ctx: ToolContext, args: BaseModel) -> ToolResult:
         return ToolResult(content=(TextContent(text=content),))
 
     return ToolDef(name=name, description="d", input_model=_NoArgs, handler=handler)
 
 
-async def test_engine_offloads_an_oversize_result_to_a_readable_workspace_file(
-    file_ctx: tuple[ToolContext, Path],
-) -> None:
-    ctx, workspace = file_ctx
-    full = "offloaded line\n" * (MAX_TOOL_RESULT_CHARS // 15 + 1)
-    assert len(full) > MAX_TOOL_RESULT_CHARS
-    engine = TurnEngine(
+def _dispatch_engine(ctx: ToolContext, tools: ToolRegistry) -> TurnEngine:
+    return TurnEngine(
         turn=ctx.turn,
         agent=ctx.agent,
         system_prompt=rendered_prompt("p"),
@@ -766,7 +762,7 @@ async def test_engine_offloads_an_oversize_result_to_a_readable_workspace_file(
         cdp_provider=None,
         search_provider=None,
         connectors=ConnectorRegistry(entries={}),
-        tools=ToolRegistry((_oversize_tool("big", full),)),
+        tools=tools,
         tool_ext={},
         hooks=HookChain(),
         blob=ctx.blob,
@@ -775,12 +771,226 @@ async def test_engine_offloads_an_oversize_result_to_a_readable_workspace_file(
         artifact_token_secret=ctx.artifact_token_secret,
         grants=None,
     )
-    block = await engine._dispatch(ctx, ToolUseBlock(id="call1", name="big", input={}))
+
+
+GITHUB_REPO_URL_KEYS = (
+    "archive_url",
+    "assignees_url",
+    "blobs_url",
+    "branches_url",
+    "collaborators_url",
+    "comments_url",
+    "commits_url",
+    "compare_url",
+    "contents_url",
+    "contributors_url",
+    "deployments_url",
+    "downloads_url",
+    "events_url",
+    "forks_url",
+    "git_commits_url",
+    "git_refs_url",
+    "git_tags_url",
+    "hooks_url",
+    "issue_comment_url",
+    "issue_events_url",
+    "issues_url",
+    "keys_url",
+    "labels_url",
+    "languages_url",
+    "merges_url",
+    "milestones_url",
+    "notifications_url",
+    "pulls_url",
+    "releases_url",
+    "stargazers_url",
+    "statuses_url",
+    "subscribers_url",
+    "subscription_url",
+    "tags_url",
+    "teams_url",
+    "trees_url",
+    "url",
+)
+GITHUB_OWNER_URL_KEYS = (
+    "avatar_url",
+    "events_url",
+    "followers_url",
+    "following_url",
+    "gists_url",
+    "html_url",
+    "organizations_url",
+    "received_events_url",
+    "repos_url",
+    "starred_url",
+    "subscriptions_url",
+    "url",
+)
+GITHUB_SEARCH_HITS = 30
+GITHUB_SEARCH_CHARS_PER_HIT = 4_000
+
+
+def _github_code_search_payload(hits: int) -> str:
+    """The shape a connector's GITHUB_SEARCH_CODE call returns: a minified envelope over one record
+    per hit, each repeating that hit's whole `repository` object (45 keys, itself carrying a 19-key
+    `owner`) — so ~5 KB a hit, and GitHub's default page of 30 is ~150 KB of provider JSON of which
+    the member's question needs two fields."""
+    items = []
+    for index in range(hits):
+        login = f"owner-{index:03d}"
+        slug = f"{login}/atlas-service-{index:03d}"
+        sha = f"{index:03d}{'a1b2c3d4e5' * 4}"[:40]
+        repo_id = 1207685915 + index
+        owner = {
+            "login": login,
+            "id": repo_id,
+            "node_id": f"MDQ6VXNlcjEyMDc2ODU5MTV{index:03d}",
+            "gravatar_id": "",
+            "type": "User",
+            "site_admin": False,
+            "user_view_type": "public",
+        } | {
+            key: f"https://api.github.com/users/{login}/{key}{{/other_user}}"
+            for key in GITHUB_OWNER_URL_KEYS
+        }
+        repository = {
+            "id": repo_id,
+            "node_id": f"R_kgDOR8vXy{index:03d}",
+            "name": f"atlas-service-{index:03d}",
+            "full_name": slug,
+            "private": False,
+            "owner": owner,
+            "description": f"Streaming transpiler service {index:03d} for the atlas fleet.",
+            "fork": False,
+        } | {
+            key: f"https://api.github.com/repos/{slug}/{key}{{/sha}}"
+            for key in GITHUB_REPO_URL_KEYS
+        }
+        items.append(
+            {
+                "name": f"stream_{index:03d}.rs",
+                "path": f"src/transport/stream_{index:03d}.rs",
+                "sha": sha,
+                "url": f"https://api.github.com/repositories/{repo_id}/contents/{index:03d}?ref={sha}",
+                "git_url": f"https://api.github.com/repositories/{repo_id}/git/blobs/{sha}",
+                "html_url": f"https://github.com/{slug}/blob/{sha}/src/stream_{index:03d}.rs",
+                "repository": repository,
+                "score": 1.0,
+            }
+        )
+    return json.dumps(
+        {"total_count": 15800, "incomplete_results": False, "items": items},
+        separators=(",", ":"),
+    )
+
+
+async def test_a_connector_sized_result_offloads_to_a_file_the_sandbox_can_filter(
+    file_ctx: tuple[ToolContext, Path],
+) -> None:
+    """The measured gap in #282: one page of provider JSON is ~150 KB, so it must not ride inline
+    and be re-ingested every later round. It offloads, the model's context keeps only the preview
+    plus the path, and the payload survives whole in the workspace — provably filterable, since the
+    real `jq` in the sandbox image answers the member's question from the file with the two fields
+    they asked for instead of the 45-key repository object repeated 30 times."""
+    ctx, workspace = file_ctx
+    payload = _github_code_search_payload(GITHUB_SEARCH_HITS)
+    assert len(payload) > MAX_TOOL_RESULT_CHARS
+    assert len(payload) // GITHUB_SEARCH_HITS > GITHUB_SEARCH_CHARS_PER_HIT
+    engine = _dispatch_engine(ctx, ToolRegistry((_fixed_result_tool("search_code", payload),)))
+
+    block = await engine._dispatch(ctx, ToolUseBlock(id="call1", name="search_code", input={}))
     path = f"{TOOL_OUTPUT_DIR}/call1.txt"
     assert not block.is_error
     assert isinstance(block.content, str)
     assert path in block.content
-    assert len(block.content) <= TOOL_RESULT_PREVIEW_CHARS + 200
-    assert (workspace / ".tool-output" / "call1.txt").read_text() == full
-    result = await _run("read", ctx, file_path=".tool-output/call1.txt", offset=1, limit=1)
-    assert "offloaded line" in result.content[0].text
+    assert len(block.content) <= TOOL_RESULT_PREVIEW_CHARS + len(
+        OFFLOAD_NOTICE.format(total=len(payload), path=path)
+    )
+    assert (workspace / ".tool-output" / "call1.txt").read_text() == payload
+
+    filtered = await _run(
+        "bash", ctx, command=f"jq -r '.items[] | \"\\(.path)\\t\\(.html_url)\"' {path}"
+    )
+    lines = filtered.content[0].text.strip().splitlines()
+    assert len(lines) == GITHUB_SEARCH_HITS
+    assert lines[0].startswith("src/transport/stream_000.rs\thttps://github.com/owner-000/")
+    assert len(filtered.content[0].text) < TOOL_RESULT_PREVIEW_CHARS
+
+    windowed = await _run("read", ctx, file_path=".tool-output/call1.txt", offset=1, limit=1)
+    assert '"total_count":15800' in windowed.content[0].text
+
+
+async def test_the_offload_preview_carries_one_whole_record_of_the_payload(
+    file_ctx: tuple[ToolContext, Path],
+) -> None:
+    """The preview is what the model reasons over to decide whether — and how — to open the file.
+    One whole record is the unit that makes it actionable: a preview cut mid-record hides the rest
+    of that record's keys, so the model cannot tell what fields exist to filter on. The first record
+    of a real page closes past 4,096 chars, which is why the preview is larger than that."""
+    ctx, _ = file_ctx
+    payload = _github_code_search_payload(GITHUB_SEARCH_HITS)
+    first_record = json.dumps(json.loads(payload)["items"][0], separators=(",", ":"))
+    envelope = payload.index("[") + 1
+    assert envelope + len(first_record) > 4_096
+    engine = _dispatch_engine(ctx, ToolRegistry((_fixed_result_tool("search_code", payload),)))
+
+    block = await engine._dispatch(ctx, ToolUseBlock(id="call2", name="search_code", input={}))
+    assert isinstance(block.content, str)
+    assert first_record in block.content
+    assert '"total_count":15800' in block.content
+
+
+async def test_the_offload_fires_only_past_the_cap(
+    file_ctx: tuple[ToolContext, Path],
+) -> None:
+    """The cap governs every tool, so where exactly it fires is the contract: a result at the cap
+    rides inline whole and writes no file, and one char more offloads. Nothing weaker holds — a
+    tool's own limit caps a field, and the JSON its handler wraps that field in grows by an escaping
+    cost the limit does not describe, so a producer's declared maximum is not a promise of staying
+    inline."""
+    ctx, workspace = file_ctx
+    at_cap = "page text line\n" * (MAX_TOOL_RESULT_CHARS // 15) + "x" * (MAX_TOOL_RESULT_CHARS % 15)
+    assert len(at_cap) == MAX_TOOL_RESULT_CHARS
+    engine = _dispatch_engine(
+        ctx,
+        ToolRegistry(
+            (
+                _fixed_result_tool("at_cap", at_cap),
+                _fixed_result_tool("over_cap", at_cap + "y"),
+            )
+        ),
+    )
+
+    inline = await engine._dispatch(ctx, ToolUseBlock(id="call3", name="at_cap", input={}))
+    assert inline.content == at_cap
+    assert not (workspace / ".tool-output" / "call3.txt").exists()
+
+    offloaded = await engine._dispatch(ctx, ToolUseBlock(id="call5", name="over_cap", input={}))
+    assert isinstance(offloaded.content, str)
+    assert f"{TOOL_OUTPUT_DIR}/call5.txt" in offloaded.content
+    assert (workspace / ".tool-output" / "call5.txt").read_text() == at_cap + "y"
+
+
+async def test_a_read_over_the_cap_offloads_without_losing_the_file_it_read(
+    file_ctx: tuple[ToolContext, Path],
+) -> None:
+    """A file read is a newly-hot path whose result the model wanted verbatim, so the offload must
+    cost it nothing recoverable: the whole page survives in the workspace, and the notice's narrowed
+    access — a windowed read of the original path — returns the same lines inline."""
+    ctx, workspace = file_ctx
+    lines = [f"{index:05d} " + "payload" * 12 for index in range(1_400)]
+    await ctx.sandbox.write_file("wide.log", ("\n".join(lines) + "\n").encode())
+    engine = _dispatch_engine(ctx, ToolRegistry(BUILTIN_TOOLS))
+
+    block = await engine._dispatch(
+        ctx, ToolUseBlock(id="call4", name="read", input={"file_path": "wide.log"})
+    )
+    assert isinstance(block.content, str)
+    assert f"{TOOL_OUTPUT_DIR}/call4.txt" in block.content
+    offloaded = (workspace / ".tool-output" / "call4.txt").read_text()
+    assert len(offloaded) > MAX_TOOL_RESULT_CHARS
+    assert lines[-1] in offloaded
+
+    windowed = await _run("read", ctx, file_path="wide.log", offset=1_400, limit=1)
+    assert lines[-1] in windowed.content[0].text
+    assert len(windowed.content[0].text) < TOOL_RESULT_PREVIEW_CHARS

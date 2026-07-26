@@ -342,7 +342,9 @@ async def test_offloaded_tool_output_paths_are_re_referenced_after_compaction(
 ) -> None:
     """Phase 2: a large tool result the engine offloaded to `.tool-output/<id>.txt` in the head is
     re-referenced by path (not re-inlined) after the boundary, so the model can re-read it; a path
-    still visible in the kept tail is not duplicated."""
+    still visible in the kept tail is not duplicated. The harvested reference must be the path
+    exactly: `TOOL_OUTPUT_PATH_RE` ends the match at whitespace, so any wording that puts a
+    character straight after `{path}` in the notice harvests a path that opens nothing."""
     head_path = "/workspace/.tool-output/head-call.txt"
     tail_path = "/workspace/.tool-output/tail-call.txt"
     compaction = _compaction(tmp_path, trigger_tokens=1, keep_messages=2)
@@ -362,6 +364,7 @@ async def test_offloaded_tool_output_paths_are_re_referenced_after_compaction(
     result, _ = await compaction.maybe_compact(messages)
     rendered = str(result[0].content)
     assert "## Durable references" in rendered
+    assert f"- {head_path}\n" in rendered or rendered.endswith(f"- {head_path}")
     assert head_path in rendered
     assert tail_path not in rendered
 
