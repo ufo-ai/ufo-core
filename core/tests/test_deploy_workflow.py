@@ -341,6 +341,17 @@ def test_hosted_namespaces_hold_rollouts_until_nlb_targets_are_ready() -> None:
         assert readiness and readiness.group(1) == "enabled", environment
 
 
+def test_sandbox_proxy_nlb_routes_across_all_enabled_zones() -> None:
+    for environment in DEPLOY_ENVIRONMENTS:
+        terraform = (ROOT / "infra" / "envs" / environment / "ufo.tf").read_text()
+        cross_zone = re.search(
+            r'"service\.beta\.kubernetes\.io/aws-load-balancer-attributes"\s*=\s*'
+            r'"load_balancing\.cross_zone\.enabled=true"',
+            terraform,
+        )
+        assert cross_zone, environment
+
+
 def test_runtime_rollout_drains_before_mount_gate() -> None:
     rollout = _workflow(WORKFLOWS / "deploy.yml")["jobs"]["rollout"]
     assert isinstance(rollout, dict)
