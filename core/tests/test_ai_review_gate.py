@@ -1,12 +1,19 @@
 import importlib.util
+import re
 import sys
 from pathlib import Path
 
-_PATH = Path(__file__).parents[2] / ".github" / "scripts" / "ai_review_gate.py"
+import yaml
+
+_ROOT = Path(__file__).parents[2]
+_PATH = _ROOT / ".github" / "scripts" / "ai_review_gate.py"
 _SPEC = importlib.util.spec_from_file_location("ai_review_gate", _PATH)
 gate = importlib.util.module_from_spec(_SPEC)
 sys.modules["ai_review_gate"] = gate
 _SPEC.loader.exec_module(gate)
+
+_WORKFLOW = _ROOT / ".github" / "workflows" / "ai-review-gate.yml"
+_SKIP_CONDITION = re.compile(r"\$\{\{ !contains\(github\.event\.review\.state, '(\w+)'\) }}")
 
 HEAD = "9426a25a359f1f74eacc63f94637e92ece667a21"
 
@@ -65,3 +72,11 @@ def test_gate_state_maps_verdicts():
     assert gate.gate_state("APPROVED") == ("success", "Claude approved")
     assert gate.gate_state("CHANGES_REQUESTED") == ("failure", "Claude requested changes")
     assert gate.gate_state(None) == ("pending", "Awaiting Claude review of the head commit")
+
+
+def test_the_workflow_skips_a_review_state_the_verdict_ignores():
+    jobs = yaml.safe_load(_WORKFLOW.read_text())["jobs"]
+    skipped = _SKIP_CONDITION.fullmatch(jobs["ai-review-gate"]["if"])
+    assert skipped, "the job runs for every review state"
+    assert skipped[1].upper() not in gate.DECISIVE_STATES
+    assert gate.claude_verdict((claude_review(skipped[1].upper()),), HEAD) is None

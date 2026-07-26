@@ -23,6 +23,9 @@ permissions:
 jobs:
   ai-review-gate:
     name: Publish AI review status
+    # A COMMENTED review carries no verdict, so it can never change the status; skipping the job
+    # allocates no runner. contains() is case-insensitive, which the lowercase webhook state needs.
+    if: ${{ !contains(github.event.review.state, 'commented') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
