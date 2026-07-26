@@ -78,6 +78,11 @@ from ufo.tools.registry import ToolRegistry
 from ufo.workspace import ws
 
 SANDBOX_IMAGE_REF = "ufo-sandbox:latest"
+GIT_PROXY_AUTH_ENV = {
+    "GIT_CONFIG_COUNT": "1",
+    "GIT_CONFIG_KEY_0": "http.proxyAuthMethod",
+    "GIT_CONFIG_VALUE_0": "basic",
+}
 TURN_QUEUE_POLL_SECONDS = 0.1
 FAILED_TERMINAL_RETRY_SECONDS = 1.0
 FAILED_TERMINAL_RETRY_MAX_SECONDS = 30.0
@@ -447,7 +452,14 @@ async def _open_sandbox(
     another backend wrote — creates fresh. The returned handle's id is written back as
     `<backend>:<id>` only when it differs from what the row already holds, so a resume (same id)
     costs no write and a fresh create (or an overwrite of a reaped id) persists once — the reaper
-    and the next process read this same column."""
+    and the next process read this same column.
+
+    git is the one sandbox client that will not present the run token unprompted: its default
+    `http.proxyAuthMethod=anyauth` waits for a `407` challenge the default-deny proxy never sends
+    (an unadmitted host is refused `403`), so its CONNECT arrives unattributed and is refused before
+    a rule is read. `GIT_PROXY_AUTH_ENV` sends the token on the first CONNECT as every other client
+    already does, and rides every turn whether or not it holds a grant or a key — reaching the proxy
+    at all precedes authenticating to anything beyond it."""
     stored = await _stored_sandbox_handle(turn.conversation_id, turn.workspace_id)
     resume_id = None if stored is None else sandbox_handle_id(backend, stored)
     run = RunToken(workspace_id=turn.workspace_id, turn_id=turn.id)
@@ -460,6 +472,7 @@ async def _open_sandbox(
             run_token=run.encode(),
             resume_id=resume_id,
             env={
+                **GIT_PROXY_AUTH_ENV,
                 **await _grant_cli_env(grants, clis, turn),
                 **await _keyed_provider_env(credentials, slots, turn.workspace_id),
             },

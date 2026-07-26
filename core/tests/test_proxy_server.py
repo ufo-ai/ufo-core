@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import json
+import os
 import socket
 import ssl
 import struct
@@ -21,8 +22,9 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from ufo.connectors import CliCredential, ForwardedResponse
 from ufo.credentials import CredentialStore, HostChoice
 from ufo.db import workspace_tx
-from ufo.ext.manifest import CredentialSlot, InjectionTarget
+from ufo.ext.manifest import CredentialSlot, InjectionTarget, Manifest
 from ufo.grants import GrantStore, grant_sentinel
+from ufo.loop.queue import GIT_PROXY_AUTH_ENV
 from ufo.sandbox.fs_creds import (
     SANDBOX_FS_CREDENTIAL_PATH,
     SandboxFsCredentialMinter,
@@ -36,6 +38,7 @@ from ufo.sandbox.proxy.rules import (
     InternetRule,
     MeterRule,
     ScopeRule,
+    derive_manifest_rules,
 )
 from ufo.sandbox.proxy.server import (
     EgressProxy,
@@ -696,6 +699,96 @@ async def test_public_internet_tunnels_and_meters_a_live_turn(db: None) -> None:
             await connection.execute(
                 sa.select(tables.ledger.c.dimension, tables.ledger.c.amount).where(
                     tables.ledger.c.turn_id == turn_id
+                )
+            )
+        ).one()
+    assert (row.dimension, int(row.amount)) == ("egress", 1)
+
+
+async def _git_ls_remote(
+    proxy_port: int, run_token: str, host: str, port: int, git_config: Mapping[str, str]
+) -> str:
+    """Drive the real `git` binary at `host:port` through the proxy, with the run token in the proxy
+    URL exactly as a carrier threads it, and answer what git reported."""
+    process = await asyncio.create_subprocess_exec(
+        "git",
+        "ls-remote",
+        f"https://{host}:{port}/owner/repo.git",
+        env={
+            "PATH": os.environ.get("PATH", ""),
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_SYSTEM": os.devnull,
+            "https_proxy": f"http://{run_token}:@127.0.0.1:{proxy_port}",
+            **git_config,
+        },
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await asyncio.wait_for(process.communicate(), timeout=60)
+    return stderr.decode(errors="replace")
+
+
+async def test_real_git_reaches_the_public_internet_only_with_the_proxy_auth_config(
+    db: None,
+) -> None:
+    """The whole chain a public `git clone` rides, with nothing hand-built: a manifest declaring
+    `sandbox_internet` derives the `InternetRule` that admits any globally routable host — no
+    per-host ScopeRule exists or is needed — and the turn's `GIT_PROXY_AUTH_ENV` is what lets git
+    present the run token that reaches that rule at all.
+
+    git's default `http.proxyAuthMethod=anyauth` waits for a `407` challenge this default-deny proxy
+    never sends, so an unconfigured CONNECT arrives unattributed, resolves to the base rules, and is
+    refused `403` before the internet rule is read. Configured, the tunnel opens and meters."""
+    async with workspace_tx() as connection:
+        seeded = await _seed_turn(connection)
+
+    async def local_public(_host: str, _port: int) -> str:
+        return "127.0.0.1"
+
+    upstream_connections = 0
+
+    async def upstream(_reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        nonlocal upstream_connections
+        upstream_connections += 1
+        writer.close()
+
+    stub = await asyncio.start_server(upstream, "127.0.0.1", 0)
+    stub_port = stub.sockets[0].getsockname()[1]
+    cert, key = await generate_ca()
+    internet = derive_manifest_rules((Manifest(name="repl", version="1", sandbox_internet=True),))
+    assert internet == (InternetRule(),)
+    resolver = PerAgentRules(base=(), grants=None, internet=internet)
+    proxy = EgressProxy(
+        resolve=resolver.resolve,
+        authorize=resolver.turn_live,
+        ca_cert=cert,
+        ca_key=key,
+        resolve_public=local_public,
+    )
+    endpoint = await proxy.start(bind_host="127.0.0.1")
+    token = RunToken(seeded.workspace_id, seeded.turn_id).encode()
+    try:
+        assert not [rule for rule in await resolver.resolve(None) if isinstance(rule, ScopeRule)]
+
+        unconfigured = await _git_ls_remote(endpoint.port, token, "git.test", stub_port, {})
+        assert "403" in unconfigured
+        assert upstream_connections == 0
+
+        configured = await _git_ls_remote(
+            endpoint.port, token, "git.test", stub_port, GIT_PROXY_AUTH_ENV
+        )
+        assert "403" not in configured
+        assert upstream_connections == 1
+    finally:
+        await proxy.stop()
+        stub.close()
+        await stub.wait_closed()
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(tables.ledger.c.dimension, tables.ledger.c.amount).where(
+                    tables.ledger.c.turn_id == seeded.turn_id
                 )
             )
         ).one()

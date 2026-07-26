@@ -23,7 +23,7 @@ from ufo.credentials import CredentialStore, HostChoice
 from ufo.db import workspace_tx
 from ufo.ext.manifest import CredentialSlot, InjectionTarget
 from ufo.grants import GrantStore, grant_sentinel
-from ufo.loop.queue import _open_sandbox
+from ufo.loop.queue import GIT_PROXY_AUTH_ENV, _open_sandbox
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import ProxyEndpoint, SandboxHandle, SandboxSpec
 from ufo.schema import tables
@@ -228,7 +228,7 @@ async def test_open_sandbox_exports_the_acting_members_grant_sentinels(
         carrier, "e2b", blob, None, PROXY, turn, GrantStore(), {"hub": HUB_CLI}, None, ()
     )
 
-    assert carrier.specs[0].env == {"HUB_TOKEN": grant_sentinel("acct-1")}
+    assert carrier.specs[0].env == {**GIT_PROXY_AUTH_ENV, "HUB_TOKEN": grant_sentinel("acct-1")}
 
 
 async def test_open_sandbox_exports_nothing_for_a_foreign_private_grant(
@@ -247,7 +247,7 @@ async def test_open_sandbox_exports_nothing_for_a_foreign_private_grant(
         carrier, "e2b", blob, None, PROXY, turn, GrantStore(), {"hub": HUB_CLI}, None, ()
     )
 
-    assert carrier.specs[0].env == {}
+    assert carrier.specs[0].env == GIT_PROXY_AUTH_ENV
 
 
 async def test_open_sandbox_exports_nothing_when_the_account_is_ambiguous(
@@ -279,7 +279,7 @@ async def test_open_sandbox_exports_nothing_when_the_account_is_ambiguous(
         carrier, "e2b", blob, None, PROXY, turn, GrantStore(), {"hub": HUB_CLI}, None, ()
     )
 
-    assert carrier.specs[0].env == {}
+    assert carrier.specs[0].env == GIT_PROXY_AUTH_ENV
 
 
 DATADOG_SITES = HostChoice(
@@ -342,6 +342,7 @@ async def test_open_sandbox_exports_keyed_provider_sentinels_not_secrets(
     )
 
     assert carrier.specs[0].env == {
+        **GIT_PROXY_AUTH_ENV,
         "DD_API_KEY": "SENTINEL_DD_API",
         "DD_APP_KEY": "SENTINEL_DD_APP",
         "DD_HOST": "api.us5.datadoghq.com",
@@ -372,6 +373,7 @@ async def test_open_sandbox_exports_nothing_for_an_unfilled_keyed_slot(
     )
 
     assert carrier.specs[0].env == {
+        **GIT_PROXY_AUTH_ENV,
         "DD_API_KEY": "SENTINEL_DD_API",
         "DD_HOST": "api.datadoghq.com",
     }
@@ -405,7 +407,7 @@ async def test_open_sandbox_withholds_and_warns_on_a_selection_the_row_does_not_
             DATADOG_SLOTS,
         )
 
-    assert carrier.specs[0].env == {}
+    assert carrier.specs[0].env == GIT_PROXY_AUTH_ENV
     warned = [
         record.ufo
         for record in caplog.records
@@ -413,3 +415,24 @@ async def test_open_sandbox_withholds_and_warns_on_a_selection_the_row_does_not_
     ]
     assert {entry["slot"] for entry in warned} == {"datadog_api_key", "datadog_application_key"}
     assert not any("169.254" in str(entry) for entry in warned)
+
+
+async def test_open_sandbox_configures_git_to_authenticate_to_the_proxy(
+    db: None, tmp_path: Path
+) -> None:
+    """git is the one sandbox client that will not present the run token unprompted: its default
+    `anyauth` waits for a `407` challenge the default-deny proxy never sends, so its CONNECT arrives
+    unattributed and is refused. Every turn — holding a grant or a key or neither — gets
+    `http.proxyAuthMethod=basic`, so git presents the token on the first CONNECT."""
+    workspace_id, conversation_id = await _conversation()
+    carrier = _ResumeRecordingCarrier(container_id="sbx-1")
+    blob = FilesystemBlobStore(root=tmp_path)
+    turn = _turn(workspace_id, conversation_id)
+
+    await _open_sandbox(carrier, "e2b", blob, None, PROXY, turn, None, {}, None, ())
+
+    assert carrier.specs[0].env == {
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "http.proxyAuthMethod",
+        "GIT_CONFIG_VALUE_0": "basic",
+    }
