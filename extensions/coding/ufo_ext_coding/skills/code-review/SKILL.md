@@ -8,7 +8,7 @@ Review a pull request's changes and report findings for the parent to act on. **
 
 ## Get the PR
 
-The objective names `{owner}/{repo}` and the PR number. Reach GitHub through the **connector** — call the `GITHUB_*` actions via `call_external_tool` with `source_id: "github"` unless the objective supplied a connected-account source id. It is authenticated; `gh`/`git` in the sandbox are not, and you never `git clone`. Call `describe_external_tools` once for the GitHub actions you use.
+The objective names `{owner}/{repo}` and the PR number. Reach GitHub through the **connector** — call the `GITHUB_*` actions via `call_external_tool` with `source_id: "github"` unless the objective supplied a connected-account source id. It is authenticated and it is the review path — read the diff through it rather than cloning, so a review costs one call instead of a checkout. (`gh` is authenticated wherever the workspace holds a GitHub connector grant, and `git` wherever it holds a git credential; neither is needed here.) Call `describe_external_tools` once for the GitHub actions you use.
 
 1. **Diff in one call** — `GITHUB_LIST_PULL_REQUESTS_FILES` (args `owner`, `repo`, `pull_number`) returns every changed file with its `patch`. This is your primary review input.
 2. **Full-file context, sparingly** — only when a patch lacks the surrounding code a specific finding needs, fetch that one file with `GITHUB_GET_REPOSITORY_CONTENT` (args `owner`, `repo`, `path`, `ref` = the PR head SHA; content is base64). A couple at most, not every file.

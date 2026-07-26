@@ -23,13 +23,14 @@ from ufo.credentials import CredentialStore, HostChoice
 from ufo.db import workspace_tx
 from ufo.ext.manifest import CredentialSlot, InjectionTarget
 from ufo.grants import GrantStore, grant_sentinel
-from ufo.loop.queue import GIT_PROXY_AUTH_ENV, _open_sandbox
+from ufo.loop.queue import GIT_PROXY_AUTH_CONFIG, _git_config_env, _open_sandbox
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import ProxyEndpoint, SandboxHandle, SandboxSpec
 from ufo.schema import tables
 from ufo.schema.records import Turn
 
 PROXY = ProxyEndpoint(port=8080, ca_cert="ca-pem")
+GIT_PROXY_AUTH_ENV = _git_config_env(GIT_PROXY_AUTH_CONFIG)
 
 
 async def _conversation(handle: str | None = None) -> tuple[UUID, UUID]:
@@ -436,3 +437,138 @@ async def test_open_sandbox_configures_git_to_authenticate_to_the_proxy(
         "GIT_CONFIG_KEY_0": "http.proxyAuthMethod",
         "GIT_CONFIG_VALUE_0": "basic",
     }
+
+
+GIT_SLOTS = (
+    CredentialSlot(
+        name="github_git_token",
+        description="git token",
+        injection=InjectionTarget(
+            host="github.com",
+            header="Authorization",
+            sentinel="SENTINEL_GIT",
+            dimension="requests",
+            git_basic_user="x-access-token",
+        ),
+    ),
+)
+
+
+async def test_open_sandbox_configures_git_to_present_the_credential_sentinel(
+    db: None, tmp_path: Path
+) -> None:
+    """A workspace holding a git credential gets the host's `extraheader` alongside the proxy-auth
+    setting, both through git's own config env. The sandbox sees the sentinel — the secret is
+    swapped in at the proxy — and git sends it on every request to that host, which is what makes
+    `git clone` and `git push` of a private repository authenticate."""
+    workspace_id, conversation_id = await _conversation()
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    await store.put(workspace_id, "github_git_token", "ghp-real")
+    carrier = _ResumeRecordingCarrier(container_id="sbx-1")
+
+    await _open_sandbox(
+        carrier,
+        "e2b",
+        FilesystemBlobStore(root=tmp_path),
+        None,
+        PROXY,
+        _turn(workspace_id, conversation_id),
+        None,
+        {},
+        store,
+        GIT_SLOTS,
+    )
+
+    assert carrier.specs[0].env == {
+        "GIT_CONFIG_COUNT": "2",
+        "GIT_CONFIG_KEY_0": "http.proxyAuthMethod",
+        "GIT_CONFIG_VALUE_0": "basic",
+        "GIT_CONFIG_KEY_1": "http.https://github.com/.extraheader",
+        "GIT_CONFIG_VALUE_1": "Authorization: SENTINEL_GIT",
+    }
+    assert "ghp-real" not in str(carrier.specs[0].env)
+
+
+async def test_open_sandbox_configures_no_extraheader_without_a_git_credential(
+    db: None, tmp_path: Path
+) -> None:
+    """An unfilled slot configures nothing: the proxy derives no rule for the host either, so git
+    reaches it as an opaque tunnel and an anonymous clone of a public repository still works. A
+    sentinel sent to a host nothing swaps on would fail a request that needs no credential."""
+    workspace_id, conversation_id = await _conversation()
+    carrier = _ResumeRecordingCarrier(container_id="sbx-1")
+
+    await _open_sandbox(
+        carrier,
+        "e2b",
+        FilesystemBlobStore(root=tmp_path),
+        None,
+        PROXY,
+        _turn(workspace_id, conversation_id),
+        None,
+        {},
+        CredentialStore(fernet=Fernet(Fernet.generate_key())),
+        GIT_SLOTS,
+    )
+
+    assert carrier.specs[0].env == GIT_PROXY_AUTH_ENV
+
+
+GIT_HOST_CHOICE_SLOTS = (
+    CredentialSlot(
+        name="github_git_token",
+        description="git token",
+        injection=InjectionTarget(
+            host=HostChoice(
+                slot="github_git_host",
+                description="GitHub host for this org",
+                hosts=("github.com", "github.example.com"),
+                default="github.com",
+                env="GITHUB_HOST",
+            ),
+            header="Authorization",
+            sentinel="SENTINEL_GIT",
+            dimension="requests",
+            git_basic_user="x-access-token",
+        ),
+    ),
+    CredentialSlot(name="github_git_host", description="GitHub host"),
+)
+
+
+async def test_open_sandbox_configures_no_git_host_the_declaration_does_not_offer(
+    db: None, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A git host resolving to nothing configures nothing, and says so. The extraheader names the
+    host in its own config key, so an unresolved one has no key to write — and writing the turn's
+    sentinel under a host the declaration never offered would send it somewhere no proxy rule swaps
+    it, failing a clone that would otherwise have worked anonymously. Warned for the same reason
+    the keyed export warns: the withholding happens when the sandbox opens, not when git runs."""
+    workspace_id, conversation_id = await _conversation()
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    await store.put(workspace_id, "github_git_token", "ghp-real")
+    await store.put(workspace_id, "github_git_host", "github.evil.test")
+    carrier = _ResumeRecordingCarrier(container_id="sbx-1")
+
+    with caplog.at_level(logging.WARNING, logger="ufo"):
+        await _open_sandbox(
+            carrier,
+            "e2b",
+            FilesystemBlobStore(root=tmp_path),
+            None,
+            PROXY,
+            _turn(workspace_id, conversation_id),
+            None,
+            {},
+            store,
+            GIT_HOST_CHOICE_SLOTS,
+        )
+
+    assert carrier.specs[0].env == GIT_PROXY_AUTH_ENV
+    warned = [
+        record.ufo
+        for record in caplog.records
+        if record.getMessage() == "sandbox.git_host_unavailable"
+    ]
+    assert [entry["slot"] for entry in warned] == ["github_git_token"]
+    assert not any("evil" in str(entry) for entry in warned)

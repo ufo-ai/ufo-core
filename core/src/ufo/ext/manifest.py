@@ -50,13 +50,20 @@ class InjectionTarget:
     provider that pins its API host per account (a Datadog site, an OpsGenie region): the member
     selects from the closed set the declaration offers, so what reaches the wire is always a literal
     the row wrote. Two slots naming one host each inject their own header, which is how a provider
-    taking more than one key on the wire is expressed."""
+    taking more than one key on the wire is expressed.
+
+    `git_basic_user` makes the slot the sandbox git's credential for `host`: the turn configures
+    git to send the sentinel as its `Authorization` header there, and the proxy swaps it for
+    `Basic base64(git_basic_user:secret)`. git is the one sandbox client whose auth is configured
+    rather than read from an env var, and smart-HTTP takes only Basic — a bearer is refused even
+    for a public repository."""
 
     host: str | HostChoice
     header: str
     sentinel: str
     env: str | None = None
     dimension: str | None = None
+    git_basic_user: str | None = None
 
 
 @dataclass(frozen=True)

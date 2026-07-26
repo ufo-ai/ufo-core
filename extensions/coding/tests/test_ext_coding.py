@@ -66,3 +66,15 @@ def test_coding_prompt_wraps_with_citation_and_fills_the_skill_index() -> None:
     assert "software-engineering task" in prompt
     assert prompt.endswith(FINISH_CONTRACT)
     assert "list_skills" not in coding.CODING_PROFILE.tool_names
+
+
+def test_coding_manifest_declares_the_git_credential_the_proxy_swaps() -> None:
+    """The pack that routes repo work declares the credential a checkout needs: one slot, injected
+    on `github.com` as the Basic password half, so the sandbox holds a sentinel and the proxy holds
+    the swap. A bearer here would be refused by git's smart-HTTP even for a public repository."""
+    (slot,) = coding.manifest().credentials
+    assert slot.name == "github_git_token"
+    assert slot.injection is not None
+    assert (slot.injection.host, slot.injection.header) == ("github.com", "Authorization")
+    assert slot.injection.git_basic_user == "x-access-token"
+    assert slot.injection.env is None

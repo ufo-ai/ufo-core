@@ -5,6 +5,7 @@ sentinel→real injection, a granted host implies its scope, a metered host impl
 A live turn adds public internet. A grant injects nothing: the broker holds the account's token
 and executes server-side, so a grant only admits and meters its host."""
 
+from base64 import b64encode
 from collections.abc import Mapping
 from dataclasses import dataclass
 from uuid import UUID
@@ -124,7 +125,10 @@ async def derive_credential_rules(
     An injection is per slot, because each key rides its own header; scope and metering are per
     host, because a request is one request however many keys it carries. Grouping by the resolved
     host is what makes that true — a provider taking two keys reaches one host, so it admits and
-    meters it once, and the egress metric counts requests rather than headers."""
+    meters it once, and the egress metric counts requests rather than headers.
+
+    A `git_basic_user` slot composes its header value here rather than storing it composed: the
+    secret is one rotatable value, and git's smart-HTTP wants it as the password half of Basic."""
     grouped: dict[str, list[InjectionRule]] = {}
     dimensions: dict[str, str] = {}
     for slot in slots:
@@ -139,6 +143,9 @@ async def derive_credential_rules(
         if host is None:
             warn("egress.credential_host_unavailable", slot=slot.name)
             continue
+        if target.git_basic_user is not None:
+            encoded = b64encode(f"{target.git_basic_user}:{real}".encode()).decode()
+            real = f"Basic {encoded}"
         grouped.setdefault(host, []).append(
             InjectionRule(host=host, header=target.header, sentinel=target.sentinel, real=real)
         )

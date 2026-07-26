@@ -24,7 +24,7 @@ from ufo.credentials import CredentialStore, HostChoice
 from ufo.db import workspace_tx
 from ufo.ext.manifest import CredentialSlot, InjectionTarget, Manifest
 from ufo.grants import GrantStore, grant_sentinel
-from ufo.loop.queue import GIT_PROXY_AUTH_ENV
+from ufo.loop.queue import GIT_PROXY_AUTH_CONFIG, _git_config_env, _git_credential_config
 from ufo.sandbox.fs_creds import (
     SANDBOX_FS_CREDENTIAL_PATH,
     SandboxFsCredentialMinter,
@@ -734,7 +734,7 @@ async def test_real_git_reaches_the_public_internet_only_with_the_proxy_auth_con
 ) -> None:
     """The whole chain a public `git clone` rides, with nothing hand-built: a manifest declaring
     `sandbox_internet` derives the `InternetRule` that admits any globally routable host — no
-    per-host ScopeRule exists or is needed — and the turn's `GIT_PROXY_AUTH_ENV` is what lets git
+    per-host ScopeRule exists or is needed — and the turn's `GIT_PROXY_AUTH_CONFIG` is what lets git
     present the run token that reaches that rule at all.
 
     git's default `http.proxyAuthMethod=anyauth` waits for a `407` challenge the proxy never sends,
@@ -776,7 +776,7 @@ async def test_real_git_reaches_the_public_internet_only_with_the_proxy_auth_con
         assert upstream_connections == 0
 
         configured = await _git_ls_remote(
-            endpoint.port, token, "git.test", stub_port, GIT_PROXY_AUTH_ENV
+            endpoint.port, token, "git.test", stub_port, _git_config_env(GIT_PROXY_AUTH_CONFIG)
         )
         assert "403" not in configured
         assert upstream_connections == 1
@@ -1337,3 +1337,53 @@ async def test_resolve_derives_forward_rules_for_the_acting_member(db: None) -> 
     resolver = PerAgentRules(base=(), grants=store, clis={"hub": cli})
     silent = await resolver.resolve(RunToken(spoken.workspace_id, spoken.turn_id))
     assert not any(isinstance(rule, ForwardRule) for rule in silent)
+
+
+async def test_real_git_presents_the_credential_sentinel_to_the_credentialed_host(
+    db: None,
+) -> None:
+    """The real `git` binary, given the turn's own config env, resolves the sentinel header for a
+    URL on the credentialed host and nothing for any other host. That is the sandbox half of the
+    swap: git sends `Authorization: <sentinel>`, the proxy's InjectionRule matches that exact value
+    and rewrites it to the Basic credential upstream, so the secret never enters the container."""
+    async with workspace_tx() as connection:
+        seeded = await _seed_turn(connection)
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    await store.put(seeded.workspace_id, "github_git_token", "ghp-real")
+    slots = (
+        CredentialSlot(
+            name="github_git_token",
+            description="git token",
+            injection=InjectionTarget(
+                host="github.com",
+                header="Authorization",
+                sentinel="SENTINEL_GIT",
+                git_basic_user="x-access-token",
+            ),
+        ),
+    )
+    env = _git_config_env(
+        (*GIT_PROXY_AUTH_CONFIG, *await _git_credential_config(store, slots, seeded.workspace_id))
+    )
+
+    async def urlmatch(url: str) -> str:
+        process = await asyncio.create_subprocess_exec(
+            "git",
+            "config",
+            "--get-urlmatch",
+            "http.extraheader",
+            url,
+            env={
+                "PATH": os.environ.get("PATH", ""),
+                "GIT_CONFIG_GLOBAL": os.devnull,
+                "GIT_CONFIG_SYSTEM": os.devnull,
+                **env,
+            },
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await asyncio.wait_for(process.communicate(), timeout=60)
+        return stdout.decode().strip()
+
+    assert await urlmatch("https://github.com/owner/private.git") == "Authorization: SENTINEL_GIT"
+    assert await urlmatch("https://gitlab.test/owner/other.git") == ""

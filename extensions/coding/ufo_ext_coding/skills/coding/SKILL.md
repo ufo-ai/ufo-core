@@ -23,7 +23,7 @@ The main agent owns the clone/no-clone decision. Do not make the coding subagent
 
 Before calling `spawn_subagent(profile="coding", ...)`, choose exactly one setup mode and state it at the start of the objective:
 
-- **Clone a public repo:** Use when the task targets a public GitHub repository. Start the objective with: `Repository setup: clone https://github.com/org/repo into the workspace with git, then work inside it.`
+- **Clone a repo:** Use when the task targets a GitHub repository. Start the objective with: `Repository setup: clone https://github.com/org/repo into the workspace with git, then work inside it.` Public repositories always clone. A private one clones when the workspace has filled the `github_git_token` slot — if `git clone` fails to authenticate, say so and ask the owner to add the token; do not fall back to reading files through `gh api`.
 - **Existing workspace:** Use when the repository is already present in the sandbox workspace. Start the objective with: `Repository setup: use the existing workspace at <path>. Do not clone.`
 - **No repository:** Use only for coding-adjacent tasks that do not need repository files. Start the objective with: `Repository setup: no repository clone is needed.`
 
@@ -60,7 +60,7 @@ After a coding subagent completes:
    - **What was done**: What was implemented, fixed, or analyzed — mention specific changes, files modified, and approach taken
    - **Testing**: What tests were added or run, and their results
    - **Key decisions**: Any notable design decisions or trade-offs made
-4. Share any generated files via `share_file` — the subagent hands work back as files and patches in the workspace, not as a pushed branch (its sandbox git is unauthenticated).
+4. Share any generated files via `share_file`. A workspace with a git credential can `git push` a branch; opening a PR additionally needs the GitHub connector, which is what `gh` authenticates through. Without those, work comes back as files and patches in the workspace.
 
 The summary should give the user a clear picture of the work without them needing to read the full diff. Be specific — mention function names, file paths, and concrete changes rather than vague descriptions.
 

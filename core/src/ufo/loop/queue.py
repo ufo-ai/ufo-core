@@ -78,11 +78,7 @@ from ufo.tools.registry import ToolRegistry
 from ufo.workspace import ws
 
 SANDBOX_IMAGE_REF = "ufo-sandbox:latest"
-GIT_PROXY_AUTH_ENV = {
-    "GIT_CONFIG_COUNT": "1",
-    "GIT_CONFIG_KEY_0": "http.proxyAuthMethod",
-    "GIT_CONFIG_VALUE_0": "basic",
-}
+GIT_PROXY_AUTH_CONFIG = (("http.proxyAuthMethod", "basic"),)
 TURN_QUEUE_POLL_SECONDS = 0.1
 FAILED_TERMINAL_RETRY_SECONDS = 1.0
 FAILED_TERMINAL_RETRY_MAX_SECONDS = 30.0
@@ -458,8 +454,10 @@ async def _open_sandbox(
     `http.proxyAuthMethod=anyauth` waits for a `407` challenge the proxy never sends, so its CONNECT
     arrives unattributed. The proxy keys every rule on that token, so an unattributed connection
     resolves to the base rules and reaches none of the turn's own egress — not the agent's internet
-    policy, not its grants. `GIT_PROXY_AUTH_ENV` presents the token on the first CONNECT as every
-    other client already does, and rides every turn whether or not it holds a grant or a key."""
+    policy, not its grants. `GIT_PROXY_AUTH_CONFIG` presents the token on the first CONNECT as every
+    other client already does, and rides every turn whether or not it holds a grant or a key. A
+    workspace holding a git credential adds that host's extraheader to the same config, so `git
+    clone` and `git push` authenticate off the sentinel the proxy swaps."""
     stored = await _stored_sandbox_handle(turn.conversation_id, turn.workspace_id)
     resume_id = None if stored is None else sandbox_handle_id(backend, stored)
     run = RunToken(workspace_id=turn.workspace_id, turn_id=turn.id)
@@ -472,7 +470,12 @@ async def _open_sandbox(
             run_token=run.encode(),
             resume_id=resume_id,
             env={
-                **GIT_PROXY_AUTH_ENV,
+                **_git_config_env(
+                    (
+                        *GIT_PROXY_AUTH_CONFIG,
+                        *await _git_credential_config(credentials, slots, turn.workspace_id),
+                    )
+                ),
                 **await _grant_cli_env(grants, clis, turn),
                 **await _keyed_provider_env(credentials, slots, turn.workspace_id),
             },
@@ -482,6 +485,47 @@ async def _open_sandbox(
     if persisted != stored:
         await _persist_sandbox_handle(turn.conversation_id, turn.workspace_id, persisted)
     return handle
+
+
+def _git_config_env(settings: tuple[tuple[str, str], ...]) -> dict[str, str]:
+    """git's own env channel for configuration, which is how the turn reaches a git it never
+    writes a config file for: one indexed key/value pair per setting, and the count git reads."""
+    env = {"GIT_CONFIG_COUNT": str(len(settings))}
+    for index, (key, value) in enumerate(settings):
+        env[f"GIT_CONFIG_KEY_{index}"] = key
+        env[f"GIT_CONFIG_VALUE_{index}"] = value
+    return env
+
+
+async def _git_credential_config(
+    credentials: CredentialStore | None,
+    slots: tuple[CredentialSlot, ...],
+    workspace_id: UUID,
+) -> tuple[tuple[str, str], ...]:
+    """Each git host this workspace holds a credential for, as an `extraheader` carrying the slot's
+    sentinel — never the secret, which the egress proxy swaps for `Basic` on the wire. git has no
+    env var to read auth from, so a header it is; the proxy admits and MITMs the host off the same
+    slot, which is why a slot with nothing stored must configure nothing: the sentinel would reach
+    the provider verbatim over an opaque tunnel, failing a clone anonymous git would serve."""
+    if credentials is None:
+        return ()
+    settings: list[tuple[str, str]] = []
+    for slot in slots:
+        target = slot.injection
+        if target is None or target.git_basic_user is None:
+            continue
+        try:
+            await credentials.get(workspace_id, slot.name)
+        except CredentialSlotUnset:
+            continue
+        host = await credential_host(credentials, workspace_id, target.host)
+        if host is None:
+            warn("sandbox.git_host_unavailable", slot=slot.name)
+            continue
+        settings.append(
+            (f"http.https://{host}/.extraheader", f"{target.header}: {target.sentinel}")
+        )
+    return tuple(settings)
 
 
 async def _keyed_provider_env(

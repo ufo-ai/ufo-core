@@ -1,6 +1,7 @@
 import logging
 import re
 import time
+from base64 import b64encode
 from dataclasses import replace
 from uuid import UUID, uuid4
 
@@ -621,3 +622,59 @@ def test_slots_reaching_one_host_must_meter_it_the_same_way() -> None:
     )
     with pytest.raises(RuntimeError, match=re.escape("api.one.test")):
         injecting_slots((agreed, aliased))
+
+
+def _git_manifest() -> Manifest:
+    """A git credential slot: one stored secret, composed into Basic on the way to the wire."""
+    return Manifest(
+        name="git",
+        version="1",
+        credentials=(
+            CredentialSlot(
+                name="github_git_token",
+                description="git token",
+                injection=InjectionTarget(
+                    host="github.com",
+                    header="Authorization",
+                    sentinel="SENTINEL_GIT",
+                    dimension="requests",
+                    git_basic_user="x-access-token",
+                ),
+            ),
+        ),
+    )
+
+
+async def test_a_git_slot_injects_basic_composed_from_its_one_secret(db: None) -> None:
+    """git smart-HTTP takes only Basic — a bearer is refused even for a public repository — so the
+    stored secret rides as the password half of `x-access-token:<token>`, composed at derivation
+    rather than stored composed: the token is one value the member rotates on its own. The host is
+    scoped and metered like any keyed host, which is also what makes the proxy MITM it at all."""
+    workspace_id = await _workspace()
+    store = _store()
+    await store.put(workspace_id, "github_git_token", "ghp-real")
+    rules = await derive_credential_rules(injecting_slots((_git_manifest(),)), workspace_id, store)
+    assert [rule for rule in rules if isinstance(rule, InjectionRule)] == [
+        InjectionRule(
+            host="github.com",
+            header="Authorization",
+            sentinel="SENTINEL_GIT",
+            real=f"Basic {b64encode(b'x-access-token:ghp-real').decode()}",
+        )
+    ]
+    assert [rule for rule in rules if isinstance(rule, ScopeRule)] == [
+        ScopeRule(allowed_hosts=frozenset({"github.com"}))
+    ]
+    assert [rule for rule in rules if isinstance(rule, MeterRule)] == [
+        MeterRule(host="github.com", dimension="requests")
+    ]
+
+
+async def test_a_git_slot_with_nothing_stored_derives_no_rule(db: None) -> None:
+    """No credential, no rules — so `github.com` keeps riding the turn's internet policy as an
+    opaque tunnel, which is what lets an anonymous clone of a public repository still work."""
+    workspace_id = await _workspace()
+    rules = await derive_credential_rules(
+        injecting_slots((_git_manifest(),)), workspace_id, _store()
+    )
+    assert rules == ()
