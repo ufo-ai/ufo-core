@@ -193,6 +193,11 @@ def _mock_transport(
             slack.SLACK_CONVERSATIONS_HISTORY_URL,
         ):
             return httpx.Response(200, json={"ok": True, "messages": []})
+        if url == slack.SLACK_CONVERSATIONS_INFO_URL:
+            channel_id = str(request.url.params.get("channel"))
+            return httpx.Response(
+                200, json={"ok": True, "channel": {"id": channel_id, "is_ext_shared": False}}
+            )
         if url == slack.SLACK_CHAT_POST_MESSAGE_URL:
             return httpx.Response(200, json={"ok": True, "channel": "C5", "ts": "999.100"})
         if url == slack.SLACK_CHAT_POST_EPHEMERAL_URL:
@@ -2211,6 +2216,84 @@ async def test_footer_is_absent_outside_the_operator_workspace(
     assert json.loads(posts[0].content)["blocks"] == [{"type": "markdown", "text": "hi"}]
 
 
+@pytest.mark.parametrize(
+    "info_response",
+    [
+        httpx.Response(200, json={"ok": True, "channel": {"id": "C5", "is_ext_shared": True}}),
+        httpx.Response(
+            200, json={"ok": True, "channel": {"id": "C5", "is_pending_ext_shared": True}}
+        ),
+        httpx.Response(200, json={"ok": True, "channel": {"id": "C5", "is_org_shared": True}}),
+        httpx.Response(200, json={"ok": True, "channel": {"id": "C5", "is_shared": True}}),
+        httpx.Response(200, json={"ok": False, "error": "channel_not_found"}),
+    ],
+    ids=["ext_shared", "pending_ext_shared", "org_shared", "is_shared", "info_unavailable"],
+)
+async def test_footer_is_absent_on_a_shared_channel_in_the_operator_workspace(
+    db: None, tmp_path, monkeypatch, info_response: httpx.Response
+) -> None:
+    """The operator workspace withholds the accounting footer and debugger link on a Slack Connect
+    or org-shared thread, where an outside guest would otherwise see the turn's cost — and fails
+    closed, dropping the footer when conversations.info cannot prove the channel internal."""
+    workspace_id, _ = await _seed(member_email=OPERATOR_OWNER_EMAIL)
+    recorder: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        recorder.append(request)
+        url = str(request.url).split("?")[0]
+        if url == slack.SLACK_CONVERSATIONS_INFO_URL:
+            return info_response
+        if url == slack.SLACK_CHAT_POST_MESSAGE_URL:
+            return httpx.Response(200, json={"ok": True, "channel": "C5", "ts": "999.100"})
+        return httpx.Response(404, json={"ok": False, "error": "not_mocked"})
+
+    app, _, blob = await _mount_transport(
+        monkeypatch, workspace_id, tmp_path, httpx.MockTransport(handler)
+    )
+    await _seed_done_turn(workspace_id, "C5:200.0", "hi", blob, artifact=False)
+
+    await app.state.writeback_poller.drain()
+
+    posts = [r for r in recorder if str(r.url) == slack.SLACK_CHAT_POST_MESSAGE_URL]
+    assert len(posts) == 1
+    assert json.loads(posts[0].content)["blocks"] == [{"type": "markdown", "text": "hi"}]
+    info = [r for r in recorder if str(r.url).split("?")[0] == slack.SLACK_CONVERSATIONS_INFO_URL]
+    assert len(info) == 1
+
+
+async def test_footer_renders_in_a_dm_settled_as_internal(db: None, tmp_path, monkeypatch) -> None:
+    """A DM carries none of the shared flags, so conversations.info settles it as internal and the
+    operator footer renders — the same read path every channel takes."""
+    workspace_id, _ = await _seed(member_email=OPERATOR_OWNER_EMAIL)
+    recorder: list[httpx.Request] = []
+    app, _, blob = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
+    turn_id = await _seed_done_turn(workspace_id, "D5", "hi", blob, artifact=False)
+
+    await app.state.writeback_poller.drain()
+
+    posts = [r for r in recorder if str(r.url) == slack.SLACK_CHAT_POST_MESSAGE_URL]
+    assert len(posts) == 1
+    footer = json.loads(posts[0].content)["blocks"][-1]
+    assert footer == {
+        "type": "context",
+        "elements": [{"type": "mrkdwn", "text": await _debug_footer(workspace_id, "D5", turn_id)}],
+    }
+
+
+def test_oauth_bot_scopes_match_the_byo_manifest_scopes() -> None:
+    """The one-click OAuth scope list and the bring-your-own-app manifest must request the same bot
+    scopes, or a token minted by one path lacks a scope the code assumes — e.g. `im:read`, which
+    `_channel_is_externally_shared` needs to run `conversations.info` on a DM. Guards the two lists
+    against drifting apart."""
+    from ufo_ext_slack.tools import SLACK_APP_MANIFEST_TEMPLATE
+
+    manifest_scopes = set(
+        re.findall(r"^\s*-\s*([a-z_]+:[a-z._]+)\s*$", SLACK_APP_MANIFEST_TEMPLATE, re.M)
+    )
+    assert set(slack.SLACK_BOT_SCOPES) == manifest_scopes
+    assert "im:read" in slack.SLACK_BOT_SCOPES
+
+
 async def test_writeback_persists_slack_retry_after(
     db: None, tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2373,7 +2456,12 @@ async def test_invalid_blocks_reposts_once(
 
     def handler(request: httpx.Request) -> httpx.Response:
         recorder.append(request)
-        if str(request.url).split("?")[0] != slack.SLACK_CHAT_POST_MESSAGE_URL:
+        url = str(request.url).split("?")[0]
+        if url == slack.SLACK_CONVERSATIONS_INFO_URL:
+            return httpx.Response(
+                200, json={"ok": True, "channel": {"id": "C5", "is_ext_shared": False}}
+            )
+        if url != slack.SLACK_CHAT_POST_MESSAGE_URL:
             return httpx.Response(404, json={"ok": False, "error": "not_mocked"})
         prior = [
             r for r in recorder if str(r.url).split("?")[0] == slack.SLACK_CHAT_POST_MESSAGE_URL

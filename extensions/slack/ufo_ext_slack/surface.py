@@ -104,12 +104,16 @@ SLACK_BOT_SCOPES = (
     "app_mentions:read",
     "assistant:write",
     "channels:history",
+    "channels:read",
     "chat:write",
     "files:read",
     "files:write",
     "groups:history",
+    "groups:read",
     "im:history",
+    "im:read",
     "mpim:history",
+    "mpim:read",
     "users:read",
     "users:read.email",
 )
@@ -375,6 +379,7 @@ SLACK_FILES_GET_UPLOAD_URL = "https://slack.com/api/files.getUploadURLExternal"
 SLACK_FILES_COMPLETE_UPLOAD = "https://slack.com/api/files.completeUploadExternal"
 SLACK_CONVERSATIONS_LIST_URL = "https://slack.com/api/conversations.list"
 SLACK_CONVERSATIONS_MEMBERS_URL = "https://slack.com/api/conversations.members"
+SLACK_CONVERSATIONS_INFO_URL = "https://slack.com/api/conversations.info"
 
 SLACK_CONVERSATION_TYPES = "public_channel,private_channel,mpim,im"
 SLACK_CONVERSATIONS_PAGE_SIZE = 200
@@ -1887,14 +1892,49 @@ async def _debug_link(ctx: SurfaceContext, writeback: Writeback) -> str | None:
     )
 
 
+async def _channel_is_externally_shared(bot_token: str, channel: str) -> bool:
+    """Whether the destination channel reaches beyond the bound workspace — a Slack Connect channel
+    shared with another org (`is_ext_shared`/`is_shared`/`is_pending_ext_shared`) or one shared
+    across an Enterprise Grid org (`is_org_shared`). Fails closed: any read error, a non-`ok`
+    payload, or a channel Slack won't describe (a `channel:read` scope a stale install lacks) counts
+    as shared, so the operator footer is withheld whenever the audience cannot be proven internal. A
+    DM carries none of these flags and settles to internal through the same read."""
+    try:
+        async with httpx.AsyncClient(timeout=AMBIENT_FETCH_TIMEOUT_SECONDS) as client:
+            payload = await _slack_ok(
+                client.get(
+                    SLACK_CONVERSATIONS_INFO_URL,
+                    params={"channel": channel},
+                    headers={"Authorization": f"Bearer {bot_token}"},
+                )
+            )
+    except Exception as error:
+        _LOG.warning("slack conversations.info failed for %s: %s", channel, error)
+        return True
+    info = payload.get("channel")
+    if not isinstance(info, dict):
+        return True
+    return any(
+        info.get(flag) is True
+        for flag in (
+            "is_ext_shared",
+            "is_pending_ext_shared",
+            "is_org_shared",
+            "is_shared",
+        )
+    )
+
+
 async def post(ctx: SurfaceContext, writeback: Writeback) -> str:
     """Post the reply to the thread and return its message ref (`channel:ts`), the delivery record.
     Only the operator workspace's replies carry the accounting footer, linking to the session
-    debugger's view of the thread when the deploy has a public base URL — internals never render
-    in a customer's thread. An `invalid_blocks` rejection is deterministic, so the reply re-posts
-    once — as conservative section blocks when it carries an ask or connect handoff (the affordance
-    survives the markdown blocks Slack rejected), as plain text otherwise — rather than the poller
-    retrying the identical Block Kit body until it ages out."""
+    debugger's view of the thread when the deploy has a public base URL — and even there only when
+    the destination channel is internal, so a Slack Connect or org-shared thread with an outside
+    guest never shows a customer the turn's cost or the debugger link. An `invalid_blocks` rejection
+    is deterministic, so the reply re-posts once — as conservative section blocks when it carries an
+    ask or connect handoff (the affordance survives the markdown blocks Slack rejected), as plain
+    text otherwise — rather than the poller retrying the identical Block Kit body until it ages
+    out."""
     channel, separator, thread_ts = writeback.queue_key.partition(":")
     thread = thread_ts if separator else None
     bot_token = await ctx.credential(SLACK_BOT_TOKEN_SLOT)
@@ -1903,7 +1943,9 @@ async def post(ctx: SurfaceContext, writeback: Writeback) -> str:
         writeback.connect_request, writeback.turn_id
     )
     metadata = None
-    if await ctx.is_operator_workspace():
+    if await ctx.is_operator_workspace() and not await _channel_is_externally_shared(
+        bot_token, channel
+    ):
         model = writeback.model or "no-model"
         params = f"-[{writeback.reasoning}]" if writeback.reasoning is not None else ""
         metadata = (
