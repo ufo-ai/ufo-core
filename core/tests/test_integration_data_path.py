@@ -42,7 +42,7 @@ from ufo.workspace import ws
 pytestmark = pytest.mark.integration
 
 # Enough opus tokens to price well past the small caps below (see test_accounting: this shape
-# prices at 81_500 micro-USD), so a single metered call decisively breaches a 50 micro-USD cap.
+# prices at 96_500 micro-USD), so a single metered call decisively breaches a 50 micro-USD cap.
 HEAVY_USAGE = Usage(
     input_tokens=1000, output_tokens=2000, cache_read_tokens=3000, cache_write_tokens=4000
 )

@@ -3,7 +3,9 @@
 Each model is one `ModelSpec`: the Anthropic ids route to core's `AnthropicClient` over the Bedrock
 Mantle Anthropic endpoint; the OpenAI ids route to core's `OpenAIClient`, which renders the Chat
 Completions or Responses request from the spec's `api_surface`. This extension carries no request
-translation of its own — only the endpoint and AWS-keyed client each spec builds."""
+translation of its own — only the endpoint and AWS-keyed client each spec builds. The Anthropic ids
+therefore inherit core's `ttl: 1h` cache breakpoints, so their `cache_write` is the 1h rate (2x base
+input); the OpenAI-compatible ids are charged no write premium."""
 
 import os
 from typing import cast
@@ -112,38 +114,38 @@ def _openai(
 BEDROCK_MODEL_SPECS = (
     _anthropic(
         "anthropic.claude-fable-5",
-        ModelPrice(10_000_000, 50_000_000, 1_000_000, 12_500_000),
+        ModelPrice(10_000_000, 50_000_000, 1_000_000, 20_000_000),
         "2026-01",
     ),
     _anthropic(
         "anthropic.claude-opus-5",
-        ModelPrice(5_000_000, 25_000_000, 500_000, 6_250_000),
+        ModelPrice(5_000_000, 25_000_000, 500_000, 10_000_000),
         "2026-05",
         context_window=ANTHROPIC_LONG_CONTEXT_WINDOW,
     ),
     _anthropic(
         "anthropic.claude-opus-4-8",
-        ModelPrice(5_000_000, 25_000_000, 500_000, 6_250_000),
+        ModelPrice(5_000_000, 25_000_000, 500_000, 10_000_000),
         "2026-01",
     ),
     _anthropic(
         "anthropic.claude-opus-4-7",
-        ModelPrice(5_000_000, 25_000_000, 500_000, 6_250_000),
+        ModelPrice(5_000_000, 25_000_000, 500_000, 10_000_000),
         "2026-01",
     ),
     _anthropic(
         "anthropic.claude-opus-4-6-v1",
-        ModelPrice(5_000_000, 25_000_000, 500_000, 6_250_000),
+        ModelPrice(5_000_000, 25_000_000, 500_000, 10_000_000),
         "2025-08",
     ),
     _anthropic(
         "anthropic.claude-sonnet-5",
-        ModelPrice(3_000_000, 15_000_000, 300_000, 3_750_000),
+        ModelPrice(3_000_000, 15_000_000, 300_000, 6_000_000),
         "2026-01",
     ),
     _anthropic(
         "anthropic.claude-sonnet-4-6",
-        ModelPrice(3_000_000, 15_000_000, 300_000, 3_750_000),
+        ModelPrice(3_000_000, 15_000_000, 300_000, 6_000_000),
         "2025-08",
     ),
     _openai(

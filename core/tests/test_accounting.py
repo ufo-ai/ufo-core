@@ -18,8 +18,15 @@ from ufo.accounting import (
 )
 from ufo.config import BlobConfig, Config, DatabaseConfig
 from ufo.db import workspace_tx
-from ufo.models.catalog import CORE_PRICES, CORE_PRICING, PRICE_DIGEST
-from ufo.models.pricing import ModelPrice, price_digest, pricing_from
+from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICES, CORE_PRICING, PRICE_DIGEST
+from ufo.models.interface import PROVIDER_ANTHROPIC
+from ufo.models.pricing import (
+    TOKENS_PER_MTOK,
+    ModelPrice,
+    price_digest,
+    pricing_from,
+    usage_priced_micro_usd,
+)
 from ufo.models.registry import model_registry
 from ufo.schema import tables
 from ufo.schema.records import Usage
@@ -36,7 +43,20 @@ def test_priced_micro_usd_matches_hand_math() -> None:
 
 def test_cache_tokens_are_priced() -> None:
     usage = Usage(cache_read_tokens=1_000_000, cache_write_tokens=1_000_000)
-    assert CORE_PRICING.micro_usd("claude-opus-4-8", usage) == 6_750_000
+    assert CORE_PRICING.micro_usd("claude-opus-4-8", usage) == 10_500_000
+
+
+def test_anthropic_cache_writes_are_priced_at_the_one_hour_ttl_rate() -> None:
+    """`AnthropicClient` stamps `ttl: 1h` on every cache breakpoint, and Anthropic bills a 1h cache
+    write at 2x base input (a 5m write is 1.25x) and a cache read at 0.1x. Every Anthropic spec's
+    rates carry that multiple, so the ledger reports the TTL the client actually requests."""
+    anthropic_specs = [s for s in CORE_MODEL_SPECS if s.provider == PROVIDER_ANTHROPIC]
+    assert anthropic_specs
+    for spec in anthropic_specs:
+        write = Usage(cache_write_tokens=TOKENS_PER_MTOK)
+        read = Usage(cache_read_tokens=TOKENS_PER_MTOK)
+        assert usage_priced_micro_usd(spec.id, write, CORE_PRICES) == spec.price.input * 2
+        assert usage_priced_micro_usd(spec.id, read, CORE_PRICES) == spec.price.input // 10
 
 
 def test_sub_micro_usd_floors() -> None:
@@ -178,7 +198,7 @@ async def test_record_then_read_back(db: None) -> None:
         await record_turn_usage(connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE)
     async with workspace_tx() as connection:
         cost = await read_turn_cost(connection, turn_id)
-    assert cost == (10_000, 81_500, "claude-opus-4-8")
+    assert cost == (10_000, 96_500, "claude-opus-4-8")
 
 
 async def test_ledger_insert_stamps_current_price_digest(db: None) -> None:
@@ -256,7 +276,7 @@ async def test_egress_never_double_counts_the_token_cost(db: None) -> None:
         await record_egress_request(connection, workspace_id, turn_id)
     async with workspace_tx() as connection:
         cost = await read_turn_cost(connection, turn_id)
-    assert cost == (10_000, 81_500, "claude-opus-4-8")
+    assert cost == (10_000, 96_500, "claude-opus-4-8")
 
 
 async def test_sandbox_tokens_row_is_disjoint_from_the_host_token_row(db: None) -> None:
@@ -288,11 +308,11 @@ async def test_sandbox_tokens_row_is_disjoint_from_the_host_token_row(db: None) 
         row.dimension: (int(row.amount), int(row.priced_micro_usd), row.price_digest)
         for row in rows
     } == {
-        "sandbox_tokens": (10_000, 81_500, PRICE_DIGEST),
-        "tokens": (10_000, 81_500, PRICE_DIGEST),
+        "sandbox_tokens": (10_000, 96_500, PRICE_DIGEST),
+        "tokens": (10_000, 96_500, PRICE_DIGEST),
     }
     assert len({row.id for row in rows}) == 2
-    assert cost == (10_000, 81_500, "claude-opus-4-8")
+    assert cost == (10_000, 96_500, "claude-opus-4-8")
 
 
 async def test_sandbox_tokens_accumulate_into_one_row(db: None) -> None:
@@ -364,9 +384,9 @@ async def test_spend_rollup_surfaces_sandbox_tokens(db: None) -> None:
     assert {d.dimension: (d.amount, d.priced_micro_usd) for d in report.by_dimension} == {
         "egress": (1, 0),
         "sandbox_tokens": (3000, 55_000),
-        "tokens": (10_000, 81_500),
+        "tokens": (10_000, 96_500),
     }
-    assert report.total_micro_usd == 81_500 + 55_000
+    assert report.total_micro_usd == 96_500 + 55_000
 
 
 async def test_spend_rollup_matches_ledger_sums(db: None) -> None:
@@ -377,15 +397,15 @@ async def test_spend_rollup_matches_ledger_sums(db: None) -> None:
         await record_egress_request(connection, workspace_id, turn_id)
     async with workspace_tx() as connection:
         report = await SpendRollup(workspace_id).read(connection, 3600)
-    assert report.total_micro_usd == 81_500
+    assert report.total_micro_usd == 96_500
     assert {d.dimension: (d.amount, d.priced_micro_usd) for d in report.by_dimension} == {
         "egress": (2, 0),
-        "tokens": (10_000, 81_500),
+        "tokens": (10_000, 96_500),
     }
-    assert [(s.label, s.priced_micro_usd) for s in report.by_member] == [("a@b.c", 81_500)]
-    assert [(s.label, s.priced_micro_usd) for s in report.by_agent] == [("assistant", 81_500)]
+    assert [(s.label, s.priced_micro_usd) for s in report.by_member] == [("a@b.c", 96_500)]
+    assert [(s.label, s.priced_micro_usd) for s in report.by_agent] == [("assistant", 96_500)]
     assert [(p.price_digest, p.priced_micro_usd) for p in report.by_price_digest] == [
-        (PRICE_DIGEST, 81_500)
+        (PRICE_DIGEST, 96_500)
     ]
 
 
@@ -407,7 +427,7 @@ async def test_workspace_usage_is_anchorless_priced_and_stamped(db: None) -> Non
             )
         ).one()
     assert row.turn_id is None
-    assert (row.dimension, int(row.amount), int(row.priced_micro_usd)) == ("tokens", 10_000, 81_500)
+    assert (row.dimension, int(row.amount), int(row.priced_micro_usd)) == ("tokens", 10_000, 96_500)
     assert row.model == "claude-opus-4-8"
     assert row.price_digest == PRICE_DIGEST
 
@@ -422,14 +442,14 @@ async def test_workspace_usage_counts_in_total_not_member_or_agent(db: None) -> 
         await record_workspace_usage(connection, workspace_id, "claude-opus-4-8", FULL_USAGE)
     async with workspace_tx() as connection:
         report = await SpendRollup(workspace_id).read(connection, 3600)
-    assert report.total_micro_usd == 81_500 * 2
+    assert report.total_micro_usd == 96_500 * 2
     assert {d.dimension: (d.amount, d.priced_micro_usd) for d in report.by_dimension} == {
-        "tokens": (20_000, 81_500 * 2)
+        "tokens": (20_000, 96_500 * 2)
     }
-    assert [(s.label, s.priced_micro_usd) for s in report.by_member] == [("a@b.c", 81_500)]
-    assert [(s.label, s.priced_micro_usd) for s in report.by_agent] == [("assistant", 81_500)]
+    assert [(s.label, s.priced_micro_usd) for s in report.by_member] == [("a@b.c", 96_500)]
+    assert [(s.label, s.priced_micro_usd) for s in report.by_agent] == [("assistant", 96_500)]
     assert [(p.price_digest, p.priced_micro_usd) for p in report.by_price_digest] == [
-        (PRICE_DIGEST, 81_500 * 2)
+        (PRICE_DIGEST, 96_500 * 2)
     ]
 
 

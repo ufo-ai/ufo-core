@@ -73,54 +73,56 @@ def core_model_specs(anthropic_key_env: str, openai_key_env: str) -> tuple[Model
     is called on the Responses surface (`api_surface="responses"`) — it rejects `tools` +
     `reasoning_effort` together on `/v1/chat/completions` (#568), so it declares the surface that
     renders the legal request rather than tripping a mid-turn 400. `claude-opus-5` carries the
-    1M-token context window it ships with, at Opus-tier pricing unchanged from Opus 4.8."""
+    1M-token context window it ships with, at Opus-tier pricing unchanged from Opus 4.8. Every
+    Anthropic `cache_write` is the 1h-TTL rate — 2x base input — because `AnthropicClient` requests
+    `ttl: 1h` on every breakpoint; cache reads are 0.1x base input."""
     return (
         _anthropic(
             "claude-fable-5",
-            ModelPrice(10_000_000, 50_000_000, 1_000_000, 12_500_000),
+            ModelPrice(10_000_000, 50_000_000, 1_000_000, 20_000_000),
             "2026-01",
             anthropic_key_env,
         ),
         _anthropic(
             "claude-opus-5",
-            ModelPrice(5_000_000, 25_000_000, 500_000, 6_250_000),
+            ModelPrice(5_000_000, 25_000_000, 500_000, 10_000_000),
             "2026-05",
             anthropic_key_env,
             context_window=ANTHROPIC_LONG_CONTEXT_WINDOW,
         ),
         _anthropic(
             "claude-opus-4-8",
-            ModelPrice(5_000_000, 25_000_000, 500_000, 6_250_000),
+            ModelPrice(5_000_000, 25_000_000, 500_000, 10_000_000),
             "2026-01",
             anthropic_key_env,
         ),
         _anthropic(
             "claude-opus-4-7",
-            ModelPrice(5_000_000, 25_000_000, 500_000, 6_250_000),
+            ModelPrice(5_000_000, 25_000_000, 500_000, 10_000_000),
             "2026-01",
             anthropic_key_env,
         ),
         _anthropic(
             "claude-opus-4-6",
-            ModelPrice(5_000_000, 25_000_000, 500_000, 6_250_000),
+            ModelPrice(5_000_000, 25_000_000, 500_000, 10_000_000),
             "2025-08",
             anthropic_key_env,
         ),
         _anthropic(
             "claude-sonnet-5",
-            ModelPrice(3_000_000, 15_000_000, 300_000, 3_750_000),
+            ModelPrice(3_000_000, 15_000_000, 300_000, 6_000_000),
             "2026-01",
             anthropic_key_env,
         ),
         _anthropic(
             "claude-sonnet-4-6",
-            ModelPrice(3_000_000, 15_000_000, 300_000, 3_750_000),
+            ModelPrice(3_000_000, 15_000_000, 300_000, 6_000_000),
             "2025-08",
             anthropic_key_env,
         ),
         _anthropic(
             "claude-haiku-4-5",
-            ModelPrice(1_000_000, 5_000_000, 100_000, 1_250_000),
+            ModelPrice(1_000_000, 5_000_000, 100_000, 2_000_000),
             "2025-07",
             anthropic_key_env,
         ),

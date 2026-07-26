@@ -1098,7 +1098,7 @@ async def test_model_host_relay_meters_sandbox_tokens_to_the_turn(db: None) -> N
     assert (row.dimension, int(row.amount), int(row.priced_micro_usd), row.model) == (
         "sandbox_tokens",
         10_000,
-        81_500,
+        96_500,
         "claude-opus-4-8",
     )
 
@@ -1128,7 +1128,7 @@ async def test_model_host_relay_meters_a_non_streaming_json_body(db: None) -> No
     assert (row.dimension, int(row.amount), int(row.priced_micro_usd), row.model) == (
         "sandbox_tokens",
         10_000,
-        81_500,
+        96_500,
         "claude-opus-4-8",
     )
 
