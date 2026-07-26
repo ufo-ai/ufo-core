@@ -14,13 +14,20 @@ Files cross through the workspace, moved by the sandbox itself: an argument carr
 (`stage_upload`, a presigned PUT), and replaced by the broker's own argument value; every file a
 tool produces (`file_outputs`, presigned URLs on the broker's file store) is fetched into
 `/workspace/connector_files/` and listed in the result. Both transfers ride the egress proxy under
-the grant's declared transfer hosts — the bytes never cross the serve process."""
+the grant's declared transfer hosts — the bytes never cross the serve process. Base64 a provider
+inlines in its own JSON result already has, so it is translated in place before the result enters
+context: decoded text inline, anything binary or large written to `/workspace/connector_files/`
+through the sandbox's write seam and replaced by a reference."""
 
 import asyncio
+import base64
+import hashlib
 import json
 import mimetypes
 import re
 import shlex
+import string
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from uuid import uuid4
@@ -47,6 +54,22 @@ TRANSFER_MAX_BYTES = 100 * 1024 * 1024
 WORKSPACE_FILES_RESULT_KEY = "workspace_files"
 CATALOG_SEARCH_LIMIT = 10
 MAX_LIST_QUERIES = 8
+
+BASE64_MARKER = "base64"
+INLINED_MARKER = "utf-8"
+OFFLOADED_MARKER = "offloaded"
+BASE64_MARKER_KEYS = frozenset({"encoding", "content_encoding", "contentencoding"})
+BASE64_CONTENT_KEYS = ("content", "data", "body")
+BASE64_NAME_KEYS = ("name", "filename", "file_name", "path")
+BASE64_WHITESPACE = {ord(char): None for char in string.whitespace}
+MAX_INLINE_DECODED_CHARS = 64 * 1024
+MAX_DECODE_CHARS = 2 * 1024 * 1024
+MAX_TRANSLATE_DEPTH = 100
+DATA_URL_PREFIX = "data:"
+DATA_URL_RE = re.compile(
+    r"\Adata:(?P<mime>[\w.+-]+/[\w.+-]+)?(?:;[\w.+-]+=[\w.+-]+)*;base64,(?P<payload>.*)\Z",
+    re.DOTALL,
+)
 
 MD5_PREFLIGHT_PROG = """
 import hashlib, sys
@@ -168,9 +191,10 @@ async def call_external_tool(ctx: ToolContext, args: CallExternalToolInput) -> T
 @dataclass(frozen=True)
 class _ConnectorCall:
     """One connector tool execution, top to bottom: stage every `workspace_file` argument to the
-    broker's file store, execute server-side with the granted account, and fetch the produced
-    files back into the workspace — the private steps below in execution order. Both transfers run
-    inside the sandbox, so the bytes never cross the serve process."""
+    broker's file store, execute server-side with the granted account, fetch the produced files
+    back into the workspace, and translate the base64 the provider inlined in its own result — the
+    private steps below in execution order. Both transfers run inside the sandbox, so the bytes
+    never cross the serve process."""
 
     ctx: ToolContext
     entry: ConnectorEntry
@@ -187,7 +211,8 @@ class _ConnectorCall:
             self.ctx.idempotency_key,
         )
         files = await self._fetched_files(self.entry.broker.file_outputs(response))
-        return {**response, WORKSPACE_FILES_RESULT_KEY: files} if files else response
+        translated = await self._translated_node(response)
+        return {**translated, WORKSPACE_FILES_RESULT_KEY: files} if files else translated
 
     async def _staged_value(self, value: object) -> object:
         """An argument value with every `{"workspace_file": path}` staged to the broker's file
@@ -259,6 +284,175 @@ class _ConnectorCall:
                 )
             saved.append({"name": safe, "workspace_path": target})
         return saved
+
+    async def _translated_node(
+        self, node: Mapping[str, object], depth: int = 0
+    ) -> dict[str, object]:
+        """One result object with the base64 its provider inlined translated into what the model
+        can actually read, and its children walked. GitHub's contents API answers `{"content":
+        "<b64>", "encoding": "base64"}`; left alone that base64 lands in context verbatim, where it
+        is enormous, useless as text, and re-read on every later round. The provider's own marker
+        is what triggers the translation — never a base64-looking string, so an id or a digest is
+        never mangled. A marker is a claim, not a guarantee, so each marked field stands on its own:
+        one that is not valid base64 is left exactly as the provider sent it while its siblings are
+        still translated, since holding a decodable field back would leave real base64 in context
+        for no gain.
+
+        A provider carries one marker for the node, not one per field, so the rewritten marker
+        summarizes it: `utf-8` only when every marked field inlined, `offloaded` when any became a
+        reference, and left alone when any field is still raw base64 — it never certifies a field it
+        does not describe. What describes an individual field is its own value: a string is the
+        decoded text, an object is the file to read it from."""
+        markers = tuple(
+            key
+            for key, item in node.items()
+            if key.lower() in BASE64_MARKER_KEYS
+            and isinstance(item, str)
+            and item.strip().lower() == BASE64_MARKER
+        )
+        marked = (
+            tuple(key for key in BASE64_CONTENT_KEYS if isinstance(node.get(key), str))
+            if markers
+            else ()
+        )
+        walked = {key: await self._translated(item, depth + 1) for key, item in node.items()}
+        if not marked:
+            return walked
+        decoded: dict[str, tuple[bytes, str | None]] = {}
+        for key in marked:
+            content = _decoded_base64(node[key])
+            if content is not None:
+                decoded[key] = content
+        if not decoded:
+            return walked
+        name = next(
+            (
+                item.strip()
+                for item in (node.get(key) for key in BASE64_NAME_KEYS)
+                if isinstance(item, str) and item.strip()
+            ),
+            FALLBACK_FILENAME,
+        )
+        mimetype = mimetypes.guess_type(name)[0] or FALLBACK_MIMETYPE
+        translated = {
+            key: await self._translated_bytes(raw, text, name, mimetype)
+            for key, (raw, text) in decoded.items()
+        }
+        if len(translated) < len(marked):
+            return {**walked, **translated}
+        marker = (
+            INLINED_MARKER
+            if all(isinstance(item, str) for item in translated.values())
+            else OFFLOADED_MARKER
+        )
+        return {**walked, **translated, **dict.fromkeys(markers, marker)}
+
+    async def _translated(self, value: object, depth: int) -> object:
+        """Anything else in the result, translated the same way: objects recurse, and a bare string
+        that IS a `data:<mime>;base64,<...>` URL carries the same claim about itself as a marked
+        field does — bounded by the same cap the decode is, since matching the pattern scans the
+        whole string and a payload past the cap could not be decoded anyway. Broker output is
+        untrusted and this walk is the only recursive pass over it on
+        a broker whose `file_outputs` reads fixed keys, so past `MAX_TRANSLATE_DEPTH` the subtree is
+        returned as it came: nesting deeper than the interpreter's recursion budget degrades to
+        untranslated rather than failing a call that used to work."""
+        if depth >= MAX_TRANSLATE_DEPTH:
+            return value
+        match value:
+            case dict():
+                return await self._translated_node(value, depth)
+            case list():
+                return [await self._translated(item, depth + 1) for item in value]
+            case str() if value.startswith(DATA_URL_PREFIX) and len(value) <= MAX_DECODE_CHARS:
+                return await self._translated_data_url(value)
+            case _:
+                return value
+
+    async def _translated_data_url(self, value: str) -> object:
+        """A `data:<mime>;base64,<payload>` string, translated under the mimetype it declares. A
+        string that merely starts `data:` without being one is returned untouched."""
+        match = DATA_URL_RE.match(value)
+        if match is None:
+            return value
+        content = _decoded_base64(match.group("payload"))
+        if content is None:
+            return value
+        decoded, text = content
+        mimetype = match.group("mime") or FALLBACK_MIMETYPE
+        name = f"{FALLBACK_FILENAME}{mimetypes.guess_extension(mimetype) or ''}"
+        return await self._translated_bytes(decoded, text, name, mimetype)
+
+    async def _translated_bytes(
+        self, decoded: bytes, text: str | None, name: str, mimetype: str
+    ) -> object:
+        """Decoded bytes as the model reads them: the text itself when it is UTF-8 within the inline
+        cap — a source file comes back readable, a fraction of the tokens — and otherwise a
+        workspace file holding the bytes plus the reference naming it, so neither the base64 nor the
+        payload it hides ever enters context."""
+        if text is not None and len(text) <= MAX_INLINE_DECODED_CHARS:
+            return text
+        return await self._offloaded(name, mimetype, decoded)
+
+    async def _offloaded(self, name: str, mimetype: str, data: bytes) -> dict[str, object]:
+        """Write decoded bytes into the workspace and return the reference the model reads them by.
+        Unlike a produced file, pulled from a presigned URL by the sandbox, these bytes were decoded
+        from the execute payload the serve process already holds, so they go straight through the
+        sandbox's write seam instead of back out over the network.
+
+        The bytes name their own directory: the same payload decoded again — the next round of a
+        conversation re-reading a file, or a retried step — resolves to the path it already wrote
+        instead of accumulating a copy per call. A produced file cannot be addressed this way
+        because the sandbox streams it from a presigned URL and the serve process never holds it;
+        here the bytes are in hand, so the digest is free. The digest is sha256 in full, not the
+        broker's dedup md5 and not a prefix of either: a provider chooses this content, and any
+        digest it can collide lets one payload overwrite another and be read under its name.
+
+        Addressing by content means two turns decoding the same payload write one path, and no
+        carrier's write is atomic — the local one truncates through `write_bytes`, docker through
+        `cat >`. So the bytes land beside the target and are renamed onto it, which is atomic within
+        a directory: a reader either sees the previous complete file or the new one, never a
+        truncated window. A produced file needs none of this because its `uuid4` path is unique to
+        one fetch and no second writer can reach it."""
+        basename = PurePosixPath(name.replace("\\", "/")).name
+        safe = basename if basename not in ("", ".", "..") else FALLBACK_FILENAME
+        target = f"{WORKSPACE_DIR}/{CONNECTOR_FILES_DIR}/{hashlib.sha256(data).hexdigest()}/{safe}"
+        staged = f"{target}.{uuid4()}.part"
+        await self.ctx.sandbox.write_file(staged, data)
+        placed = await self.ctx.sandbox.bash(
+            f"mv -f {shlex.quote(staged)} {shlex.quote(target)}", timeout_s=TRANSFER_TIMEOUT_SECONDS
+        )
+        if placed.exit_code != 0:
+            raise RuntimeError(
+                placed.stderr.strip() or f"placing decoded file {safe!r} in the workspace failed"
+            )
+        return {"name": safe, "workspace_path": target, "mimetype": mimetype, "bytes": len(data)}
+
+
+def _decoded_base64(value: object) -> tuple[bytes, str | None] | None:
+    """The bytes a marked field holds and their text, or None when the value is not valid base64 —
+    a provider's marker is a claim, not a guarantee. Whitespace goes first (GitHub and PEM wrap
+    their payloads) and validation is strict, so a mislabelled plain string is left alone rather
+    than silently mangled into garbage bytes the way the default lenient decode would. Non-ASCII
+    raises a bare ValueError rather than the binascii subclass, so both are caught: an i18n
+    placeholder a provider marks base64 leaves its node untouched like any other mislabelled field.
+    Text is None when the bytes are not UTF-8, which is what routes them to a file.
+
+    A field longer than MAX_DECODE_CHARS is refused rather than decoded, which is what keeps this
+    off the one serve loop's critical path. Each step is a single C call that holds the GIL for its
+    whole duration — none of `str.translate`, `base64.b64decode`, or `bytes.decode` releases it — so
+    a worker thread would starve the loop just the same; only the bound holds. At the cap the worst
+    case measures ~7 ms, inside the budget for GIL-bound work, and a payload past it is left for the
+    engine's tool-result offload, which keeps it out of context without decoding anything."""
+    if not isinstance(value, str) or len(value) > MAX_DECODE_CHARS:
+        return None
+    try:
+        decoded = base64.b64decode(value.translate(BASE64_WHITESPACE), validate=True)
+    except ValueError:
+        return None
+    try:
+        return decoded, decoded.decode("utf-8")
+    except UnicodeDecodeError:
+        return decoded, None
 
 
 async def search_connector_tools(ctx: ToolContext, args: SearchConnectorToolsInput) -> ToolResult:
@@ -351,7 +545,11 @@ CONNECTOR_TOOLS: tuple[ToolDef, ...] = (
             "parameter whose schema asks for 'workspace_file' takes a file from the workspace — "
             'pass {"workspace_file": "/workspace/<path>"} and the file is staged to the '
             "connector automatically. Files a tool returns are saved into the workspace and "
-            "listed under 'workspace_files' in the result with their paths."
+            "listed under 'workspace_files' in the result with their paths. A result field the "
+            "provider returned as base64 (e.g. a file's 'content') arrives decoded: small text as "
+            "the decoded string in place, anything binary or large as a "
+            "{name, workspace_path, mimetype, bytes} reference — read those bytes from "
+            "'workspace_path' rather than treating the object as an error."
         ),
         input_model=CallExternalToolInput,
         handler=call_external_tool,
