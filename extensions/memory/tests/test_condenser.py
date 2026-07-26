@@ -234,7 +234,7 @@ async def _facts(workspace_id: UUID) -> list[sa.Row]:
                         memory_item.c.item_class,
                         memory_item.c.memory_kind,
                         memory_item.c.confidence,
-                        memory_item.c.source_ref,
+                        memory_item.c.created_from_page_id,
                         memory_item.c.as_of,
                         memory_item.c.superseded_by,
                     ).where(memory_item.c.workspace_id == workspace_id)
@@ -315,7 +315,7 @@ async def test_derive_facts_writes_subject_scoped_facts_through_page_change(
     assert fact.subject == SHARED_SUBJECT
     assert fact.memory_kind == "event"
     assert fact.confidence == 8
-    assert fact.source_ref == str(page_id)
+    assert fact.created_from_page_id == page_id
 
 
 async def test_derive_facts_rides_its_own_cursor_independent_of_the_indexer(

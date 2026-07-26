@@ -392,6 +392,8 @@ class SourceRecord:
     owner_member_id: UUID | None
     next_sync_at: datetime
     consecutive_errors: int
+    created_at: datetime
+    updated_at: datetime
 
 
 @dataclass(frozen=True)
@@ -564,6 +566,8 @@ class ExtensionContext:
                 tables.source.c.owner_member_id,
                 tables.source.c.next_sync_at,
                 tables.source.c.consecutive_errors,
+                tables.source.c.created_at,
+                tables.source.c.updated_at,
             )
             .where(
                 tables.source.c.workspace_id == self.store.workspace_id,
@@ -584,6 +588,8 @@ class ExtensionContext:
                 owner_member_id=row["owner_member_id"],
                 next_sync_at=row["next_sync_at"],
                 consecutive_errors=row["consecutive_errors"],
+                created_at=row["created_at"],
+                updated_at=row["updated_at"],
             )
             for row in rows
         )

@@ -8,6 +8,7 @@ from uuid import UUID
 import sqlalchemy as sa
 
 from ufo.db import workspace_tx
+from ufo.objects import ObjectRef
 from ufo.schema import tables
 from ufo.workspace import ws_current
 
@@ -16,10 +17,15 @@ DEFAULT_MEMORY_SEARCH_PROVIDER = "default"
 
 @dataclass(frozen=True)
 class MemoryMatch:
-    """One provider-neutral memory result ready for a consumer to inject."""
+    """One provider-neutral memory result ready for a consumer to inject. `ref` is the durable
+    object behind the hit — search finds, `object_get` opens — and `created_at` is its recency,
+    rendered beside the snippet so hits are triaged without opening them; both are None only for
+    a provider whose results are not object-backed."""
 
     kind: str
     text: str
+    ref: ObjectRef | None = None
+    created_at: datetime | None = None
 
 
 class MemorySearchProvider(Protocol):

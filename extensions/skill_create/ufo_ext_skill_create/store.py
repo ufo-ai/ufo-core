@@ -211,17 +211,17 @@ class UserSkillStore:
                 )
             )
 
-    async def updated_at(self, workspace_id: UUID, name: str) -> datetime | None:
+    async def timestamps(self, workspace_id: UUID, name: str) -> tuple[datetime, datetime] | None:
         async with self.ctx.transaction() as connection:
             row = (
                 await connection.execute(
-                    sa.select(user_skill.c.updated_at).where(
+                    sa.select(user_skill.c.created_at, user_skill.c.updated_at).where(
                         user_skill.c.workspace_id == workspace_id,
                         user_skill.c.name == name,
                     )
                 )
             ).one_or_none()
-        return None if row is None else row.updated_at
+        return None if row is None else (row.created_at, row.updated_at)
 
     async def _count(self, workspace_id: UUID) -> int:
         async with self.ctx.transaction() as connection:

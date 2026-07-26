@@ -83,8 +83,11 @@ terminal frame. A client's wait always ends — the terminal state commits on th
   durable `.tool-output` files it offloaded, and keeps the recent tail verbatim. The trigger derives
   from the model's real window less the summary reserve, so a long turn never exceeds it.
 - **Memory** — an extension, not core: it owns the `memory_item` table, the `memory_search`/
-  `memory_update` tools, and recall (lexical + vector RRF fusion, subject ∈ {member, shared}),
-  auto-injected each turn through a `user_prompt_submit` hook. It also provides the typed
+  `memory_update` tools, the read-only `memory` object kind (each search hit carries its
+  `memory/<id>` or `page/<id>` ref and date; `object_get` opens it — `created_from` links a
+  derived item back to its synced page, `superseded_by` a consolidated one to its replacement,
+  and search excludes superseded items), and recall (lexical + vector RRF fusion, subject ∈
+  {member, shared}), auto-injected each turn through a `user_prompt_submit` hook. It also provides the typed
   `memory_search` seam: core resolves the conversation's member under workspace scope and routes
   a consumer to the extension's one search workflow. Scheduled tasks require this seam and search
   after admission and before the run's first model round. Recall carries the
@@ -101,7 +104,14 @@ terminal frame. A client's wait always ends — the terminal state commits on th
   `ask_user`, `request_credentials`, `spawn_subagent`, `load_skill`, `share_file`, and the five
   object verbs (`object_list`/`get`/`explain`/`apply`/`delete`) over extension-registered kinds
   (RFC 0017) — one generic CRUD surface instead of per-extension config tools. Object lists accept
-  exact first-class-field filters and field ordering; gets return the kind's readable spec.
+  exact first-class-field filters and field ordering; gets return the kind's readable spec beside
+  its live status, the owning row's timestamps (recency is the first arbitration signal when
+  retrieved facts conflict), and its typed links — `created_from`, `synced_by`, `created_in`,
+  `reports_to`, `superseded_by`, a closed core vocabulary; each link's `kind/name` target opens
+  with the same verb. Links are stored on the owning row and rendered forward-only: a forward link
+  is O(1) and points toward equal-or-wider visibility, so there is no edge table, no backlinks, and
+  no target elision — a reverse question is a structured query over the forward column, exposed
+  only when a flow needs it. A link never grants visibility.
   Everything else arrives via extensions.
   Two tools where one would do is a defect. `share_file` ports the shipped design: byte custody in
   the blob store, a TTL-bound token URL served by core's artifact route — no token, no bytes.

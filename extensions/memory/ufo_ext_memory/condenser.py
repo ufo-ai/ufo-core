@@ -127,7 +127,7 @@ class FactDeriver:
                     item_class=FACT,
                     memory_kind=fact.memory_kind,
                     confidence=fact.confidence,
-                    source_ref=str(page.page_id),
+                    created_from_page_id=page.page_id,
                     as_of=page.as_of,
                 )
             )
@@ -274,6 +274,7 @@ class MemoryConsolidator:
                     memory_kind=KIND_FACT,
                     confidence=max(fact.confidence for fact in cluster),
                     source_ref=None,
+                    created_from_page_id=None,
                     embedding_digest=None,
                     superseded_by=None,
                     created_at=sa.func.now(),

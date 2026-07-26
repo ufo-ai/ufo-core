@@ -19,6 +19,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
+from datetime import datetime
 from typing import ClassVar, Literal, Protocol, get_args
 from uuid import UUID
 
@@ -30,6 +31,7 @@ from pydantic import (
     SecretBytes,
     SecretStr,
     ValidationError,
+    field_validator,
     model_validator,
 )
 from pydantic.errors import PydanticInvalidForJsonSchema
@@ -45,7 +47,63 @@ OBJECT_MANIFEST_MAX_BYTES = 65_536
 OBJECT_LIST_PAGE = 50
 ENVELOPE_KEYS = frozenset({"kind", "name", "spec"})
 
+type Relation = Literal["created_from", "synced_by", "created_in", "reports_to", "superseded_by"]
+
 type _SortRank = Literal[0, 1, 2, 3]
+
+
+class ObjectRef(BaseModel):
+    """One object's canonical identity — a registered kind plus that kind's own object name,
+    displayed `kind/name`. The one navigation currency: search hits, links, and change alerts all
+    hand the agent a ref it can `object_get`."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    kind: str
+    name: str
+
+    @field_validator("kind")
+    @classmethod
+    def validate_kind(cls, value: str) -> str:
+        if not KIND_NAME_PATTERN.fullmatch(value):
+            raise ValueError(f"object ref kind {value!r} must match {KIND_NAME_PATTERN.pattern}")
+        return value
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        if len(value) > OBJECT_NAME_MAX_LENGTH or not OBJECT_NAME_PATTERN.fullmatch(value):
+            raise ValueError(
+                f"object ref name {value!r} must match {OBJECT_NAME_PATTERN.pattern} "
+                f"(at most {OBJECT_NAME_MAX_LENGTH} chars)"
+            )
+        return value
+
+    def __str__(self) -> str:
+        return f"{self.kind}/{self.name}"
+
+
+class ObjectLink(BaseModel):
+    """One typed outgoing link on an object: a relation from the closed vocabulary and the target's
+    ref. Stored on the owning row and rendered forward-only — the reverse direction is a structured
+    query over the forward column, never a stored edge. A link never grants visibility: the target
+    stays gated by its own kind's read."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    relation: Relation
+    target: ObjectRef
+
+
+@dataclass(frozen=True)
+class ObjectDetail[SpecT: BaseModel]:
+    """One object as its store reads it: the applied spec, the owning row's timestamps (None for a
+    kind whose instances are declarations, not rows), and its typed outgoing links."""
+
+    spec: SpecT
+    created_at: datetime | None
+    updated_at: datetime | None
+    links: tuple[ObjectLink, ...] = ()
 
 
 class UnknownKind(ValueError):
@@ -226,15 +284,16 @@ def _sortable(value: JsonValue, field_name: str) -> tuple[_SortRank, str | int |
 
 
 class ObjectStore[SpecT: BaseModel](Protocol):
-    """A kind's handlers over its own storage, typed by the kind's own spec model. `apply`
-    receives the validated spec and the currently applied one (None on create); `status` is
-    kind-specific live state rendered beside the spec on get — read by no code, so a loose
-    mapping is the honest type. Handlers raise `VerbNotSupported` / `OwnerRequired` / domain
-    `ValueError`s; each renders as the tool error."""
+    """A kind's handlers over its own storage, typed by the kind's own spec model. `get` reads
+    everything the owning row carries — spec, timestamps, links; `apply` receives the validated
+    spec and the currently applied one (None on create); `status` is kind-specific live state
+    rendered beside the spec on get — read by no code, so a loose mapping is the honest type.
+    Handlers raise `VerbNotSupported` / `OwnerRequired` / domain `ValueError`s; each renders as
+    the tool error."""
 
     async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage: ...
 
-    async def get(self, ctx: ToolContext, name: str) -> SpecT | None: ...
+    async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[SpecT] | None: ...
 
     async def status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None: ...
 
@@ -264,7 +323,7 @@ class OwnedRow:
 @dataclass(frozen=True)
 class MemberOwnedObjects[SpecT: BaseModel]:
     """Base for a member-owned object kind: the per-member visibility and ownership gate lives here
-    once, so a kind cannot ship without it. A subclass supplies only data (`_owned_rows`, `_spec`,
+    once, so a kind cannot ship without it. A subclass supplies only data (`_owned_rows`, `_detail`,
     `_status`) and domain mutation (`_apply_owned`, `_delete_owned`); the gate hides a row invisible
     to the acting member (absent from `list`, not-found from `get`/`status`, `UnknownObject` from
     `apply`/`delete`) and refuses `OwnerRequired` when a visible row is not the actor's to change.
@@ -291,13 +350,13 @@ class MemberOwnedObjects[SpecT: BaseModel]:
         )
         return object_page(rows, query)
 
-    async def get(self, ctx: ToolContext, name: str) -> SpecT | None:
+    async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[SpecT] | None:
         owner = await self._owner(ctx, name)
         if owner is None or not self._visible(
             owner, ctx.acting_member_id, await ctx.speaker_is_owner()
         ):
             return None
-        return await self._spec(ctx, name)
+        return await self._detail(ctx, name)
 
     async def status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None:
         owner = await self._owner(ctx, name)
@@ -347,7 +406,7 @@ class MemberOwnedObjects[SpecT: BaseModel]:
     async def _owned_rows(self, ctx: ToolContext) -> tuple[OwnedRow, ...]:
         raise NotImplementedError
 
-    async def _spec(self, ctx: ToolContext, name: str) -> SpecT | None:
+    async def _detail(self, ctx: ToolContext, name: str) -> ObjectDetail[SpecT] | None:
         raise NotImplementedError
 
     async def _status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None:
@@ -521,8 +580,11 @@ class ObjectVerbs:
             ToolDef(
                 name="object_get",
                 description=(
-                    "Read one workspace object by kind and name: its applied spec and, beside "
-                    "it, the kind's live status (next fire time, last sync, fill state)."
+                    "Read one workspace object by kind and name: its applied spec, the kind's "
+                    "live status (next fire time, last sync, fill state), its typed links to "
+                    "related objects (each an object_get-able kind/name), and the row's "
+                    "created_at/updated_at — recency is the first arbitration signal when "
+                    "retrieved facts conflict."
                 ),
                 input_model=ObjectGetInput,
                 handler=self._get,
@@ -595,17 +657,18 @@ class ObjectVerbs:
     async def _get(self, ctx: ToolContext, args: ObjectGetInput) -> ToolResult:
         bound = self._resolve(args.kind)
         bound_ctx = self._bound_ctx(ctx, bound)
-        spec = await bound.kind.store.get(bound_ctx, args.name)
-        if spec is None:
+        detail = await bound.kind.store.get(bound_ctx, args.name)
+        if detail is None:
             raise UnknownObject(f"no {args.kind} object named {args.name!r}")
         rendered: dict[str, object] = {
             "kind": args.kind,
             "name": args.name,
-            "spec": spec.model_dump(mode="json"),
+            "spec": detail.spec.model_dump(mode="json"),
+            "status": await bound.kind.store.status(bound_ctx, args.name),
+            "links": [link.model_dump(mode="json") for link in detail.links],
+            "created_at": None if detail.created_at is None else detail.created_at.isoformat(),
+            "updated_at": None if detail.updated_at is None else detail.updated_at.isoformat(),
         }
-        status = await bound.kind.store.status(bound_ctx, args.name)
-        if status is not None:
-            rendered["status"] = status
         return ToolResult(content=(TextContent(text=yaml.safe_dump(rendered, sort_keys=False)),))
 
     async def _explain(self, ctx: ToolContext, args: ObjectExplainInput) -> ToolResult:
@@ -637,10 +700,12 @@ class ObjectVerbs:
                 )
             ) from error
         bound_ctx = self._bound_ctx(ctx, bound)
-        old = await bound.kind.store.get(bound_ctx, name)
-        await bound.kind.store.apply(bound_ctx, name, spec, old)
+        existing = await bound.kind.store.get(bound_ctx, name)
+        await bound.kind.store.apply(
+            bound_ctx, name, spec, None if existing is None else existing.spec
+        )
         return _json_result(
-            {"kind": kind_name, "name": name, "result": "updated" if old else "created"}
+            {"kind": kind_name, "name": name, "result": "updated" if existing else "created"}
         )
 
     async def _delete(self, ctx: ToolContext, args: ObjectDeleteInput) -> ToolResult:
@@ -655,7 +720,7 @@ class ObjectVerbs:
                 "kind": args.kind,
                 "name": args.name,
                 "deleted": True,
-                "spec": old.model_dump(mode="json"),
+                "spec": old.spec.model_dump(mode="json"),
             }
         )
 

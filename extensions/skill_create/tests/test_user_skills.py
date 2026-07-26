@@ -341,7 +341,7 @@ async def test_applied_skill_resolves_files_and_mounts(db: None, tmp_path) -> No
     }
     assert fetched["status"]["description"] == "greets people"
     assert fetched["status"]["files"] == 3
-    assert fetched["status"]["updated_at"] is not None
+    assert fetched["updated_at"] is not None
     assert [skill.name for skill in merged.tree("greet")] == ["greet"]
     assert ("references/tone.md", b"warm") in merged.named("greet").files
 

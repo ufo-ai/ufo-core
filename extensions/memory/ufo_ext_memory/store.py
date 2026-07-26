@@ -87,6 +87,7 @@ memory_item = sa.Table(
     sa.Column("memory_kind", sa.Text, nullable=False),
     sa.Column("confidence", sa.Integer, nullable=False),
     sa.Column("source_ref", sa.Text, nullable=True),
+    sa.Column("created_from_page_id", sa.Uuid, nullable=True),
     sa.Column("as_of", sa.DateTime(timezone=True), nullable=True),
     sa.Column("embedding_digest", sa.Text, nullable=True),
     sa.Column("embedding_claimed_at", sa.DateTime(timezone=True), nullable=True),
@@ -133,6 +134,7 @@ class MemoryInventoryItem(BaseModel):
     memory_kind: MemoryKind
     confidence: int
     source_ref: str | None
+    created_from_page_id: UUID | None
     as_of: datetime | None
     embedding_digest: str | None
     embedding_claimed_at: datetime | None
@@ -178,6 +180,7 @@ async def inventory(
             memory_kind=row["memory_kind"],
             confidence=row["confidence"],
             source_ref=row["source_ref"],
+            created_from_page_id=row["created_from_page_id"],
             as_of=row["as_of"],
             embedding_digest=row["embedding_digest"],
             embedding_claimed_at=row["embedding_claimed_at"],
@@ -205,10 +208,12 @@ def _aware(when: datetime) -> datetime:
 
 
 class MemoryWrite(BaseModel):
-    """What a commit records: the subject scoping visibility, the body, its class, the ref back to
-    what produced it, and the recall-decay inputs — `as_of` is when the source information was
-    current, `memory_kind` selects the recency half-life (fact/preference/decision/event/task), and
-    `confidence` (1..10) scales a fact's decayed rank."""
+    """What a commit records: the subject scoping visibility, the body, its class, its provenance,
+    and the recall-decay inputs — `created_from_page_id` is the synced page a derivation distilled
+    it from (the `created_from` link), `source_ref` a free-form note for tool writes, `as_of` when
+    the source information was current, `memory_kind` selects the recency half-life
+    (fact/preference/decision/event/task), and `confidence` (1..10) scales a fact's decayed
+    rank."""
 
     subject: str
     body: str
@@ -216,6 +221,7 @@ class MemoryWrite(BaseModel):
     memory_kind: MemoryKind = KIND_FACT
     confidence: int = Field(default=DEFAULT_CONFIDENCE, ge=1, le=MAX_CONFIDENCE)
     source_ref: str | None = None
+    created_from_page_id: UUID | None = None
     as_of: datetime | None = None
 
 
@@ -380,6 +386,7 @@ class SourceMatch:
     subject: str
     text: str
     score: float
+    created_at: datetime
 
 
 @dataclass(frozen=True)
@@ -415,6 +422,7 @@ class MemoryStore:
                 memory_kind=write.memory_kind,
                 confidence=write.confidence,
                 source_ref=write.source_ref,
+                created_from_page_id=write.created_from_page_id,
                 as_of=write.as_of,
                 superseded_by=None,
                 created_at=sa.func.now(),
@@ -427,6 +435,9 @@ class MemoryStore:
                         memory_item.c.memory_kind: statement.excluded.memory_kind,
                         memory_item.c.confidence: statement.excluded.confidence,
                         memory_item.c.source_ref: statement.excluded.source_ref,
+                        memory_item.c.created_from_page_id: (
+                            statement.excluded.created_from_page_id
+                        ),
                         memory_item.c.as_of: statement.excluded.as_of,
                         memory_item.c.updated_at: sa.func.now(),
                     },
@@ -487,7 +498,9 @@ class MemoryStore:
             rows = (
                 (
                     await connection.execute(
-                        sa.select(mem_page.c.page_id, mem_page.c.subject).where(*conditions)
+                        sa.select(
+                            mem_page.c.page_id, mem_page.c.subject, mem_page.c.created_at
+                        ).where(*conditions)
                     )
                 )
                 .mappings()
@@ -500,6 +513,7 @@ class MemoryStore:
                 subject=by_id[UUID(hit.owner_id)]["subject"],
                 text=hit.text,
                 score=hit.score,
+                created_at=by_id[UUID(hit.owner_id)]["created_at"],
             )
             for hit in fused
             if UUID(hit.owner_id) in by_id

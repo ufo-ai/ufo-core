@@ -1,9 +1,10 @@
 """The `credential` object kind: declared BYOK slots projected as workspace objects.
 
 Instances are the slots installed extensions declare, filled or not — the declaration lives in
-the manifest, the row holds only the sealed value. The value appears in no read: spec is the
-declaration (slot, description, injection host), status says filled or empty and when that
-changed — no value field, no value digest. Fill and rotate stay `request_credentials` (a secret
+the manifest, the row holds only the sealed value, and an empty slot has no row (its envelope
+timestamps are null). The value appears in no read: spec is the declaration (slot, description,
+injection host), status says filled or empty — no value field, no value digest. Fill and rotate
+stay `request_credentials` (a secret
 and a private handoff, the speaker gating the act), so create and update refuse naming it;
 delete clears the stored value, owner-gated in the handler, and the slot stays listed as empty.
 
@@ -22,6 +23,7 @@ from ufo.credentials import CredentialStore, HostChoice, credential_host
 from ufo.db import workspace_tx
 from ufo.ext.context import JsonValue
 from ufo.objects import (
+    ObjectDetail,
     ObjectListQuery,
     ObjectPage,
     ObjectRow,
@@ -96,17 +98,30 @@ class CredentialObjects:
         ]
         return object_page(tuple(rows), query)
 
-    async def get(self, ctx: ToolContext, name: str) -> CredentialSpec | None:
+    async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[CredentialSpec] | None:
         slot = self._named().get(name)
         if slot is None:
             return None
-        return CredentialSpec(
-            slot=slot.name,
-            description=slot.description,
-            extension=slot.extension,
-            host=slot.host if isinstance(slot.host, str) else "",
-            host_slot=slot.host.slot if isinstance(slot.host, HostChoice) else "",
-            host_options=slot.host.hosts if isinstance(slot.host, HostChoice) else (),
+        async with workspace_tx() as connection:
+            row = (
+                await connection.execute(
+                    sa.select(tables.credential.c.created_at, tables.credential.c.updated_at).where(
+                        tables.credential.c.workspace_id == ws_current().workspace_id,
+                        tables.credential.c.slot == slot.name,
+                    )
+                )
+            ).one_or_none()
+        return ObjectDetail(
+            spec=CredentialSpec(
+                slot=slot.name,
+                description=slot.description,
+                extension=slot.extension,
+                host=slot.host if isinstance(slot.host, str) else "",
+                host_slot=slot.host.slot if isinstance(slot.host, HostChoice) else "",
+                host_options=slot.host.hosts if isinstance(slot.host, HostChoice) else (),
+            ),
+            created_at=None if row is None else row.created_at,
+            updated_at=None if row is None else row.updated_at,
         )
 
     async def status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None:
@@ -116,16 +131,13 @@ class CredentialObjects:
         async with workspace_tx() as connection:
             row = (
                 await connection.execute(
-                    sa.select(tables.credential.c.updated_at).where(
+                    sa.select(tables.credential.c.slot).where(
                         tables.credential.c.workspace_id == ws_current().workspace_id,
                         tables.credential.c.slot == slot.name,
                     )
                 )
             ).one_or_none()
-        status: dict[str, JsonValue] = {
-            "filled": row is not None,
-            "updated_at": None if row is None else row.updated_at.isoformat(),
-        }
+        status: dict[str, JsonValue] = {"filled": row is not None}
         if slot.host is not None and self.credentials is not None:
             status["host"] = await credential_host(
                 self.credentials, ws_current().workspace_id, slot.host

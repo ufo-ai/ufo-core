@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue
 from ufo.sdk.context import ExtensionContext
 from ufo.sdk.manifest import Manifest, SkillSpec
 from ufo.sdk.objects import (
+    ObjectDetail,
     ObjectKind,
     ObjectListQuery,
     ObjectPage,
@@ -126,28 +127,34 @@ class SkillObjects:
         )
         return object_page(rows, query)
 
-    async def get(self, ctx: ToolContext, name: str) -> UserSkillSpec | None:
+    async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[UserSkillSpec] | None:
         files = await self._files(ctx, name)
         if files is None:
             return None
-        return UserSkillSpec(
-            files={
-                path: FileRef(sha256=hashlib.sha256(content).hexdigest(), size=len(content))
-                for path, content in files.items()
-            }
+        ext = _require_ext(ctx)
+        timestamps = await UserSkillStore(ext).timestamps(ext.store.workspace_id, name)
+        if timestamps is None:
+            return None
+        created_at, updated_at = timestamps
+        return ObjectDetail(
+            spec=UserSkillSpec(
+                files={
+                    path: FileRef(sha256=hashlib.sha256(content).hexdigest(), size=len(content))
+                    for path, content in files.items()
+                }
+            ),
+            created_at=created_at,
+            updated_at=updated_at,
         )
 
     async def status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None:
         files = await self._files(ctx, name)
         if files is None:
             return None
-        ext = _require_ext(ctx)
-        updated_at = await UserSkillStore(ext).updated_at(ext.store.workspace_id, name)
         return {
             "description": parse_skill_content(name, files).description,
             "files": len(files),
             "bytes": sum(len(content) for content in files.values()),
-            "updated_at": None if updated_at is None else updated_at.isoformat(),
         }
 
     async def apply(

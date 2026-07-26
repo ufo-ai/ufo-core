@@ -42,6 +42,7 @@ from ufo.objects import (
     InvalidManifest,
     InvalidName,
     MemberOwnedObjects,
+    ObjectDetail,
     ObjectKind,
     ObjectListQuery,
     ObjectOwner,
@@ -230,12 +231,21 @@ async def test_widget_crud_round_trips_through_the_verbs(db: None) -> None:
             await _text(tools, "object_get", ctx, kind=sample.WIDGET_KIND, name="anvil")
         )
         assert fetched["spec"] == {"color": "teal", "size": 1}
-        assert "status" not in fetched
+        assert fetched["status"] is None
+        assert fetched["links"] == []
+        created_at = datetime.fromisoformat(fetched["created_at"])
+        assert datetime.fromisoformat(fetched["updated_at"]) >= created_at
 
         updated = json.loads(
             await _text(tools, "object_apply", ctx, manifest=_widget_manifest("anvil", color="red"))
         )
         assert updated["result"] == "updated"
+
+        refetched = yaml.safe_load(
+            await _text(tools, "object_get", ctx, kind=sample.WIDGET_KIND, name="anvil")
+        )
+        assert datetime.fromisoformat(refetched["created_at"]) == created_at
+        assert datetime.fromisoformat(refetched["updated_at"]) >= created_at
 
         explained = json.loads(await _text(tools, "object_explain", ctx, kind=sample.WIDGET_KIND))
         assert "color" in explained["spec_schema"]["properties"]
@@ -264,6 +274,8 @@ async def test_relic_reads_and_refuses_every_mutation(db: None) -> None:
             await _text(tools, "object_get", ctx, kind=sample.RELIC_KIND, name=sample.RELIC_NAME)
         )
         assert fetched["status"] == {"origin": "excavated"}
+        assert fetched["created_at"] is None
+        assert fetched["updated_at"] is None
 
         apply_tool = tools["object_apply"]
         relic = f"kind: {sample.RELIC_KIND}\nname: {sample.RELIC_NAME}\nspec:\n  inscription: x\n"
@@ -576,8 +588,8 @@ async def _agent_row(
                 prompt=prompt,
                 model=model,
                 internet_access_allowed=internet_access_allowed,
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
+                created_at=datetime(2026, 7, 1, tzinfo=UTC),
+                updated_at=datetime(2026, 7, 2, tzinfo=UTC),
             )
         )
     return agent_id
@@ -601,6 +613,12 @@ async def test_agent_kind_updates_model_owner_gated_and_shows_prompt_readonly(db
         }
         assert fetched["status"]["prompt"] == "be brief"
         assert fetched["status"]["prompt_digest"] == prompt_digest("be brief")
+        assert datetime.fromisoformat(fetched["created_at"]).replace(tzinfo=UTC) == datetime(
+            2026, 7, 1, tzinfo=UTC
+        )
+        assert datetime.fromisoformat(fetched["updated_at"]).replace(tzinfo=UTC) == datetime(
+            2026, 7, 2, tzinfo=UTC
+        )
 
         manifest = yaml.safe_dump(
             {
@@ -954,7 +972,12 @@ async def test_share_file_lands_an_artifact_object_and_get_copies_the_latest_bac
         status = fetched["status"]
         assert status["size_bytes"] == len(b"quarterly numbers")
         assert status["turn_id"] == str(turn.id)
-        assert status["conversation_id"] == str(turn.conversation_id)
+        assert fetched["links"] == [
+            {
+                "relation": "created_in",
+                "target": {"kind": "conversation", "name": str(turn.conversation_id)},
+            }
+        ]
         assert status["versions"] == 1
         assert status["workspace_path"] == f"artifacts/{name}/report.txt"
         assert (workspace_dir / "artifacts" / name / "report.txt").read_bytes() == (
@@ -1131,8 +1154,8 @@ class _OwnerOnlyStore(MemberOwnedObjects[_BootSpec]):
     async def _owned_rows(self, ctx: ToolContext) -> tuple[OwnedRow, ...]:
         return (OwnedRow(name="boot", summary="s", owner=ObjectOwner(member_id=None, shared=True)),)
 
-    async def _spec(self, ctx: ToolContext, name: str) -> _BootSpec | None:
-        return _BootSpec()
+    async def _detail(self, ctx: ToolContext, name: str) -> ObjectDetail[_BootSpec] | None:
+        return ObjectDetail(spec=_BootSpec(), created_at=None, updated_at=None)
 
     async def _status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None:
         return {}

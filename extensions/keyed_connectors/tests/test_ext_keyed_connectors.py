@@ -151,7 +151,7 @@ async def test_a_read_reports_the_host_this_workspace_actually_uses(db: None) ->
 
         keyed = await objects.get(ctx, "datadog-api-key")
         assert keyed is not None
-        assert keyed.host_slot == "datadog_api_host"
-        assert US5_HOST in keyed.host_options
+        assert keyed.spec.host_slot == "datadog_api_host"
+        assert US5_HOST in keyed.spec.host_options
         companion = await objects.get(ctx, "datadog-api-host")
-        assert companion is not None and companion.host_options == ()
+        assert companion is not None and companion.spec.host_options == ()

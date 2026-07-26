@@ -46,6 +46,8 @@ class ScheduledTask:
     origin_seq: int | None
     resume_turn_id: UUID | None
     claim_id: str | None
+    created_at: datetime
+    updated_at: datetime
     created_by_member_id: UUID | None = None
 
 
@@ -57,15 +59,12 @@ class ScheduleInvoker(Protocol):
 
 @dataclass(frozen=True)
 class TaskInspection:
-    """One scheduled task's live picture for status rendering: the conversation it reports into
-    (with its surface), timing marks, and the latest fire's turn and terminal text."""
+    """One scheduled task's live picture for status rendering: its timing marks and the latest
+    fire's turn and terminal text — where it reports is the task's `reports_to` link."""
 
-    conversation_id: UUID
-    surface: str
     next_run_at: datetime
     last_run_at: datetime | None
     expires_at: datetime | None
-    updated_at: datetime
     last_turn_id: UUID | None
     last_turn_status: str | None
     last_response: str | None
@@ -86,6 +85,8 @@ _COLUMNS = (
     tables.scheduled_task.c.origin_seq,
     tables.scheduled_task.c.resume_turn_id,
     tables.scheduled_task.c.claimed_by,
+    tables.scheduled_task.c.created_at,
+    tables.scheduled_task.c.updated_at,
 )
 
 
@@ -125,6 +126,8 @@ def _task(row: sa.RowMapping) -> ScheduledTask:
         origin_seq=row["origin_seq"],
         resume_turn_id=row["resume_turn_id"],
         claim_id=row["claimed_by"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
     )
 
 
@@ -358,6 +361,8 @@ class ScheduleStore:
                         tables.scheduled_task.c.id,
                         tables.scheduled_task.c.conversation_id,
                         tables.scheduled_task.c.created_by_member_id,
+                        tables.scheduled_task.c.created_at,
+                        tables.scheduled_task.c.updated_at,
                     )
                 )
             ).one()
@@ -376,6 +381,8 @@ class ScheduleStore:
             origin_seq=origin_seq,
             resume_turn_id=resume_turn_id,
             claim_id=None,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
         )
 
     async def cancel(self, name: str) -> bool:
@@ -514,26 +521,22 @@ class ScheduleStore:
         return updated.rowcount > 0
 
     async def inspect(self, name: str) -> TaskInspection | None:
-        """One task's live picture beyond its definition: where it reports (the bound conversation
-        and its surface), its timing marks, and the latest fire's turn with its terminal outcome —
-        the read the `scheduled_task` object kind renders as status."""
+        """One task's live picture beyond its definition: its timing marks and the latest fire's
+        turn with its terminal outcome — the read the `scheduled_task` object kind renders as
+        status."""
         query = (
             sa.select(
-                tables.scheduled_task.c.conversation_id,
                 tables.scheduled_task.c.next_run_at,
                 tables.scheduled_task.c.last_run_at,
                 tables.scheduled_task.c.expires_at,
-                tables.scheduled_task.c.updated_at,
                 tables.scheduled_task.c.last_turn_id,
-                tables.conversation.c.surface,
                 tables.turn.c.status.label("turn_status"),
                 tables.turn.c.terminal,
             )
             .select_from(
-                tables.scheduled_task.join(
-                    tables.conversation,
-                    tables.scheduled_task.c.conversation_id == tables.conversation.c.id,
-                ).outerjoin(tables.turn, tables.scheduled_task.c.last_turn_id == tables.turn.c.id)
+                tables.scheduled_task.outerjoin(
+                    tables.turn, tables.scheduled_task.c.last_turn_id == tables.turn.c.id
+                )
             )
             .where(
                 tables.scheduled_task.c.workspace_id == self.workspace_id,
@@ -547,12 +550,9 @@ class ScheduleStore:
             return None
         terminal = row["terminal"]
         return TaskInspection(
-            conversation_id=row["conversation_id"],
-            surface=row["surface"],
             next_run_at=row["next_run_at"],
             last_run_at=row["last_run_at"],
             expires_at=_utc(row["expires_at"]),
-            updated_at=row["updated_at"],
             last_turn_id=row["last_turn_id"],
             last_turn_status=row["turn_status"],
             last_response=(terminal or {}).get("text") if terminal else None,

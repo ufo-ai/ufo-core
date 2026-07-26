@@ -15,7 +15,17 @@ from typing import ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator
 
-from ufo.sdk.objects import MemberOwnedObjects, ObjectKind, ObjectOwner, OwnedRow, OwnerRequired
+from ufo.sdk.objects import (
+    CONVERSATION_KIND,
+    MemberOwnedObjects,
+    ObjectDetail,
+    ObjectKind,
+    ObjectLink,
+    ObjectOwner,
+    ObjectRef,
+    OwnedRow,
+    OwnerRequired,
+)
 from ufo.sdk.scheduling import ScheduledTask, ScheduleStore
 from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 from ufo_ext_scheduled_tasks.cron import next_fire, validate_cron
@@ -110,15 +120,25 @@ class ScheduledTaskObjects(MemberOwnedObjects[ScheduledTaskSpec]):
             for task in await _require_scheduler(ctx).list()
         )
 
-    async def _spec(self, ctx: ToolContext, name: str) -> ScheduledTaskSpec | None:
+    async def _detail(self, ctx: ToolContext, name: str) -> ObjectDetail[ScheduledTaskSpec] | None:
         task = await self._find(ctx, name)
         if task is None:
             return None
-        return ScheduledTaskSpec(
-            schedule=task.schedule,
-            prompt=task.prompt,
-            description=task.description,
-            expires_at=task.expires_at,
+        return ObjectDetail(
+            spec=ScheduledTaskSpec(
+                schedule=task.schedule,
+                prompt=task.prompt,
+                description=task.description,
+                expires_at=task.expires_at,
+            ),
+            created_at=task.created_at,
+            updated_at=task.updated_at,
+            links=(
+                ObjectLink(
+                    relation="reports_to",
+                    target=ObjectRef(kind=CONVERSATION_KIND, name=str(task.conversation_id)),
+                ),
+            ),
         )
 
     async def _status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None:
@@ -137,10 +157,6 @@ class ScheduledTaskObjects(MemberOwnedObjects[ScheduledTaskSpec]):
                 ),
             }
         return {
-            "reports_to": {
-                "conversation_id": str(inspection.conversation_id),
-                "surface": inspection.surface,
-            },
             "next_run_at": inspection.next_run_at.isoformat(),
             "last_run_at": (
                 None if inspection.last_run_at is None else inspection.last_run_at.isoformat()
@@ -148,7 +164,6 @@ class ScheduledTaskObjects(MemberOwnedObjects[ScheduledTaskSpec]):
             "expires_at": (
                 None if inspection.expires_at is None else inspection.expires_at.isoformat()
             ),
-            "updated_at": inspection.updated_at.isoformat(),
             "last_run": last_run,
         }
 

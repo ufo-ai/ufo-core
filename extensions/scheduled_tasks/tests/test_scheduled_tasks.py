@@ -1308,8 +1308,6 @@ async def test_runner_fires_due_task_into_a_turn(db: None) -> None:
         inspection = await store.inspect("scheduled-daily")
         assert inspection is not None
         assert inspection.last_turn_id == turns[0]["id"]
-        assert inspection.conversation_id == conversation_id
-        assert inspection.surface == "cli"
         assert inspection.last_response is None
         async with workspace_tx() as connection:
             await connection.execute(
@@ -1317,7 +1315,7 @@ async def test_runner_fires_due_task_into_a_turn(db: None) -> None:
                 .values(status="done", terminal={"status": "done", "text": "found 3 new replies"})
                 .where(tables.turn.c.id == turns[0]["id"])
             )
-        status = yaml.safe_load(
+        fetched = yaml.safe_load(
             await _dispatch(
                 _object_tool("object_get"),
                 replace(
@@ -1327,14 +1325,17 @@ async def test_runner_fires_due_task_into_a_turn(db: None) -> None:
                 kind=SCHEDULED_TASK_KIND,
                 name="scheduled-daily",
             )
-        )["status"]
-        assert status["reports_to"] == {
-            "conversation_id": str(conversation_id),
-            "surface": "cli",
-        }
+        )
+        assert fetched["links"] == [
+            {
+                "relation": "reports_to",
+                "target": {"kind": "conversation", "name": str(conversation_id)},
+            }
+        ]
+        assert fetched["updated_at"] is not None
+        status = fetched["status"]
         assert status["last_run"]["turn_id"] == str(turns[0]["id"])
         assert status["last_run"]["response"] == "found 3 new replies"
-        assert status["updated_at"] is not None
 
 
 async def test_runner_replaces_final_permitted_fire_with_check_in(db: None) -> None:

@@ -166,6 +166,13 @@ async def test_granted_accounts_list_and_read_through_the_verbs(db: None) -> Non
         await _grant(
             workspace_id, agent_id, conversation_id, grantor_id, "gmail", "alice@example.com"
         )
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.grant).values(
+                    created_at=datetime(2026, 7, 10, tzinfo=UTC),
+                    updated_at=datetime(2026, 7, 11, tzinfo=UTC),
+                )
+            )
         ctx = _tool_context(workspace_id, grantor_id)
         listing = json.loads(await _text(_object_tool("object_list"), ctx, kind=CONNECTOR_KIND))
         assert [row["name"] for row in listing["objects"]] == ["gmail-alice-example-com"]
@@ -187,6 +194,12 @@ async def test_granted_accounts_list_and_read_through_the_verbs(db: None) -> Non
         assert fetched["status"]["grantor_member_id"] == str(grantor_id)
         assert fetched["status"]["host"] == "api.gmail.test"
         assert fetched["status"]["agent"] == "assistant"
+        assert datetime.fromisoformat(fetched["created_at"]).replace(tzinfo=UTC) == datetime(
+            2026, 7, 10, tzinfo=UTC
+        )
+        assert datetime.fromisoformat(fetched["updated_at"]).replace(tzinfo=UTC) == datetime(
+            2026, 7, 11, tzinfo=UTC
+        )
 
 
 async def test_connect_stays_the_only_create_path(db: None) -> None:

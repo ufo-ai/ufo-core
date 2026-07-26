@@ -30,12 +30,16 @@ from ufo.artifact_token import (
     mint_artifact_token,
 )
 from ufo.blob import BlobNotFound
+from ufo.conversations import CONVERSATION_KIND
 from ufo.db import workspace_tx
 from ufo.ext.context import JsonValue
 from ufo.objects import (
+    ObjectDetail,
     ObjectKind,
+    ObjectLink,
     ObjectListQuery,
     ObjectPage,
+    ObjectRef,
     ObjectRow,
     VerbNotSupported,
     object_page,
@@ -120,13 +124,25 @@ class ArtifactObjects:
         )
         return object_page(rows, query)
 
-    async def get(self, ctx: ToolContext, name: str) -> ArtifactSpec | None:
+    async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[ArtifactSpec] | None:
         shares = await self._find(name)
         if shares is None:
             return None
         latest = shares[0]
-        return ArtifactSpec(
-            filename=latest.filename, media_type=latest.media_type, subject=latest.subject or ""
+        return ObjectDetail(
+            spec=ArtifactSpec(
+                filename=latest.filename,
+                media_type=latest.media_type,
+                subject=latest.subject or "",
+            ),
+            created_at=shares[-1].created_at,
+            updated_at=latest.created_at,
+            links=(
+                ObjectLink(
+                    relation="created_in",
+                    target=ObjectRef(kind=CONVERSATION_KIND, name=str(latest.conversation_id)),
+                ),
+            ),
         )
 
     async def status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None:
@@ -145,7 +161,6 @@ class ArtifactObjects:
             "size_bytes": latest.size_bytes,
             "shared_at": latest.created_at.isoformat(),
             "turn_id": str(latest.turn_id),
-            "conversation_id": str(latest.conversation_id),
             "versions": len(shares),
             "download_url": url,
             "workspace_path": await self._materialize(ctx, name, latest),
@@ -247,9 +262,10 @@ ARTIFACT_OBJECT = ObjectKind(
         "from different sessions stays distinct. Re-sharing a filename in the same conversation "
         "adds a version — get, status, and the workspace copy reflect the latest share. "
         "object_get copies the latest bytes back into the conversation workspace at "
-        "artifacts/<name>/<filename> — the way to reuse a file an earlier turn produced — and "
-        "its status carries a fresh member download link (valid one hour), the share time, the "
-        "sharing turn and conversation, and the version count; a file over 32 MiB is not copied "
+        "artifacts/<name>/<filename> — the way to reuse a file an earlier turn produced — its "
+        "status carries a fresh member download link (valid one hour), the share time, the "
+        "sharing turn, and the version count, and its `created_in` link names the sharing "
+        "conversation; a file over 32 MiB is not copied "
         "(workspace_path is null) and is fetched via the link instead. Create and update are "
         "refused: an artifact exists by sharing a produced file, so write the file in the "
         "workspace and share_file it. Delete removes the record and stored bytes of every "

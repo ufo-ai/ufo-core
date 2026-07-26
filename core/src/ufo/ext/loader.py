@@ -29,6 +29,7 @@ from pydantic import BaseModel, ConfigDict
 from ufo.agents import AGENT_OBJECT
 from ufo.artifacts import ARTIFACT_OBJECT
 from ufo.connectors import CliCredential
+from ufo.conversations import CONVERSATION_OBJECT
 from ufo.credential_kind import (
     CREDENTIAL_DESCRIPTION,
     CREDENTIAL_GUIDANCE,
@@ -74,6 +75,7 @@ from ufo.tools.registry import ToolDef, ToolRegistry
 CORE_OBJECT_KINDS: tuple[BoundKind, ...] = (
     BoundKind(kind=AGENT_OBJECT, extension=None, context=None),
     BoundKind(kind=ARTIFACT_OBJECT, extension=None, context=None),
+    BoundKind(kind=CONVERSATION_OBJECT, extension=None, context=None),
 )
 EXTENSION_ENTRY_POINT_GROUP = "ufo.extension"
 PACK_ENTRY_POINT_GROUP = "ufo.pack"

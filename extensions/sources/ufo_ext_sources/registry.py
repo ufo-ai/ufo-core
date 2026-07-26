@@ -1,9 +1,14 @@
-"""Connector registry: backend slug → `Connector` class.
+"""Connector registry: backend slug → `Connector` class, and the binding-identity name rule.
 
 Explicit, not scanned — a new provider adds a line rather than paying for import-time discovery. The
 slug is the connector's `name` and doubles as the source `backend` name a `source` row carries and
 the credential slot the direct backend reads its key from; the manifest wraps each in a
-`ConnectorBackend` and registers it as a source the sync driver drives."""
+`ConnectorBackend` and registers it as a source the sync driver drives. `binding_name` is the one
+naming rule for a registered binding — the `source` object kind derives names from it and the
+`page` kind links back through it."""
+
+import hashlib
+import json
 
 from ufo.sdk.sources import Connector
 from ufo_ext_sources.active_campaign import ActiveCampaignConnector
@@ -65,6 +70,19 @@ def _connector_registry(
             raise ValueError(f"duplicate source connector name {connector_type.name!r}")
         connectors[connector_type.name] = connector_type
     return connectors
+
+
+SOURCE_KIND = "source"
+NAME_DIGEST_HEX = 8
+
+
+def binding_name(provider: str, account: str, base_url: str | None) -> str:
+    digest = hashlib.sha256(
+        json.dumps(
+            {"account": account, "base_url": base_url, "provider": provider}, sort_keys=True
+        ).encode()
+    ).hexdigest()[:NAME_DIGEST_HEX]
+    return f"{provider.replace('_', '-')}-{digest}"
 
 
 CONNECTORS = _connector_registry(

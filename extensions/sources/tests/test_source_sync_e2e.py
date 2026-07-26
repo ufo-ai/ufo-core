@@ -25,7 +25,8 @@ from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.store import PageIndexer
 from ufo_ext_sources.direct import DirectAuthProxy
 from ufo_ext_sources.klaviyo import KLAVIYO_REVISION, KlaviyoConnector
-from ufo_ext_sources.tools import SourceObjects, SourceSpec, _binding_name
+from ufo_ext_sources.registry import binding_name
+from ufo_ext_sources.tools import SourceObjects, SourceSpec
 
 from ufo.blob import FilesystemBlobStore
 from ufo.config import Config
@@ -204,7 +205,7 @@ async def _sync_and_search(
     with ws(state.workspace_id):
         await SourceObjects().apply(
             context,
-            _binding_name(provider, account, None),
+            binding_name(provider, account, None),
             SourceSpec(provider=provider, streams=(stream,)),
             None,
         )

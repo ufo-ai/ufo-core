@@ -21,7 +21,7 @@ import yaml
 from cryptography.fernet import Fernet
 from ufo_ext_sources.manifest import NAME, manifest
 from ufo_ext_sources.pages import PAGE_BODY_MAX_BYTES, PAGE_KIND, PageObjects, _page_timestamp
-from ufo_ext_sources.registry import CONNECTORS
+from ufo_ext_sources.registry import CONNECTORS, binding_name
 
 from ufo.blob import FilesystemBlobStore
 from ufo.credentials import CredentialStore
@@ -385,8 +385,15 @@ async def test_pages_list_filter_order_and_read_body_through_the_verbs(
         assert fetched["spec"]["created_at"] == "2026-07-11T00:00:00.000000+00:00"
         assert fetched["spec"]["body"] == "# Newest issue\n\nIssue body"
         assert fetched["spec"]["body_truncated"] is False
-        assert fetched["status"]["backend"] == "asana"
-        assert fetched["status"]["source_id"] == str(source_id)
+        assert fetched["status"] is None
+        assert fetched["links"] == [
+            {
+                "relation": "synced_by",
+                "target": {"kind": "source", "name": binding_name("asana", "acct-one", None)},
+            }
+        ]
+        assert fetched["created_at"] is not None
+        assert fetched["updated_at"] is not None
 
 
 async def test_pages_order_timestamp_variants_chronologically(db: None, tmp_path: Path) -> None:

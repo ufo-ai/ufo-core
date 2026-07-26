@@ -157,7 +157,8 @@ async def test_declared_slot_lists_reads_and_clears_without_the_value(db: None) 
         }
         assert fetched["status"]["filled"] is True
         assert fetched["status"]["host"] == sample.INJECTION_HOST
-        assert isinstance(fetched["status"]["updated_at"], str)
+        assert isinstance(fetched["created_at"], str)
+        assert isinstance(fetched["updated_at"], str)
 
         outputs.append(await _text(_object_tool("object_explain"), ctx, kind=CREDENTIAL_KIND))
 
@@ -174,9 +175,10 @@ async def test_declared_slot_lists_reads_and_clears_without_the_value(db: None) 
         cleared = yaml.safe_load(cleared_text)
         assert cleared["status"] == {
             "filled": False,
-            "updated_at": None,
             "host": sample.INJECTION_HOST,
         }
+        assert cleared["created_at"] is None
+        assert cleared["updated_at"] is None
 
         async with workspace_tx() as connection:
             ciphertexts = (

@@ -561,6 +561,8 @@ async def test_scheduled_fire_into_an_unseated_members_conversation_is_refused(d
         origin_seq=None,
         resume_turn_id=None,
         claim_id="claim-1",
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
         created_by_member_id=_member_id,
     )
     dbos = StubDbos()

@@ -19,16 +19,20 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ufo.sdk.context import ExtensionContext, JsonValue
 from ufo.sdk.objects import (
+    ObjectDetail,
     ObjectKind,
+    ObjectLink,
     ObjectListQuery,
     ObjectPage,
+    ObjectRef,
     ObjectRow,
     OwnerRequired,
     VerbNotSupported,
     object_page,
 )
-from ufo.sdk.sources import SHARED_SUBJECT, member_subject
+from ufo.sdk.sources import SHARED_SUBJECT, ConnectorSourceConfig, member_subject
 from ufo.sdk.tools import ToolContext
+from ufo_ext_sources.registry import CONNECTORS, SOURCE_KIND, binding_name
 
 PAGE_KIND = "page"
 PAGES_ARE_SYNCED = (
@@ -96,10 +100,21 @@ class _Page:
     body_ref: str
     created_at: datetime
     updated_at: datetime
+    source_name: str | None
 
     @property
     def name(self) -> str:
         return str(self.id)
+
+    def links(self) -> tuple[ObjectLink, ...]:
+        if self.source_name is None:
+            return ()
+        return (
+            ObjectLink(
+                relation="synced_by",
+                target=ObjectRef(kind=SOURCE_KIND, name=self.source_name),
+            ),
+        )
 
     def spec(self, body: str, body_truncated: bool) -> PageSpec:
         return PageSpec(
@@ -145,7 +160,7 @@ class PageObjects:
         )
         return object_page(rows, query)
 
-    async def get(self, ctx: ToolContext, name: str) -> PageSpec | None:
+    async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[PageSpec] | None:
         page = await self._find(ctx, name)
         if page is None:
             return None
@@ -170,21 +185,15 @@ class PageObjects:
             if len(content) <= PAGE_BODY_MAX_BYTES or error.reason != "unexpected end of data":
                 raise
             body = bounded[: error.start].decode("utf-8")
-        return page.spec(
-            body,
-            len(content) > PAGE_BODY_MAX_BYTES,
+        return ObjectDetail(
+            spec=page.spec(body, len(content) > PAGE_BODY_MAX_BYTES),
+            created_at=page.created_at,
+            updated_at=page.updated_at,
+            links=page.links(),
         )
 
     async def status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None:
-        page = await self._find(ctx, name)
-        if page is None:
-            return None
-        return {
-            "source_id": str(page.source_id),
-            "backend": page.backend,
-            "created_at": page.created_at.isoformat(),
-            "updated_at": page.updated_at.isoformat(),
-        }
+        return None
 
     async def apply(
         self, ctx: ToolContext, name: str, spec: PageSpec, old: PageSpec | None
@@ -204,7 +213,14 @@ class PageObjects:
 
     async def _pages(self, ctx: ToolContext) -> tuple[_Page, ...]:
         ext = _require_ext(ctx)
-        backends = {source.id: source.backend for source in await ext.sources()}
+        sources = await ext.sources()
+        backends = {source.id: source.backend for source in sources}
+        source_names = {
+            source.id: binding_name(source.backend, config.account, config.base_url)
+            for source in sources
+            if source.backend in CONNECTORS
+            and (config := ConnectorSourceConfig.model_validate(source.config))
+        }
         return tuple(
             _Page(
                 id=record.id,
@@ -219,6 +235,7 @@ class PageObjects:
                 body_ref=record.body_ref,
                 created_at=record.created_at,
                 updated_at=record.updated_at,
+                source_name=source_names.get(record.source_id),
             )
             for record in await ext.source_pages(_audience_subjects(ctx))
         )

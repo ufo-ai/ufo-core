@@ -81,6 +81,7 @@ from ufo.models.interface import (
     ToolResultBlock,
     ToolUseBlock,
 )
+from ufo.objects import ObjectRef
 from ufo.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
 from ufo.schema import tables
 from ufo.schema.records import (
@@ -133,7 +134,8 @@ class CapturingModel:
 class MemoryAwareModel:
     async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
         recalled = (
-            "<recalled_memory>\n- [fact] Investor Alice prefers &lt;email&gt;\n</recalled_memory>"
+            "<recalled_memory>\n- [fact] Investor Alice prefers &lt;email&gt; "
+            "(memory/11111111-1111-1111-1111-111111111111, 2026-07-09)\n</recalled_memory>"
         )
         text = "remembered" if recalled in request.system else "missing"
         yield TextDelta(text=text)
@@ -149,7 +151,14 @@ class StaticMemorySearch:
         start: datetime | None = None,
         end: datetime | None = None,
     ) -> tuple[MemoryMatch, ...]:
-        return (MemoryMatch(kind="fact", text="Investor Alice prefers <email>"),)
+        return (
+            MemoryMatch(
+                kind="fact",
+                text="Investor Alice prefers <email>",
+                ref=ObjectRef(kind="memory", name="11111111-1111-1111-1111-111111111111"),
+                created_at=datetime(2026, 7, 9, tzinfo=UTC),
+            ),
+        )
 
 
 @dataclass

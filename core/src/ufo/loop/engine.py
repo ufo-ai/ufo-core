@@ -775,7 +775,18 @@ class TurnEngine:
             return system
         if not matches:
             return system
-        recalled = "\n".join(f"- [{escape(match.kind)}] {escape(match.text)}" for match in matches)
+        recalled = "\n".join(
+            f"- [{escape(match.kind)}] {escape(match.text)}"
+            + (
+                ""
+                if match.ref is None
+                else " ("
+                + escape(str(match.ref))
+                + ("" if match.created_at is None else f", {match.created_at.date().isoformat()}")
+                + ")"
+            )
+            for match in matches
+        )
         return f"{system}\n\n{SCHEDULED_MEMORY_CONTEXT.format(recalled=recalled)}"
 
     async def _mark_running(self) -> bool:

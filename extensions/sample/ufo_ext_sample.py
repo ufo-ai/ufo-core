@@ -12,7 +12,7 @@ undeclared slot is refused."""
 import hashlib
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import ClassVar
 from uuid import UUID
@@ -83,6 +83,7 @@ from ufo.sdk.models import (
     Usage,
 )
 from ufo.sdk.objects import (
+    ObjectDetail,
     ObjectKind,
     ObjectListQuery,
     ObjectPage,
@@ -309,6 +310,16 @@ class RelicSpec(BaseModel):
     inscription: str
 
 
+class StoredWidget(BaseModel):
+    """A widget's persisted row: the applied spec and the timestamps the envelope renders. Crosses
+    the `ext_store` boundary, so it validates on the way back out."""
+
+    model_config = ConfigDict(extra="forbid")
+    spec: WidgetSpec
+    created_at: datetime
+    updated_at: datetime
+
+
 @dataclass(frozen=True)
 class WidgetStore:
     """The full-CRUD probe store over the sample's own `ext_store` keys: apply/get/delete round a
@@ -322,16 +333,21 @@ class WidgetStore:
             ObjectRow(
                 name=name,
                 summary=f"a {name} widget",
-                fields=WidgetSpec.model_validate(value).model_dump(mode="json"),
+                fields=StoredWidget.model_validate(value).spec.model_dump(mode="json"),
             )
             for key, value in entries
             if (name := key.removeprefix(WIDGET_KEY_PREFIX))
         )
         return object_page(rows, query)
 
-    async def get(self, ctx: ToolContext, name: str) -> WidgetSpec | None:
+    async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[WidgetSpec] | None:
         value = await self._ext(ctx).store.get(WIDGET_KEY_PREFIX + name)
-        return None if value is None else WidgetSpec.model_validate(value)
+        if value is None:
+            return None
+        stored = StoredWidget.model_validate(value)
+        return ObjectDetail(
+            spec=stored.spec, created_at=stored.created_at, updated_at=stored.updated_at
+        )
 
     async def status(self, ctx: ToolContext, name: str) -> None:
         return None
@@ -339,7 +355,14 @@ class WidgetStore:
     async def apply(
         self, ctx: ToolContext, name: str, spec: WidgetSpec, old: WidgetSpec | None
     ) -> None:
-        await self._ext(ctx).store.put(WIDGET_KEY_PREFIX + name, spec.model_dump())
+        ext = self._ext(ctx)
+        value = await ext.store.get(WIDGET_KEY_PREFIX + name)
+        now = datetime.now(UTC)
+        created_at = now if value is None else StoredWidget.model_validate(value).created_at
+        await ext.store.put(
+            WIDGET_KEY_PREFIX + name,
+            StoredWidget(spec=spec, created_at=created_at, updated_at=now).model_dump(mode="json"),
+        )
 
     async def delete(self, ctx: ToolContext, name: str) -> None:
         if not await ctx.speaker_is_owner():
@@ -363,8 +386,12 @@ class RelicStore:
             query,
         )
 
-    async def get(self, ctx: ToolContext, name: str) -> RelicSpec | None:
-        return RelicSpec(inscription=RELIC_INSCRIPTION) if name == RELIC_NAME else None
+    async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[RelicSpec] | None:
+        if name != RELIC_NAME:
+            return None
+        return ObjectDetail(
+            spec=RelicSpec(inscription=RELIC_INSCRIPTION), created_at=None, updated_at=None
+        )
 
     async def status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None:
         return {"origin": "excavated"}

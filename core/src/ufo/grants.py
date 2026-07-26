@@ -126,6 +126,7 @@ class GrantSummary:
     grantor_member_id: UUID
     conversation_id: UUID
     granted_at: datetime
+    updated_at: datetime
     shared: bool
 
 
@@ -510,6 +511,7 @@ async def grant_summaries(workspace_id: UUID) -> tuple[GrantSummary, ...]:
                     tables.grant.c.grantor_member_id,
                     tables.grant.c.conversation_id,
                     tables.grant.c.created_at,
+                    tables.grant.c.updated_at,
                     tables.grant.c.shared,
                 )
                 .select_from(
@@ -528,6 +530,7 @@ async def grant_summaries(workspace_id: UUID) -> tuple[GrantSummary, ...]:
             grantor_member_id=row.grantor_member_id,
             conversation_id=row.conversation_id,
             granted_at=row.created_at,
+            updated_at=row.updated_at,
             shared=row.shared,
         )
         for row in rows

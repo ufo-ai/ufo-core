@@ -78,7 +78,7 @@ def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None
     assert {
         "0050",
         "index_default_0002",
-        "memory_0008",
+        "memory_0009",
         "sample_ext_note_0001",
         "skill_create_0001",
         "knowledge_graph_0001",
@@ -173,6 +173,94 @@ def test_memory_as_of_migration_repairs_page_derived_rows(tmp_path: Path) -> Non
 
     assert datetime.fromisoformat(repaired).replace(tzinfo=UTC) == source_as_of
     assert untouched is None
+
+
+def test_memory_provenance_migration_backfills_page_derived_rows(tmp_path: Path) -> None:
+    database_path = tmp_path / "memory-provenance.db"
+    url = f"sqlite+aiosqlite:///{database_path}"
+    config = Config()
+    config.set_main_option("script_location", str(MIGRATIONS_DIR))
+    config.set_main_option(
+        "version_locations",
+        os.pathsep.join((str(MIGRATIONS_DIR / "versions"), *migration_locations())),
+    )
+    config.set_main_option("path_separator", "os")
+    config.set_main_option("sqlalchemy.url", url)
+    command.upgrade(config, "0050")
+    command.upgrade(config, "memory_0008")
+
+    engine = sa.create_engine(f"sqlite:///{database_path}")
+    workspace_id, source_id, page_id = (uuid4() for _ in range(3))
+    derived_id, manual_id, dangling_id = (uuid4() for _ in range(3))
+    ingested = datetime(2026, 7, 24, tzinfo=UTC)
+    with engine.connect() as connection:
+        connection.execute(
+            sa.text(
+                "insert into workspace (id, created_at, updated_at) "
+                "values (:id, :ingested, :ingested)"
+            ),
+            {"id": workspace_id.hex, "ingested": ingested},
+        )
+        connection.execute(
+            sa.text(
+                "insert into source "
+                "(id, workspace_id, backend, config, next_sync_at, created_at, updated_at) "
+                "values (:id, :workspace_id, 'folder', '{}', :ingested, :ingested, :ingested)"
+            ),
+            {"id": source_id.hex, "workspace_id": workspace_id.hex, "ingested": ingested},
+        )
+        connection.execute(
+            sa.text(
+                "insert into page "
+                "(id, workspace_id, source_id, digest, body_ref, subject, tombstone, "
+                "stream, title, created_at, updated_at) values "
+                "(:id, :workspace_id, :source_id, 'sha256:page', 'pages/page', 'shared', false, "
+                "'issues', 'Old issue', :ingested, :ingested)"
+            ),
+            {
+                "id": page_id.hex,
+                "workspace_id": workspace_id.hex,
+                "source_id": source_id.hex,
+                "ingested": ingested,
+            },
+        )
+        for item_id, source_ref in (
+            (derived_id, str(page_id)),
+            (manual_id, "member-authored"),
+            (dangling_id, str(uuid4())),
+        ):
+            connection.execute(
+                sa.text(
+                    "insert into memory_item "
+                    "(id, workspace_id, subject, body, item_class, memory_kind, confidence, "
+                    "source_ref, created_at, updated_at) values "
+                    "(:id, :workspace_id, 'shared', 'fact', 'fact', 'fact', 5, "
+                    ":source_ref, :ingested, :ingested)"
+                ),
+                {
+                    "id": item_id.hex,
+                    "workspace_id": workspace_id.hex,
+                    "source_ref": source_ref,
+                    "ingested": ingested,
+                },
+            )
+        connection.commit()
+
+    command.upgrade(config, "memory_0009")
+    with engine.connect() as connection:
+        derived, manual, dangling = (
+            connection.execute(
+                sa.text("select created_from_page_id, source_ref from memory_item where id = :id"),
+                {"id": item_id.hex},
+            ).one()
+            for item_id in (derived_id, manual_id, dangling_id)
+        )
+    engine.dispose()
+
+    assert derived.created_from_page_id == page_id.hex
+    assert derived.source_ref is None
+    assert manual.created_from_page_id is None and manual.source_ref == "member-authored"
+    assert dangling.created_from_page_id is None and dangling.source_ref is not None
 
 
 def test_migrate_command_brings_the_schema_to_head(

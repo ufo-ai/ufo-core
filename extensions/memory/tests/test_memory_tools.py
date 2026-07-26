@@ -507,7 +507,10 @@ async def test_memory_search_interleaves_per_query_results(
     ctx = _tool_ctx(_ext(object(), object()), uuid4(), tmp_path)
     with ws(uuid4()):
         found = await _run("memory_search", ctx, queries=["alpha", "beta"])
-    bodies = [line.split("] ", 1)[1] for line in found.content[0].text.splitlines()]
+    bodies = [
+        line.split("] ", 1)[1].rsplit(" (memory/", 1)[0]
+        for line in found.content[0].text.splitlines()
+    ]
     assert bodies == ["a-one", "b-one", "a-two"]
 
 

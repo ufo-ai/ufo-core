@@ -18,8 +18,6 @@ nor reach a source private to someone else. The `page_change` hook reads a chang
 subscribers and invokes one alert turn per subscribed conversation, referencing the changed pages
 as `page/<id>` objects (only the shared pages a subscriber may read)."""
 
-import hashlib
-import json
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -35,6 +33,7 @@ from ufo.sdk.context import CredentialSlotUnset, ExtensionContext
 from ufo.sdk.manifest import HookContext, HookOutcome, PageChangeBatch
 from ufo.sdk.objects import (
     MemberOwnedObjects,
+    ObjectDetail,
     ObjectKind,
     ObjectOwner,
     OwnedRow,
@@ -44,10 +43,8 @@ from ufo.sdk.objects import (
 from ufo.sdk.sources import SHARED_SUBJECT, ConnectorSourceConfig, PageChange, member_subject
 from ufo.sdk.tools import ConnectUnavailable, ToolContext
 from ufo_ext_sources.pages import PAGE_KIND
-from ufo_ext_sources.registry import CONNECTORS
+from ufo_ext_sources.registry import CONNECTORS, SOURCE_KIND, binding_name
 
-SOURCE_KIND = "source"
-NAME_DIGEST_HEX = 8
 SUMMARY_MAX = 120
 SUBSCRIBERS_PREFIX = "subscribers:"
 ALERT_LABELS_MAX = 5
@@ -129,21 +126,14 @@ class SourceSpec(BaseModel):
     )
 
 
-def _binding_name(provider: str, account: str, base_url: str | None) -> str:
-    digest = hashlib.sha256(
-        json.dumps(
-            {"account": account, "base_url": base_url, "provider": provider}, sort_keys=True
-        ).encode()
-    ).hexdigest()[:NAME_DIGEST_HEX]
-    return f"{provider.replace('_', '-')}-{digest}"
-
-
 @dataclass(frozen=True)
 class _Stream:
     name: str
     next_sync_at: datetime
     consecutive_errors: int
     source_id: UUID
+    created_at: datetime
+    updated_at: datetime
 
 
 @dataclass(frozen=True)
@@ -157,7 +147,15 @@ class _Binding:
 
     @property
     def name(self) -> str:
-        return _binding_name(self.provider, self.account, self.base_url)
+        return binding_name(self.provider, self.account, self.base_url)
+
+    @property
+    def created_at(self) -> datetime:
+        return min(stream.created_at for stream in self.streams)
+
+    @property
+    def updated_at(self) -> datetime:
+        return max(stream.updated_at for stream in self.streams)
 
     def spec(self, subscribers: tuple[str, ...] = ()) -> SourceSpec:
         return SourceSpec(
@@ -200,6 +198,8 @@ async def _bindings_from_ext(ext: ExtensionContext) -> tuple[_Binding, ...]:
                 next_sync_at=record.next_sync_at,
                 consecutive_errors=record.consecutive_errors,
                 source_id=record.id,
+                created_at=record.created_at,
+                updated_at=record.updated_at,
             )
         )
         disclosure.setdefault(key, (record.subject, record.owner_member_id))
@@ -316,12 +316,16 @@ class SourceObjects(MemberOwnedObjects[SourceSpec]):
             for binding in await self._bindings(ctx)
         )
 
-    async def _spec(self, ctx: ToolContext, name: str) -> SourceSpec | None:
+    async def _detail(self, ctx: ToolContext, name: str) -> ObjectDetail[SourceSpec] | None:
         binding = await self._find(ctx, name)
         if binding is None:
             return None
         subscribers = tuple(sorted((await _subscribers_map(_require_ext(ctx), name)).keys()))
-        return binding.spec(subscribers=subscribers)
+        return ObjectDetail(
+            spec=binding.spec(subscribers=subscribers),
+            created_at=binding.created_at,
+            updated_at=binding.updated_at,
+        )
 
     async def _status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None:
         binding = await self._find(ctx, name)
@@ -378,7 +382,7 @@ class SourceObjects(MemberOwnedObjects[SourceSpec]):
             )
         base_url = _validated_base_url(spec.provider, spec.base_url or None)
         account = await self._resolved_account(ctx, spec)
-        derived = _binding_name(spec.provider, account, base_url)
+        derived = binding_name(spec.provider, account, base_url)
         if name != derived:
             raise ValueError(
                 f"source names derive from the binding — apply this spec as name {derived!r}"

@@ -18,6 +18,7 @@ from ufo.ext.context import JsonValue
 from ufo.governance import prompt_digest
 from ufo.models.interface import AUTO_MODEL
 from ufo.objects import (
+    ObjectDetail,
     ObjectKind,
     ObjectListQuery,
     ObjectPage,
@@ -94,14 +95,18 @@ class AgentObjects:
             query=query,
         )
 
-    async def get(self, ctx: ToolContext, name: str) -> AgentSpec | None:
+    async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[AgentSpec] | None:
         row = await self._row(name)
         return (
             None
             if row is None
-            else AgentSpec(
-                model=row.model,
-                internet_access_allowed=row.internet_access_allowed,
+            else ObjectDetail(
+                spec=AgentSpec(
+                    model=row.model,
+                    internet_access_allowed=row.internet_access_allowed,
+                ),
+                created_at=row.created_at,
+                updated_at=row.updated_at,
             )
         )
 
@@ -113,7 +118,6 @@ class AgentObjects:
             "prompt": row.prompt,
             "prompt_digest": prompt_digest(row.prompt),
             "model": _effective_model(ctx, row.model),
-            "updated_at": row.updated_at.isoformat(),
         }
 
     async def apply(
@@ -148,6 +152,7 @@ class AgentObjects:
                         tables.agent.c.prompt,
                         tables.agent.c.model,
                         tables.agent.c.internet_access_allowed,
+                        tables.agent.c.created_at,
                         tables.agent.c.updated_at,
                     ).where(
                         tables.agent.c.workspace_id == ws_current().workspace_id,

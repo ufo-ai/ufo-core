@@ -1,5 +1,5 @@
-"""The memory extension's declared points: the two tools, the recall hook, two page-change
-consumers, two derivation jobs, the skill.
+"""The memory extension's declared points: the two tools, the `memory` object kind, the recall
+hook, two page-change consumers, two derivation jobs, the skill.
 
 `memory_search` and `memory_update` are the agent's durable-memory tools; the `user_prompt_submit`
 hook auto-injects relevant memory into the turn's context before the model runs. Two `page_change`
@@ -39,6 +39,7 @@ from ufo.sdk.manifest import (
 )
 from ufo.sdk.memory import DEFAULT_MEMORY_SEARCH_PROVIDER, MemoryMatch
 from ufo.sdk.o11y import log
+from ufo.sdk.objects import ObjectRef
 from ufo.sdk.operator import resolve_operator_workspace
 from ufo.sdk.sources import SHARED_SUBJECT, member_subject
 from ufo.sdk.surfaces import SurfaceSpec
@@ -54,6 +55,7 @@ from ufo_ext_memory.events import (
     MAX_RECALLED_MEMORY_IDS,
     MEMORY_RECALL_EVENT,
 )
+from ufo_ext_memory.objects import MEMORY_KIND, MEMORY_OBJECT, PAGE_OBJECT_KIND
 from ufo_ext_memory.store import (
     DEFAULT_CONFIDENCE,
     FACT,
@@ -198,13 +200,33 @@ class MemorySearchService:
                 if match is not None and match.page_id not in sources:
                     sources[match.page_id] = match
         matches = tuple(
-            MemoryMatch(kind=item.item_class, text=item.body)
+            MemoryMatch(
+                kind=item.item_class,
+                text=item.body,
+                ref=ObjectRef(kind=MEMORY_KIND, name=str(item.memory_id)),
+                created_at=item.created_at,
+            )
             for item in list(recalled.values())[:MEMORY_SEARCH_LIMIT]
         )
         return matches + tuple(
-            MemoryMatch(kind="source", text=match.text)
+            MemoryMatch(
+                kind="source",
+                text=match.text,
+                ref=ObjectRef(kind=PAGE_OBJECT_KIND, name=str(match.page_id)),
+                created_at=match.created_at,
+            )
             for match in list(sources.values())[:MEMORY_SEARCH_LIMIT]
         )
+
+
+def match_line(match: MemoryMatch) -> str:
+    """One hit as the agent triages it: snippet first, then the durable ref and recency —
+    `object_get` the ref to open the full memory or page behind the hit."""
+    line = f"- [{match.kind}] {match.text}"
+    if match.ref is None:
+        return line
+    stamp = "" if match.created_at is None else f", {match.created_at.date().isoformat()}"
+    return f"{line} ({match.ref}{stamp})"
 
 
 async def memory_search_handler(ctx: ToolContext, args: MemorySearchInput) -> ToolResult:
@@ -223,9 +245,7 @@ async def memory_search_handler(ctx: ToolContext, args: MemorySearchInput) -> To
     if not matches:
         return ToolResult(content=(TextContent(text="No matching memory."),))
     return ToolResult(
-        content=(
-            TextContent(text="\n".join(f"- [{match.kind}] {match.text}" for match in matches)),
-        )
+        content=(TextContent(text="\n".join(match_line(match) for match in matches)),)
     )
 
 
@@ -373,9 +393,11 @@ def manifest() -> Manifest:
                     "channel. Pass up to "
                     f"{MAX_MEMORY_QUERIES} distinct queries — they run in parallel and their "
                     "results are merged and deduplicated. Optionally restrict to items written "
-                    "in a window with start_date/end_date (ISO-8601, e.g. 2026-01-31). Returns the "
-                    "best-matching items and document snippets; use it to recall context before "
-                    "answering."
+                    "in a window with start_date/end_date (ISO-8601, e.g. 2026-01-31). Returns "
+                    "the best-matching items and document snippets, each with its object ref "
+                    "(memory/<id> or page/<id>) and date — object_get a ref to open the full "
+                    "item or page and follow its provenance links. Use it to recall context "
+                    "before answering."
                 ),
                 input_model=MemorySearchInput,
                 handler=memory_search_handler,
@@ -399,6 +421,7 @@ def manifest() -> Manifest:
                 handler=memory_update_handler,
             ),
         ),
+        objects=(MEMORY_OBJECT,),
         hooks=(
             HookSpec(event="user_prompt_submit", handler=recall_hook),
             HookSpec(event="page_change", handler=index_pages),

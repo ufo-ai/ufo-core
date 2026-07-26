@@ -21,6 +21,7 @@ from ufo.sdk.context import JsonValue
 from ufo.sdk.grants import GrantSummary, grant_summaries
 from ufo.sdk.objects import (
     MemberOwnedObjects,
+    ObjectDetail,
     ObjectKind,
     ObjectOwner,
     OwnedRow,
@@ -73,12 +74,16 @@ class ConnectorObjects(MemberOwnedObjects[ConnectorSpec]):
             for name, grant in (await self._named(ctx)).items()
         )
 
-    async def _spec(self, ctx: ToolContext, name: str) -> ConnectorSpec | None:
+    async def _detail(self, ctx: ToolContext, name: str) -> ObjectDetail[ConnectorSpec] | None:
         grant = (await self._named(ctx)).get(name)
         if grant is None:
             return None
-        return ConnectorSpec(
-            provider=grant.provider, account_id=grant.account_id, shared=grant.shared
+        return ObjectDetail(
+            spec=ConnectorSpec(
+                provider=grant.provider, account_id=grant.account_id, shared=grant.shared
+            ),
+            created_at=grant.granted_at,
+            updated_at=grant.updated_at,
         )
 
     async def _status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None:
@@ -87,7 +92,6 @@ class ConnectorObjects(MemberOwnedObjects[ConnectorSpec]):
             return None
         return {
             "grantor_member_id": str(grant.grantor_member_id),
-            "granted_at": grant.granted_at.isoformat(),
             "host": grant.host,
             "agent": grant.agent,
             "shared": grant.shared,
