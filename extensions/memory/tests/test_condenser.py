@@ -128,16 +128,6 @@ def _model(payload: str) -> ModelAccess:
     )
 
 
-@pytest.fixture
-async def clean(db: None, database_url: str) -> AsyncIterator[None]:
-    async with workspace_tx() as connection:
-        await connection.execute(sa.text("delete from chunk"))
-        await connection.execute(sa.text("delete from memory_item"))
-        if database_url.startswith("sqlite"):
-            await connection.execute(sa.text("delete from chunk_fts"))
-    yield
-
-
 async def _workspace() -> UUID:
     workspace_id = uuid4()
     async with workspace_tx() as connection:
@@ -420,7 +410,7 @@ async def test_derive_facts_without_a_model_skips_but_advances_cursor(
 
 
 async def test_consolidation_supersedes_originals_and_recall_surfaces_the_summary(
-    clean: None,
+    db: None,
 ) -> None:
     workspace_id = await _workspace()
     probe = vec((9, 1.0))
@@ -473,7 +463,7 @@ async def test_consolidation_supersedes_originals_and_recall_surfaces_the_summar
     assert len(after) == 1
 
 
-async def test_consolidation_without_a_model_writes_nothing(clean: None) -> None:
+async def test_consolidation_without_a_model_writes_nothing(db: None) -> None:
     workspace_id = await _workspace()
     probe = vec((5, 1.0))
     originals = [

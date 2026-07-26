@@ -18,7 +18,6 @@ from collections.abc import AsyncIterator, Iterator
 
 import asyncpg
 import pytest
-import sqlalchemy as sa
 from dbos import DBOS
 from sqlalchemy.engine import make_url
 
@@ -26,7 +25,7 @@ from ufo.config import BlobConfig, Config, DatabaseConfig
 from ufo.db import apply_migrations, dispose_db, init_db, workspace_tx
 from ufo.schema.records import DBOS_APP_NAME, DBOS_APP_VERSION
 from ufo.workspace import init_workspace_credentials
-from ufo_testsupport.tables import DELETE_ORDER
+from ufo_testsupport.tables import reset_workspace_data
 
 POSTGRES_TEST_URL = os.environ.get(
     "UFO_TEST_POSTGRES_URL",
@@ -93,8 +92,7 @@ def _reset_workspace_credentials() -> Iterator[None]:
 async def db(database_url: str) -> AsyncIterator[None]:
     init_db(database_url)
     async with workspace_tx() as connection:
-        for table in DELETE_ORDER:
-            await connection.execute(sa.delete(table))
+        await reset_workspace_data(connection)
     yield
     await dispose_db()
 

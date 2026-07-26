@@ -30,7 +30,7 @@ from dbos import DBOSClient
 from fastapi import FastAPI
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_ufo.manifest import manifest as ufo_manifest
-from ufo_testsupport.tables import DELETE_ORDER
+from ufo_testsupport.tables import reset_workspace_data
 
 from ufo import cli
 from ufo.bearer import mint_token
@@ -421,8 +421,7 @@ async def _bootstrap_workspace() -> UUID:
     the bearer for."""
     workspace_id, member_id, agent_id = uuid4(), uuid4(), uuid4()
     async with workspace_tx() as connection:
-        for table in DELETE_ORDER:
-            await connection.execute(sa.delete(table))
+        await reset_workspace_data(connection)
         await connection.execute(
             sa.insert(tables.workspace).values(
                 id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()

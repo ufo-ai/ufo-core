@@ -5,12 +5,10 @@ and hook drive it — over the deploy index/embed backends and the workspace-sco
 threads onto the context. The embed client and the DefaultIndex are real dependencies, never the
 asserted thing: every assertion reads the Recalled/SourceMatch values back."""
 
-from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
-import pytest
 import sqlalchemy as sa
 from ufo_ext_embed_openai import EMBED_DIM
 from ufo_ext_index_default import DefaultIndex
@@ -59,16 +57,6 @@ class StubEmbed:
 class BrokenEmbed:
     async def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
         raise RuntimeError("embed provider unreachable")
-
-
-@pytest.fixture
-async def clean(db: None, database_url: str) -> AsyncIterator[None]:
-    async with workspace_tx() as connection:
-        await connection.execute(sa.text("delete from chunk"))
-        await connection.execute(sa.text("delete from mem_page"))
-        if database_url.startswith("sqlite"):
-            await connection.execute(sa.text("delete from chunk_fts"))
-    yield
 
 
 async def _workspace() -> UUID:
@@ -144,7 +132,7 @@ async def _seed_page_chunk(
         )
 
 
-async def test_commit_persists_item_and_derives_no_chunk(clean: None) -> None:
+async def test_commit_persists_item_and_derives_no_chunk(db: None) -> None:
     workspace_id = await _workspace()
     await _store(StubEmbed(vec((0, 1.0))), workspace_id).commit(
         MemoryWrite(subject=SHARED_SUBJECT, body="the sky is blue today", item_class=FACT)
@@ -166,7 +154,7 @@ async def test_commit_persists_item_and_derives_no_chunk(clean: None) -> None:
     assert chunks == 0
 
 
-async def test_recommitting_a_fact_updates_in_place_not_duplicated(clean: None) -> None:
+async def test_recommitting_a_fact_updates_in_place_not_duplicated(db: None) -> None:
     """A fact committed twice is content-addressed to one row: the id derives from
     (workspace, subject, item_class, body), so the re-commit upserts its decay inputs in place and
     one recallable item survives — not two hits for the same claim. The re-commit's confidence
@@ -230,7 +218,7 @@ def test_fuse_recall_folds_in_the_un_embedded_tail_leg() -> None:
     assert set(owners) == {"A", "T"}
 
 
-async def test_recall_blend_promotes_the_semantically_closer_fact(clean: None) -> None:
+async def test_recall_blend_promotes_the_semantically_closer_fact(db: None) -> None:
     """The cosine blend end to end: two equally-worded facts committed at the same time tie on the
     lexical leg and on decay, so recall's order is decided by the raw query-chunk cosine — the fact
     whose embedding is nearer the query ranks first."""
@@ -252,7 +240,7 @@ async def test_recall_blend_promotes_the_semantically_closer_fact(clean: None) -
     assert [item.memory_id for item in recalled] == [close, far]
 
 
-async def test_fresh_fact_recalls_before_indexing_then_via_the_index(clean: None) -> None:
+async def test_fresh_fact_recalls_before_indexing_then_via_the_index(db: None) -> None:
     """Immediacy: a just-committed fact is recallable before the index job derives its chunks — the
     un-embedded tail's lexical leg surfaces it. After the indexer stamps its digest, the index path
     serves it and the tail (embedding_digest IS NULL) no longer holds it, so it counts once."""
@@ -275,7 +263,7 @@ async def test_fresh_fact_recalls_before_indexing_then_via_the_index(clean: None
     assert "1234" in after[0].body
 
 
-async def test_untail_leg_respects_subject_scoping(clean: None) -> None:
+async def test_untail_leg_respects_subject_scoping(db: None) -> None:
     """The tail leg is workspace + subject scoped like the index legs: an un-embedded fact in one
     member's subject is invisible to another member's recall, and never leaks cross-member."""
     workspace_id = await _workspace()
@@ -287,7 +275,7 @@ async def test_untail_leg_respects_subject_scoping(clean: None) -> None:
     assert len(mine) == 1 and "77" in mine[0].body
 
 
-async def test_recall_returns_items_scoped_to_subject(clean: None) -> None:
+async def test_recall_returns_items_scoped_to_subject(db: None) -> None:
     workspace_id = await _workspace()
     member = uuid4()
     probe = vec((1, 1.0))
@@ -305,7 +293,7 @@ async def test_recall_returns_items_scoped_to_subject(clean: None) -> None:
     assert [item.subject for item in theirs] == [SHARED_SUBJECT]
 
 
-async def test_recall_skips_a_superseded_item(clean: None) -> None:
+async def test_recall_skips_a_superseded_item(db: None) -> None:
     workspace_id = await _workspace()
     probe = vec((2, 1.0))
     stale = await _seed_item(workspace_id, SHARED_SUBJECT, "the release ship date is friday", probe)
@@ -321,7 +309,7 @@ async def test_recall_skips_a_superseded_item(clean: None) -> None:
     assert empty == ()
 
 
-async def test_recall_degrades_to_lexical_when_embed_fails(clean: None) -> None:
+async def test_recall_degrades_to_lexical_when_embed_fails(db: None) -> None:
     workspace_id = await _workspace()
     await _seed_item(workspace_id, SHARED_SUBJECT, "the mascot is named zoltar", vec((3, 1.0)))
     hits = await _store(BrokenEmbed(), workspace_id).recall(
@@ -331,7 +319,7 @@ async def test_recall_degrades_to_lexical_when_embed_fails(clean: None) -> None:
     assert "zoltar" in hits[0].body
 
 
-async def test_pages_and_facts_do_not_crowd_each_others_candidate_window(clean: None) -> None:
+async def test_pages_and_facts_do_not_crowd_each_others_candidate_window(db: None) -> None:
     """Facts and pages share the chunk index; each retrieval must get a full limit of its own kind.
     With the limit equal to the fact count (and the page count), one shared candidate window could
     return at most `limit` rows across both kinds — so recall returning every fact AND search
@@ -386,7 +374,7 @@ def test_enforce_type_diversity_caps_a_class_and_backfills() -> None:
     assert sum(1 for row in kept if row.item_class == "fact") == 3
 
 
-async def test_recall_reorders_by_information_age(clean: None) -> None:
+async def test_recall_reorders_by_information_age(db: None) -> None:
     """Two equally-matching facts committed together rank by source information time: the current
     one first and the year-old page fact demoted, end to end over the real index."""
     workspace_id = await _workspace()
@@ -411,7 +399,7 @@ async def test_recall_reorders_by_information_age(clean: None) -> None:
     assert [item.memory_id for item in recalled] == [new, old]
 
 
-async def test_recall_filters_to_the_created_at_window(clean: None) -> None:
+async def test_recall_filters_to_the_created_at_window(db: None) -> None:
     workspace_id = await _workspace()
     probe = vec((0, 1.0))
     old = await _seed_item(
@@ -461,7 +449,7 @@ async def test_mem_page_carries_workspace_id(db: None) -> None:
     assert workspace_fk["options"]["ondelete"].upper() == "CASCADE"
 
 
-async def test_page_indexer_writes_the_contexts_workspace_id(clean: None) -> None:
+async def test_page_indexer_writes_the_contexts_workspace_id(db: None) -> None:
     """The `page_change` writer populates `workspace_id` from the context it holds: the mirror row
     it upserts for a page change carries the indexer's workspace, not a NULL."""
     workspace_id = await _workspace()

@@ -10,7 +10,6 @@ target names fail at the boundary."""
 
 import json
 import re
-from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -69,15 +68,6 @@ class _StubEmbed:
 
     async def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
         return tuple((1.0,) + (0.0,) * (EMBED_DIM - 1) for _ in texts)
-
-
-@pytest.fixture
-async def clean(db: None, database_url: str) -> AsyncIterator[None]:
-    async with workspace_tx() as connection:
-        await connection.execute(sa.text("delete from chunk"))
-        if database_url.startswith("sqlite"):
-            await connection.execute(sa.text("delete from chunk_fts"))
-    yield
 
 
 class _ExtractionModel:
@@ -243,7 +233,7 @@ async def _get(tools: dict[str, ToolDef], ctx: ToolContext, kind: str, name: str
 
 
 async def test_search_to_object_get_walks_page_provenance_end_to_end(
-    clean: None, tmp_path: Path
+    db: None, tmp_path: Path
 ) -> None:
     workspace_id = await _workspace()
     blob = FilesystemBlobStore(root=tmp_path)
@@ -397,7 +387,7 @@ async def test_conversation_kind_lists_only_visible_rows(db: None) -> None:
 
 
 async def test_superseded_memory_leaves_search_and_links_to_its_replacement(
-    clean: None, tmp_path: Path
+    db: None, tmp_path: Path
 ) -> None:
     workspace_id = await _workspace()
     blob = FilesystemBlobStore(root=tmp_path)

@@ -1413,11 +1413,6 @@ async def test_sample_source_syncs_a_page_recallable_through_memory(
     all through public surfaces."""
     workspace_id = await _workspace()
     manifest = _sample_manifest()
-    async with workspace_tx() as connection:
-        await connection.execute(sa.text("delete from chunk"))
-        await connection.execute(sa.text("delete from mem_page"))
-        if database_url.startswith("sqlite"):
-            await connection.execute(sa.text("delete from chunk_fts"))
     await run_onboarding_steps((manifest,), workspace_id, _credential_store())
 
     embed = _StubEmbed(_vec((3, 1.0)))

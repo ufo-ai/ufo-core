@@ -165,20 +165,12 @@ async def _chunk_count() -> int:
         return (await connection.execute(sa.text("select count(*) from chunk"))).scalar_one()
 
 
-async def _clear_chunks(database_url: str) -> None:
-    async with workspace_tx() as connection:
-        await connection.execute(sa.text("delete from chunk"))
-        if database_url.startswith("sqlite"):
-            await connection.execute(sa.text("delete from chunk_fts"))
-
-
 async def test_folder_source_syncs_indexes_and_is_recalled(
     db: None, database_url: str, tmp_path: Path
 ) -> None:
     """A registered folder source syncs a document to a page, the page indexer embeds it to chunks,
     and `search_sources` recalls it — the whole source→index→recall data path over the real index
     and blob store."""
-    await _clear_chunks(database_url)
     workspace_id = await _workspace()
     root = tmp_path / "src"
     root.mkdir()
@@ -222,12 +214,9 @@ async def test_folder_source_syncs_indexes_and_is_recalled(
     assert "on-call captain" in pages[0].text
 
 
-async def test_member_fact_recall_is_isolated_from_other_members(
-    db: None, database_url: str
-) -> None:
+async def test_member_fact_recall_is_isolated_from_other_members(db: None) -> None:
     """A committed member fact recalls for its owner after indexing but is invisible to another
     member — the {member, shared} isolation enforced in the real index query, end to end."""
-    await _clear_chunks(database_url)
     workspace_id = await _workspace()
     alice, bob = uuid4(), uuid4()
     embed = StubEmbed(axis=2)

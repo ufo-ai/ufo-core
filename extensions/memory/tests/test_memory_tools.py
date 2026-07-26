@@ -8,7 +8,6 @@ in a fresh one — both by the search tool and, unprompted, by the user_prompt_s
 
 import json
 import logging
-from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -67,15 +66,6 @@ async def _unavailable_spawn(
     profile: str, payload: dict[str, object], background: bool = False
 ) -> SpawnResult:
     raise RuntimeError("spawn is not wired in the memory tool tests")
-
-
-@pytest.fixture
-async def clean(db: None, database_url: str) -> AsyncIterator[None]:
-    async with workspace_tx() as connection:
-        await connection.execute(sa.text("delete from chunk"))
-        if database_url.startswith("sqlite"):
-            await connection.execute(sa.text("delete from chunk_fts"))
-    yield
 
 
 async def _workspace() -> UUID:
@@ -138,7 +128,7 @@ async def _run(name: str, ctx: ToolContext, **args: object) -> ToolResult:
 
 
 async def test_memory_update_then_search_recalls_in_a_new_conversation(
-    clean: None, tmp_path: Path
+    db: None, tmp_path: Path
 ) -> None:
     workspace_id = await _workspace()
     member = uuid4()
@@ -167,7 +157,7 @@ async def test_memory_search_provider_rejects_an_empty_query_set() -> None:
 
 
 async def test_user_prompt_submit_hook_injects_and_observes_a_recalled_fact(
-    clean: None,
+    db: None,
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -304,7 +294,7 @@ async def test_recall_hook_observes_search_failure_without_denial(
 
 
 async def test_recall_hook_excludes_episodic_topic_pointers(
-    clean: None, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    db: None, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """An episodic hit is rewritten to a topic pointer and dropped from the auto-injected context;
     a durable fact is injected verbatim — the episodic→topic exclusion, end to end through the
@@ -363,7 +353,7 @@ async def test_recall_hook_excludes_episodic_topic_pointers(
         assert record.ufo["memory_ids"] == [memory_ids["the api key rotates monthly"]]
 
 
-async def test_recall_hook_ignores_a_non_prompt_payload(clean: None) -> None:
+async def test_recall_hook_ignores_a_non_prompt_payload(db: None) -> None:
     workspace_id = await _workspace()
     embed = StubEmbed(vec((0, 1.0)))
     ext = _ext(DefaultIndex(transaction=workspace_tx), embed)
@@ -391,7 +381,7 @@ async def test_recall_hook_ignores_a_non_prompt_payload(clean: None) -> None:
 
 
 async def test_memory_update_scopes_to_member_by_default_and_shared_on_flag(
-    clean: None, tmp_path: Path
+    db: None, tmp_path: Path
 ) -> None:
     workspace_id = await _workspace()
     member = uuid4()
@@ -409,7 +399,7 @@ async def test_memory_update_scopes_to_member_by_default_and_shared_on_flag(
     assert subjects == sorted([member_subject(member), "shared"])
 
 
-async def test_memory_search_reports_no_match_on_empty_memory(clean: None, tmp_path: Path) -> None:
+async def test_memory_search_reports_no_match_on_empty_memory(db: None, tmp_path: Path) -> None:
     workspace_id = await _workspace()
     embed = StubEmbed(vec((0, 1.0)))
     ext = _ext(DefaultIndex(transaction=workspace_tx), embed)
@@ -429,7 +419,7 @@ def test_date_bound_reads_a_bare_end_date_as_the_whole_day() -> None:
     )
 
 
-async def test_memory_search_merges_and_dedups_across_queries(clean: None, tmp_path: Path) -> None:
+async def test_memory_search_merges_and_dedups_across_queries(db: None, tmp_path: Path) -> None:
     workspace_id = await _workspace()
     member = uuid4()
     working = StubEmbed(vec((0, 1.0)))
@@ -449,7 +439,7 @@ async def test_memory_search_merges_and_dedups_across_queries(clean: None, tmp_p
 
 
 async def test_memory_search_bounds_the_merged_result_across_queries(
-    clean: None, tmp_path: Path
+    db: None, tmp_path: Path
 ) -> None:
     workspace_id = await _workspace()
     member = uuid4()

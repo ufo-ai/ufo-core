@@ -1,5 +1,5 @@
 import hashlib
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -101,16 +101,6 @@ async def _unavailable_spawn(
     profile: str, payload: dict[str, object], background: bool = False
 ) -> SpawnResult:
     raise RuntimeError("spawn is not wired in the source tests")
-
-
-@pytest.fixture
-async def clean(db: None, database_url: str) -> AsyncIterator[None]:
-    async with workspace_tx() as connection:
-        await connection.execute(sa.text("delete from chunk"))
-        await connection.execute(sa.text("delete from mem_page"))
-        if database_url.startswith("sqlite"):
-            await connection.execute(sa.text("delete from chunk_fts"))
-    yield
 
 
 async def _workspace() -> UUID:
@@ -272,7 +262,7 @@ async def _search(memory: MemoryStore, member_id: UUID | None, blob_root: Path, 
 
 
 async def test_folder_syncs_a_page_body_to_blob_no_chunk_until_indexed(
-    clean: None, database_url: str, tmp_path: Path
+    db: None, database_url: str, tmp_path: Path
 ) -> None:
     workspace_id = await _workspace()
     root = tmp_path / "src"
@@ -301,7 +291,7 @@ async def test_folder_syncs_a_page_body_to_blob_no_chunk_until_indexed(
 
 
 async def test_folder_sync_preserves_bare_carriage_returns(
-    clean: None, database_url: str, tmp_path: Path
+    db: None, database_url: str, tmp_path: Path
 ) -> None:
     workspace_id = await _workspace()
     root = tmp_path / "src"
@@ -439,7 +429,7 @@ async def test_boot_registered_folder_sources_are_shared(db: None, tmp_path: Pat
 
 
 async def test_synced_page_content_is_found_via_memory_search(
-    clean: None, database_url: str, tmp_path: Path
+    db: None, database_url: str, tmp_path: Path
 ) -> None:
     workspace_id = await _workspace()
     root = tmp_path / "src"
@@ -458,7 +448,7 @@ async def test_synced_page_content_is_found_via_memory_search(
 
 
 async def test_unchanged_doc_resync_does_not_reindex_or_duplicate(
-    clean: None, database_url: str, tmp_path: Path
+    db: None, database_url: str, tmp_path: Path
 ) -> None:
     workspace_id = await _workspace()
     root = tmp_path / "src"
@@ -481,7 +471,7 @@ async def test_unchanged_doc_resync_does_not_reindex_or_duplicate(
 
 
 async def test_changed_doc_resync_marks_due_and_reindexes(
-    clean: None, database_url: str, tmp_path: Path
+    db: None, database_url: str, tmp_path: Path
 ) -> None:
     workspace_id = await _workspace()
     root = tmp_path / "src"
@@ -508,7 +498,7 @@ async def test_changed_doc_resync_marks_due_and_reindexes(
 
 
 async def test_edited_page_leaves_no_stale_chunk_in_search_sources(
-    clean: None, database_url: str, tmp_path: Path
+    db: None, database_url: str, tmp_path: Path
 ) -> None:
     """Re-indexing an edited page prunes the old body's chunks: a term unique to the prior body no
     longer surfaces through `search_sources`, while the new body's term does. Without the prune the
@@ -540,7 +530,7 @@ async def test_edited_page_leaves_no_stale_chunk_in_search_sources(
 
 
 async def test_removed_file_tombstones_page_and_index_drops_its_chunks(
-    clean: None, database_url: str, tmp_path: Path
+    db: None, database_url: str, tmp_path: Path
 ) -> None:
     workspace_id = await _workspace()
     root = tmp_path / "src"
@@ -569,7 +559,7 @@ async def test_removed_file_tombstones_page_and_index_drops_its_chunks(
 
 
 async def test_page_change_runner_cursor_resumes_across_ticks(
-    clean: None, database_url: str, tmp_path: Path
+    db: None, database_url: str, tmp_path: Path
 ) -> None:
     """The core page-change runner rides each consumer's own cursor, so a later tick re-embeds
     nothing already indexed and picks up only the pages changed since — the embed call count is the
@@ -749,7 +739,7 @@ async def test_page_change_drive_skips_a_workspace_unchanged_since_its_cursor(
 
 
 async def test_shared_page_scoping_excludes_a_member_only_search(
-    clean: None, database_url: str, tmp_path: Path
+    db: None, database_url: str, tmp_path: Path
 ) -> None:
     workspace_id = await _workspace()
     root = tmp_path / "src"
@@ -775,7 +765,7 @@ async def test_shared_page_scoping_excludes_a_member_only_search(
 
 
 async def test_member_scoped_page_is_invisible_to_another_member(
-    clean: None, database_url: str, tmp_path: Path
+    db: None, database_url: str, tmp_path: Path
 ) -> None:
     workspace_id = await _workspace()
     alice, bob = uuid4(), uuid4()
@@ -840,7 +830,7 @@ async def test_member_scoped_page_is_invisible_to_another_member(
 
 
 async def test_a_failing_source_is_isolated_and_released(
-    clean: None, database_url: str, tmp_path: Path
+    db: None, database_url: str, tmp_path: Path
 ) -> None:
     """One bad source must not wedge the run: its fetch raises, but the sibling still syncs and the
     failing source is released (claim cleared) and backed off (next_sync_at advanced) rather than

@@ -6,10 +6,8 @@ job's context. The embed client is a real dependency counted (never asserted) to
 overlapping runs embed each row once."""
 
 import asyncio
-from collections.abc import AsyncIterator
 from uuid import UUID, uuid4
 
-import pytest
 import sqlalchemy as sa
 import ufo_ext_memory.manifest as memory_manifest
 from ufo_ext_embed_openai import EMBED_DIM
@@ -61,15 +59,6 @@ class CountingEmbed:
         return tuple(self._vector for _ in texts)
 
 
-@pytest.fixture
-async def clean(db: None, database_url: str) -> AsyncIterator[None]:
-    async with workspace_tx() as connection:
-        await connection.execute(sa.text("delete from chunk"))
-        if database_url.startswith("sqlite"):
-            await connection.execute(sa.text("delete from chunk_fts"))
-    yield
-
-
 async def _workspace() -> UUID:
     workspace_id = uuid4()
     async with workspace_tx() as connection:
@@ -97,7 +86,7 @@ async def _chunk_count() -> int:
         return (await connection.execute(sa.text("select count(*) from chunk"))).scalar_one()
 
 
-async def test_index_job_derives_chunks_and_stamps_digest(clean: None) -> None:
+async def test_index_job_derives_chunks_and_stamps_digest(db: None) -> None:
     workspace_id = await _workspace()
     store, indexer = _wire(StubEmbed(vec((0, 1.0))), workspace_id)
     await store.commit(MemoryWrite(subject="shared", body="the capital of france is paris"))
@@ -116,7 +105,7 @@ async def test_index_job_derives_chunks_and_stamps_digest(clean: None) -> None:
     assert await _chunk_count() == derived
 
 
-async def test_overlapping_index_runs_embed_each_row_once(clean: None) -> None:
+async def test_overlapping_index_runs_embed_each_row_once(db: None) -> None:
     workspace_id = await _workspace()
     embed = CountingEmbed(vec((0, 1.0)))
     store, _ = _wire(embed, workspace_id)
@@ -148,7 +137,7 @@ async def test_overlapping_index_runs_embed_each_row_once(clean: None) -> None:
     assert pending == 0
 
 
-async def test_committed_fact_recalls_after_indexing(clean: None) -> None:
+async def test_committed_fact_recalls_after_indexing(db: None) -> None:
     workspace_id = await _workspace()
     probe = vec((4, 1.0))
     store, indexer = _wire(StubEmbed(probe), workspace_id)
@@ -161,7 +150,7 @@ async def test_committed_fact_recalls_after_indexing(clean: None) -> None:
     assert "zoltar" in hits[0].body
 
 
-async def test_member_memory_is_invisible_to_another_member(clean: None) -> None:
+async def test_member_memory_is_invisible_to_another_member(db: None) -> None:
     workspace_id = await _workspace()
     alice, bob = uuid4(), uuid4()
     probe = vec((5, 1.0))
@@ -178,7 +167,7 @@ async def test_member_memory_is_invisible_to_another_member(clean: None) -> None
 
 
 async def test_memory_index_job_fires_bound_only_on_workspaces_with_unindexed_items(
-    clean: None,
+    db: None,
 ) -> None:
     """The memory-index job runs through the real dispatch: its candidate names only the workspaces
     holding an un-indexed memory_item (read through the RLS-bypass path, never `ws_current`, so no

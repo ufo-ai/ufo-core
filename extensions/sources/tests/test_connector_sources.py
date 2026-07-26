@@ -581,11 +581,6 @@ async def test_asana_source_syncs_through_the_driver_into_recallable_memory(
     connector's backend (records pulled through a mock auth-proxy transport, no token read), and
     recall the landed page through memory — the both-ends proof for a connector source."""
     workspace_id = await _workspace()
-    async with workspace_tx() as connection:
-        await connection.execute(sa.text("delete from chunk"))
-        await connection.execute(sa.text("delete from mem_page"))
-        if database_url.startswith("sqlite"):
-            await connection.execute(sa.text("delete from chunk_fts"))
 
     context = context_for("sources", frozenset())
     with ws(workspace_id):

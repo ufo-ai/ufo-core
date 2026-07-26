@@ -9,6 +9,7 @@ import sqlalchemy as sa
 from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
+from ufo_testsupport.tables import reset_workspace_data
 
 from ufo.db import MIGRATIONS_DIR, apply_migrations, workspace_tx
 from ufo.ext.loader import migration_locations
@@ -18,6 +19,83 @@ from ufo.schema import tables
 def test_migrations_are_idempotent(database_url: str) -> None:
     apply_migrations(database_url)
     apply_migrations(database_url)
+
+
+async def test_reset_wipes_every_application_table_and_keeps_the_stamp(
+    db: None, database_url: str
+) -> None:
+    """`reset_workspace_data`'s own contract, asserted directly: a core row, an extension row, and
+    an index chunk all vanish; the alembic stamp survives; and on sqlite the FTS5 virtual table is
+    emptied through its own surface, leaving the index writable afterwards."""
+    workspace_id = uuid4()
+    sqlite = database_url.startswith("sqlite")
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.workspace).values(
+                id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
+            )
+        )
+        await connection.execute(
+            sa.text(
+                "insert into memory_item "
+                "(id, workspace_id, subject, body, item_class, memory_kind, confidence, "
+                "created_at, updated_at) values "
+                "(:id, :workspace_id, 'shared', 'probe', 'fact', 'fact', 5, :now, :now)"
+            ),
+            {"id": uuid4().hex, "workspace_id": workspace_id.hex, "now": datetime.now(UTC)},
+        )
+        if sqlite:
+            await connection.execute(
+                sa.text(
+                    "insert into chunk (chunk_digest, owner_kind, owner_id, subject, ordinal, "
+                    "text) values ('sha256:probe', 'memory', :owner, 'shared', 0, 'probe row')"
+                ),
+                {"owner": uuid4().hex},
+            )
+            await connection.execute(
+                sa.text(
+                    "insert into chunk_fts (chunk_digest, text) "
+                    "values ('sha256:probe', 'probe row')"
+                )
+            )
+        else:
+            await connection.execute(
+                sa.text(
+                    "insert into chunk (workspace_id, chunk_digest, owner_kind, owner_id, "
+                    "subject, ordinal, text) values (:workspace_id, 'sha256:probe', 'memory', "
+                    ":owner, 'shared', 0, 'probe row')"
+                ),
+                {"workspace_id": str(workspace_id), "owner": str(uuid4())},
+            )
+
+    async with workspace_tx() as connection:
+        await reset_workspace_data(connection)
+
+    async with workspace_tx() as connection:
+        for table in ("workspace", "memory_item", "chunk"):
+            count = (
+                await connection.execute(sa.text(f"select count(*) from {table}"))
+            ).scalar_one()
+            assert count == 0, table
+        stamped = (
+            await connection.execute(sa.text("select count(*) from alembic_version"))
+        ).scalar_one()
+        assert stamped >= 1
+        if sqlite:
+            fts = (await connection.execute(sa.text("select count(*) from chunk_fts"))).scalar_one()
+            assert fts == 0
+            await connection.execute(
+                sa.text(
+                    "insert into chunk_fts (chunk_digest, text) "
+                    "values ('sha256:after', 'still writable')"
+                )
+            )
+            matched = (
+                await connection.execute(
+                    sa.text("select count(*) from chunk_fts where chunk_fts match 'writable'")
+                )
+            ).scalar_one()
+            assert matched == 1
 
 
 DUPLICATE_PROBE = """\"\"\"duplicate revision probe\"\"\"

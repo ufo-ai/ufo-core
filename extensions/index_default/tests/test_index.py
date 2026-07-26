@@ -27,20 +27,16 @@ def vec(*axes: tuple[int, float]) -> tuple[float, ...]:
 
 
 @pytest.fixture
-async def clean_chunk(db: None, database_url: str) -> AsyncIterator[None]:
+async def ambient_workspace(db: None) -> AsyncIterator[None]:
     token = current_workspace.set(WORKSPACE)
     try:
-        async with workspace_tx() as connection:
-            await connection.execute(sa.text("delete from chunk"))
-            if database_url.startswith("sqlite"):
-                await connection.execute(sa.text("delete from chunk_fts"))
         yield
     finally:
         current_workspace.reset(token)
 
 
 async def test_upsert_lexical_and_vector_return_ordered_hits(
-    clean_chunk: None, database_url: str
+    ambient_workspace: None, database_url: str
 ) -> None:
     backend = DefaultIndex(transaction=workspace_tx)
     e0 = vec((0, 1.0))
@@ -77,7 +73,7 @@ LITERAL_MISS_QUERIES = ('vel"vet', "NEAR(wild rumpus)", "wild*", "^wild", "title
 
 
 async def test_lexical_recalls_through_punctuated_queries(
-    clean_chunk: None, database_url: str
+    ambient_workspace: None, database_url: str
 ) -> None:
     backend = DefaultIndex(transaction=workspace_tx)
     await backend.upsert(
@@ -102,7 +98,7 @@ async def test_lexical_recalls_through_punctuated_queries(
         assert await backend.lexical(query, frozenset({SUBJECT}), "memory_item", 10) == (), query
 
 
-async def test_foreign_subject_is_excluded(clean_chunk: None, database_url: str) -> None:
+async def test_foreign_subject_is_excluded(ambient_workspace: None, database_url: str) -> None:
     backend = DefaultIndex(transaction=workspace_tx)
     await backend.upsert(
         (
@@ -117,7 +113,7 @@ async def test_foreign_subject_is_excluded(clean_chunk: None, database_url: str)
 
 
 async def test_vector_returns_a_small_owner_kinds_rows_under_a_dominant_corpus(
-    clean_chunk: None, database_url: str
+    ambient_workspace: None, database_url: str
 ) -> None:
     """The filtered vector leg returns exactly the best rows within the filter when the corpus is
     dominated by another owner kind's vectors sitting nearest the query — the shape where an
@@ -150,7 +146,7 @@ async def test_vector_returns_a_small_owner_kinds_rows_under_a_dominant_corpus(
     assert {hit.chunk_digest for hit in hits} == {"target-0", "target-1"}
 
 
-async def test_delete_removes_only_its_scope(clean_chunk: None, database_url: str) -> None:
+async def test_delete_removes_only_its_scope(ambient_workspace: None, database_url: str) -> None:
     backend = DefaultIndex(transaction=workspace_tx)
     await backend.upsert(
         (
@@ -166,7 +162,7 @@ async def test_delete_removes_only_its_scope(clean_chunk: None, database_url: st
 
 
 async def test_prune_drops_the_scopes_chunks_outside_the_keep_set(
-    clean_chunk: None, database_url: str
+    ambient_workspace: None, database_url: str
 ) -> None:
     backend = DefaultIndex(transaction=workspace_tx)
     await backend.upsert(
@@ -184,7 +180,7 @@ async def test_prune_drops_the_scopes_chunks_outside_the_keep_set(
 
 
 async def test_prune_with_an_empty_keep_set_drops_the_whole_scope(
-    clean_chunk: None, database_url: str
+    ambient_workspace: None, database_url: str
 ) -> None:
     backend = DefaultIndex(transaction=workspace_tx)
     await backend.upsert(
