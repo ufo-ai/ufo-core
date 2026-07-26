@@ -172,6 +172,10 @@ resource "aws_secretsmanager_secret_version" "api_keys" {
     "slack-client-id"                        = ""
     "slack-client-secret"                    = ""
     "slack-signing-secret"                   = ""
+    "github-app-id"                          = ""
+    "github-app-client-id"                   = ""
+    "github-app-client-secret"               = ""
+    "github-app-private-key"                 = ""
   })
 
   lifecycle {

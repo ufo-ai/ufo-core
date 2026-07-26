@@ -22,7 +22,6 @@ from base64 import urlsafe_b64encode
 from dataclasses import dataclass, field
 from datetime import datetime
 from json import dumps
-from pathlib import Path
 from uuid import UUID
 
 import httpx
@@ -110,10 +109,13 @@ class GitHubAppTokens:
 
 def app_tokens(installation_slot: str) -> GitHubAppTokens:
     """Read the deploy's App registration loud: a configured id with no readable key is a deploy
-    that would answer every git request with the member's fallback token and no signal why."""
+    that would answer every git request with the member's fallback token and no signal why. The key
+    is the PEM itself, not a path — one secret value the deploy sets beside every other, rather than
+    a file the process must also have mounted."""
     app_id = os.environ["GITHUB_APP_ID"]
-    private_key_path = os.environ["GITHUB_APP_PRIVATE_KEY_PATH"]
-    key = serialization.load_pem_private_key(Path(private_key_path).read_bytes(), password=None)
+    key = serialization.load_pem_private_key(
+        os.environ["GITHUB_APP_PRIVATE_KEY"].encode(), password=None
+    )
     if not isinstance(key, rsa.RSAPrivateKey):
-        raise RuntimeError(f"github app private key at {private_key_path} is not an RSA key")
+        raise RuntimeError("GITHUB_APP_PRIVATE_KEY is not an RSA private key")
     return GitHubAppTokens(app_id=app_id, private_key=key, installation_slot=installation_slot)

@@ -82,6 +82,14 @@ spec:
     - {secretKey: SLACK_CLIENT_ID, remoteRef: {key: ${secret_api_keys}, property: slack-client-id}}
     - {secretKey: SLACK_CLIENT_SECRET, remoteRef: {key: ${secret_api_keys}, property: slack-client-secret}}
     - {secretKey: SLACK_SIGNING_SECRET, remoteRef: {key: ${secret_api_keys}, property: slack-signing-secret}}
+    # This deploy's GitHub App: id and client id name it, the client secret completes the install
+    # OAuth exchange, and the PEM signs the JWT that mints an installation token per turn. All four
+    # or none — serve fails loud on a half-set registration. The PEM is the value, not a path, so it
+    # rides the same secret projection as every other credential and needs no mounted file.
+    - {secretKey: GITHUB_APP_ID, remoteRef: {key: ${secret_api_keys}, property: github-app-id}}
+    - {secretKey: GITHUB_APP_CLIENT_ID, remoteRef: {key: ${secret_api_keys}, property: github-app-client-id}}
+    - {secretKey: GITHUB_APP_CLIENT_SECRET, remoteRef: {key: ${secret_api_keys}, property: github-app-client-secret}}
+    - {secretKey: GITHUB_APP_PRIVATE_KEY, remoteRef: {key: ${secret_api_keys}, property: github-app-private-key}}
     # Serve trusts the proxy certificate; only the proxy receives the key.
     - {secretKey: UFO_EGRESS_CA_CERT, remoteRef: {key: ${secret_platform}, property: egress-ca-cert}}
     - {secretKey: UFO_TOKEN_SECRET, remoteRef: {key: ${secret_platform}, property: ufo-token-secret}}
