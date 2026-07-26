@@ -87,7 +87,7 @@ variable "node_desired_size" {
 variable "cluster_admin_principal_arns" {
   type        = list(string)
   default     = []
-  description = "IAM principal ARNs granted EKS cluster-admin via access entries (e.g. the CI deploy role and the account root for local kubectl)."
+  description = "IAM principal ARNs granted EKS cluster-admin via access entries. One entry matches one exact principal and never a role assumed through it, so every principal that needs kubectl — the CI deploy role, an operator's Identity Center role — is named here in its own right."
 }
 
 # ---- RDS (PostgreSQL 16) ----

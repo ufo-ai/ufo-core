@@ -1,3 +1,14 @@
+# The Identity Center admin permission set. Looked up rather than written down because the role
+# carries a generated suffix that changes whenever the permission set is re-provisioned. The ARNs come
+# back carrying the reserved SSO path, which is what an access entry wants: it resolves the principal
+# to a real IAM role and stores its roleID. (Stripping that path is an aws-auth ConfigMap rule and
+# does not apply here — a stripped ARN names no role at all.) Empty in an account with no such
+# permission set, which simply grants no entry.
+data "aws_iam_roles" "sso_admin" {
+  name_regex  = "AWSReservedSSO_AdministratorAccess_.*"
+  path_prefix = "/aws-reserved/sso.amazonaws.com/"
+}
+
 module "platform" {
   source = "../../modules/platform"
 
@@ -10,11 +21,16 @@ module "platform" {
   ses_sender = var.ses_sender
 
   # Static cluster-admins (applier-independent — see eks.tf for why creator-perms is off): the GitHub
-  # Actions deploy role AND the account root (root keeps kubectl access; EKS access entries accept it).
-  cluster_admin_principal_arns = [
-    "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/github-deploy",
-    "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root",
-  ]
+  # Actions deploy role, the account root, and the Identity Center admin permission set. An entry for
+  # the root principal does NOT cover a role assumed through it, so without the SSO role every human
+  # kubectl is rejected and cluster access has to be laundered through the deploy role.
+  cluster_admin_principal_arns = concat(
+    [
+      "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/github-deploy",
+      "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root",
+    ],
+    tolist(data.aws_iam_roles.sso_admin.arns),
+  )
 
   # Cost-trimmed, single-AZ data stores for a testing instance.
   single_nat_gateway        = true

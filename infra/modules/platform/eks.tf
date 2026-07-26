@@ -11,8 +11,9 @@ module "eks" {
 
   # Cluster admin must NOT depend on who runs `terraform apply` — the creator-perms shortcut binds an
   # access entry to the caller's identity, so root (local) and the CI deploy role would churn/collide
-  # over it. Instead disable it and enumerate admins explicitly (applier-independent). GitOps applies
-  # run as the deploy role; for local cluster ops, assume that role.
+  # over it. Instead disable it and enumerate admins explicitly (applier-independent). Every principal
+  # that needs kubectl is named in cluster_admin_principal_arns: an access entry matches one exact
+  # principal, so a human's Identity Center role is listed there in its own right.
   enable_cluster_creator_admin_permissions = false
 
   access_entries = {
