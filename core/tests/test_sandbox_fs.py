@@ -128,7 +128,7 @@ def test_s3fs_command_construction() -> None:
     assert command == (
         "s3fs ufo-blobs:/conversations/c1/workspace /workspace "
         "-o ecs -o url=https://s3.example:9000 -o endpoint=us-east-1 "
-        "-o compat_dir -o allow_other -o uid=1000 -o gid=1000"
+        "-o compat_dir -o allow_other -o hard_remove -o uid=1000 -o gid=1000"
     )
 
 
@@ -137,7 +137,8 @@ def test_s3fs_command_adds_path_style_for_minio() -> None:
         BUCKET, "conversations/c1/workspace", "/workspace", "https://minio:9000", "us-east-1", True
     )
     assert command.endswith(
-        "-o compat_dir -o allow_other -o uid=1000 -o gid=1000 -o use_path_request_style"
+        "-o compat_dir -o allow_other -o hard_remove -o uid=1000 -o gid=1000 "
+        "-o use_path_request_style"
     )
 
 

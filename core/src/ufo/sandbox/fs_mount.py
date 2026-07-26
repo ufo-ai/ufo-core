@@ -33,6 +33,12 @@ def s3fs_command(
     # allow_other lets a user other than the mounting agent (uid 1000) reach the mount — the file
     # tools' helper stats and serves paths under /workspace, so without it those ops get EACCES.
     # Requires `user_allow_other` in /etc/fuse.conf, set in the mount prepare step.
+    # hard_remove really removes a file unlinked while still open — its open handles are served by
+    # pseudo fd (the image's pinned s3fs) instead of the default's server-side copy to a
+    # `.fuse_hidden*` object per unlink, which litters the workspace prefix and doubles the S3
+    # traffic of extract/build workloads. Writes made through a handle after the unlink are
+    # discarded at close — POSIX for a zero-link file, and no less durable than the default, whose
+    # hidden object libfuse likewise deletes at the last close.
     # The command runs in a shell at a privileged mount seam, so every interpolated value is
     # shell-quoted even though the inputs are framework-controlled (bucket/region/url from config,
     # prefix from ids).
@@ -42,6 +48,7 @@ def s3fs_command(
         f"-o endpoint={shlex.quote(region)}",
         "-o compat_dir",
         "-o allow_other",
+        "-o hard_remove",
         f"-o uid={SANDBOX_UID}",
         f"-o gid={SANDBOX_GID}",
     ]

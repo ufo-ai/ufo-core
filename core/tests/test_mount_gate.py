@@ -127,6 +127,30 @@ def test_mount_gate_recipe_wires_the_expiring_token_proxy_and_root_mount_steps()
     assert EXERCISE.startswith("set -ex")
 
 
+def test_mount_gate_exercise_writes_to_a_file_unlinked_while_open() -> None:
+    """The write/fsync/close after os.remove are the file-handle requests libfuse delivers with a
+    null path — the case that segfaulted every packaged s3fs (s3fs-fuse#2903) — and the trailing
+    read-back proves the daemon survived them. They only flow because the recipe mounts with
+    `hard_remove` (asserted here against the gate's own mount command): without it the unlink hides
+    the open file as a `.fuse_hidden*` copy and the probe exercises nothing."""
+    recipe = _mount_gate_recipe(
+        bucket="bucket",
+        region="us-east-1",
+        proxy_url="https://proxy.test/",
+        ca_cert="ca-pem",
+        token_secret="secret",
+        conversation=uuid4(),
+        now=NOW,
+    )
+    assert "-o hard_remove" in recipe.root_commands[2]
+    assert "os.remove('unlinked.bin')" in EXERCISE
+    unlink = EXERCISE.index("os.remove")
+    assert EXERCISE.index("os.write(fd, b'b'", unlink) > unlink
+    assert EXERCISE.index("os.fsync(fd)", unlink) > unlink
+    assert EXERCISE.index("os.close(fd)", unlink) > unlink
+    assert EXERCISE.index("alive.txt") > unlink
+
+
 def test_mount_gate_recipe_requires_the_proxy_ca() -> None:
     with pytest.raises(RuntimeError, match=EGRESS_CA_CERT_ENV):
         _mount_gate_recipe(

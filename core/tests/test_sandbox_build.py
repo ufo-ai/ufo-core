@@ -13,6 +13,10 @@ from sandbox.build_template import (
     NPM_PACKAGES,
     PIP_PACKAGES,
     RUNTIME_USER,
+    S3FS_BUILD_COMMAND,
+    S3FS_BUILD_TOOLCHAIN,
+    S3FS_COMMIT,
+    S3FS_VERSION_MARKER,
     SANDBOX_ENV,
     SANDBOX_SCRIPTS,
     SANDBOX_TEMPLATE_READY_COMMAND,
@@ -27,7 +31,6 @@ EXPECTED_APT = (
     "curl",
     "jq",
     "ripgrep",
-    "s3fs",
     "util-linux",
     "poppler-utils",
     "chromium",
@@ -91,6 +94,10 @@ def test_no_kubernetes_toolchain_baked() -> None:
 
 
 def test_ready_probe_checks_every_baked_entrypoint() -> None:
+    """`set -e` is what makes the probe a gate: a multi-line script's exit status is otherwise the
+    last command's alone, so every earlier check could fail while the template still reports
+    READY."""
+    assert SANDBOX_TEMPLATE_READY_COMMAND.startswith("set -ex\n")
     for tool in (
         "python3",
         "node",
@@ -98,15 +105,21 @@ def test_ready_probe_checks_every_baked_entrypoint() -> None:
         "sbxfs",
         "sbxcred",
         "rg",
-        "s3fs",
-        "runuser",
         "pdftotext",
         "pdftoppm",
         "soffice",
         "gh",
     ):
         assert f"command -v {tool}" in SANDBOX_TEMPLATE_READY_COMMAND
+    assert "test -x /usr/sbin/runuser" in SANDBOX_TEMPLATE_READY_COMMAND
     assert "chromium" in SANDBOX_TEMPLATE_READY_COMMAND
+
+
+def test_ready_probe_pins_the_s3fs_build() -> None:
+    """`command -v` would pass on a distro s3fs — every packaged build segfaults on the null path
+    libfuse hands file-handle requests for unlinked-while-open files, so the probe demands the
+    pinned commit's version string at every sandbox boot."""
+    assert f"s3fs --version | grep -q {S3FS_VERSION_MARKER}" in SANDBOX_TEMPLATE_READY_COMMAND
 
 
 def test_scripts_include_the_credential_relay() -> None:
@@ -158,4 +171,22 @@ def test_gh_installs_from_the_official_cli_repo() -> None:
 def test_gh_install_is_covered_by_the_drift_digest(monkeypatch) -> None:
     before = build_definition_digest()
     monkeypatch.setattr(build_template, "GH_INSTALL_COMMAND", "changed")
+    assert build_definition_digest() != before
+
+
+def test_s3fs_builds_from_the_pinned_null_path_fix_commit() -> None:
+    """No packaged s3fs survives the null-path file-handle requests libfuse delivers for files
+    unlinked while open (s3fs-fuse#2903 — the segfault that dropped a live /workspace mid-turn);
+    the image builds the first upstream commit that serves them by pseudo fd, and the marker the
+    ready probe greps is that commit's version string."""
+    assert S3FS_COMMIT in S3FS_BUILD_COMMAND
+    assert "github.com/s3fs-fuse/s3fs-fuse" in S3FS_BUILD_COMMAND
+    assert S3FS_VERSION_MARKER == f"commit:{S3FS_COMMIT[:7]}"
+    assert f"apt-get purge -y {S3FS_BUILD_TOOLCHAIN} && apt-get autoremove -y" in S3FS_BUILD_COMMAND
+    assert S3FS_BUILD_COMMAND in pod_dockerfile()
+
+
+def test_s3fs_build_is_covered_by_the_drift_digest(monkeypatch) -> None:
+    before = build_definition_digest()
+    monkeypatch.setattr(build_template, "S3FS_BUILD_COMMAND", "changed")
     assert build_definition_digest() != before

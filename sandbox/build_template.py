@@ -62,8 +62,7 @@ READY_VERIFY_TIMEOUT_SECONDS = 120
 # to source — the drift gate that keeps publishing opt-in without letting a stale template pass.
 BUILD_DIGEST_PATH = f"{UFO_DIR}/template-digest"
 
-# s3fs → mounts the conversation's per-thread sandbox-fs prefix at the workspace (the follow-on
-# mount unit); poppler-utils → pdftotext/pdftoppm/pdfimages (pdf + media skills); chromium → the
+# poppler-utils → pdftotext/pdftoppm/pdfimages (pdf + media skills); chromium → the
 # headless browser skills; libreoffice-{writer,calc,impress} → soffice for the office convert/recalc
 # paths; pandoc → docx↔markdown text extraction; qpdf → pdf CLI merge/split/encrypt/repair;
 # tesseract-ocr → the pytesseract OCR path for scanned PDFs.
@@ -74,7 +73,6 @@ APT_PACKAGES = (
     "curl",
     "jq",
     "ripgrep",
-    "s3fs",
     "util-linux",
     "poppler-utils",
     "chromium",
@@ -84,6 +82,32 @@ APT_PACKAGES = (
     "pandoc",
     "qpdf",
     "tesseract-ocr",
+)
+# s3fs mounts the conversation's workspace prefix at /workspace (the fs_mount recipe). Built from
+# source at a pinned upstream commit: every packaged build (distro 1.95, upstream v1.97) dies with
+# SIGSEGV when libfuse hands a file-handle request a null path — a file unlinked or renamed over
+# while still open (s3fs-fuse#2903) — dropping the whole mount mid-turn. The pin is the first
+# commit that serves those requests by pseudo fd (s3fs-fuse#2908). Runtime libraries install as
+# named packages so the same-layer toolchain purge cannot sweep them; the version grep fails the
+# build if the binary on PATH is not the pinned one.
+S3FS_COMMIT = "8fe5ecaca26a2a3bac65bc9666b9f84f13ca7593"
+S3FS_VERSION_MARKER = f"commit:{S3FS_COMMIT[:7]}"
+S3FS_BUILD_TOOLCHAIN = (
+    "build-essential automake autoconf libtool pkg-config "
+    "libfuse3-dev libcurl4-openssl-dev libxml2-dev libssl-dev"
+)
+S3FS_BUILD_COMMAND = (
+    "apt-get update && apt-get install -y --no-install-recommends "
+    f"fuse3 libfuse3-4 libxml2 libssl3t64 media-types {S3FS_BUILD_TOOLCHAIN} && "
+    "git init /tmp/s3fs-fuse && "
+    "git -C /tmp/s3fs-fuse fetch --depth 1 https://github.com/s3fs-fuse/s3fs-fuse.git "
+    f"{S3FS_COMMIT} && "
+    "git -C /tmp/s3fs-fuse checkout FETCH_HEAD && "
+    "cd /tmp/s3fs-fuse && ./autogen.sh && ./configure --prefix=/usr/local --with-openssl && "
+    'make -j"$(nproc)" && make install && cd / && rm -rf /tmp/s3fs-fuse && '
+    f"apt-get purge -y {S3FS_BUILD_TOOLCHAIN} && "
+    "apt-get autoremove -y && rm -rf /var/lib/apt/lists/* && "
+    f"s3fs --version | grep -q {S3FS_VERSION_MARKER}"
 )
 # gh is the sandboxed GitHub CLI behind the grant-sentinel GH_TOKEN (the egress proxy forwards its
 # sentinel-carrying requests through the connector broker). It installs from GitHub's own apt repo —
@@ -136,21 +160,22 @@ NPM_PACKAGES = (
 # every exec's envs, since e2b commands do not inherit the template ENV.
 # The scripts baked into the image, with a version bumped on any content change so the digest moves.
 SANDBOX_SCRIPTS: tuple[tuple[str, int], ...] = (("sbx", 2), ("sbxfs", 2), ("sbxcred", 1))
-SANDBOX_TEMPLATE_READY_COMMAND = """
+SANDBOX_TEMPLATE_READY_COMMAND = f"""
+set -ex
 command -v python3 >/dev/null
 command -v node >/dev/null
 command -v sbx >/dev/null
 command -v sbxfs >/dev/null
 command -v sbxcred >/dev/null
 command -v rg >/dev/null
-command -v s3fs >/dev/null
-command -v runuser >/dev/null
+s3fs --version | grep -q {S3FS_VERSION_MARKER}
+test -x /usr/sbin/runuser
 command -v pdftotext >/dev/null
 command -v pdftoppm >/dev/null
 command -v soffice >/dev/null
 command -v gh >/dev/null
-browser="$(command -v chromium || command -v chromium-browser)"
-browser="${browser:-$(command -v google-chrome || command -v google-chrome-stable)}"
+browser="$(command -v chromium || command -v chromium-browser \\
+  || command -v google-chrome || command -v google-chrome-stable || true)"
 test -n "$browser"
 """.strip()
 
@@ -166,6 +191,7 @@ def build_definition_digest() -> str:
         "start": START_COMMAND,
         "ready": SANDBOX_TEMPLATE_READY_COMMAND,
         "apt": list(APT_PACKAGES),
+        "s3fs": S3FS_BUILD_COMMAND,
         "gh": GH_INSTALL_COMMAND,
         "pip": list(PIP_PACKAGES),
         "npm": list(NPM_PACKAGES),
@@ -191,6 +217,7 @@ def apply_layers(builder: object) -> object:
         + " && rm -rf /var/lib/apt/lists/*"
     )
     builder.run_cmd("apt-get remove -y sudo || true; rm -rf /etc/sudoers /etc/sudoers.d")
+    builder.run_cmd(S3FS_BUILD_COMMAND)
     builder.run_cmd(GH_INSTALL_COMMAND)
     builder.run_cmd("python3 -m pip install --no-cache-dir " + " ".join(PIP_PACKAGES))
     builder.run_cmd(

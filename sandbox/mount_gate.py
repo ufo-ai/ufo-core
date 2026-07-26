@@ -3,9 +3,11 @@
 
 Boots a sandbox from the published template, issues a short-lived operator probe token, brings
 /workspace up through the production credential endpoint and carrier recipe, then exercises the
-mount the way an agent does — create, list, read back, chmod, delete — and proves the health probe
-passes. Any failure exits non-zero, so a deploy onto a broken storage chain (template FUSE/s3fs,
-credential endpoint, IAM trust or policy, bucket) goes red in the pipeline. The workspace prefix
+mount the way an agent does — create, list, read back, chmod, delete, and the write/fsync/close of
+a file unlinked while open, the file-handle requests libfuse delivers with no path (which
+segfaulted every packaged s3fs, s3fs-fuse#2903) — and proves the health probe passes. Any failure
+exits non-zero, so a deploy onto a broken storage chain (template FUSE/s3fs, credential endpoint,
+IAM trust or policy, bucket) goes red in the pipeline. The workspace prefix
 is a throwaway conversation id, emptied again by the exercise's own delete; the sandbox is killed
 either way."""
 
@@ -53,6 +55,18 @@ ls -l gate.txt
 [ "$(cat gate.txt)" = gate-probe ]
 chmod 644 gate.txt
 rm gate.txt
+python3 -c "
+import os
+fd = os.open('unlinked.bin', os.O_CREAT | os.O_RDWR, 0o644)
+os.write(fd, b'a' * 65536)
+os.remove('unlinked.bin')
+os.write(fd, b'b' * 65536)
+os.fsync(fd)
+os.close(fd)
+"
+echo gate-probe > alive.txt
+[ "$(cat alive.txt)" = gate-probe ]
+rm alive.txt
 """.strip()
 
 
