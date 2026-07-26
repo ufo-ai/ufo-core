@@ -54,69 +54,34 @@ mis-scopes retrieval; under an audience function computed from roots it would mi
 fact derived from those pages. §2 names it and closes it.
 
 **In flight, assumed:** **#645** — agent as the operational security boundary; everything scoped
-`(workspace, agent, subject)`; a new agent starts empty; copying is explicit. **#624** — the
-portal as read-projections; every mutation a chat turn. **#613** — typed `links` on
-`object_get`; `memory_search` returns `ObjectRef`s; "search finds, `object_get` opens."
+`(workspace, agent, subject)`; a new agent starts empty; copying is explicit. **#613** — typed
+`links` on `object_get`; `memory_search` returns `ObjectRef`s; "search finds, `object_get`
+opens."
 
 **Adjacent, not here:** RFC 0016 owns the self-improvement loop, its gate, and the governance
 spine that gives a behavior change an approver and an undo. This RFC gates no act and records no
 decision — knowledge flows by computation, so it needs neither.
 
-## What the field ships
+## Prior art
 
-Verified July 2026; full sourcing in PR #684's research record.
+Full sourcing in PR #684's research record; the live engagements are in §Alternatives.
 
 - **Nobody merges knowledge semantically.** Production conflict handling is compare-and-swap
-  prevention (Anthropic's `content_sha256`, Letta's `memory_replace`), last-write-wins with
-  documented lost updates (`memory_rethink`), regenerate-and-adopt (Anthropic Dreams and OpenAI
-  Dreaming both write a *new* store from an immutable input; a human adopts or discards
-  wholesale), temporal invalidation that keeps both sides (Graphiti `invalid_at`), and
-  partition-as-refusal (Graphiti: no cross-namespace merge, by doc). The one literal three-way
-  merge is Letta's git worktrees — textual, own-subagents only.
+  prevention, last-write-wins with documented lost updates, regenerate-and-adopt (Dreams,
+  Dreaming — a new store from an immutable input, adopted wholesale), temporal invalidation that
+  keeps both sides (Graphiti), and partition-as-refusal. The one literal three-way merge is
+  Letta's git worktrees — textual, own-subagents only.
 - **Query-time ACL enforcement is proven — on documents only.** Glean enforces the source's
   permissions per reader, per search, and never touches derived memory, because a derived item
   has no ACL to enforce. Typed provenance is the missing half: it *is* the derived fact's ACL,
   and it makes the audience computable at read. That is the whole bet of this RFC — an existing,
   validated enterprise-search mechanism extended one layer down, to facts.
-- **The graph engine is being deleted by the people who sold it.** Mem0 removed external graph
-  stores after measuring ~2%; LightRAG deletes traversal; the memory-benchmark canon is
-  demonstrably gameable (a named teardown caught test-set-engineered fixes, a retrieval config
-  that bypassed retrieval, 0.4% sampling); the durable pro-graph result is HippoRAG 2's +7 F1 on
-  multi-hop, lift that vanishes below ~15% relational query share.
-- **Enclosure is accelerating, which is why the seat exists.** Each platform governs only its own
-  agents by design (Purview risk-scores no third-party agent) while enclosing data against the
-  others (Slack's 2025 API terms cut Glean to query-by-query). No bundle can occupy the
-  cross-vendor seat; a mediated brain can.
-
-## What ActiveGraph teaches
-
-Yohei Nakajima's ActiveGraph (arXiv:2605.21997, "The Log is the Agent") is the nearest prior art
-for the coordination substrate: an append-only event log as source of truth; the graph a
-deterministic projection; behaviors react to shared state — the blackboard lineage, named in the
-paper — with total provenance on every mutation, **fork** (branch at any event, prefix served
-from a content-addressed response cache), **trial**, **diff**, and **promote** (shipped v1.3): a
-fork's net delta adopted into its parent, three-way against the fork point, atomic, quiescent,
-audited — and fail-closed: "no semantic merge; identical concurrent edits still conflict; the
-escape hatch is re-fork."
-
-The map for this RFC's two organs — what ActiveGraph ships single-writer, ufo ships multi-tenant
-(its authority ceilings and its log map to RFC 0016's spine, not here):
-
-| ActiveGraph | ufo organ |
-|---|---|
-| shared graph, behaviors react (blackboard) | workspace objects + typed links (#613) + `page_change` events + automations — the coordination plane, already built |
-| fork (branch at any event) | the scope lattice `(workspace, agent, subject)` — every principal's write line exists by construction, no machinery |
-| promote (adoption: atomic, quiescent, audited, fail-closed) | the audience function (§2) — adoption without an act: readability arrives where roots permit, items never move, and the semantic merge promote refuses is not solved but unnecessary |
-
-Promote is free in a single-writer runtime; in a multi-tenant one the bound is that a reader is
-never served a fact whose sources they could not open — and widening past that bound is a member
-speaking where the wider audience lives, not machinery.
-
-**Should we just use ActiveGraph? No** — architecture (contractually single-process,
-single-writer; ufo is multi-process with live concurrent writers under DBOS) and category (its
-graph is coordination working-state: no tenancy, no members, no retrieval — its only embedding
-implementation is a test double the runtime never calls — no decay, no consolidation).
-Everything portable is design, and the table above absorbs it.
+- **ActiveGraph** (arXiv:2605.21997) is the nearest substrate prior art. Its blackboard —
+  behaviors reacting to a shared graph — ufo already has (objects, typed links, `page_change`
+  events, automations), and its `promote` is adoption, not merge: "no semantic merge; identical
+  concurrent edits still conflict." Here that boundary is dissolved rather than solved — with no
+  copies there is nothing to reconcile (§Alternatives, *cross by copying*). Not adoptable as a
+  runtime: contractually single-process and single-writer, no tenancy, no members, no retrieval.
 
 ## Proposal
 
@@ -183,7 +148,7 @@ The rest of the organ, each change with its cost:
 - **Three lifecycle ops, and forgetting cascades.** `supersede` (leaves the index; row and
   record intact), `delete` (tombstone; record intact), `redact` (record payload scrubbed;
   skeleton intact; never on a live head). Collapsing these is how a system becomes unable to
-  answer whether "forget this" meant *stop retrieving* or *erase the receipt*. A derived item
+  answer whether "forget this" meant *stop retrieving* or *erase the trace*. A derived item
   tombstones when no remaining provenance root supports it — a join over `memory_provenance` —
   so the existing page-deletion path is the eraser. **The ops are their own undo**: a superseded
   row stays in the store, so a bad consolidation is reversible by unmarking it; only `redact`
@@ -286,12 +251,9 @@ or not it appears in the chain.
 
 **Deliberately deferred, each with its reason:**
 
-- **The widening grant** — a `memory_share` verb granting named roots to a wider audience, with
-  revoke, recompute, item grants for syntheses, and secret detection on the widening path. The
-  computed audience delivers sharing; restating is the zero-machinery fallback; unit 2's
-  withheld-at-recall rate measures the residual demand where the tax is paid. Builds only when
-  that number says retyping is a real tax — and arrives as its own RFC, with revoke's closure
-  over consolidation designed first.
+- **The widening grant** — builds only when unit 2's withheld-at-recall rate says retyping is a
+  real tax, and arrives as its own RFC (§Alternatives carries the full argument and the
+  machinery it drags).
 - **The graph arm** — entity resolution (`merged_into` pointers, alias conservatism),
   provider-structure extraction, a fusion leg inside recall. Behind unit 1's relational-share
   meter clearing ~15%; below it the lift measurably vanishes while extraction costs apply to
@@ -323,9 +285,8 @@ or not it appears in the chain.
   sanctioned convergence paths with their latency written down (≤60s).
 - **The allocation principle:** scope and audience are questions about who may know a thing and
   live at core's enforcement points; extraction, ranking, and consolidation are questions about
-  retrieval and live in extensions — both labs shipped regenerate-style consolidation this year
-  (Dreams, Dreaming), which is the mechanism layer commoditizing on schedule, and neither
-  records an audience.
+  retrieval and live in extensions — the mechanism layer is commoditizing on schedule, and none
+  of it records an audience.
 
 ## Why this survives
 
@@ -334,8 +295,8 @@ or not it appears in the chain.
 | Scope | No model knows who may see a salary band; each platform governs only its own agents by design (Purview risk-scores no third-party agent) while enclosing data against the others (Slack's 2025 API terms cut Glean to query-by-query) — the cross-vendor seat is structurally unoccupiable by any one bundle | Hyperscalers fold tenant-faithful *knowledge* scoping into the identity plane |
 | Substrate mediation | Every lab is pulling memory into the platform (managed stores, Dreams/Dreaming); a mediated carrier keeps the audience true while using their stores | A provider ships workspace-audience semantics — then ufo is a UI on it, and the bet was still right to take |
 | Audience | Nobody merges, and nothing here needs to: with no copies there are no replicas to reconcile — the consistency challenge the field names most pressing is dissolved, not entered; Glean proved query-time ACL enforcement at document granularity, and typed provenance is the only missing input to do it one layer down | Provenance stops being resolvable — we lose the page substrate, not the model race |
-| Graph as a measured arm | HippoRAG 2's multi-hop lift is real above ~15% relational share; gbrain ships the same bounded-arm shape in production | The meter says share is under ~15% — the arm is never built; unit 1 measures before anything is |
-| Derived knowledge at all | 1M-token windows went GA and the gap moved rather than closed: most models fall below half their short-context baseline by 32K on non-literal tasks (NoLiMa); multi-turn agents drop 39% with no recovery; long context beats RAG by 8 points at 26× the tokens; test-time training memorizes metrics, not content (recall stays zero) | Weight-level continual learning ships with real recall — or a workspace sits under its measured crossover, where stuffing already wins |
+| Graph as a measured arm | HippoRAG 2's multi-hop lift is real above ~15% relational share — and the sellers are the skeptics: Mem0 removed external graph stores after measuring ~2%, LightRAG deletes traversal, and the benchmark canon is demonstrably gameable (a named teardown caught test-set-engineered fixes and a retrieval config that bypassed retrieval) | The meter says share is under ~15% — the arm is never built; unit 1 measures before anything is |
+| Derived knowledge at all | Most models fall below half their short-context baseline by 32K on non-literal tasks (NoLiMa); multi-turn agents drop 39% with no recovery; long context beats RAG by 8 points at 26× the tokens; test-time training memorizes metrics, not content (recall stays zero) | Weight-level continual learning ships with real recall — or a workspace sits under its measured crossover, where stuffing already wins |
 
 Read the graveyard precisely: every 2025–26 casualty is an orchestration layer; no system that
 stores, indexes, or governs an organization's knowledge died in the window. Scaffolds die into
@@ -352,13 +313,13 @@ thinner standard scaffolds; knowledge layers compound.
   rows (exfiltration by grant, retroactive widening), all for a frequency nobody has measured
   against a fallback that costs nothing to build. The withheld-at-recall counter measures that
   frequency where the tax is paid; the grant is built when the number says so, not before.
-- **Cross by copying — reconcile item sets into each destination scope.** Promote's shape
-  applied to knowledge: a curated set crosses atomically into the destination, `crossed_from`
-  chains later corrections, per-destination supersede keeps every scope one internally
-  consistent head. Rejected because it rebuilds replication: every crossed row is a replica
-  whose consistency a classify cascade must then maintain per destination — the exact open
-  problem the field names — and the machinery it drags in (staleness recompute at apply,
-  crossing caps, self-corroboration exclusions) exists only to manage the copies. What they do
+- **Cross by copying — reconcile item sets into each destination scope** (ActiveGraph's
+  `promote`, applied to knowledge). A curated set crosses atomically into the destination,
+  `crossed_from` chains later corrections, per-destination supersede keeps every scope one
+  internally consistent head. Rejected because it rebuilds replication: every crossed row is a
+  replica whose consistency a classify cascade must then maintain per destination — the exact
+  open problem the field names — and the machinery it drags in (staleness recompute at apply,
+  crossing caps, self-corroboration exclusions) exists only to manage the copies. What copies do
   buy — one head per scope regardless of reader — is real, and §2 prices it: reader-relative
   currency is how organizations already read.
 - **Model-chosen scope** — let the writer decide who may read what it learned. The model would
@@ -380,11 +341,6 @@ thinner standard scaffolds; knowledge layers compound.
   the property being sold. Revisit if the brain ever becomes single-tenant-per-repo.
 - **CRDTs.** No shipped instance for knowledge, and for a reason: commutativity is exactly the
   property a contradiction lacks — and with no replicas there is nothing to converge.
-- **Wait for the platform control planes** (Agent 365, Fabric IQ). Authored ontologies and
-  outside-in inventories; an external registry cannot enforce which member may see which fact.
-  Interop, not substitution.
-- **The RFC 0013 shape** (everything at once). Died of seven programs. Two organs, two units,
-  two meters that each gate a deferred build.
 
 ## Open decisions
 
