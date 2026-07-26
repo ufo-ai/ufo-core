@@ -23,11 +23,19 @@ The main agent owns the clone/no-clone decision. Do not make the coding subagent
 
 Before calling `spawn_subagent(profile="coding", ...)`, choose exactly one setup mode and state it at the start of the objective:
 
-- **Clone a repo:** Use when the task targets a GitHub repository. Start the objective with: `Repository setup: clone https://github.com/org/repo into the workspace with git, then work inside it.` Public repositories always clone. A private one clones when the workspace has filled the `github_git_token` slot — if `git clone` fails to authenticate, say so and ask the owner to add the token; do not fall back to reading files through `gh api`.
+- **Clone a repo:** Use when the task targets a GitHub repository. Start the objective with: `Repository setup: clone https://github.com/org/repo into the workspace with git, then work inside it.` Public repositories always clone; private ones need the workspace connected to GitHub (below). Do not fall back to reading files through `gh api` when a clone fails to authenticate — say what failed and what the owner needs to do.
 - **Existing workspace:** Use when the repository is already present in the sandbox workspace. Start the objective with: `Repository setup: use the existing workspace at <path>. Do not clone.`
 - **No repository:** Use only for coding-adjacent tasks that do not need repository files. Start the objective with: `Repository setup: no repository clone is needed.`
 
 A coding subagent should not spend startup time deciding whether to clone.
+
+## Connecting GitHub for private repositories
+
+A private clone or push needs the workspace connected, and only the owner can do it. Call `connect_github` and give them the link it returns. On GitHub they choose the organization and which repositories the ufo App may reach; GitHub returns them to ufo and the connection completes itself. Nothing is pasted back and no id or token is ever typed — GitHub confirms under the owner's own authorization that the installation is one they reach, which is why a workspace can only connect its own. The link is single-purpose and expires shortly, so mint a fresh one rather than reusing an old message.
+
+For a repository outside any organization that installed the App, the fallback is the owner's own fine-grained personal access token with Contents read and write, collected privately into `github_git_token`. Never accept a token pasted into the conversation itself.
+
+With either in place, `git clone` and `git push` authenticate inside the sandbox — which holds only a sentinel, never the credential. `gh` authenticates separately, off a GitHub connector grant.
 
 ## Finding the Repository
 

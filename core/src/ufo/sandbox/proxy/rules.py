@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from uuid import UUID
 
 from ufo.connectors import CliCredential, RequestForwarder
-from ufo.credentials import CredentialSlotUnset, CredentialStore, credential_host
+from ufo.credentials import CredentialStore, credential_host, slot_secret
 from ufo.ext.manifest import CredentialSlot, Manifest, open_connector_namespace
 from ufo.grants import Grant, grant_sentinel
 from ufo.o11y import warn
@@ -135,9 +135,8 @@ async def derive_credential_rules(
         target = slot.injection
         if target is None:
             continue
-        try:
-            real = await store.get(workspace_id, slot.name)
-        except CredentialSlotUnset:
+        real = await slot_secret(slot.name, slot.source, workspace_id, store)
+        if real is None:
             continue
         host = await credential_host(store, workspace_id, target.host)
         if host is None:

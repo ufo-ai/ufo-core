@@ -26,7 +26,7 @@ from ufo.config import (
     load_config,
 )
 from ufo.connectors import AuthProxy, ConnectorEntry, ConnectorRegistry
-from ufo.credentials import CredentialStore
+from ufo.credentials import CredentialRequests, CredentialStore, install_credential_requests
 from ufo.db import current_workspace, init_db, init_owner_db
 from ufo.ext.context import CredentialAccess, context_for
 from ufo.ext.loader import (
@@ -185,6 +185,16 @@ def run() -> None:
     )
     init_runtime(runtime)
     install_connect_flow(_connect_flow(credentials, config, manifests))
+    install_credential_requests(
+        None
+        if credentials is None
+        else CredentialRequests(
+            fernet=credentials.fernet,
+            declared=frozenset(
+                slot.name for manifest in manifests for slot in manifest.credentials
+            ),
+        )
+    )
     dbos = DBOS(
         config={
             "name": DBOS_APP_NAME,

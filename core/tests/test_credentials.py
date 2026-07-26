@@ -20,7 +20,10 @@ from ufo.credentials import (
     HostChoice,
     credential_host,
     open_credential_request,
+    open_installation,
     seal_credential_request,
+    seal_installation,
+    slot_secret,
 )
 from ufo.db import workspace_tx
 from ufo.ext.loader import injecting_slots
@@ -678,3 +681,69 @@ async def test_a_git_slot_with_nothing_stored_derives_no_rule(db: None) -> None:
         injecting_slots((_git_manifest(),)), workspace_id, _store()
     )
     assert rules == ()
+
+
+class _MintedTokens:
+    """A source standing in for the GitHub App: it mints for a workspace that named an install."""
+
+    def __init__(self, installed: UUID | None) -> None:
+        self.installed = installed
+        self.calls = 0
+
+    async def secret(self, workspace_id: UUID, store: CredentialStore) -> str | None:
+        self.calls += 1
+        return "minted-installation-token" if workspace_id == self.installed else None
+
+
+async def test_a_minted_source_answers_before_the_stored_fallback(db: None) -> None:
+    """A workspace that installed the App gets the token minted for this turn, not the member's
+    stored one — the App's identity is what the organization granted. The stored value stays the
+    fallback for a workspace with no installation, which is a repository outside that org."""
+    installed = await _workspace()
+    bare = await _workspace()
+    store = _store()
+    for workspace_id in (installed, bare):
+        await store.put(workspace_id, "github_git_token", "member-pat")
+    source = _MintedTokens(installed)
+
+    assert await slot_secret("github_git_token", source, installed, store) == (
+        "minted-installation-token"
+    )
+    assert await slot_secret("github_git_token", source, bare, store) == "member-pat"
+    assert await slot_secret("github_git_token", None, installed, store) == "member-pat"
+    assert source.calls == 2
+
+
+async def test_a_slot_with_neither_a_mint_nor_a_stored_value_resolves_to_nothing(db: None) -> None:
+    """No credential at all opens no egress: the caller skips the slot rather than deriving a rule
+    that would swap in nothing, so the host keeps riding the turn's own internet policy."""
+    workspace_id = await _workspace()
+    assert (
+        await slot_secret("github_git_token", _MintedTokens(None), workspace_id, _store()) is None
+    )
+
+
+def test_an_installation_binding_opens_only_for_the_workspace_that_sealed_it() -> None:
+    """The binding is what makes a self-asserted installation id worthless. An id is a small integer
+    anyone can type, and the deploy's App key mints against any installation of it — so the slot
+    holds a seal only the install callback can produce, and only for the workspace it names."""
+    fernet = Fernet(Fernet.generate_key())
+    mine, theirs = uuid4(), uuid4()
+    sealed = seal_installation(fernet, mine, "149082716")
+
+    assert open_installation(fernet, mine, sealed) == "149082716"
+    with pytest.raises(CredentialRequestInvalid, match="another workspace"):
+        open_installation(fernet, theirs, sealed)
+    with pytest.raises(CredentialRequestInvalid, match="this deploy sealed"):
+        open_installation(fernet, mine, "149082716")
+    with pytest.raises(CredentialRequestInvalid, match="this deploy sealed"):
+        open_installation(Fernet(Fernet.generate_key()), mine, sealed)
+
+
+def test_a_bare_installation_id_in_the_slot_mints_nothing(db: None) -> None:
+    """The end the attack would come through: an owner (or an agent talking one into it) filling the
+    installation slot by hand through the ordinary credential prompt. The value never opens, so no
+    token is minted against it."""
+    fernet = Fernet(Fernet.generate_key())
+    with pytest.raises(CredentialRequestInvalid):
+        open_installation(fernet, uuid4(), "149082716")

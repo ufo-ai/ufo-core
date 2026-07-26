@@ -16,10 +16,10 @@ from ufo.config import Config
 from ufo.connectors import CliCredential, ConnectorRegistry
 from ufo.credentials import (
     CredentialRequests,
-    CredentialSlotUnset,
     CredentialStore,
     HostChoice,
     credential_host,
+    slot_secret,
 )
 from ufo.db import workspace_tx
 from ufo.ext.loader import (
@@ -514,9 +514,7 @@ async def _git_credential_config(
         target = slot.injection
         if target is None or target.git_basic_user is None:
             continue
-        try:
-            await credentials.get(workspace_id, slot.name)
-        except CredentialSlotUnset:
+        if await slot_secret(slot.name, slot.source, workspace_id, credentials) is None:
             continue
         host = await credential_host(credentials, workspace_id, target.host)
         if host is None:
@@ -551,9 +549,7 @@ async def _keyed_provider_env(
         host_env = target.host.env if isinstance(target.host, HostChoice) else None
         if target.env is None and host_env is None:
             continue
-        try:
-            await credentials.get(workspace_id, slot.name)
-        except CredentialSlotUnset:
+        if await slot_secret(slot.name, slot.source, workspace_id, credentials) is None:
             continue
         host = await credential_host(credentials, workspace_id, target.host)
         if host is None:

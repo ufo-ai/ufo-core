@@ -29,6 +29,10 @@ from ufo.accounting import (
 )
 from ufo.blob import BlobNotFound, BlobStore
 from ufo.candidates import WorkspaceCandidates, owner_candidates
+from ufo.credentials import (
+    installed_credential_requests,
+    seal_installation,
+)
 from ufo.db import workspace_tx
 from ufo.ext.surface import SurfaceInstallationAccess
 from ufo.governance import Governance, prompt_digest
@@ -156,10 +160,25 @@ class CredentialAccess:
 
     async def rotate(self, slot: str, expected: str, plaintext: str) -> bool:
         """Compare-and-swap an existing declared slot after an external provider rotates it. This
-        cannot create the initial credential: that remains the member-sealed surface handoff."""
+        cannot create the initial credential: that remains the member-sealed handoff."""
         if slot not in self.declared:
             raise UndeclaredCredentialSlot(slot)
         return await ws_current().rotate_credential(slot, expected, plaintext)
+
+    async def bind_installation(self, slot: str, installation_id: str) -> None:
+        """Record a provider installation the caller has already proved this workspace's member can
+        reach. What lands in the slot is a seal over `(workspace, installation)`, not the id: an id
+        is a small integer, a deploy's app key mints against any installation of it, and the slot is
+        also fillable through the ordinary credential prompt — so only a value sealed here opens
+        when a credential is minted against it."""
+        if slot not in self.declared:
+            raise UndeclaredCredentialSlot(slot)
+        await ws_current().put_credential(
+            slot,
+            seal_installation(
+                installed_credential_requests().fernet, self.workspace_id, installation_id
+            ),
+        )
 
 
 @dataclass(frozen=True)

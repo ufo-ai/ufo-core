@@ -5,6 +5,7 @@ imports a core internal."""
 
 import json
 
+import ufo_ext_coding.connect as connect
 import ufo_ext_coding.manifest as coding
 
 from ufo.ext.loader import skill_registry
@@ -14,7 +15,7 @@ from ufo.tools.builtins import BUILTIN_TOOLS
 
 def test_coding_manifest_registers_a_single_coding_profile() -> None:
     manifest = coding.manifest()
-    assert manifest.tools == ()
+    assert [tool.name for tool in manifest.tools] == ["connect_github"]
     (profile,) = manifest.subagents
     assert profile.name == "coding"
     assert profile.input_model.model_validate({"objective": "fix it"}).objective == "fix it"
@@ -72,9 +73,25 @@ def test_coding_manifest_declares_the_git_credential_the_proxy_swaps() -> None:
     """The pack that routes repo work declares the credential a checkout needs: one slot, injected
     on `github.com` as the Basic password half, so the sandbox holds a sentinel and the proxy holds
     the swap. A bearer here would be refused by git's smart-HTTP even for a public repository."""
-    (slot,) = coding.manifest().credentials
+    installation, slot = coding.manifest().credentials
+    assert installation.name == "github_app_installation"
+    assert installation.injection is None
     assert slot.name == "github_git_token"
     assert slot.injection is not None
     assert (slot.injection.host, slot.injection.header) == ("github.com", "Authorization")
     assert slot.injection.git_basic_user == "x-access-token"
     assert slot.injection.env is None
+
+
+def test_the_connect_tool_and_its_return_leg_ship_together() -> None:
+    """The member acts between them: a tool that mints an install link with no route to return to
+    would strand every connection, and a route with no tool could never be reached with a seal."""
+    manifest = coding.manifest()
+    assert [tool.name for tool in manifest.tools] == ["connect_github"]
+    (route,) = manifest.routes
+    assert (route.method, route.path) == ("GET", connect.ROUTE_PATH)
+    assert route.identify is connect.install_workspace
+
+
+def test_the_install_url_names_the_published_app() -> None:
+    assert connect.INSTALL_URL == ("https://github.com/apps/flyingobject-ai-ufo/installations/new")

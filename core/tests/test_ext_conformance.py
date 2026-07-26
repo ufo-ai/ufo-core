@@ -892,6 +892,7 @@ async def test_context_confines_the_credential_handle(db: None) -> None:
         ext_by_tool[sample.TOOL_NAME],
     ):
         assert {name for name in dir(context.credentials) if not name.startswith("_")} == {
+            "bind_installation",
             "get",
             "rotate",
             "workspace_id",

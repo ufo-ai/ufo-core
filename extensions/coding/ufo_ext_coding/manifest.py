@@ -13,6 +13,7 @@ The pack also declares the git credential slot, because a checkout is the work i
 workspace that fills it gets authenticated `git clone` and `git push` for private repositories,
 with the token swapped onto the wire at the egress proxy and only a sentinel inside the sandbox."""
 
+import os
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -21,9 +22,20 @@ from ufo.sdk.manifest import (
     CredentialSlot,
     InjectionTarget,
     Manifest,
+    RouteSpec,
     SkillSpec,
     SubagentProfile,
 )
+from ufo.sdk.tools import ToolDef
+from ufo_ext_coding.connect import (
+    GIT_INSTALLATION_SLOT,
+    ROUTE_PATH,
+    ConnectGitHubInput,
+    connect_github,
+    github_installed,
+    install_workspace,
+)
+from ufo_ext_coding.github_app import app_tokens
 
 NAME = "coding"
 VERSION = "0.1.0"
@@ -60,15 +72,46 @@ class CodingOutput(BaseModel):
     result: str
 
 
+GIT_APP_ID_ENV = "GITHUB_APP_ID"
+GIT_APP_CLIENT_ID_ENV = "GITHUB_APP_CLIENT_ID"
+GIT_APP_SECRET_ENV = "GITHUB_APP_CLIENT_SECRET"
+GIT_APP_KEY_ENV = "GITHUB_APP_PRIVATE_KEY_PATH"
 GIT_SLOT = "github_git_token"
 GIT_HOST = "github.com"
 GIT_SENTINEL = "UFO_SENTINEL_GIT_GITHUB"
 GIT_BASIC_USER = "x-access-token"
+GIT_INSTALLATION = CredentialSlot(
+    name=GIT_INSTALLATION_SLOT,
+    description="Which ufo GitHub App installation this workspace uses. Filled by installing the "
+    "App, never typed: the value is a seal this deploy writes once GitHub confirms the install "
+    "belongs to the member who authorized it.",
+)
+
+
+def github_app_id() -> str | None:
+    """The deploy's App registration, all of it or none: an id without a client id or a readable key
+    is a deploy whose members would be told to connect GitHub and then silently answered with
+    member-token-only mode, with no signal which half is missing."""
+    app_id = os.environ.get(GIT_APP_ID_ENV)
+    if app_id is None:
+        return None
+    missing = [
+        name
+        for name in (GIT_APP_CLIENT_ID_ENV, GIT_APP_SECRET_ENV, GIT_APP_KEY_ENV)
+        if not os.environ.get(name)
+    ]
+    if missing:
+        raise RuntimeError(f"{GIT_APP_ID_ENV} is set but {', '.join(missing)} is not")
+    return app_id
+
+
 GIT_CREDENTIAL = CredentialSlot(
     name=GIT_SLOT,
     description="A GitHub token with repository contents read and write — a fine-grained personal "
-    "access token scoped to the repositories the agent works in. It authenticates `git clone` and "
-    "`git push` for private repositories from the sandbox, which holds only a sentinel for it.",
+    "access token scoped to the repositories the agent works in. Only needed for a repository "
+    "outside an organization that installed the ufo GitHub App; where the App is installed, its "
+    "own token is minted per turn instead.",
+    source=None if github_app_id() is None else app_tokens(GIT_INSTALLATION_SLOT),
     injection=InjectionTarget(
         host=GIT_HOST,
         header="Authorization",
@@ -94,5 +137,22 @@ def manifest() -> Manifest:
         version=VERSION,
         subagents=(CODING_PROFILE,),
         skills=tuple(SkillSpec(path=SKILLS_ROOT / name) for name in SKILL_NAMES),
-        credentials=(GIT_CREDENTIAL,),
+        credentials=(GIT_INSTALLATION, GIT_CREDENTIAL),
+        tools=(
+            ToolDef(
+                name="connect_github",
+                description="Connect the workspace's GitHub so the agent can clone and push "
+                "private repositories: hands the owner the App install link. Owner-only.",
+                input_model=ConnectGitHubInput,
+                handler=connect_github,
+            ),
+        ),
+        routes=(
+            RouteSpec(
+                method="GET",
+                path=ROUTE_PATH,
+                handler=github_installed,
+                identify=install_workspace,
+            ),
+        ),
     )

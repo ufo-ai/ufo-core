@@ -9,6 +9,8 @@ and fulfillment verifies the seal before writing — the plaintext travels membe
 never through the transcript or the sandbox."""
 
 from dataclasses import dataclass
+from json import dumps, loads
+from typing import Protocol
 from uuid import UUID
 
 import sqlalchemy as sa
@@ -100,6 +102,65 @@ class CredentialRequests:
         if state.payload is None:
             raise CredentialRequestInvalid("credential authorization carries no provider state")
         return state.payload
+
+
+def seal_installation(fernet: Fernet, workspace_id: UUID, installation_id: str) -> str:
+    """Bind a provider installation to the workspace that authorized it. The stored value is this
+    seal, never the bare id: an installation id is a small integer anyone can guess, so a slot
+    holding one a member typed would let a workspace mint against another organization's install.
+    Only the callback that verified an authorization seal can produce this, and only the workspace
+    it names can open it. No TTL — an installation outlives the request that bound it."""
+    payload = dumps({"workspace_id": str(workspace_id), "installation_id": installation_id})
+    return fernet.encrypt(payload.encode()).decode()
+
+
+def open_installation(fernet: Fernet, workspace_id: UUID, sealed: str) -> str:
+    """The installation id this workspace bound, or `CredentialRequestInvalid` for anything else —
+    a forged blob, another workspace's binding, or a bare id typed into the slot by hand."""
+    try:
+        payload = loads(fernet.decrypt(sealed.encode()).decode())
+    except (InvalidToken, ValueError) as error:
+        raise CredentialRequestInvalid(
+            "installation binding is not one this deploy sealed"
+        ) from error
+    if payload.get("workspace_id") != str(workspace_id):
+        raise CredentialRequestInvalid("installation binding belongs to another workspace")
+    return str(payload["installation_id"])
+
+
+_installed_requests: CredentialRequests | None = None
+
+
+def install_credential_requests(requests: CredentialRequests | None) -> None:
+    """The process's single credential-request authority, installed once at serve boot. A provider
+    callback arrives in a browser with no turn and no session, so the route that receives it
+    resolves its workspace from the sealed state alone and needs the Fernet here rather than
+    threaded through a context it does not have."""
+    global _installed_requests
+    _installed_requests = requests
+
+
+def installed_credential_requests() -> CredentialRequests:
+    if _installed_requests is None:
+        raise RuntimeError("credential authorization unavailable: no credential key configured")
+    return _installed_requests
+
+
+def authorized_slot_workspace(sealed: str, slot: str, payload: str) -> UUID | None:
+    """The workspace an authorization seal was minted for, or None for anything that is not this
+    deploy's own seal for exactly this slot and purpose. A provider redirects the member's browser
+    back with no turn and no session, so the route that receives it resolves its workspace from the
+    seal alone — and must pin the slot and purpose here, since a seal minted to authorize one slot
+    would otherwise stand in for another."""
+    if _installed_requests is None:
+        return None
+    try:
+        state = open_credential_request(_installed_requests.fernet, sealed)
+    except CredentialRequestInvalid:
+        return None
+    if state.slots != (slot,) or state.payload != payload:
+        return None
+    return state.workspace_id
 
 
 @dataclass(frozen=True)
@@ -212,6 +273,32 @@ class HostChoice:
         offer."""
         wanted = selected.strip().lower()
         return next((host for host in self.hosts if host.lower() == wanted), None)
+
+
+class CredentialSource(Protocol):
+    """A slot whose secret this deploy mints per workspace rather than the member storing one: the
+    resolution runs at rule derivation, so a short-lived token is minted for the turn that uses it.
+    None means this workspace has nothing to mint from, and the stored value answers instead."""
+
+    async def secret(self, workspace_id: UUID, store: "CredentialStore") -> str | None: ...
+
+
+async def slot_secret(
+    name: str, source: CredentialSource | None, workspace_id: UUID, store: CredentialStore
+) -> str | None:
+    """The one answer to "what secret does this slot hold for this workspace" — a minted one where
+    the slot declares a source, else the member's stored value, else None. Every consumer resolves
+    through here (proxy rules, the sandbox export, the git config) so no role injects a credential
+    another role never exported. Takes the name and source rather than the slot itself, because the
+    manifest that declares slots already imports this module."""
+    if source is not None:
+        minted = await source.secret(workspace_id, store)
+        if minted is not None:
+            return minted
+    try:
+        return await store.get(workspace_id, name)
+    except CredentialSlotUnset:
+        return None
 
 
 async def credential_host(

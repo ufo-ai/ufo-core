@@ -21,7 +21,7 @@ from starlette.responses import Response
 from ufo.browser import CdpProvider
 from ufo.candidates import WorkspaceCandidates
 from ufo.connectors import AuthProxy, CliCredential, ConnectorBroker, ConnectorResolver
-from ufo.credentials import HostChoice
+from ufo.credentials import CredentialSource, HostChoice
 from ufo.ext.context import CredentialAccess, ExtensionContext
 from ufo.ext.surface import SurfaceSpec
 from ufo.grants import OAuthProvider, OAuthProviderResolver
@@ -69,11 +69,15 @@ class InjectionTarget:
 @dataclass(frozen=True)
 class CredentialSlot:
     """A named secret an extension needs. With an InjectionTarget the proxy swaps it onto the
-    wire so the sandbox never holds it; without one it is readable only in-process."""
+    wire so the sandbox never holds it; without one it is readable only in-process. A `source` mints
+    the secret for this workspace instead of the member storing one, falling back to a stored value
+    when it has nothing to mint from — a published GitHub App's installation token, with the
+    member's own token as the slot's stored fallback."""
 
     name: str
     description: str
     injection: InjectionTarget | None = None
+    source: CredentialSource | None = None
 
 
 @dataclass(frozen=True)
