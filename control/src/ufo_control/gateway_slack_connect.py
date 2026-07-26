@@ -187,9 +187,13 @@ class SlackConnectConfigError(SlackTerminalError):
 
 
 async def ensure_delivery_table(pool: asyncpg.Pool) -> None:
+    """Create the delivery ledger under `gateway_store.BOOT_DDL_LOCK` — one booting replica shapes
+    at a time."""
     async with pool.acquire() as connection:
-        for statement in DDL:
-            await connection.execute(statement)
+        async with connection.transaction():
+            await connection.execute(gateway_store.BOOT_DDL_LOCK)
+            for statement in DDL:
+                await connection.execute(statement)
 
 
 async def rearm_failed_delivery(pool: asyncpg.Pool, onboard_claim_id: UUID) -> datetime | None:

@@ -90,12 +90,12 @@ class InviteCodes:
     ttl: timedelta = INVITE_TTL
 
     async def ensure_table(self) -> None:
-        """Create the ledger under an advisory lock — one process reshapes at a time. A table
-        that cannot name objects is rebuilt and its codes are void: every ledger reply names an
-        object, so an unnameable code could never be honored."""
+        """Create the ledger under `gateway_store.BOOT_DDL_LOCK` — one booting replica reshapes at a
+        time. A table that cannot name objects is rebuilt and its codes are void: every ledger reply
+        names an object, so an unnameable code could never be honored."""
         async with self.pool.acquire() as connection:
             async with connection.transaction():
-                await connection.execute(f"select pg_advisory_xact_lock(hashtext('{TABLE}'))")
+                await connection.execute(gateway_store.BOOT_DDL_LOCK)
                 unnumbered = await connection.fetchval(
                     "select exists (select from information_schema.tables"
                     "  where table_schema = $1 and table_name = 'invite_code')"
