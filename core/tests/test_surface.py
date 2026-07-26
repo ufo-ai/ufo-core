@@ -821,6 +821,54 @@ async def test_live_delivery_renews_its_claim_before_a_peer_can_recover_it(
     ]
 
 
+async def test_the_delivered_commit_never_contends_with_its_own_claim_renewal(
+    db: None, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The renewal and the delivered commit write the same writeback row. If the commit runs while
+    this row's refresher still holds the row lock, it waits on its own lease — the delivered write
+    is serialized behind a refresh under a loaded runner. Assert the lease is closed first: no
+    refresh for a turn is ever in flight when that turn is marked delivered."""
+    in_flight: dict[UUID, int] = {}
+    contended = 0
+    monkeypatch.setattr(surface_module, "WRITEBACK_CLAIM_REFRESH_SECONDS", 0.0)
+    renew_claim = WritebackPoller._renew_claim
+    mark_delivered = WritebackPoller._mark_delivered
+
+    async def tracked_renew(self: WritebackPoller, turn_id: UUID) -> None:
+        while True:
+            in_flight[turn_id] = in_flight.get(turn_id, 0) + 1
+            try:
+                await renew_claim(self, turn_id)
+            finally:
+                in_flight[turn_id] -= 1
+
+    async def watched_mark(self: WritebackPoller, turn_id: UUID) -> None:
+        nonlocal contended
+        if in_flight.get(turn_id):
+            contended += 1
+        await mark_delivered(self, turn_id)
+
+    monkeypatch.setattr(WritebackPoller, "_renew_claim", tracked_renew)
+    monkeypatch.setattr(WritebackPoller, "_mark_delivered", watched_mark)
+    workspace_id, _, _ = await _seed()
+    turn_ids = tuple(
+        [await _seed_turn(workspace_id, f"CCOMMIT:{index}.0", "done", "slow") for index in range(4)]
+    )
+    blob = FilesystemBlobStore(root=tmp_path)
+    contexts = {workspace_id: _context(workspace_id, StubDbos(), blob)}
+    surface = BlockingSurface(blocked_workspace=workspace_id)
+    running = asyncio.create_task(_fleet_poller(contexts, surface, worker_id="worker-1").drain())
+    try:
+        await asyncio.wait_for(surface.blocked.wait(), timeout=1)
+    finally:
+        surface.release.set()
+        await asyncio.wait_for(running, timeout=5)
+    assert [(await _writeback(turn_id)).status for turn_id in turn_ids] == [
+        WRITEBACK_DELIVERED
+    ] * len(turn_ids)
+    assert contended == 0
+
+
 async def test_claim_renewal_cancels_external_delivery_when_ownership_changes(
     db: None, tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

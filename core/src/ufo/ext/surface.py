@@ -1304,25 +1304,29 @@ class WritebackPoller:
         reply_ref: str | None,
         renewal: asyncio.Task[None],
     ) -> None:
+        """The lease covers exactly the external delivery, and ends before the commit that closes
+        it. The renewal and `_mark_delivered` write the same writeback row, so a refresh still in
+        flight holds the row lock the commit needs: the lease is stopped and awaited first, and only
+        then does the terminal compare-and-swap run — never against this row's own refresher."""
         delivery = asyncio.create_task(self._deliver_claimed(workspace_id, turn_id, reply_ref))
         try:
             done, _pending = await asyncio.wait(
                 (delivery, renewal), return_when=asyncio.FIRST_COMPLETED
             )
-            if delivery in done:
-                await delivery
-                return
-            if renewal.cancelled():
-                raise asyncio.CancelledError
-            error = renewal.exception()
-            if error is None:
-                raise RuntimeError("writeback claim renewal stopped")
-            raise error
+            if delivery not in done:
+                if renewal.cancelled():
+                    raise asyncio.CancelledError
+                error = renewal.exception()
+                if error is None:
+                    raise RuntimeError("writeback claim renewal stopped")
+                raise error
+            await delivery
         finally:
             for task in (delivery, renewal):
                 if not task.done():
                     task.cancel()
             await asyncio.gather(delivery, renewal, return_exceptions=True)
+        await self._mark_delivered(turn_id)
 
     async def _deliver_claimed(
         self, workspace_id: UUID, turn_id: UUID, reply_ref: str | None
@@ -1331,12 +1335,10 @@ class WritebackPoller:
         entry = self.surfaces.get(surface_name)
         if entry is None:
             log("surface.writeback_no_surface", turn_id=str(turn_id), surface=surface_name)
-            await self._mark_delivered(turn_id)
             return
         spec = entry
         if spec.post is None or spec.attach is None:
             log("surface.writeback_no_delivery", turn_id=str(turn_id), surface=surface_name)
-            await self._mark_delivered(turn_id)
             return
         context = self.context_for(workspace_id, surface_name)
         if reply_ref is None:
@@ -1349,7 +1351,6 @@ class WritebackPoller:
             await spec.attach(context, writeback, reply_ref)
         except Exception as error:
             raise _WritebackDeliveryFailed("attach", error) from error
-        await self._mark_delivered(turn_id)
 
     async def _renew_claim(self, turn_id: UUID) -> None:
         while True:
