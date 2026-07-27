@@ -1,588 +1,824 @@
-# Model selection, request dispatch, and streamed response normalization  `stage-10`
+# Agent turn engine main loop  `stage-10`
 
-This stage is the system’s “call the right AI” layer. It sits in the main work loop, after the program has a prompt or tool request ready, and before the answer is handed back to the rest of the app. The registry is the switchboard: it looks up the requested model, chooses which provider can serve it, finds the needed key, and records pricing information.
+This stage is the main work loop for one assistant turn. It starts after a user message is ready to be answered, and it ends when the assistant has either produced a final result, paused, or handed work to another agent. The key file is `engine.py`, which acts like a traffic controller. It claims the turn so only one worker handles it, gathers the conversation history, sends it to the model, streams the model’s answer as it arrives, and watches for tool calls. When the model asks to use a tool, the engine runs it safely, records what happened, and feeds the result back into the conversation.
 
-The provider files are adapters, like plug shapes for different sockets. The OpenAI adapter sends chat messages to OpenAI or compatible services and converts the streaming reply into the project’s standard text, tool-call, and usage events. The Anthropic adapter does the same for Anthropic’s Messages API, including prompts, tools, and images. The OpenRouter extension routes OpenAI-style requests through OpenRouter’s many model providers. The Bedrock extension connects Amazon Bedrock Mantle models to the same common interface and defines their authentication and costs. The self-improvement extension uses this shared model doorway with extra limits and metering, so its experiments stay controlled and comparable.
+The engine also handles interruptions. It can pause for a user question, stop when a spending limit is reached, retry when the conversation is too large, or absorb new messages that arrived mid-turn. It records usage for billing and saves progress carefully, so if the system crashes it can replay the turn without repeating paid model calls or tools with real-world side effects. `__init__.py` simply makes this folder importable as a Python package.
 
 ## Files in this stage
 
-### Bedrock and core transports
-Bedrock Mantle plugs into the model system by routing requests through the shared Anthropic and OpenAI-compatible streaming adapters.
+### Turn Loop Package and Engine
+Package setup and the central turn engine that orchestrates a full replay-safe assistant turn.
 
-### `extensions/bedrock/ufo_ext_bedrock.py`
+### `core/src/ufo/loop/__init__.py`
 
-`io_transport` · `startup registration and model request handling`
+`other` · `import/package discovery`
 
-This file is an adapter, like a travel plug between two different electrical sockets. The UFO system has its own way to describe a model request: messages, images, tools, tool results, token limits, and streaming output. Amazon Bedrock Mantle exposes several different model APIs, including Anthropic-style APIs and OpenAI-style APIs. This file translates between those worlds.
+This is an empty `__init__.py` file. In Python projects, a file with this name tells Python that the surrounding folder should be treated as an importable package. You can think of it like a label on a drawer: the drawer may contain useful tools, and the label lets the rest of the program find them by name.
 
-At startup, the `manifest` function tells UFO that there is a provider named `bedrock`, which credential it needs, which model names it can serve, and the pricing table for those models. When a model is actually requested, `bedrock_client` checks the model name and returns the right kind of client: Anthropic, OpenAI chat-compatible, or OpenAI Responses-compatible.
+Because this file has no code inside it, it does not create objects, run setup steps, or change program behavior directly. Its value is structural. Without it, depending on the Python version and packaging setup, other parts of the project might not be able to reliably import things from `core/src/ufo/loop` using package-style paths such as `ufo.loop...`.
 
-The OpenAI Responses path needs extra work, because UFO messages may contain text, images, tool calls, and tool outputs. `responses_input` rewrites those into the shape expected by OpenAI’s Responses API. `responses_request` then builds the full request, including system instructions, tools, reasoning effort, and streaming settings.
-
-`BedrockResponsesClient.complete` sends the request, reads the streamed events as they arrive, and converts them back into UFO events such as text chunks, tool-call starts, tool-call argument chunks, and final token usage. It also retries early provider failures, reports refusals clearly, and detects truncated or failed responses.
-
-#### Function details
-
-##### `responses_input`  (lines 117–181)
-
-```
-def responses_input(messages: tuple[Message, ...]) -> list[ResponseInputItemParam]
-```
-
-**Purpose**: This function converts UFO’s internal message format into the list of input items expected by OpenAI’s Responses API. It is needed because a conversation may contain plain text, images, tool calls, and tool results, and each of those must be represented differently for the provider.
-
-**Data flow**: It receives a tuple of UFO `Message` objects. It first trims images if needed, then walks through each message and each content block. Plain text becomes text input, images become base64 data URLs, tool calls become function-call records, and tool results become function-call-output records. The result is a list of OpenAI Responses API input items ready to send over the network.
-
-**Call relations**: `responses_request` calls this when building the final provider request. In the larger flow, it is the message translator: it takes the conversation as UFO understands it and hands `responses_request` provider-shaped input that OpenAI-compatible Bedrock Mantle can accept.
-
-*Call graph*: called by 1 (responses_request); 9 external calls (dumps, EasyInputMessageParam, ResponseFunctionToolCallParam, ResponseInputImageContentParam, ResponseInputImageParam, FunctionCallOutput, ResponseInputTextContentParam, ResponseInputTextParam, trim_images).
+So this file matters not because it performs work itself, but because it helps organize the codebase and makes the `loop` part of the system visible to Python’s import machinery.
 
 
-##### `responses_request`  (lines 184–209)
+### `core/src/ufo/loop/engine.py`
 
-```
-def responses_request(request: ModelRequest) -> dict[str, Any]
-```
+`orchestration` · `turn execution`
 
-**Purpose**: This function builds the complete set of arguments for an OpenAI Responses API call. It combines the model name, system instructions, converted messages, token limits, reasoning settings, and tool definitions into one request package.
+A “turn” is one stretch of work by the agent in a conversation, starting from a user message and ending in a final answer, a question to the user, a parked state, or a failure. This file is the turn engine. It makes sure only one worker owns a turn, then feeds prior conversation, time and sender context, and any injected extension guidance into the model. If the model asks to use tools, the engine runs those tools, sends their results back to the model, and repeats until the model gives a final answer.
 
-**Data flow**: It receives a `ModelRequest`, which is UFO’s full description of what the model should do. It calls `responses_input` to convert the conversation, adds streaming and storage settings, includes reasoning effort when enabled, and translates available tools into OpenAI function tools. It returns a dictionary of keyword arguments that can be passed directly to the OpenAI client.
+The hard part is reliability. The system uses DBOS steps, which are recorded checkpoints for work with side effects. Think of them like stamped receipts: if the process crashes, completed model rounds, tool calls, arrival drains, and compactions are read from the receipt instead of being done again. That prevents double-billing and prevents tools from repeating external writes.
 
-**Call relations**: `BedrockResponsesClient.complete` calls this right before it contacts the provider. This function sits between the high-level UFO request and the low-level API call, making sure the provider receives the request in the exact shape it expects.
-
-*Call graph*: calls 1 internal fn (responses_input); called by 1 (complete); 1 external calls (FunctionToolParam).
-
-
-##### `BedrockResponsesClient.complete`  (lines 216–311)
-
-```
-async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]
-```
-
-**Purpose**: This asynchronous method sends a UFO model request to Bedrock Mantle’s OpenAI Responses-compatible endpoint and streams the answer back as UFO events. Someone uses it when the chosen Bedrock model is served through the OpenAI Responses API rather than Anthropic or OpenAI chat APIs.
-
-**Data flow**: It receives a `ModelRequest`. It turns that request into provider arguments with `responses_request`, sends it to the OpenAI client, then reads the provider’s stream event by event. Text deltas become `TextDelta` events, tool-call starts become `ToolCallStart`, tool-call argument pieces become `ToolCallDelta`, and the final provider token counts become a `Usage` event. If the provider refuses, truncates, fails, times out, or returns no usage, it raises an appropriate error instead of silently pretending the request succeeded.
-
-**Call relations**: This is the main request-handling path for Bedrock models listed as OpenAI Responses models. `bedrock_client` creates a `BedrockResponsesClient` for those models. During completion, this method calls `responses_request`, then hands off to the OpenAI SDK client, converts SDK stream events into UFO stream events, and uses `asyncio.sleep` when retrying early retryable failures.
-
-*Call graph*: calls 1 internal fn (responses_request); 7 external calls (__init__, __init__, __init__, __init__, __init__, __init__, sleep).
-
-
-##### `bedrock_region`  (lines 314–320)
-
-```
-def bedrock_region() -> str
-```
-
-**Purpose**: This function finds the AWS region that Bedrock Mantle should use. Bedrock endpoints are regional, so without a region the code cannot know where to send requests.
-
-**Data flow**: It reads the `AWS_REGION` environment variable first, then `AWS_DEFAULT_REGION` if the first is not set. If it finds a region, it returns that string. If neither variable exists, it raises an error explaining which environment variables the user must set.
-
-**Call relations**: `bedrock_client` calls this before creating any provider client. It is the small gatekeeper that makes sure the network client is pointed at a real AWS region before any model request can be made.
-
-*Call graph*: called by 1 (bedrock_client).
-
-
-##### `bedrock_client`  (lines 323–351)
-
-```
-def bedrock_client(model: str, key: str) -> ModelClient
-```
-
-**Purpose**: This function creates the right model client for a requested Bedrock Mantle model. It hides the fact that different Bedrock models use different underlying API styles.
-
-**Data flow**: It receives a model name and an API key. It calls `bedrock_region` to find the AWS region, then checks which known model group the name belongs to. Anthropic models get an Anthropic Bedrock Mantle client, OpenAI chat-compatible models get an `OpenAIClient`, and OpenAI Responses-compatible models get a `BedrockResponsesClient`. If the model name is not in any supported group, it raises an error.
-
-**Call relations**: The provider specification created by `manifest` points to this function as the client factory. When UFO decides a Bedrock model should serve a request, it calls `bedrock_client`, which then creates and returns the client object that will actually perform completions.
-
-*Call graph*: calls 1 internal fn (bedrock_region); 6 external calls (__init__, __init__, __init__, AsyncAnthropicBedrockMantle, cast, openai_sdk_client).
-
-
-##### `manifest`  (lines 354–378)
-
-```
-def manifest() -> Manifest
-```
-
-**Purpose**: This function describes the Bedrock extension to the UFO plugin system. It says what the provider is called, what credential it needs, which models it supports, how to build clients, and what prices apply.
-
-**Data flow**: It takes no input. It creates a credential slot for the Bedrock API key, creates a model provider specification that matches known Bedrock model IDs, connects that provider to `bedrock_client`, attaches the environment variable used for the API key, and includes the price table. It returns a `Manifest` object that UFO can read during extension loading.
-
-**Call relations**: This is the file’s registration point. The wider system calls `manifest` when loading the extension, then later uses the returned provider specification to match model names and call `bedrock_client` when a Bedrock-backed model is needed.
-
-*Call graph*: 3 external calls (__init__, __init__, __init__).
-
-
-### `core/src/ufo/models/anthropic.py`
-
-`io_transport` · `request handling`
-
-This file lets the rest of the project talk to Anthropic models without needing to know Anthropic's exact request and streaming formats. Think of it like a travel adapter: UFO has its own plug shape for messages, images, tool calls, and usage counts, while Anthropic expects a different shape. This file converts between the two.
-
-First, it builds an Anthropic SDK client with the project's own retry policy, rather than relying on the SDK's built-in retries. Then it translates UFO content blocks into Anthropic content blocks. Plain text stays plain text. Images become base64 image objects. Tool-use and tool-result messages are reshaped into the format Anthropic expects.
-
-The main piece is `AnthropicClient.complete`. It sends a model request as a streaming Anthropic request. As chunks arrive, it yields UFO events: text pieces, tool-call starts, and tool-call JSON fragments. At the end, it yields exactly one `Usage` record showing token counts, including cache reads and writes.
-
-The file is careful about failures. Timeouts and temporary provider errors are retried before any output has been yielded. Once the caller has started receiving output, failures are raised immediately, because retrying could duplicate partial answers. It also treats truncation and model refusal as clear errors instead of pretending they are normal completions.
+The engine also watches live cost and seat/spend limits, publishes progress to connected clients, shrinks long conversations when they approach model limits, offloads huge tool results into workspace files, stores large images outside replay logs, and writes the durable transcript at the end. Without this file, turns could race each other, lose messages, repeat expensive work after crashes, or commit answers that ignored messages arriving mid-run.
 
 #### Function details
 
-##### `anthropic_sdk_client`  (lines 40–44)
+##### `_claim_turn`  (lines 164–206)
 
 ```
-def anthropic_sdk_client(api_key: str) -> anthropic.AsyncAnthropic
+async def _claim_turn(turn_id: UUID, attempt: str) -> bool
 ```
 
-**Purpose**: Creates the Anthropic asynchronous client used to make API calls. It turns off the SDK's own retry behavior so this file can apply one consistent retry policy itself.
+**Purpose**: Claims a queued or parked turn so this workflow becomes its owner. This prevents two workers from running the same turn at the same time.
 
-**Data flow**: It receives an API key → builds an `anthropic.AsyncAnthropic` client with a fixed timeout and zero SDK retries → returns that ready-to-use client object.
+**Data flow**: It receives a turn ID and an attempt ID. It locks the conversation row, updates the turn to running only if it is claimable by this attempt, clears the dispatch marker, and removes one-time resume tasks for that turn. It returns true if the claim succeeded and false if another execution already owns or finished it.
 
-**Call relations**: This is the setup doorway for Anthropic access. It calls Anthropic's SDK constructor, and the resulting client is meant to be stored inside `AnthropicClient`, whose `complete` method later uses it to send model requests.
+**Call relations**: TurnEngine._mark_running uses this at the start of a run. _claim_turn_with_handoff also uses it before checking whether another queued turn should be handed off for dispatch.
 
-*Call graph*: 1 external calls (AsyncAnthropic).
-
-
-##### `_anthropic_image`  (lines 47–51)
-
-```
-def _anthropic_image(source: ImageSource) -> dict[str, object]
-```
-
-**Purpose**: Converts UFO's internal image description into the image shape Anthropic's API expects. It is a small helper for keeping image conversion consistent in normal messages and tool results.
-
-**Data flow**: It receives an `ImageSource`, which contains the image media type and base64 data → wraps those fields in Anthropic's image-content dictionary format → returns that dictionary.
-
-**Call relations**: This helper is used whenever higher-level conversion code finds an image. `anthropic_content` uses it for images in regular message content, and `_anthropic_tool_result_part` uses it for images returned by tools.
-
-*Call graph*: called by 2 (_anthropic_tool_result_part, anthropic_content).
+*Call graph*: called by 2 (_mark_running, _claim_turn_with_handoff); 6 external calls (and_, delete, or_, select, update, workspace_tx).
 
 
-##### `_anthropic_tool_result_part`  (lines 54–59)
+##### `_claim_turn_with_handoff`  (lines 217–274)
 
 ```
-def _anthropic_tool_result_part(part: ToolResultContent) -> dict[str, object]
+async def _claim_turn_with_handoff(turn_id: UUID, attempt: str) -> tuple[bool, _TurnHandoff | None]
 ```
 
-**Purpose**: Converts one piece of a tool result into Anthropic's expected format. A tool result may contain text or images, and this function knows how to translate each kind.
+**Purpose**: Claims the current turn and, if possible, marks the next queued turn in the same conversation as ready to dispatch. It helps keep conversation work moving in order.
 
-**Data flow**: It receives one tool-result content block → if it is text, it creates an Anthropic text dictionary; if it is an image, it delegates image formatting to `_anthropic_image` → returns the converted dictionary.
+**Data flow**: It receives the current turn ID and attempt ID. First it tries to claim the current turn. If that works, it looks for the next queued turn in the same conversation and stamps it as enqueued when it has not already been stamped. It returns whether the current claim succeeded plus optional handoff details for the next turn.
 
-**Call relations**: This function is called by `anthropic_content` when a message includes a tool result with multiple content parts. It hands image work off to `_anthropic_image` so image formatting stays in one place.
+**Call relations**: It builds on _claim_turn. The handoff object it creates gives another part of the system enough information to enqueue the next workflow without racing the current one.
 
-*Call graph*: calls 1 internal fn (_anthropic_image); called by 1 (anthropic_content).
-
-
-##### `anthropic_content`  (lines 62–87)
-
-```
-def anthropic_content(content: str | tuple[ContentBlock, ...]) -> str | list[dict[str, object]]
-```
-
-**Purpose**: Turns UFO message content into content Anthropic can accept. It supports plain strings, text blocks, image blocks, tool-use blocks, and tool-result blocks.
-
-**Data flow**: It receives either a simple string or a tuple of UFO content blocks → strings pass through unchanged; structured blocks are inspected one by one and converted into Anthropic dictionaries → returns either the original string or a list of converted content dictionaries.
-
-**Call relations**: `AnthropicClient.complete` calls this while building the outgoing Anthropic request. When it encounters images, it uses `_anthropic_image`; when it encounters structured tool-result parts, it uses `_anthropic_tool_result_part`.
-
-*Call graph*: calls 2 internal fn (_anthropic_image, _anthropic_tool_result_part); called by 1 (complete).
+*Call graph*: calls 1 internal fn (_claim_turn); 5 external calls (__init__, select, update, workspace_tx, uuid4).
 
 
-##### `AnthropicClient.complete`  (lines 94–245)
+##### `ModelStreamError.__init__`  (lines 361–362)
 
 ```
-async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]
+def __init__(self, error_class: str, message: str, partial_output: str='') -> None
 ```
 
-**Purpose**: Sends one UFO model request to Anthropic and streams the answer back as UFO model events. It is responsible for request formatting, streaming conversion, retry behavior, refusal handling, truncation detection, and final usage reporting.
+**Purpose**: Creates an error object for a model stream that failed after already producing some output or usage. It keeps the provider’s error type, message, and partial text together.
 
-**Data flow**: It receives a `ModelRequest` containing the model name, system prompt, conversation messages, token limit, reasoning setting, and optional tools → trims images from the message history as needed, converts message content with `anthropic_content`, adds Anthropic-specific options, and opens a streaming API call → as Anthropic sends events, it yields UFO events such as `TextDelta`, `ToolCallStart`, and `ToolCallDelta` → after the stream finishes normally, it yields one `Usage` record with token counts and then returns. If Anthropic times out or reports a retryable problem before anything has been yielded, it waits and retries. If the model refuses, runs out of token budget, or the stream is malformed, it raises a clear error instead.
+**Data flow**: It receives an error class name, an error message, and optional partial output. It stores all three in the exception’s arguments so they survive persistence and replay. It returns a constructed exception object.
 
-**Call relations**: This is the main runtime path for the file. Callers use it when they need an Anthropic completion. It calls `anthropic_content` to prepare messages, calls the Anthropic SDK to create a stream, constructs UFO event objects from incoming stream chunks, sleeps between retry attempts when needed, and raises `ModelResponseTruncated` or `ModelRefusal` for special stop reasons.
+**Call relations**: TurnEngine._stream_recovering_overflow creates this after _stream_once reports a model streaming failure in its recorded result.
 
-*Call graph*: calls 1 internal fn (anthropic_content); 9 external calls (__init__, __init__, __init__, __init__, __init__, __init__, sleep, trim_images, log).
+*Call graph*: called by 1 (_stream_recovering_overflow).
 
 
-### `core/src/ufo/models/openai.py`
-
-`io_transport` · `request handling during a model call`
-
-This file solves a translation problem. The rest of the system talks in UFO's own message and event types, but OpenAI expects a particular JSON shape and sends back a stream in its own format. Without this file, UFO could not reliably ask OpenAI-style models for answers, pass images and tool calls to them, or understand their streamed responses.
-
-The flow is like using an interpreter between two people who speak different dialects. First, helper functions convert UFO messages into OpenAI messages. Plain text becomes normal chat content. Images become OpenAI image URL parts using base64 data. Tool requests become OpenAI function calls. Tool results are split carefully because OpenAI only accepts tool-result text in a tool message; any images from a tool result are moved into a following user message.
-
-The main piece, OpenAIClient.complete, sends the converted request with streaming turned on. As chunks arrive, it yields small UFO events: text pieces, the start of a tool call, tool-call argument fragments, and finally token usage. It also contains the safety behavior around unreliable providers: it retries timeouts and temporary server errors before any output has been yielded, waits when the provider asks it to slow down, detects truncated responses, and treats completely empty replies as retryable a few times.
-
-#### Function details
-
-##### `openai_sdk_client`  (lines 37–43)
+##### `ModelStreamError.__str__`  (lines 364–366)
 
 ```
-def openai_sdk_client(api_key: str, base_url: str | None=None) -> openai.AsyncOpenAI
+def __str__(self) -> str
 ```
 
-**Purpose**: Creates the low-level asynchronous OpenAI SDK client used to talk to the provider. It deliberately turns off the SDK's own retries so this file's OpenAIClient can apply one clear retry policy.
+**Purpose**: Formats the model stream error as readable text. It includes the model provider’s error class so later checks can still recognize special cases such as context overflow.
 
-**Data flow**: It receives an API key and, optionally, a base URL for an OpenAI-compatible service. It builds an AsyncOpenAI client with a fixed timeout, no SDK retries, and the given connection details, then returns that client for later model requests.
+**Data flow**: It reads the stored error class and message from the exception. It combines them into a single string. It does not expose the partial output, because that is meant for recovery, not terminal error display.
 
-**Call relations**: This is the setup doorway for the transport layer. Other code can call it when constructing an OpenAIClient, and the returned SDK object is what OpenAIClient.complete later uses to create streaming chat completions.
-
-*Call graph*: 1 external calls (AsyncOpenAI).
+**Call relations**: This is used whenever the exception is converted to text, including logging or terminal error handling elsewhere in the engine.
 
 
-##### `_openai_image`  (lines 46–50)
+##### `ModelStreamError.model_error_class`  (lines 369–371)
 
 ```
-def _openai_image(source: ImageSource) -> dict[str, object]
+def model_error_class(self) -> str
 ```
 
-**Purpose**: Turns UFO's internal image data into the image format OpenAI expects. It packages a base64 image as a data URL, which is a text form of an embedded image.
+**Purpose**: Returns the original class name of the model provider error. Callers use this to distinguish truncation, overflow, and ordinary failures.
 
-**Data flow**: It receives an ImageSource containing a media type, such as image/png, and base64 image data. It wraps those fields into an OpenAI image_url dictionary and returns that dictionary.
+**Data flow**: It reads the first stored argument from the exception and returns it unchanged. Nothing else is modified.
 
-**Call relations**: This small converter is used whenever images need to cross the boundary into OpenAI's message format. openai_messages uses it for images in normal messages, and _openai_tool_result uses it for images returned by tools.
-
-*Call graph*: called by 2 (_openai_tool_result, openai_messages).
+**Call relations**: TurnEngine._model_round checks this value after _stream_recovering_overflow raises the error, especially to recover from output truncation.
 
 
-##### `_openai_tool_result`  (lines 53–69)
+##### `ModelStreamError.partial_output`  (lines 374–376)
 
 ```
-def _openai_tool_result(result: str | tuple[ToolResultContent, ...]) -> tuple[str, list[dict[str, object]]]
+def partial_output(self) -> str
 ```
 
-**Purpose**: Splits a tool result into the parts OpenAI can accept in different places. OpenAI tool messages are text-only, so image results must be separated and sent later as user image content.
+**Purpose**: Returns any text or tool-call fragments the model produced before the stream failed. This lets the engine salvage paid-for output instead of throwing it away.
 
-**Data flow**: It receives either a plain string result or a tuple of result blocks. If the result is text, it returns that text and no images. If the result contains several blocks, it collects text blocks into one newline-joined string, converts image blocks with _openai_image, and returns both the text and the image list.
+**Data flow**: It reads the saved partial output from the exception. The caller can then write that content to a file or use it in recovery guidance.
 
-**Call relations**: openai_messages calls this while converting UFO tool-result blocks. It hands back text for an OpenAI tool message and image parts that openai_messages lifts into a following user message so the model can still see them.
-
-*Call graph*: calls 1 internal fn (_openai_image); called by 1 (openai_messages).
+**Call relations**: TurnEngine._model_round uses this when a model response was truncated, offloading the partial output so the model can continue from it.
 
 
-##### `openai_messages`  (lines 72–125)
+##### `ModelStreamError.model_error_message`  (lines 379–381)
 
 ```
-def openai_messages(system: str, messages: tuple[Message, ...]) -> list[dict[str, object]]
+def model_error_message(self) -> str
 ```
 
-**Purpose**: Converts UFO's conversation history into the list of messages expected by the OpenAI Chat Completions API. This includes system instructions, text, images, tool calls, and tool results.
+**Purpose**: Returns the original message from the model provider error. This preserves useful detail for terminal frames and diagnostics.
 
-**Data flow**: It receives the system prompt and a tuple of UFO Message objects. It first adds the system message, then walks through the conversation after trim_images has reduced image history as needed. For each message, it converts plain text directly, converts image blocks into OpenAI image parts, serializes tool-call inputs into JSON text, turns tool results into OpenAI tool messages, and moves any tool-result images into a follow-up user message. It returns a list of OpenAI-shaped dictionaries ready to send over the API.
+**Data flow**: It reads the stored message from the exception and returns it. It does not change state.
 
-**Call relations**: OpenAIClient.complete calls this just before making the provider request. Inside the conversion, it relies on _openai_image for image formatting, _openai_tool_result for tool outputs, json.dumps for tool arguments, and trim_images to keep image-heavy histories within practical limits.
-
-*Call graph*: calls 2 internal fn (_openai_image, _openai_tool_result); called by 1 (complete); 2 external calls (dumps, trim_images).
+**Call relations**: TurnEngine._commit_once uses this when building a terminal error frame for a failed turn caused by model streaming.
 
 
-##### `OpenAIClient.complete`  (lines 132–261)
+##### `TurnParked.__init__`  (lines 388–390)
 
 ```
-async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]
+def __init__(self, message: str) -> None
 ```
 
-**Purpose**: Sends one model request to OpenAI and streams the answer back as UFO ModelEvent objects. It is the main runtime path for getting text, tool calls, and token usage from an OpenAI-style provider.
+**Purpose**: Creates an exception that means the turn must pause instead of finish because a spend cap or seat rule blocked further work. Parking is resumable, unlike failure.
 
-**Data flow**: It receives a ModelRequest containing the model name, system prompt, prior messages, token limit, reasoning setting, and available tools. It converts the messages with openai_messages, builds the provider request, and starts a streaming chat completion. As provider chunks arrive, it turns text chunks into TextDelta events, tool-call beginnings into ToolCallStart events, tool-call argument fragments into ToolCallDelta events, and the final usage report into a Usage event. It also changes behavior on errors: before any output is yielded, it retries timeouts and retryable HTTP status errors with delays; after output has started, it raises failures immediately. If the provider says the reply was cut off by the token limit, it raises ModelResponseTruncated. If the stream has no usage data, it raises an error. If the provider returns an empty stop response, it retries a few times before yielding usage and ending.
+**Data flow**: It receives a user-facing message. It stores that message on the exception so the parked notification can explain why the turn stopped.
 
-**Call relations**: This method is called by the higher-level model-running code when UFO needs a response from an OpenAI-compatible model. It hands message conversion to openai_messages, uses the OpenAI SDK stream as the outside source of truth, emits UFO event objects for the rest of the system to consume, logs timeout retries through ufo.o11y.log, waits between retries with asyncio.sleep, and raises ModelResponseTruncated when the provider stopped because the requested token budget was exhausted.
+**Call relations**: TurnEngine._enforce_spend raises this. TurnEngine.run catches it and calls _park to record the parked state.
 
-*Call graph*: calls 1 internal fn (openai_messages); 7 external calls (__init__, __init__, __init__, __init__, __init__, sleep, log).
+*Call graph*: called by 1 (_enforce_spend).
 
 
-### Model registry
-The registry resolves requested models to available providers, credentials, and pricing metadata.
-
-### `core/src/ufo/models/registry.py`
-
-`orchestration` · `startup to turn/request handling`
-
-This file is the switchboard for AI model backends. The project can talk directly to Anthropic and OpenAI, and extensions can add more model providers through manifests. The registry combines all of these into one ordered table, with the built-in providers first. That order matters: if a normal OpenAI or Anthropic model name is requested, the direct built-in client wins before any extension gets a chance.
-
-The registry also joins together pricing information, so the same source of truth can answer both “who serves this model?” and “how should this model be priced?” Without this file, model selection would be scattered around the codebase, and unknown models might be guessed at instead of failing clearly.
-
-A key idea here is that API keys are resolved late, when a model is actually used. A workspace may bring its own key, often called BYOK (“bring your own key”), or the system may fall back to a platform key from an environment variable. This means one missing provider key does not break the whole server at startup; it only fails if someone tries to use that provider. The registry also supports an `auto` model setting, which acts like saying “use the deployment’s default model” until runtime resolves it to a real model name.
-
-#### Function details
-
-##### `ModelRegistry.resolve`  (lines 44–48)
+##### `_dispatch_segments`  (lines 393–417)
 
 ```
-def resolve(self, model: str) -> str
+def _dispatch_segments(tools: ToolRegistry, tool_calls: tuple[ToolUseBlock, ...]) -> Iterator[tuple[ToolUseBlock, ...]]
 ```
 
-**Purpose**: This turns the special `auto` model choice into the concrete default model configured for this deployment. If the caller already gave a specific model name, it leaves it alone.
+**Purpose**: Splits a model’s tool calls into safe execution groups. Tools marked as safe to run in parallel can run together; other tools become one-at-a-time barriers.
 
-**Data flow**: It receives a model name. If that name is the project’s `auto` marker, it replaces it with the registry’s configured default model; otherwise it returns the original name unchanged. It does not change any stored state.
+**Data flow**: It receives the tool registry and the ordered tool calls from one model round. It checks each tool’s parallel-safety flag, groups consecutive safe calls up to the configured limit, and yields each group in the original order.
 
-**Call relations**: This is used before the system chooses a provider or prices a run, so later steps work with a real model name instead of the generic `auto` shortcut.
+**Call relations**: TurnEngine._model_round uses this before dispatching tools. The grouping lets the engine gain speed without letting a write race ahead of a read that may depend on it.
 
-
-##### `ModelRegistry.client_for`  (lines 50–67)
-
-```
-async def client_for(self, model: str) -> ModelClient
-```
-
-**Purpose**: This creates the actual model client that should serve a given model, using the right provider and the right API key for the current workspace. Someone uses it when they are ready to make a model call.
-
-**Data flow**: It receives a model name, finds the first provider that claims it, then decides whether that provider needs an API key. If no key is needed, it builds the client with an empty key. If a key is needed, it asks the current workspace for the workspace’s saved key first, or the configured environment variable fallback. If no usable key exists, it raises a clear error. On success, it returns a ready-to-use model client.
-
-**Call relations**: It asks `ModelRegistry._provider_for` to choose the provider, then asks `ws_current` for the workspace tied to the current operation so the call can use that workspace’s credentials. This keeps provider choice and key lookup in one place before the turn loop sends work to the model.
-
-*Call graph*: calls 1 internal fn (_provider_for); 1 external calls (ws_current).
+*Call graph*: calls 1 internal fn (get); called by 1 (_model_round).
 
 
-##### `ModelRegistry.key_slot_for`  (lines 69–77)
+##### `_parse_args`  (lines 420–422)
 
 ```
-def key_slot_for(self, model: str) -> str | None
+def _parse_args(partials: list[str]) -> dict[str, object]
 ```
 
-**Purpose**: This answers which workspace BYOK credential slot would be used for a model, if any. It is useful for reporting or billing code that needs to label whether a model call used a workspace-owned key or a platform-served provider.
+**Purpose**: Turns streamed JSON fragments from a tool call into a normal argument dictionary. Empty arguments become an empty dictionary.
 
-**Data flow**: It receives a model name and scans the registry’s providers for the first one that matches. If no provider matches, or the matching provider does not use a workspace key slot, it returns `None`. Otherwise it returns the provider’s key slot name, such as the Anthropic or OpenAI key slot.
+**Data flow**: It receives a list of partial JSON strings. It joins them, parses the result when it contains non-whitespace text, and returns the decoded dictionary-like value.
 
-**Call relations**: Unlike `client_for`, this is deliberately quiet rather than strict. It does not raise an error for old or unknown model names, which lets accounting-style flows keep moving even if a historical model provider has since been removed.
+**Call relations**: TurnEngine._stream_once uses this after a model stream finishes to build ToolUseBlock objects from streamed tool-call argument fragments.
 
-
-##### `ModelRegistry.model_key_env`  (lines 79–88)
-
-```
-def model_key_env(self, model: str, config: Config) -> str | None
-```
-
-**Purpose**: This tells onboarding code which environment variable should be checked before the first use of a built-in model provider. It only knows how to eagerly check the core Anthropic and OpenAI providers.
-
-**Data flow**: It receives a model name and the project configuration. It finds the provider for that model, looks at the provider’s name, and returns the configured environment variable name for Anthropic or OpenAI. For extension-provided models, it returns `None` because those providers resolve their keys later in their own way.
-
-**Call relations**: It relies on `ModelRegistry._provider_for` to identify who serves the model. This function is part of the early setup or onboarding path, while `client_for` is the later runtime path that actually obtains the key and builds the client.
-
-*Call graph*: calls 1 internal fn (_provider_for).
+*Call graph*: called by 1 (_stream_once); 1 external calls (loads).
 
 
-##### `ModelRegistry._provider_for`  (lines 90–94)
+##### `_context_tag`  (lines 425–435)
 
 ```
-def _provider_for(self, model: str) -> ModelProviderSpec
+def _context_tag(context: TurnContext | None, admitted_at: datetime) -> str
 ```
 
-**Purpose**: This is the registry’s private lookup helper. It finds the first provider in the ordered table that says it can serve a given model, and fails clearly if none can.
+**Purpose**: Builds the small context header placed before user messages, showing when the message was admitted and who sent it. This gives the model a stable sense of time and speaker.
 
-**Data flow**: It receives a model name and checks each provider’s matching rule in order. If one matches, it returns that provider specification. If none match, it raises a `ValueError` saying that no provider serves the model.
+**Data flow**: It receives optional turn context and the stored admission time. It formats the time in the sender’s timezone when available, otherwise UTC, adds the sender name if present, and returns a text block wrapped in a context tag.
 
-**Call relations**: Both `ModelRegistry.client_for` and `ModelRegistry.model_key_env` call this so they make provider decisions in exactly the same way. It is the central gatekeeper that prevents the system from guessing a backend for an unknown model.
+**Call relations**: TranscriptRepair.load_messages uses it for the founding inbound message. TurnEngine._render_arrival uses it for later messages absorbed while the turn is running.
 
-*Call graph*: called by 2 (client_for, model_key_env).
-
-
-##### `model_registry`  (lines 97–123)
-
-```
-def model_registry(config: Config, manifests: tuple[Manifest, ...]) -> ModelRegistry
-```
-
-**Purpose**: This builds the active `ModelRegistry` from configuration and extension manifests. It is the setup function that gathers built-in providers, adds contributed providers, and prepares the combined pricing table.
-
-**Data flow**: It receives the loaded configuration and a tuple of manifests from extensions. It creates built-in provider entries for Anthropic and OpenAI, including their model-name matching rules, client builders, key slots, and configured key environment variables. It then appends all model providers contributed by manifests, collects their price entries, merges those prices with the core pricing table, and returns a frozen `ModelRegistry` containing the providers, pricing, and configured default `auto` model.
-
-**Call relations**: This is called during setup to create the registry used later by model selection, credential lookup, and accounting. It constructs `ModelProviderSpec` entries, passes contributed prices through `pricing_with`, and returns the `ModelRegistry` object that the rest of the system consults during model runs.
-
-*Call graph*: 3 external calls (__init__, __init__, pricing_with).
+*Call graph*: called by 2 (load_messages, _render_arrival); 2 external calls (astimezone, ZoneInfo).
 
 
-### Extension model gateways
-OpenRouter and the self-improvement extension add higher-level model access paths that reuse the system’s common request and metering conventions.
-
-### `extensions/openrouter/ufo_ext_openrouter.py`
-
-`io_transport` · `request handling`
-
-OpenRouter speaks the same basic “chat completions” protocol as OpenAI, but it can send a request onward to many different upstream providers. This file is the adapter that makes that look like a normal model client to the rest of the system. Without it, the project could only use the built-in direct providers, and OpenRouter-only model names would have nowhere to go.
-
-The file does a few OpenRouter-specific jobs. First, it turns model names into OpenRouter slugs, such as changing a bare OpenAI model name into `openai/...` or a Claude model into `anthropic/...`. Second, it builds the request OpenRouter expects, including streamed output, tool definitions, usage reporting, and optional “reasoning” effort. Third, it reads the streamed response piece by piece and converts it into the project’s own events: text chunks, tool-call starts, tool-call argument chunks, and final token usage.
-
-It also protects the caller from some common service problems. Temporary rate-limit or server errors are retried before any output has been produced. If OpenRouter returns an empty answer from one upstream provider, the client can try again while asking OpenRouter to avoid that provider, like asking a dispatcher to try a different driver after one arrives with an empty package.
-
-#### Function details
-
-##### `openrouter_slug`  (lines 58–68)
+##### `_bounded`  (lines 438–444)
 
 ```
-def openrouter_slug(model: str) -> str
+def _bounded(content: str) -> str
 ```
 
-**Purpose**: Turns the model name used by the rest of the system into the model name format OpenRouter expects. If the name already names a provider, it leaves it alone; otherwise it adds known provider prefixes for OpenAI and Anthropic-style models.
+**Purpose**: Shortens overly large text to the maximum size allowed for tool results. This protects the model context from being flooded by one huge result.
 
-**Data flow**: It receives a model string. It checks whether the string already contains a slash, whether it starts like an OpenAI model, or whether it starts like a Claude model. It returns the original string or a provider-prefixed version that can be sent to OpenRouter.
+**Data flow**: It receives text. If it is short enough, it returns the text unchanged. If it is too long, it returns the leading portion plus a note explaining how many characters were cut.
 
-**Call relations**: When `OpenRouterModelClient._create_kwargs` prepares an API request, it calls this function so the outgoing request uses the right OpenRouter model slug.
+**Call relations**: TurnEngine._dispatch_step uses it for error results and fallback truncation. TurnEngine._model_round uses it when creating an artificial finish-tool error.
 
-*Call graph*: called by 1 (_create_kwargs).
-
-
-##### `_chunk_provider`  (lines 71–76)
-
-```
-def _chunk_provider(chunk: ChatCompletionChunk) -> str | None
-```
-
-**Purpose**: Finds which upstream provider OpenRouter used for a streamed response chunk, when OpenRouter includes that extra detail. This matters because the client may ask OpenRouter to avoid that provider if it produces an empty completion.
-
-**Data flow**: It receives one streamed chat chunk from the OpenAI-compatible API. It looks in the chunk’s extra metadata for a `provider` value. It returns that provider name as text, or returns nothing if the chunk does not say.
-
-**Call relations**: `OpenRouterModelClient.complete` calls this while reading the stream. The provider name it returns can later be added to an ignore list if the response ended cleanly but produced no useful text or tool calls.
-
-*Call graph*: called by 1 (complete).
+*Call graph*: called by 2 (_dispatch_step, _model_round).
 
 
-##### `_usage_of`  (lines 79–88)
+##### `_final_act`  (lines 447–465)
 
 ```
-def _usage_of(usage: CompletionUsage) -> Usage
+def _final_act(tool_calls: tuple[ToolUseBlock, ...], results: tuple[ToolResultBlock, ...], tool_name: str, model: type[PayloadT]) -> PayloadT | None
 ```
 
-**Purpose**: Converts OpenAI-style token usage numbers into the project’s own `Usage` object. It separates normal input tokens from cached input tokens so costs can be counted correctly.
+**Purpose**: Detects when a special tool call was the successful final action of a round and extracts its structured payload. This is how ask-user, credential, and connect-account requests become terminal frame fields.
 
-**Data flow**: It receives the usage record from the API. It reads total prompt tokens, completion tokens, and any cached prompt tokens. If cached tokens are impossibly larger than total prompt tokens, it raises an error; otherwise it returns a `Usage` value with input, output, and cache-read token counts.
+**Data flow**: It receives the round’s tool calls, their results, the tool name to look for, and the expected payload model. It checks the last call and result, parses the JSON payload from the result text, validates it, and returns the typed payload or None.
 
-**Call relations**: `OpenRouterModelClient.complete` calls this when a streamed chunk includes final usage information. The returned `Usage` object is yielded at the end of a successful model response.
+**Call relations**: TurnEngine._model_round calls this after tool dispatch to remember whether the latest round ended by asking the user, requesting credentials, or requesting an account connection.
 
-*Call graph*: called by 1 (complete); 1 external calls (__init__).
-
-
-##### `OpenRouterModelClient.complete`  (lines 104–172)
-
-```
-async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]
-```
-
-**Purpose**: Sends one model request to OpenRouter and streams the answer back in the project’s standard event format. It is the main runtime path for using OpenRouter as a model backend.
-
-**Data flow**: It receives a `ModelRequest` containing the model name, messages, token limit, tools, and reasoning setting. It builds OpenRouter API arguments, opens a streaming request, then reads chunks as they arrive. Text becomes `TextDelta` events, tool calls become `ToolCallStart` and `ToolCallDelta` events, and final token counts become a `Usage` event. It may also sleep and retry on temporary API errors, raise a truncation error if the model hit the token limit, or retry with a provider excluded if the first provider returned an empty result.
-
-**Call relations**: The rest of the system calls this when it wants a response from an OpenRouter-backed model. Inside, it hands request-building to `OpenRouterModelClient._create_kwargs`, uses `_chunk_provider` to remember which upstream provider answered, uses `_usage_of` to translate token accounting, and emits the project’s standard model events for downstream turn-processing code.
-
-*Call graph*: calls 3 internal fn (_create_kwargs, _chunk_provider, _usage_of); 5 external calls (__init__, __init__, __init__, __init__, sleep).
+*Call graph*: called by 1 (_model_round); 1 external calls (loads).
 
 
-##### `OpenRouterModelClient._create_kwargs`  (lines 174–202)
+##### `_total_usage`  (lines 468–474)
 
 ```
-def _create_kwargs(self, request: ModelRequest, ignore_providers: frozenset[str]) -> dict[str, Any]
+def _total_usage(usage_events: list[Usage]) -> Usage
 ```
 
-**Purpose**: Builds the exact set of arguments sent to OpenRouter’s OpenAI-compatible chat API. This keeps request-shaping separate from the streaming and retry logic.
+**Purpose**: Adds many token-usage reports into one total. This gives billing, live cost display, and spend checks a single number to use.
 
-**Data flow**: It receives a model request and a set of provider names to avoid. It converts the model name with `openrouter_slug`, converts the conversation into OpenAI-style messages, adds token limits, streaming options, optional reasoning settings, optional ignored providers, and optional tool definitions. It returns a dictionary of API arguments.
+**Data flow**: It receives a list of usage events. It sums input, output, cache-read, and cache-write token counts separately and returns one Usage object with those totals.
 
-**Call relations**: `OpenRouterModelClient.complete` calls this right before making each OpenRouter request. If an empty response forces a retry, `complete` calls it again with a larger ignore list so OpenRouter can choose a different upstream provider.
+**Call relations**: TurnEngine uses it in _publish_cost, _enforce_spend, _commit_once, _park, and _bill_cancelled so all cost-related paths calculate from the same accumulated usage.
 
-*Call graph*: calls 1 internal fn (openrouter_slug); called by 1 (complete); 1 external calls (openai_messages).
-
-
-##### `_model_client`  (lines 205–206)
-
-```
-def _model_client(model: str, key: str) -> OpenRouterModelClient
-```
-
-**Purpose**: Creates an `OpenRouterModelClient` using the supplied API key. It is the factory function the manifest gives to the host system when a model should be served through OpenRouter.
-
-**Data flow**: It receives a model name and an API key. The model name is not needed at this construction step; the key is used to create an asynchronous OpenAI-compatible SDK client pointed at OpenRouter’s base URL. It returns an `OpenRouterModelClient` wrapping that SDK client.
-
-**Call relations**: The provider specification created by `manifest` refers to this function as its client builder. When the host chooses the OpenRouter provider, it calls this function to get the client that will later run `complete`.
-
-*Call graph*: 2 external calls (__init__, openai_sdk_client).
+*Call graph*: called by 5 (_bill_cancelled, _commit_once, _enforce_spend, _park, _publish_cost); 1 external calls (__init__).
 
 
-##### `manifest`  (lines 209–223)
+##### `TranscriptRepair.resolve`  (lines 489–513)
 
 ```
-def manifest() -> Manifest
+async def resolve(self) -> TerminalFrame | None
 ```
 
-**Purpose**: Describes this extension to the wider system: its name, version, how to match models, how to create a client, where to find the API key, and known prices. This is how the extension is discovered and registered.
+**Purpose**: Republishes a terminal result for a turn that already finished, usually after a duplicate delivery or crash after commit. This helps waiting clients receive the ending they missed.
 
-**Data flow**: It takes no input. It creates a `Manifest` containing one model provider specification for OpenRouter. That specification matches any model not claimed earlier by more specific providers, points to `_model_client`, names the API key environment variable and key slot, and includes pinned price data for known OpenRouter slugs.
+**Data flow**: It reads the turn’s stored terminal frame from the database. If none exists, it returns None. If one exists, it persists the inbound transcript if needed, publishes the terminal frame to the live hub, logs publish failures without crashing, and returns the frame.
 
-**Call relations**: The extension loader calls this when loading the OpenRouter extension. The returned manifest tells the host system to use `_model_client` when it needs an OpenRouter-backed client, which then produces an `OpenRouterModelClient` for actual requests.
+**Call relations**: TurnEngine._resolve_unclaimed calls this when the current execution could not claim the turn. It may call TranscriptRepair.persist_inbound before publishing.
+
+*Call graph*: calls 1 internal fn (persist_inbound); 5 external calls (__init__, model_validate, select, workspace_tx, log).
+
+
+##### `TranscriptRepair.persist_transcript`  (lines 515–522)
+
+```
+async def persist_transcript(self, messages: tuple[Message, ...], answer: str, system: str, injected: str) -> None
+```
+
+**Purpose**: Writes the completed conversation transcript for a successful turn. It includes the assistant’s final answer.
+
+**Data flow**: It receives the model-visible messages, answer text, system prompt, and injected prompt text. It appends the assistant answer to the messages and passes the full conversation to write_conversation.
+
+**Call relations**: TurnEngine._persist_transcript delegates here after a done terminal is committed. It relies on write_conversation for retries.
+
+*Call graph*: calls 1 internal fn (write_conversation); 1 external calls (__init__).
+
+
+##### `TranscriptRepair.persist_inbound`  (lines 524–531)
+
+```
+async def persist_inbound(self, arrivals: tuple[Message, ...]=()) -> None
+```
+
+**Purpose**: Writes only the user-side messages for a turn that did not complete normally. This preserves what the user said without saving a failed or partial assistant reply.
+
+**Data flow**: It loads the prior transcript plus the founding inbound, appends any absorbed arrival messages, and writes that conversation. The assistant’s error text is intentionally left out.
+
+**Call relations**: TranscriptRepair.resolve may call it when republishing a committed terminal. TurnEngine._persist_inbound delegates here on parked, failed, or cancelled paths.
+
+*Call graph*: calls 2 internal fn (load_messages, write_conversation); called by 1 (resolve).
+
+
+##### `TranscriptRepair.load_messages`  (lines 533–541)
+
+```
+async def load_messages(self) -> tuple[Message, ...]
+```
+
+**Purpose**: Builds the initial message list the model should see for this turn. It combines prior conversation with this turn’s inbound message.
+
+**Data flow**: It reads prior messages using _prior_messages. For ordinary user-facing turns, it prefixes the inbound text with a context tag; for subagent turns, it keeps the inbound payload bare. It returns the prior messages plus the new user message.
+
+**Call relations**: TurnEngine._load_messages and TranscriptRepair.persist_inbound use this. It calls _context_tag and _prior_messages to assemble stable context.
+
+*Call graph*: calls 2 internal fn (_prior_messages, _context_tag); called by 1 (persist_inbound); 1 external calls (__init__).
+
+
+##### `TranscriptRepair._prior_messages`  (lines 543–549)
+
+```
+async def _prior_messages(self) -> tuple[Message, ...]
+```
+
+**Purpose**: Reads the conversation transcript before this turn. It avoids treating this turn’s own previous write as prior context during replay.
+
+**Data flow**: It asks the transcript store for the saved conversation. If there is no transcript, or the saved transcript is already at this turn’s sequence or later, it returns an empty tuple. Otherwise it returns the stored messages.
+
+**Call relations**: TranscriptRepair.load_messages calls this before adding the current inbound message.
+
+*Call graph*: called by 1 (load_messages).
+
+
+##### `TranscriptRepair.write_conversation`  (lines 551–571)
+
+```
+async def write_conversation(self, messages: tuple[Message, ...], system: str | None=None, injected: str | None=None) -> None
+```
+
+**Purpose**: Writes a Conversation object to durable transcript storage with a few retries. This makes transcript writes more tolerant of temporary storage failures.
+
+**Data flow**: It receives messages and optional system/injected prompt text. It wraps them in a Conversation with the current turn sequence, tries to write it, logs failures, waits briefly, and retries before giving up silently after the configured attempts.
+
+**Call relations**: TranscriptRepair.persist_transcript and TranscriptRepair.persist_inbound both rely on this as the common transcript-writing path.
+
+*Call graph*: called by 2 (persist_inbound, persist_transcript); 3 external calls (__init__, sleep, log).
+
+
+##### `TurnEngine.__post_init__`  (lines 606–613)
+
+```
+def __post_init__(self) -> None
+```
+
+**Purpose**: Checks that subagent output mode does not conflict with a real tool named finish. The engine reserves finish as the special structured-return tool for subagents.
+
+**Data flow**: After the dataclass is created, it looks at whether an output model is present. If so, it checks the tool registry for a tool named finish and raises an error if one exists. Otherwise it leaves the engine unchanged.
+
+**Call relations**: This runs automatically when a TurnEngine is constructed. It protects later flow in _stream_once, _model_round, and _force_finish from ambiguity.
+
+
+##### `TurnEngine.run`  (lines 615–764)
+
+```
+async def run(self) -> TerminalFrame | None
+```
+
+**Purpose**: Runs the whole turn from claim to terminal outcome. It is the main body that coordinates context loading, hooks, model rounds, tool work, billing, transcript writes, parking, failure handling, and cleanup.
+
+**Data flow**: It starts with the turn, agent, model, tools, stores, and live hub already wired into the engine. It claims the turn, prepares tool context, fires the inbound hook, loops through model rounds until a terminal result is ready, commits that result, publishes it, and writes the transcript. On parking, cancellation, or error, it records usage where possible, releases messages that should be retried, persists safe inbound text, and cleans up tool context resources.
+
+**Call relations**: This is the top-level method called by the turn workflow. It calls most helper methods in this file, including _mark_running, _model_round, _commit, _park, _persist_transcript, and _persist_inbound.
+
+*Call graph*: calls 11 internal fn (_bill_cancelled, _commit, _load_messages, _mark_running, _model_round, _park, _persist_inbound, _persist_transcript, _release_unabsorbed, _resolve_unclaimed (+1 more)); 7 external calls (__init__, __init__, __init__, __init__, emit_metric, log, turn_span).
+
+
+##### `TurnEngine.run.rank_find`  (lines 628–645)
+
+```
+async def rank_find(system: str, user: str) -> str
+```
+
+**Purpose**: Lets browser tooling ask the model to rank page elements for a find operation. It is host-side helper work whose token usage still counts toward the same turn.
+
+**Data flow**: It receives a small system prompt and user prompt. It sends a model request with reasoning off, collects streamed text into one string, and appends any usage events to the turn’s usage list. It returns the model’s ranking text.
+
+**Call relations**: TurnEngine.run places this function into ToolContext as the find callback. Browser-related tools can call it during dispatch, and its usage is later included in the turn’s billing.
 
 *Call graph*: 2 external calls (__init__, __init__).
 
 
-### `extensions/self_improvement/ufo_ext_self_improvement/model.py`
-
-`io_transport` · `cross-cutting model calls`
-
-The self-improvement extension needs to ask a language model for two kinds of help. Sometimes it wants plain text back, such as a proposal or evaluation. Other times it wants a full model “turn,” which may include tool use information as part of a conversation. This file defines those two narrow needs and then adapts them to the project’s wider model access system.
-
-Think of it like a ticket counter at a train station. The rest of the extension does not need to know how the whole rail network works. It only needs to say where it wants to go and receive the right kind of ticket. Here, `ModelAccessLeg` is that counter: it takes a system instruction, conversation messages, and optionally tool descriptions, then builds a `ModelRequest` for the SDK’s `ModelAccess` object.
-
-A key detail is that every request is capped at `MAX_OUTPUT_TOKENS`, currently 2048, and has reasoning turned off. That makes calls more predictable and keeps usage under control. The file also defines two protocol classes, `ModelLeg` and `ReplayLeg`. A protocol is like a promise about what methods an object must provide. This lets other code depend on a simple shape instead of a specific implementation, which makes testing and swapping model backends easier.
-
-#### Function details
-
-##### `ModelLeg.complete`  (lines 13–13)
+##### `TurnEngine._scheduled_system`  (lines 766–793)
 
 ```
-async def complete(self, system: str, messages: tuple[Message, ...]) -> str
+async def _scheduled_system(self, system: str) -> str
 ```
 
-**Purpose**: This describes the simplest kind of model call the extension needs: send instructions and prior messages, then get text back. It is a protocol method, so it defines an expected behavior rather than doing the work itself.
+**Purpose**: Adds recalled memory to the system prompt for scheduled turns. Scheduled work has no fresh human present, so remembered context can help the agent act sensibly.
 
-**Data flow**: The caller provides a system instruction and a tuple of conversation messages. Any object that claims to be a `ModelLeg` must turn that input into a final text string. This protocol method itself has no body, so it changes nothing directly.
+**Data flow**: It receives the current system prompt. It searches memory for the conversation using the turn’s inbound text, with a short timeout. If search fails or finds nothing, it returns the original prompt; otherwise it appends escaped recalled-memory entries.
 
-**Call relations**: Other self-improvement code can ask for a `ModelLeg` when it only needs text completion. A real implementation, such as `ModelAccessLeg.complete`, supplies the actual connection to the SDK model service.
+**Call relations**: TurnEngine.run calls this only for scheduled admissions. It degrades by logging and continuing if memory search is unavailable or slow.
 
-
-##### `ReplayLeg.turn`  (lines 17–19)
-
-```
-async def turn(self, system: str, messages: tuple[Message, ...], tools: tuple[ToolSchema, ...]) -> Message
-```
-
-**Purpose**: This describes a fuller model conversation step where the model can see available tools and return a complete message. It is used for replay-style interactions where the response may need more structure than plain text.
-
-**Data flow**: The caller provides a system instruction, existing conversation messages, and tool descriptions. Any object matching this protocol must produce one model message in response. Since this is only a protocol declaration, it does not perform the call itself or modify anything.
-
-**Call relations**: Replay or simulation code can depend on this small interface without caring which model backend is underneath. `ModelAccessLeg.turn` is the concrete version in this file that forwards the request to the SDK.
+*Call graph*: called by 1 (run); 3 external calls (timeout, escape, log).
 
 
-##### `ModelAccessLeg.complete`  (lines 28–37)
+##### `TurnEngine._mark_running`  (lines 795–803)
 
 ```
-async def complete(self, system: str, messages: tuple[Message, ...]) -> str
+async def _mark_running(self) -> bool
 ```
 
-**Purpose**: This performs a plain text model completion through the SDK’s metered model access layer. It is used when the extension wants a textual answer and does not need tool-aware conversation behavior.
+**Purpose**: Claims this turn as running under the current workflow attempt. This is the engine’s single-owner gate.
 
-**Data flow**: It receives a system instruction and conversation messages. It wraps them in a `ModelRequest`, adds the selected model name from `ModelAccess`, caps the answer length at 2048 tokens, and turns reasoning off. It then sends that request to `self.model.complete` and returns the resulting text.
+**Data flow**: It uses the turn ID and attempt stored on the engine. It delegates the database update to _claim_turn and returns whether the claim succeeded.
 
-**Call relations**: This is the concrete worker behind the `ModelLeg.complete` promise. Code that only knows it needs a text completion can call this adapter, and the adapter hands the properly shaped request to the SDK by constructing a `ModelRequest` first.
+**Call relations**: TurnEngine.run calls this before doing model or tool work. If it returns false, run switches to _resolve_unclaimed.
 
-*Call graph*: 1 external calls (__init__).
+*Call graph*: calls 1 internal fn (_claim_turn); called by 1 (run).
 
 
-##### `ModelAccessLeg.turn`  (lines 39–51)
+##### `TurnEngine._repair`  (lines 805–806)
 
 ```
-async def turn(self, system: str, messages: tuple[Message, ...], tools: tuple[ToolSchema, ...]) -> Message
+def _repair(self) -> TranscriptRepair
 ```
 
-**Purpose**: This performs a tool-aware model turn through the SDK’s metered model access layer. It is used when the extension needs the model to respond as part of a conversation that may include available tools.
+**Purpose**: Creates a small helper object for transcript repair and transcript writes. It keeps transcript-related actions separate from the main engine.
 
-**Data flow**: It receives a system instruction, conversation messages, and tool schemas, which are descriptions of tools the model may use. It packages those into a `ModelRequest`, includes the configured model name, limits the output to 2048 tokens, and disables reasoning. It sends the request to `self.model.turn` and returns the resulting model message.
+**Data flow**: It takes the engine’s turn, transcript store, and hub. It returns a TranscriptRepair object that can load, write, or republish transcript state.
 
-**Call relations**: This is the concrete worker behind the `ReplayLeg.turn` promise. Replay-style code calls it when it needs a full message back, and this adapter translates that need into the SDK’s standard `ModelRequest` format before passing it onward.
+**Call relations**: TurnEngine._load_messages, _persist_transcript, _persist_inbound, and _resolve_unclaimed all call this before delegating transcript-related work.
 
-*Call graph*: 1 external calls (__init__).
+*Call graph*: called by 4 (_load_messages, _persist_inbound, _persist_transcript, _resolve_unclaimed); 1 external calls (__init__).
+
+
+##### `TurnEngine._load_messages`  (lines 808–809)
+
+```
+async def _load_messages(self) -> tuple[Message, ...]
+```
+
+**Purpose**: Loads the messages that should start this turn’s model context. It is a thin wrapper around the transcript repair helper.
+
+**Data flow**: It creates a TranscriptRepair object from the engine state and asks it to load messages. It returns those messages to the caller.
+
+**Call relations**: TurnEngine.run calls this when preparing the first model window or denial transcript.
+
+*Call graph*: calls 1 internal fn (_repair); called by 1 (run).
+
+
+##### `TurnEngine._model_round`  (lines 811–957)
+
+```
+async def _model_round(self, context: ToolContext, messages: tuple[Message, ...], usage_events: list[Usage], system: str, arrival_log: list[Message], absorbed_ids: list[UUID]) -> tuple[tuple[Message,
+```
+
+**Purpose**: Runs repeated model rounds until the turn has an answer or must force a final response. It is where model streaming, tool dispatch, new-message absorption, compaction, spend checks, truncation recovery, and subagent finish rules come together.
+
+**Data flow**: It receives the tool context, current messages, usage list, system prompt, and mutable logs of absorbed arrivals. Each loop absorbs queued arrivals, checks spend, compacts if needed, streams one model response, records cost, dispatches requested tools, and feeds results back as the next user message. It returns the final message window, answer text, and any structured ask-user, credential, or connect-account request.
+
+**Call relations**: TurnEngine.run calls this inside its terminal-commit loop. It calls helpers such as _absorb_arrivals, _stream_recovering_overflow, _dispatch, _force_final, _force_finish, _publish_cost, and _offload.
+
+*Call graph*: calls 11 internal fn (_absorb_arrivals, _dispatch, _enforce_spend, _force_final, _force_finish, _offload, _publish_cost, _stream_recovering_overflow, _bounded, _dispatch_segments (+1 more)); called by 1 (run); 6 external calls (__init__, __init__, __init__, gather, emit_metric, log).
+
+
+##### `TurnEngine._absorb_arrivals`  (lines 959–981)
+
+```
+async def _absorb_arrivals(self, messages: tuple[Message, ...], arrival_log: list[Message], absorbed_ids: list[UUID]) -> tuple[Message, ...]
+```
+
+**Purpose**: Adds new inbound messages that arrived while the agent was already working. This prevents the agent from closing a reply while ignoring newly queued user input.
+
+**Data flow**: It receives the current messages plus mutable arrival and ID logs. For normal turns, it claims arrival rows, appends their IDs, skips denied arrivals, converts rendered arrivals into user messages, records them, and returns the expanded message tuple. For subagent turns, it returns the original messages unchanged.
+
+**Call relations**: TurnEngine._model_round calls this at the start of every round. It delegates the durable drain to _claim_arrivals.
+
+*Call graph*: calls 1 internal fn (_claim_arrivals); called by 1 (_model_round); 1 external calls (__init__).
+
+
+##### `TurnEngine._render_arrival`  (lines 983–1006)
+
+```
+async def _render_arrival(self, body: str, context: TurnContext | None, speaker_member_id: UUID | None, created_at: datetime) -> str | None
+```
+
+**Purpose**: Turns one queued inbound message into the exact text the model should see. It applies the same prompt-submission hook used for the founding message.
+
+**Data flow**: It receives the raw body, stored context, speaker ID, and creation time. It fires the user_prompt_submit hook, returns None if the hook denies the message, otherwise prefixes a context tag and appends injected context in its own marked block.
+
+**Call relations**: TurnEngine._claim_arrivals calls this for each claimed row so the rendered result is recorded with the drain step.
+
+*Call graph*: calls 1 internal fn (_context_tag); called by 1 (_claim_arrivals); 1 external calls (__init__).
+
+
+##### `TurnEngine._claim_arrivals`  (lines 1009–1051)
+
+```
+async def _claim_arrivals(self, absorbed: tuple[UUID, ...]) -> tuple[Arrival, ...]
+```
+
+**Purpose**: Durably drains pending inbound messages for this conversation into the current turn. Because it is a recorded step, replay sees the same drained batch instead of consuming different messages.
+
+**Data flow**: It receives IDs already absorbed by this run. It marks eligible inbound rows as consumed by this turn, reads their data, sorts them by sequence, renders each arrival, and returns Arrival objects containing the row ID and rendered text or None.
+
+**Call relations**: TurnEngine._absorb_arrivals calls this. It calls _render_arrival for hook processing and context formatting.
+
+*Call graph*: calls 1 internal fn (_render_arrival); called by 1 (_absorb_arrivals); 6 external calls (__init__, model_validate, and_, or_, update, workspace_tx).
+
+
+##### `TurnEngine._release_unabsorbed`  (lines 1053–1072)
+
+```
+async def _release_unabsorbed(self, absorbed: tuple[UUID, ...]) -> None
+```
+
+**Purpose**: Returns arrival messages to the pending queue if this run stamped them but did not safely absorb them. This avoids losing user messages after cancellation or failure.
+
+**Data flow**: It receives the IDs known to have been absorbed. It best-effort clears consumed_turn_id for other rows stamped with this turn ID. If the database update fails, it logs the problem and lets later admission recovery handle what remains.
+
+**Call relations**: TurnEngine.run calls this on cancellation and error paths, after billing or committing failure as appropriate.
+
+*Call graph*: called by 1 (run); 3 external calls (update, workspace_tx, log).
+
+
+##### `TurnEngine._force_final`  (lines 1074–1102)
+
+```
+async def _force_final(self, messages: tuple[Message, ...], usage_events: list[Usage], system: str) -> tuple[tuple[Message, ...], str]
+```
+
+**Purpose**: Forces a closing response when the model has spent its allowed number of tool-use rounds. This avoids endless tool loops and gives the user the best available answer.
+
+**Data flow**: It receives messages, usage, and system prompt. It logs and emits a metric, checks spend, compacts if needed, then either forces a subagent finish call or adds a no-more-tools prompt and streams one final model response without tools. It returns the updated messages and final text.
+
+**Call relations**: TurnEngine._model_round calls this after its normal round loop is exhausted. It may call _force_finish for subagents, or _stream_recovering_overflow and _publish_cost for ordinary turns.
+
+*Call graph*: calls 4 internal fn (_enforce_spend, _force_finish, _publish_cost, _stream_recovering_overflow); called by 1 (_model_round); 3 external calls (__init__, emit_metric, log).
+
+
+##### `TurnEngine._force_finish`  (lines 1104–1129)
+
+```
+async def _force_finish(self, messages: tuple[Message, ...], usage_events: list[Usage], system: str) -> tuple[tuple[Message, ...], str]
+```
+
+**Purpose**: Forces a subagent to end through the reserved finish tool so the parent receives schema-shaped data instead of free-form prose. It fails loudly if the model still does not obey the output contract.
+
+**Data flow**: It receives messages, usage, and system prompt. It streams one round with only the finish tool offered and required, publishes cost, validates the finish arguments against the output model, and returns the messages plus canonical JSON answer. If the call is missing or invalid, it raises an error.
+
+**Call relations**: TurnEngine._model_round uses this when a subagent tries to end with prose. TurnEngine._force_final uses it when a subagent exhausts its round budget.
+
+*Call graph*: calls 2 internal fn (_publish_cost, _stream_recovering_overflow); called by 2 (_force_final, _model_round).
+
+
+##### `TurnEngine._stream_recovering_overflow`  (lines 1131–1168)
+
+```
+async def _stream_recovering_overflow(self, messages: tuple[Message, ...], usage_events: list[Usage], system: str, offer_tools: bool=True, force_finish: bool=False) -> tuple[tuple[Message, ...], str,
+```
+
+**Purpose**: Runs one model round and retries once after forced compaction if the provider says the context is too large. It separates recoverable context overflow from ordinary model failures.
+
+**Data flow**: It receives messages, usage, system prompt, and tool-offering options. It calls _stream_once, adds usage, and converts recorded stream errors into ModelStreamError. If an exception looks like context overflow, it forces compaction, adds compaction usage, retries once, and returns the compacted messages plus response text and tool calls.
+
+**Call relations**: TurnEngine._model_round, _force_final, and _force_finish all call this instead of calling _stream_once directly. It uses is_context_overflow to decide whether retry is safe.
+
+*Call graph*: calls 2 internal fn (__init__, _stream_once); called by 3 (_force_final, _force_finish, _model_round); 3 external calls (is_context_overflow, emit_metric, log).
+
+
+##### `TurnEngine._enforce_spend`  (lines 1170–1207)
+
+```
+async def _enforce_spend(self, usage_events: list[Usage]) -> None
+```
+
+**Purpose**: Checks whether the turn may continue spending tokens. It also rechecks seat access so a revoked member stops before the next model call.
+
+**Data flow**: It receives the in-memory usage events for this attempt. It checks seat admission when relevant, then skips accounting work if no caps apply. Otherwise it prices current in-flight usage, asks the spend evaluator for a decision, and raises TurnParked with the decision message when work must pause.
+
+**Call relations**: TurnEngine._model_round calls this before each model round, and _force_final calls it before the forced closing round. TurnEngine.run catches TurnParked and records a parked state.
+
+*Call graph*: calls 2 internal fn (__init__, _total_usage); called by 2 (_force_final, _model_round); 6 external calls (__init__, __init__, applicable_caps_absent, workspace_tx, gate_member, seat_gate_absent).
+
+
+##### `TurnEngine._stream_once`  (lines 1210–1317)
+
+```
+async def _stream_once(self, messages: tuple[Message, ...], system: str, offer_tools: bool=True, force_finish: bool=False) -> StreamResult
+```
+
+**Purpose**: Performs one actual model streaming request and records the result as a replayable step. It streams live text to clients while collecting final text, tool calls, usage, and any mid-stream error.
+
+**Data flow**: It receives messages, system prompt, and flags controlling whether tools or forced finish are offered. It builds a model request, collects text deltas, tool-call starts and argument fragments, and usage events. It flushes live text to the hub as it arrives. On stream error it returns a StreamResult carrying usage and partial output; on success it parses tool arguments and returns text, tool calls, and usage.
+
+**Call relations**: TurnEngine._stream_recovering_overflow is its caller. The recorded StreamResult lets crash replay avoid calling the model again.
+
+*Call graph*: calls 1 internal fn (_parse_args); called by 1 (_stream_recovering_overflow); 5 external calls (__init__, __init__, __init__, __init__, monotonic).
+
+
+##### `TurnEngine._stream_once.flush`  (lines 1266–1272)
+
+```
+async def flush() -> None
+```
+
+**Purpose**: Publishes buffered text chunks from a streaming model response to the live hub. It keeps clients updated without publishing every tiny fragment one by one.
+
+**Data flow**: It reads the current buffer of text chunks. If there is content, it joins and publishes it as a TextDelta, clears the buffer, resets the byte count, and records the latest flush time.
+
+**Call relations**: TurnEngine._stream_once calls this during streaming when the buffer is large enough or old enough, and once more at the end.
+
+*Call graph*: 2 external calls (__init__, monotonic).
+
+
+##### `TurnEngine._publish_cost`  (lines 1319–1332)
+
+```
+async def _publish_cost(self, usage_events: list[Usage]) -> None
+```
+
+**Purpose**: Publishes the turn’s live cost and token count so the user interface can show spending as the turn progresses. It does not perform final billing.
+
+**Data flow**: It receives usage events, totals them, prices them with the model pricing table, counts all token categories, and sends a CostTick frame through _publish.
+
+**Call relations**: TurnEngine._model_round calls this after model rounds. _force_final and _force_finish also call it after forced closing streams.
+
+*Call graph*: calls 2 internal fn (_publish, _total_usage); called by 3 (_force_final, _force_finish, _model_round); 1 external calls (__init__).
+
+
+##### `TurnEngine._dispatch`  (lines 1334–1361)
+
+```
+async def _dispatch(self, context: ToolContext, call: ToolUseBlock) -> ToolResultBlock
+```
+
+**Purpose**: Runs one tool call and rebuilds the model-facing result, including any images that were stored outside the replay log. It is the safe wrapper around the recorded dispatch step.
+
+**Data flow**: It receives the tool context and one tool-use block. It calls _dispatch_step to get bounded text, error status, and image references. If there are image references, it reads their bytes from the blob store and returns a ToolResultBlock with text and image blocks; otherwise it returns a plain text ToolResultBlock.
+
+**Call relations**: TurnEngine._model_round calls this for each tool in each dispatch segment. It delegates side-effect-sensitive work to _dispatch_step.
+
+*Call graph*: calls 1 internal fn (_dispatch_step); called by 1 (_model_round); 4 external calls (__init__, __init__, __init__, __init__).
+
+
+##### `TurnEngine._offload`  (lines 1363–1388)
+
+```
+async def _offload(self, name: str, content: str) -> str | None
+```
+
+**Purpose**: Writes large or salvaged text into the sandbox’s tool-output directory and returns the path. This keeps huge content out of the model context while still making it available to the agent.
+
+**Data flow**: It receives a file name and text content. It ensures the tool-output directory exists, writes the bytes into the sandbox, logs and emits a metric on failure, and returns the path or None.
+
+**Call relations**: TurnEngine._dispatch_step calls this for oversized successful tool output. TurnEngine._model_round calls it to save partial model output after truncation.
+
+*Call graph*: called by 2 (_dispatch_step, _model_round); 2 external calls (emit_metric, log).
+
+
+##### `TurnEngine._dispatch_step`  (lines 1391–1520)
+
+```
+async def _dispatch_step(self, context: ToolContext, call: ToolUseBlock) -> DispatchResult
+```
+
+**Purpose**: Executes one tool call as a replayable step. It validates input, runs hooks, invokes the tool, bounds or offloads output, protects the model from untrusted content, stores large images separately, and returns a compact dispatch result.
+
+**Data flow**: It receives tool context and a tool call. It announces activity, looks up and validates the tool, runs the pre-tool hook, executes the handler with an idempotency key when needed, gathers text and images, turns exceptions into error text, offloads large successful text, wraps untrusted output, fires the proper post hook, resizes and stores images in the blob store, and returns a DispatchResult.
+
+**Call relations**: TurnEngine._dispatch calls this and then rehydrates image references. It calls _publish_activity, _offload, _bounded, and _bounded_image as part of tool execution.
+
+*Call graph*: calls 4 internal fn (_bounded_image, _offload, _publish_activity, _bounded); called by 1 (_dispatch); 8 external calls (__init__, __init__, __init__, __init__, __init__, __init__, __init__, replace).
+
+
+##### `TurnEngine._bounded_image`  (lines 1522–1550)
+
+```
+async def _bounded_image(self, image: ImageBlock) -> ImageBlock
+```
+
+**Purpose**: Shrinks oversized tool-result images before they are sent back to the model. This avoids provider limits and avoids paying for pixels that add little value.
+
+**Data flow**: It receives an ImageBlock whose data is base64 text. It decodes and opens the image, returns it unchanged if already small, otherwise resizes it to the edge limit, saves it in a suitable format, re-encodes it, and returns a new ImageBlock. If decoding or resizing fails, it logs and returns the original image.
+
+**Call relations**: TurnEngine._dispatch_step calls this before writing image content to the blob store.
+
+*Call graph*: called by 1 (_dispatch_step); 7 external calls (__init__, __init__, to_thread, b64decode, b64encode, BytesIO, log).
+
+
+##### `TurnEngine._publish_activity`  (lines 1552–1571)
+
+```
+async def _publish_activity(self, call: ToolUseBlock) -> None
+```
+
+**Purpose**: Sends a live activity update when a tool call starts. This lets users see that the agent is doing work during long tool-heavy turns.
+
+**Data flow**: It receives a tool call. For load_skill it publishes the skill name. For other tools it builds a short preview from the arguments and uses the model-provided user_description when present. It sends the frame through _publish.
+
+**Call relations**: TurnEngine._dispatch_step calls this before validating and running the tool. Publish failures are absorbed by _publish.
+
+*Call graph*: calls 1 internal fn (_publish); called by 1 (_dispatch_step); 3 external calls (__init__, __init__, dumps).
+
+
+##### `TurnEngine._commit`  (lines 1573–1623)
+
+```
+async def _commit(self, status: TerminalStatus, usage_events: list[Usage], answer: str='', error: BaseException | None=None, question: AskUserInput | None=None, credential_request: CredentialRequest |
+```
+
+**Purpose**: Persists the terminal state of a turn and publishes it live. It retries database commit failures so a temporary outage does not lose the turn ending.
+
+**Data flow**: It receives the desired status, usage, answer, optional error and request payloads, plus arrival-safety options. It repeatedly calls _commit_once with backoff until it gets a frame or a no-commit signal. If a frame is returned, it publishes a Terminal frame, emits a metric, logs the terminal, and returns it.
+
+**Call relations**: TurnEngine.run calls this for done and failed outcomes. It relies on _commit_once for the actual database transaction and _publish for the live notification.
+
+*Call graph*: calls 2 internal fn (_commit_once, _publish); called by 1 (run); 4 external calls (__init__, sleep, emit_metric, log).
+
+
+##### `TurnEngine._commit_once`  (lines 1625–1723)
+
+```
+async def _commit_once(self, status: TerminalStatus, usage_events: list[Usage], answer: str, error: BaseException | None, question: AskUserInput | None, credential_request: CredentialRequest | None, c
+```
+
+**Purpose**: Performs one database transaction to bill usage and store the turn’s terminal frame. It can refuse to commit if new arrivals are still unabsorbed.
+
+**Data flow**: It totals usage, optionally locks the conversation and checks for pending or unrecorded arrivals, records turn usage, reads final cost, builds a TerminalFrame with status, answer, error details, tokens, cost, cache percentage, model, reasoning, and any structured request, then updates the turn row. If another execution already committed, it reads and returns the existing terminal frame.
+
+**Call relations**: TurnEngine._commit calls this inside a retry loop. It uses shared accounting helpers and _total_usage to keep terminal billing consistent.
+
+*Call graph*: calls 1 internal fn (_total_usage); called by 1 (_commit); 9 external calls (__init__, model_validate, and_, or_, select, update, read_turn_cost, record_turn_usage, workspace_tx).
+
+
+##### `TurnEngine._park`  (lines 1725–1762)
+
+```
+async def _park(self, message: str, usage_events: list[Usage]) -> None
+```
+
+**Purpose**: Stores a non-terminal parked state when spend or seat rules stop a running turn. Parking preserves work and allows a later resume instead of failing the turn.
+
+**Data flow**: It receives a message and usage events. In one database transaction it marks the turn parked, bills consumed usage for this attempt, and releases inbound messages stamped by this turn so a resumed workflow can drain them again. If the update succeeded, it publishes a Parked frame and emits/logs the parked event.
+
+**Call relations**: TurnEngine.run calls this after catching TurnParked from _enforce_spend.
+
+*Call graph*: calls 2 internal fn (_publish, _total_usage); called by 1 (run); 6 external calls (__init__, update, record_turn_usage, workspace_tx, emit_metric, log).
+
+
+##### `TurnEngine._publish`  (lines 1764–1773)
+
+```
+async def _publish(self, frame: LiveFrame) -> None
+```
+
+**Purpose**: Publishes a live frame to the hub without letting publish failures break the turn. Durable database state remains the source of truth.
+
+**Data flow**: It receives a live frame such as text, cost, tool activity, parked, or terminal. It tries to publish it for this turn ID. If publishing fails, it logs the error and returns normally.
+
+**Call relations**: TurnEngine._commit, _park, _publish_activity, and _publish_cost all use this shared safe publishing path.
+
+*Call graph*: called by 4 (_commit, _park, _publish_activity, _publish_cost); 1 external calls (log).
+
+
+##### `TurnEngine._bill_cancelled`  (lines 1775–1794)
+
+```
+async def _bill_cancelled(self, usage_events: list[Usage]) -> None
+```
+
+**Purpose**: Best-effort billing for a turn that was cancelled after consuming model tokens. It tries to count real usage without delaying cancellation too much.
+
+**Data flow**: It receives usage events, totals them, and attempts to record usage in the database for the current attempt. If billing fails, it logs the failure and does not raise.
+
+**Call relations**: TurnEngine.run calls this when DBOS cancellation or asyncio cancellation interrupts the turn.
+
+*Call graph*: calls 1 internal fn (_total_usage); called by 1 (run); 3 external calls (record_turn_usage, workspace_tx, log).
+
+
+##### `TurnEngine._resolve_unclaimed`  (lines 1796–1801)
+
+```
+async def _resolve_unclaimed(self) -> TerminalFrame | None
+```
+
+**Purpose**: Handles the case where this execution did not win ownership of the turn. It either republishes an already committed terminal or steps aside while another execution continues.
+
+**Data flow**: It creates a TranscriptRepair helper and asks it to resolve the turn. The result is a terminal frame if the turn had already finished, or None if it is still running elsewhere.
+
+**Call relations**: TurnEngine.run calls this after _mark_running returns false. It delegates to TranscriptRepair.resolve through _repair.
+
+*Call graph*: calls 1 internal fn (_repair); called by 1 (run).
+
+
+##### `TurnEngine._persist_transcript`  (lines 1803–1806)
+
+```
+async def _persist_transcript(self, messages: tuple[Message, ...], answer: str, system: str, injected: str) -> None
+```
+
+**Purpose**: Persists the full successful transcript through the repair helper. It keeps the main run method from knowing transcript-writing details.
+
+**Data flow**: It receives messages, answer, system prompt, and injected prompt text. It creates a TranscriptRepair helper and delegates the write.
+
+**Call relations**: TurnEngine.run calls this after a done terminal is committed. It delegates through _repair to TranscriptRepair.persist_transcript.
+
+*Call graph*: calls 1 internal fn (_repair); called by 1 (run).
+
+
+##### `TurnEngine._persist_inbound`  (lines 1808–1809)
+
+```
+async def _persist_inbound(self, arrivals: tuple[Message, ...]=()) -> None
+```
+
+**Purpose**: Persists only inbound user messages for a turn that did not finish with a normal answer. This protects future context without saving bad assistant output.
+
+**Data flow**: It receives optional arrival messages. It creates a TranscriptRepair helper and delegates the inbound-only write.
+
+**Call relations**: TurnEngine.run calls this on non-done endings and some error or cancellation paths. It delegates through _repair to TranscriptRepair.persist_inbound.
+
+*Call graph*: calls 1 internal fn (_repair); called by 1 (run).
 
 ## 📊 State Registers Touched
 
-- `reg-effective-config` — The combined settings that tell the service which features, adapters, limits, and deployment options to use.
-- `reg-capability-registry` — The loaded menu of extension-provided routes, tools, skills, hooks, jobs, credentials, models, and search backends.
-- `reg-model-catalog` — The model switchboard that maps model names to providers, credentials, request formats, and prices.
-- `reg-accounting-ledger-spend` — The usage ledger, spend caps, exports, and cost totals for models, egress, and other billable work.
-- `reg-observability-trace-state` — The logs, metrics, traces, traceparent links, and redaction rules used to monitor work safely.
-- `reg-adapter-implementation-registry` — Process-wide mapping from configured backend/provider names to implementation adapters for Redis hubs, sandboxes, browsers, models, search, sources, and related services.
-- `reg-http-client-pools` — Shared outbound HTTP client/session pools and retry-capable transport state used for provider APIs, OAuth/credential bridges, connectors, model calls, billing, email, and other integrations.
+- `reg-workspace-directory` — The shared record of workspaces, members, owners, agents, and workspace boundaries.
+- `reg-conversation-transcript` — The stored conversation history, messages, files, speakers, and outcomes that later stages read and append to.
+- `reg-turn-state` — The durable status of each unit of agent work, including whether it is waiting, running, paused, finished, failed, or cancelled.
+- `reg-live-stream` — The live feed of turn updates, text chunks, tool events, costs, and final frames that clients and debuggers can watch.
+- `reg-cancellation-state` — The shared stop signal state used to cancel active turns, child tasks, tools, and abandoned work safely.
+- `reg-model-catalog` — The shared list of available AI models, providers, limits, prices, and client adapters.
+- `reg-prompt-state` — The agent instructions, rendered prompt templates, fingerprints, and governed prompt-change proposals.
+- `reg-compaction-state` — The saved summaries and reduced conversation versions used when a conversation is too large for a model call.
+- `reg-tool-catalog` — The shared catalog of tools the model may call, including their names, schemas, handlers, and safety properties.
+- `reg-tool-context` — The per-run authority envelope that gives tools only the workspace, credentials, cleanup hooks, and permissions they are allowed to use.
+- `reg-sandbox-session` — The sandbox handle and lifecycle state for the safe workspace where code, files, browsers, and commands run.
+- `reg-browser-session` — The browser automation connection state used when tools need a controlled browser for a turn.
+- `reg-subagent-tree` — The shared parent-child work structure for delegated agents, including child turns, messages, waits, and cancellations.
+- `reg-accounting-ledger` — The usage, price, spend-cap, billing, export, and cost records used to track and limit money spent by workspaces and turns.
+- `reg-observability-context` — The shared tracing, metrics, structured logs, and trace-parent links used to understand work across processes and turns.
+- `reg-todo-checklist` — The per-conversation persistent checklist or task-progress state maintained by the todo extension across agent turns.
+- `reg-turn-admission-context` — Durable per-turn requester/speaker/on-behalf-of, timezone, surface context, and authorization-link metadata used to attribute, resume, and safely handle work.
+- `reg-agent-runtime-settings` — Persistent non-prompt agent configuration such as selected runtime profile, workflow/tool policy, internet-access setting, and conversation or surface agent bindings.
+- `reg-turn-replay-journal` — Durable per-turn execution checkpoints for model calls, tool results, and side-effect/idempotency markers used to resume work without duplicating paid calls or irreversible actions.

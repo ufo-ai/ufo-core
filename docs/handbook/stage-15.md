@@ -1,2560 +1,2238 @@
-# Persistence, workspace objects, and blob storage  `stage-15` (cross-cutting infrastructure)
+# Derived indexing, memory, graph extraction, and page alerts  `stage-15`
 
-This stage is the system’s storage backbone. It is shared behind the scenes by startup, the main work loop, and admin flows whenever they need to remember something safely. The database map in tables.py defines the shared table layout. db.py is the guarded doorway that opens database connections, runs updates to the schema, and keeps each workspace’s data separated. gateway_store.py keeps temporary signup claims before a workspace exists.
+This stage runs behind the scenes after pages or saved artifacts change. Its job is to turn raw text into things the system can find, remember, and act on later. The core indexing file defines the common shape of text “chunks,” search results, and index backends. The OpenAI embedding extension turns text into numeric meaning fingerprints, splitting large text safely. The default index stores chunks and embeddings locally, while the Turbopuffer extension can store and search them in an external search service.
 
-Large files use a separate “blob” store through blob.py, so the rest of the code can save bytes without knowing whether they are on disk or in S3-style storage. transcript.py and loop/transcript.py define and safely update saved conversations, including compacted summaries.
+The memory extension builds on this. Its manifest wires in tools, hooks, jobs, and screens. Its store saves memories, searches them, and keeps indexes current. The condenser turns changed pages into durable facts and later merges related facts into clearer summaries. The objects file lets memories be opened and inspected read-only, while events gives shared names for recall activity.
 
-The workspace object layer in objects.py turns stored records into named things people can list, inspect, change, or delete, with validation and permission checks. Specific object types plug into it: agents, shared artifacts, connected accounts, synced source pages, external content sources, and user-created skills. Together, these pieces act like labeled shelves and locked cabinets for the project’s durable data.
+The knowledge graph extension adds another recall path: its manifest connects hooks and lookup tools, and its store extracts entities and relationships from pages. Page alerts let users watch topics, then send a follow-up conversation message when a changed page matches.
 
 ## Files in this stage
 
-### Database and onboarding storage
-Shared relational storage definitions and access paths support workspace-scoped persistence and signup claim records.
+### Indexing substrate
+Shared chunking rules, embedding generation, and pluggable search backends turn changed text into searchable vectors and keyword records.
 
-### `core/src/ufo/schema/tables.py`
+### `core/src/ufo/indexing.py`
 
-`data_model` · `database setup and all database access`
+`domain_logic` · `indexing or content update`
 
-This file is the blueprint for the system’s database. It uses SQLAlchemy, a Python library for describing databases, to define one neutral schema that can be created in different database engines. Without this file, the rest of the application would not have a clear, shared understanding of where workspaces, members, conversations, agent runs, billing records, credentials, scheduled tasks, and synced content are stored.
+Search works better when long text is broken into smaller, meaningful pieces. This file provides that shared breaking-up step, plus the small data shapes and contracts used to store and retrieve those pieces. Think of it like a library card system: the text is cut into cards, each card gets a stable ID, the cards are filed in an index, and old cards are removed when the source text changes.
 
-The central object is `metadata`, which is like the binder that holds every table definition. Each `sa.Table(...)` entry adds one page to that binder. For example, `workspace` stores customer or team spaces, `member` stores people inside them, `agent` stores AI agents, `conversation` groups message activity, and `turn` records one unit of agent work. Other tables track incoming messages, costs, spending limits, external account grants, writebacks to chat surfaces, shared files, extension data, runtime heartbeats, synced sources, scheduled tasks, and indexed pages.
+The file does not talk directly to a database or a search engine. Instead, it defines Protocols, which are promises about what another object must be able to do. `IndexBackend` promises it can save chunks, delete or prune them, and search them by words or by vector similarity. Vector similarity means comparing numeric representations of text so related meanings can match even when the exact words differ. `EmbedClient` promises it can turn text into those numeric representations, called embeddings.
 
-The file also encodes important guardrails. Foreign keys keep rows connected to valid parent rows, like ensuring a member belongs to an existing workspace. Unique rules prevent duplicate identities, names, or message sequence numbers. Check constraints reject impossible states, such as a negative spend amount or an invalid turn status. Indexes act like labeled tabs in a filing cabinet, helping the database quickly find common records such as pending work, parked turns, due scheduled tasks, or unacknowledged ledger exports.
-
-
-### `core/src/ufo/db.py`
-
-`io_transport` · `startup, request handling, background jobs, migrations, teardown`
-
-This file protects the system’s tenancy boundary: the line that keeps one workspace’s data separate from another’s. In a multi-workspace service, a database connection is not just a pipe to storage. It must also know which workspace the current request or job belongs to, otherwise a bug could accidentally read or write the wrong tenant’s rows.
-
-The main idea is simple: normal code should use `workspace_tx`, which opens a transaction and, for PostgreSQL, pins the current workspace ID into a database setting named `app.workspace_id`. Database row-level security, or RLS (rules inside the database that filter rows per user or tenant), then uses that setting to allow only the right rows. If no workspace was set, PostgreSQL policies fail closed instead of leaking data.
-
-There is one deliberate exception: `owner_tx`. It opens a transaction without setting a workspace. Background sweeps use this to find work across all workspaces, but they are expected to re-enter the correct workspace before reading tenant-specific content.
-
-The file also handles practical database setup. It builds async SQLAlchemy engines, forces their first connection to happen safely before multiple event loops use them, applies Alembic migrations to create or update tables, and adds SQLite-specific settings so local or test databases behave more reliably.
+`TextChunker` is the main local worker. It splits text by paragraphs, lines, sentences, punctuation, and finally whitespace if needed. It aims for readable chunk sizes, adds a little overlap so context is not lost between neighboring chunks, and caps very long chunks by character count. `chunk_embed_upsert` ties the workflow together: chunk the text, embed the chunks, save them, then prune anything from the same owner that no longer belongs. That final prune is important because edited or emptied text should not leave stale search results behind.
 
 #### Function details
 
-##### `_build_engine`  (lines 39–50)
+##### `IndexBackend.upsert`  (lines 68–68)
 
 ```
-def _build_engine(url: str) -> AsyncEngine
+async def upsert(self, chunks: tuple[Chunk, ...]) -> None
 ```
 
-*Call graph*: calls 1 internal fn (_first_connect); called by 2 (init_db, init_owner_db); 1 external calls (create_async_engine).
+**Purpose**: This is the promised method an index backend must provide to save chunks into the search index. “Upsert” means save this chunk whether it is new or already exists, replacing the old version if needed.
+
+**Data flow**: It receives a group of `Chunk` objects, including their text and embeddings. The concrete backend is expected to write those chunks into its storage system. Nothing is returned; the visible result is that the index now contains those chunks.
+
+**Call relations**: `chunk_embed_upsert` calls this after the text has been split and embedded. The core code does not know how storage works; it simply hands completed chunks to whatever backend implements this promise.
+
+*Call graph*: called by 1 (chunk_embed_upsert).
 
 
-##### `init_db`  (lines 53–57)
-
-```
-def init_db(url: str) -> None
-```
-
-*Call graph*: calls 1 internal fn (_build_engine).
-
-
-##### `init_owner_db`  (lines 60–69)
+##### `IndexBackend.delete`  (lines 70–70)
 
 ```
-def init_owner_db(url: str) -> None
+async def delete(self, scope: IndexScope) -> None
 ```
 
-*Call graph*: calls 1 internal fn (_build_engine).
+**Purpose**: This is the promised method an index backend must provide to remove all indexed chunks for one source item. It is used when a whole indexed owner, such as a page or memory item, should disappear from search.
+
+**Data flow**: It receives an `IndexScope`, which identifies the owner kind and owner ID. The concrete backend removes matching chunks from its storage. Nothing is returned; the index is changed by deletion.
+
+**Call relations**: This file only defines the contract. Other parts of the system can call it when they need to fully remove an owner’s indexed text.
 
 
-##### `_first_connect`  (lines 72–92)
-
-```
-def _first_connect(engine: AsyncEngine) -> None
-```
-
-*Call graph*: called by 1 (_build_engine); 1 external calls (Thread).
-
-
-##### `_first_connect.run`  (lines 79–86)
+##### `IndexBackend.prune`  (lines 72–72)
 
 ```
-def run() -> None
+async def prune(self, scope: IndexScope, keep: frozenset[str]) -> None
 ```
 
-*Call graph*: calls 1 internal fn (_open_and_close); 1 external calls (new_event_loop).
+**Purpose**: This is the promised method an index backend must provide to remove stale chunks while keeping a specific current set. It matters after an edit, because old chunks from the previous text should not keep appearing in search.
+
+**Data flow**: It receives an `IndexScope` naming the owner and a set of chunk digests to keep. The backend deletes indexed chunks for that owner whose digests are not in the keep set. Nothing is returned; the index is cleaned up.
+
+**Call relations**: `chunk_embed_upsert` calls this every time after preparing the current chunks. If the new body is empty, the keep set is empty too, so pruning removes all old chunks for that owner.
+
+*Call graph*: called by 1 (chunk_embed_upsert).
 
 
-##### `_open_and_close`  (lines 95–97)
-
-```
-async def _open_and_close(engine: AsyncEngine) -> None
-```
-
-*Call graph*: called by 1 (run); 1 external calls (connect).
-
-
-##### `dispose_db`  (lines 100–107)
+##### `IndexBackend.lexical`  (lines 74–76)
 
 ```
-async def dispose_db() -> None
+async def lexical(self, query: str, subjects: frozenset[str], owner_kind: str, limit: int) -> tuple[Hit, ...]
 ```
 
+**Purpose**: This is the promised method an index backend must provide for word-based search. It looks for chunks whose stored text matches the query words, usually like a traditional search box.
 
-##### `workspace_tx`  (lines 111–121)
+**Data flow**: It receives a query string, a set of allowed subjects, an owner kind, and a maximum number of results. The backend searches its stored text under those filters and returns `Hit` objects, each describing a matching chunk and its score.
 
-```
-async def workspace_tx() -> AsyncIterator[AsyncConnection]
-```
-
-*Call graph*: 1 external calls (text).
+**Call relations**: This file defines the shared shape of the request and response. Retrieval code elsewhere can call this on a backend without needing to know which database or search engine is underneath.
 
 
-##### `owner_tx`  (lines 125–138)
+##### `IndexBackend.vector`  (lines 78–80)
 
 ```
-async def owner_tx() -> AsyncIterator[AsyncConnection]
+async def vector(self, embedding: tuple[float, ...], subjects: frozenset[str], owner_kind: str, limit: int) -> tuple[Hit, ...]
 ```
 
+**Purpose**: This is the promised method an index backend must provide for meaning-based search using embeddings. It finds chunks whose numeric text representation is close to the query embedding.
 
-##### `apply_migrations`  (lines 141–157)
+**Data flow**: It receives an embedding, a set of allowed subjects, an owner kind, and a result limit. The backend compares the embedding with stored chunk embeddings, applies the filters, and returns scored `Hit` objects.
 
-```
-def apply_migrations(url: str, pack: str | None=None) -> None
-```
-
-*Call graph*: 3 external calls (__init__, upgrade, migration_locations).
+**Call relations**: This is the retrieval counterpart to embedding chunks during indexing. Search orchestration elsewhere can ask the backend for semantically similar chunks through this common method.
 
 
-##### `_sqlite_on_connect`  (lines 160–166)
+##### `EmbedClient.embed`  (lines 84–84)
 
 ```
-def _sqlite_on_connect(dbapi_connection: Any, _connection_record: Any) -> None
+async def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]
 ```
 
+**Purpose**: This is the promised method an embedding client must provide to turn text into numeric vectors. Those vectors let the system compare pieces of text by meaning, not only by exact words.
 
-##### `_sqlite_begin_immediate`  (lines 169–171)
+**Data flow**: It receives a tuple of text strings. The concrete embedding client sends or computes them wherever appropriate and returns one numeric vector for each input text, in the same order.
+
+**Call relations**: `chunk_embed_upsert` calls this after chunking text and before saving chunks. The returned vectors are attached to the chunks before they are handed to `IndexBackend.upsert`.
+
+*Call graph*: called by 1 (chunk_embed_upsert).
+
+
+##### `chunk_embed_upsert`  (lines 87–112)
 
 ```
-def _sqlite_begin_immediate(connection: sa.Connection) -> None
+async def chunk_embed_upsert(index: IndexBackend, embed: EmbedClient, chunker: 'TextChunker', owner_kind: str, owner_id: str, subject: str, body: str) -> None
 ```
 
-*Call graph*: 1 external calls (exec_driver_sql).
+**Purpose**: This function performs the shared indexing update for one body of text. It chunks the body, gets embeddings for each chunk, saves the finished chunks, and removes stale chunks from the same owner.
+
+**Data flow**: It receives an index backend, an embedding client, a chunker, owner details, a subject, and the body text. First it asks the chunker to create chunks. If there are chunks, it embeds their text, copies each chunk with its embedding filled in, and upserts them into the index. Finally it prunes the owner’s indexed chunks so only the newly produced chunk digests remain.
+
+**Call relations**: This is the file’s main workflow function. It calls `EmbedClient.embed` to get vectors, `IndexBackend.upsert` to save current chunks, and `IndexBackend.prune` to remove old ones, using `IndexScope` to name the owner being cleaned.
+
+*Call graph*: calls 3 internal fn (embed, prune, upsert); 2 external calls (__init__, replace).
 
 
-### `control/src/ufo_control/gateway_store.py`
+##### `TextChunker.chunk`  (lines 121–132)
 
-`io_transport` · `startup and onboarding request handling`
+```
+def chunk(self, text: str, owner_kind: str, owner_id: str, subject: str) -> tuple[Chunk, ...]
+```
 
-This file is the database layer for hosted onboarding. It gives the rest of the system a small, clear set of actions: create the database table, save a new claim, find the current unfinished claim for a signup surface, count verification attempts, mark a claim as verified, finish it with a workspace id, or delete it.
+**Purpose**: This method turns one text body into ordered `Chunk` objects ready for embedding. It adds ownership information and a stable digest so each chunk can be identified later.
 
-The central idea is custody: once an onboarding flow starts, the important facts are kept in Postgres so they survive process restarts and can be shared safely across running services. The table stores the email, email domain, hashed verification code, where the signup came from, expiry time, number of attempts, verification time, and final workspace result. A unique database index makes sure there is only one active unfinished claim for the same surface and reference, like allowing only one open ticket for the same desk and ticket number.
+**Data flow**: It receives raw text plus owner kind, owner ID, and subject. It asks `_slices` for clean text pieces, numbers those pieces in order, computes a digest for each one, and returns the resulting chunks. The chunks do not yet have embeddings.
 
-The `OnboardClaim` data class is the in-memory shape of one row from the table. `OnboardStore` is the small wrapper around an asyncpg connection pool. Asyncpg is an asynchronous Postgres library, meaning database calls can wait without blocking the whole program. One helper, `_aware`, makes sure timestamps coming back from the database have timezone information, which avoids subtle time comparison bugs around expiry.
+**Call relations**: `chunk_embed_upsert` uses this as the first step of indexing. Inside the method, `_slices` decides how to split the text, `_digest` gives each piece a stable ID, and `Chunk` objects carry the result forward.
+
+*Call graph*: calls 2 internal fn (_digest, _slices); 1 external calls (__init__).
+
+
+##### `TextChunker._slices`  (lines 134–142)
+
+```
+def _slices(self, text: str) -> list[str]
+```
+
+**Purpose**: This method decides the overall splitting plan for raw text. It turns empty text into no chunks, short text into one or more character-capped pieces, and long text into readable overlapping sections.
+
+**Data flow**: It receives raw text. It checks whether the text is blank, estimates its word count, and then either caps it directly or splits it recursively, merges small pieces, adds overlap, and caps final pieces by character length. It returns a list of text slices.
+
+**Call relations**: `TextChunker.chunk` calls this before wrapping slices into `Chunk` objects. `_slices` coordinates the lower-level helpers: `_count_words`, `_recursive_split`, `_greedy_merge`, `_apply_overlap`, and `_cap_by_chars`.
+
+*Call graph*: calls 5 internal fn (_apply_overlap, _cap_by_chars, _count_words, _greedy_merge, _recursive_split); called by 1 (chunk).
+
+
+##### `TextChunker._count_words`  (lines 145–151)
+
+```
+def _count_words(text: str) -> int
+```
+
+**Purpose**: This helper estimates how large a piece of text is. It treats languages without spaces between words, such as Chinese, Japanese, and Korean text, differently from space-separated text.
+
+**Data flow**: It receives text and removes whitespace to count non-blank characters. If enough of the text is CJK characters, it uses character count as the size estimate. Otherwise it counts runs of non-whitespace text like ordinary words. It returns that number.
+
+**Call relations**: `_slices`, `_recursive_split`, and `_greedy_merge` use this to decide whether text is too large, small enough, or safe to combine. It is the chunker’s measuring tape.
+
+*Call graph*: called by 3 (_greedy_merge, _recursive_split, _slices); 1 external calls (sub).
+
+
+##### `TextChunker._cap_by_chars`  (lines 153–165)
+
+```
+def _cap_by_chars(self, text: str) -> list[str]
+```
+
+**Purpose**: This helper enforces a hard maximum character size for chunks. It is a safety net for text that is too long even after word-based splitting.
+
+**Data flow**: It receives one text piece. If it fits within the maximum character length, it returns it as a one-item list. If it is too long, it cuts it into overlapping character windows so no piece exceeds the cap, then returns the non-empty pieces.
+
+**Call relations**: `_slices` calls this both for short text and after the full chunking process. It ensures downstream embedding and indexing code never receives extremely large text pieces.
+
+*Call graph*: called by 1 (_slices).
+
+
+##### `TextChunker._recursive_split`  (lines 167–179)
+
+```
+def _recursive_split(self, text: str, level: int) -> list[str]
+```
+
+**Purpose**: This helper breaks large text using increasingly fine separators. It tries natural breaks first, like paragraphs and sentences, before falling back to whitespace.
+
+**Data flow**: It receives text and a delimiter level. At each level, it tries to split on the separators for that level. If splitting does not help, it moves to the next level. Pieces still too large are split again more finely. It returns a list of smaller text pieces.
+
+**Call relations**: `_slices` calls this when text is bigger than the target size. `_recursive_split` uses `_split_at_delimiters` for natural punctuation breaks, `_count_words` to test piece size, and `_split_on_whitespace` as the final fallback.
+
+*Call graph*: calls 3 internal fn (_count_words, _split_at_delimiters, _split_on_whitespace); called by 1 (_slices).
+
+
+##### `TextChunker._split_at_delimiters`  (lines 182–195)
+
+```
+def _split_at_delimiters(text: str, delimiters: tuple[str, ...]) -> list[str]
+```
+
+**Purpose**: This helper cuts text at the earliest occurrence of any supplied delimiter, while keeping the delimiter with the piece before it. This helps preserve punctuation and line breaks in the resulting chunks.
+
+**Data flow**: It receives text and a group of delimiter strings. It repeatedly finds the earliest delimiter in the remaining text, cuts there, stores that piece, and continues with the rest. It returns all non-blank pieces.
+
+**Call relations**: `_recursive_split` calls this at each delimiter level. It supplies the first, natural-looking cuts before the chunker decides whether pieces need further splitting.
+
+*Call graph*: called by 1 (_recursive_split).
+
+
+##### `TextChunker._split_on_whitespace`  (lines 197–213)
+
+```
+def _split_on_whitespace(self, text: str) -> list[str]
+```
+
+**Purpose**: This helper is the last-resort splitter when punctuation and line breaks are not enough. It splits by runs of non-whitespace text, roughly meaning words.
+
+**Data flow**: It receives text. If normal word runs are available, it groups them into batches of the target size. If there are no words, or one very long run, it cuts by character count based on the target. It returns non-empty text pieces.
+
+**Call relations**: `_recursive_split` calls this when it has run out of delimiter levels. It prevents the chunker from getting stuck on text with no useful punctuation or spacing.
+
+*Call graph*: called by 1 (_recursive_split).
+
+
+##### `TextChunker._greedy_merge`  (lines 215–229)
+
+```
+def _greedy_merge(self, pieces: list[str]) -> list[str]
+```
+
+**Purpose**: This helper combines neighboring pieces when they are small enough together. It avoids creating many tiny chunks that would be less useful for search.
+
+**Data flow**: It receives a list of pieces from the splitting step. Starting from the first piece, it keeps adding the next piece if the combined text stays within a generous size limit. When adding would make it too large, it stores the current combined chunk and starts a new one. It returns the merged list.
+
+**Call relations**: `_slices` calls this after `_recursive_split`. It uses `_count_words` and a rounded size limit to balance two goals: keep chunks readable, but not too small.
+
+*Call graph*: calls 1 internal fn (_count_words); called by 1 (_slices); 1 external calls (ceil).
+
+
+##### `TextChunker._apply_overlap`  (lines 231–237)
+
+```
+def _apply_overlap(self, chunks: list[str]) -> list[str]
+```
+
+**Purpose**: This helper adds a little context from the end of each chunk to the start of the next one. The goal is to keep meaning from being lost exactly at a chunk boundary.
+
+**Data flow**: It receives a list of chunks. If there is only one chunk or overlap is disabled, it returns them unchanged. Otherwise, for each chunk after the first, it prefixes trailing context from the previous chunk and returns the expanded list.
+
+**Call relations**: `_slices` calls this after merging. It uses `_trailing_context` to choose what context to copy, and `itertools.pairwise` to walk through neighboring chunk pairs.
+
+*Call graph*: calls 1 internal fn (_trailing_context); called by 1 (_slices); 1 external calls (pairwise).
+
+
+##### `TextChunker._trailing_context`  (lines 239–249)
+
+```
+def _trailing_context(self, text: str) -> str
+```
+
+**Purpose**: This helper chooses the bit of text from the end of one chunk that should be repeated before the next chunk. It tries to make that overlap start at a sensible sentence boundary when possible.
+
+**Data flow**: It receives one chunk of text. It extracts the last configured number of word runs. If that trailing text contains an early sentence boundary, it drops the earlier sentence fragment and returns the later part. Otherwise it returns the trailing words as-is. If the chunk is already short, it returns no overlap.
+
+**Call relations**: `_apply_overlap` calls this while building overlapped chunks. It is the small piece that makes overlap more readable instead of blindly copying text from the middle of a sentence whenever it can avoid it.
+
+*Call graph*: called by 1 (_apply_overlap).
+
+
+##### `TextChunker._digest`  (lines 252–254)
+
+```
+def _digest(owner_kind: str, owner_id: str, subject: str, ordinal: int, text: str) -> str
+```
+
+**Purpose**: This helper creates a stable unique ID for a chunk. The ID changes if the owner, subject, order, or text changes, which helps the index know which chunks are current.
+
+**Data flow**: It receives owner kind, owner ID, subject, ordinal number, and chunk text. It joins those values with a separator, hashes them with SHA-256, and returns the digest string with a `sha256:` prefix.
+
+**Call relations**: `TextChunker.chunk` calls this for every slice it turns into a `Chunk`. Later, `chunk_embed_upsert` uses those digests as the keep set when pruning stale indexed chunks.
+
+*Call graph*: called by 1 (chunk); 1 external calls (sha256).
+
+
+### `extensions/embed_openai/ufo_ext_embed_openai.py`
+
+`io_transport` · `startup registration and embedding jobs`
+
+This extension is the project's built-in OpenAI embedding backend. An embedding is a list of numbers that represents the meaning of a piece of text, so similar text ends up with similar numbers. The system can then search or compare memories by meaning, not just by exact words.
+
+The file registers a default backend named "default". If no other embedding backend is chosen, the core system can discover this one through the extension manifest. The actual OpenAI client is not created when the server starts. Instead, it is created only when an embed call happens. That matters because a developer can start the system without an OpenAI key, but the first real embedding attempt will fail clearly if `OPENAI_API_KEY` is missing.
+
+Before sending text to OpenAI, the file trims each item to a maximum size and groups items into batches. This is like packing boxes before shipping: each box has limits on both item count and total weight. Here the limits are number of texts and total characters. The `OpenAIEmbedClient` then sends each batch to OpenAI's async API, keeps the returned vectors in the same order as the input, and returns them as plain tuples of floats.
 
 #### Function details
 
-##### `_aware`  (lines 47–50)
+##### `plan_embed_batches`  (lines 32–48)
 
 ```
-def _aware(value: datetime | None) -> datetime | None
+def plan_embed_batches(texts: tuple[str, ...]) -> tuple[tuple[str, ...], ...]
 ```
 
-**Purpose**: This helper makes a timestamp safe to use by ensuring it has timezone information. If the timestamp is missing a timezone, it treats it as UTC, the common worldwide time standard.
+**Purpose**: This function prepares text for the OpenAI embedding request by trimming overly long entries and splitting the work into safe-sized batches. It prevents one request from becoming too large for the provider or for the system's own limits.
 
-**Data flow**: It receives either a datetime value or nothing. If it receives nothing, it returns nothing. If it receives a datetime that already has timezone information, it returns it unchanged; otherwise it adds UTC timezone information and returns the corrected value.
+**Data flow**: It receives a tuple of text strings. For each string, it cuts the text down to the configured maximum length, then adds it to the current batch unless that batch would exceed the maximum number of items or total characters. It returns a tuple of batches, where each batch is a tuple of clipped text strings.
 
-**Call relations**: When `OnboardStore.live_claim` rebuilds an `OnboardClaim` from a database row, it calls `_aware` for timestamp fields. `_aware` uses the datetime object's `replace` operation only when it needs to attach UTC.
+**Call relations**: The embedding client calls this just before talking to OpenAI. It acts as the packing step: `OpenAIEmbedClient.embed` gives it all requested texts, then sends each returned batch as a separate OpenAI request.
 
-*Call graph*: called by 1 (live_claim); 1 external calls (replace).
+*Call graph*: called by 1 (embed).
 
 
-##### `OnboardStore.ensure_table`  (lines 57–60)
+##### `OpenAIEmbedClient.embed`  (lines 61–73)
 
 ```
-async def ensure_table(self) -> None
+async def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]
 ```
 
-**Purpose**: This prepares the database storage needed for onboarding claims. It creates the schema, table, and active-claim index if they do not already exist.
+**Purpose**: This async method turns one or more text strings into OpenAI embedding vectors. It is the main runtime bridge between this project and OpenAI's embedding API.
 
-**Data flow**: It starts with the store's database connection pool. It borrows one connection, runs each setup SQL statement in order, and returns nothing after the database has the required structure.
+**Data flow**: It receives a tuple of texts. It reads `OPENAI_API_KEY` from the environment; if the key is missing, it raises a clear error. It creates an async OpenAI client, uses `plan_embed_batches` to split the input safely, sends each batch to OpenAI, sorts the response rows back into input order, converts the returned numbers to floats, and returns a tuple of embedding vectors.
 
-**Call relations**: This is typically called during startup before onboarding requests are accepted. Other store methods assume the table and index already exist, so this method lays the groundwork they rely on.
+**Call relations**: This method is used when the core indexing or memory system needs embeddings from this backend. It calls `plan_embed_batches` to shape the payload, then hands each batch to `openai.AsyncOpenAI` so the external provider can produce vectors.
 
+*Call graph*: calls 1 internal fn (plan_embed_batches); 1 external calls (AsyncOpenAI).
 
-##### `OnboardStore.insert_claim`  (lines 62–76)
 
-```
-async def insert_claim(self, claim: OnboardClaim) -> None
-```
-
-**Purpose**: This saves a new onboarding claim in the database. It is used when a user begins onboarding and the system needs a durable record of the verification step.
-
-**Data flow**: It receives an `OnboardClaim` object containing the claim id, email details, hashed code, signup surface, attempt count, and expiry time. It borrows a database connection and inserts those fields into the onboarding table. It does not return a value; the change is the new row in Postgres.
-
-**Call relations**: This method is called by higher-level onboarding code after it has created the claim details. It does not call other project helpers; it directly writes the row through asyncpg.
-
-
-##### `OnboardStore.live_claim`  (lines 78–99)
-
-```
-async def live_claim(self, surface: str, surface_ref: str) -> OnboardClaim | None
-```
-
-**Purpose**: This looks up the unfinished onboarding claim for a particular signup location. It ignores claims that have already produced a workspace, so callers get only the currently active claim.
-
-**Data flow**: It receives a `surface` and `surface_ref`, which together identify where the onboarding attempt came from. It queries Postgres for a matching row whose `resulting_workspace_id` is still empty. If there is no row, it returns `None`; if there is a row, it converts the database fields into an `OnboardClaim` object and returns it.
-
-**Call relations**: Higher-level onboarding code uses this when it needs to continue or inspect an existing claim. While rebuilding the claim object, it calls `_aware` to normalize timestamp fields and then constructs an `OnboardClaim` for the caller.
-
-*Call graph*: calls 1 internal fn (_aware); 1 external calls (__init__).
-
-
-##### `OnboardStore.record_attempt`  (lines 101–102)
-
-```
-async def record_attempt(self, claim_id: UUID, attempts: int) -> None
-```
-
-**Purpose**: This updates how many times someone has tried to verify an onboarding claim. It helps the system enforce limits or track failed code entries.
-
-**Data flow**: It receives the claim id and the new attempt count. It passes an update instruction and those values to the shared `_update` helper. It returns nothing; the database row is changed.
-
-**Call relations**: This is a focused public method for attempt counting. Instead of writing SQL itself, it hands the actual database update to `OnboardStore._update`, the common helper also used by verification and completion updates.
-
-*Call graph*: calls 1 internal fn (_update).
-
-
-##### `OnboardStore.mark_verified`  (lines 104–105)
-
-```
-async def mark_verified(self, claim_id: UUID) -> None
-```
-
-**Purpose**: This records that an onboarding claim has passed verification. It stamps the database row with the current database time.
-
-**Data flow**: It receives the claim id. It asks `_update` to set `verified_at` to `now()` in Postgres. It returns nothing; the visible result is that the claim row now has a verification timestamp.
-
-**Call relations**: This is called when the onboarding flow has accepted the user's verification code. It delegates the common update mechanics to `OnboardStore._update`.
-
-*Call graph*: calls 1 internal fn (_update).
-
-
-##### `OnboardStore.complete`  (lines 107–108)
-
-```
-async def complete(self, claim_id: UUID, resulting_workspace_id: str) -> None
-```
-
-**Purpose**: This marks an onboarding claim as finished by recording the workspace that resulted from it. Once this is set, the claim is no longer considered active by `live_claim`.
-
-**Data flow**: It receives the claim id and the resulting workspace id. It sends those to `_update`, which writes the workspace id into the database row. It returns nothing; the database now shows that the claim has completed.
-
-**Call relations**: This is used near the end of a successful onboarding flow. It relies on `OnboardStore._update` for the database write, and its result affects future calls to `OnboardStore.live_claim`, which only returns claims without a resulting workspace id.
-
-*Call graph*: calls 1 internal fn (_update).
-
-
-##### `OnboardStore.delete_claim`  (lines 110–112)
-
-```
-async def delete_claim(self, claim_id: UUID) -> None
-```
-
-**Purpose**: This removes an onboarding claim from the database. It is useful when a claim should be discarded rather than completed.
-
-**Data flow**: It receives a claim id, borrows a database connection, and runs a delete statement for that id. It returns nothing; if a matching row existed, it is gone afterward.
-
-**Call relations**: Higher-level onboarding code can call this for cleanup or cancellation. Unlike the small field updates, it does not use `_update` because deleting a whole row is a different database action.
-
-
-##### `OnboardStore._update`  (lines 114–118)
-
-```
-async def _update(self, assignment: str, claim_id: UUID, *values: object) -> None
-```
-
-**Purpose**: This is the shared helper for simple updates to one onboarding claim row. It keeps repeated database update code in one place.
-
-**Data flow**: It receives a SQL assignment such as setting attempts, setting verified time, or setting the resulting workspace id, plus the claim id and any needed values. It borrows a connection and runs an update against the row with that id. It returns nothing; the matching row is modified.
-
-**Call relations**: `OnboardStore.record_attempt`, `OnboardStore.mark_verified`, and `OnboardStore.complete` all call this helper when they need to change one field on a claim. It is an internal helper rather than the main interface callers should use directly.
-
-*Call graph*: called by 3 (complete, mark_verified, record_attempt).
-
-
-### Blob and transcript storage
-Large byte storage and transcript helpers provide durable conversation, compaction, and shared file data.
-
-### `core/src/ufo/blob.py`
-
-`io_transport` · `cross-cutting storage access during request handling and background work`
-
-A “blob” here means a chunk of bytes such as an attachment, workspace file, exported artifact, or saved record. This file is the storage adapter for those bytes. It defines a common promise, `BlobStore`, with actions like save, read, stream, copy, delete, and list. Then it provides two real versions of that promise: `FilesystemBlobStore`, which turns blob keys into files under a local root folder, and `S3BlobStore`, which stores the same kind of objects in an S3 bucket.
-
-The important idea is that callers use slash-separated keys, like paths, but they do not need to know whether those keys map to disk files or cloud objects. Large data can be moved in pieces through streaming, so a huge file does not have to sit in memory all at once. Local writes use a temporary file and then replace the final file, like writing a new page off to the side before swapping it into a binder. This avoids leaving half-written files behind as the visible result. S3 writes use multipart uploads for large content, which is S3’s way of safely sending big objects in pieces.
-
-The file also normalizes missing-object behavior: both backends raise `BlobNotFound` when a requested key is absent. Finally, `blob_store_for` builds the right backend from configuration.
-
-#### Function details
-
-##### `BlobStore.put`  (lines 46–46)
-
-```
-async def put(self, key: str, data: bytes) -> None
-```
-
-**Purpose**: This is the shared interface for saving a complete in-memory byte string under a blob key. Code uses it when the data is already small enough or already collected in memory.
-
-**Data flow**: A caller provides a key and bytes. A concrete store, such as the filesystem or S3 version, writes those bytes under that key. Nothing is returned, but the stored object should be available afterward.
-
-**Call relations**: This is the promise that implementations must satisfy. The sample extension calls it when exporting data that can be written as one complete byte value.
-
-*Call graph*: called by 1 (export).
-
-
-##### `BlobStore.put_file`  (lines 48–51)
-
-```
-async def put_file(self, key: str, source: Path) -> None
-```
-
-**Purpose**: This is the shared interface for storing an existing local file under a blob key without loading the whole file into memory. It is useful for larger exported files.
-
-**Data flow**: A caller gives a destination key and a path to a local file. The chosen backend reads from that file and writes the bytes into blob storage. The result is a stored object at the key.
-
-**Call relations**: Local and Docker sandbox export code call this when a produced file needs to become a stored blob. Each backend decides the safest and most efficient way to copy the file into storage.
-
-*Call graph*: called by 2 (export, export).
-
-
-##### `BlobStore.get`  (lines 53–53)
-
-```
-async def get(self, key: str) -> bytes
-```
-
-**Purpose**: This is the shared interface for reading a whole blob into memory as bytes. It is meant for stored objects that are expected to be reasonably small.
-
-**Data flow**: A caller provides a key. The configured backend looks up that key and returns its bytes, or raises `BlobNotFound` if it is absent.
-
-**Call relations**: Transcript compaction reading and Slack identity reading use this when they need the complete stored content at once. The concrete backend supplies the actual disk or S3 read.
-
-*Call graph*: called by 2 (read_compaction_record, read_identity).
-
-
-##### `BlobStore.exists`  (lines 55–55)
-
-```
-async def exists(self, key: str) -> bool
-```
-
-**Purpose**: This is the shared interface for asking whether a blob key is present. It lets callers check for optional stored data without trying to read it first.
-
-**Data flow**: A caller provides a key. The backend checks its storage location and returns `true` if an object is present, otherwise `false`.
-
-**Call relations**: Slack identity loading uses this before reading identity data. The interface keeps that check independent of whether the project is using local files or S3.
-
-*Call graph*: called by 1 (read_identity).
-
-
-##### `BlobStore.delete`  (lines 57–59)
-
-```
-async def delete(self, key: str) -> None
-```
-
-**Purpose**: This is the shared interface for removing a stored object. Deleting a key that is already absent is treated as harmless, so repeated cleanup attempts are safe.
-
-**Data flow**: A caller provides a key. The backend asks the storage system to remove that object. Nothing is returned, and no error is expected just because the key was missing.
-
-**Call relations**: This method is part of the common storage contract. Any code that needs cleanup can call it through `BlobStore` and leave the backend-specific deletion details to the implementation.
-
-
-##### `BlobStore.get_stream`  (lines 61–61)
-
-```
-def get_stream(self, key: str) -> AsyncIterator[bytes]
-```
-
-**Purpose**: This is the shared interface for reading a blob in chunks instead of all at once. It is used when the object may be large and should not fill memory.
-
-**Data flow**: A caller provides a key. The backend opens the object and yields byte chunks one by one until the object is fully read, or raises `BlobNotFound` if the key is absent.
-
-**Call relations**: This method belongs to the common storage contract. The filesystem and S3 implementations provide chunked reading in their own ways while presenting the same shape to callers.
-
-
-##### `BlobStore.put_stream`  (lines 63–63)
-
-```
-async def put_stream(self, key: str, chunks: AsyncIterator[bytes]) -> None
-```
-
-**Purpose**: This is the shared interface for saving incoming chunks of bytes as one blob. It is useful when data arrives gradually, such as from a network stream or a large generated file.
-
-**Data flow**: A caller provides a key and an asynchronous stream of byte chunks. The backend writes each chunk into storage and finishes with one complete object at the key.
-
-**Call relations**: This method is the write-side partner to `get_stream`. Callers can feed data through the common interface while the selected backend chooses local temporary files or S3 multipart upload.
-
-
-##### `BlobStore.copy`  (lines 65–70)
-
-```
-async def copy(self, src_key: str, dst_key: str) -> None
-```
-
-**Purpose**: This is the shared interface for duplicating one stored blob to another key inside the same store. It avoids making the application read the bytes out and write them back itself.
-
-**Data flow**: A caller gives a source key and a destination key. The backend copies the stored object internally and leaves a duplicate at the destination, or raises `BlobNotFound` if the source is missing.
-
-**Call relations**: Docker and E2B export paths use this when a file already in storage needs to be promoted or shared as an artifact. The S3 implementation can do this server-side, which saves time and bandwidth.
-
-*Call graph*: called by 2 (export, export).
-
-
-##### `BlobStore.list`  (lines 72–76)
-
-```
-async def list(self, prefix: str) -> tuple[BlobEntry, ...]
-```
-
-**Purpose**: This is the shared interface for listing stored objects under a required key prefix. It gives callers a bounded view of one area of blob storage rather than scanning everything.
-
-**Data flow**: A caller provides a prefix. The backend returns a sorted tuple of `BlobEntry` records, each carrying a key, byte size, and last-modified time, up to a fixed maximum.
-
-**Call relations**: This method is part of the common read-view contract. Both backends use it to let higher-level code browse a conversation workspace, artifact area, or similar prefix-shaped group.
-
-
-##### `FilesystemBlobStore.put`  (lines 85–90)
-
-```
-async def put(self, key: str, data: bytes) -> None
-```
-
-**Purpose**: This saves in-memory bytes as a file below the configured local storage root. It writes through a temporary file first so callers do not see a half-written final file.
-
-**Data flow**: It receives a key and bytes. It turns the key into a safe path, creates parent folders, writes the bytes to a uniquely named temporary file, then replaces the destination path with that temporary file. The result is a complete local file.
-
-**Call relations**: This is the filesystem implementation of `BlobStore.put`. It relies on `_resolve` to keep keys inside the storage root and uses background thread work so file I/O does not block the async event loop.
-
-*Call graph*: calls 1 internal fn (_resolve); 2 external calls (to_thread, uuid4).
-
-
-##### `FilesystemBlobStore.put_file`  (lines 92–97)
-
-```
-async def put_file(self, key: str, source: Path) -> None
-```
-
-**Purpose**: This stores an existing local file into the filesystem blob store. It copies the file through a temporary destination so the visible blob appears only after the copy is complete.
-
-**Data flow**: It receives a blob key and a source file path. It resolves the destination, makes needed folders, copies the source file to a temporary file, then replaces the final destination. Afterward the blob key points to the copied file.
-
-**Call relations**: This implements `BlobStore.put_file` for local storage. Sandbox export code can call the interface, and this method performs the disk-level copy safely.
-
-*Call graph*: calls 1 internal fn (_resolve); 2 external calls (to_thread, uuid4).
-
-
-##### `FilesystemBlobStore.get`  (lines 99–104)
-
-```
-async def get(self, key: str) -> bytes
-```
-
-**Purpose**: This reads a whole local blob file into memory. If the file is not present, it raises the project’s standard `BlobNotFound` error.
-
-**Data flow**: It receives a key, resolves it to a safe file path, and reads all bytes from that file. The bytes are returned to the caller, or a missing file is translated into `BlobNotFound`.
-
-**Call relations**: This is the filesystem implementation of `BlobStore.get`. It uses `_resolve` before reading so callers cannot escape the configured blob directory.
-
-*Call graph*: calls 1 internal fn (_resolve); 2 external calls (__init__, to_thread).
-
-
-##### `FilesystemBlobStore.exists`  (lines 106–108)
-
-```
-async def exists(self, key: str) -> bool
-```
-
-**Purpose**: This checks whether a local blob exists as a regular file. It is a quick yes-or-no lookup for optional local data.
-
-**Data flow**: It receives a key, resolves it to a path under the root, and asks the filesystem whether that path is a file. It returns a boolean answer.
-
-**Call relations**: This implements `BlobStore.exists` for local storage. Higher-level code can ask through the shared interface without knowing the answer comes from a filesystem check.
-
-*Call graph*: calls 1 internal fn (_resolve); 1 external calls (to_thread).
-
-
-##### `FilesystemBlobStore.delete`  (lines 110–112)
-
-```
-async def delete(self, key: str) -> None
-```
-
-**Purpose**: This removes a local blob file if it exists. Missing files are ignored so cleanup can be retried safely.
-
-**Data flow**: It receives a key, resolves it to a safe path, and asks the filesystem to unlink, or remove, that file with missing files allowed. It returns nothing.
-
-**Call relations**: This is the filesystem version of `BlobStore.delete`. It uses `_resolve` to avoid deleting anything outside the blob store root.
-
-*Call graph*: calls 1 internal fn (_resolve); 1 external calls (to_thread).
-
-
-##### `FilesystemBlobStore.get_stream`  (lines 114–127)
-
-```
-async def get_stream(self, key: str) -> AsyncIterator[bytes]
-```
-
-**Purpose**: This reads a local blob file piece by piece. It is meant for large files that should not be loaded into memory all at once.
-
-**Data flow**: It receives a key, resolves and opens the file, then repeatedly reads fixed-size chunks and yields them to the caller. It closes the file afterward, and a missing file becomes `BlobNotFound`.
-
-**Call relations**: This implements `BlobStore.get_stream` for local files. It hands chunks back to whatever caller is consuming the stream, while using thread offloading for blocking file reads.
-
-*Call graph*: calls 1 internal fn (_resolve); 2 external calls (__init__, to_thread).
-
-
-##### `FilesystemBlobStore.put_stream`  (lines 129–142)
-
-```
-async def put_stream(self, key: str, chunks: AsyncIterator[bytes]) -> None
-```
-
-**Purpose**: This writes a stream of incoming byte chunks into a local blob file. It protects the final destination by writing to a temporary file until the stream finishes successfully.
-
-**Data flow**: It receives a key and an asynchronous source of chunks. It resolves the destination, opens a temporary file, writes each chunk, closes it, and replaces the final path. If anything fails, it closes and removes the temporary file.
-
-**Call relations**: This is the filesystem implementation of `BlobStore.put_stream`. It works with callers that produce data gradually and uses the same atomic temporary-file pattern as the simpler write methods.
-
-*Call graph*: calls 1 internal fn (_resolve); 2 external calls (to_thread, uuid4).
-
-
-##### `FilesystemBlobStore.copy`  (lines 144–152)
-
-```
-async def copy(self, src_key: str, dst_key: str) -> None
-```
-
-**Purpose**: This duplicates one local blob file to another local blob key. It first verifies the source exists, then writes the destination safely through a temporary file.
-
-**Data flow**: It receives source and destination keys. It resolves the source, checks that it is a file, resolves the destination, copies the source to a temporary destination file, and replaces the final destination. If the source is missing, it raises `BlobNotFound`.
-
-**Call relations**: This is the filesystem implementation of `BlobStore.copy`. Export flows can call the common copy operation, and this backend performs a local file copy.
-
-*Call graph*: calls 1 internal fn (_resolve); 3 external calls (__init__, to_thread, uuid4).
-
-
-##### `FilesystemBlobStore.list`  (lines 154–157)
-
-```
-async def list(self, prefix: str) -> tuple[BlobEntry, ...]
-```
-
-**Purpose**: This lists local blob files whose keys start with a given prefix. It requires a prefix so callers do not accidentally scan the whole store.
-
-**Data flow**: It receives a prefix. If the prefix is empty, it raises an error. Otherwise it runs `_walk` in a background thread and returns the resulting tuple of entries.
-
-**Call relations**: This implements `BlobStore.list` for local storage. It delegates the actual directory walking and entry building to `_walk`.
-
-*Call graph*: 1 external calls (to_thread).
-
-
-##### `FilesystemBlobStore._walk`  (lines 159–180)
-
-```
-def _walk(self, prefix: str) -> tuple[BlobEntry, ...]
-```
-
-**Purpose**: This does the actual filesystem scan for `FilesystemBlobStore.list`. It turns matching files into `BlobEntry` records with key, size, and modification time.
-
-**Data flow**: It receives a prefix, finds the local directory that could contain matching files, walks through files below it, filters out nonmatching keys and temporary files, gathers file metadata, sorts by key, and returns at most the configured maximum number of entries.
-
-**Call relations**: `FilesystemBlobStore.list` calls this in a worker thread because walking directories can block. `_walk` uses `_resolve` to choose the starting directory safely and creates the entries that list callers receive.
-
-*Call graph*: calls 1 internal fn (_resolve); 4 external calls (__init__, fromtimestamp, walk, Path).
-
-
-##### `FilesystemBlobStore._resolve`  (lines 182–187)
-
-```
-def _resolve(self, key: str) -> Path
-```
-
-**Purpose**: This converts a blob key into a real filesystem path while enforcing that the path stays inside the configured storage root. It is the safety gate for all local file operations.
-
-**Data flow**: It receives a key, joins it to the root directory, resolves any `..` or symbolic path pieces, and checks that the result is still below the root and not the root itself. It returns the safe path or raises an error if the key tries to escape.
-
-**Call relations**: All filesystem read, write, delete, copy, stream, and walk operations call this before touching disk. It prevents a blob key from becoming an accidental path to unrelated files on the machine.
-
-*Call graph*: called by 9 (_walk, copy, delete, exists, get, get_stream, put, put_file, put_stream).
-
-
-##### `_is_missing_key`  (lines 190–191)
-
-```
-def _is_missing_key(error: ClientError) -> bool
-```
-
-**Purpose**: This recognizes S3 error responses that mean “that object does not exist.” It lets the S3 backend turn several provider-specific error codes into one project-level meaning.
-
-**Data flow**: It receives a `ClientError` from the S3 library, looks inside the error response for its code, and returns `true` if that code is one of the known missing-object codes.
-
-**Call relations**: S3 read, existence, stream, and copy methods call this when S3 reports an error. If it says the key is missing, those methods return `false` or raise `BlobNotFound` as appropriate.
-
-*Call graph*: called by 4 (copy, exists, get, get_stream).
-
-
-##### `S3BlobStore.put`  (lines 210–212)
-
-```
-async def put(self, key: str, data: bytes) -> None
-```
-
-**Purpose**: This saves in-memory bytes as one object in an S3 bucket. It is the cloud-storage version of writing a complete blob at once.
-
-**Data flow**: It receives a key and bytes, gets or creates an S3 client for the current event loop, and sends a `put_object` request to store the bytes in the configured bucket. It returns nothing after S3 accepts the write.
-
-**Call relations**: This implements `BlobStore.put` for S3. It first goes through `_client`, which reuses a cached S3 client instead of rebuilding one for every operation.
-
-*Call graph*: calls 1 internal fn (_client).
-
-
-##### `S3BlobStore.put_file`  (lines 214–246)
-
-```
-async def put_file(self, key: str, source: Path) -> None
-```
-
-**Purpose**: This uploads a local file into S3, using multipart upload for non-empty files. Multipart upload means the file is sent in pieces and then S3 joins those pieces into one object.
-
-**Data flow**: It receives a destination key and a local source path. It checks the file size, stores an empty object directly if the file is empty, otherwise opens the file, reads fixed-size ranges, uploads each part, and asks S3 to complete the upload. If an error happens, it aborts the upload and closes the file.
-
-**Call relations**: This is the S3 implementation of `BlobStore.put_file`. Export code can provide a file path through the shared interface, and this method performs the cloud upload without reading the entire file into memory at once.
-
-*Call graph*: calls 1 internal fn (_client); 1 external calls (to_thread).
-
-
-##### `S3BlobStore.get`  (lines 248–258)
-
-```
-async def get(self, key: str) -> bytes
-```
-
-**Purpose**: This reads a whole S3 object into memory. It translates S3’s missing-object errors into the project’s `BlobNotFound` error.
-
-**Data flow**: It receives a key, gets an S3 client, asks S3 for the object, reads the response body fully, and returns the bytes. If S3 says the key is missing, it raises `BlobNotFound`; other S3 errors are passed upward.
-
-**Call relations**: This implements `BlobStore.get` for S3. It uses `_client` for the connection and `_is_missing_key` to normalize missing-object behavior.
-
-*Call graph*: calls 2 internal fn (_client, _is_missing_key); 1 external calls (__init__).
-
-
-##### `S3BlobStore.exists`  (lines 260–268)
-
-```
-async def exists(self, key: str) -> bool
-```
-
-**Purpose**: This checks whether an S3 object exists without downloading it. It uses S3 metadata lookup, which is lighter than reading the full object.
-
-**Data flow**: It receives a key, gets an S3 client, and sends a `head_object` request. If S3 finds the object, it returns `true`; if S3 reports a missing key, it returns `false`; other errors are raised.
-
-**Call relations**: This implements `BlobStore.exists` for S3. It relies on `_is_missing_key` so provider-specific missing-object codes become a simple boolean answer.
-
-*Call graph*: calls 2 internal fn (_client, _is_missing_key).
-
-
-##### `S3BlobStore.delete`  (lines 270–272)
-
-```
-async def delete(self, key: str) -> None
-```
-
-**Purpose**: This asks S3 to delete an object from the configured bucket. Like the common interface promises, deleting an absent key is safe from the caller’s point of view.
-
-**Data flow**: It receives a key, gets an S3 client, and sends a delete request for that bucket and key. It returns nothing after the request completes.
-
-**Call relations**: This is the S3 implementation of `BlobStore.delete`. It uses `_client` to share the S3 connection setup used by the other S3 operations.
-
-*Call graph*: calls 1 internal fn (_client).
-
-
-##### `S3BlobStore.get_stream`  (lines 274–285)
-
-```
-async def get_stream(self, key: str) -> AsyncIterator[bytes]
-```
-
-**Purpose**: This reads an S3 object in chunks. It is designed for large objects that should pass through the application gradually instead of all at once.
-
-**Data flow**: It receives a key, gets an S3 client, requests the object, and yields fixed-size chunks from the response body. If S3 says the object is missing, it raises `BlobNotFound`.
-
-**Call relations**: This implements `BlobStore.get_stream` for S3. It uses `_client` for access and `_is_missing_key` for consistent missing-key behavior.
-
-*Call graph*: calls 2 internal fn (_client, _is_missing_key); 1 external calls (__init__).
-
-
-##### `S3BlobStore.put_stream`  (lines 287–331)
-
-```
-async def put_stream(self, key: str, chunks: AsyncIterator[bytes]) -> None
-```
-
-**Purpose**: This writes an incoming stream of byte chunks into S3. Small streams are saved with one request, while larger streams are uploaded in S3 multipart form.
-
-**Data flow**: It receives a key and an asynchronous stream of chunks. It buffers chunks until they reach the multipart part size, starts a multipart upload if needed, uploads each part, uploads the final remaining bytes, and completes the upload. If anything fails after multipart upload starts, it aborts the upload.
-
-**Call relations**: This is the S3 implementation of `BlobStore.put_stream`. It lets callers produce data gradually while still using S3’s required multipart process for large objects.
-
-*Call graph*: calls 1 internal fn (_client).
-
-
-##### `S3BlobStore.copy`  (lines 333–369)
-
-```
-async def copy(self, src_key: str, dst_key: str) -> None
-```
-
-**Purpose**: This duplicates an object inside the same S3 bucket without routing the object bytes through the application process. For very large objects, it uses S3’s multipart copy feature.
-
-**Data flow**: It receives a source key and destination key. It first checks the source object and its size. Small enough objects are copied with one S3 copy request; larger objects are copied in byte ranges as multipart parts, then completed. If the source is missing, it raises `BlobNotFound`; if multipart copy fails, it aborts the unfinished copy.
-
-**Call relations**: This implements `BlobStore.copy` for S3. Export flows use the common copy operation, and this method keeps the work inside S3, which avoids downloading and re-uploading large artifacts.
-
-*Call graph*: calls 2 internal fn (_client, _is_missing_key); 1 external calls (__init__).
-
-
-##### `S3BlobStore.list`  (lines 371–388)
-
-```
-async def list(self, prefix: str) -> tuple[BlobEntry, ...]
-```
-
-**Purpose**: This lists S3 objects whose keys begin with a required prefix. It returns a bounded set of simple entries rather than exposing raw S3 pages to callers.
-
-**Data flow**: It receives a prefix, rejects an empty one, gets an S3 client, pages through S3 list results, converts each object into a `BlobEntry`, stops at the configured maximum, and returns the entries as a tuple.
-
-**Call relations**: This is the S3 implementation of `BlobStore.list`. It uses S3 pagination behind the scenes, while callers receive the same kind of entries they would get from the filesystem backend.
-
-*Call graph*: calls 1 internal fn (_client); 1 external calls (__init__).
-
-
-##### `S3BlobStore._client`  (lines 390–406)
+##### `build`  (lines 76–81)
 
 ```
-async def _client(self) -> AioBaseClient
+def build(ctx: ExtensionContext) -> EmbedClient
 ```
 
-**Purpose**: This gets the reusable S3 client for the currently running async event loop. Reusing the client avoids repeated expensive setup and respects that the underlying network client belongs to one event loop.
+**Purpose**: This function creates the embedding client that the core system will use for this backend. It deliberately does not require an OpenAI key at construction time.
 
-**Data flow**: It looks up the current event loop, checks whether a client already exists for it, and returns that client if found. If not, it creates a new S3 client from the configured endpoint and region, stores it in the cache, and returns it. If another task already stored a client first, it closes the redundant one and logs if that cleanup fails.
+**Data flow**: It receives an extension context, which represents the workspace or runtime scope, but this backend does not need to read anything from it. It returns a new `OpenAIEmbedClient` instance configured with the default model.
 
-**Call relations**: Every S3 operation calls this before talking to S3. It is the connection factory and cache that keeps blob traffic from repeatedly rebuilding the S3 service client.
+**Call relations**: The manifest points to this function as the factory for the default embedding backend. During startup, the core extension system can call it to get a client, while the actual OpenAI API setup is delayed until `OpenAIEmbedClient.embed` is called.
 
-*Call graph*: called by 9 (copy, delete, exists, get, get_stream, list, put, put_file, put_stream); 3 external calls (get_session, get_running_loop, log).
+*Call graph*: 1 external calls (__init__).
 
 
-##### `blob_store_for`  (lines 409–421)
+##### `manifest`  (lines 84–89)
 
 ```
-def blob_store_for(config: BlobConfig) -> FilesystemBlobStore | S3BlobStore
+def manifest() -> Manifest
 ```
 
-**Purpose**: This builds the correct blob store from configuration. It is the small factory that turns settings into either a local filesystem store or an S3-backed store.
+**Purpose**: This function tells the host application what this extension provides. In this case, it announces an embedding backend named `default` and says that `build` should be used to create it.
 
-**Data flow**: It receives a `BlobConfig`. If the configured backend is `filesystem`, it checks for a root path and returns a `FilesystemBlobStore`; if the backend is `s3`, it checks for a bucket and returns an `S3BlobStore` with the configured endpoint and region. Missing required settings raise a clear error.
+**Data flow**: It takes no input. It constructs an `EmbedBackendSpec` describing the backend name and factory function, wraps that in a `Manifest` with the extension name and version, and returns the manifest to the extension loader.
 
-**Call relations**: Startup or setup code can call this once it has loaded configuration. After this function returns, the rest of the system can use the common `BlobStore` behavior without branching on the chosen backend.
+**Call relations**: The extension loading system calls this to discover the extension. The returned manifest connects the backend name `default` to `build`, so later startup code can construct the OpenAI embedding client when this backend is selected.
 
 *Call graph*: 2 external calls (__init__, __init__).
 
 
-### `core/src/ufo/transcript.py`
+### `extensions/index_default/ufo_ext_index_default.py`
 
-`io_transport` · `conversation persistence and readback`
+`domain_logic` · `cross-cutting during indexing and search`
 
-A conversation with an AI can be long, and the system needs to save it durably so other tools can inspect it later. This file is the common rulebook for that saved data. Without it, one part of the project might write a transcript in one format while another part tries to read it in a different format, causing old conversations, debug views, or evaluation tools to break.
+This file is the project’s default “index,” meaning the place where pieces of content are saved so they can be found again later. Without it, a fresh deployment would have no standard way to store chunks of text, remove stale chunks, or search memory by keywords and embeddings. An embedding is a list of numbers that represents the meaning of text, so similar text ends up with similar number lists.
 
-The main saved transcript is represented by `Conversation`. It contains the message list at a particular sequence number, plus optional extra context such as the system prompt and injected text used for a completed turn. The file turns that record into compact bytes by converting it to JSON, then compressing it with LZ4, a fast compression format. It also reverses that process when reading.
+The file supports two database styles. In PostgreSQL, it uses PostgreSQL’s built-in full-text search for word matching and pgvector for vector similarity. In SQLite, it uses FTS5, SQLite’s full-text search feature, and does vector comparison in Python by scanning rows and calculating cosine similarity. The public data types stay the same either way, so the rest of the system does not need to know which database is underneath.
 
-The file also describes “compaction” records. Compaction is when an older, bulky part of a conversation is summarized so the model can keep working with a smaller context window. For each compaction, the system stores the messages before, the messages after, and a structured summary explaining what was preserved. Helper functions build the storage paths and read these records back from a blob store, which is a generic place for storing named chunks of bytes.
+The main class, DefaultIndex, opens a workspace-scoped database transaction for each operation. It can insert or update chunks, delete all chunks for one owner, prune old chunks after re-chunking, search by words, and search by vector similarity. Think of it like a library catalog that stores both the words on each page and a rough “meaning fingerprint” for each page, then can look up either exact words or nearby ideas.
 
 #### Function details
 
-##### `transcript_key`  (lines 37–38)
+##### `pgvector_literal`  (lines 31–32)
 
 ```
-def transcript_key(conversation_id: UUID) -> str
+def pgvector_literal(vector: tuple[float, ...]) -> str
 ```
 
-**Purpose**: Builds the storage name for the main saved transcript of one conversation. Someone uses it when they need to put or fetch the conversation messages from the blob store.
+**Purpose**: Turns a Python tuple of numbers into the text format expected by PostgreSQL’s pgvector extension. This is needed when saving or querying vector embeddings in PostgreSQL.
 
-**Data flow**: It takes a conversation ID, which is a unique identifier, and inserts it into a fixed path pattern. The result is a string like a file path pointing to that conversation’s compressed transcript.
+**Data flow**: It receives a tuple such as several floating-point numbers → converts each value to a plain float representation and joins them inside square brackets → returns a string that PostgreSQL can cast into its vector type.
 
-**Call relations**: This function provides the agreed address for transcript blobs. Writers and readers can use the same path convention so they meet at the same saved object.
+**Call relations**: When DefaultIndex.upsert saves an embedding to PostgreSQL, it uses this helper to format the stored value. When DefaultIndex.vector searches by embedding in PostgreSQL, it uses the same helper to format the query vector before handing it to SQL.
 
-
-##### `encode`  (lines 41–43)
-
-```
-def encode(conversation: Conversation) -> bytes
-```
-
-**Purpose**: Turns a `Conversation` object into compressed bytes suitable for durable storage. This keeps the saved transcript compact and in a predictable JSON shape.
-
-**Data flow**: It receives a validated conversation record. It first turns that record into ordinary data, writes it as JSON with stable formatting, converts the JSON text into bytes, and then compresses those bytes. The output is the byte blob that can be stored.
-
-**Call relations**: This is the write-side codec for conversations. Code that saves transcripts calls this before sending data to storage, while `decode` performs the matching read-side operation later.
-
-*Call graph*: 2 external calls (model_dump, dumps).
+*Call graph*: called by 2 (upsert, vector).
 
 
-##### `decode`  (lines 46–50)
+##### `cosine`  (lines 35–43)
 
 ```
-def decode(body: bytes) -> Conversation
+def cosine(left: tuple[float, ...], right: tuple[float, ...]) -> float
 ```
 
-**Purpose**: Turns stored compressed transcript bytes back into a validated `Conversation`. It also gives callers a clear `TranscriptDecodeError` if the stored data is corrupt or no longer matches the expected shape.
+**Purpose**: Measures how similar two embeddings are using cosine similarity, a common way to compare the direction of two number lists. SQLite uses this because it does not have the same vector-search support as PostgreSQL here.
 
-**Data flow**: It receives compressed bytes from storage. It decompresses them, asks the `Conversation` model to validate and parse the JSON, and returns the resulting conversation object. If decompression or validation fails, it converts that failure into a transcript-specific error.
+**Data flow**: It receives two equal-length tuples of numbers → calculates the size of each vector, multiplies matching positions together, and divides by the combined sizes → returns a similarity score, or 0.0 if either vector has no size.
 
-**Call relations**: This is the read-side partner to `encode`. Any reader of a saved transcript can rely on it to either return a proper `Conversation` or clearly report that the stored transcript cannot be understood.
+**Call relations**: DefaultIndex.vector calls this on SQLite after reading candidate rows from the database. It supplies the scores that are then used to sort the best vector matches.
+
+*Call graph*: called by 1 (vector); 1 external calls (sqrt).
+
+
+##### `pack_embedding`  (lines 46–47)
+
+```
+def pack_embedding(vector: tuple[float, ...]) -> bytes
+```
+
+**Purpose**: Converts an embedding into compact bytes so SQLite can store it in a database column. SQLite does not have the same native vector type used by PostgreSQL, so the numbers are packed by hand.
+
+**Data flow**: It receives a tuple of floating-point numbers → writes them into a binary blob using four bytes per number → returns those bytes for storage in SQLite.
+
+**Call relations**: DefaultIndex.upsert calls this only on the SQLite path, just before writing a chunk and its embedding to the database.
+
+*Call graph*: called by 1 (upsert); 1 external calls (pack).
+
+
+##### `unpack_embedding`  (lines 50–51)
+
+```
+def unpack_embedding(blob: bytes) -> tuple[float, ...]
+```
+
+**Purpose**: Converts an embedding stored as bytes in SQLite back into a tuple of numbers. This is the reverse of pack_embedding.
+
+**Data flow**: It receives a binary blob from the database → reads it as a sequence of four-byte floating-point numbers → returns a tuple that Python can compare with another embedding.
+
+**Call relations**: DefaultIndex.vector calls this on SQLite rows before passing the restored embedding to cosine for scoring.
+
+*Call graph*: called by 1 (vector); 1 external calls (unpack).
+
+
+##### `_hit`  (lines 54–63)
+
+```
+def _hit(row: sa.RowMapping, score: float) -> Hit
+```
+
+**Purpose**: Builds a standard search result object from a database row and a score. This keeps PostgreSQL and SQLite search results shaped the same for the rest of the system.
+
+**Data flow**: It receives a row containing chunk details plus a separate score → copies fields such as chunk ID, owner, subject, order, and text into a Hit object → returns that Hit with the score converted to a normal float.
+
+**Call relations**: DefaultIndex.lexical uses this after word-search queries, and DefaultIndex.vector uses it after vector-search queries. It is the final adapter between raw database results and the index API’s Hit objects.
+
+*Call graph*: called by 2 (lexical, vector); 1 external calls (__init__).
+
+
+##### `DefaultIndex.upsert`  (lines 168–205)
+
+```
+async def upsert(self, chunks: tuple[Chunk, ...]) -> None
+```
+
+**Purpose**: Adds new chunks to the index or updates existing chunks with the same digest. This is used when content is indexed or re-indexed so search sees the latest text and embedding.
+
+**Data flow**: It receives a tuple of Chunk objects → if there are none, it does nothing; otherwise it opens a database transaction, checks whether the connection is PostgreSQL or SQLite, and writes each chunk using the right SQL → in SQLite it also refreshes the full-text-search table entry for each chunk.
+
+**Call relations**: This is called by the wider indexing flow when chunks are ready to be stored. On PostgreSQL it uses pgvector_literal for embeddings; on SQLite it uses pack_embedding and also updates the separate FTS table so later lexical searches can find the text.
+
+*Call graph*: calls 2 internal fn (pack_embedding, pgvector_literal).
+
+
+##### `DefaultIndex.delete`  (lines 207–214)
+
+```
+async def delete(self, scope: IndexScope) -> None
+```
+
+**Purpose**: Removes every indexed chunk that belongs to one owner. This is used when a document, memory item, or other indexed owner should no longer be searchable.
+
+**Data flow**: It receives an IndexScope, which identifies an owner kind and owner ID → opens a transaction and deletes matching rows → on SQLite it deletes from the full-text-search table first, then from the main chunk table; on PostgreSQL one delete from the chunk table is enough.
+
+**Call relations**: Other parts of the system can call this to clear an indexed owner. DefaultIndex.prune also calls it when the keep-set is empty, because pruning everything is the same as deleting the whole scope.
+
+*Call graph*: called by 1 (prune).
+
+
+##### `DefaultIndex.prune`  (lines 216–230)
+
+```
+async def prune(self, scope: IndexScope, keep: frozenset[str]) -> None
+```
+
+**Purpose**: Removes old chunks for an owner while keeping a known set of current chunk digests. This matters after content is split into chunks again, because old chunks may otherwise stay searchable even though they no longer exist in the source.
+
+**Data flow**: It receives an IndexScope and a set of chunk digests to keep → if the keep-set is empty, it delegates to delete; otherwise it opens a transaction and deletes only chunks for that owner whose digest is not in the keep-set → on SQLite it also removes matching rows from the full-text-search table.
+
+**Call relations**: The re-indexing flow uses this after writing the current chunks for an owner. It calls DefaultIndex.delete for the simple “keep nothing” case; otherwise it runs dialect-specific pruning SQL.
+
+*Call graph*: calls 1 internal fn (delete).
+
+
+##### `DefaultIndex.lexical`  (lines 232–268)
+
+```
+async def lexical(self, query: str, subjects: frozenset[str], owner_kind: str, limit: int) -> tuple[Hit, ...]
+```
+
+**Purpose**: Searches for chunks whose text matches a word query. This is the keyword-search half of the index, useful when the caller has exact terms or phrases to look for.
+
+**Data flow**: It receives a query string, allowed subjects, an owner kind, and a maximum result count → if there are no subjects, or the cleaned query is empty, it returns no results; otherwise it runs PostgreSQL full-text search or SQLite FTS5 search → converts each matching row into a Hit and returns them ordered by database-provided relevance.
+
+**Call relations**: The search layer calls this when it wants lexical, meaning word-based, retrieval. After the database returns rows, this function hands each row to _hit so callers receive the same Hit shape regardless of database.
+
+*Call graph*: calls 1 internal fn (_hit).
+
+
+##### `DefaultIndex.vector`  (lines 270–303)
+
+```
+async def vector(self, embedding: tuple[float, ...], subjects: frozenset[str], owner_kind: str, limit: int) -> tuple[Hit, ...]
+```
+
+**Purpose**: Searches for chunks whose embeddings are closest to a query embedding. This is the meaning-based search path, used when similar ideas should match even if the exact words differ.
+
+**Data flow**: It receives a query embedding, allowed subjects, an owner kind, and a maximum result count → if the embedding or subject set is empty, it returns no results; otherwise it opens a transaction → PostgreSQL scores and orders rows in SQL, while SQLite reads candidate embeddings, unpacks them, scores them in Python with cosine similarity, sorts them, and returns the top hits.
+
+**Call relations**: The search layer calls this for vector retrieval. On PostgreSQL it uses pgvector_literal before sending the query to SQL; on SQLite it uses unpack_embedding and cosine to score rows locally. In both cases it uses _hit to turn scored rows into standard Hit objects.
+
+*Call graph*: calls 4 internal fn (_hit, cosine, pgvector_literal, unpack_embedding).
+
+
+##### `manifest`  (lines 306–316)
+
+```
+def manifest() -> Manifest
+```
+
+**Purpose**: Describes this extension to the host system and registers the default index backend. This is how the core system discovers that the backend named "default" can be created from this file.
+
+**Data flow**: It takes no input → creates a Manifest containing the extension name, version, and an IndexBackendSpec → the spec includes a factory that builds DefaultIndex using the transaction opener supplied by the host context → returns the Manifest.
+
+**Call relations**: The extension-loading system calls this during setup. The returned manifest tells the core that when it needs the default index backend, it should create a DefaultIndex wired to the workspace-scoped transaction function.
+
+*Call graph*: 2 external calls (__init__, __init__).
+
+
+### `extensions/turbopuffer/ufo_ext_turbopuffer.py`
+
+`io_transport` · `startup registration, then index reads/writes during jobs and serving`
+
+This extension is the bridge between UFO’s own indexing interface and Turbopuffer, an external hosted search service. Without it, a workspace configured to use the “turbopuffer” backend could not save searchable memory chunks or retrieve them during recall.
+
+The file treats every text chunk like a document in a Turbopuffer namespace, which is a named container for one workspace’s indexed data. Each document stores the chunk text, its owner information, its subject, its position, and optionally an embedding, which is a list of numbers that represents the meaning of the text. Turbopuffer can then search these documents in two ways: vector search, which finds text with similar meaning, and BM25 keyword search, which is a common full-text ranking method for matching words.
+
+A small set of helper functions translates between UFO’s chunk IDs and Turbopuffer’s document IDs, builds request bodies, turns returned rows into UFO `Hit` objects, and creates filters so searches only look inside the right owner kind and subject set. The `TurbopufferIndex` class performs the actual HTTP calls. It reads the API key from UFO’s credential store, writes chunks in batches, queries for matches, and deletes old chunks by first listing the documents in a scope. The `manifest` function registers this backend so the rest of the system can discover and build it at startup.
+
+#### Function details
+
+##### `turbopuffer_id`  (lines 42–48)
+
+```
+def turbopuffer_id(chunk_digest: str) -> str
+```
+
+**Purpose**: Converts UFO chunk digests into document IDs that are safe and short enough for Turbopuffer. Standard SHA-256 digests are shortened using URL-safe Base64; any non-standard ID is left alone.
+
+**Data flow**: It receives a chunk digest string. If the string looks like `sha256:` followed by a 64-character hex value, it turns the raw bytes into a shorter URL-safe text ID and removes the padding characters. If it does not match that shape, it returns the original string unchanged.
+
+**Call relations**: When chunks are written, `upsert_body` uses this to choose the Turbopuffer document IDs. When chunks are removed, `TurbopufferIndex.delete` and `TurbopufferIndex.prune` use the same conversion so they delete the exact documents that were written.
+
+*Call graph*: called by 3 (delete, prune, upsert_body); 1 external calls (urlsafe_b64encode).
+
+
+##### `chunk_digest_from_id`  (lines 51–60)
+
+```
+def chunk_digest_from_id(chunk_id: str) -> str
+```
+
+**Purpose**: Converts a Turbopuffer document ID back into UFO’s normal chunk digest form when possible. This keeps search results using the same kind of ID that the rest of UFO expects.
+
+**Data flow**: It receives a document ID from Turbopuffer. If the ID has the shortened Base64 length, it tries to decode it and rebuilds a `sha256:` digest from the bytes. If decoding fails, or if the ID does not have that length, it returns the original ID.
+
+**Call relations**: Search and listing responses come back as Turbopuffer rows. `hit_from_row` uses this when making recall hits, and `_scope_chunks` uses it when rebuilding chunk records before delete or prune work.
+
+*Call graph*: called by 2 (_scope_chunks, hit_from_row); 1 external calls (urlsafe_b64decode).
+
+
+##### `upsert_body`  (lines 63–79)
+
+```
+def upsert_body(chunks: tuple[Chunk, ...]) -> dict[str, Any]
+```
+
+**Purpose**: Builds the JSON body sent to Turbopuffer when saving or replacing a batch of chunks. It also tells Turbopuffer to use cosine distance for vector search and to enable full-text search on the text field.
+
+**Data flow**: It receives a tuple of UFO `Chunk` objects. It turns them into parallel columns: IDs, vectors, owner fields, subjects, ordinals, and text. The result is a dictionary ready to send as the HTTP request body.
+
+**Call relations**: `TurbopufferIndex.upsert` calls this for each write batch. Inside the body-building step, it calls `turbopuffer_id` so the stored document IDs match Turbopuffer’s limits and later delete calls.
+
+*Call graph*: calls 1 internal fn (turbopuffer_id); called by 1 (upsert).
+
+
+##### `query_filters`  (lines 82–86)
+
+```
+def query_filters(owner_kind: str, subjects: frozenset[str]) -> list[Any]
+```
+
+**Purpose**: Builds the filter used for normal searches. It narrows results to one owner kind and to the allowed set of recall subjects, so a query does not search unrelated memory.
+
+**Data flow**: It receives an owner kind and a frozen set of subjects. It returns a Turbopuffer filter expression saying: owner kind must equal this value, and subject must be one of these values.
+
+**Call relations**: `TurbopufferIndex._query` calls this whenever lexical or vector search is run. It is the small gatekeeper that keeps broad search requests inside the caller’s intended scope.
+
+*Call graph*: called by 1 (_query).
+
+
+##### `scope_filters`  (lines 89–96)
+
+```
+def scope_filters(scope: IndexScope, after_id: str | None) -> list[Any]
+```
+
+**Purpose**: Builds the filter used when listing all chunks for one owner scope. This is needed before deleting or pruning, because Turbopuffer deletes by document ID.
+
+**Data flow**: It receives an `IndexScope`, which identifies an owner kind and owner ID, plus an optional `after_id` for paging. It returns a filter expression for that owner, and if `after_id` is present, only IDs greater than that value are included.
+
+**Call relations**: `TurbopufferIndex._scope_chunks` calls this while walking through all documents in a scope page by page. That listing then feeds `delete` and `prune`.
+
+*Call graph*: called by 1 (_scope_chunks).
+
+
+##### `hit_from_row`  (lines 99–108)
+
+```
+def hit_from_row(row: dict[str, Any], score: float) -> Hit
+```
+
+**Purpose**: Turns one row returned by Turbopuffer into UFO’s standard `Hit` object. A `Hit` is the record the rest of the system uses to represent a found chunk and its score.
+
+**Data flow**: It receives a row dictionary from Turbopuffer and a score chosen by the caller. It reads the ID, owner fields, subject, ordinal, and text, converts the ID back to a chunk digest, and returns a `Hit` containing all of that information.
+
+**Call relations**: `TurbopufferIndex.lexical` and `TurbopufferIndex.vector` call this after `_query` returns raw rows. It is the translation point between Turbopuffer’s response shape and UFO’s recall result shape.
+
+*Call graph*: calls 1 internal fn (chunk_digest_from_id); called by 2 (lexical, vector); 1 external calls (__init__).
+
+
+##### `vector_score`  (lines 111–117)
+
+```
+def vector_score(row: dict[str, Any], position: int, total: int) -> float
+```
+
+**Purpose**: Computes a useful score for one vector-search result. UFO wants higher scores to mean better matches, while Turbopuffer may return distance, where lower means closer.
+
+**Data flow**: It receives a result row, the row’s position in the returned list, and the total number of rows. If Turbopuffer included a `$dist` distance, it turns that into `1 - distance`. If no distance is present, it falls back to a descending rank score based on position.
+
+**Call relations**: `TurbopufferIndex.vector` calls this before converting rows into hits. This keeps vector results comparable in the simple “bigger is better” direction expected by later recall fusion.
+
+*Call graph*: called by 1 (vector).
+
+
+##### `TurbopufferIndex.upsert`  (lines 131–142)
+
+```
+async def upsert(self, chunks: tuple[Chunk, ...]) -> None
+```
+
+**Purpose**: Saves new or updated chunks into Turbopuffer. It ignores chunks without embeddings because this backend’s stored vector column needs embeddable content.
+
+**Data flow**: It receives a tuple of `Chunk` objects. It keeps only chunks that have an embedding, asks `_auth` for an authorization header, splits the work into batches, builds each request body with `upsert_body`, posts it to the namespace path from `_path`, and raises an error if Turbopuffer rejects the request. It returns nothing, but the remote index is updated.
+
+**Call relations**: The core indexing flow calls this when content needs to become searchable. It relies on `_auth` for the API key, `_path` for the workspace namespace, and `upsert_body` for the exact Turbopuffer payload.
+
+*Call graph*: calls 3 internal fn (_auth, _path, upsert_body).
+
+
+##### `TurbopufferIndex.delete`  (lines 144–152)
+
+```
+async def delete(self, scope: IndexScope) -> None
+```
+
+**Purpose**: Deletes every indexed chunk belonging to one owner scope. This is used when an owner’s indexed content should be removed entirely.
+
+**Data flow**: It receives an `IndexScope`. It gets authorization, asks `_scope_chunks` to list all chunks in that scope, converts their digests to Turbopuffer document IDs, sends delete requests in batches, and raises an error if any remote request fails. The result is that those documents disappear from Turbopuffer.
+
+**Call relations**: The wider indexing system calls this when a full scope is being removed. Since Turbopuffer deletes by ID, this method first delegates to `_scope_chunks` to discover those IDs, then uses `_path` and `turbopuffer_id` to delete the right remote records.
+
+*Call graph*: calls 4 internal fn (_auth, _path, _scope_chunks, turbopuffer_id).
+
+
+##### `TurbopufferIndex.prune`  (lines 154–164)
+
+```
+async def prune(self, scope: IndexScope, keep: frozenset[str]) -> None
+```
+
+**Purpose**: Deletes only the chunks in a scope that are no longer supposed to exist. This is useful after content is re-chunked, so old leftover chunks do not remain searchable.
+
+**Data flow**: It receives an `IndexScope` and a set of chunk digests to keep. It lists the current chunks in that scope, filters out the ones present in the keep set, converts the remaining digests to Turbopuffer IDs, and sends batched delete requests. It returns nothing, but stale remote documents are removed.
+
+**Call relations**: The indexing flow calls this during cleanup after rewriting a scope. Like `delete`, it depends on `_auth`, `_scope_chunks`, `_path`, and `turbopuffer_id`, but it removes only records outside the keep set.
+
+*Call graph*: calls 4 internal fn (_auth, _path, _scope_chunks, turbopuffer_id).
+
+
+##### `TurbopufferIndex.lexical`  (lines 166–174)
+
+```
+async def lexical(self, query: str, subjects: frozenset[str], owner_kind: str, limit: int) -> tuple[Hit, ...]
+```
+
+**Purpose**: Runs a keyword-style search over chunk text. It uses BM25, a ranking method that scores documents by how well their words match the query.
+
+**Data flow**: It receives a query string, a set of allowed subjects, an owner kind, and a result limit. If the query is blank or there are no subjects, it returns an empty tuple. Otherwise it asks `_query` to rank by text BM25, then turns each returned row into a `Hit` with a simple rank-based score.
+
+**Call relations**: The recall system uses this when it wants word-based matches. This method delegates the HTTP request to `_query` and then uses `hit_from_row` so callers receive normal UFO hits instead of raw Turbopuffer rows.
+
+*Call graph*: calls 2 internal fn (_query, hit_from_row).
+
+
+##### `TurbopufferIndex.vector`  (lines 176–185)
+
+```
+async def vector(self, embedding: tuple[float, ...], subjects: frozenset[str], owner_kind: str, limit: int) -> tuple[Hit, ...]
+```
+
+**Purpose**: Runs meaning-based search using an embedding vector. It finds chunks whose stored vectors are close to the query vector.
+
+**Data flow**: It receives an embedding, allowed subjects, an owner kind, and a result limit. If the embedding is empty or there are no subjects, it returns no results. Otherwise it asks `_query` to run approximate nearest-neighbor search, scores each row with `vector_score`, drops non-positive scores, and returns the remaining rows as `Hit` objects.
+
+**Call relations**: The recall system uses this when it wants semantic matches rather than exact word matches. It hands the remote search to `_query`, uses `vector_score` to make scores point in the expected direction, and uses `hit_from_row` to return standard UFO results.
+
+*Call graph*: calls 3 internal fn (_query, hit_from_row, vector_score).
+
+
+##### `TurbopufferIndex._query`  (lines 187–200)
+
+```
+async def _query(self, rank_by: list[Any], owner_kind: str, subjects: frozenset[str], limit: int) -> list[dict[str, Any]]
+```
+
+**Purpose**: Sends one search request to Turbopuffer and returns the raw result rows. It is shared by both keyword search and vector search.
+
+**Data flow**: It receives a Turbopuffer `rank_by` instruction, owner kind, subject set, and limit. It builds a request body with the ranking rule, maximum result count, returned attributes, and filters from `query_filters`. It posts that body to the namespace query path with authorization. If the namespace does not exist, it returns an empty list; otherwise it checks for errors and returns the response rows.
+
+**Call relations**: `TurbopufferIndex.lexical` and `TurbopufferIndex.vector` both call this instead of duplicating HTTP request logic. It calls `_auth` for credentials, `_path` for the endpoint, and `query_filters` to keep the search scoped.
+
+*Call graph*: calls 3 internal fn (_auth, _path, query_filters); called by 2 (lexical, vector).
+
+
+##### `TurbopufferIndex._scope_chunks`  (lines 202–230)
+
+```
+async def _scope_chunks(self, scope: IndexScope, headers: dict[str, str]) -> list[Chunk]
+```
+
+**Purpose**: Lists all chunks currently stored in Turbopuffer for one owner scope. It is mainly a support step for deletion and pruning.
+
+**Data flow**: It receives an `IndexScope` and already-built authorization headers. It repeatedly queries Turbopuffer for pages of rows ordered by ID, using `scope_filters` and an `after_id` marker to continue where the previous page ended. Each row is converted into a lightweight `Chunk` with its digest and attributes. It returns the full list found so far, or an empty/partial list if the namespace does not exist.
+
+**Call relations**: `TurbopufferIndex.delete` and `TurbopufferIndex.prune` call this before deciding which document IDs to delete. It uses `_path` to reach the namespace, `scope_filters` to stay inside the owner scope, and `chunk_digest_from_id` to restore UFO-style chunk digests.
+
+*Call graph*: calls 3 internal fn (_path, chunk_digest_from_id, scope_filters); called by 2 (delete, prune); 1 external calls (__init__).
+
+
+##### `TurbopufferIndex._auth`  (lines 232–234)
+
+```
+async def _auth(self) -> dict[str, str]
+```
+
+**Purpose**: Builds the HTTP authorization header for Turbopuffer requests. It reads the API key from UFO’s credential access object each time it is needed.
+
+**Data flow**: It asks the credential store for the `turbopuffer_api_key` value. It then returns a dictionary containing an `Authorization` header in Bearer-token form. It does not change local state.
+
+**Call relations**: `upsert`, `delete`, `prune`, and `_query` call this before making HTTP requests. It is the shared doorway between UFO’s credential system and Turbopuffer’s API authentication.
+
+*Call graph*: called by 4 (_query, delete, prune, upsert).
+
+
+##### `TurbopufferIndex._path`  (lines 236–237)
+
+```
+def _path(self, suffix: str='') -> str
+```
+
+**Purpose**: Builds the URL path for this workspace’s Turbopuffer namespace. This keeps all indexed data separated by workspace.
+
+**Data flow**: It receives an optional suffix such as `/query`. It combines the fixed namespace prefix, the credential object’s workspace ID, and the suffix into a path like `/namespaces/ufo-<workspace>...`.
+
+**Call relations**: `upsert`, `delete`, `prune`, `_query`, and `_scope_chunks` call this whenever they need to post to the correct Turbopuffer endpoint. It centralizes the namespace naming rule so every operation uses the same workspace container.
+
+*Call graph*: called by 5 (_query, _scope_chunks, delete, prune, upsert).
+
+
+##### `manifest`  (lines 240–260)
+
+```
+def manifest() -> Manifest
+```
+
+**Purpose**: Declares this file as a UFO extension and registers the Turbopuffer index backend. This is how the core system discovers that `memory.index_backend = "turbopuffer"` is available.
+
+**Data flow**: It creates and returns a `Manifest` containing the extension name and version, one credential slot for the Turbopuffer API key, and one index backend specification. The backend factory builds a `TurbopufferIndex` with the runtime credential access object and an `httpx` asynchronous HTTP client pointed at Turbopuffer’s base URL.
+
+**Call relations**: The extension loading path calls this during startup. After that, the core can use the registered factory to create a `TurbopufferIndex`, and all later index operations flow through that object.
+
+*Call graph*: 3 external calls (__init__, __init__, __init__).
+
+
+### Memory extension surface
+The memory package exposes durable recall through its manifest, event vocabulary, and read-only memory object interface.
+
+### `extensions/memory/ufo_ext_memory/__init__.py`
+
+`other` · `package import`
+
+This is the package entry file for the memory extension, but it does not contain any executable logic itself. Its main job is to label the package and explain its scope in a short docstring. In Python, an `__init__.py` file marks a directory as an importable package, meaning other parts of the project can refer to `ufo_ext_memory` as a module.
+
+The text in the file tells a newcomer what this package is meant to provide. The extension is concerned with “durable facts,” meaning information that should survive beyond a single interaction. It also mentions recall through a `user_prompt_submit` hook, which means the extension can react when a user sends a prompt and bring relevant memory back into the conversation. It mentions page derivation through a `page_change` hook, meaning it can respond when some page-like content changes and derive memory-related output from it. Finally, it points to a memory-index job, which likely prepares or organizes stored memory so it can be searched or recalled efficiently.
+
+Without this file, the package may not be importable in some Python setups, and readers would lose this small but useful signpost explaining what the memory extension is for.
+
+
+### `extensions/memory/ufo_ext_memory/manifest.py`
+
+`orchestration` · `startup registration, then active during tool calls, prompt submission hooks, page-change processing, and scheduled jobs`
+
+This file tells the host system how the memory feature plugs in. Without it, the agent would not know that memory_search and memory_update exist, prompts would not get relevant remembered facts added before the model answers, and background jobs would not index or consolidate memory.
+
+The file has three main jobs. First, it defines the input shapes for the two tools: one for searching memory with up to three focused queries, and one for writing a lasting fact or preference. Second, it provides the small workflows behind those tools and hooks. Searching fans out across both stored memory items and synced source pages, then merges the results so one query cannot crowd out the others. Updating chooses whether a memory belongs to one member or to the shared workspace, then stores it. The recall hook runs before a user prompt reaches the model and quietly injects relevant memory into the context; importantly, it is “best effort,” meaning it times out and swallows errors rather than blocking the user’s turn.
+
+Third, the file registers background work. One job indexes memory for search. Page-change hooks index changed source pages and derive new facts from them. Another job consolidates older facts into broader summaries. The manifest at the end is like a plugboard: it connects all these pieces to the system.
+
+#### Function details
+
+##### `_date_bound`  (lines 150–161)
+
+```
+def _date_bound(value: str | None, *, end: bool) -> datetime | None
+```
+
+**Purpose**: Turns an optional date or date-time string into a timezone-aware UTC boundary for searching memory by creation date. It also makes an end date like 2026-01-31 include that whole day by moving the boundary to the next midnight.
+
+**Data flow**: It receives a string or nothing, plus a flag saying whether this is the end of a range. If there is no string, it returns nothing. If there is a string, it parses it as an ISO-style date or date-time, adds UTC when no timezone was written, optionally advances a bare end date by one day, and returns the resulting datetime. Bad date text is allowed to raise an error so the tool call can report a recoverable problem.
+
+**Call relations**: The memory search tool calls this before searching. The parsed start and end values are then passed into the search workflow so only memory created within that window is considered.
+
+*Call graph*: called by 1 (memory_search_handler); 2 external calls (fromisoformat, timedelta).
+
+
+##### `MemorySearchService.search`  (lines 170–219)
+
+```
+async def search(self, queries: tuple[str, ...], member_id: UUID | None, start: datetime | None=None, end: datetime | None=None) -> tuple[MemoryMatch, ...]
+```
+
+**Purpose**: Runs the shared memory-search workflow used by the tool and by other extension code. It searches both durable memory items and synced source-page snippets, then returns a single set of readable matches.
+
+**Data flow**: It receives one to three search queries, the current member if there is one, and optional start and end times. It finds the right subjects to search, such as the member’s private memory plus shared memory, asks the store to search memories and source pages for every query in parallel, then merges the per-query results in rounds. Duplicate memory IDs and page IDs are removed. It outputs MemoryMatch objects that include the kind of hit, the text snippet, an object reference that can be opened later, and the creation date.
+
+**Call relations**: The memory_search_handler creates this service when the agent calls memory_search. The manifest also registers it as the default memory search provider, so other parts of the system can use the same search behavior instead of reimplementing it.
+
+*Call graph*: 6 external calls (__init__, __init__, gather, zip_longest, recall_subjects, store_for).
+
+
+##### `match_line`  (lines 222–229)
+
+```
+def match_line(match: MemoryMatch) -> str
+```
+
+**Purpose**: Formats one memory search result into a single line of text that an agent or user can read. It includes the snippet first, then the reference and date when available.
+
+**Data flow**: It receives one MemoryMatch. It builds a line such as a bullet with the match kind and text. If the match has an object reference, it appends that reference and, when present, the creation date. It returns the finished text line.
+
+**Call relations**: After memory_search_handler gets matches from MemorySearchService.search, it calls this for each match to make the final tool response easy to scan.
+
+*Call graph*: called by 1 (memory_search_handler).
+
+
+##### `memory_search_handler`  (lines 232–249)
+
+```
+async def memory_search_handler(ctx: ToolContext, args: MemorySearchInput) -> ToolResult
+```
+
+**Purpose**: Implements the memory_search tool that the agent can call before answering. It turns tool arguments into a real search and returns either matching memory lines or a clear “No matching memory” message.
+
+**Data flow**: It receives the tool context and the search arguments. It checks that the extension context exists, parses optional start and end dates, searches using MemorySearchService, and formats the matches. It returns a ToolResult containing text for the agent. If nothing matches, the returned text says so.
+
+**Call relations**: The manifest registers this as the handler for the memory_search tool. During a model turn, when the agent invokes that tool, the tool system calls this function; it then delegates date parsing to _date_bound, searching to MemorySearchService.search, and display formatting to match_line.
+
+*Call graph*: calls 2 internal fn (_date_bound, match_line); 3 external calls (__init__, __init__, __init__).
+
+
+##### `memory_update_handler`  (lines 252–270)
+
+```
+async def memory_update_handler(ctx: ToolContext, args: MemoryUpdateInput) -> ToolResult
+```
+
+**Purpose**: Implements the memory_update tool that lets the agent store a durable fact, preference, decision, event, or task-like memory. It decides whether the new memory is private to the current member or shared with the workspace.
+
+**Data flow**: It receives the tool context and the memory text plus metadata such as kind, confidence, sharing choice, and source reference. It checks that the extension context exists. If the memory is marked shared, or there is no current member, it writes to the shared subject; otherwise it writes to the member’s subject. It commits a MemoryWrite to the store and returns a short confirmation message naming where it was remembered.
+
+**Call relations**: The manifest registers this as the handler for the memory_update tool. When the agent learns something worth keeping, the tool system calls this function, which hands the actual write to the memory store.
+
+*Call graph*: 5 external calls (__init__, __init__, __init__, member_subject, store_for).
+
+
+##### `recall_hook`  (lines 273–303)
+
+```
+async def recall_hook(ctx: HookContext) -> HookOutcome
+```
+
+**Purpose**: Automatically adds relevant remembered facts to the model’s context before it answers a user prompt. It is deliberately fail-soft: memory recall should help the answer, but it must not block the conversation if search is slow or broken.
+
+**Data flow**: It receives a hook context and first checks that the event is a user prompt submission. It builds the set of subjects to search, tries to recall matching memory under a short timeout, and records the error class if something fails. It filters out topic-only recalls, logs which memory IDs were injected when there is a turn, and returns injected context text only if recall succeeded and found usable lines. On timeout or error, it returns nothing.
+
+**Call relations**: The manifest registers this for the user_prompt_submit event. The host calls it just before the model runs. It uses the memory store to recall facts and InjectContext to hand extra text back to the prompt-building system.
+
+*Call graph*: 5 external calls (__init__, timeout, log, recall_subjects, store_for).
+
+
+##### `index_memory`  (lines 306–311)
+
+```
+async def index_memory(ctx: ExtensionContext) -> None
+```
+
+**Purpose**: Runs the scheduled job that turns committed memory items into searchable index chunks. This is what makes newly stored memories findable by semantic search.
+
+**Data flow**: It receives the extension context. It verifies that both the index backend and embedding backend are available; embeddings are numeric representations of text used for similarity search. It creates a MemoryIndexer with the index, embedder, database transaction, and text chunker, then runs it. It does not return a value; its effect is updating indexing data.
+
+**Call relations**: The manifest registers this as the memory_index background job. The job scheduler calls it for workspaces that have memory items awaiting indexing, as selected by _items_awaiting_index through owner_candidates.
+
+*Call graph*: 2 external calls (__init__, __init__).
+
+
+##### `index_pages`  (lines 314–329)
+
+```
+async def index_pages(ctx: HookContext) -> HookOutcome
+```
+
+**Purpose**: Processes changed source pages so their content can be searched alongside memories. It also keeps a memory-side mirror row for each page change.
+
+**Data flow**: It receives a hook context and only acts when the payload is a batch of page changes. It checks that indexing and embedding services are wired. Then it creates a PageIndexer with the needed services, the workspace ID, and a text chunker, and applies the incoming changes. It returns nothing to the hook system.
+
+**Call relations**: The manifest registers this as one consumer of page_change events. When the core runner replays source-page changes, this hook indexes the delivered batch while the runner owns the cursor and batching.
+
+*Call graph*: 2 external calls (__init__, __init__).
+
+
+##### `derive_facts`  (lines 332–340)
+
+```
+async def derive_facts(ctx: HookContext) -> HookOutcome
+```
+
+**Purpose**: Looks at changed source pages and tries to distill durable facts from them. This lets synced documents gradually become remembered facts the agent can recall later.
+
+**Data flow**: It receives a hook context and only acts for page-change batches. It builds a FactDeriver from the memory store and the optional model, then applies it to the changed pages. The output is not returned directly; the effect is that new fact memory items may be written to the store.
+
+**Call relations**: The manifest registers this as a second page_change consumer, separate from page indexing. When the runner delivers a page-change batch, this function hands the batch to FactDeriver, which performs the model-based extraction work.
+
+*Call graph*: 2 external calls (__init__, store_for).
+
+
+##### `consolidate_memory`  (lines 343–351)
+
+```
+async def consolidate_memory(ctx: ExtensionContext) -> None
+```
+
+**Purpose**: Runs the scheduled consolidation job that groups older related facts into broader semantic summaries. This keeps memory useful as it grows, like turning many scattered notes into a concise summary page.
+
+**Data flow**: It receives the extension context. It checks that the embedding backend is present, then creates a MemoryConsolidator with embeddings, database transaction access, workspace ID, and the model. It runs the consolidator. It returns nothing; its effect is writing summary memories and marking originals as superseded where appropriate.
+
+**Call relations**: The manifest registers this as the memory_consolidate background job. The scheduler calls it for workspaces selected by _consolidatable_workspaces, so it only runs where there are enough old live facts to make consolidation worthwhile.
 
 *Call graph*: 1 external calls (__init__).
 
 
-##### `compaction_key`  (lines 100–101)
+##### `_items_awaiting_index`  (lines 354–359)
 
 ```
-def compaction_key(conversation_id: UUID, index: int, half: CompactionHalf) -> str
+def _items_awaiting_index() -> sa.Select[tuple[UUID]]
 ```
 
-**Purpose**: Builds the storage name for one piece of a compaction record. A compaction has three saved pieces: the window before compaction, the window after compaction, and the summary.
+**Purpose**: Builds the database query that finds workspaces with memory items not yet indexed. It is used to decide where the memory indexing job should run.
 
-**Data flow**: It takes a conversation ID, a compaction index, and which piece is being addressed. It combines them into a fixed path string under that conversation’s compaction folder.
+**Data flow**: It takes no runtime input. It creates a SQL query selecting distinct workspace IDs from memory items whose embedding digest is missing, which means they still need indexing. It returns the query object rather than executing it.
 
-**Call relations**: When `read_compaction_record` wants to fetch a compaction from storage, it calls this three times to locate the `before`, `after`, and `summary` blobs.
+**Call relations**: The manifest passes this query builder to owner_candidates for the memory_index job. The job system uses it during scheduling to find candidate workspace owners that have real indexing work waiting.
 
-*Call graph*: called by 1 (read_compaction_record).
-
-
-##### `decode_compaction`  (lines 104–113)
-
-```
-def decode_compaction(index: int, before: bytes, after: bytes, summary: bytes) -> CompactionRecord
-```
-
-**Purpose**: Rebuilds one complete compaction record from its three stored byte blobs. It validates both message windows and the structured summary before returning them together.
-
-**Data flow**: It receives the compaction number plus compressed bytes for the before window, after window, and summary. It decompresses each blob, parses the JSON into the expected model, and packages the result into a `CompactionRecord`. If any piece cannot be decoded or validated, it raises `TranscriptDecodeError`.
-
-**Call relations**: `read_compaction_record` calls this after it has fetched the three blobs from storage. This function is the point where raw stored bytes become a usable compaction object for debug views, evaluation tools, or other readers.
-
-*Call graph*: called by 1 (read_compaction_record); 2 external calls (__init__, __init__).
+*Call graph*: 1 external calls (select).
 
 
-##### `read_compaction_record`  (lines 116–127)
+##### `_consolidatable_workspaces`  (lines 362–377)
 
 ```
-async def read_compaction_record(blob: BlobStore, conversation_id: UUID, index: int) -> CompactionRecord | None
+def _consolidatable_workspaces() -> sa.Select[tuple[UUID]]
 ```
 
-**Purpose**: Reads one compaction record for a conversation from the blob store. If that numbered compaction does not exist, it returns `None` instead of treating that as a hard failure.
+**Purpose**: Builds the database query that finds workspaces where memory consolidation could actually produce a useful cluster. It avoids scheduling consolidation for workspaces with too few facts, only young facts, or already-superseded facts.
 
-**Data flow**: It receives a blob store, a conversation ID, and a compaction index. It builds the three storage keys, fetches the three blobs, and decodes them into a `CompactionRecord`. If any required blob is missing, it returns `None` to mean there is no record at that index.
+**Data flow**: It takes no direct input. It calculates an age cutoff based on the current UTC time and the minimum age rule. Then it creates a SQL query for workspace IDs that have enough live fact items older than that cutoff. It returns the query object without running it.
 
-**Call relations**: This function is the shared per-record reader. `read_compaction_records` calls it repeatedly, starting at index 1, to collect every saved compaction until the first missing one.
+**Call relations**: The manifest gives this query builder to owner_candidates for the memory_consolidate job. The scheduler uses it to pick only workspaces where a consolidation pass has a reasonable chance of doing useful work.
 
-*Call graph*: calls 3 internal fn (get, compaction_key, decode_compaction); called by 1 (read_compaction_records).
+*Call graph*: 2 external calls (now, select).
 
 
-##### `read_compaction_records`  (lines 130–140)
+##### `manifest`  (lines 380–455)
 
 ```
-async def read_compaction_records(blob: BlobStore, conversation_id: UUID) -> tuple[CompactionRecord, ...]
+def manifest() -> Manifest
 ```
 
-**Purpose**: Reads all compaction records for a conversation in order, from oldest to newest. It stops when it reaches the first missing compaction index.
+**Purpose**: Declares the complete memory extension to the host system. It names the extension and registers its tools, hooks, jobs, object kind, skill files, memory search provider, and web surface.
 
-**Data flow**: It receives a blob store and a conversation ID. It starts at compaction index 1, asks `read_compaction_record` for that record, appends each found record to a list, and moves to the next index. When a record is missing, it returns the collected records as an immutable tuple.
+**Data flow**: It takes no input. It constructs a Manifest containing two tool definitions, the memory object, three hook registrations, two scheduled jobs with candidate selectors, a skill directory, the default memory search provider, and a surface route group. It returns that Manifest for the host to load.
 
-**Call relations**: This is the higher-level reader used when a caller wants the full compaction history. It relies on `read_compaction_record` for each individual fetch and uses the system’s convention that compaction indices are written sequentially.
+**Call relations**: This is the file’s main registration point. At startup, the extension loader calls it, and the returned manifest tells the rest of the system when to call memory_search_handler, memory_update_handler, recall_hook, index_pages, derive_facts, index_memory, and consolidate_memory.
 
-*Call graph*: calls 1 internal fn (read_compaction_record).
+*Call graph*: 8 external calls (__init__, __init__, __init__, __init__, __init__, __init__, __init__, owner_candidates).
 
 
-### `core/src/ufo/loop/transcript.py`
+### `extensions/memory/ufo_ext_memory/events.py`
 
-`io_transport` · `turn completion and repair republishing`
+`data_model` · `cross-cutting`
 
-A conversation transcript is the durable record of what has happened so far. This file wraps a shared blob store, which is a simple storage place for named chunks of bytes, and gives the rest of the system a small, careful interface for one conversation. Its main job is to protect the transcript from going backwards. Each saved conversation has a sequence number, called `seq`, that increases as the conversation advances. Before writing, this code reads the current stored transcript. If the stored transcript already has the same or a higher sequence number, the new write is ignored. In everyday terms, it is like a clerk refusing to replace page 10 of a logbook with another copy of page 9. This matters because more than one part of the system may try to publish the final state for a turn, especially during repair or retry flows. The first valid write for a sequence number is treated as authoritative, and stale writes cannot erase it. The file relies on shared transcript helpers to turn conversation objects into bytes and back, and to choose the storage key for a specific conversation ID.
+The memory extension can emit structured events, which are machine-readable messages about something that happened. This file defines the small set of fixed values used for those events. The main event name, `MEMORY_RECALL_EVENT`, marks the moment when the system tries to recall stored memories before preparing a response. The two size limits act like guardrails: one caps how many recalled memory IDs may be included in an event, and the other caps how much of an error class name is recorded if recall fails. Without this file, different parts of the extension might use slightly different event names or include overly large event details, making logs and monitoring harder to trust. Think of it like a label maker and a few packing rules: every package gets the same label, and no package is allowed to contain more detail than expected.
+
+
+### `extensions/memory/ufo_ext_memory/objects.py`
+
+`domain_logic` · `request handling`
+
+This file is the doorway from the general object system into the memory extension’s stored memory records. A memory item is a saved piece of information, such as a fact, preference, decision, event, or task. Other tools can find memory references through search, and this object type is what lets those references be opened to see the full text and details.
+
+The main rule is that memory is read-only here. Listing shows only current, non-superseded memories, newest first. Getting a specific memory by id can still return an older superseded memory if the caller has a stale reference. In that case, the response includes a link to the newer memory that replaced it. This is like keeping an old filing-card number working, but adding a note that says “see the newer card instead.”
+
+Access is also scoped. A caller can read shared memory, and, when the conversation has a member identity, that member’s private memory. The file uses the extension context to open a database transaction, reads from the memory table, turns rows into object-system results, and adds helpful links back to source pages or replacement memories. Attempts to apply changes or delete a memory are refused with clear messages.
 
 #### Function details
 
-##### `Transcript.read`  (lines 17–22)
+##### `_require_ext`  (lines 58–61)
 
 ```
-async def read(self) -> Conversation | None
+def _require_ext(ctx: ToolContext) -> ExtensionContext
 ```
 
-**Purpose**: Reads the saved transcript for this conversation, if one exists. It gives callers either a decoded `Conversation` object or `None` when nothing has been saved yet.
+**Purpose**: This helper makes sure the object request has the memory extension context attached. The extension context is needed because it knows how to reach the memory store and database transaction machinery.
 
-**Data flow**: It starts with the `conversation_id` stored in the `Transcript` object. It turns that ID into the blob-store key, asks the blob store for the saved bytes, and if the blob is missing it returns `None`. If bytes are found, it decodes them into a `Conversation` object and returns that.
+**Data flow**: It receives a tool context. If that context contains an extension context, it returns it unchanged. If not, it stops the request with a runtime error, because the memory object code cannot safely read memory without knowing which extension store it belongs to.
 
-**Call relations**: This is the lookup step used before deciding whether a write is safe. `Transcript.write` calls it first so it can compare the existing sequence number with the new one. It also uses the shared transcript helpers to build the storage key and decode the stored bytes.
+**Call relations**: Both `MemoryObjects.list` and `MemoryObjects.get` call this at the start of their work. It acts like a gatekeeper before either function opens a database transaction or reads memory rows.
 
-*Call graph*: called by 1 (write); 2 external calls (decode, transcript_key).
-
-
-##### `Transcript.write`  (lines 24–28)
-
-```
-async def write(self, conversation: Conversation) -> None
-```
-
-**Purpose**: Writes a conversation transcript only if it is newer than what is already stored. This prevents stale or repeated work from overwriting the current durable transcript.
-
-**Data flow**: It receives a `Conversation` object to save. First it reads the currently stored conversation, if any. If the current saved version exists and its `seq` is greater than or equal to the incoming `seq`, it stops without changing storage. Otherwise, it encodes the incoming conversation into bytes and stores those bytes under this conversation’s transcript key.
-
-**Call relations**: This is the protective publishing step used when a run finishes a turn, or when a repair flow republishes a committed final state. It calls `Transcript.read` to inspect the existing record, then hands the new conversation to the shared encoder and writes it to the blob store only when the sequence check says it is safe.
-
-*Call graph*: calls 1 internal fn (read); 2 external calls (encode, transcript_key).
+*Call graph*: called by 2 (get, list).
 
 
-### Workspace object framework
-The central workspace object layer validates names, schemas, permissions, and dispatches object operations to the owning kind.
-
-### `core/src/ufo/objects.py`
-
-`domain_logic` · `startup registration and tool request handling`
-
-A workspace object is a durable named item, written as one YAML document with three parts: what kind it is, what its name is, and its spec, meaning the user-authored settings for that object. This file makes those objects work in a consistent way across core code and extensions. Without it, every extension would need its own rules for names, validation, permissions, and tool behavior, which would make objects harder to trust and easier to misuse.
-
-The file has three main jobs. First, it defines the shared shape of object kinds and stores. A store is the kind-specific code that actually reads, writes, and deletes rows in its own storage. Second, it validates registered object kinds at startup. It rejects duplicate kind names, unsafe schema choices, secret-bearing fields, and models that cannot be represented as JSON, because specs are shown back to users and may appear in transcripts. Third, it exposes five tool verbs through ObjectVerbs: list, get, explain, apply, and delete.
-
-It also includes MemberOwnedObjects, a reusable permission gate for objects owned by members. Think of it like a front desk: before the storage room is opened, it checks whether the requester is allowed to see or change the item. Subclasses provide the actual data and mutations; this base class enforces visibility and ownership consistently.
-
-#### Function details
-
-##### `ObjectStore.list`  (lines 92–92)
+##### `MemoryObjects.list`  (lines 70–109)
 
 ```
-async def list(self, ctx: ToolContext, query: str, cursor: str) -> ObjectPage
+async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage
 ```
 
-**Purpose**: This is the required listing operation for any object kind's storage code. A kind implements it to return a page of visible object names and short summaries.
+**Purpose**: This returns a page of visible, current memory items for the caller. It is meant for browsing live memories, not for recalling memories by relevance; search is the main recall path.
 
-**Data flow**: It receives the current tool context, a search query, and a cursor for paging. The implementing store uses those inputs to find matching rows and returns an ObjectPage containing short listing rows and possibly a cursor for the next page.
+**Data flow**: It receives the tool context and a list query. It first gets the extension context, then opens a database transaction and reads memory rows from the current workspace. It only includes subjects the caller is allowed to see, and it excludes rows that have been superseded. Each row becomes a short object listing with the memory id as its name, a trimmed text summary, and fields such as subject, item class, and memory kind. Those rows are wrapped into an object page and returned.
 
-**Call relations**: ObjectVerbs._list calls this through the registered kind's store after it has resolved which kind is being listed. Implementations may also be supplied indirectly by MemberOwnedObjects.list for member-owned kinds.
+**Call relations**: When the object system asks to list `memory` objects, this method does the work. It calls `_require_ext` to get the extension state, uses `recall_subjects` to decide which shared or member-private memories are visible, builds `ObjectRow` entries for the object system, and hands them to `object_page` so the result follows the standard paging shape.
+
+*Call graph*: calls 1 internal fn (_require_ext); 4 external calls (__init__, select, object_page, recall_subjects).
 
 
-##### `ObjectStore.get`  (lines 94–94)
+##### `MemoryObjects.get`  (lines 111–161)
 
 ```
-async def get(self, ctx: ToolContext, name: str) -> SpecT | None
+async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[MemorySpec] | None
 ```
 
-**Purpose**: This is the required read operation for one object. A kind implements it to return the stored spec for a named object, or nothing if that object is not available.
+**Purpose**: This opens one memory item by id and returns its full stored details. It can also reveal important provenance links, such as the source page it came from or the newer memory that replaced it.
 
-**Data flow**: It receives the tool context and an object name. The store looks up that name in its own storage and returns the validated spec model, or None if no readable object exists.
+**Data flow**: It receives the tool context and a name string. It first tries to treat the name as a UUID, which is the durable id format used for memory items. If the name is not a valid UUID, it returns nothing. Otherwise it gets the extension context, reads the matching row from the current workspace, and checks that the memory subject is visible to the caller. If no visible row exists, it returns nothing. If a row is found, it builds links for `created_from` and `superseded_by` when those values exist, packages the memory fields into a `MemorySpec`, and returns an `ObjectDetail` with timestamps and links.
 
-**Call relations**: ObjectVerbs._get, ObjectVerbs._apply, and ObjectVerbs._delete use this before reading, updating, or deleting. For member-owned kinds, MemberOwnedObjects.get can provide the permission-aware version.
+**Call relations**: When a caller opens a memory reference, the object system calls this method. It relies on `_require_ext` for extension state, `recall_subjects` for visibility rules, and `uuid.UUID` to validate the requested id. It creates `ObjectRef` and `ObjectLink` values so readers can move from a memory to its source page or to the memory that superseded it.
+
+*Call graph*: calls 1 internal fn (_require_ext); 7 external calls (__init__, __init__, __init__, __init__, select, recall_subjects, UUID).
 
 
-##### `ObjectStore.status`  (lines 96–96)
+##### `MemoryObjects.status`  (lines 163–164)
 
 ```
 async def status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None
 ```
 
-**Purpose**: This is the optional live-status read for an object. A kind implements it to show current state that is not part of the authored spec, such as last sync time or next scheduled run.
+**Purpose**: This reports no separate status for memory objects. A memory item is either readable through `get` or not visible, so there is no extra progress or health state to show here.
 
-**Data flow**: It receives the current context and object name. The store gathers live state for that object and returns a plain JSON-like dictionary, or None if there is no status to show.
+**Data flow**: It receives the tool context and object name, but does not read anything or change anything. It always returns `None`, meaning there is no status payload for this object.
 
-**Call relations**: ObjectVerbs._get asks for this after it has successfully read the spec, so the user can see both the desired settings and the current state together.
-
-
-##### `ObjectStore.apply`  (lines 98–98)
-
-```
-async def apply(self, ctx: ToolContext, name: str, spec: SpecT, old: SpecT | None) -> None
-```
-
-**Purpose**: This is the required create-or-update operation for an object kind. A kind implements it to perform the real mutation after core code has already validated the YAML envelope, object name, and spec shape.
-
-**Data flow**: It receives the context, object name, newly validated spec, and the old spec if one already existed. The store writes or updates its own backing data and returns no value; errors explain why the change is refused.
-
-**Call relations**: ObjectVerbs._apply calls this after parsing and validation. MemberOwnedObjects.apply can sit in front of a kind's custom mutation code to enforce ownership before _apply_owned runs.
+**Call relations**: The object system may ask an object kind for status information. For memory objects, this method intentionally ends that path immediately because the file only supports reading item contents and listing live items.
 
 
-##### `ObjectStore.delete`  (lines 100–100)
+##### `MemoryObjects.apply`  (lines 166–169)
 
 ```
-async def delete(self, ctx: ToolContext, name: str) -> None
+async def apply(self, ctx: ToolContext, name: str, spec: MemorySpec, old: MemorySpec | None) -> None
 ```
 
-**Purpose**: This is the required delete operation for an object kind. A kind implements it to remove the named object from its own storage when deletion is allowed.
+**Purpose**: This refuses attempts to create or update memory through the generic object apply path. Memories must be recorded through `memory_update`, which keeps writes on the intended, controlled route.
 
-**Data flow**: It receives the context and object name. The store removes the stored row or raises an error if deletion is not supported or not allowed, and it returns no value on success.
+**Data flow**: It receives the tool context, memory name, proposed memory spec, and optional old spec. Instead of using those values to change storage, it raises a `VerbNotSupported` error with a message explaining that memories are not applied here.
 
-**Call relations**: ObjectVerbs._delete calls this after confirming the object exists. MemberOwnedObjects.delete can provide the common visibility and ownership checks before a subclass's _delete_owned performs the actual deletion.
-
-
-##### `MemberOwnedObjects.list`  (lines 141–158)
-
-```
-async def list(self, ctx: ToolContext, query: str, cursor: str) -> ObjectPage
-```
-
-**Purpose**: This lists only the member-owned objects the current actor is allowed to see. It applies sharing and ownership rules before returning names and short summaries.
-
-**Data flow**: It starts with the current context, query text, and paging cursor. It asks the subclass for all owned rows, filters out rows that are invisible to the actor, filters by query, sorts by name, slices one page, and returns an ObjectPage with public listing rows.
-
-**Call relations**: This is the list implementation a member-owned object kind can inherit. It uses _owned_rows for raw data and _visible for permission checks, then hands a safe page back to ObjectVerbs._list through the ObjectStore interface.
-
-*Call graph*: calls 3 internal fn (_owned_rows, _visible, speaker_is_owner); 2 external calls (__init__, __init__).
-
-
-##### `MemberOwnedObjects.get`  (lines 160–166)
-
-```
-async def get(self, ctx: ToolContext, name: str) -> SpecT | None
-```
-
-**Purpose**: This reads a member-owned object's spec only if the actor is allowed to see it. Invisible objects are treated the same as missing objects.
-
-**Data flow**: It receives the context and name. It finds the object's owner, checks whether the current actor can see that owner’s row, and either returns None or asks the subclass for the actual spec.
-
-**Call relations**: ObjectVerbs._get can call this through a kind's store. The method relies on _owner and _visible before handing off to _spec, so subclasses do not have to repeat the visibility rule.
-
-*Call graph*: calls 4 internal fn (_owner, _spec, _visible, speaker_is_owner).
-
-
-##### `MemberOwnedObjects.status`  (lines 168–174)
-
-```
-async def status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None
-```
-
-**Purpose**: This reads live status for a member-owned object only when the actor can see the object. It prevents hidden objects from leaking status information.
-
-**Data flow**: It receives the context and object name. It looks up ownership, checks visibility, and either returns None or asks the subclass for the status dictionary.
-
-**Call relations**: ObjectVerbs._get may call this after reading a spec. It uses the same _owner and _visible gate as MemberOwnedObjects.get, then delegates the kind-specific status work to _status.
-
-*Call graph*: calls 4 internal fn (_owner, _status, _visible, speaker_is_owner).
-
-
-##### `MemberOwnedObjects.apply`  (lines 176–186)
-
-```
-async def apply(self, ctx: ToolContext, name: str, spec: SpecT, old: SpecT | None) -> None
-```
-
-**Purpose**: This creates or updates a member-owned object while enforcing who may change it. It allows subclasses to focus on the domain-specific write while this method handles the access rules.
-
-**Data flow**: It receives the context, name, new spec, and previous spec. It checks whether an existing row is visible; if not, it raises a not-found style error. If the row is visible but not owned by the actor and the actor is not the workspace owner, it refuses with an owner-required error. It may also require a live speaker for sensitive changes. If all checks pass, it passes the work to _apply_owned.
-
-**Call relations**: ObjectVerbs._apply reaches this through the store interface for member-owned kinds. The method uses _owner, _visible, and _owned as the gate, then hands the actual create or update to the subclass's _apply_owned.
-
-*Call graph*: calls 5 internal fn (_apply_owned, _owned, _owner, _visible, speaker_is_owner); 2 external calls (__init__, __init__).
-
-
-##### `MemberOwnedObjects.delete`  (lines 188–199)
-
-```
-async def delete(self, ctx: ToolContext, name: str) -> None
-```
-
-**Purpose**: This deletes a member-owned object only when the requester has permission. It hides invisible objects by reporting them as not found and blocks visible-but-not-owned rows unless the speaker is the workspace owner.
-
-**Data flow**: It receives the context and name. It looks up the owner, checks existence, visibility, ownership, and any live-speaker requirement. On success, it calls the subclass deletion hook; on failure, it raises a clear error.
-
-**Call relations**: ObjectVerbs._delete reaches this through the store interface. The method performs the shared permission story with _owner, _visible, and _owned, then delegates the actual removal to _delete_owned.
-
-*Call graph*: calls 5 internal fn (_delete_owned, _owned, _owner, _visible, speaker_is_owner); 2 external calls (__init__, __init__).
-
-
-##### `MemberOwnedObjects._owned`  (lines 201–205)
-
-```
-def _owned(self, owner: ObjectOwner, acting: UUID | None) -> bool
-```
-
-**Purpose**: This answers whether the current acting member is the member-owner of a row. Owner-only rows, which have no member id, are deliberately not considered owned by any member.
-
-**Data flow**: It receives an ObjectOwner and the acting member id. It compares the row's member id to the acting member id and returns true only when both exist and match.
-
-**Call relations**: MemberOwnedObjects._visible uses this to decide what can be seen. MemberOwnedObjects.apply and MemberOwnedObjects.delete use it to decide whether a non-workspace-owner may change a row.
-
-*Call graph*: called by 3 (_visible, apply, delete).
-
-
-##### `MemberOwnedObjects._visible`  (lines 207–208)
-
-```
-def _visible(self, owner: ObjectOwner, acting: UUID | None, is_owner: bool) -> bool
-```
-
-**Purpose**: This decides whether a row is visible to the current actor. A row is visible if it is shared, owned by the acting member, or the speaker is the workspace owner.
-
-**Data flow**: It receives the row owner, the acting member id, and whether the speaker is the workspace owner. It combines those facts into one true-or-false visibility answer.
-
-**Call relations**: All read and mutation paths in MemberOwnedObjects use this as the common visibility test. It calls _owned for the member-owner part of that decision.
-
-*Call graph*: calls 1 internal fn (_owned); called by 5 (apply, delete, get, list, status).
-
-
-##### `MemberOwnedObjects._owner`  (lines 210–211)
-
-```
-async def _owner(self, ctx: ToolContext, name: str) -> ObjectOwner | None
-```
-
-**Purpose**: This finds the ownership record for one named object. It is a small lookup helper used before visibility and mutation decisions.
-
-**Data flow**: It receives the context and object name. It asks the subclass for all owned rows, searches for the matching name, and returns that row's ObjectOwner or None if no such row exists.
-
-**Call relations**: MemberOwnedObjects.get, status, apply, and delete call this before deciding whether the object is visible or changeable. It depends on _owned_rows, which subclasses must implement.
-
-*Call graph*: calls 1 internal fn (_owned_rows); called by 4 (apply, delete, get, status).
-
-
-##### `MemberOwnedObjects._owned_rows`  (lines 213–214)
-
-```
-async def _owned_rows(self, ctx: ToolContext) -> tuple[OwnedRow, ...]
-```
-
-**Purpose**: This is a required subclass hook that supplies the raw list of member-owned rows. The base class cannot know where each kind stores its data, so subclasses provide it.
-
-**Data flow**: It receives the context and should return all rows with names, summaries, and owners. In this base class it raises NotImplementedError, meaning a subclass must replace it.
-
-**Call relations**: MemberOwnedObjects.list uses this to build visible listings, and _owner uses it to find the owner for one name. It is the data source for the shared permission gate.
-
-*Call graph*: called by 2 (_owner, list).
-
-
-##### `MemberOwnedObjects._spec`  (lines 216–217)
-
-```
-async def _spec(self, ctx: ToolContext, name: str) -> SpecT | None
-```
-
-**Purpose**: This is a required subclass hook that fetches the actual spec for a named object. The base class calls it only after visibility has already been checked.
-
-**Data flow**: It receives the context and object name. A subclass should read and return the stored spec model, or None if the spec is unavailable; the base version only signals that it must be implemented.
-
-**Call relations**: MemberOwnedObjects.get calls this after _owner and _visible say the actor may read the object. This keeps permission logic in the base class and storage details in the subclass.
-
-*Call graph*: called by 1 (get).
-
-
-##### `MemberOwnedObjects._status`  (lines 219–220)
-
-```
-async def _status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None
-```
-
-**Purpose**: This is a required subclass hook that fetches live status for a named object. It lets each object kind decide what current state is useful to show.
-
-**Data flow**: It receives the context and object name. A subclass should return a JSON-like status dictionary or None; the base implementation raises NotImplementedError.
-
-**Call relations**: MemberOwnedObjects.status calls this only after the shared visibility check has passed. The hook supplies the kind-specific status while the base class supplies the access control.
-
-*Call graph*: called by 1 (status).
-
-
-##### `MemberOwnedObjects._apply_owned`  (lines 222–230)
-
-```
-async def _apply_owned(self, ctx: ToolContext, name: str, spec: SpecT, old: SpecT | None, owner: ObjectOwner | None) -> None
-```
-
-**Purpose**: This is a required subclass hook that performs the real create or update for a member-owned object. It runs after the base class has checked visibility and ownership.
-
-**Data flow**: It receives the context, name, new spec, old spec, and the existing owner if any. A subclass writes the change to its storage and returns no value; the base version raises NotImplementedError.
-
-**Call relations**: MemberOwnedObjects.apply calls this after all shared mutation gates pass. This separation keeps authorization in one place and domain-specific writing in the subclass.
-
-*Call graph*: called by 1 (apply).
-
-
-##### `MemberOwnedObjects._delete_owned`  (lines 232–233)
-
-```
-async def _delete_owned(self, ctx: ToolContext, name: str, owner: ObjectOwner) -> None
-```
-
-**Purpose**: This is a required subclass hook that performs the real deletion for a member-owned object. It is called only after the base class confirms deletion is allowed.
-
-**Data flow**: It receives the context, object name, and owner record. A subclass removes the row from its storage and returns no value; the base implementation requires subclasses to provide it.
-
-**Call relations**: MemberOwnedObjects.delete calls this at the end of the permission flow. The base class decides whether deletion may happen; the subclass decides how deletion is done.
-
-*Call graph*: called by 1 (delete).
-
-
-##### `object_registry`  (lines 261–278)
-
-```
-def object_registry(bound: tuple[BoundKind, ...]) -> dict[str, BoundKind]
-```
-
-**Purpose**: This builds the lookup table of all registered object kinds for one deployment. It also acts as a startup safety check so bad or conflicting object kinds fail before the system serves requests.
-
-**Data flow**: It receives bound object kinds from core and extensions. For each one, it checks the kind name format, rejects duplicate names, validates the spec model, and stores the kind under its name. It returns a dictionary from kind name to BoundKind.
-
-**Call relations**: Startup wiring calls this before ObjectVerbs can dispatch tools. It calls _validate_spec_model for the deeper schema checks, then ObjectVerbs later uses the resulting registry to resolve tool requests.
-
-*Call graph*: calls 1 internal fn (_validate_spec_model).
-
-
-##### `_validate_spec_model`  (lines 281–301)
-
-```
-def _validate_spec_model(owner: str, kind: ObjectKind) -> None
-```
-
-**Purpose**: This checks that an object kind's spec model is safe to store and show back to users. It prevents loose fields, secret fields, and types that cannot be represented as JSON.
-
-**Data flow**: It receives the owner label and ObjectKind. It walks the main model and any nested models, checks that unexpected keys are forbidden, scans field annotations for secret types, and asks Pydantic to produce a JSON schema. It returns nothing on success or raises a startup error on failure.
-
-**Call relations**: object_registry calls this for every registered kind. It uses _reachable_models to find nested Pydantic models and _annotation_types to inspect complex type annotations.
-
-*Call graph*: calls 2 internal fn (_annotation_types, _reachable_models); called by 1 (object_registry).
-
-
-##### `_reachable_models`  (lines 304–318)
-
-```
-def _reachable_models(model: type[BaseModel]) -> tuple[type[BaseModel], ...]
-```
-
-**Purpose**: This finds the Pydantic models nested inside a spec model. It is used so validation rules apply not just to the top-level spec but also to embedded objects.
-
-**Data flow**: It receives a Pydantic model class. It walks through its fields, follows annotations that are also Pydantic models, avoids revisiting models it has already seen, and returns all discovered model classes.
-
-**Call relations**: _validate_spec_model calls this before checking configuration and secret fields. It uses _annotation_types to unpack annotations such as lists or unions that may hide nested model types.
-
-*Call graph*: calls 1 internal fn (_annotation_types); called by 1 (_validate_spec_model).
-
-
-##### `_annotation_types`  (lines 321–328)
-
-```
-def _annotation_types(annotation: object) -> tuple[object, ...]
-```
-
-**Purpose**: This flattens a type annotation into the concrete pieces inside it. For example, it lets the code inspect the item type inside a list or the choices inside a union.
-
-**Data flow**: It receives an annotation object. It asks Python's typing system for inner arguments; if there are none, it returns the annotation itself. If there are inner arguments, it recursively flattens them into one tuple.
-
-**Call relations**: _validate_spec_model uses this to spot secret-bearing fields, and _reachable_models uses it to find nested Pydantic models. It is a small helper for schema inspection.
-
-*Call graph*: called by 2 (_reachable_models, _validate_spec_model); 1 external calls (get_args).
-
-
-##### `ObjectVerbs.tools`  (lines 363–422)
-
-```
-def tools(self) -> tuple[ToolDef, ...]
-```
-
-**Purpose**: This declares the five public object tools: list, get, explain, apply, and delete. Each declaration includes the user-facing description, input shape, and the method that will run.
-
-**Data flow**: It uses the ObjectVerbs instance's handler methods and input models to create ToolDef objects. The result is a tuple of tool definitions that the tool registry can expose to the model or caller.
-
-**Call relations**: Tool setup calls this to publish the object API. Later, when a tool is invoked, the registered ToolDef routes the request to _list, _get, _explain, _apply, or _delete.
+**Call relations**: If the object system tries to write a `memory` object, this method is called. It deliberately does not hand off to database code or update helpers; it stops the flow and points users toward the memory update mechanism.
 
 *Call graph*: 1 external calls (__init__).
 
 
-##### `ObjectVerbs._list`  (lines 424–438)
+##### `MemoryObjects.delete`  (lines 171–172)
 
 ```
-async def _list(self, ctx: ToolContext, args: ObjectListInput) -> ToolResult
+async def delete(self, ctx: ToolContext, name: str) -> None
 ```
 
-**Purpose**: This implements the object_list tool. It either lists all registered object kinds or lists objects of one chosen kind.
+**Purpose**: This refuses attempts to delete a memory item. In this system, old memories are ended by being superseded during consolidation, not by direct deletion.
 
-**Data flow**: It receives the tool context and list arguments. If no kind is provided, it turns the registry into a JSON list of kind names and descriptions. If a kind is provided, it resolves that kind, binds the context to the owning extension, asks the store for a page, and returns object names, summaries, and possibly a next cursor.
+**Data flow**: It receives the tool context and memory name. It does not look up the item or remove anything. It raises a `VerbNotSupported` error explaining that memories cannot be deleted through this object interface.
 
-**Call relations**: The object_list ToolDef routes here. It uses _resolve when a specific kind is requested, _bound_ctx so the store runs under the right extension context, and _json_result to format the response.
+**Call relations**: If the object system tries to delete a `memory` object, this method is called. It stops the request immediately, preserving the system’s rule that memory cleanup happens through superseding and recall filtering rather than direct removal.
 
-*Call graph*: calls 3 internal fn (_bound_ctx, _resolve, _json_result).
-
-
-##### `ObjectVerbs._get`  (lines 440–454)
-
-```
-async def _get(self, ctx: ToolContext, args: ObjectGetInput) -> ToolResult
-```
-
-**Purpose**: This implements the object_get tool. It returns one object's saved spec and, when available, its live status.
-
-**Data flow**: It receives the context plus kind and name. It resolves the kind, binds the context, asks the store for the spec, raises a not-found error if absent, asks for status, then renders the result as YAML text.
-
-**Call relations**: The object_get ToolDef routes here. It depends on _resolve and _bound_ctx before calling the kind's store, and it packages the answer directly as a ToolResult rather than using the JSON helper because the output is YAML.
-
-*Call graph*: calls 2 internal fn (_bound_ctx, _resolve); 4 external calls (__init__, __init__, __init__, safe_dump).
+*Call graph*: 1 external calls (__init__).
 
 
-##### `ObjectVerbs._explain`  (lines 456–468)
+### Memory derivation and recall
+Saved pages are condensed into long-term memories, merged into summaries, stored, searched, ranked, and kept aligned with their source pages.
 
-```
-async def _explain(self, ctx: ToolContext, args: ObjectExplainInput) -> ToolResult
-```
+### `extensions/memory/ufo_ext_memory/condenser.py`
 
-**Purpose**: This implements the object_explain tool. It tells a user how to author objects of a given kind before they write a manifest.
+`domain_logic` · `page-change processing and periodic background consolidation`
 
-**Data flow**: It receives the context and kind name. It resolves the kind and returns its description, guidance, naming rule, and generated JSON schema for the spec.
+This file is the memory system’s “condenser.” Like reducing a long set of notes into index cards and then later merging similar index cards into one clearer card, it has two main jobs.
 
-**Call relations**: The object_explain ToolDef routes here. It uses _resolve to find the kind and _json_result to send back the explanation in a machine-readable form.
+First, `FactDeriver` watches batches of changed source pages. It ignores deleted pages and pages that are too short to be useful. For the rest, it asks the configured language model to extract standalone facts. A language model is software that can read text and generate text. The file keeps the model request bounded by cutting long page bodies and limiting the response size, so one large page cannot make the job run away. The model’s answer is treated as untrusted: it must parse as JSON, and each fact must pass validation before it is written to the memory store.
 
-*Call graph*: calls 2 internal fn (_resolve, _json_result).
+Second, `MemoryConsolidator` runs periodically on older facts. It finds facts that have not already been replaced, groups them by subject, embeds their text into number vectors, and clusters facts that appear semantically similar. An embedding is a numeric fingerprint of meaning. Each cluster is summarized by the model into one `semantic` memory item, and the original facts are marked as superseded by that summary. This keeps recall from being clogged with repeated facts while preserving their combined meaning.
 
+Both parts are fail-soft. If no model is configured, they skip model work instead of breaking the system.
 
-##### `ObjectVerbs._apply`  (lines 470–489)
+#### Function details
+
+##### `FactDeriver.apply`  (lines 106–115)
 
 ```
-async def _apply(self, ctx: ToolContext, args: ObjectApplyInput) -> ToolResult
+async def apply(self, changes: tuple[PageChange, ...]) -> None
 ```
 
-**Purpose**: This implements the object_apply tool, which creates or updates an object from a YAML manifest. It is the main validation path before a kind-specific store is allowed to mutate data.
+**Purpose**: This is the entry point for turning a delivered batch of page changes into extracted memory facts. It filters out deleted pages and pages that are too short, then processes the remaining pages in small groups.
 
-**Data flow**: It receives the context and manifest text. It parses the YAML envelope, resolves the kind, validates the object name, validates the spec against the kind's model, binds the context to the owning extension, reads any old spec, and calls the store's apply method. It returns whether the result was created or updated.
+**Data flow**: It receives a tuple of page changes. It keeps only pages that still exist and have enough body text, then, if a model is available, splits them into bounded batches and sends each batch onward for fact extraction. It returns nothing; its effect is that eligible pages may lead to new memory items being written later in the flow.
 
-**Call relations**: The object_apply ToolDef routes here. The method chains together _parse_envelope, _resolve, _validate_name, model validation, _bound_ctx, and the store's apply operation, then formats success through _json_result.
+**Call relations**: The page-change runner calls this when it has a batch of source page updates to deliver. `apply` does the first safety check and batching step, then hands each group to `FactDeriver._derive` so the actual model reading and memory writing can happen.
 
-*Call graph*: calls 5 internal fn (_bound_ctx, _resolve, _json_result, _parse_envelope, _validate_name); 1 external calls (__init__).
-
-
-##### `ObjectVerbs._delete`  (lines 491–505)
-
-```
-async def _delete(self, ctx: ToolContext, args: ObjectDeleteInput) -> ToolResult
-```
-
-**Purpose**: This implements the object_delete tool. It deletes one object and echoes the deleted spec so the user has enough information to recreate it if deletion was accidental.
-
-**Data flow**: It receives the context plus kind and name. It resolves the kind, binds the context, reads the existing spec, raises a not-found error if absent, asks the store to delete the object, and returns a JSON result containing the deleted spec.
-
-**Call relations**: The object_delete ToolDef routes here. It uses _resolve and _bound_ctx before calling the store, then uses _json_result to format the deletion confirmation.
-
-*Call graph*: calls 3 internal fn (_bound_ctx, _resolve, _json_result); 1 external calls (__init__).
+*Call graph*: calls 1 internal fn (_derive); 1 external calls (batched).
 
 
-##### `ObjectVerbs._resolve`  (lines 507–512)
+##### `FactDeriver._derive`  (lines 117–133)
 
 ```
-def _resolve(self, kind: str) -> BoundKind
+async def _derive(self, model: ModelAccess, pages: tuple[PageChange, ...]) -> None
 ```
 
-**Purpose**: This looks up an object kind by name in the registry. It turns an unknown kind into a helpful error that names the registered kinds.
+**Purpose**: This function connects extracted facts back to the pages they came from and writes the useful ones into the memory store. It is where model output becomes durable memory.
 
-**Data flow**: It receives a kind string. It checks the registry mapping and returns the matching BoundKind, or raises UnknownKind with a list of available choices.
+**Data flow**: It takes a model and a batch of pages. It builds a lookup from page ID to page, asks `_extract` for candidate facts, drops facts that point to an unknown page or are not notable enough, and writes the remaining facts with their subject, confidence, source page ID, and timestamp. It returns nothing, but it may add fact records to storage.
 
-**Call relations**: The list, get, explain, apply, and delete handlers all call this before touching a store. It is the shared doorway from a user-provided kind name to the registered object implementation.
+**Call relations**: `FactDeriver.apply` calls this after filtering and batching pages. `_derive` depends on `FactDeriver._extract` to read the pages with the model, then wraps each accepted result in a `MemoryWrite` so the memory store can commit it.
 
-*Call graph*: called by 5 (_apply, _delete, _explain, _get, _list); 1 external calls (__init__).
-
-
-##### `ObjectVerbs._bound_ctx`  (lines 514–515)
-
-```
-def _bound_ctx(self, ctx: ToolContext, bound: BoundKind) -> ToolContext
-```
-
-**Purpose**: This adjusts the tool context so a kind's store runs with the extension context that owns that kind. That matters because extension stores need their own workspace-scoped resources.
-
-**Data flow**: It receives the current ToolContext and the resolved BoundKind. It returns a copy of the context with its extension context replaced by the bound kind's context.
-
-**Call relations**: The list, get, apply, and delete handlers call this after _resolve and before invoking store methods. It is the adapter that lets one shared tool implementation dispatch safely into extension-owned storage.
-
-*Call graph*: called by 4 (_apply, _delete, _get, _list); 1 external calls (replace).
+*Call graph*: calls 1 internal fn (_extract); called by 1 (apply); 1 external calls (__init__).
 
 
-##### `_parse_envelope`  (lines 518–536)
+##### `FactDeriver._extract`  (lines 135–151)
 
 ```
-def _parse_envelope(manifest: str) -> tuple[str, str, Mapping[str, object]]
+async def _extract(self, model: ModelAccess, pages: tuple[PageChange, ...]) -> tuple[ExtractedFact, ...]
 ```
 
-**Purpose**: This parses and checks the outer YAML document used by object_apply. It enforces the simple three-key shape: kind, name, and spec.
+**Purpose**: This function asks the language model to read a small batch of page bodies and return structured candidate facts. It also converts the model’s raw text answer into validated `ExtractedFact` objects.
 
-**Data flow**: It receives manifest text. It rejects overly large input, invalid YAML, non-mapping YAML, missing or extra top-level keys, non-string kind or name values, and non-mapping specs. On success it returns the kind string, name string, and spec mapping.
+**Data flow**: It receives a model and pages. It builds a compact JSON payload containing page IDs and trimmed page text, creates a model request with instructions for fact extraction, sends it to the model, and passes the model’s reply to `_parse_facts`. It returns a tuple of validated facts, or an empty tuple if nothing usable came back.
 
-**Call relations**: ObjectVerbs._apply calls this first, before resolving the kind or validating the spec. Its errors stop malformed manifests before they reach any object store.
+**Call relations**: `FactDeriver._derive` calls this when it needs candidate facts for a page group. `_extract` is the only part of the fact-derivation path that talks directly to the model, and it hands parsing and validation off to `_parse_facts`.
 
-*Call graph*: called by 1 (_apply); 2 external calls (__init__, safe_load).
+*Call graph*: calls 2 internal fn (complete, _parse_facts); called by 1 (_derive); 3 external calls (__init__, __init__, dumps).
 
 
-##### `_validate_name`  (lines 539–544)
+##### `MemoryConsolidator.run`  (lines 181–190)
 
 ```
-def _validate_name(name: str) -> None
+async def run(self) -> None
 ```
 
-**Purpose**: This enforces the shared naming rule for all object instances. Names must be short, lowercase, and hyphen-friendly so they are predictable and safe to address.
+**Purpose**: This is the main periodic consolidation job. It finds older facts, groups related ones, and replaces repeated clusters with a single summary memory.
 
-**Data flow**: It receives a name string. It checks length and the allowed pattern, returning nothing if valid or raising InvalidName with the rule if invalid.
+**Data flow**: It starts with no direct input other than the consolidator’s configured store, embedding client, workspace, and optional model. If no model is configured, it does nothing. Otherwise it reads old facts, groups them by subject, embeds each group, clusters similar facts, and consolidates clusters that are large enough. It returns nothing, but it may create semantic summary records and mark older facts as superseded.
 
-**Call relations**: ObjectVerbs._apply calls this after parsing the manifest and resolving the kind. It ensures every kind uses the same object-name grammar.
+**Call relations**: A scheduler or background worker calls `run` from time to time. `run` coordinates the full consolidation pipeline by calling `_aged_facts`, `_buckets`, `_embed`, `_clusters`, and `_consolidate` in order.
+
+*Call graph*: calls 5 internal fn (_aged_facts, _buckets, _clusters, _consolidate, _embed).
+
+
+##### `MemoryConsolidator._aged_facts`  (lines 192–221)
+
+```
+async def _aged_facts(self) -> tuple[_AgedFact, ...]
+```
+
+**Purpose**: This function fetches candidate facts that are old enough to be safely summarized. It deliberately skips facts that were already superseded, so the same facts are not consolidated again.
+
+**Data flow**: It reads the current time, computes a cutoff age, opens a database transaction, and selects fact records in the current workspace that are older than the cutoff and have no `superseded_by` marker. It returns those rows as `_AgedFact` objects containing only the fields needed for consolidation.
+
+**Call relations**: `MemoryConsolidator.run` calls this first to decide what material is available. The rest of the consolidation flow works only with the compact `_AgedFact` records returned here.
+
+*Call graph*: called by 1 (run); 3 external calls (__init__, now, select).
+
+
+##### `MemoryConsolidator._buckets`  (lines 223–232)
+
+```
+def _buckets(self, facts: tuple[_AgedFact, ...]) -> tuple[tuple[str, tuple[_AgedFact, ...]], ...]
+```
+
+**Purpose**: This function groups old facts by subject so unrelated people, projects, or topics are not summarized together. It also caps each group so one busy subject cannot dominate the job.
+
+**Data flow**: It receives a tuple of aged facts. It builds groups keyed by each fact’s subject, sorts each group by recency, keeps only the newest allowed number of facts per subject, and returns subject-and-facts pairs. It does not write anything.
+
+**Call relations**: `MemoryConsolidator.run` calls this after loading aged facts. The returned buckets are then considered one at a time for embedding and clustering.
+
+*Call graph*: called by 1 (run).
+
+
+##### `MemoryConsolidator._embed`  (lines 234–238)
+
+```
+async def _embed(self, facts: tuple[_AgedFact, ...]) -> dict[UUID, tuple[float, ...]]
+```
+
+**Purpose**: This function turns fact text into embedding vectors, which are number lists that help compare meaning. These vectors let the consolidator find facts that say similar things even if their wording differs.
+
+**Data flow**: It receives facts, trims each fact body to a safe length, and sends the text list to the embedding client. It pairs each returned vector back to the fact ID and returns a dictionary from fact ID to vector.
+
+**Call relations**: `MemoryConsolidator.run` calls this for each subject bucket that has enough facts. The vectors it returns are passed to `_clusters`, which uses them to group similar facts.
+
+*Call graph*: called by 1 (run).
+
+
+##### `MemoryConsolidator._clusters`  (lines 240–259)
+
+```
+def _clusters(self, facts: tuple[_AgedFact, ...], embeddings: dict[UUID, tuple[float, ...]]) -> tuple[tuple[_AgedFact, ...], ...]
+```
+
+**Purpose**: This function groups facts that appear close in meaning. It uses a simple greedy method: each fact joins the first existing cluster whose leading fact is similar enough, or starts a new cluster.
+
+**Data flow**: It receives facts and their embedding vectors. It sorts facts newest first, compares each fact’s vector with the first fact in existing clusters using cosine similarity, and builds clusters from those comparisons. It returns a tuple of fact clusters without changing storage.
+
+**Call relations**: `MemoryConsolidator.run` calls this after embeddings are available. `_clusters` relies on `_cosine` for the similarity score, then `run` sends clusters that are large enough to `_consolidate`.
+
+*Call graph*: calls 1 internal fn (_cosine); called by 1 (run).
+
+
+##### `MemoryConsolidator._consolidate`  (lines 261–288)
+
+```
+async def _consolidate(self, model: ModelAccess, cluster: tuple[_AgedFact, ...]) -> None
+```
+
+**Purpose**: This function replaces one cluster of related facts with a single semantic summary. It creates the summary and marks the original facts as superseded in the same database transaction.
+
+**Data flow**: It receives a model and a cluster of facts. It asks `_summarize` for a concise summary; if the summary is empty, it stops. Otherwise it creates a new summary ID, inserts a semantic memory item with the summary text and best confidence from the cluster, then updates all original facts so they point to the new summary. It returns nothing, but it changes the database.
+
+**Call relations**: `MemoryConsolidator.run` calls this for each cluster that passes the minimum-size rule. `_consolidate` calls `_summarize` before opening the write transaction, then uses database insert and update operations to make the replacement durable.
+
+*Call graph*: calls 1 internal fn (_summarize); called by 1 (run); 3 external calls (insert, update, uuid4).
+
+
+##### `MemoryConsolidator._summarize`  (lines 290–299)
+
+```
+async def _summarize(self, model: ModelAccess, cluster: tuple[_AgedFact, ...]) -> str
+```
+
+**Purpose**: This function asks the language model to compress several related facts into one clear standalone statement. It is the text-writing step of consolidation.
+
+**Data flow**: It receives a model and a cluster of facts. It trims each fact body, packs the facts into compact JSON, creates a model request with summarization instructions, sends it to the model, strips whitespace from the answer, cuts it to the maximum allowed length, and returns the summary text.
+
+**Call relations**: `MemoryConsolidator._consolidate` calls this before writing anything to the database. It is the only model call in the consolidation write path, and its result becomes the body of the new semantic memory item.
+
+*Call graph*: calls 1 internal fn (complete); called by 1 (_consolidate); 3 external calls (__init__, __init__, dumps).
+
+
+##### `_recency`  (lines 302–303)
+
+```
+def _recency(fact: _AgedFact) -> tuple[datetime, UUID]
+```
+
+**Purpose**: This small helper gives the code a consistent way to sort facts from older to newer or newer to older. It uses both creation time and ID so ordering stays stable when times match.
+
+**Data flow**: It receives an aged fact and returns a pair made from that fact’s creation time and unique ID. Callers use that pair as a sorting key; the function does not modify anything.
+
+**Call relations**: The bucket and clustering logic use this helper when they need newest-first ordering. It keeps the ordering rule in one place instead of repeating it.
+
+
+##### `_cosine`  (lines 306–312)
+
+```
+def _cosine(left: tuple[float, ...], right: tuple[float, ...]) -> float
+```
+
+**Purpose**: This helper measures how similar two embedding vectors are. A higher score means the two pieces of text are closer in meaning according to their embeddings.
+
+**Data flow**: It receives two equal-length tuples of numbers. It computes the cosine similarity by comparing their dot product against their lengths; if either vector has zero length in the mathematical sense, it returns 0.0. The output is a single floating-point similarity score.
+
+**Call relations**: `MemoryConsolidator._clusters` calls this while deciding whether a fact should join an existing cluster. The score is compared with the clustering threshold to decide whether two facts are similar enough.
+
+*Call graph*: called by 1 (_clusters); 1 external calls (sqrt).
+
+
+##### `_parse_facts`  (lines 315–337)
+
+```
+def _parse_facts(text: str) -> tuple[ExtractedFact, ...]
+```
+
+**Purpose**: This function safely reads the model’s fact-extraction response. It accepts only a JSON object with a usable facts list and drops malformed entries instead of failing the whole batch.
+
+**Data flow**: It receives raw text from the model. It looks for the first JSON object, tries to decode it, checks that it contains a list named `facts`, and validates each dictionary in that list as an `ExtractedFact`. It returns the valid facts as a tuple, or an empty tuple if the response cannot be used.
+
+**Call relations**: `FactDeriver._extract` calls this right after the model replies. This helper is the safety gate between unpredictable model text and the memory-writing path, so bad model output does not block page-change processing.
+
+*Call graph*: called by 1 (_extract); 1 external calls (JSONDecoder).
+
+
+### `extensions/memory/ufo_ext_memory/store.py`
+
+`domain_logic` · `request handling and background indexing`
+
+This file gives the memory extension its durable “notebook” and its search machinery. A memory is saved as a row in the `memory_item` table. Saving is deliberately quick: it writes the memory text and metadata, but does not immediately split it into chunks or create embeddings. An embedding is a numeric version of text used for meaning-based search. That slower work is done later by `MemoryIndexer`, like a librarian shelving books after the front desk has accepted them.
+
+When asked to recall something, `MemoryStore` searches in two ways: ordinary word matching and meaning-based vector search. It combines those results with reciprocal-rank fusion, a method that rewards items that appear high in more than one result list. It also checks newly written memories that have not been indexed yet, so fresh facts can still be found. After candidate memories are found, the file reads the real rows back from the database, drops replaced items, applies recency and confidence decay for facts, limits one memory type from crowding out the rest, and turns episodic memories into topic pointers rather than injecting their full text.
+
+The same pattern is used for source pages. `PageIndexer` turns page changes into searchable chunks and keeps a small `mem_page` mirror table so source search can return page subject and date information. Tombstoned pages are removed from both the search index and the mirror.
+
+#### Function details
+
+##### `recall_subjects`  (lines 109–114)
+
+```
+def recall_subjects(member_id: UUID | None) -> frozenset[str]
+```
+
+**Purpose**: Builds the set of visibility areas that a recall request is allowed to search. If there is a known member, it includes that member’s private memory space plus the shared space; otherwise it only includes shared memory.
+
+**Data flow**: It receives an optional member ID. If the ID exists, it turns it into that member’s subject label and combines it with the shared subject; if not, it returns only the shared subject. The result is a frozen set that later search code can safely use as a filter.
+
+**Call relations**: This is a small helper used before recall or source search begins. It relies on `ufo.sdk.sources.member_subject` to format a member-specific subject, then hands the allowed subjects to memory lookup code.
+
+*Call graph*: 1 external calls (member_subject).
+
+
+##### `inventory`  (lines 148–203)
+
+```
+async def inventory(transaction: Transaction, workspace_id: UUID) -> tuple[MemoryInventoryItem, ...]
+```
+
+**Purpose**: Returns a bounded, newest-first listing of stored memories for an operator or explorer view. This is not a search; it shows what is in the memory store and includes useful live signals like age and decay.
+
+**Data flow**: It receives a transaction opener and workspace ID. It reads recent `memory_item` rows for that workspace, takes one current timestamp, and for each row calculates age, half-life, and decay multiplier. It returns `MemoryInventoryItem` objects that combine the stored row fields with those derived values.
+
+**Call relations**: This function is used when someone wants to inspect memory contents directly. While building the listing, it calls `_aware` to normalize dates, `half_life_days` to know whether a memory decays, and `decay_multiplier` so the explorer reports the same weighting that recall would use.
+
+*Call graph*: calls 3 internal fn (_aware, decay_multiplier, half_life_days); 3 external calls (__init__, now, select).
+
+
+##### `_aware`  (lines 206–207)
+
+```
+def _aware(when: datetime) -> datetime
+```
+
+**Purpose**: Makes sure a datetime has timezone information. This avoids incorrect age calculations when some stored dates are missing an explicit timezone.
+
+**Data flow**: It receives a datetime. If the datetime already has timezone information, it returns it unchanged; otherwise it treats it as UTC and returns a timezone-aware version.
+
+**Call relations**: It is a low-level helper for time math. `inventory` and `decay_multiplier` call it before subtracting dates, so recency calculations are consistent.
+
+*Call graph*: called by 2 (decay_multiplier, inventory); 1 external calls (replace).
+
+
+##### `_fuse`  (lines 250–273)
+
+```
+def _fuse(legs: tuple[tuple[Hit, ...], ...], cosine_leg: tuple[Hit, ...]) -> dict[str, tuple[float, float, str]]
+```
+
+**Purpose**: Combines several search result lists into one best score per owning row. It is the shared scoring core for both memory recall and source-page search.
+
+**Data flow**: It receives multiple result lists, called legs, plus the vector-search leg used for cosine similarity. It ranks chunks within each leg, gives chunks credit for appearing high in those lists, keeps the best chunk per owner, and records the best semantic similarity score for that owner. It returns a dictionary from owner ID to fused rank score, cosine score, and matched text snippet.
+
+**Call relations**: `fuse_hits` and `fuse_recall` call this so they do not duplicate the same rank-combining work. It is the place where raw index hits are collapsed from many chunks into one candidate per memory item or source page.
+
+*Call graph*: called by 2 (fuse_hits, fuse_recall); 1 external calls (from_iterable).
+
+
+##### `fuse_hits`  (lines 276–281)
+
+```
+def fuse_hits(lexical: tuple[Hit, ...], vector: tuple[Hit, ...], limit: int) -> tuple[Fused, ...]
+```
+
+**Purpose**: Ranks source-page search hits by combining word-based and meaning-based search results. It produces a short list of page-level matches.
+
+**Data flow**: It receives lexical hits, vector hits, and a limit. It sends both hit lists through `_fuse`, sorts owners by the fused rank score, trims to the requested limit, and returns `Fused` records with owner ID, score, and snippet text.
+
+**Call relations**: `MemoryStore.search_sources` calls this after asking the index for page hits. It hands back ranked page candidates that `search_sources` then checks against the `mem_page` table.
+
+*Call graph*: calls 1 internal fn (_fuse); called by 1 (search_sources); 1 external calls (__init__).
+
+
+##### `fuse_recall`  (lines 284–301)
+
+```
+def fuse_recall(lexical: tuple[Hit, ...], vector: tuple[Hit, ...], tail: tuple[Hit, ...], limit: int) -> tuple[Fused, ...]
+```
+
+**Purpose**: Ranks memory candidates by blending fused search rank with semantic closeness. It also includes a special “tail” list for memories that were saved but not indexed yet.
+
+**Data flow**: It receives lexical hits, vector hits, tail hits, and a limit. It fuses all three lists, normalizes the fused rank score, adds a weighted cosine similarity score from vector search, sorts by the combined score, and returns `Fused` candidates.
+
+**Call relations**: `MemoryStore.recall` calls this after collecting all recall search legs. Its output is not the final answer yet; recall still reads rows from the database, applies decay, enforces type diversity, and rewrites episodic items.
+
+*Call graph*: calls 1 internal fn (_fuse); called by 1 (recall); 1 external calls (__init__).
+
+
+##### `half_life_days`  (lines 319–325)
+
+```
+def half_life_days(item_class: str, memory_kind: str) -> float | None
+```
+
+**Purpose**: Says how quickly a memory should lose ranking strength because it is old. Only fact-style memories decay; episodic and semantic memories do not.
+
+**Data flow**: It receives the memory’s class and kind. If the class is not `fact`, it returns `None`; otherwise it looks up the configured half-life for that kind, falling back to the default fact half-life.
+
+**Call relations**: `decay_multiplier` uses this to decide the decay curve for recall scoring, and `inventory` uses it to show operators which half-life applies to each stored memory.
+
+*Call graph*: called by 2 (decay_multiplier, inventory).
+
+
+##### `decay_multiplier`  (lines 328–340)
+
+```
+def decay_multiplier(item_class: str, memory_kind: str, confidence: int, as_of: datetime | None, now: datetime) -> float
+```
+
+**Purpose**: Calculates the multiplier that reduces a fact’s relevance as it ages. This keeps old low-confidence facts from ranking as strongly as newer or more trusted facts.
+
+**Data flow**: It receives memory class, kind, confidence, the date the information was current, and the current time. It finds the half-life, normalizes the timestamp, computes age in days, and returns a multiplier based on confidence and age. For non-decaying memories or missing dates, it returns 1.0.
+
+**Call relations**: `decay_factor` calls this during recall, and `inventory` calls it for display. It calls `_aware` for safe time math and `half_life_days` for the correct decay schedule.
+
+*Call graph*: calls 2 internal fn (_aware, half_life_days); called by 2 (decay_factor, inventory).
+
+
+##### `decay_factor`  (lines 343–346)
+
+```
+def decay_factor(item: Recalled, now: datetime) -> float
+```
+
+**Purpose**: Applies the standard decay calculation to a recalled memory item. It is a convenience wrapper used while ranking recall results.
+
+**Data flow**: It receives a `Recalled` item and the current time. It chooses the item’s `as_of` date when available, otherwise its creation date, then passes the item’s class, kind, confidence, and date into `decay_multiplier`. It returns the multiplier used to adjust the item’s score.
+
+**Call relations**: `MemoryStore.recall` calls this after candidate memories have been enriched from the database. It connects the stored memory fields to the shared decay formula.
+
+*Call graph*: calls 1 internal fn (decay_multiplier); called by 1 (recall).
+
+
+##### `enforce_type_diversity`  (lines 349–367)
+
+```
+def enforce_type_diversity(rows: tuple[Recalled, ...], limit: int) -> tuple[Recalled, ...]
+```
+
+**Purpose**: Prevents one class of memory from filling the whole recall result list. This helps a user see a more balanced set of facts, episodic pointers, and semantic items when possible.
+
+**Data flow**: It receives already-ranked recalled rows and a result limit. It walks the rows in order, keeps only a capped number per item class at first, saves overflow items for later, then backfills from the overflow if there is still room. It returns the final trimmed tuple.
+
+**Call relations**: `MemoryStore.recall` calls this after applying score decay. It is one of the last shaping steps before episodic items are rewritten and returned.
+
+*Call graph*: called by 1 (recall).
+
+
+##### `as_topic_pointer`  (lines 370–380)
+
+```
+def as_topic_pointer(item: Recalled, index: int) -> Recalled
+```
+
+**Purpose**: Turns an episodic memory result into a short topic pointer instead of returning its full body text. This makes episodic memory act like a breadcrumb to explore, not automatic context to inject verbatim.
+
+**Data flow**: It receives a recalled item and its position in the final list. If the item is not episodic, it returns it unchanged. If it is episodic, it creates a copy with a short body such as “Memory topic 1...” and marks its recall mode as `topic`.
+
+**Call relations**: `MemoryStore.recall` calls this as the final transformation on diversified results. It uses `dataclasses.replace` to copy the item without mutating the original.
+
+*Call graph*: called by 1 (recall); 1 external calls (replace).
+
+
+##### `MemoryStore.commit`  (lines 403–445)
+
+```
+async def commit(self, write: MemoryWrite) -> None
+```
+
+**Purpose**: Saves one memory item to the database without doing expensive indexing work immediately. This keeps writes fast and leaves indexing to the background job.
+
+**Data flow**: It receives a `MemoryWrite` object. It creates a stable ID from workspace, subject, item class, and body, then inserts the row. If the same memory already exists, it updates metadata such as confidence, source, and date instead of creating a duplicate. The row remains due for indexing if it has no embedding digest.
+
+**Call relations**: External memory-writing flows call this on a `MemoryStore`. It does not call the indexer; instead, `MemoryIndexer.run` later finds rows with missing embedding digests and indexes them.
+
+*Call graph*: 1 external calls (uuid5).
+
+
+##### `MemoryStore.recall`  (lines 447–473)
+
+```
+async def recall(self, query: str, subjects: frozenset[str], limit: int, start: datetime | None=None, end: datetime | None=None) -> tuple[Recalled, ...]
+```
+
+**Purpose**: Finds memories relevant to a query and returns them in a useful order. It combines search relevance, freshness, confidence, memory-type balance, and special episodic handling.
+
+**Data flow**: It receives query text, allowed subjects, a limit, and optional date bounds. It gets lexical and vector search legs from `_legs`, gets unindexed fresh-memory matches from `_untail_leg`, fuses those with `fuse_recall`, and reads real database rows through `_enrich`. It then multiplies scores by decay, sorts, enforces type diversity, converts episodic items to topic pointers, and returns recalled memories.
+
+**Call relations**: This is the main read path for memory recall. It orchestrates helper functions in this file: `_legs`, `_untail_leg`, `fuse_recall`, `_enrich`, `decay_factor`, `enforce_type_diversity`, and `as_topic_pointer`.
+
+*Call graph*: calls 7 internal fn (_enrich, _legs, _untail_leg, as_topic_pointer, decay_factor, enforce_type_diversity, fuse_recall); 2 external calls (replace, now).
+
+
+##### `MemoryStore.search_sources`  (lines 475–520)
+
+```
+async def search_sources(self, query: str, subjects: frozenset[str], limit: int, start: datetime | None=None, end: datetime | None=None) -> tuple[SourceMatch, ...]
+```
+
+**Purpose**: Searches synced source pages and returns matching snippets with page metadata. It lets the memory extension search source documents as well as stored memory facts.
+
+**Data flow**: It receives a query, allowed subjects, a limit, and optional date bounds. It asks `_legs` for lexical and vector page hits, combines them with `fuse_hits`, then reads matching page rows from `mem_page` to get subject and creation date. It returns `SourceMatch` objects for candidates that still exist and fit the date window.
+
+**Call relations**: This is the source-page counterpart to `recall`. It calls `_legs` to talk to the index and `fuse_hits` to rank hits, then relies on the `mem_page` mirror kept current by `PageIndexer._apply`.
+
+*Call graph*: calls 2 internal fn (_legs, fuse_hits); 3 external calls (__init__, select, UUID).
+
+
+##### `MemoryStore._legs`  (lines 522–530)
+
+```
+async def _legs(self, query: str, subjects: frozenset[str], owner_kind: str, limit: int) -> tuple[tuple[Hit, ...], tuple[Hit, ...]]
+```
+
+**Purpose**: Runs the two normal search methods for a query: word matching and meaning-based vector matching. It is shared by memory recall and source-page search.
+
+**Data flow**: It receives query text, allowed subjects, an owner kind, and a limit. It first tries to embed the query with `_embed_query`, then asks the index backend for lexical hits. If an embedding exists, it also asks for vector hits; if not, the vector leg is empty. It returns both hit tuples.
+
+**Call relations**: `MemoryStore.recall` and `MemoryStore.search_sources` both call this before fusing results. It delegates embedding failure handling to `_embed_query` so callers can still get lexical results when embedding is unavailable.
+
+*Call graph*: calls 1 internal fn (_embed_query); called by 2 (recall, search_sources).
+
+
+##### `MemoryStore._untail_leg`  (lines 532–575)
+
+```
+async def _untail_leg(self, query: str, subjects: frozenset[str], limit: int) -> tuple[Hit, ...]
+```
+
+**Purpose**: Searches the newest unindexed memory rows directly in the database. This makes a freshly committed memory recallable before the background indexer has processed it.
+
+**Data flow**: It receives query text, allowed subjects, and a limit. It splits the query into lowercase terms, reads recent memory rows whose embedding digest is still missing and that are not superseded, counts term matches in each body, creates index-like `Hit` objects for rows with matches, sorts them by match count, and returns the best ones.
+
+**Call relations**: `MemoryStore.recall` calls this alongside the normal index legs. Once `MemoryIndexer._index_item` stamps an embedding digest on a row, that row no longer appears in this tail search and is served by the real index instead.
+
+*Call graph*: called by 1 (recall); 3 external calls (__init__, split, select).
+
+
+##### `MemoryStore._embed_query`  (lines 577–585)
+
+```
+async def _embed_query(self, query: str) -> tuple[float, ...]
+```
+
+**Purpose**: Turns a recall or search query into an embedding vector when possible. If embedding fails, it safely falls back so word search can still work.
+
+**Data flow**: It receives query text. If the query is blank, it returns an empty tuple. Otherwise it asks the embed backend for one vector; if that call raises an error, it logs a warning and returns an empty tuple. On success, it returns the first vector.
+
+**Call relations**: `MemoryStore._legs` calls this before vector search. Its failure-tolerant behavior means `recall` and `search_sources` can continue with lexical search even if the embedding service is down.
+
+*Call graph*: called by 1 (_legs).
+
+
+##### `MemoryStore._enrich`  (lines 587–639)
+
+```
+async def _enrich(self, fused: tuple[Fused, ...], start: datetime | None, end: datetime | None) -> tuple[Recalled, ...]
+```
+
+**Purpose**: Turns fused candidate IDs into full recalled memory records from the database. It also removes candidates that should not be served anymore.
+
+**Data flow**: It receives fused candidates and optional date bounds. If there are no candidates, it returns nothing. Otherwise it loads matching `memory_item` rows, excludes superseded rows and rows outside the date window, then rebuilds results in fused order as `Recalled` objects with body, subject, source, confidence, and dates.
+
+**Call relations**: `MemoryStore.recall` calls this after `fuse_recall`. It is the gate where search-index candidates are checked against the durable database before final ranking and return.
+
+*Call graph*: called by 1 (recall); 3 external calls (__init__, select, UUID).
+
+
+##### `store_for`  (lines 642–652)
+
+```
+def store_for(ext: ExtensionContext) -> MemoryStore
+```
+
+**Purpose**: Builds a ready-to-use `MemoryStore` from the extension context. It also fails early if the required index or embedding backends were not wired in.
+
+**Data flow**: It receives an `ExtensionContext`. It checks for an index backend and an embedding backend, raises an error if either is missing, and otherwise creates a `MemoryStore` with those backends, the scoped transaction opener, and the current workspace ID.
+
+**Call relations**: Setup code uses this to obtain the main memory workflow object. It connects the broader extension context to the methods that commit, recall, and search sources.
+
+*Call graph*: 1 external calls (__init__).
+
+
+##### `MemoryIndexer.run`  (lines 668–670)
+
+```
+async def run(self) -> None
+```
+
+**Purpose**: Processes a batch of memory items that still need indexing. This is the background path that turns saved text into searchable chunks and embeddings.
+
+**Data flow**: It asks `_claim_due` for rows that are due and safely claimed. For each claimed item, it calls `_index_item`, which writes chunks to the index and stamps the row as indexed. It does not return a value; it changes index contents and database row state.
+
+**Call relations**: A scheduled or worker loop calls this periodically. It coordinates `_claim_due` and `_index_item` so memory writes stay fast while indexing catches up asynchronously.
+
+*Call graph*: calls 2 internal fn (_claim_due, _index_item).
+
+
+##### `MemoryIndexer._claim_due`  (lines 672–704)
+
+```
+async def _claim_due(self) -> tuple[MemoryItem, ...]
+```
+
+**Purpose**: Finds and claims memory rows that need embedding work. The claim prevents overlapping indexer runs from doing the same work at the same time.
+
+**Data flow**: It computes a lease cutoff time, selects rows whose embedding digest is missing and whose claim is absent or expired, and limits the batch size. Inside one transaction, it uses database locking where available, stamps `embedding_claimed_at` on selected rows, and returns them as `MemoryItem` objects.
+
+**Call relations**: `MemoryIndexer.run` calls this before indexing. The rows it returns are then passed to `_index_item`; rows already claimed by another worker are skipped until their lease expires.
+
+*Call graph*: called by 1 (run); 5 external calls (now, timedelta, or_, select, update).
+
+
+##### `MemoryIndexer._index_item`  (lines 706–726)
+
+```
+async def _index_item(self, item: MemoryItem) -> None
+```
+
+**Purpose**: Indexes one memory item and marks it as no longer due. This is where the memory body is split, embedded, and written to the search backend.
+
+**Data flow**: It receives a claimed `MemoryItem`. It calls `chunk_embed_upsert` with the item’s ID, subject, and body so the index backend stores searchable chunks. It then computes a SHA-256 digest of the body and updates the database row with that digest, clears the claim timestamp, and refreshes `updated_at`.
+
+**Call relations**: `MemoryIndexer.run` calls this for each row claimed by `_claim_due`. Its database update is what removes the item from future due batches and from the unindexed tail search used by recall.
+
+*Call graph*: called by 1 (run); 3 external calls (sha256, update, chunk_embed_upsert).
+
+
+##### `PageIndexer.apply`  (lines 744–746)
+
+```
+async def apply(self, changes: tuple[PageChange, ...]) -> None
+```
+
+**Purpose**: Applies a delivered batch of source-page changes to the memory extension’s page index. It is the batch-level entry for page indexing work.
+
+**Data flow**: It receives a tuple of `PageChange` objects. It loops through them in order and passes each one to `_apply`. It returns nothing, but each change may update index chunks and the `mem_page` mirror table.
+
+**Call relations**: The core page-change runner calls this after it has gathered changes. This method keeps batching simple and delegates the actual per-page behavior to `_apply`.
+
+*Call graph*: calls 1 internal fn (_apply).
+
+
+##### `PageIndexer._apply`  (lines 748–779)
+
+```
+async def _apply(self, change: PageChange) -> None
+```
+
+**Purpose**: Applies one source-page change: either remove a deleted page or index an active page. This keeps source search aligned with the latest synced pages.
+
+**Data flow**: It receives one `PageChange`. If the change is a tombstone, it deletes that page’s chunks from the index and removes its `mem_page` row. Otherwise it chunks and embeds the page body, upserts those chunks into the index, then updates or inserts the mirror row with page ID, workspace, subject, and creation date.
+
+**Call relations**: `PageIndexer.apply` calls this for each change in a batch. `MemoryStore.search_sources` later depends on the chunks and `mem_page` rows created here, and tombstone handling ensures deleted pages do not appear in search results.
+
+*Call graph*: called by 1 (apply); 5 external calls (__init__, delete, insert, update, chunk_embed_upsert).
+
+
+### Knowledge graph extraction
+The knowledge graph extension registers graph search and hooks, then extracts entities and relationships from pages for later traversal.
+
+### `extensions/knowledge_graph/ufo_ext_knowledge_graph/__init__.py`
+
+`other` · `import/package discovery`
+
+This is an empty Python package initializer. In Python, a file named `__init__.py` tells the interpreter that the surrounding folder should be treated as an importable package. Think of it like a label on a folder: it does not add any documents itself, but it makes the folder recognizable to the filing system.
+
+For this extension, the package name is `ufo_ext_knowledge_graph`. Other parts of the project can import modules from this folder because this file exists. Without it, depending on the Python version and packaging setup, imports might fail or the extension might not be discovered in the expected way.
+
+There are no functions, classes, settings, or startup actions here. Its value is structural rather than behavioral: it helps define the shape of the codebase and makes the knowledge graph extension available as a normal Python package.
+
+
+### `extensions/knowledge_graph/ufo_ext_knowledge_graph/manifest.py`
+
+`orchestration` · `startup registration, then prompt submission and page-change processing`
+
+This file is like the sign-up sheet for the knowledge-graph extension. Without it, the rest of UFO would not know that the extension has a `graph_search` tool, that it can add relevant graph facts before a user message is sent to the model, or that it should rebuild graph data when source pages change.
+
+The graph is a structured map of entities and relationships, such as people, companies, topics, and typed links between them. The search tool starts from a named entity and walks a limited number of relationship steps, then returns readable lines with citations to the source pages the facts came from. This helps answer “who is connected to whom?” questions that ordinary text search may miss.
+
+The prompt hook runs when a user submits a message. It tries to find graph relations relevant to that message and inject them as extra context for the model. Importantly, it is deliberately best-effort: it has a short timeout and swallows errors, because a slow graph lookup should not block the user’s turn.
+
+The page-change hook is the background intake path. When the core system reports changed pages, this file hands them to the graph extractor, which turns page content into graph nodes and edges outside the normal write path.
+
+#### Function details
+
+##### `graph_search_handler`  (lines 71–88)
+
+```
+async def graph_search_handler(ctx: ToolContext, args: GraphSearchInput) -> ToolResult
+```
+
+**Purpose**: This is the actual worker behind the `graph_search` tool. Given an entity name, it looks up nearby graph relationships, optionally limited to certain relationship types, and returns them as readable text with source citations.
+
+**Data flow**: It receives the tool context and a `GraphSearchInput` object containing the entity name, hop count, optional edge-type filter, and optional user-facing description. It reads the extension’s database transaction and workspace id from the context, converts requested edge-type names into the graph’s allowed internal types, asks `GraphStore` to traverse outward from the entity for the current audience member, and formats the returned subgraph. It outputs a `ToolResult` containing either the formatted graph relations or a friendly message saying none were found.
+
+**Call relations**: The UFO tool system calls this when the model or runtime invokes `graph_search`. It builds a `GraphStore`, uses `graph_subjects` to scope the search to the relevant audience member, uses `to_edge_type` to validate and normalize filters, asks the store for the traversal, and passes the result through `render_subgraph` before wrapping it in `TextContent` and `ToolResult`.
+
+*Call graph*: 6 external calls (__init__, __init__, __init__, graph_subjects, render_subgraph, to_edge_type).
+
+
+##### `graph_context_hook`  (lines 91–110)
+
+```
+async def graph_context_hook(ctx: HookContext) -> HookOutcome
+```
+
+**Purpose**: This hook tries to add useful graph facts to a user’s prompt before the model responds. It is designed not to get in the way: if lookup is slow, fails, or finds nothing, it simply adds nothing.
+
+**Data flow**: It receives a hook context and first checks that the event payload is a user prompt. If so, it starts a short timeout, creates a `GraphStore` from the extension transaction and workspace id, asks for graph context related to the prompt text and audience member, and formats the returned subgraph. It outputs an `InjectContext` containing the graph relations when there are lines to add; otherwise, or after any error, it returns `None` and changes nothing.
+
+**Call relations**: The core hook system calls this during the `user_prompt_submit` event. Inside that moment, it uses `asyncio.timeout` to stay below the hook deadline, calls `graph_subjects` to keep the lookup scoped to the audience member, calls the graph store for relevant context, and uses `render_subgraph` to turn the result into text that `InjectContext` can place into the model’s prompt.
+
+*Call graph*: 5 external calls (__init__, __init__, timeout, graph_subjects, render_subgraph).
+
+
+##### `extract_graph`  (lines 113–125)
+
+```
+async def extract_graph(ctx: HookContext) -> HookOutcome
+```
+
+**Purpose**: This hook turns changed source pages into graph data. It lets the extension update its nodes and relationships after page changes, instead of doing that work inline while pages are being written.
+
+**Data flow**: It receives a hook context and checks whether the payload is a batch of page changes. If it is, it creates a `GraphExtractor` using the current transaction, workspace id, and model, then applies the extractor to the delivered page changes. It returns `None`; its effect is the updated graph data written through the extractor.
+
+**Call relations**: The core page-change runner calls this for the `page_change` event when it has a batch ready for this extension. The function does not own the batch loop or cursor; it only takes the batch it was given, constructs `GraphExtractor`, and hands the page changes off so extraction can produce graph nodes and typed edges.
+
+*Call graph*: 1 external calls (__init__).
+
+
+##### `manifest`  (lines 128–152)
+
+```
+def manifest() -> Manifest
+```
+
+**Purpose**: This function builds the extension declaration that UFO reads to discover what the knowledge-graph extension can do. It registers the graph search tool and the two hooks that run on prompt submission and page changes.
+
+**Data flow**: It takes no input. It packages the extension name, version, one `ToolDef` for `graph_search`, and two `HookSpec` entries into a `Manifest` object. The returned manifest is what the host system uses to wire this file’s handlers into the wider application.
+
+**Call relations**: The extension loading process calls this at registration time. It creates the `ToolDef` that points to `graph_search_handler`, creates hook specifications that point to `graph_context_hook` and `extract_graph`, and returns a `Manifest` so the core UFO runtime knows when and how to call them.
+
+*Call graph*: 3 external calls (__init__, __init__, __init__).
+
+
+### `extensions/knowledge_graph/ufo_ext_knowledge_graph/store.py`
+
+`domain_logic` · `page change indexing and query handling`
+
+This file is the heart of the knowledge-graph extension. Its job is to turn ordinary page text into a map of things and how they relate, like “Alice works_at Acme” or “Project X mentions roadmap.” Without it, the extension would have no durable graph to search, and page changes would not become reusable knowledge.
+
+It owns two database tables: one for entities, such as people, companies, topics, and organizations, and one for edges, which are typed relationships between entities. The `GraphExtractor` is the write side. When a page changes, it checks whether that exact version was already processed. If not, it parses simple markdown patterns such as `[[links]]`, `[[works_at::Acme]]`, `@mentions`, `#tags`, and URLs. If a model is available, it also asks the model to extract extra typed relationships from prose. It then creates or updates entity rows and writes edge rows tied to the page digest, so old edges can be replaced when the page changes.
+
+The `GraphStore` is the read side. It finds matching entity nodes, then walks a limited number of relationship steps, much like following roads on a map. It deliberately caps the search size so one query cannot pull back the whole graph.
+
+#### Function details
+
+##### `to_edge_type`  (lines 160–165)
+
+```
+def to_edge_type(raw: str) -> EdgeType
+```
+
+**Purpose**: Checks that a relationship type is one of the graph’s approved types, such as `mentions` or `works_at`. This prevents misspelled or invented relationship names from being saved or queried as if they were valid.
+
+**Data flow**: It receives a raw text value for an edge type. It compares that value with the fixed set of allowed edge types. If the value is allowed, it returns it as a trusted edge type; if not, it raises an error so the bad value is stopped immediately.
+
+**Call relations**: Both model-extracted relations and database edge writes pass through this gate. `GraphExtractor._tier_b` uses it to validate model output, and `GraphExtractor._record_edge` uses it before persisting any edge.
+
+*Call graph*: called by 2 (_record_edge, _tier_b); 2 external calls (__init__, cast).
+
+
+##### `normalize_name`  (lines 192–195)
+
+```
+def normalize_name(name: str) -> str
+```
+
+**Purpose**: Turns a name into a stable lookup key by trimming it, lowercasing it, and collapsing repeated spaces. This lets names like “Sam  Altman” and “sam altman” point to the same graph node.
+
+**Data flow**: It receives a display name as text. It cleans the spacing and casing. It returns the normalized version used for matching and deduplication, while the original display name can still be stored separately.
+
+**Call relations**: The parser uses it to avoid recording the same reference twice. The extractor uses it when creating entity IDs, and the store uses it when resolving a user query or finding entities mentioned in incoming text.
+
+*Call graph*: called by 4 (_upsert_entity, _resolve, _seed_from_text, record); 1 external calls (sub).
+
+
+##### `graph_subjects`  (lines 198–203)
+
+```
+def graph_subjects(member_id: UUID | None) -> frozenset[str]
+```
+
+**Purpose**: Chooses which subject areas a graph query should read from. A subject is a scope, like a member’s private space or the shared workspace.
+
+**Data flow**: It receives an optional member ID. If there is a member, it returns both that member’s subject and the shared subject; if not, it returns only the shared subject.
+
+**Call relations**: This helper prepares the subject set used by graph reads. It calls the shared source helper that turns a member ID into that member’s subject name.
+
+*Call graph*: 1 external calls (member_subject).
+
+
+##### `parse_page`  (lines 248–284)
+
+```
+def parse_page(body: str) -> ParsedPage
+```
+
+**Purpose**: Extracts obvious entity references from markdown without using an AI model. It gives the graph a reliable baseline from links, mentions, tags, and URLs.
+
+**Data flow**: It receives the full page body. It looks for a first-level heading to use as the page’s title, scans wikilinks first, then scans the remaining text for `@mentions`, `#tags`, and URLs. It returns a parsed page containing the title and a deduplicated list of references.
+
+**Call relations**: When `GraphExtractor._apply` sees a changed page that needs processing, it calls this function before materializing database rows. The helper `parse_page.record` does the repeated work of cleaning and deduplicating each found reference.
 
 *Call graph*: called by 1 (_apply); 1 external calls (__init__).
 
 
-##### `_json_result`  (lines 547–548)
+##### `parse_page.record`  (lines 260–267)
 
 ```
-def _json_result(payload: Mapping[str, object]) -> ToolResult
+def record(edge_type: str, name: str, entity_type: str) -> None
 ```
 
-**Purpose**: This wraps a plain mapping as a JSON tool response. It keeps the common response formatting for most object tools in one small helper.
+**Purpose**: Adds one found reference to the page parse result, but only if it is meaningful and not already seen. It is the small checkpoint that keeps duplicate links from becoming duplicate edges.
 
-**Data flow**: It receives a payload mapping. It converts the payload to a JSON string, wraps that string in TextContent, then wraps it in a ToolResult.
+**Data flow**: It receives an edge type, a target name, and an entity type. It trims the name, ignores empty names, normalizes the name for comparison, and appends a `Ref` only when that same kind of reference has not already been recorded.
 
-**Call relations**: ObjectVerbs._list, _explain, _apply, and _delete use this to return structured results. ObjectVerbs._get is the main exception because it returns YAML for readability.
+**Call relations**: This nested helper is used inside `parse_page` each time the parser finds a wikilink, mention, tag, or URL. It relies on `normalize_name` so duplicates with different spacing or casing still collapse to one reference.
 
-*Call graph*: called by 4 (_apply, _delete, _explain, _list); 3 external calls (__init__, __init__, dumps).
+*Call graph*: calls 1 internal fn (normalize_name); 1 external calls (__init__).
 
 
-### Core workspace objects
-Built-in workspace object kinds expose the workspace agent and shared conversation artifacts through the common object interface.
+##### `render_subgraph`  (lines 287–302)
 
-### `core/src/ufo/agents.py`
+```
+def render_subgraph(subgraph: Subgraph) -> tuple[str, ...]
+```
 
-`domain_logic` · `request handling`
+**Purpose**: Turns a returned subgraph into readable text lines. Each line describes one relationship and cites the page it came from.
 
-This file makes the workspace's agent look like a normal object that tools can list, inspect, and update. The important rule is separation of responsibility: the agent's model can be changed here, but its system prompt cannot. Prompt changes go through a separate governance proposal path, so prompt edits can be reviewed and checked safely.
+**Data flow**: It receives a `Subgraph` containing nodes and edges. It matches each edge’s start and end IDs back to node details, skips edges whose nodes are missing, and returns text lines like `Source -edge_type-> Target [page ...]`.
 
-Think of the agent as a shared office computer. This file lets the owner swap which engine the computer runs on, but it does not let anyone rewrite the company policy posted above the desk. That policy, the prompt, is only shown here along with a digest, which is like a fingerprint used to prove exactly which prompt a proposal refers to.
+**Call relations**: This is a presentation helper for graph results. Query tools and context hooks can use the same rendering so graph output is shown consistently.
 
-There is only one agent per workspace. It is created when the workspace is initialized, so this object kind refuses creation and deletion. Updates are also guarded: if the current speaker is not the workspace owner, changing the model is rejected. When a model change succeeds, it updates the database row for the current workspace. The change does not interrupt a running turn; the next turn reads the fresh agent row and uses the new model.
+
+##### `GraphExtractor.apply`  (lines 320–322)
+
+```
+async def apply(self, changes: tuple[PageChange, ...]) -> None
+```
+
+**Purpose**: Processes a batch of page changes for graph indexing. It is the public entry point for the write side of this file.
+
+**Data flow**: It receives a tuple of page changes. It walks through them one at a time and passes each change to `_apply`. It does not return graph data; its effect is to update the graph tables.
+
+**Call relations**: The page-change runner calls this when it has delivered a batch to the knowledge-graph extension. This method then delegates each individual change to `GraphExtractor._apply`.
+
+*Call graph*: calls 1 internal fn (_apply).
+
+
+##### `GraphExtractor._apply`  (lines 324–338)
+
+```
+async def _apply(self, change: PageChange) -> None
+```
+
+**Purpose**: Decides what to do with one changed page. It either soft-deletes that page’s edges, skips unchanged content, or rebuilds the graph facts from the page.
+
+**Data flow**: It receives one `PageChange`. If the page is tombstoned, it marks all edges from that page as tombstoned in the database. Otherwise, it checks whether the same digest was already extracted; if not, it parses the page and materializes the results.
+
+**Call relations**: `GraphExtractor.apply` calls this for each change. It calls `_already_extracted` to avoid duplicate work, `parse_page` to read deterministic references, and `_materialize` to write entities and edges.
+
+*Call graph*: calls 3 internal fn (_already_extracted, _materialize, parse_page); called by 1 (apply); 1 external calls (update).
+
+
+##### `GraphExtractor._already_extracted`  (lines 340–354)
+
+```
+async def _already_extracted(self, change: PageChange) -> bool
+```
+
+**Purpose**: Checks whether this exact page version has already produced graph edges. This keeps repeated delivery of the same page change from doing unnecessary database writes.
+
+**Data flow**: It receives a page change with a page ID and digest. It queries the edge table for a non-tombstoned edge from that page with the same digest. It returns `true` if such an edge exists, otherwise `false`.
+
+**Call relations**: `GraphExtractor._apply` calls this before doing parsing and writes. If it returns true, the extractor stops early for that page.
+
+*Call graph*: called by 1 (_apply); 1 external calls (select).
+
+
+##### `GraphExtractor._materialize`  (lines 356–383)
+
+```
+async def _materialize(self, change: PageChange, parsed: ParsedPage) -> None
+```
+
+**Purpose**: Writes the graph representation of one live page into the database. It creates the page’s anchor node, creates or reuses target nodes, records edges, and removes stale edges from older page versions.
+
+**Data flow**: It receives a page change and the deterministic parse of the page. If a model is configured, it first asks `_tier_b` for extra relations. Then, inside one database transaction, it upserts the page anchor entity, upserts each referenced target entity, records deterministic and model-derived edges, and deletes edges from older digests for the same page.
+
+**Call relations**: `GraphExtractor._apply` calls this after deciding a page needs extraction. It coordinates `_tier_b`, `_upsert_entity`, and `_record_edge`, making it the main write-orchestration step inside the extractor.
+
+*Call graph*: calls 3 internal fn (_record_edge, _tier_b, _upsert_entity); called by 1 (_apply); 1 external calls (delete).
+
+
+##### `GraphExtractor._tier_b`  (lines 385–423)
+
+```
+async def _tier_b(self, model: ModelAccess, body: str) -> tuple[ExtractedRelation, ...]
+```
+
+**Purpose**: Asks the configured AI model to extract extra typed relationships from the page’s prose. This is optional and only adds to the deterministic parser’s results.
+
+**Data flow**: It receives a model access object and the page body. It sends a bounded model request that forces a structured tool response, validates that response, rejects unknown edge types, drops empty targets, and returns the accepted extracted relations. If the model call or validation fails, it logs a warning and returns no relations.
+
+**Call relations**: `GraphExtractor._materialize` calls this before opening the database write transaction, so the database is not held open while waiting for the model. It uses `to_edge_type` to make sure model output cannot invent relationship types.
+
+*Call graph*: calls 2 internal fn (turn, to_edge_type); called by 1 (_materialize); 2 external calls (__init__, __init__).
+
+
+##### `GraphExtractor._upsert_entity`  (lines 425–464)
+
+```
+async def _upsert_entity(self, connection: AsyncConnection, subject: str, name: str, entity_type: str, fill: bool) -> UUID
+```
+
+**Purpose**: Creates or updates one entity node and returns its stable ID. It is used both for page anchor nodes and for referenced target nodes.
+
+**Data flow**: It receives a database connection, subject, display name, entity type, and a flag saying whether this reference fills in a real page-defined entity. It normalizes the name, builds a deterministic UUID from the workspace, subject, type, and normalized name, and inserts the row. If `fill` is true, an existing stub is updated into a filled entity; if false, existing entities are left alone.
+
+**Call relations**: `GraphExtractor._materialize` calls this for the page itself and for every referenced target. It calls `normalize_name` so repeated references resolve to the same node and uses the active SQL dialect to choose the right upsert statement.
+
+*Call graph*: calls 1 internal fn (normalize_name); called by 1 (_materialize); 2 external calls (execute, uuid5).
+
+
+##### `GraphExtractor._record_edge`  (lines 466–513)
+
+```
+async def _record_edge(self, connection: AsyncConnection, change: PageChange, from_entity: UUID, to_entity: UUID, raw_edge_type: str, confidence: float=DETERMINISTIC_CONFIDENCE) -> None
+```
+
+**Purpose**: Creates or updates one relationship edge between two entities. It ties that edge to the source page and the page digest that produced it.
+
+**Data flow**: It receives a database connection, the page change, the source entity ID, target entity ID, raw edge type, and confidence score. It validates the edge type, builds a deterministic edge ID, and upserts the edge row with the current digest, confidence, and tombstone set to false.
+
+**Call relations**: `GraphExtractor._materialize` calls this after both endpoint entities exist. It uses `to_edge_type` as the final validation gate before any relationship reaches the graph table.
+
+*Call graph*: calls 1 internal fn (to_edge_type); called by 1 (_materialize); 2 external calls (execute, uuid5).
+
+
+##### `GraphStore.traverse`  (lines 525–533)
+
+```
+async def traverse(self, query: str, subjects: frozenset[str], hops: int, edge_types: frozenset[str]) -> Subgraph
+```
+
+**Purpose**: Runs a direct graph search from a user-provided name. It finds matching entity nodes and then walks nearby relationships.
+
+**Data flow**: It receives a query string, allowed subjects, hop count, and optional edge-type filter. It resolves the query text to seed node IDs, expands outward from those seeds, and returns a `Subgraph` containing visited nodes and edges.
+
+**Call relations**: This is the main read method for a graph search tool. It first calls `_resolve` to find starting nodes, then calls `_expand` to collect the neighborhood around them.
+
+*Call graph*: calls 2 internal fn (_expand, _resolve).
+
+
+##### `GraphStore.context_for`  (lines 535–539)
+
+```
+async def context_for(self, text: str, subjects: frozenset[str], hops: int) -> Subgraph
+```
+
+**Purpose**: Finds graph context relevant to a piece of text, such as an incoming conversation turn. Instead of searching one exact name, it seeds from any known entity name that appears in the text.
+
+**Data flow**: It receives text, allowed subjects, and a hop count. It finds entity IDs mentioned in the text, expands outward from them, and returns the resulting subgraph.
+
+**Call relations**: Inbound context-building code can call this before responding to a user. It delegates seed finding to `_seed_from_text` and graph walking to `_expand`.
+
+*Call graph*: calls 2 internal fn (_expand, _seed_from_text).
+
+
+##### `GraphStore._resolve`  (lines 541–555)
+
+```
+async def _resolve(self, query: str, subjects: frozenset[str]) -> frozenset[UUID]
+```
+
+**Purpose**: Looks up graph entities whose normalized name exactly matches a query. This turns a human search term into starting node IDs.
+
+**Data flow**: It receives a query and subject set. It normalizes the query, returns nothing if the query or subjects are empty, otherwise queries the entity table for matching names in the current workspace and subjects. It returns the matching IDs.
+
+**Call relations**: `GraphStore.traverse` calls this before expanding the graph. It uses `normalize_name` so search terms match the same cleanup rules used during extraction.
+
+*Call graph*: calls 1 internal fn (normalize_name); called by 1 (traverse); 1 external calls (select).
+
+
+##### `GraphStore._seed_from_text`  (lines 557–574)
+
+```
+async def _seed_from_text(self, text: str, subjects: frozenset[str]) -> frozenset[UUID]
+```
+
+**Purpose**: Finds known entities whose names appear inside a larger text. This lets the system attach graph context to a message without the user naming a formal search query.
+
+**Data flow**: It receives text and subject set. It normalizes the text, fetches a capped list of recently updated candidate entities, and returns the IDs of candidates whose normalized names appear as whole padded phrases in the text.
+
+**Call relations**: `GraphStore.context_for` calls this to choose starting points for context expansion. It uses `normalize_name` for the same matching behavior used elsewhere.
+
+*Call graph*: calls 1 internal fn (normalize_name); called by 1 (context_for); 1 external calls (select).
+
+
+##### `GraphStore._expand`  (lines 576–592)
+
+```
+async def _expand(self, seeds: frozenset[UUID], subjects: frozenset[str], hops: int, edge_types: frozenset[str]) -> Subgraph
+```
+
+**Purpose**: Walks outward from starting nodes for a limited number of steps. This is the shared graph-walking engine behind both direct search and context lookup.
+
+**Data flow**: It receives seed IDs, subjects, a hop count, and optional edge-type filters. It keeps track of visited nodes and collected edges, repeatedly asks `_hop` for the next ring of neighbors, stops at configured limits, then fetches node details and returns a `Subgraph`.
+
+**Call relations**: Both `GraphStore.traverse` and `GraphStore.context_for` call this after they have seed nodes. It calls `_hop` for each expansion step and `_nodes` at the end to turn IDs into readable node records.
+
+*Call graph*: calls 2 internal fn (_hop, _nodes); called by 2 (context_for, traverse); 1 external calls (__init__).
+
+
+##### `GraphStore._hop`  (lines 594–639)
+
+```
+async def _hop(self, frontier: set[UUID], subjects: frozenset[str], edge_types: frozenset[str], edges: dict[UUID, TraversedEdge], visited: set[UUID]) -> set[UUID]
+```
+
+**Purpose**: Performs one step of graph expansion from the current frontier of nodes. A frontier is the current outer edge of the search, like the next set of intersections to inspect on a map.
+
+**Data flow**: It receives the current frontier, subjects, edge-type filters, the accumulated edge dictionary, and the visited node set. It queries non-tombstoned edges touching the frontier, records each edge, adds newly discovered endpoint nodes to `visited`, and returns the next frontier.
+
+**Call relations**: `GraphStore._expand` calls this once per hop until it reaches the hop limit or result caps. It creates `TraversedEdge` records from database rows so the final subgraph can cite each relationship.
+
+*Call graph*: called by 1 (_expand); 3 external calls (__init__, or_, select).
+
+
+##### `GraphStore._nodes`  (lines 641–663)
+
+```
+async def _nodes(self, ids: set[UUID]) -> tuple[EntityNode, ...]
+```
+
+**Purpose**: Fetches readable details for a set of entity IDs. It turns the graph walk’s internal IDs back into names, types, and stub status.
+
+**Data flow**: It receives a set of UUIDs. If the set is empty, it returns no nodes; otherwise it queries the entity table for those IDs in the current workspace and builds `EntityNode` objects from the rows.
+
+**Call relations**: `GraphStore._expand` calls this after all hops are complete. The returned nodes are paired with the collected edges to form the final `Subgraph`.
+
+*Call graph*: called by 1 (_expand); 2 external calls (__init__, select).
+
+
+### Page-change alerts
+Page alert watches connect changed workspace pages to follow-up messages in the conversations that asked to monitor them.
+
+### `extensions/page_alerts/ufo_ext_page_alerts/__init__.py`
+
+`other` · `import/package discovery`
+
+This is a very small package marker file. In Python, an `__init__.py` file tells the interpreter that a folder should be treated as an importable package, meaning other parts of the project can refer to it by name. Here, the package is for a “page alerts” extension, which likely adds alert-related behavior to pages elsewhere in the system.
+
+The file does not define any functions, classes, settings, or startup behavior. Its only content is a docstring: a short text note saying “Page alerts extension.” Think of it like a label on a folder. The real work of the extension is expected to live in other files inside this package, but this file makes the folder recognizable and importable as a package.
+
+Without this file, depending on the Python version and packaging setup, imports or extension discovery could become less clear or fail in environments that expect a traditional package layout.
+
+
+### `extensions/page_alerts/ufo_ext_page_alerts/alerts.py`
+
+`domain_logic` · `tool calls and page-change hook`
+
+This file solves a practical problem: people may want to know when a synced document changes in a way that matters to them, without manually checking every page. A user can ask the assistant to watch for a topic, such as “pricing changes” or “security policy updates.” The file saves that watch with the current conversation and agent, so future alerts know exactly where to go.
+
+When the system later receives a batch of changed pages, this file checks each live page change against each saved watch. It does not simply search for exact words. Instead, it asks the configured language model a very small yes-or-no question: does this document concern the watch topic? The page text is clipped to a safe length, and the model is told to answer only “MATCH” or “NO,” keeping the check bounded and cheap.
+
+If the model says there is a match, the file asks the extension system to start an alerting turn in the original conversation. An idempotency key, like a receipt number, is based on the watch and page digest so the same replayed page-change batch does not create duplicate alerts. It also ignores deleted pages, called tombstones, because there is no page body to classify.
 
 #### Function details
 
-##### `AgentObjects.list`  (lines 48–64)
-
-```
-async def list(self, ctx: ToolContext, query: str, cursor: str) -> ObjectPage
-```
-
-**Purpose**: Shows the agent objects available in the current workspace. Since there is normally only one agent, this is mostly a searchable listing that says what model the workspace agent currently uses.
-
-**Data flow**: It receives a tool context, a search string, and a cursor used for paging. It reads agent names and models from the database for the current workspace, keeps only rows whose name or model contains the search text, skips rows before the cursor when one is supplied, and returns a page of object rows with short human-readable summaries.
-
-**Call relations**: This is used when the object system needs to browse `agent` objects. It opens a workspace database transaction, asks for the current workspace identity, builds the query, then packages the matching database rows into the standard object-page shape expected by the rest of the object tooling.
-
-*Call graph*: 5 external calls (__init__, __init__, select, workspace_tx, ws_current).
-
-
-##### `AgentObjects.get`  (lines 66–68)
-
-```
-async def get(self, ctx: ToolContext, name: str) -> AgentSpec | None
-```
-
-**Purpose**: Fetches the editable specification for one agent object. In this file, the editable specification is only the model name, not the prompt.
-
-**Data flow**: It receives a tool context and an agent name. It asks `_row` to find the matching database row; if there is no row, it returns nothing. If the row exists, it returns an `AgentSpec` containing the model from that row.
-
-**Call relations**: This is the read half used before showing or applying an object spec. It relies on `_row` for the actual database lookup, then converts the stored row into the narrow public spec that callers are allowed to edit.
-
-*Call graph*: calls 1 internal fn (_row); 1 external calls (__init__).
-
-
-##### `AgentObjects.status`  (lines 70–78)
-
-```
-async def status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None
-```
-
-**Purpose**: Returns read-only status details for an agent, especially the current prompt and a digest of that prompt. This lets callers see the prompt without making prompt editing part of the agent spec.
-
-**Data flow**: It receives a tool context and an agent name. It looks up the database row with `_row`; if nothing is found, it returns nothing. Otherwise it returns a dictionary containing the prompt text, the prompt's digest, and the last update time as text.
-
-**Call relations**: This supports inspection of the agent beyond the editable model field. It calls `_row` to read the stored prompt and update time, then calls `prompt_digest` to compute the fingerprint used by the governance proposal flow.
-
-*Call graph*: calls 1 internal fn (_row); 1 external calls (prompt_digest).
-
-
-##### `AgentObjects.apply`  (lines 80–95)
-
-```
-async def apply(self, ctx: ToolContext, name: str, spec: AgentSpec, old: AgentSpec | None) -> None
-```
-
-**Purpose**: Changes the agent's model, but only for an existing agent and only when the speaker is the workspace owner. It refuses attempts to create a new agent through this path.
-
-**Data flow**: It receives the tool context, the agent name, the requested new spec, and the old spec if one existed. If there was no old spec, it raises an error because agents cannot be created here. It then checks whether the speaker is the owner; if not, it raises an owner-required error. If allowed, it updates the current workspace's agent row in the database with the new model and a fresh update time.
-
-**Call relations**: This is the write path for changing the model. The object system calls it when someone applies an `agent` object spec. It checks creation rules first, asks the tool context about ownership, and then writes the update through the workspace transaction so the next agent turn can read the new model.
-
-*Call graph*: calls 1 internal fn (speaker_is_owner); 5 external calls (__init__, __init__, update, workspace_tx, ws_current).
-
-
-##### `AgentObjects.delete`  (lines 97–98)
-
-```
-async def delete(self, ctx: ToolContext, name: str) -> None
-```
-
-**Purpose**: Always refuses deletion of the workspace agent. The project currently assumes every workspace has exactly one agent.
-
-**Data flow**: It receives the tool context and the agent name, but does not read or change any stored data. It immediately raises a not-supported error explaining that the agent cannot be deleted.
-
-**Call relations**: The object system calls this when someone tries to delete an `agent` object. Instead of handing off to the database, it stops the flow at once because deleting the single workspace agent would break the workspace's expected shape.
-
-*Call graph*: 1 external calls (__init__).
-
-
-##### `AgentObjects._row`  (lines 100–113)
-
-```
-async def _row(self, name: str) -> sa.Row | None
-```
-
-**Purpose**: Looks up the stored database row for a named agent in the current workspace. It is a small shared helper so `get` and `status` read the same source of truth.
-
-**Data flow**: It receives an agent name. It opens a workspace database transaction, uses the current workspace id and the given name to search the agent table, and returns the row containing the prompt, model, and update time. If there is no matching row, it returns nothing.
-
-**Call relations**: `get` calls this when it needs the editable model value, and `status` calls it when it needs the prompt and timestamp. By keeping the lookup here, both paths use the same workspace scoping and avoid accidentally reading another workspace's agent.
-
-*Call graph*: called by 2 (get, status); 3 external calls (select, workspace_tx, ws_current).
-
-
-### `core/src/ufo/artifacts.py`
-
-`domain_logic` · `request handling`
-
-An artifact is a file produced during a conversation and shared with `share_file`. This file is the read-and-delete side of that feature. Without it, shared files would still exist in storage, but users and tools would not have a clean way to find them again, reuse them in the workspace, or remove them.
-
-The file treats each artifact as the combination of a conversation and a filename. If the same conversation shares `report.txt` more than once, those shares become versions of one artifact, and the newest one is what users see. If a different conversation shares a file with the same name, it is a separate artifact. To make that visible, artifact names start with a short piece of the conversation ID and then a cleaned-up filename.
-
-The main class, `ArtifactObjects`, plugs this behavior into the project’s object system. It can list artifacts, return the latest file details, build a status report, copy the latest bytes back into the sandbox workspace, and delete all stored versions. It refuses create and update requests because artifacts are not edited directly; they are born only when a file is shared. A useful detail: large files over about 32 MiB are not copied back into the workspace, but they can still be fetched through a temporary download link when token signing is configured.
-
-#### Function details
-
-##### `artifact_object_names`  (lines 54–74)
-
-```
-def artifact_object_names(shares: Iterable[tuple[UUID, str]]) -> dict[tuple[UUID, str], str]
-```
-
-**Purpose**: Builds the public object name for each shared-file identity. It keeps files from different conversations separate, while making files from the same conversation naturally group together in lists.
-
-**Data flow**: It receives pairs of conversation ID and filename. It turns each filename into a safe short slug, prefixes it with the first part of the conversation ID, checks whether any names accidentally collide, and adds a short digest only for the colliding cases. It returns a lookup table from each original pair to its final object name.
-
-**Call relations**: When `ArtifactObjects._groups` has loaded the stored artifact rows and grouped them by conversation and filename, it asks this function to assign stable names to those groups. This function relies on `_slug` for readable filename cleanup and `_identity_digest` only when two different identities would otherwise get the same name.
-
-*Call graph*: calls 2 internal fn (_identity_digest, _slug); called by 1 (_groups); 1 external calls (Counter).
-
-
-##### `_slug`  (lines 77–79)
-
-```
-def _slug(filename: str) -> str
-```
-
-**Purpose**: Turns a filename into a short, URL-like name fragment that is safe and readable. This prevents odd characters, spaces, or very long names from becoming awkward object names.
-
-**Data flow**: It receives a filename, lowercases it, replaces runs of non-letter and non-number characters with dashes, trims extra dashes, and cuts it to the allowed length. If nothing usable remains, it returns the fallback word `artifact`.
-
-**Call relations**: `artifact_object_names` calls this whenever it needs the filename part of an artifact object name. It is a small helper that keeps naming rules in one place.
-
-*Call graph*: called by 1 (artifact_object_names).
-
-
-##### `_identity_digest`  (lines 82–84)
-
-```
-def _identity_digest(identity: tuple[UUID, str]) -> str
-```
-
-**Purpose**: Creates a short source for a collision-breaking suffix. It is used when two different artifact identities would otherwise receive the same object name.
-
-**Data flow**: It receives a conversation ID and filename, combines them into one string, and runs that string through SHA-256, a standard one-way hashing method. It returns the hexadecimal digest, from which callers use only a short prefix.
-
-**Call relations**: `artifact_object_names` calls this only after it discovers that two generated names collide. The digest lets the final names stay stable and distinct without making every artifact name long.
-
-*Call graph*: called by 1 (artifact_object_names); 1 external calls (sha256).
-
-
-##### `ArtifactObjects.list`  (lines 102–114)
-
-```
-async def list(self, ctx: ToolContext, query: str, cursor: str) -> ObjectPage
-```
-
-**Purpose**: Returns a page of artifact objects that match a search query. This is what lets a user or tool browse shared files in the workspace.
-
-**Data flow**: It reads all artifact groups through `_groups`, filters them by the query text against the object name, latest filename, or latest caption, then applies the cursor so results can be paged. It turns the selected groups into object rows with short summaries and returns an object page with a next cursor when more results remain.
-
-**Call relations**: The object system calls this when someone lists artifacts. It depends on `_groups` for the current artifact set and `_summary` to make each row understandable in a compact listing.
-
-*Call graph*: calls 2 internal fn (_groups, _summary); 2 external calls (__init__, __init__).
-
-
-##### `ArtifactObjects.get`  (lines 116–123)
-
-```
-async def get(self, ctx: ToolContext, name: str) -> ArtifactSpec | None
-```
-
-**Purpose**: Returns the editable-looking specification for one artifact, which describes the latest shared version. In practice this is read-only information, because artifacts cannot be created or updated through this object interface.
-
-**Data flow**: It receives an object name, looks up the matching group with `_find`, and returns nothing if no artifact has that name. If found, it takes the newest share and returns its filename, media type, and caption as an `ArtifactSpec`.
-
-**Call relations**: The object system calls this when someone asks for a single artifact. It delegates name lookup to `_find`; unlike `status`, it only describes the artifact and does not copy file bytes into the workspace.
-
-*Call graph*: calls 1 internal fn (_find); 1 external calls (__init__).
-
-
-##### `ArtifactObjects.status`  (lines 125–145)
-
-```
-async def status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None
-```
-
-**Purpose**: Builds a detailed status report for one artifact and, when possible, makes the latest file available again inside the workspace. This is the path used when a later turn wants to reuse a file made earlier.
-
-**Data flow**: It receives the tool context and object name, finds the artifact group, and returns nothing if it does not exist. For the latest version, it records size, share time, turn ID, conversation ID, and version count; if token signing is configured, it also creates a temporary download URL. Finally, it asks `_materialize` to copy the file bytes into the sandbox unless the file is too large, and includes that workspace path or null.
-
-**Call relations**: The object system calls this as part of getting an artifact’s practical status. It uses `_find` to locate the latest share, calls `mint_artifact_token` to create a temporary link when allowed, and hands off to `_materialize` for the workspace copy.
-
-*Call graph*: calls 2 internal fn (_find, _materialize); 2 external calls (now, mint_artifact_token).
-
-
-##### `ArtifactObjects.apply`  (lines 147–150)
-
-```
-async def apply(self, ctx: ToolContext, name: str, spec: ArtifactSpec, old: ArtifactSpec | None) -> None
-```
-
-**Purpose**: Rejects attempts to create or update artifacts through the object interface. This protects the rule that artifacts are produced only by writing a workspace file and sharing it with `share_file`.
-
-**Data flow**: It receives the requested object name, desired artifact spec, and any old spec, but does not use them to change storage. Instead, it immediately raises a `VerbNotSupported` error with guidance explaining how artifacts should be created.
-
-**Call relations**: If the broader object system tries to apply a create or update operation to this object kind, this method is the guardrail. It stops the flow before any database, blob, or workspace changes can happen.
-
-*Call graph*: 1 external calls (__init__).
-
-
-##### `ArtifactObjects.delete`  (lines 152–164)
-
-```
-async def delete(self, ctx: ToolContext, name: str) -> None
-```
-
-**Purpose**: Deletes an artifact and every stored version of it. This removes both the database records and the saved file bytes, so old download links stop working.
-
-**Data flow**: It receives an artifact name, uses `_find` to collect all versions, and raises an error if the name is unknown. It then opens a workspace database transaction, deletes matching `shared_artifact` rows for the current workspace, and afterwards deletes each version’s blob from blob storage.
-
-**Call relations**: The object system calls this when a user requests deletion. It relies on `_find` to translate the object name into stored rows, uses the workspace transaction and current workspace ID to delete only the right records, then cleans up the actual stored bytes through the blob service.
-
-*Call graph*: calls 1 internal fn (_find); 3 external calls (delete, workspace_tx, ws_current).
-
-
-##### `ArtifactObjects._materialize`  (lines 166–177)
-
-```
-async def _materialize(self, ctx: ToolContext, name: str, latest: sa.Row) -> str | None
-```
-
-**Purpose**: Copies the latest artifact bytes back into the conversation workspace when the file is small enough. This makes a previously shared file usable again by later tools as a normal workspace file.
-
-**Data flow**: It receives the context, artifact name, and latest database row. If the file is larger than the configured limit, it returns null and copies nothing. Otherwise it reads the blob bytes, raises a clear error if the blob is missing, writes the bytes into `artifacts/<name>/<filename>` in the sandbox, and returns that path.
-
-**Call relations**: `ArtifactObjects.status` calls this while building an artifact status report. It is deliberately not used by `_find`, `get`, or `delete`, so simple lookups and deletion do not unexpectedly write files into the workspace.
-
-*Call graph*: called by 1 (status).
-
-
-##### `ArtifactObjects._find`  (lines 179–181)
-
-```
-async def _find(self, name: str) -> tuple[sa.Row, ...] | None
-```
-
-**Purpose**: Finds the stored versions for one artifact object name. It is the shared lookup step used before reading details, reporting status, or deleting.
-
-**Data flow**: It receives an artifact object name, asks `_groups` for all named artifact groups, and searches for an exact name match. It returns the tuple of stored rows for that artifact, newest first, or null if no group matches.
-
-**Call relations**: `get`, `status`, and `delete` all call this before doing their own work. It keeps name resolution consistent by relying on the same grouping and naming rules used by `list`.
-
-*Call graph*: calls 1 internal fn (_groups); called by 3 (delete, get, status).
-
-
-##### `ArtifactObjects._groups`  (lines 183–216)
-
-```
-async def _groups(self) -> Sequence[tuple[str, tuple[sa.Row, ...]]]
-```
-
-**Purpose**: Loads all shared artifacts for the current workspace and organizes them into object groups. Each group represents one conversation-and-filename pair, with versions sorted newest first.
-
-**Data flow**: It opens a workspace database transaction, selects shared artifact rows joined with their conversation IDs, and limits the query to the current workspace. It groups rows by conversation ID and filename, asks `artifact_object_names` to assign object names, sorts each group by share time and blob key with newest first, and returns the groups sorted by name.
-
-**Call relations**: `list` calls this to browse all artifacts, and `_find` calls it to resolve one name. It is the central bridge between raw database rows and the object view that the rest of this file presents.
-
-*Call graph*: calls 1 internal fn (artifact_object_names); called by 2 (_find, list); 3 external calls (select, workspace_tx, ws_current).
-
-
-##### `_summary`  (lines 219–225)
-
-```
-def _summary(shares: tuple[sa.Row, ...]) -> str
-```
-
-**Purpose**: Creates the short text shown for an artifact in a listing. It gives enough detail to recognize the file without opening it.
-
-**Data flow**: It receives the rows for one artifact group, looks at the newest version, and builds a sentence containing the filename, media type, size, share date, and version count when there is more than one version. It trims the result to the configured maximum length.
-
-**Call relations**: `ArtifactObjects.list` calls this for every artifact row it returns. It turns the grouped database information into a human-readable summary for the object list.
-
-*Call graph*: called by 1 (list).
-
-
-### Extension workspace objects
-Extension-owned object kinds expose connected accounts, synced pages, external sources, and workspace-created skills while preserving workspace boundaries.
-
-### `extensions/connectors/ufo_ext_connectors/objects.py`
-
-`domain_logic` · `request handling for connector object reads, sharing changes, and revocation`
-
-A connected account is not just ordinary data. It comes from a real third-party service and usually involves a secret token, like an OAuth permission grant. This file protects that boundary. It says: accounts can only be created through the special `connect_account` chat flow, not by naming an object by hand. That prevents someone from pretending to create a provider account without going through the proper consent and secret-handling path.
-
-Once an account exists, this file presents it as a workspace object with a stable name, such as a provider name plus an account identifier. If two accounts would end up with the same cleaned-up name, it adds a short fingerprint so the names stay unique. Listing and reading show useful facts such as who granted the account, whether it is shared, and when it was granted.
-
-The only allowed edit is changing `shared`, which decides whether the account is private to the grantor or visible for broader workspace use. Deleting the object revokes the grant, meaning the account stops being available to tools, syncs, and proxy rules. The surrounding object framework enforces who is allowed to do that: the original grantor or a workspace owner.
-
-#### Function details
-
-##### `_slug`  (lines 45–46)
+##### `_slug`  (lines 38–42)
 
 ```
 def _slug(raw: str) -> str
 ```
 
-**Purpose**: Turns a provider name or account id into a safe, simple name part. It lowercases the text, replaces runs of non-letter-or-number characters with dashes, and trims extra dashes from the ends.
+**Purpose**: Turns a user-provided watch name into a safe storage name. It makes names lowercase, replaces non-letter-or-number runs with dashes, and rejects names that contain no usable letters or digits.
 
-**Data flow**: It receives raw text such as a provider name or account identifier. It cleans that text into a lowercase slug that fits the object naming style. It returns the cleaned string and changes nothing else.
+**Data flow**: It receives raw text from a watch name or topic. It uses a regular expression to clean that text into a simple dash-separated identifier. It returns the cleaned name, or raises an error if nothing meaningful remains.
 
-**Call relations**: ConnectorObjects._named uses this helper when building human-readable object names for connected accounts. It is the small cleanup step before account grants are exposed as named workspace objects.
+**Call relations**: When a user creates a watch, watch_pages calls this so the watch can be stored under a predictable key. When a user cancels a watch, cancel_page_watch calls it so the same kind of key can be found again.
 
-*Call graph*: called by 1 (_named); 1 external calls (sub).
+*Call graph*: called by 2 (cancel_page_watch, watch_pages); 1 external calls (sub).
 
 
-##### `ConnectorObjects._owned_rows`  (lines 63–74)
+##### `watch_pages`  (lines 45–66)
 
 ```
-async def _owned_rows(self, ctx: ToolContext) -> tuple[OwnedRow, ...]
+async def watch_pages(ctx: ToolContext, args: WatchPagesInput) -> ToolResult
 ```
 
-**Purpose**: Builds the list view for connector objects. Each row says the object name, which provider account it represents, and who owns or shares it.
+**Purpose**: Creates a new page watch from a chat tool call. It records what topic to watch for and binds the watch to the current conversation and agent so later alerts return to the right place.
 
-**Data flow**: It receives the current tool context, which includes the current workspace and turn. It asks _named for the connected accounts in that workspace, then turns each grant into an owned object row with a short summary and ownership information. It returns all rows as a tuple.
+**Data flow**: It receives the tool context, which includes the current turn and extension storage, plus the requested topic and optional name. It checks that extension context is available, cleans the watch name, saves the topic, conversation ID, and agent ID in the extension store, then returns a short confirmation message to the user.
 
-**Call relations**: The broader object system calls this when it needs to list connector objects a member can see. It relies on _named to translate grant records into object names, then hands the resulting rows back to the object framework for visibility and presentation.
+**Call relations**: This is called when a member asks the assistant to watch synced pages. It uses _slug to create the storage key, then writes the watch record that on_page_change will later read when page updates arrive.
 
-*Call graph*: calls 1 internal fn (_named); 2 external calls (__init__, __init__).
+*Call graph*: calls 1 internal fn (_slug); 2 external calls (__init__, __init__).
 
 
-##### `ConnectorObjects._spec`  (lines 76–82)
+##### `list_page_watches`  (lines 69–79)
 
 ```
-async def _spec(self, ctx: ToolContext, name: str) -> ConnectorSpec | None
+async def list_page_watches(ctx: ToolContext, args: ListPageWatchesInput) -> ToolResult
 ```
 
-**Purpose**: Returns the editable specification for one connector object. In practice, this exposes the provider, account id, and whether the account is shared.
+**Purpose**: Shows the user the page watches that are currently saved. It gives a simple list of watch names and their topics, or says there are none.
 
-**Data flow**: It receives the current context and an object name. It looks up that name through _named. If no such grant exists, it returns nothing. If it finds one, it creates and returns a ConnectorSpec containing the grant’s provider, account id, and shared flag.
+**Data flow**: It receives the tool context and an empty input object. It checks for extension context, reads all stored records whose keys start with the watch prefix, turns each valid record into a display line, and returns those lines as text.
 
-**Call relations**: The object framework calls this when someone reads or applies an object. It uses _named as the source of truth for object names, then returns the small spec model that the rest of the object machinery understands.
+**Call relations**: This is called when a member asks what page watches exist. It relies on _watch_fields to verify and unpack each stored watch before showing it.
 
-*Call graph*: calls 1 internal fn (_named); 1 external calls (__init__).
+*Call graph*: calls 1 internal fn (_watch_fields); 2 external calls (__init__, __init__).
 
 
-##### `ConnectorObjects._status`  (lines 84–94)
+##### `cancel_page_watch`  (lines 82–89)
 
 ```
-async def _status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None
+async def cancel_page_watch(ctx: ToolContext, args: CancelPageWatchInput) -> ToolResult
 ```
 
-**Purpose**: Provides extra read-only status details for a connector object. This is audit-style information, such as who granted it and when.
+**Purpose**: Deletes a saved page watch by name. It protects users from thinking they cancelled something that did not exist by raising an error when the named watch cannot be found.
 
-**Data flow**: It receives the current context and an object name. It looks up the corresponding grant through _named. If the name is unknown, it returns nothing. Otherwise it returns a dictionary with the grantor member id, grant time, host, agent, and sharing state.
+**Data flow**: It receives the tool context and the watch name to cancel. It checks that extension context is available, cleans the name into the same storage form used when creating the watch, looks up that stored record, deletes it if present, and returns a confirmation message.
 
-**Call relations**: The object system calls this when it wants more than the basic spec. It sits beside _spec: _spec gives the editable shape, while _status gives helpful facts that should not be edited directly.
+**Call relations**: This is called when a member asks to stop watching a topic. It uses _slug to find the same key that watch_pages created, then removes the record so on_page_change will no longer consider it.
 
-*Call graph*: calls 1 internal fn (_named).
+*Call graph*: calls 1 internal fn (_slug); 2 external calls (__init__, __init__).
 
 
-##### `ConnectorObjects._apply_owned`  (lines 96–113)
-
-```
-async def _apply_owned(self, ctx: ToolContext, name: str, spec: ConnectorSpec, old: ConnectorSpec | None, owner: ObjectOwner | None) -> None
-```
-
-**Purpose**: Applies the one allowed change to a connected account: switching its `shared` setting on or off. It refuses attempts to create an account or change anything else, because account connection must go through the secure connect flow.
-
-**Data flow**: It receives the current context, the object name, the requested new spec, the old spec if one exists, and ownership information. If there is no old object, or if anything besides `shared` changed, it raises an error explaining that account connection is not supported here. If the shared value did not change, it does nothing. If it did change, it finds the grant and asks the grant store to update the shared flag for that provider account in the workspace.
-
-**Call relations**: The object framework calls this after permission checks decide the speaker may mutate the object. This function then enforces the connector-specific rule: only sharing may change. When a real sharing change is needed, it uses _named to find the grant and hands the update to the grant store.
-
-*Call graph*: calls 1 internal fn (_named); 2 external calls (__init__, model_copy).
-
-
-##### `ConnectorObjects._delete_owned`  (lines 115–119)
-
-```
-async def _delete_owned(self, ctx: ToolContext, name: str, owner: ObjectOwner) -> None
-```
-
-**Purpose**: Revokes a connected account by deleting its grant record. This removes the account’s availability for tools and related connector behavior.
-
-**Data flow**: It receives the current context, the object name, and ownership information. It finds the matching grant through _named. If the grant store is unavailable, it raises an error. Otherwise it tells the grant store to revoke the provider/account pair for the current workspace.
-
-**Call relations**: The object framework calls this after permission checks confirm that the grantor or a workspace owner is allowed to delete the connector object. This function translates that object deletion into the real domain action: revoking the underlying grant.
-
-*Call graph*: calls 1 internal fn (_named).
-
-
-##### `ConnectorObjects._named`  (lines 121–138)
-
-```
-async def _named(self, ctx: ToolContext) -> dict[str, GrantSummary]
-```
-
-**Purpose**: Builds the map from connector object names to grant summaries. This is the central name-making step that lets raw connected-account grants appear as stable workspace objects.
-
-**Data flow**: It receives the current context and reads grant summaries for the current workspace. It keeps one grant per provider/account pair, builds a cleaned name from the provider and account id, and groups grants that would have the same name. If a name is unique, it uses it directly. If several grants collapse to the same name, it adds a short hash-based suffix so each object name stays distinct. It returns a dictionary from object name to grant summary.
-
-**Call relations**: All the main connector object operations call this first: listing, reading specs, reading status, changing sharing, and deleting. It depends on _slug to make readable name parts, on the grants API to fetch current grants, and on hashing only when needed to avoid name collisions.
-
-*Call graph*: calls 1 internal fn (_slug); called by 5 (_apply_owned, _delete_owned, _owned_rows, _spec, _status); 2 external calls (sha256, grant_summaries).
-
-
-### `extensions/sources/ufo_ext_sources/pages.py`
-
-`domain_logic` · `request handling`
-
-A source page is a document that came from an external content source, such as a synced provider. This file is the bridge between those stored synced pages and the system’s general object interface. It deliberately does not let people create or edit pages here, because pages are produced by the content-sync driver, not by users typing object changes. Think of it like a library catalogue for imported documents: you can search the card catalogue, read where an item came from, and ask the librarian to remove a record, but you cannot rewrite the book through the catalogue.
-
-The file defines what a page looks like to the outside world: its source provider, who can see it, a digest that identifies the body content, and a reference to where the body is stored. The actual body is never copied into the object response. When listing or fetching pages, the code only shows pages visible to the current audience: shared pages, plus that member’s private pages if the current turn belongs to a member. When deleting, it first checks that the speaker is the workspace owner. If allowed, it asks the extension context to forget the page, which tombstones the row so the existing cleanup pipeline can remove derived index data.
-
-#### Function details
-
-##### `_require_ext`  (lines 49–52)
-
-```
-def _require_ext(ctx: ToolContext) -> ExtensionContext
-```
-
-**Purpose**: This helper makes sure the tool request has an extension context attached. The extension context is the object that knows how to read synced sources and forget pages.
-
-**Data flow**: It receives a tool context. If that context contains an extension context, it returns it. If not, it stops the request with a runtime error, because page objects cannot work without access to the source-page storage API.
-
-**Call relations**: PageObjects._pages calls this before reading sources and pages. PageObjects.delete also calls it before asking the extension layer to forget a page.
-
-*Call graph*: called by 2 (_pages, delete).
-
-
-##### `_audience_subjects`  (lines 55–61)
-
-```
-def _audience_subjects(ctx: ToolContext) -> frozenset[str]
-```
-
-**Purpose**: This decides which visibility buckets the current caller is allowed to read. It prevents one member from seeing another member’s private synced pages.
-
-**Data flow**: It reads the current audience member id from the tool context. If there is no member, it returns only the shared subject. If there is a member, it returns both the shared subject and that member’s private subject.
-
-**Call relations**: PageObjects._pages calls this when asking the extension context for source pages. When a private member space is needed, this helper uses member_subject to build the correct member-specific subject name.
-
-*Call graph*: called by 1 (_pages); 1 external calls (member_subject).
-
-
-##### `_Page.name`  (lines 76–77)
-
-```
-def name(self) -> str
-```
-
-**Purpose**: This gives a page its public object name. The name is simply the page row’s UUID written as text.
-
-**Data flow**: It reads the page’s internal id and converts it to a string. Nothing else is changed.
-
-**Call relations**: The surrounding page-object code uses this name when listing pages, searching by name, building cursors, and finding a requested page.
-
-
-##### `_Page.spec`  (lines 79–82)
-
-```
-def spec(self) -> PageSpec
-```
-
-**Purpose**: This turns an internal page record into the public page specification returned by object get. The specification contains metadata only, not the page body.
-
-**Data flow**: It reads the page’s backend name, visibility subject, digest, and body reference. It uses those values to create and return a PageSpec.
-
-**Call relations**: PageObjects.get relies on this conversion after PageObjects._find has located the matching page. The function hands off to PageSpec construction so the result follows the declared schema.
-
-*Call graph*: 1 external calls (__init__).
-
-
-##### `_Page.summary`  (lines 84–85)
-
-```
-def summary(self) -> str
-```
-
-**Purpose**: This creates a short human-readable description for a page in list results. It gives enough detail to recognize the page without loading the body.
-
-**Data flow**: It combines the source backend, visibility subject, and digest into one sentence-like string. It then cuts that string to the maximum summary length and returns it.
-
-**Call relations**: PageObjects.list uses this summary when filtering search results and when building each ObjectRow shown to callers.
-
-
-##### `PageObjects.list`  (lines 96–104)
-
-```
-async def list(self, ctx: ToolContext, query: str, cursor: str) -> ObjectPage
-```
-
-**Purpose**: This returns a searchable, paginated list of visible synced pages. It is used when someone wants to browse page objects without fetching each one.
-
-**Data flow**: It receives the tool context, a search query, and a cursor. It loads all pages visible to the caller, keeps only pages whose name or summary contains the query, sorts them by name, applies the cursor, and returns one page of ObjectRow entries plus a next cursor if more results remain.
-
-**Call relations**: This is one of the main object-kind operations exposed through PAGE_OBJECT. It calls PageObjects._pages to get the readable page set, then creates ObjectRow values and wraps them in an ObjectPage for the object system.
-
-*Call graph*: calls 1 internal fn (_pages); 2 external calls (__init__, __init__).
-
-
-##### `PageObjects.get`  (lines 106–108)
-
-```
-async def get(self, ctx: ToolContext, name: str) -> PageSpec | None
-```
-
-**Purpose**: This fetches the public metadata for one page by name. It returns nothing if the page does not exist or is not visible to the caller.
-
-**Data flow**: It receives the tool context and requested page name. It asks PageObjects._find for the matching visible page. If found, it converts that page to a PageSpec; otherwise it returns null.
-
-**Call relations**: This is the read path for a single page object. It depends on PageObjects._find to apply the same visibility rules used elsewhere before returning the page specification.
-
-*Call graph*: calls 1 internal fn (_find).
-
-
-##### `PageObjects.status`  (lines 110–119)
-
-```
-async def status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None
-```
-
-**Purpose**: This returns operational details about one page, such as its source row and timestamps. It is useful for understanding where a synced page came from and when it last changed.
-
-**Data flow**: It receives the tool context and page name. It looks up the visible page. If none is found, it returns null. If found, it returns a small dictionary with the source id, backend name, creation time, and update time, with dates formatted as text.
-
-**Call relations**: Like get and delete, this starts with PageObjects._find so it only reports status for pages the caller is allowed to see.
-
-*Call graph*: calls 1 internal fn (_find).
-
-
-##### `PageObjects.apply`  (lines 121–124)
-
-```
-async def apply(self, ctx: ToolContext, name: str, spec: PageSpec, old: PageSpec | None) -> None
-```
-
-**Purpose**: This refuses create and update attempts for page objects. Pages can only be landed by the sync driver, so user-side object apply is not allowed.
-
-**Data flow**: It receives the requested name, new spec, and optional old spec, but does not use them to change storage. It always raises a VerbNotSupported error explaining that pages are synced rather than authored here.
-
-**Call relations**: The object system calls apply for create or update-style operations. This implementation immediately stops that flow with VerbNotSupported instead of handing anything to storage.
-
-*Call graph*: 1 external calls (__init__).
-
-
-##### `PageObjects.delete`  (lines 126–132)
-
-```
-async def delete(self, ctx: ToolContext, name: str) -> None
-```
-
-**Purpose**: This forgets a synced page, but only when the speaker is the workspace owner. Forgetting means marking the page as removed so later cleanup can clear indexed data derived from it.
-
-**Data flow**: It receives the tool context and page name. First it checks whether the speaker is the owner. If not, it raises OwnerRequired. Then it finds the visible page by name. If no page is found, it raises a value error. If found, it gets the extension context and asks it to forget that page id.
-
-**Call relations**: This is the delete path exposed through PAGE_OBJECT. It calls ToolContext.speaker_is_owner for the permission gate, PageObjects._find to identify the page, and _require_ext so it can hand the final forget request to the extension context.
-
-*Call graph*: calls 3 internal fn (speaker_is_owner, _find, _require_ext); 1 external calls (__init__).
-
-
-##### `PageObjects._find`  (lines 134–135)
-
-```
-async def _find(self, ctx: ToolContext, name: str) -> _Page | None
-```
-
-**Purpose**: This looks for one visible page with a specific object name. It centralizes the common lookup used by get, status, and delete.
-
-**Data flow**: It receives the tool context and a page name. It loads the caller-visible page list through PageObjects._pages and returns the first page whose name matches. If none match, it returns null.
-
-**Call relations**: PageObjects.get, PageObjects.status, and PageObjects.delete all call this before doing their own work. It delegates the actual reading and visibility filtering to PageObjects._pages.
-
-*Call graph*: calls 1 internal fn (_pages); called by 3 (delete, get, status).
-
-
-##### `PageObjects._pages`  (lines 137–152)
-
-```
-async def _pages(self, ctx: ToolContext) -> tuple[_Page, ...]
-```
-
-**Purpose**: This loads all live source pages the current caller is allowed to see and wraps them in the file’s internal _Page shape. It is the shared reader behind listing and lookup.
-
-**Data flow**: It receives the tool context. It gets the extension context, reads registered sources so it can map source ids to backend names, computes the allowed visibility subjects, then reads source page records for those subjects. Each record becomes an _Page containing ids, source information, visibility, digest, body reference, and timestamps.
-
-**Call relations**: PageObjects.list calls this to build browse results, and PageObjects._find calls it to locate one page. Inside, it uses _require_ext for access to extension APIs, _audience_subjects for visibility filtering, and _Page construction to present records in a convenient local form.
-
-*Call graph*: calls 2 internal fn (_audience_subjects, _require_ext); called by 2 (_find, list); 1 external calls (__init__).
-
-
-### `extensions/sources/ufo_ext_sources/tools.py`
-
-`domain_logic` · `object requests and page-change notifications`
-
-A “source” here means one connection to an outside provider account, plus the selected streams of data to sync from it. For example, one Zendesk account might sync tickets and users. This file turns that connection into an object with a stable name, ownership rules, validation, and change notifications.
-
-The important idea is that the source’s identity comes from its real connection details: provider, account, and tenant URL. Like a passport number, the name is derived from those facts, not chosen freely. If someone applies the same setup under the wrong name, the code refuses and tells them the right name. If they want different streams, they must delete and recreate the source, because changing streams changes what is being synced.
-
-The file also protects privacy. A source is private to the registering member unless it is explicitly shared. Only the registering member or workspace owner can share or delete it. Subscriptions are different: any member who can see a source may subscribe their own conversation, but cannot subscribe or unsubscribe anyone else.
-
-Finally, when synced pages change, the page-change hook looks up which source binding they came from, filters out private pages, and invokes subscribed conversations with readable page references.
-
-#### Function details
-
-##### `_binding_name`  (lines 132–138)
-
-```
-def _binding_name(provider: str, account: str, base_url: str | None) -> str
-```
-
-**Purpose**: Creates the official object name for a source binding. The name is based on the provider, account, and base URL, so the same real-world connection always gets the same name.
-
-**Data flow**: It receives a provider name, an account id, and an optional base URL. It turns those identity details into sorted JSON, hashes them with SHA-256, keeps a short digest, and returns a readable name like provider-1234abcd.
-
-**Call relations**: SourceObjects._apply_owned uses this when checking whether a user applied a source under the correct name. _Binding.name uses it whenever an existing binding needs to expose its derived object name.
-
-*Call graph*: called by 2 (_apply_owned, name); 2 external calls (sha256, dumps).
-
-
-##### `_Binding.name`  (lines 159–160)
-
-```
-def name(self) -> str
-```
-
-**Purpose**: Returns the derived object name for an existing source binding. This keeps stored bindings and newly applied specs using the same naming rule.
-
-**Data flow**: It reads the binding’s provider, account, and base URL, passes them to _binding_name, and returns the resulting string.
-
-**Call relations**: Other code treats this property as the binding’s object name. It delegates the actual naming rule to _binding_name so listing, finding, applying, and alerts all agree.
-
-*Call graph*: calls 1 internal fn (_binding_name).
-
-
-##### `_Binding.spec`  (lines 162–170)
-
-```
-def spec(self, subscribers: tuple[str, ...]=()) -> SourceSpec
-```
-
-**Purpose**: Turns an internal source binding back into the public spec shown to object users. This is how object_get can describe the source in the same shape that object_apply accepts.
-
-**Data flow**: It reads the binding’s provider, streams, account, base URL, sharing subject, and optional subscriber list. It returns a SourceSpec with direct-account details hidden as an empty account_id and sharing converted into a true or false value.
-
-**Call relations**: This is used when the object layer needs to compare or show a binding’s configuration. SourceObjects._apply_owned also uses the same spec shape to decide whether a re-apply is a no-op, a share change, or an unsupported config change.
-
-*Call graph*: 1 external calls (__init__).
-
-
-##### `_Binding.summary`  (lines 172–174)
-
-```
-def summary(self) -> str
-```
-
-**Purpose**: Builds a short human-readable summary of a source binding. It is meant for lists and alert messages where a compact label is more useful than the full spec.
-
-**Data flow**: It reads the provider, account, and stream names, joins the stream names together, and trims the final sentence to a maximum length.
-
-**Call relations**: _alert_message uses this to make change alerts understandable to the subscribed conversation.
-
-*Call graph*: called by 1 (_alert_message).
-
-
-##### `_require_ext`  (lines 177–180)
-
-```
-def _require_ext(ctx: ToolContext) -> ExtensionContext
-```
-
-**Purpose**: Checks that the current tool call has access to the extension context. The extension context is the gateway to stored sources, credentials, and the extension’s private storage.
-
-**Data flow**: It receives a ToolContext. If the extension context is present, it returns it; if not, it raises a runtime error because source objects cannot work without it.
-
-**Call relations**: Most SourceObjects methods call this before reading or changing registered sources. It is a guardrail that catches a wiring mistake early instead of failing later in a less clear way.
-
-*Call graph*: called by 7 (_apply_owned, _bindings, _delete_owned, _resolved_account, _spec, _status, apply).
-
-
-##### `_require_connectors`  (lines 183–186)
-
-```
-def _require_connectors(ctx: ToolContext) -> ConnectorRegistry
-```
-
-**Purpose**: Checks that the current tool call has a connector registry. The connector registry is the catalog of connected-account providers available in this turn.
-
-**Data flow**: It receives a ToolContext. If connector information exists, it returns it; otherwise it raises a runtime error.
-
-**Call relations**: SourceObjects._resolved_account calls this while deciding whether a provider should use a connected account or a workspace credential.
-
-*Call graph*: called by 1 (_resolved_account).
-
-
-##### `_bindings_from_ext`  (lines 189–216)
-
-```
-async def _bindings_from_ext(ext: ExtensionContext) -> tuple[_Binding, ...]
-```
-
-**Purpose**: Reconstructs source bindings from the lower-level stored source rows. Each stream is stored separately, so this function groups rows back into the one source object users see.
-
-**Data flow**: It asks the extension context for all registered source rows. It ignores rows for unknown providers, validates each row’s connector config, groups rows by provider, account, and base URL, and returns _Binding objects with sorted streams.
-
-**Call relations**: SourceObjects._bindings uses this for object listing, lookup, status, and specs. on_page_change also uses it to connect changed page rows back to the source binding that produced them.
-
-*Call graph*: calls 1 internal fn (sources); called by 2 (_bindings, on_page_change); 3 external calls (__init__, __init__, model_validate).
-
-
-##### `_subscribers_map`  (lines 219–231)
-
-```
-async def _subscribers_map(ext: ExtensionContext, name: str) -> dict[str, str]
-```
-
-**Purpose**: Reads the saved subscriber list for one source. The list maps conversation ids to agent ids so alerts can re-enter the right conversation with the right agent.
-
-**Data flow**: It receives the extension context and source name. It reads a key from extension storage, returns an empty map if nothing is stored, returns a copy if the stored value is valid, and raises an error if the stored data has the wrong shape.
-
-**Call relations**: SourceObjects._edit_subscribers reads this before changing one subscriber entry. SourceObjects._spec and SourceObjects._status use it to show subscription state. on_page_change uses it to decide whom to alert.
-
-*Call graph*: called by 4 (_edit_subscribers, _spec, _status, on_page_change).
-
-
-##### `_store_subscribers`  (lines 234–240)
-
-```
-async def _store_subscribers(ext: ExtensionContext, name: str, mapping: dict[str, str]) -> None
-```
-
-**Purpose**: Writes the subscriber map for a source, or removes it when there are no subscribers left. This keeps extension storage tidy.
-
-**Data flow**: It receives the extension context, source name, and subscriber map. If the map has entries, it writes them under the source’s subscriber key; if the map is empty, it deletes that key.
-
-**Call relations**: SourceObjects._edit_subscribers calls this after adding or removing the caller. SourceObjects._delete_owned calls it with an empty map when the source itself is removed.
-
-*Call graph*: called by 2 (_delete_owned, _edit_subscribers).
-
-
-##### `_binding_identity`  (lines 243–244)
-
-```
-def _binding_identity(spec: SourceSpec) -> tuple[str, tuple[str, ...], str, str, bool]
-```
-
-**Purpose**: Extracts the parts of a source spec that define the source’s real identity. It ignores subscriber changes because subscriptions are allowed to change without recreating the source.
-
-**Data flow**: It receives a SourceSpec. It returns a tuple containing provider, sorted streams, account id, base URL, and sharing flag.
-
-**Call relations**: SourceObjects.apply compares old and new identities with this helper. If only subscribers changed, apply takes the lighter subscription-edit path.
-
-*Call graph*: called by 1 (apply).
-
-
-##### `_self_only_change`  (lines 247–254)
-
-```
-def _self_only_change(old: tuple[str, ...], new: tuple[str, ...], caller: str) -> None
-```
-
-**Purpose**: Enforces the rule that a conversation may only add or remove its own subscriber id. This stops one conversation from silently subscribing or unsubscribing another.
-
-**Data flow**: It receives the old subscriber ids, the new subscriber ids, and the caller’s conversation id. It compares the two sets and raises a ValueError if anything changed besides the caller’s own id.
-
-**Call relations**: SourceObjects.apply calls this before allowing a subscribers-only edit. If the check passes, SourceObjects.apply hands off to _edit_subscribers.
-
-*Call graph*: called by 1 (apply).
-
-
-##### `SourceObjects.apply`  (lines 276–291)
-
-```
-async def apply(self, ctx: ToolContext, name: str, spec: SourceSpec, old: SourceSpec | None) -> None
-```
-
-**Purpose**: Applies a requested source object change, with special treatment for subscription edits. It lets visible members subscribe themselves without requiring ownership, while all other changes follow the stricter owner rules from the base object system.
-
-**Data flow**: It receives the tool context, object name, requested SourceSpec, and the old visible spec if one exists. If the source identity is unchanged, it verifies that only the caller’s subscriber id changed and updates subscriptions. Otherwise it delegates to the parent apply logic for normal create, share, or replace behavior.
-
-**Call relations**: This is the first custom method reached for object_apply on a source. It calls _binding_identity, _self_only_change, _require_ext, and _edit_subscribers for subscription-only edits; for everything else, it relies on MemberOwnedObjects’ apply flow, which later calls _apply_owned.
-
-*Call graph*: calls 4 internal fn (_edit_subscribers, _binding_identity, _require_ext, _self_only_change).
-
-
-##### `SourceObjects._edit_subscribers`  (lines 293–304)
-
-```
-async def _edit_subscribers(self, ext: ExtensionContext, name: str, desired: tuple[str, ...], caller: str, agent: UUID) -> None
-```
-
-**Purpose**: Adds or removes the caller’s conversation from a source’s subscriber list. When adding, it remembers the agent id so later alerts go back to the same agent in the same conversation.
-
-**Data flow**: It receives the extension context, source name, desired subscriber ids, caller conversation id, and agent id. It loads the current subscriber map, adds or removes only the caller’s entry, and stores the updated map.
-
-**Call relations**: SourceObjects.apply calls this after proving the requested change is subscriber-only and self-only. It uses _subscribers_map and _store_subscribers as the read and write steps.
-
-*Call graph*: calls 2 internal fn (_store_subscribers, _subscribers_map); called by 1 (apply).
-
-
-##### `SourceObjects._owned_rows`  (lines 306–317)
-
-```
-async def _owned_rows(self, ctx: ToolContext) -> tuple[OwnedRow, ...]
-```
-
-**Purpose**: Builds the lightweight rows used when listing source objects. Each row contains the object name, a short summary, and ownership information.
-
-**Data flow**: It reads all bindings through _bindings. For each binding, it creates an OwnedRow with the derived name, summary text, and an ObjectOwner showing whether it is shared and who registered it.
-
-**Call relations**: The base object system calls this when it needs to list or find visible source objects. It depends on _bindings to turn stored stream rows into user-facing source bindings.
-
-*Call graph*: calls 1 internal fn (_bindings); 2 external calls (__init__, __init__).
-
-
-##### `SourceObjects._spec`  (lines 319–324)
-
-```
-async def _spec(self, ctx: ToolContext, name: str) -> SourceSpec | None
-```
-
-**Purpose**: Returns the public spec for a named source object, including its subscriber ids. This powers object_get-style reads of the source manifest.
-
-**Data flow**: It receives the context and object name. It finds the binding, reads subscriber ids from extension storage, and returns the binding as a SourceSpec; if the binding does not exist, it returns null.
-
-**Call relations**: The object framework calls this when it needs the full spec for a source. It uses _find to locate the binding, then _subscribers_map to add the subscription information.
-
-*Call graph*: calls 3 internal fn (_find, _require_ext, _subscribers_map).
-
-
-##### `SourceObjects._status`  (lines 326–347)
-
-```
-async def _status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None
-```
-
-**Purpose**: Builds live status information for a named source. This tells the caller whether it is shared, whether the current conversation is subscribed, and how each stream is doing.
-
-**Data flow**: It receives the context and object name. It finds the binding, reads subscribers, checks the caller’s conversation id, and returns a dictionary with sharing state, subscriber id, subscribed true or false, per-stream next sync time, and error counts. For private owned sources, it also includes the owner member id.
-
-**Call relations**: The object framework calls this alongside object reads or explanations. It uses _find for the source data and _subscribers_map for the caller’s subscription state.
-
-*Call graph*: calls 3 internal fn (_find, _require_ext, _subscribers_map).
-
-
-##### `SourceObjects._apply_owned`  (lines 349–417)
-
-```
-async def _apply_owned(self, ctx: ToolContext, name: str, spec: SourceSpec, old: SourceSpec | None, owner: ObjectOwner | None) -> None
-```
-
-**Purpose**: Creates a new source binding or performs the limited allowed changes to an existing one. It validates the provider, stream names, tenant URL, account or credential, derived object name, and sharing rules before registering anything.
-
-**Data flow**: It receives the context, requested name, spec, previous spec, and owner information. It verifies there is a speaking member, rejects subscribers during first registration, checks that the provider and streams exist, validates the base URL, resolves the account or credential, derives the required name, and compares it to the supplied name. If an existing binding is found, it either does nothing, flips private to shared, or refuses unsupported config changes. If no binding exists, it registers one source row per stream.
-
-**Call relations**: The parent object apply flow calls this after ownership gates pass. It calls _require_ext, _validated_base_url, _resolved_account, _binding_name, and _find, then uses the extension context to register sources or mark existing source rows as shared.
-
-*Call graph*: calls 5 internal fn (_find, _resolved_account, _binding_name, _require_ext, _validated_base_url); 5 external calls (__init__, __init__, __init__, member_subject, get).
-
-
-##### `SourceObjects._delete_owned`  (lines 419–426)
-
-```
-async def _delete_owned(self, ctx: ToolContext, name: str, owner: ObjectOwner) -> None
-```
-
-**Purpose**: Deletes a source binding and clears its subscriptions. Removing the binding also removes each stream row that feeds synced pages.
-
-**Data flow**: It receives the context, source name, and owner information. It finds the binding, raises an UnknownObject error if it is missing, removes every stream source id from the extension, and deletes the subscriber map.
-
-**Call relations**: The base object system calls this after delete permission has been checked. It uses _find to locate the binding, _require_ext to reach the extension API, and _store_subscribers to clear alert subscriptions.
-
-*Call graph*: calls 3 internal fn (_find, _require_ext, _store_subscribers); 1 external calls (__init__).
-
-
-##### `SourceObjects._resolved_account`  (lines 428–466)
-
-```
-async def _resolved_account(self, ctx: ToolContext, spec: SourceSpec) -> str
-```
-
-**Purpose**: Decides which authentication identity a source should use. Some providers use connected accounts; others use a workspace credential, sometimes called BYOK, meaning “bring your own key.”
-
-**Data flow**: It receives the context and source spec. If the provider is in the connector registry, it fetches active connected accounts, asks the user to choose when needed, and returns the chosen account id. If the provider uses a direct workspace credential, it checks that no account_id was supplied, verifies the credential is set, and returns the special direct-account marker.
-
-**Call relations**: SourceObjects._apply_owned calls this before deriving the final source name and registering streams. It uses _require_ext and _require_connectors because it needs both credential information and connector-account information.
-
-*Call graph*: calls 3 internal fn (connector_accounts, _require_connectors, _require_ext); called by 1 (_apply_owned).
-
-
-##### `SourceObjects._find`  (lines 468–471)
-
-```
-async def _find(self, ctx: ToolContext, name: str) -> _Binding | None
-```
-
-**Purpose**: Looks up one source binding by its derived object name. It is the small search helper used by read, status, apply, and delete paths.
-
-**Data flow**: It receives the context and source name. It loads all current bindings, scans for a binding whose name matches, and returns that binding or null.
-
-**Call relations**: SourceObjects._spec, _status, _apply_owned, and _delete_owned call this whenever they need to work with one named source. It relies on _bindings for the current reconstructed binding list.
-
-*Call graph*: calls 1 internal fn (_bindings); called by 4 (_apply_owned, _delete_owned, _spec, _status).
-
-
-##### `SourceObjects._bindings`  (lines 473–474)
-
-```
-async def _bindings(self, ctx: ToolContext) -> tuple[_Binding, ...]
-```
-
-**Purpose**: Loads all source bindings visible to this object store implementation. It is a thin wrapper that ensures the extension context exists before reconstructing bindings.
-
-**Data flow**: It receives the tool context, extracts the extension context, calls _bindings_from_ext, and returns the resulting tuple of bindings.
-
-**Call relations**: SourceObjects._owned_rows and _find call this as their common source of truth. It connects the object-level code to the extension’s stored source rows.
-
-*Call graph*: calls 2 internal fn (_bindings_from_ext, _require_ext); called by 2 (_find, _owned_rows).
-
-
-##### `on_page_change`  (lines 477–516)
+##### `on_page_change`  (lines 92–146)
 
 ```
 async def on_page_change(ctx: HookContext) -> HookOutcome
 ```
 
-**Purpose**: Sends alert turns to conversations subscribed to sources whose synced pages changed. It only alerts about shared pages, so private page changes are not leaked.
+**Purpose**: Responds to synced-page change events by comparing changed pages with saved watches and triggering alerts for matches. This is the core alerting path.
 
-**Data flow**: It receives a hook context and expects a PageChangeBatch payload. It rebuilds bindings, maps changed source ids to bindings, groups changes by binding, loads each binding’s subscribers, keeps only shared changes, builds an alert message, and invokes each subscribed conversation with an idempotency key so replayed batches do not duplicate alerts.
+**Data flow**: It receives a hook context containing a page-change batch and extension services. It confirms the payload really is a page-change batch, loads all saved watches, skips work if there are none, and requires an off-turn model to be available. For each non-deleted page, it takes a clipped excerpt, asks the model whether the page matches each watch topic, and if the answer includes MATCH, it invokes an alerting turn in the stored conversation and agent using a duplicate-prevention key. It returns no special outcome.
 
-**Call relations**: The extension hook system calls this when page changes are reported. It uses _bindings_from_ext to understand which source produced each change, _subscribers_map to find listeners, and _alert_message to create the text sent into each subscribed conversation.
+**Call relations**: The source page-sync pipeline calls this hook when pages change. It uses _watch_fields to unpack saved watch records, builds a small model request with Message and ModelRequest, and converts stored conversation and agent strings back into UUID objects before asking the extension system to send the alert.
 
-*Call graph*: calls 3 internal fn (_alert_message, _bindings_from_ext, _subscribers_map); 1 external calls (UUID).
-
-
-##### `_alert_message`  (lines 519–530)
-
-```
-def _alert_message(binding: _Binding, changes: list[PageChange]) -> str
-```
-
-**Purpose**: Creates the plain-language message sent when a subscribed source changes. The message tells the agent which source changed and which page objects to inspect.
-
-**Data flow**: It receives a binding and a list of page changes. It builds a short list of page references, counts extra and removed pages, chooses singular or plural wording, includes the binding summary, and returns one complete instruction message.
-
-**Call relations**: on_page_change calls this once per changed binding before invoking subscribers. It calls _page_reference for each displayed page and _Binding.summary to describe the source.
-
-*Call graph*: calls 2 internal fn (summary, _page_reference); called by 1 (on_page_change).
+*Call graph*: calls 1 internal fn (_watch_fields); 3 external calls (__init__, __init__, UUID).
 
 
-##### `_page_reference`  (lines 533–539)
+##### `_watch_fields`  (lines 149–154)
 
 ```
-def _page_reference(change: PageChange) -> str
+def _watch_fields(key: str, value: object) -> tuple[str, str, str]
 ```
 
-**Purpose**: Formats one changed page as a readable object reference. It gives the alerted agent both the page object id and a small label from the page body when available.
+**Purpose**: Checks that a stored watch record has the expected shape and extracts the important fields. It prevents later code from silently using broken or incomplete watch data.
 
-**Data flow**: It receives a PageChange. If the page is not deleted and has body text, it takes the first line as a label; otherwise it uses a fallback label. It returns text like page/<id> (label).
+**Data flow**: It receives a storage key and the value read from the store. If the value is a dictionary with string fields for topic, conversation ID, and agent ID, it returns those three strings. Otherwise, it raises an error naming the malformed watch.
 
-**Call relations**: _alert_message calls this while building the list of changed pages included in a subscriber alert.
+**Call relations**: list_page_watches calls this before displaying saved watches, and on_page_change calls it before using a watch to classify pages and send alerts. In both cases it acts like a gatekeeper for stored watch data.
 
-*Call graph*: called by 1 (_alert_message).
-
-
-##### `_validated_base_url`  (lines 542–576)
-
-```
-def _validated_base_url(provider: str, base_url: str | None) -> str | None
-```
-
-**Purpose**: Checks and normalizes tenant API URLs for providers that need them. This prevents unsafe or wrongly shaped URLs from being stored as source configuration.
-
-**Data flow**: It receives a provider and optional base URL. For providers with a fixed API host, it rejects overrides. For tenant-specific providers, it requires a URL, parses it, checks that it uses HTTPS, has no username, password, port, query, or fragment, and matches the provider’s allowed host and path pattern. It returns a normalized HTTPS URL or null for fixed-host providers.
-
-**Call relations**: SourceObjects._apply_owned calls this before resolving the account and deriving the binding name. Its validation errors tell the caller the expected URL shape for that provider.
-
-*Call graph*: called by 1 (_apply_owned); 1 external calls (urlsplit).
-
-
-### `extensions/skill_create/ufo_ext_skill_create/store.py`
-
-`domain_logic` · `request handling and per-turn skill loading`
-
-A “skill” here is a small directory of files, led by a SKILL.md file, that teaches the agent some reusable behavior. This file is the safe storage layer for skills created by a user inside a workspace. Without it, a skill made during one turn could disappear when the temporary sandbox is thrown away, or worse, leak into another workspace or replace a built-in skill.
-
-The store uses a database table named user_skill. Each row belongs to one workspace and one skill name. The actual files are packed into a JSON object where each file’s bytes are base64-encoded. Base64 is a common way to turn raw bytes into plain text so they can be stored safely in a text database column. A SHA-256 digest, which is a fingerprint of the stored content, records the saved version.
-
-Before saving, the store checks that the skill name is a simple safe slug, such as “daily-report”. It parses the skill with the same parser used for normal runtime skills, refuses names that would collide with core or pack skills, and caps each workspace at 100 saved skills. When loading, it reads only that workspace’s rows, decodes the files, parses them back into runtime skills, and skips any broken stored skill with a warning instead of blocking the whole workspace.
-
-#### Function details
-
-##### `UserSkillStore.save`  (lines 86–147)
-
-```
-async def save(self, workspace_id: UUID, name: str, files: Mapping[str, bytes], registry_names: frozenset[str]) -> RuntimeSkill
-```
-
-**Purpose**: Saves a user-authored skill for one workspace after checking that it is safe, valid, and allowed. It returns the parsed skill so the caller can use the same version that was persisted.
-
-**Data flow**: It receives a workspace ID, a proposed skill name, a map of file paths to file bytes, and the set of skill names already available this turn. It first rejects unsafe names, parses the files as a real skill, checks whether this workspace already owns that name, rejects attempts to override core or pack skills, and enforces the per-workspace skill limit for new names. It then base64-encodes every file, stores the bundle as JSON, computes a SHA-256 fingerprint, and updates the existing database row or inserts a new one. The output is the parsed RuntimeSkill, and the database is changed to contain the latest saved files.
-
-**Call relations**: This is the main entry point for persisting a new or edited user skill. During its checks, it asks UserSkillStore._owns whether this workspace already has the name and UserSkillStore._count how many skills the workspace has saved. It hands the file contents to parse_skill_content so saving uses the same validation path as other skills, then writes the final bundle through the extension transaction.
-
-*Call graph*: calls 2 internal fn (_count, _owns); 9 external calls (__init__, __init__, __init__, __init__, b64encode, sha256, insert, update, parse_skill_content).
-
-
-##### `UserSkillStore.load_all`  (lines 149–186)
-
-```
-async def load_all(self, workspace_id: UUID) -> tuple[RuntimeSkill, ...]
-```
-
-**Purpose**: Loads every saved skill for one workspace so they can be added to the runtime skill registry for a turn. It keeps failures isolated: one bad stored skill is logged and skipped instead of breaking the whole turn.
-
-**Data flow**: It receives a workspace ID and reads all stored skill names and content blobs for that workspace from the database. For each row, it validates the stored JSON shape, base64-decodes the files back to bytes, and parses those files into a RuntimeSkill. The output is a tuple of successfully parsed skills; invalid or corrupt rows do not appear in the result, and a warning is written to the log.
-
-**Call relations**: This function is used when the system is preparing the skills available during a turn. It reads from the same database rows that UserSkillStore.save writes, then hands each decoded file bundle to parse_skill_content so the runtime sees normal RuntimeSkill objects rather than raw stored text.
-
-*Call graph*: 3 external calls (b64decode, select, parse_skill_content).
-
-
-##### `UserSkillStore.files`  (lines 188–203)
-
-```
-async def files(self, workspace_id: UUID, name: str) -> dict[str, bytes] | None
-```
-
-**Purpose**: Fetches the original file bundle for one saved skill in one workspace. This is useful when another part of the extension needs to inspect, edit, or display the saved files rather than just load the skill into the registry.
-
-**Data flow**: It receives a workspace ID and skill name, then looks for that exact row in the database. If no row exists, it returns None. If the row exists, it validates the stored JSON and base64-decodes each saved file back into bytes. The output is a dictionary from relative file paths to raw file bytes.
-
-**Call relations**: This is a read-back helper for one specific skill. It uses the same stored content format created by UserSkillStore.save, but unlike UserSkillStore.load_all, it does not parse the files into a RuntimeSkill; it returns the files themselves.
-
-*Call graph*: 2 external calls (b64decode, select).
-
-
-##### `UserSkillStore.delete`  (lines 205–212)
-
-```
-async def delete(self, workspace_id: UUID, name: str) -> None
-```
-
-**Purpose**: Removes one saved user skill from one workspace. It lets a workspace clean up skills it no longer wants, including making room under the saved-skill limit.
-
-**Data flow**: It receives a workspace ID and skill name, then deletes the matching database row if it exists. It returns nothing. After it runs, that skill will no longer be loaded for that workspace on future turns.
-
-**Call relations**: This is the counterpart to UserSkillStore.save. Where save inserts or replaces a skill row, delete removes the row so later calls to UserSkillStore.load_all or UserSkillStore.files will not find that skill.
-
-*Call graph*: 1 external calls (delete).
-
-
-##### `UserSkillStore.updated_at`  (lines 214–224)
-
-```
-async def updated_at(self, workspace_id: UUID, name: str) -> datetime | None
-```
-
-**Purpose**: Looks up when a saved skill was last changed. Callers can use this timestamp to show freshness, compare versions, or decide whether something needs to be refreshed.
-
-**Data flow**: It receives a workspace ID and skill name, then reads the updated_at column for that exact database row. If the skill is not saved in that workspace, it returns None. Otherwise, it returns the stored datetime.
-
-**Call relations**: This is a small lookup beside the main save/load flow. UserSkillStore.save updates the timestamp whenever it writes a skill, and updated_at later exposes that saved time to callers that need metadata rather than file contents.
-
-*Call graph*: 1 external calls (select).
-
-
-##### `UserSkillStore._count`  (lines 226–234)
-
-```
-async def _count(self, workspace_id: UUID) -> int
-```
-
-**Purpose**: Counts how many user skills are currently saved in one workspace. It exists to enforce the rule that a workspace cannot accumulate unlimited saved skills.
-
-**Data flow**: It receives a workspace ID and asks the database how many user_skill rows belong to that workspace. It returns that number as an integer and does not change anything.
-
-**Call relations**: UserSkillStore.save calls this when it is about to add a new skill name. If the count has reached the workspace limit, save refuses the new skill instead of letting future turns become slower and storage grow without bound.
-
-*Call graph*: called by 1 (save); 1 external calls (select).
-
-
-##### `UserSkillStore._owns`  (lines 236–246)
-
-```
-async def _owns(self, workspace_id: UUID, name: str) -> bool
-```
-
-**Purpose**: Checks whether a workspace already has a saved user skill with a given name. This tells the save path whether it is updating an existing user skill or trying to create a new one.
-
-**Data flow**: It receives a workspace ID and skill name, then searches for a matching database row. It returns true if the row exists and false otherwise. It only reads the database.
-
-**Call relations**: UserSkillStore.save uses this check before deciding what rules apply. If the workspace already owns the name, saving is treated as an update; if not, save checks for collisions with core or pack skills and checks the workspace skill count before inserting.
-
-*Call graph*: called by 1 (save); 1 external calls (select).
+*Call graph*: called by 2 (list_page_watches, on_page_change).
 
 ## 📊 State Registers Touched
 
-- `reg-workspace-context` — The current workspace and member context that keeps every request acting inside the right tenant boundary.
-- `reg-workspaces-members-agents` — The durable records for workspaces, their members, and the agents that can act for them.
-- `reg-identity-and-session-tokens` — The identities, bearer tokens, gateway tokens, operator sessions, and other passes that prove who is allowed in.
-- `reg-onboarding-claims-invites` — The temporary signup codes, email claims, and invite records used before or during workspace creation.
-- `reg-connected-credentials` — The encrypted store of outside account connections and secrets that tools and sync jobs may use safely.
-- `reg-extension-pack-lock` — The saved choice of active packs and installed extensions for a workspace.
-- `reg-extension-state-store` — The per-workspace key-value storage area where extensions keep their own persistent settings and data.
-- `reg-capability-registry` — The loaded menu of extension-provided routes, tools, skills, hooks, jobs, credentials, models, and search backends.
-- `reg-search-index-state` — The searchable content indexes, chunks, embeddings, and search backend choices used for recall and source replay.
-- `reg-sandbox-session-policy` — The safe execution room state: sandbox handles, mounted workspace files, storage access, and restrictions.
-- `reg-conversation-transcript` — The saved conversation thread, messages, transcript edits, and compacted summaries.
-- `reg-turn-queue-run-state` — The durable state of each agent turn, including whether it is queued, claimed, running, parked, finished, failed, or cancelled.
-- `reg-inbound-surface-state` — The stored inbound messages and surface delivery keys that connect Slack, web, terminal, and other fronts to conversations.
-- `reg-artifact-blob-store` — The shared file and blob storage used for uploaded content, generated artifacts, and token-protected downloads.
-- `reg-source-sync-state` — The remembered external sources, imported pages, raw bodies, change records, cursors, errors, and deletion markers.
-- `reg-memory-store` — The workspace memory facts, episodes, ownership labels, confidence, and consolidation indexes used for recall.
-- `reg-knowledge-graph` — The stored people, companies, things, and relationships used as structured background knowledge.
-- `reg-scheduled-task-calendar` — The durable calendar of one-time and repeating tasks that workers can safely claim and run later.
-- `reg-runtime-instance-fleet` — The heartbeat records for live worker and runtime processes, used to detect dead workers and clean up abandoned work.
-- `reg-accounting-ledger-spend` — The usage ledger, spend caps, exports, and cost totals for models, egress, and other billable work.
-- `reg-seat-billing-state` — The workspace seat limits, granted seats, included seats, and external billing integration state.
-- `reg-workspace-object-catalog` — The named workspace objects and object-type registry used to list, inspect, validate, change, or delete stored things.
-- `reg-prompt-governance` — The saved prompt digests, prompt-change proposals, approvals, and experiment evidence that control instruction changes.
-- `reg-subagent-work-tree` — The parent-child turn links, delegated work state, and message flow between main agents and subagents.
-- `reg-schema-migration-version` — The Alembic/schema version state recording which core and extension migrations have been applied before runtime uses the database.
-- `reg-database-connection-pool` — The process-wide database engine/session factory and connection pool used by request handlers, workers, schedulers, and persistence code.
-- `reg-action-proposal-state` — Durable non-governance proposals created by agents or tools for later user/operator review, approval, rejection, or commit.
-- `reg-hosted-domain-workspace-map` — Durable hosted onboarding mapping from verified email domains to the shared workspace used for automatic member provisioning.
-- `reg-agent-todo-goal-state` — The agent-maintained goal/todo checklist state that tools update and later prompt/runtime assembly can reload as working context.
+- `reg-extension-set` — The saved and loaded set of extensions, packs, manifests, and contributed capabilities available to the runtime.
+- `reg-workspace-storage` — The shared file, blob, artifact, and mount state that stores workspace bytes and files shared back to users.
+- `reg-source-pages` — The source connections, sync cursors, imported pages, removal markers, and page-change records from outside systems.
+- `reg-search-index` — The searchable text chunks, embeddings, and selected index backend used to find relevant stored content.
+- `reg-memory-store` — The durable memories, memory pages, recall events, and consolidation state used for long-term recall.
+- `reg-knowledge-graph` — The stored entities and relationships extracted from pages so the system can look up connected facts.
+- `reg-extension-store` — The per-workspace extension-owned storage where plugins keep their own durable records without private tables.
+- `reg-page-alert-subscriptions` — The stored page-change watch rules, subscribed conversations, topic alerts, and pending alert notifications triggered by synced content changes.

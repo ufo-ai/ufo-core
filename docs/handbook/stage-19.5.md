@@ -1,158 +1,307 @@
-# User-facing capability extension package markers  `stage-19.5`
+# Source and page persistence migrations  `stage-19.5`
 
-This stage is shared behind-the-scenes support. It does not run the main product by itself. Instead, it puts “front doors” on many extension folders so Python can recognize and import them as packages. A package is simply a folder that Python treats as a named bundle of code.
+This stage is behind-the-scenes setup for the database, the system’s long-term memory. It is not the main work loop. Instead, these migrations change the database shape as the project grows, so synced content can be stored safely across upgrades.
 
-Most files here are __init__.py markers. The browser marker identifies the browser extension and points to browser, computer-use, and browser-agent tools. Its bua marker opens a smaller browser-use area for imports. Coding, documents, knowledge graph, research, sites, Slack, UFO, web, and YC each have similar markers so their tools can be found by the rest of the system. The documents extension also marks script folders for document review, PowerPoint, and spreadsheet skills, making those helper scripts importable. The memory marker also describes its role: storing long-term facts, recalling them during prompts, updating memory from pages, and indexing memory. The skill-create marker describes support for making and exposing user-created skills. Together, these files act like labels on tool drawers, letting later stages open the right drawer when needed.
+The first migration creates the basic storage: a source table for places content comes from, and a page table for the content found there. Later migrations refine that model. One opens the source backend field so sources are not limited to folders; extensions can add new kinds of sources. Another adds an error streak counter, which lets the system remember repeated failures and back off instead of retrying too aggressively.
+
+Other migrations improve how sources are managed. One adds a removed_at timestamp, so a source can be hidden or retired without erasing its history. Another adds ownership, marking a source as shared or tied to one member. The page-focused migrations add browsing details like stream name, title, and original source timestamps, then rename page timestamp columns so their meaning is clearer.
 
 ## Files in this stage
 
-### Browser package markers
-Browser-facing package markers establish the main browser extension namespace and its browser-use automation subpackage.
+### Initial source and page tables
+Creates the foundational persistence tables for synced content sources and their discovered pages.
 
-### `extensions/browser/ufo_ext_browser/__init__.py`
+### `core/src/ufo/schema/migrations/versions/0008_source_page.py`
 
-`other` · `import time`
+`data_model` · `database migration`
 
-This is the package marker for the browser tool extension. In Python, an `__init__.py` file tells Python that a folder should be treated as an importable package. Here, it does not define any functions, classes, or setup code. Its main job is to give a short human-readable summary of the package: this area contains tools for working with a sandbox browser or computer-use environment, along with a browser-focused subagent profile. You can think of it like a label on a drawer. The drawer holds the actual tools elsewhere, while this file tells readers and Python that the drawer exists and what kind of things belong in it. If this file were removed, depending on the Python version and packaging setup, imports from this folder might become less explicit or fail in environments that expect traditional Python packages.
+This migration teaches the database about “sources” and “pages.” A source is where content comes from, such as a folder. A page is a stored piece of content from that source, tied to a workspace and marked with information the system needs to show it, sync it, or ignore it later. Without this file, the application would have nowhere structured to record which content locations should be synced, when they are due for syncing, or what pages have already been discovered.
 
+The `source` table stores the sync setup: which workspace owns the source, what backend type it uses, its configuration, a cursor for remembering progress, the next time it should sync, and temporary claim fields so workers can avoid doing the same sync job at the same time. Think of this like a shared job clipboard: one worker can “claim” a source for a while so others know to leave it alone.
 
-### `extensions/browser/ufo_ext_browser/bua/__init__.py`
+The `page` table stores synced content metadata: which workspace and source it belongs to, a digest for change detection, a reference to the body content, a subject describing who it is for, and a tombstone flag for deleted or hidden pages. The indexes are shortcuts that make common lookups faster, such as finding sources due to sync or reading a workspace’s page feed in update order.
 
-`other` · `import/package discovery`
+#### Function details
 
-This is an empty Python package file. In Python projects, a file named `__init__.py` tells Python that the surrounding folder should be treated as an importable package. You can think of it like a label on a drawer: the drawer may contain useful tools, but this label simply makes the drawer recognizable to the rest of the program.
+##### `upgrade`  (lines 12–47)
 
-Because this file has no code inside it, it does not create objects, run setup steps, or change program behavior directly. Its value is structural. Without it, depending on the Python version and import style, other parts of the project might not be able to reliably import modules from `extensions/browser/ufo_ext_browser/bua`. That could break code that expects `bua` to be a normal package.
+```
+def upgrade() -> None
+```
 
-So this file matters not because of what it runs, but because it helps organize the project and keeps imports predictable.
+**Purpose**: This function applies the migration by creating the new database structures needed for synced sources and pages. It is used when moving the database forward to this schema version.
 
+**Data flow**: Before it runs, the database has no `source` or `page` tables from this migration. The function asks Alembic, the database migration tool, to create the `source` table, add an index for finding sources that are due to sync, create the `page` table, and add indexes for page feed and source lookups. After it finishes, the application can store source sync settings and page records with the required links, rules, and lookup shortcuts.
 
-### Coding and document packages
-These markers expose coding and document-oriented extension packages, including importable script folders for document review and Office file workflows.
+**Call relations**: When the migration system upgrades the database, it calls `upgrade`. This function hands the actual table and index creation work to Alembic operations, using SQLAlchemy objects to describe columns, foreign keys, checks, and data types in a database-independent way.
 
-### `extensions/coding/ufo_ext_coding/__init__.py`
+*Call graph*: 11 external calls (create_index, create_table, Boolean, CheckConstraint, Column, DateTime, ForeignKeyConstraint, JSON, PrimaryKeyConstraint, Text (+1 more)).
 
-`other` · `import time`
 
-In Python, a folder often needs an `__init__.py` file to be treated as a package, meaning a named group of code that can be imported elsewhere. This file is that marker for the `ufo_ext_coding` extension package. It is currently empty, so it does not run setup code, expose shortcut imports, or define any functions or classes.
+##### `downgrade`  (lines 50–55)
 
-Its value is structural rather than behavioral. Without it, depending on the Python version and import style, code that tries to import `ufo_ext_coding` or modules inside it might fail or behave differently. You can think of it like a label on a filing cabinet drawer: the label does not contain the documents, but it tells the system that the drawer is an organized place to look.
+```
+def downgrade() -> None
+```
 
+**Purpose**: This function reverses the migration by removing the tables and indexes that `upgrade` created. It is used when rolling the database back to an earlier schema version.
 
-### `extensions/documents/ufo_ext_documents/__init__.py`
+**Data flow**: Before it runs, the database may contain the `source` and `page` tables plus their indexes. The function drops the page-related indexes, removes the `page` table, then drops the source index and removes the `source` table. After it finishes, the database is back to the older shape where these source and page records cannot be stored.
 
-`other` · `import time`
+**Call relations**: When the migration system rolls back from this schema version, it calls `downgrade`. The function delegates the removal steps to Alembic, carefully dropping indexes before the tables they belong to so the database objects are removed cleanly.
 
-This is an empty package initializer. In Python, a file named `__init__.py` tells the interpreter that the surrounding folder should be treated as an importable package. Think of it like a label on a drawer: the label does not contain the tools, but it tells the system that the drawer exists and can be opened by name.
+*Call graph*: 2 external calls (drop_index, drop_table).
 
-Here, the drawer is `ufo_ext_documents`, which appears to be an extension area for document-related functionality. Even though this file has no code, it still matters because imports elsewhere may rely on the package name being valid. Without it, depending on the Python version and packaging setup, other parts of the project might fail to import document extension modules cleanly.
 
-There are no functions, classes, settings, or startup actions here. Its job is structural: it helps organize code and gives the package a clear boundary.
+### Source behavior and lifecycle
+Evolves source records to support open backend types, retry backoff state, soft removal, and ownership subjects.
 
+### `core/src/ufo/schema/migrations/versions/0019_source_backend_open.py`
 
-### `extensions/documents/ufo_ext_documents/skills/document-review/scripts/__init__.py`
+`data_model` · `database migration`
 
-`other` · `package import/discovery`
+This file is one step in the project’s database history. It uses Alembic, a tool that applies database schema changes in order, like a set of numbered renovation instructions for a house. Before this migration, the `source` table had a check constraint named `source_backend` that only allowed the `backend` column to contain the value `folder`. That was safe when folders were the only possible source type, but it would block newer source backends added through extensions. The upgrade removes that restriction, so the application can store other backend names. The downgrade does the reverse: it puts the old rule back, allowing only `folder` again. Both directions use Alembic’s batch table alteration helper, which is a safer way to edit a table across different database systems, especially ones with limited direct table-alter support. Without this migration, installing or using new source backend extensions could fail when the database rejects their backend name.
 
-This is an empty Python `__init__.py` file. Its job is not to perform document review directly, but to tell Python that the surrounding `scripts` directory should be treated as an importable package. In everyday terms, it is like putting a label on a folder so the rest of the system knows the folder is part of the organized project structure, not just a loose collection of files. Without this file, some Python environments or tooling might not reliably find or import script modules from this directory, especially in older packaging styles. There are no functions, classes, settings, or side effects here. Its importance is structural: it supports package discovery and keeps imports predictable for the document-review skill’s script code.
+#### Function details
 
+##### `upgrade`  (lines 11–13)
 
-### `extensions/documents/ufo_ext_documents/skills/office-pptx/scripts/__init__.py`
+```
+def upgrade() -> None
+```
 
-`other` · `import time`
+**Purpose**: Applies the forward database change. It removes the old `source_backend` rule so the `source.backend` value can be something other than `folder`.
 
-This is an empty Python package marker. In Python, a file named `__init__.py` tells the interpreter that the folder should be treated as an importable package. Think of it like a label on a drawer: the drawer may contain useful tools, but this label mainly helps Python find and organize them. Here, the drawer is the `scripts` folder inside the PowerPoint-related document extension. Without this file, some Python environments or import styles might not reliably recognize the folder as a package, which could make nearby script modules harder or impossible to import. Because the file is empty, it does not define settings, start any process, or change behavior when loaded beyond the package-recognition effect.
+**Data flow**: It reads no application data directly. It opens a controlled table-change block for the `source` table, tells the database to drop the check constraint named `source_backend`, and leaves the table with a more open `backend` column.
 
+**Call relations**: Alembic calls this when moving the database from revision `0018` to `0019`. Inside that migration step, it asks `alembic.op.batch_alter_table` to prepare a safe edit area for the `source` table, then performs the constraint removal there.
 
-### `extensions/documents/ufo_ext_documents/skills/office-xlsx/scripts/__init__.py`
+*Call graph*: 1 external calls (batch_alter_table).
 
-`other` · `import time`
 
-This file does not contain any executable code, but it still has a useful job. In Python projects, an `__init__.py` file tells Python that a folder should be treated as a package, meaning its contents can be imported as part of the project’s module structure. Think of it like a label on a drawer: the drawer may be empty at the front, but the label tells the rest of the system where to look for related tools inside it. Without this file, some Python environments or import styles might not recognize `scripts` as a package, which could make imports from this directory fail or behave differently. Because it is empty, it does not set up state, define helpers, or run startup code. Its purpose is structural: it supports organization and import compatibility for the Office XLSX document skill scripts.
+##### `downgrade`  (lines 16–18)
 
+```
+def downgrade() -> None
+```
 
-### Knowledge and recall packages
-These package markers make knowledge graph, memory, and research capabilities importable for higher-level user workflows.
+**Purpose**: Reverses the migration if the database is rolled back. It restores the old rule that only allows `folder` as a source backend.
 
-### `extensions/knowledge_graph/ufo_ext_knowledge_graph/__init__.py`
+**Data flow**: It reads no application data directly. It opens a controlled table-change block for the `source` table, creates a check constraint named `source_backend`, and makes the database reject any `backend` value outside `folder`.
 
-`other` · `import time`
+**Call relations**: Alembic calls this when rolling the database back from revision `0019` to `0018`. It uses `alembic.op.batch_alter_table` to safely edit the `source` table, then recreates the constraint that the upgrade removed.
 
-In Python, an `__init__.py` file is like a label on a folder saying, “this folder is part of the program and can be imported.” This particular file is empty, so it does not define settings, functions, or startup behavior. Its value is structural: it lets the knowledge graph extension live under a clear package name, `ufo_ext_knowledge_graph`, and allows other files to import pieces from that package in the usual Python way. Without this file, some Python environments or tooling might not treat the folder as a normal package, which could make imports less predictable. Think of it as the front door sign for the extension’s code folder: it does not do the work inside the building, but it helps the rest of the system find the building correctly.
+*Call graph*: 1 external calls (batch_alter_table).
 
 
-### `extensions/memory/ufo_ext_memory/__init__.py`
+### `core/src/ufo/schema/migrations/versions/0021_source_error_backoff.py`
 
-`other` · `startup and cross-cutting`
+`data_model` · `database migration during deploy or setup`
 
-This file does not contain working code. Its main job is to identify this folder as the home of the memory extension and to give a short summary of the extension’s responsibilities. In plain terms, the memory extension is about helping the system remember useful information over time. It can store durable facts, bring relevant memories back when a user submits a prompt, derive memory from page changes, and run a background-style job that builds or updates an index so memories can be found later. An index is like a library catalog: it does not replace the books, but it helps you find the right one quickly. Without this package file, Python tooling may not treat the folder as an importable package in older or stricter setups, and readers would lose this small signpost explaining what the extension is for.
+This file is one small step in the project’s database history. It changes the `source` table by adding a `consecutive_errors` column, which stores a whole number and starts at `0` for existing rows. In plain terms, it gives every source a scoreboard for repeated failures. If a source keeps failing, other parts of the system can increase this number and use it to decide whether to back off, much like waiting longer before calling a phone number that keeps being busy.
 
+The file is written as an Alembic migration. Alembic is a tool that applies database changes in order, so every installation can move from the old table shape to the new one safely. The `revision` and `down_revision` values tell Alembic where this migration sits in that ordered chain.
 
-### `extensions/research/ufo_ext_research/__init__.py`
+There are two directions. `upgrade` applies the change by adding the column. `downgrade` reverses it by removing the column. Without this migration, code that expects to read or update `source.consecutive_errors` would fail because the database would not have that field.
 
-`other` · `import time`
+#### Function details
 
-In Python, a folder becomes an importable package when it contains an `__init__.py` file. This file is that marker for the `ufo_ext_research` research extension. Think of it like a label on a folder: it tells Python, “this folder is a named part of the program.” Without it, depending on the Python setup and packaging rules, other parts of the system might not be able to reliably import modules from this directory. The file is empty, so it does not run setup code, define helper functions, or expose a simplified public interface. Its value is structural rather than behavioral: it helps the project organize research-related extension code under a clear package name.
+##### `upgrade`  (lines 12–16)
 
+```
+def upgrade() -> None
+```
 
-### Sites and skill authoring
-These entries expose site-oriented capabilities and the skill-authoring extension that supports creating and surfacing saved workspace skills.
+**Purpose**: This function moves the database schema forward by adding the `consecutive_errors` column to the `source` table. It makes sure the new value is always present and defaults to `0`, so old rows have a valid starting point.
 
-### `extensions/sites/ufo_ext_sites/__init__.py`
+**Data flow**: It receives no direct input from application code; Alembic calls it when applying this migration. It tells the database to add a new integer column named `consecutive_errors` to `source`, with `0` filled in by default. After it runs, every source row can store a count of repeated errors.
 
-`other` · `import/setup`
+**Call relations**: Alembic calls this function when upgrading from revision `0020` to `0021`. Inside it, the function builds the new column definition with SQLAlchemy and hands that instruction to Alembic’s `add_column`, which performs the database change.
 
-This is an empty Python package marker file. In Python, a folder can be treated as an importable package when it contains an `__init__.py` file. That means code elsewhere can refer to this folder by name, such as importing modules that live under `extensions/sites/ufo_ext_sites`.
+*Call graph*: 3 external calls (add_column, Column, Integer).
 
-Because the file has no code, it does not run setup steps, create objects, or change any settings. Its value is structural: it tells Python and project tools, “this directory is part of the program’s module tree.” A simple analogy is a label on a filing cabinet drawer. The label does not contain the documents, but it lets people and systems know the drawer has a name and can be found reliably.
 
-Without this file, some Python environments or tooling might not recognize the directory as a package, which could make imports fail or behave inconsistently. So even though it looks empty, it helps keep the extension site code organized and importable.
+##### `downgrade`  (lines 19–20)
 
+```
+def downgrade() -> None
+```
 
-### `extensions/skill_create/ufo_ext_skill_create/__init__.py`
+**Purpose**: This function reverses the migration by removing the `consecutive_errors` column from the `source` table. It is used if the database needs to be rolled back to the previous schema version.
 
-`other` · `import time`
+**Data flow**: It receives no direct input from application code; Alembic calls it during a rollback. It asks the database to drop the `consecutive_errors` column. After it runs, source rows no longer store this repeated-error counter.
 
-This file does not contain runnable logic. Its main job is to identify this folder as a Python package and to document, in one place, the purpose of the extension. The extension is about skill authoring: helping users create new skills, treating skills as a known kind of object in the system, and making sure skills saved in a workspace can be used at runtime.
+**Call relations**: Alembic calls this function when downgrading from revision `0021` back to `0020`. It hands the rollback work to Alembic’s `drop_column`, which removes the column that `upgrade` added.
 
-In plain terms, a “skill” here is likely a reusable capability or instruction set that the system can call on later. The docstring says this extension covers both the creation workflow and the runtime side, where saved skills are merged into the registry for the current turn. A registry is like a catalog: it tells the system what skills are available right now.
+*Call graph*: 1 external calls (drop_column).
 
-Without this package marker, Python would not treat this directory as an importable package in the usual way. Without the short description, newcomers would have less immediate context for why this extension exists and what pieces they should expect to find nearby.
 
+### `core/src/ufo/schema/migrations/versions/0036_source_removed.py`
 
-### Messaging and core extension packages
-Slack and UFO package markers provide importable namespaces for messaging integration and the core UFO extension area.
+`data_model` · `database migration`
 
-### `extensions/slack/ufo_ext_slack/__init__.py`
+This migration changes the shape of the database. Before it runs, a record in the `source` table has no built-in place to remember when it was removed. After it runs, each source can store a `removed_at` time, or leave it empty if the source has not been removed. This is often called a “soft delete”: instead of throwing away the record, the system keeps it and writes down when it stopped being active. An everyday analogy is putting a retirement date on a file rather than shredding the file.
 
-`other` · `import/package discovery`
+The file is used by Alembic, the database migration tool. Alembic reads the `revision` and `down_revision` values to know where this change fits in the ordered chain of database updates. The `upgrade` function applies the change by adding the new column. The `downgrade` function reverses it by dropping that column.
 
-This is an empty package marker file. In Python, a folder can be treated as an importable package when it contains an `__init__.py` file. That means other parts of the system can refer to code inside `extensions/slack/ufo_ext_slack` using normal Python import paths. Think of it like putting a label on a drawer: the drawer may hold many useful tools, but this label is what lets the rest of the workshop find it reliably. Because the file is empty, it does not set up Slack behavior, load settings, or run any startup work. Its value is structural: without it, some Python environments or tooling might not recognize this directory as a package, which could make imports from the Slack extension fail.
+This matters because application code can later distinguish between sources that still exist and sources that were removed, while preserving history. Without this migration, any code expecting `source.removed_at` to exist would fail when talking to the database.
 
+#### Function details
 
-### `extensions/ufo/ufo_ext_ufo/__init__.py`
+##### `upgrade`  (lines 12–13)
 
-`other` · `import time`
+```
+def upgrade() -> None
+```
 
-This is an empty package initializer. In Python, a file named `__init__.py` tells the interpreter that the surrounding folder should be treated as an importable package. Think of it like a label on a drawer: the drawer may contain useful tools in other files, but this label is what lets the rest of the program find the drawer by name. Because the file is empty, it does not run setup code, expose helper functions, or define shared values. Its main job is structural: without it, some Python environments or packaging tools might not recognize `extensions/ufo/ufo_ext_ufo` as a normal package, which could make imports fail or behave differently.
+**Purpose**: Applies this migration by adding a `removed_at` timestamp column to the `source` table. This gives the database a place to record when a source was removed, while allowing the value to be empty for active sources.
 
+**Data flow**: It reads no application data. When Alembic runs the migration, this function asks the database to add a new nullable date-and-time column named `removed_at` to the existing `source` table. After it finishes, the table has one extra field available for every source row.
 
-### Web and YC workflows
-The final package markers expose general web-extension modules and YC-specific workflow support.
+**Call relations**: Alembic calls this function when moving the database forward from revision `0035` to `0036`. Inside it, the function relies on Alembic's `add_column` operation and SQLAlchemy's column and timestamp definitions to describe the exact database change.
 
-### `extensions/web/ufo_ext_web/__init__.py`
+*Call graph*: 3 external calls (add_column, Column, DateTime).
 
-`other` · `import time`
 
-This is an empty package marker file. In Python, a folder can be treated as an importable package when it contains an `__init__.py` file. That means other parts of the project can refer to this folder by name, such as importing modules under `ufo_ext_web`.
+##### `downgrade`  (lines 16–17)
 
-There is no code here because the package does not need any startup work, shared constants, or convenience imports at this level. Its job is more like a label on a drawer: it tells Python, and human readers, that the files inside belong together as the web extension part of the project.
+```
+def downgrade() -> None
+```
 
-Without this file, some Python environments or tooling might not recognize the directory as a normal package, which could make imports less reliable. So even though it looks empty, it helps keep the project structure clear and importable.
+**Purpose**: Reverses this migration by removing the `removed_at` column from the `source` table. Someone would use this only when rolling the database schema back to the previous version.
 
+**Data flow**: It receives no direct input from application code. When run, it tells the database to drop the `removed_at` column from `source`. After it finishes, the table no longer has that field, and any stored removal timestamps in that column are lost.
 
-### `extensions/yc/ufo_ext_yc/__init__.py`
+**Call relations**: Alembic calls this function when moving the database backward from revision `0036` to `0035`. It hands the actual schema change to Alembic's `drop_column` operation, which performs the database-level removal.
 
-`other` · `import time`
+*Call graph*: 1 external calls (drop_column).
 
-This is an empty package marker file. In Python, a directory with an `__init__.py` file is treated as a package, which means other parts of the project can import modules from `extensions/yc/ufo_ext_yc` using normal Python import paths. Think of it like a label on a folder: the label does not contain instructions, but it tells Python, “this folder belongs to the program and can be used as a module namespace.” Without this file, some Python setups or tooling might not recognize the directory as an importable package, especially in older or stricter environments. Because the file is empty, it does not run setup code, expose shortcuts, or change package behavior when imported.
+
+### `core/src/ufo/schema/migrations/versions/0044_source_subject.py`
+
+`data_model` · `database migration`
+
+This file is an Alembic migration, which means it describes one step in changing the database structure over time. Its job is to update the `source` table so the system can tell who a source belongs to. Before this migration, sources did not have a built-in way to say whether they were shared or owned by one member. Without this change, later code that depends on source ownership would have nowhere reliable to store that information.
+
+The migration adds two new columns. `subject` is required and defaults to `shared`, so existing rows get a safe value automatically. It is checked so it can only be `shared` or a member-style value beginning with `member:`. This is like putting a label on every item in a shared cabinet: either it belongs to the whole group, or the label names a person. `owner_member_id` is optional and points to a row in the `member` table, creating a database-level link to the owning member when one exists.
+
+The file also includes the reverse operation. If the migration is rolled back, it first removes the rules and link, then removes the two columns. That order matters because databases usually will not let you remove a column while constraints still depend on it.
+
+#### Function details
+
+##### `upgrade`  (lines 12–21)
+
+```
+def upgrade() -> None
+```
+
+**Purpose**: Applies the forward database change. It adds the new source ownership fields and database rules that keep those fields valid.
+
+**Data flow**: It starts with the existing `source` table. It adds a required `subject` text column with `shared` filled in for existing and default new rows, then adds an optional `owner_member_id` UUID column. After that, it adds a rule that limits `subject` to accepted values and a foreign key, which is a database link, from `owner_member_id` to the `member` table. The result is a `source` table that can safely record shared sources and member-owned sources.
+
+**Call relations**: Alembic calls this function when the project is moved from the previous database version to this one. Inside the function, it hands the actual table changes to Alembic operations and SQLAlchemy column definitions, which translate the Python instructions into database changes.
+
+*Call graph*: 4 external calls (add_column, batch_alter_table, Column, Uuid).
+
+
+##### `downgrade`  (lines 24–29)
+
+```
+def downgrade() -> None
+```
+
+**Purpose**: Reverses the migration if the database needs to go back to the previous version. It removes the ownership rules and columns added by `upgrade`.
+
+**Data flow**: It starts with a `source` table that has the new ownership columns and constraints. It first removes the foreign key and check constraint, because those depend on the columns. Then it drops `owner_member_id` and `subject`. The result is the older table shape, without source ownership fields.
+
+**Call relations**: Alembic calls this function during a rollback from this migration to the prior one. It uses Alembic table-alteration and column-removal operations to undo the same structural changes that `upgrade` introduced.
+
+*Call graph*: 2 external calls (batch_alter_table, drop_column).
+
+
+### Page browsing metadata
+Adds browse-oriented page metadata and clarifies page record timestamp column names.
+
+### `core/src/ufo/schema/migrations/versions/0047_page_browse_fields.py`
+
+`data_model` · `database migration`
+
+This file is one step in the project’s database history. It tells the migration tool how to change the `page` table so synced pages can be browsed and displayed with more useful information. Without this migration, the application could store a page, but it would not have dedicated database fields for things like the page’s title, which stream it belongs to, or when the source system says it was created or updated.
+
+The file uses Alembic, a database migration tool, together with SQLAlchemy, a Python library for describing database tables and columns. Think of Alembic as a renovation log for a house: each migration says exactly what wall, room, or fixture was added, and how to undo that change if needed.
+
+The `upgrade` path adds four columns to the `page` table. `stream` and `title` are required text fields, so they get an empty-string default to keep existing rows valid. `source_created_at` and `source_updated_at` are optional text fields, so old pages can simply leave them blank. The `downgrade` path reverses the change by removing those columns in the opposite direction.
+
+#### Function details
+
+##### `upgrade`  (lines 12–17)
+
+```
+def upgrade() -> None
+```
+
+**Purpose**: Applies this migration by adding four new fields to the `page` table. This is used when moving the database forward to a version that supports browsing synced pages by stream, title, and source timestamps.
+
+**Data flow**: It starts with the existing `page` table. Inside a safe table-alteration block, it creates text columns named `stream`, `title`, `source_created_at`, and `source_updated_at`. After it runs, every page row has places to store this extra browse information, with empty defaults for the required fields.
+
+**Call relations**: The migration runner calls this when upgrading the database from the previous revision. It asks Alembic to open a batch edit on the `page` table, then uses SQLAlchemy column definitions to describe exactly what should be added.
+
+*Call graph*: 3 external calls (batch_alter_table, Column, Text).
+
+
+##### `downgrade`  (lines 20–25)
+
+```
+def downgrade() -> None
+```
+
+**Purpose**: Reverses this migration by removing the browse-related fields from the `page` table. This is used if the database must be rolled back to the earlier schema version.
+
+**Data flow**: It starts with a `page` table that already has the four added columns. Inside a table-alteration block, it drops `source_updated_at`, `source_created_at`, `title`, and `stream`. After it runs, the table looks like it did before this migration.
+
+**Call relations**: The migration runner calls this during a rollback. It uses Alembic’s batch table-editing helper to safely remove the columns that `upgrade` added, restoring the older shape of the table.
+
+*Call graph*: 1 external calls (batch_alter_table).
+
+
+### `core/src/ufo/schema/migrations/versions/0049_page_record_timestamps.py`
+
+`data_model` · `schema migration`
+
+This file is a small database change script. It is used by Alembic, a tool that applies database schema changes in order, like turning pages in an instruction manual. The real problem it solves is naming: the `page` table used to have timestamp fields called `source_created_at` and `source_updated_at`. This migration renames them to `record_created_at` and `record_updated_at`, which suggests they describe the page record itself rather than some outside source.
+
+Nothing about the stored timestamp values is changed here. The migration only changes the column names. That matters because the application code and the database must agree on names. If the code starts looking for `record_created_at` but the database still has `source_created_at`, reads or writes would fail.
+
+The file has two directions. `upgrade` applies the new names when moving the database forward. `downgrade` reverses the change if someone rolls the database back to the previous version. Both use Alembic’s batch table alteration feature, which is a safe way to change a table and is especially helpful for databases that have limited support for direct column changes.
+
+#### Function details
+
+##### `upgrade`  (lines 12–23)
+
+```
+def upgrade() -> None
+```
+
+**Purpose**: Moves the database schema forward by renaming the `page` table’s timestamp columns from the old `source_*` names to the newer `record_*` names. This prepares the database for code that expects the clearer column names.
+
+**Data flow**: It takes no direct input from the caller, but it reads the migration context provided by Alembic. It opens a controlled edit session for the `page` table, renames `source_created_at` to `record_created_at`, and renames `source_updated_at` to `record_updated_at`. The result is an updated database schema; the timestamp data remains in place under the new column names.
+
+**Call relations**: Alembic calls this function when applying revision `0049`. Inside it, the function asks Alembic to alter the `page` table and tells SQLAlchemy that the existing columns are text fields, so the rename can be performed without changing the stored data type.
+
+*Call graph*: 2 external calls (batch_alter_table, Text).
+
+
+##### `downgrade`  (lines 26–37)
+
+```
+def downgrade() -> None
+```
+
+**Purpose**: Moves the database schema backward by restoring the old timestamp column names. This is used if the migration needs to be rolled back to the previous schema version.
+
+**Data flow**: It takes no direct input from the caller, but uses Alembic’s active database migration context. It opens a controlled edit session for the `page` table, renames `record_created_at` back to `source_created_at`, and renames `record_updated_at` back to `source_updated_at`. The result is a database schema that matches the older version, with the existing timestamp values preserved.
+
+**Call relations**: Alembic calls this function when undoing revision `0049`. Like the forward migration, it uses Alembic’s batch table alteration helper and SQLAlchemy’s text type description so the database knows these are column renames, not changes to the stored values.
+
+*Call graph*: 2 external calls (batch_alter_table, Text).

@@ -1,1039 +1,654 @@
-# Onboarding, workspace creation, and member provisioning  `stage-4`
+# Serve process startup, app lifespan, and fleet coordination  `stage-4`
 
-This stage is the front door for a hosted UFO user. It runs during startup for a new person or team: proving they are allowed in, creating or finding their workspace, adding them as a member, and handing back the address and bearer token, which is the secret pass they use to connect later.
+This stage is the server’s “come alive and stay healthy” step. It happens at startup, then keeps running behind the scenes until shutdown. The main entry point, core/src/ufo/serve.py, assembles the service process. It starts the web server, attaches extension routes and user-facing surfaces, connects the background job engine, sets up workspace boundaries, credentials, sandbox networking, storage, and live update channels. In simple terms, it plugs all the main parts together so requests, jobs, files, and real-time updates can move through the system safely.
 
-The main web server is built in gateway.py. It guides the user through installing the client, entering an email, using an invite if required, and receiving their connection details. gateway_claim.py manages the email proof: it creates a short-lived code and rejects expired or repeatedly wrong attempts. gateway_email.py decides whether an address looks like a work email and sends the code, either through Amazon SES or to the local log in development. gateway_invite.py checks one-time invite codes. gateway_directives.py formats simple instructions sent to the terminal client. gateway_web.py presents the same flow in a browser. gateway_shared.py links a verified email domain to one shared workspace, creates it when needed, adds the member, and ensures a default agent exists. core/src/ufo/onboarding.py performs the deeper first-run workspace setup.
+core/src/ufo/runtime_instance.py makes each running server process known to the wider fleet, meaning the group of server processes working together. It writes heartbeat-style records so other parts of the system can tell the process is alive. It also runs cleanup loops that find work left behind by crashed or stopped processes, and it spreads cancellations from parent tasks to child tasks. During shutdown, these pieces help stop background server work cleanly instead of leaving loose ends.
 
 ## Files in this stage
 
-### Onboarding gateway
-The public gateway coordinates the hosted signup conversation and delegates verification, invite, and workspace setup steps.
+### Serve Runtime Lifecycle
+Starts the shared service process, initializes integrations and local runtime state, then registers the process with fleet-wide heartbeat and cleanup coordination.
 
-### `control/src/ufo_control/gateway.py`
+### `core/src/ufo/serve.py`
 
-`entrypoint` · `startup, request handling, shutdown`
+`entrypoint` · `startup, request handling, background work, shutdown`
 
-This file is the front door for hosted UFO onboarding. Without it, new users could not download the client script, sign in from the terminal or web page, prove that they own a work email address, or be placed into the right shared workspace.
+Think of this file as the control room for one running UFO fleet process. A single process serves many workspaces, so the central problem is keeping each request, job, credential lookup, and database read tied to the correct workspace. Without this file, the system would have pieces like storage, extensions, jobs, sandboxes, and web routes, but nothing would assemble them safely into one service.
 
-The server is a FastAPI app, which means it defines HTTP routes such as health checks, script download, login page, and onboarding endpoints. The central idea is a short conversation with the user. First, the server asks for a work email. Then it sends and checks a verification code. After that, it either finds an existing workspace for that email domain or creates one. If new workspaces require invite codes, it pauses and asks for an invite before creating the workspace. Finally, it returns small “directives,” which are simple commands for the client, such as “say this message,” “ask this question,” “store this token,” or “use this workspace URL.”
+At startup, `run` loads configuration, opens databases, loads extension manifests, checks credentials, creates the shared runtime, starts DBOS workers, registers background jobs, mounts API routes, and finally starts Uvicorn, the web server. It also starts a heartbeat so other processes know this one is alive.
 
-The file also sets up shared resources at startup: database connections, onboarding storage tables, invite-code storage, email sending, workspace resolution, and secrets used to mint login tokens. On shutdown it closes those resources. A few guardrails keep public requests small and predictable, so a bad or accidental request cannot send unlimited data into the onboarding flow.
+A major safety theme is “fail loudly at boot.” If an extension asks for a browser provider, search provider, connector auth backend, or credential key that is missing, this file stops startup instead of letting the first user request fail later.
+
+Another important theme is workspace boundaries. Shared surface routes identify the caller’s workspace from the request, bind that workspace for the whole response, and clear it afterward. This is like checking a visitor’s badge at the door and making sure the badge is removed before the next visitor enters.
+
+The file also decides whether sandbox internet traffic uses a local in-process proxy or an external proxy, so sandboxed agents can get controlled, metered, credential-aware network access.
 
 #### Function details
 
-##### `_stamp_script`  (lines 60–64)
+##### `_assert_no_reserved_routes`  (lines 110–126)
 
 ```
-def _stamp_script(text: str) -> str
+def _assert_no_reserved_routes(app: FastAPI) -> None
 ```
 
-**Purpose**: This prepares the downloadable client script before the server starts serving it. It replaces the development version marker with a short fingerprint of the script text, and fills in the public base URL the client should contact.
+**Purpose**: Checks that this service has not mounted web routes under URL prefixes reserved for the separate onboarding gateway. This prevents a silent routing conflict where the front door sends those paths somewhere else.
 
-**Data flow**: It takes the raw script text as input. It hashes the text to make a short version label, reads the public base URL from the environment or uses a default, then substitutes both values into the script. It returns the finished script text that users download.
+**Data flow**: It receives the FastAPI app, reads its registered routes, and looks for paths beginning with reserved prefixes such as `/login`, `/v1/onboard`, or `/ufo`. If it finds any, it raises an error; otherwise startup continues unchanged.
 
-**Call relations**: This runs while the module is being loaded, before requests arrive. The `/ufo` route later serves the stamped result directly, so each downloader gets a script with a stable version and the right server address.
+**Call relations**: `run` calls this after all routes have been mounted, just before starting the web server. It acts as the final guardrail that proves the service and gateway will not fight over the same paths.
 
-*Call graph*: 1 external calls (sha1).
-
-
-##### `Onboarding.advance`  (lines 80–86)
-
-```
-async def advance(self, channel: str, session: str, body: str, install: bytes) -> bytes
-```
-
-**Purpose**: This is the main stepper for the onboarding conversation. Given a user’s channel, session, and latest reply, it decides what question or result should come next.
-
-**Data flow**: It receives the channel name, session ID, user text, and any install instructions to include. It looks up any live claim for that channel and session. If there is no claim yet, it starts email collection; if the email is not verified, it checks the code; if verification is done, it resolves the workspace and signs the user in. It returns bytes containing client directives.
-
-**Call relations**: The web and terminal onboarding routes call this for each request. It acts like a receptionist: it checks where the user is in the process, then sends the work to `_collect_email`, `_verify_code`, or `_resolve`.
-
-*Call graph*: calls 3 internal fn (_collect_email, _resolve, _verify_code).
+*Call graph*: called by 1 (run).
 
 
-##### `Onboarding._collect_email`  (lines 88–106)
+##### `run`  (lines 129–253)
 
 ```
-async def _collect_email(self, channel: str, session: str, body: str, install: bytes) -> bytes
+def run() -> None
 ```
 
-**Purpose**: This handles the first part of onboarding: asking for a work email and starting a verification claim. It also turns validation or email-sending problems into friendly prompts.
+**Purpose**: Starts the shared UFO service process. It builds every major dependency, installs web routes and background workers, and then runs the HTTP server.
 
-**Data flow**: It receives the channel, session, user input, and install bytes. If the user has not typed anything, it returns directives that introduce UFO and ask for an email. If there is input, it tries to start a claim using that email. On failure it returns an error message and asks again; on success it tells the user a code was emailed and asks for that code.
+**Data flow**: It begins by reading configuration and environment variables. From those it creates database connections, credential storage, extension objects, blob storage, model and memory backends, connector routing, sandbox support, the runtime object, DBOS workflow execution, FastAPI routes, and scheduled jobs. Its visible output is a running web server; it also starts background threads and records this process as an active fleet seat.
 
-**Call relations**: Only `Onboarding.advance` sends users here, when no live claim exists yet. This function does not finish onboarding; it creates the first stored claim and returns the conversation to the caller for the next user reply.
+**Call relations**: This is the top-level entry point for the file. It calls the many helper functions in this file to choose backends, validate extension requirements, mount routes, launch jobs, set up proxy access, and shut down cleanly when Uvicorn exits.
 
-*Call graph*: called by 1 (advance); 2 external calls (directive, render).
-
-
-##### `Onboarding._verify_code`  (lines 108–115)
-
-```
-async def _verify_code(self, claim: OnboardClaim, body: str, install: bytes) -> bytes
-```
-
-**Purpose**: This checks the emailed verification code for an existing onboarding claim. It keeps the user in the code-entry step until the code is accepted.
-
-**Data flow**: It receives the stored claim, the user’s latest text, and install bytes. It asks the claim workflow to verify the code. If verification fails, it returns a message explaining the problem and asks for the code again. If it succeeds, it immediately continues into workspace resolution and returns that result.
-
-**Call relations**: `Onboarding.advance` calls this after a claim exists but has not yet been verified. When the code is correct, this function hands off to `_resolve`, so the user can move directly from verification to workspace setup without making another request.
-
-*Call graph*: calls 1 internal fn (_resolve); called by 1 (advance); 2 external calls (directive, render).
+*Call graph*: calls 16 internal fn (from_env, _assert_no_reserved_routes, _connect_flow, _connector_registry, _launch_jobs, _mount_ext_routes, _mount_shared_surfaces, _proxy_endpoint, _select_carrier, _select_cdp_provider (+6 more)); 39 external calls (__init__, __init__, __init__, __init__, __init__, __init__, __init__, run, Fernet, DBOS (+15 more)).
 
 
-##### `Onboarding._resolve`  (lines 117–132)
+##### `_stop_executor`  (lines 256–270)
 
 ```
-async def _resolve(self, claim: OnboardClaim, answer: str | None, install: bytes) -> bytes
+def _stop_executor(dbos: DBOS, heartbeat: Heartbeat, graceful_shutdown_seconds: int) -> None
 ```
 
-**Purpose**: This turns a verified email claim into an actual workspace login. It enforces invite-code rules for brand-new workspaces, creates or finds the workspace, marks the claim complete, and signs the user in.
+**Purpose**: Stops DBOS workflow execution safely during shutdown. It only retires this process’s fleet seat if no workflows are still active.
 
-**Data flow**: It receives a verified claim, the user’s latest answer if any, and install bytes. If invites are required and there is no workspace for the email domain yet, it runs the invite gate. Once the gate is clear, it ensures a workspace exists for the email domain, records the completed claim with that workspace ID, and returns signed-in directives with a token and workspace URL.
+**Data flow**: It receives the DBOS executor object, heartbeat object, and a shutdown time limit. It asks DBOS to drain work, checks whether any workflows are still active, logs and leaves the seat alive if work remains, or retires the heartbeat seat if the executor is empty.
 
-**Call relations**: This is reached from `Onboarding.advance` for already verified claims and from `_verify_code` immediately after successful code verification. It may call `_invite_gate` first, then finishes through `_signed_in`.
+**Call relations**: `run` calls this in its `finally` block after the web server stops. It hands off to DBOS for draining and to `Heartbeat.retire` only when it is safe for another process to recover abandoned work.
 
-*Call graph*: calls 2 internal fn (_invite_gate, _signed_in); called by 2 (_verify_code, advance); 1 external calls (directive).
-
-
-##### `Onboarding._invite_gate`  (lines 134–175)
-
-```
-async def _invite_gate(self, claim: OnboardClaim, answer: str | None, install: bytes) -> bytes | InviteAccepted | None
-```
-
-**Purpose**: This checks whether a verified user is allowed to create a new workspace when invite codes are required. It asks for a code, accepts a valid one, or explains why a code cannot be used.
-
-**Data flow**: It receives the claim, the user’s possible invite answer, and install bytes. If the claim already has an invite attached, it lets the flow continue. If no answer was given, it asks for an invite. If a code was given, it tries to redeem it and returns either an accepted invite record or directives explaining that the code expired, was already used, was unknown, or should be tried again.
-
-**Call relations**: `_resolve` calls this only when a new workspace would be created under an invite-required setup. It either blocks the flow with another prompt or hands back an accepted invite so `_resolve` can continue.
-
-*Call graph*: called by 1 (_resolve); 2 external calls (directive, render).
+*Call graph*: calls 1 internal fn (retire); called by 1 (run); 3 external calls (run, destroy, log).
 
 
-##### `Onboarding._signed_in`  (lines 177–196)
+##### `_shared_owner_dsn`  (lines 273–287)
 
 ```
-def _signed_in(self, claim: OnboardClaim, workspace_id: str, install: bytes, accepted: bytes) -> bytes
+def _shared_owner_dsn(config: Config) -> str
 ```
 
-**Purpose**: This creates the final successful onboarding response. It gives the client its login token, workspace address, and a signed-in message.
+**Purpose**: Finds the special database connection string used for cross-workspace owner-level reads. This is needed for jobs that must enumerate workspaces before rebinding each operation to one workspace.
 
-**Data flow**: It receives the completed claim, workspace ID, install bytes, and any message about an accepted invite. It mints a token for the user and workspace, checks whether the email domain belongs to the operator, and renders directives for the client. Operator-domain users also receive a debugger URL; other users do not.
+**Data flow**: It reads either the owner database URL environment variable or the configured owner URL. If neither exists, it raises an error. If it gets a plain PostgreSQL URL, it rewrites it to use the async database driver expected by the service.
 
-**Call relations**: `_resolve` calls this after the workspace is ready and the claim is complete. It is the last step in the onboarding path and returns the data the terminal or web client needs to continue as a signed-in user.
+**Call relations**: `run` uses this before initializing the owner database connection. It supports later background sweeps that need to see across workspaces without accidentally running under an unset workspace.
 
-*Call graph*: called by 1 (_resolve); 3 external calls (directive, render, mint_token).
-
-
-##### `GatewayState.healthy`  (lines 206–214)
-
-```
-async def healthy(self) -> bool
-```
-
-**Purpose**: This checks whether the gateway is connected to the database using the expected roles. It is used by the health-check endpoint so deployments can tell whether the service is really ready.
-
-**Data flow**: It reads from the owner database pool and from a workspace transaction, asking each connection which database user it is running as. If either check fails, it logs the failure and returns false. If both roles match the expected startup values, it returns true.
-
-**Call relations**: The `/healthz` route calls this during health checks. It uses the normal database access paths, so the health result reflects whether the gateway can actually talk to the database in the way later requests need.
-
-*Call graph*: 2 external calls (text, workspace_tx).
+*Call graph*: called by 1 (run).
 
 
-##### `_require_env`  (lines 217–221)
+##### `_launch_jobs`  (lines 290–333)
 
 ```
-def _require_env(name: str) -> str
+def _launch_jobs(runtime: Runtime, sync_driver: SyncDriver, page_feed: CorePageFeed) -> None
 ```
 
-**Purpose**: This reads a required environment variable and fails loudly if it is missing. It prevents the gateway from starting with missing secrets or URLs.
+**Purpose**: Registers and starts the service’s background jobs. These include source syncing, turn dispatching, sandbox cleanup, page-change indexing, and extension-provided jobs.
 
-**Data flow**: It receives the variable name. It looks that name up in the process environment. If a non-empty value is present, it returns it; otherwise it raises a startup error explaining which setting is missing.
+**Data flow**: It receives the runtime, sync driver, and page feed. It builds an admission helper, creates job runners for page changes and core jobs, combines those with extension job bindings, and launches the `JobRunner`, which registers schedules and queued work with DBOS.
 
-**Call relations**: The startup lifespan uses this when building `Onboarding`, especially for the workspace base URL and token secret. This keeps configuration mistakes from becoming confusing runtime failures during a user’s sign-in.
+**Call relations**: `run` calls this after DBOS has launched and after the runtime is available. Inside it, `invoker_for` creates workspace-specific admission invokers so jobs can admit work under the right workspace.
 
-*Call graph*: called by 1 (lifespan).
-
-
-##### `_invite_required`  (lines 224–233)
-
-```
-def _invite_required() -> bool
-```
-
-**Purpose**: This decides whether creating a new workspace must be protected by invite codes. Its default is safe: invites are required unless the deployment explicitly disables them.
-
-**Data flow**: It reads the invite-required environment setting, normalizes the text, and accepts true/false-style values. It returns a boolean. If the value is unclear, it raises an error instead of guessing.
-
-**Call relations**: The startup lifespan calls this before building the onboarding object. `_resolve` later uses the resulting setting to decide whether to run the invite gate for new workspaces.
-
-*Call graph*: called by 1 (lifespan).
+*Call graph*: called by 1 (run); 8 external calls (__init__, __init__, __init__, __init__, __init__, durable_surfaces, bindings_from, core_jobs).
 
 
-##### `_dsn_role`  (lines 236–240)
+##### `_launch_jobs.invoker_for`  (lines 304–305)
 
 ```
-def _dsn_role(dsn: str) -> str
+def invoker_for(workspace_id: UUID) -> AdmissionInvoker
 ```
 
-**Purpose**: This extracts the database role name from a database connection string. The gateway uses that role name later to confirm its database connections are what it expected.
+**Purpose**: Creates a small object that can admit work for one specific workspace. It is used when a background job needs to enqueue or re-admit turns for that workspace.
 
-**Data flow**: It receives a database DSN, meaning a connection string. It parses the string and reads the username part. If there is no username, it raises an error; otherwise it returns the role name.
+**Data flow**: It receives a workspace ID, combines it with the shared `Admission` object, and returns an `AdmissionInvoker` tied to that workspace.
 
-**Call relations**: The startup lifespan calls this for both owner and serving database URLs. Those expected role names are stored in `GatewayState`, and `GatewayState.healthy` compares live connections against them.
+**Call relations**: This helper is passed as a factory into job-related objects created by `_launch_jobs`. Those job objects call it when they need a workspace-scoped way to submit work.
 
-*Call graph*: called by 1 (lifespan).
-
-
-##### `_request_body`  (lines 243–249)
-
-```
-async def _request_body(request: Request) -> str
-```
-
-**Purpose**: This safely reads a request body as short text. It protects onboarding endpoints from overly large submissions.
-
-**Data flow**: It receives a FastAPI request. It reads the body in chunks, keeping only up to the allowed size plus one byte to detect overflow. If the body is too large, it raises an input error. Otherwise it decodes the bytes as UTF-8 text, replaces invalid characters, trims surrounding whitespace, and returns the string.
-
-**Call relations**: Both onboarding routes use this before sending user input into the onboarding conversation. If it raises an input error, those routes turn the problem into a clear client directive or JSON response instead of letting the request crash.
-
-*Call graph*: called by 2 (onboard, onboard_web); 2 external calls (__init__, stream).
+*Call graph*: 1 external calls (__init__).
 
 
-##### `gateway_app`  (lines 252–366)
+##### `_select_carrier`  (lines 336–376)
 
 ```
-def gateway_app() -> FastAPI
+def _select_carrier(config: Config, manifests: tuple[Manifest, ...]) -> Carrier
 ```
 
-**Purpose**: This builds the FastAPI web application for the gateway. It defines the startup and shutdown behavior, then registers every public route the onboarding server exposes.
+**Purpose**: Chooses the sandbox backend that will run agent code. A carrier is the component that actually starts and controls sandboxes, such as a local runner or an extension-provided remote runner.
 
-**Data flow**: It creates an empty state slot, defines a lifespan function that will fill and clear that state, creates the FastAPI app, attaches route functions, and returns the finished app object. At the bottom of the file, that returned app becomes the ASGI application served by the web server.
+**Data flow**: It starts with the built-in local carrier, adds carrier factories declared by extensions, checks for duplicate names, and looks up the configured backend. For remote backends, it also verifies that a public HTTPS proxy URL is configured. It returns one constructed carrier instance or raises a clear startup error.
 
-**Call relations**: This is the file’s top-level assembly point. The nested route functions depend on the shared state created by `gateway_app.lifespan`, and outside infrastructure talks to the returned FastAPI app to serve requests.
+**Call relations**: `run` calls this while building the runtime. The selected carrier is later used by turns and cleanup jobs to create and reap sandboxes.
 
-*Call graph*: 1 external calls (FastAPI).
-
-
-##### `gateway_app.lifespan`  (lines 256–296)
-
-```
-async def lifespan(app: FastAPI)
-```
-
-**Purpose**: This is the startup and shutdown routine for the gateway app. It opens database connections, prepares storage, builds the onboarding services, and cleans everything up when the server stops.
-
-**Data flow**: On startup, it reads database URLs, creates an owner database pool, ensures onboarding and invite tables exist, initializes the serving database connection, reads required settings, and stores a `GatewayState` containing all shared services. It then lets the app serve requests. On shutdown, it clears the state, disposes the database setup, and closes the pool.
-
-**Call relations**: FastAPI calls this around the app’s lifetime. Every route that needs shared resources relies on the state this function creates, while helper functions like `_require_env`, `_invite_required`, and `_dsn_role` keep startup configuration explicit and checked.
-
-*Call graph*: calls 3 internal fn (_dsn_role, _invite_required, _require_env); 14 external calls (__init__, __init__, __init__, __init__, __init__, __init__, __init__, create_pool, dispose_db, init_db (+4 more)).
+*Call graph*: called by 1 (run); 2 external calls (__init__, urlparse).
 
 
-##### `gateway_app.healthz`  (lines 301–304)
+##### `_source_backends`  (lines 379–393)
 
 ```
-async def healthz() -> Response
+def _source_backends(manifests: tuple[Manifest, ...]) -> dict[str, SourceBackend]
 ```
 
-**Purpose**: This answers health-check requests. It tells load balancers or deployment tools whether the gateway is ready to serve real traffic.
+**Purpose**: Builds the list of source-sync backends available to the sync driver. A source backend knows how to read pages or files from a particular kind of source.
 
-**Data flow**: It looks at the shared state and asks it to run a database role check. If there is no state or the check fails, it returns a JSON response with status `unavailable` and HTTP status 503. If everything is healthy, it returns `ok`.
+**Data flow**: It begins with the built-in folder source. For each extension source provider, it creates a credential reader limited to that extension’s declared credential slots, builds the backend, and stores it by backend name. Duplicate backend names cause startup to fail.
 
-**Call relations**: This route depends on `GatewayState.healthy` for the real readiness test. It is usually called by monitoring systems rather than end users.
+**Call relations**: `run` uses this to construct the `SyncDriver`. The sync driver later uses the returned map to decide how to sync each configured source.
 
-*Call graph*: 1 external calls (JSONResponse).
-
-
-##### `gateway_app.serve_script`  (lines 307–308)
-
-```
-async def serve_script() -> Response
-```
-
-**Purpose**: This serves the UFO client installer script. It is what a user or install command downloads from `/ufo`.
-
-**Data flow**: It takes no request body. It returns the already stamped script text with a shell-script media type, so clients treat it as a script rather than ordinary JSON or HTML.
-
-**Call relations**: It uses the `STAMPED_SCRIPT` prepared at module load time by `_stamp_script`. This keeps request handling fast because the script does not need to be reread or restamped for every download.
-
-*Call graph*: 1 external calls (PlainTextResponse).
+*Call graph*: called by 1 (run); 2 external calls (__init__, __init__).
 
 
-##### `gateway_app.fleet`  (lines 311–314)
+##### `_select_hub`  (lines 396–414)
 
 ```
-async def fleet() -> Response
+def _select_hub(config: Config, manifests: tuple[Manifest, ...]) -> Hub
 ```
 
-**Purpose**: This reports a small public count of existing workspaces, named `craft` in the response. It is a lightweight status-style endpoint.
+**Purpose**: Chooses the live-update hub used to send frames or events inside the service. The built-in default is an in-process hub, but extensions can register other hub implementations.
 
-**Data flow**: It reads the shared database pool from state, asks the database how many rows are in the workspace table, and returns that number as JSON.
+**Data flow**: It builds a name-to-builder map from the built-in hub and extension hub specs. It checks for duplicate backend names, finds the configured backend, and calls its builder with the configured hub URL. It returns the constructed hub or raises an error if the chosen name is unknown.
 
-**Call relations**: This route is only available after lifespan startup has filled the shared state. It talks directly to the database pool rather than going through the onboarding conversation.
+**Call relations**: `run` calls this early when assembling shared runtime services. The resulting hub is used by live surfaces and tailing code to stream updates.
 
-*Call graph*: 1 external calls (JSONResponse).
-
-
-##### `gateway_app.login`  (lines 317–318)
-
-```
-async def login() -> Response
-```
-
-**Purpose**: This serves the browser login page. It gives web users the HTML page that can drive the onboarding flow through the web endpoint.
-
-**Data flow**: It takes the incoming GET request and returns the stored login-page HTML as an HTML response. It does not read the database or user input.
-
-**Call relations**: The page returned here is paired with `gateway_app.onboard_web`, which performs the actual step-by-step onboarding conversation for browser clients.
-
-*Call graph*: 1 external calls (HTMLResponse).
+*Call graph*: called by 1 (run); 1 external calls (__init__).
 
 
-##### `gateway_app.onboard_web`  (lines 321–336)
+##### `_select_cdp_provider`  (lines 417–445)
 
 ```
-async def onboard_web(request: Request) -> Response
+def _select_cdp_provider(config: Config, manifests: tuple[Manifest, ...], credentials: CredentialStore | None) -> CdpProvider | None
 ```
 
-**Purpose**: This is the JSON-based onboarding endpoint for the browser login flow. It reads the user’s session and reply, advances onboarding, and returns structured directives for the web page.
+**Purpose**: Selects the browser automation provider, if one is installed and configured. CDP means Chrome DevTools Protocol, a way to control a browser programmatically.
 
-**Data flow**: It requires an `x-ufo-session` header, checks that the session is not too long, reads a small request body, and passes the web channel, session, and body into `state.onboarding.advance`. If input is bad or something unexpected fails, it creates error directives instead. It parses the directive bytes into JSON-friendly data and returns them.
+**Data flow**: It collects browser provider specs from extensions, checks for duplicate backend names, and looks up the configured provider name. If none is registered under that name, it returns `None`. If the provider needs credentials but no credential store exists, it raises an error. Otherwise it builds and returns the provider with credential access limited to that extension’s declared slots.
 
-**Call relations**: The browser login page calls this while the user signs in. It shares the same onboarding engine as the terminal endpoint, but converts the final directives into JSON because web code is easier to drive from structured data.
+**Call relations**: `run` calls this when building the runtime. `_require_cdp_provider` also calls it during requirement validation when an extension says browser support must be available.
 
-*Call graph*: calls 1 internal fn (_request_body); 5 external calls (__init__, JSONResponse, directive, render, parse_directives).
+*Call graph*: called by 2 (_require_cdp_provider, run); 1 external calls (__init__).
 
 
-##### `gateway_app.onboard`  (lines 339–364)
+##### `_validate_requires`  (lines 448–472)
 
 ```
-async def onboard(channel: str, request: Request) -> Response
+def _validate_requires(config: Config, manifests: tuple[Manifest, ...], credentials: CredentialStore | None) -> None
 ```
 
-**Purpose**: This is the plain-text onboarding endpoint for terminal or channel-based clients. It returns the directive stream in the simple text format those clients expect.
+**Purpose**: Checks that every active extension’s declared required service is actually available. This catches missing browser, search, or memory support during startup instead of during a user action.
 
-**Data flow**: It receives a channel from the URL, reads the `x-ufo-session` header, decides whether first-run install directives should be included, checks channel and session length, reads a small body, and advances onboarding. Missing or invalid input becomes text directives that tell the client what went wrong and exit. A successful step returns the next onboarding directives as plain text.
+**Data flow**: It reads each manifest’s required seam names, finds the matching checker function, and runs it with the current configuration, manifests, and credentials. Unknown seam names or failed checks are wrapped in errors that name the extension and missing requirement.
 
-**Call relations**: Terminal clients call this endpoint during installation and sign-in. It uses `_request_body` for safe input reading, `first_run_install` to add install-time instructions when needed, and the shared `Onboarding.advance` flow to decide what the client should show or store next.
+**Call relations**: `run` calls this after loading manifests and credentials. It delegates the actual checks to functions such as `_require_cdp_provider`, `_require_search_provider`, and `_require_memory_search`.
 
-*Call graph*: calls 1 internal fn (_request_body); 5 external calls (__init__, PlainTextResponse, directive, first_run_install, render).
+*Call graph*: called by 1 (run).
 
 
-### Signup verification gates
-These modules validate work-email eligibility, issue and check short-lived email claims, and enforce one-time invite codes.
+##### `_require_cdp_provider`  (lines 475–489)
 
-### `control/src/ufo_control/gateway_claim.py`
+```
+def _require_cdp_provider(config: Config, manifests: tuple[Manifest, ...], credentials: CredentialStore | None) -> None
+```
 
-`domain_logic` · `onboarding request handling`
+**Purpose**: Enforces that a browser automation provider is present when an extension requires one. It turns an optional runtime feature into a mandatory startup check.
 
-This file is the gatekeeper for proving that someone controls a work email address. That matters because onboarding should not continue just because a person typed an address; they must be able to receive mail there. The flow is like a hotel front desk giving a temporary key card: the key only works for a short time, and too many failed tries means you must start over.
+**Data flow**: It asks `_select_cdp_provider` to resolve the configured provider. If that returns `None`, it raises an error explaining that the required provider is not registered.
 
-The main piece is ClaimWorkflow. When onboarding starts, it first asks the email policy whether the address is allowed and what company domain it belongs to. It then creates a random six-digit code, stores only a hash of that code, and emails the real code to the user. A hash is a one-way fingerprint: the system can check a later code without keeping the original readable code in storage. If sending the email fails, the stored claim is deleted so there is no half-created verification request left behind.
+**Call relations**: _validate_requires calls this when a manifest lists the `cdp_providers` requirement. It reuses the normal provider-selection logic so validation matches runtime behavior.
 
-When the user submits a code, the workflow checks three things: whether they have already tried too many times, whether the code has expired, and whether the submitted code matches the stored hash. Expired or over-used claims are removed. A correct code marks the claim as verified. The important safety detail is that the code itself never needs to be stored after it is emailed.
+*Call graph*: calls 1 internal fn (_select_cdp_provider).
+
+
+##### `_select_search_provider`  (lines 492–527)
+
+```
+def _select_search_provider(config: Config, manifests: tuple[Manifest, ...], credentials: CredentialStore | None) -> SearchProvider | None
+```
+
+**Purpose**: Chooses the web or research search backend for the process. Search is optional unless an extension declares that it requires it.
+
+**Data flow**: It gathers search provider specs from extensions, checks for duplicate names, and examines the configured search provider. If the setting is absent, it returns `None`. If the configured name is unknown or credentials are missing, it raises an error. Otherwise it builds the provider with credential access for the declaring extension’s slots.
+
+**Call relations**: `run` calls this while building the runtime. `_require_search_provider` calls it during startup validation when research tools need search to be available.
+
+*Call graph*: called by 2 (_require_search_provider, run); 2 external calls (__init__, __init__).
+
+
+##### `_require_search_provider`  (lines 530–543)
+
+```
+def _require_search_provider(config: Config, manifests: tuple[Manifest, ...], credentials: CredentialStore | None) -> None
+```
+
+**Purpose**: Enforces that a configured and usable search provider exists. This protects research extensions from failing only when the first search request arrives.
+
+**Data flow**: It checks that the search provider setting is present, then calls `_select_search_provider` to verify the named backend can be built. It returns nothing if the requirement is satisfied, or raises a startup error if not.
+
+**Call relations**: _validate_requires calls this for extensions that list the `search_providers` requirement. It delegates backend resolution to `_select_search_provider`.
+
+*Call graph*: calls 1 internal fn (_select_search_provider).
+
+
+##### `_require_memory_search`  (lines 546–572)
+
+```
+def _require_memory_search(_config: Config, manifests: tuple[Manifest, ...], credentials: CredentialStore | None) -> None
+```
+
+**Purpose**: Verifies that exactly one default memory-search provider is available. Memory search is the feature that lets the system look up stored knowledge or indexed past content.
+
+**Data flow**: It scans all manifests for providers with the default memory-search name. If none exist, more than one exists, or the chosen provider declares credentials without a credential store, it raises an error. Otherwise it simply confirms the requirement.
+
+**Call relations**: _validate_requires uses this when an extension requires memory search. Unlike some other requirements, it performs the check directly instead of calling a separate selector in this file.
+
+
+##### `_select_auth_proxy`  (lines 584–621)
+
+```
+def _select_auth_proxy(config: Config, manifests: tuple[Manifest, ...], credentials: CredentialStore | None) -> AuthProxy | None
+```
+
+**Purpose**: Chooses the fallback authentication proxy used by connector feed sync when a connector does not have its own broker. An auth proxy is a host-side service that supplies or exchanges credentials without exposing them directly to sandbox code.
+
+**Data flow**: It collects auth proxy specs from extensions and checks for duplicate backend names. If no backend is explicitly configured, it accepts the only registered backend or fails if several choices exist. It verifies the selected backend exists and that credentials are available, then builds the proxy with access limited to the declaring extension’s credential slots.
+
+**Call relations**: _connector_registry calls this while creating the connector registry. The returned proxy becomes the fallback path for connector credential resolution.
+
+*Call graph*: called by 1 (_connector_registry); 2 external calls (__init__, __init__).
+
+
+##### `_mount_ext_routes`  (lines 624–662)
+
+```
+def _mount_ext_routes(app: FastAPI, manifests: tuple[Manifest, ...], credentials: CredentialStore | None, index: IndexBackend, embed: EmbedClient) -> None
+```
+
+**Purpose**: Adds HTTP routes provided by extensions under `/ext/<extension-name>/...`. Each route must first identify the workspace for the incoming request before the extension handler is allowed to run.
+
+**Data flow**: It loops through manifests with routes, verifies credentials are available when needed, creates an extension context, and adds each route to the FastAPI app. The route wrapper rejects unidentified requests and runs identified ones inside the correct workspace binding.
+
+**Call relations**: `run` calls this after jobs are launched and before shared surfaces are mounted. It creates the nested `endpoint` function used as the actual FastAPI handler for each extension route.
+
+*Call graph*: called by 1 (run); 2 external calls (add_route, context_for).
+
+
+##### `_mount_ext_routes.endpoint`  (lines 646–656)
+
+```
+async def endpoint(request: Request, handler=spec.handler, identify=spec.identify, extension_context=context) -> Response
+```
+
+**Purpose**: Acts as the safety wrapper around an extension HTTP route. It makes sure the request belongs to a workspace before calling extension code.
+
+**Data flow**: It receives a web request, calls the route’s identify function, and returns a 401 response if identification fails. If identification succeeds, it temporarily binds that workspace and calls the extension’s handler with the prepared extension context and request. The handler’s response is returned to the client.
+
+**Call relations**: This function is registered with FastAPI by `_mount_ext_routes`. It hands off to the extension’s own handler only after the workspace has been resolved.
+
+*Call graph*: 2 external calls (Response, ws).
+
+
+##### `WorkspaceScopeBoundary.__call__`  (lines 683–691)
+
+```
+async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None
+```
+
+**Purpose**: Middleware that clears the current workspace before and after every HTTP request. This prevents one request’s workspace from leaking into another request.
+
+**Data flow**: It receives the ASGI request scope plus receive and send callables. For non-HTTP traffic, it simply passes through. For HTTP traffic, it sets the ambient workspace to `None`, runs the downstream app, and then sets it back to `None` in a final cleanup step even if an error occurs.
+
+**Call relations**: _mount_shared_surfaces installs this as middleware. Shared surface endpoints set the workspace during a request, and this boundary guarantees that binding is cleaned up after the full response, including streamed responses.
+
+*Call graph*: 1 external calls (set).
+
+
+##### `_mount_shared_surfaces`  (lines 694–775)
+
+```
+def _mount_shared_surfaces(app: FastAPI, manifests: tuple[Manifest, ...], credentials: CredentialStore | None, blob: BlobStore, hub: Hub, dbos_client: DBOSClient, artifact_secret: str, public_base_url
+```
+
+**Purpose**: Mounts shared surface routes, such as product-facing integrations, so one service can safely serve many workspaces. A surface is an external interface that can admit turns, stream updates, and sometimes post durable writebacks.
+
+**Data flow**: It adds the workspace boundary middleware, builds shared admission and hub-tailing helpers, and then loops through surface specs from manifests. For each route, it creates authentication helpers, registers a FastAPI endpoint, and records durable surfaces that need writeback polling. If durable posting is available, it creates a shared `WritebackPoller` and stores it on the app.
+
+**Call relations**: `run` calls this after extension routes are mounted. It creates both the nested `context_for` helper, which builds per-workspace surface contexts, and the nested `endpoint` wrapper, which authenticates each request.
+
+*Call graph*: called by 1 (run); 10 external calls (__init__, __init__, __init__, __init__, add_middleware, add_route, durable_surfaces, writeback_workspaces, log, uuid4).
+
+
+##### `_mount_shared_surfaces.context_for`  (lines 721–731)
+
+```
+def context_for(workspace_id: UUID, surface: str) -> SurfaceContext
+```
+
+**Purpose**: Builds the per-request context object that a surface handler uses. This context carries the workspace ID and the tools needed to admit work, access blobs, stream updates, read credentials, and create artifact links.
+
+**Data flow**: It receives a workspace ID and surface name. It combines them with shared services such as blob storage, admission, hub tailing, credentials, artifact token secret, and public base URL, then returns a `SurfaceContext` tied to that workspace.
+
+**Call relations**: The surface endpoint wrapper calls this after identifying the request’s workspace. The writeback poller also uses it so durable background delivery runs under the correct workspace.
+
+*Call graph*: 2 external calls (__init__, __init__).
+
+
+##### `_mount_shared_surfaces.endpoint`  (lines 747–761)
+
+```
+async def endpoint(request: Request, handler=route.handler, identify=resolver, surface=spec.name, surface_auth=auth) -> Response
+```
+
+**Purpose**: Wraps a shared surface route with authentication and workspace binding. It makes sure every surface request is tied to exactly one workspace before route code runs.
+
+**Data flow**: It receives a request, calls the surface’s identify function with surface authentication, and handles three outcomes: a ready-made response, no identity, or a workspace ID. No identity becomes a 401 response. A workspace ID is stored as the current workspace, then the real surface route handler is called with a workspace-specific context.
+
+**Call relations**: _mount_shared_surfaces registers this function with FastAPI for each surface route. It hands off to the surface’s handler only after identification and workspace binding.
+
+*Call graph*: 3 external calls (Response, set, context_for).
+
+
+##### `_serve_lifespan`  (lines 779–802)
+
+```
+async def _serve_lifespan(app: FastAPI) -> AsyncIterator[None]
+```
+
+**Purpose**: Runs app-level background tasks for as long as the web app is alive. These tasks recover work from dead executors, reconcile cancellations, and optionally deliver durable surface writebacks.
+
+**Data flow**: When the FastAPI lifespan starts, it creates an async task group and starts executor recovery and cancellation reconciliation. If a writeback poller exists, it starts that too. When the app is shutting down, it cancels those tasks.
+
+**Call relations**: `run` passes this as the FastAPI lifespan function. It is separate from the heartbeat thread because heartbeat liveness must begin earlier and survive event-loop stalls.
+
+*Call graph*: 3 external calls (__init__, __init__, TaskGroup).
+
+
+##### `_proxy_endpoint`  (lines 805–835)
+
+```
+def _proxy_endpoint(config: Config, manifests: tuple[Manifest, ...], credentials: CredentialStore | None, pricing: Pricing, run_tokens: RunTokenCodec, workspace_fs: SandboxFsCredentialMinter | None=No
+```
+
+**Purpose**: Chooses how sandboxes will reach the egress proxy, the controlled gateway for outbound internet traffic. It supports either a local in-process proxy or an external shared proxy.
+
+**Data flow**: It reads sandbox proxy configuration. If no public proxy URL is set, it starts a local egress proxy and returns its endpoint. If a public proxy URL is set, it reads the shared proxy certificate from the environment and returns a `ProxyEndpoint` pointing at the external proxy. Missing certificate data causes startup to fail.
+
+**Call relations**: `run` calls this while building the runtime. If local proxying is needed, it delegates to `_local_egress_proxy`.
+
+*Call graph*: calls 1 internal fn (_local_egress_proxy); called by 1 (run); 1 external calls (__init__).
+
+
+##### `_local_egress_proxy`  (lines 838–877)
+
+```
+def _local_egress_proxy(config: Config, manifests: tuple[Manifest, ...], credentials: CredentialStore | None, pricing: Pricing, run_tokens: RunTokenCodec, workspace_fs: SandboxFsCredentialMinter | Non
+```
+
+**Purpose**: Starts an in-process egress proxy for single-node or local deployments. This proxy gives sandboxes a controlled way to access the network with policy checks, credentials, and metering.
+
+**Data flow**: It builds a rule resolver from model rules, grants, credentials, extension-declared injection slots, internet rules, transfer hosts, and connector command-line tools. It creates a new event loop in a daemon thread, starts the proxy boot coroutine there, and waits for a `ProxyEndpoint` result within the startup timeout.
+
+**Call relations**: _proxy_endpoint calls this when the deployment does not use an external proxy. Its nested `_boot` function performs the asynchronous certificate generation and proxy startup.
+
+*Call graph*: called by 1 (_proxy_endpoint); 10 external calls (__init__, __init__, new_event_loop, run_coroutine_threadsafe, Thread, connector_clis, injecting_slots, model_rule_base, connector_transfer_hosts, derive_manifest_rules).
+
+
+##### `_local_egress_proxy._boot`  (lines 865–875)
+
+```
+async def _boot() -> ProxyEndpoint
+```
+
+**Purpose**: Performs the asynchronous startup steps for the local egress proxy. It creates temporary certificate authority material and starts the proxy server.
+
+**Data flow**: It generates a certificate authority certificate and key, builds an `EgressProxy` with rule resolution, live-turn authorization, run-token checking, pricing, and optional workspace filesystem credential refresh. It starts the proxy on the configured port and returns the resulting endpoint.
+
+**Call relations**: _local_egress_proxy schedules this coroutine on the proxy’s dedicated event loop. It hands the finished endpoint back to `_local_egress_proxy`, which then returns it to `_proxy_endpoint`.
+
+*Call graph*: 2 external calls (__init__, generate_ca).
+
+
+##### `_connector_registry`  (lines 883–906)
+
+```
+def _connector_registry(config: Config, manifests: tuple[Manifest, ...], credentials: CredentialStore | None) -> ConnectorRegistry
+```
+
+**Purpose**: Builds the registry that knows about all installed connector providers. Connectors are integrations that may use OAuth or brokered authentication to access external services.
+
+**Data flow**: It scans manifests for connector definitions, checks that no two extensions register the same provider name, and creates registry entries with labels and broker information. It also builds the connector namespace resolver and selects the fallback auth proxy. It returns a `ConnectorRegistry`.
+
+**Call relations**: `run` calls this during runtime construction. It calls `_select_auth_proxy` for fallback credential resolution, and the resulting registry is used by connector tools and source sync.
+
+*Call graph*: calls 1 internal fn (_select_auth_proxy); called by 1 (run); 3 external calls (__init__, __init__, open_connector_namespace).
+
+
+##### `_connect_flow`  (lines 909–934)
+
+```
+def _connect_flow(credentials: CredentialStore | None, config: Config, manifests: tuple[Manifest, ...]) -> ConnectFlow | None
+```
+
+**Purpose**: Creates the OAuth connect flow used to start and finish member authorization for connectors. OAuth is the common browser-based permission handoff used by many third-party services.
+
+**Data flow**: If no credential store exists, it returns `None` because grants cannot be securely stored. Otherwise it collects OAuth providers from connector manifests, checks for duplicate provider names, computes the callback URL, and returns a `ConnectFlow` with encryption, grant storage, provider data, and namespace resolution.
+
+**Call relations**: `run` installs the returned connect flow globally. This flow is then used by tools, surfaces, and the OAuth callback route; it calls `_connect_redirect_uri` to validate and build the external callback address.
+
+*Call graph*: calls 1 internal fn (_connect_redirect_uri); called by 1 (run); 3 external calls (__init__, __init__, open_connector_namespace).
+
+
+##### `_connect_redirect_uri`  (lines 937–961)
+
+```
+def _connect_redirect_uri(config: Config, providers: Mapping[str, OAuthProvider]) -> str
+```
+
+**Purpose**: Builds and validates the public OAuth callback URL for connector authorization. This URL must be reachable by third-party providers after a user approves access.
+
+**Data flow**: It reads `connect.public_base_url` from configuration and the set of registered OAuth providers. If no providers exist, it returns an empty or best-effort callback URL. If providers exist, it requires a base URL with an HTTP or HTTPS scheme and a real hostname, rejects bind-only addresses like `127.0.0.1`, and returns the base URL plus the callback path.
+
+**Call relations**: _connect_flow calls this while constructing the OAuth flow. Its validation prevents a connector from registering with a callback address that an outside provider cannot reach.
+
+*Call graph*: called by 1 (_connect_flow); 1 external calls (urlparse).
+
+
+### `core/src/ufo/runtime_instance.py`
+
+`orchestration` · `main loop`
+
+Think of each serve process as a worker in a shared workshop. This file makes every worker regularly sign a time sheet, so the others know it is still alive. That sign-in is stored in the `runtime_instance` table as a heartbeat: a timestamp that is refreshed every few seconds.
+
+That heartbeat matters because DBOS, the durable workflow system used here, records which executor started a queued workflow. If a workflow is still marked pending under an executor whose heartbeat has gone stale, the original process probably died. The `ExecutorRecovery` loop finds those stranded workflows and asks DBOS to recover them, so another live process can continue the work instead of leaving it frozen.
+
+The file also has a `CancelReconciler`. Cancelling one turn is a local action, but turns can spawn child turns and grandchildren. This reconciler periodically searches for still-running turns that sit underneath a cancelled ancestor, then cancels them too. This makes cancellation eventually flow down the whole tree, even after crashes or restarts.
+
+All three background jobs are deliberately tolerant of temporary database or DBOS failures. They log the failed tick and keep going, because one bad moment should not kill the long-running safety loops.
 
 #### Function details
 
-##### `hash_code`  (lines 27–28)
+##### `record_fleet_seat`  (lines 38–53)
 
 ```
-def hash_code(code: str) -> str
+async def record_fleet_seat(instance_id: UUID) -> None
 ```
 
-**Purpose**: Turns a verification code into a secure fingerprint using SHA-256, a standard one-way hashing method. This lets the system compare codes later without saving the real code in readable form.
+**Purpose**: This records that a serve process exists before it starts doing durable DBOS work. It creates the process's row in the shared `runtime_instance` table, which other processes later use as proof that this executor is alive.
 
-**Data flow**: It takes a code as text, converts it into bytes, and runs it through SHA-256. The output is a fixed-looking string that represents the code but cannot practically be turned back into the original code.
+**Data flow**: It receives an `instance_id`, opens a database transaction, and inserts a new runtime-instance row with no workspace attached and the current time as its heartbeat. After the row is written, it logs that the fleet seat was recorded. The outside world now has a fresh liveness marker for this process.
 
-**Call relations**: ClaimWorkflow.start uses this before saving a new claim, so the database stores only the fingerprint of the emailed code. ClaimWorkflow.verify uses it again on the user’s submitted code, then compares the two fingerprints to decide whether the user entered the right code.
+**Call relations**: This is the first part of the liveness story. Later, `Heartbeat.beat` keeps the row fresh, `Heartbeat.retire` removes it on graceful shutdown, and `ExecutorRecovery._live_executors` reads it to decide which executors must not be recovered.
 
-*Call graph*: called by 2 (start, verify); 1 external calls (sha256).
+*Call graph*: 3 external calls (insert, owner_tx, log).
 
 
-##### `ClaimWorkflow.start`  (lines 39–61)
+##### `Heartbeat.run`  (lines 66–76)
 
 ```
-async def start(self, email: str, surface: str, surface_ref: str) -> str
+async def run(self) -> None
 ```
 
-**Purpose**: Begins a new email verification claim. It checks that the email is allowed, creates a temporary code, stores the claim, and sends the code to the user.
+**Purpose**: This is the never-ending loop that keeps one process's heartbeat fresh. It protects a healthy process from being mistaken for a dead one.
 
-**Data flow**: It receives an email address plus information about where onboarding started, such as the surface and its reference. It validates the email, makes a random six-digit code, builds an onboarding claim with an expiry time and zero attempts, stores that claim, and sends the code by email. If email sending fails, it deletes the stored claim and raises a clear ClaimError. On success, it returns the validated email domain.
+**Data flow**: It repeatedly calls `Heartbeat.beat` to update the database timestamp for this instance. If a database error happens on one tick, it logs the failure instead of stopping. Then it waits for the heartbeat interval and tries again.
 
-**Call relations**: This is called when a user starts onboarding with a work email. Inside the flow it calls hash_code so the stored claim contains only a code fingerprint, creates the claim record, asks the store to save it, and asks the email sender to deliver the real code. If anything goes wrong during delivery, it turns that failure into a ClaimError for the onboarding flow to show back to the user.
+**Call relations**: This loop drives `Heartbeat.beat` over and over. Its updates are later read by `ExecutorRecovery._live_executors`, which uses them to avoid recovering work that is still being run by a live process.
 
-*Call graph*: calls 1 internal fn (hash_code); 5 external calls (__init__, __init__, now, randbelow, uuid4).
+*Call graph*: calls 1 internal fn (beat); 2 external calls (sleep, log).
 
 
-##### `ClaimWorkflow.verify`  (lines 63–73)
+##### `Heartbeat.beat`  (lines 78–88)
 
 ```
-async def verify(self, claim: OnboardClaim, code: str) -> None
+async def beat(self) -> None
 ```
 
-**Purpose**: Checks a submitted verification code against an existing claim. It enforces the attempt limit and expiration time before marking the claim as verified.
+**Purpose**: This writes one fresh heartbeat timestamp for the current process. It is the small database update that says, in effect, “I am still here.”
 
-**Data flow**: It receives a stored claim and the code the user typed. First it checks whether the claim has already used too many attempts; if so, it deletes the claim and reports that onboarding must restart. Next it checks whether the claim has expired; expired claims are also deleted. If the claim is still usable, it records one more attempt, hashes the submitted code, compares that hash with the stored hash, and either raises ClaimError for a mismatch or marks the claim as verified.
+**Data flow**: It reads the instance id from the `Heartbeat` object, opens a database transaction, and updates that row's `heartbeat_at` and `updated_at` fields to the current database time. It returns nothing, but the stored liveness timestamp becomes fresh.
 
-**Call relations**: This runs after the user receives an email and submits the code back to the onboarding flow. It calls hash_code to make the user’s entered code comparable with the stored fingerprint, and it uses a safe comparison function so the check does not reveal hints through timing differences. It hands successful cases to the store by marking the claim verified, while failed or stale cases become ClaimError messages for the surrounding onboarding process.
+**Call relations**: `Heartbeat.run` calls this on every heartbeat tick. The timestamp it writes is later compared against a cutoff by `ExecutorRecovery._live_executors` to decide whether this executor is alive.
 
-*Call graph*: calls 1 internal fn (hash_code); 3 external calls (__init__, now, compare_digest).
+*Call graph*: called by 1 (run); 2 external calls (update, owner_tx).
 
 
-### `control/src/ufo_control/gateway_email.py`
+##### `Heartbeat.retire`  (lines 90–96)
 
-`io_transport` · `request handling during signup/onboarding; also startup-style sender selection from environment`
-
-This file supports the signup or onboarding path where a person must prove they control a company email address. First, it checks the email address itself. It rejects malformed addresses and common personal or disposable domains, such as Gmail or temporary-mail services, because the workspace is meant to map to a real organization rather than an anonymous inbox. This is a “fail closed” rule: if the address does not clearly look acceptable, it is refused.
-
-The second job is delivering the short verification code. The file defines a shared sender shape, `EmailSender`, so the rest of the gateway can ask for “send this code” without caring how delivery happens. In production, `SesEmailSender` sends through Amazon SES, Amazon’s email service. It reads the pod’s web identity token, asks AWS STS for temporary credentials, signs the SES request locally using AWS Signature Version 4, and sends the email with asynchronous HTTP so the server is not blocked while waiting on the network. For local work, `ConsoleEmailSender` writes the email contents to the process log instead of contacting AWS.
-
-Configuration comes from environment variables. Missing production settings cause clear runtime errors, which is intentional: silent email failure would break account verification.
-
-#### Function details
-
-##### `normalize_email`  (lines 122–128)
-
-```
-def normalize_email(email: str) -> tuple[str, str]
-```
-
-**Purpose**: This function cleans up an email address and extracts its domain. It is the first safety gate before deciding whether an address is allowed.
-
-**Data flow**: It receives a raw email string, trims spaces, lowercases it, and checks that it has a simple valid shape with one domain after the `@`. If the shape is bad, it raises `WorkEmailError`; otherwise it returns the cleaned full address and the domain part.
-
-**Call relations**: The work-email policy calls this before applying its denylist. By separating cleanup from policy, the policy can work with a predictable lowercase domain.
-
-*Call graph*: called by 1 (validate); 1 external calls (__init__).
-
-
-##### `WorkEmailPolicy.validate`  (lines 135–139)
-
-```
-def validate(self, email: str) -> str
-```
-
-**Purpose**: This method decides whether an email address belongs to an acceptable work domain. It rejects personal and throwaway email domains so a workspace is tied to a real organization.
-
-**Data flow**: It receives an email string, asks `normalize_email` for the domain, then checks that domain against the denylist stored on the policy. If the domain is denied, it raises `WorkEmailError`; if it is allowed, it returns the domain.
-
-**Call relations**: This is the main entry point for email eligibility checks in this file. It relies on `normalize_email` for format checking, then adds the project-specific rule about work email domains.
-
-*Call graph*: calls 1 internal fn (normalize_email); 1 external calls (__init__).
-
-
-##### `public_apex_host`  (lines 142–150)
-
-```
-def public_apex_host() -> str
-```
-
-**Purpose**: This function finds the public website host used in user-facing instructions. It turns a configured base URL into just the host name.
-
-**Data flow**: It reads `UFO_PUBLIC_BASE_URL` from the environment, or uses the default public URL if none is set. It strips away the scheme and path, returning only the host; if no host can be found, it raises a runtime error explaining the expected format.
-
-**Call relations**: This helper is used when something needs the public front-door host, such as invite text that includes an install command. It depends on standard URL parsing rather than hand-splitting the string.
-
-*Call graph*: 1 external calls (urlsplit).
-
-
-##### `verification_email`  (lines 153–159)
-
-```
-def verification_email(code: str, expires_at: datetime, ttl: timedelta) -> tuple[str, str]
-```
-
-**Purpose**: This function builds the subject and plain-text body for a verification-code email. It keeps the wording consistent no matter which sender is used.
-
-**Data flow**: It receives the code, the expiration time, and the time-to-live duration. It formats the expiration time and duration into a short message, then returns the subject and body as text.
-
-**Call relations**: Both the real SES sender and the console sender call this before delivering or logging a code. That way local development shows the same message a real user would receive.
-
-*Call graph*: called by 2 (send, send); 2 external calls (strftime, total_seconds).
-
-
-##### `invite_email`  (lines 162–172)
-
-```
-def invite_email(object_number: int, code: str, expires_at: datetime, apex_host: str) -> tuple[str, str]
-```
-
-**Purpose**: This function builds the subject and plain-text body for an invitation code. The invite text includes the object number, code, expiration time, and install command host.
-
-**Data flow**: It receives an object number, a code, an expiration time, and the public host name. It converts the expiration time to UTC, formats all values into the invite template, and returns the subject and body.
-
-**Call relations**: This is separate from normal verification email because invite codes have different wording and are intended for an operator to send manually. It does not send anything itself; it only prepares the text.
-
-*Call graph*: 1 external calls (astimezone).
-
-
-##### `EmailSender.send`  (lines 176–176)
-
-```
-async def send(self, email: str, code: str, expires_at: datetime, ttl: timedelta) -> None
-```
-
-**Purpose**: This is the shared promise that any email sender must fulfill: given an address and code details, send or otherwise deliver the code. It lets the rest of the system use email delivery without knowing whether it is real SES delivery or console logging.
-
-**Data flow**: It defines the expected inputs: recipient email, code, expiration time, and time-to-live. The protocol itself produces no result and changes nothing; concrete senders provide the actual behavior.
-
-**Call relations**: Both `SesEmailSender.send` and `ConsoleEmailSender.send` match this shape. `email_sender_from_env` returns an object that follows this protocol, so callers can treat both modes the same way.
-
-
-##### `SesEmailSender.send`  (lines 199–221)
-
-```
-async def send(self, email: str, code: str, expires_at: datetime, ttl: timedelta) -> None
-```
-
-**Purpose**: This method sends a verification code through Amazon SES, Amazon’s email-sending service. It is the production delivery path.
-
-**Data flow**: It receives the recipient email and code timing details. It builds the email text, obtains temporary AWS credentials, creates the JSON request body SES expects, signs the request so AWS can trust it, and posts it over asynchronous HTTP. If SES returns an error response, it raises a runtime error with the status and part of the response body.
-
-**Call relations**: This is called when the environment selects SES mode. It calls `verification_email` for the message, `_assume_role` for temporary credentials, and `_sigv4_headers` to create the required AWS authentication headers before sending the HTTP request.
-
-*Call graph*: calls 3 internal fn (_assume_role, _sigv4_headers, verification_email); 3 external calls (now, AsyncClient, dumps).
-
-
-##### `SesEmailSender._assume_role`  (lines 223–242)
-
-```
-async def _assume_role(self) -> SesCredentials
-```
-
-**Purpose**: This method exchanges the pod’s web identity token for short-lived AWS credentials. Those credentials are needed before the sender can call SES.
-
-**Data flow**: It reads the token file configured on the sender, sends that token plus the role ARN to AWS STS, and waits for the XML response. If STS reports an error, it raises a runtime error; otherwise it parses the response into access key, secret key, and session token values.
-
-**Call relations**: `SesEmailSender.send` calls this right before each email send. After STS replies, this method hands the raw XML to `_parse_assume_role_credentials` so the rest of the sender can work with a simple credentials object.
-
-*Call graph*: calls 1 internal fn (_parse_assume_role_credentials); called by 1 (send); 1 external calls (AsyncClient).
-
-
-##### `_parse_assume_role_credentials`  (lines 245–258)
-
-```
-def _parse_assume_role_credentials(payload: str) -> SesCredentials
-```
-
-**Purpose**: This helper reads the AWS STS XML response and extracts the temporary credentials. It turns a bulky service response into the small credential object the sender needs.
-
-**Data flow**: It receives the XML response text from STS, parses it, and looks for the access key ID, secret access key, and session token. If any required value is missing, it raises a runtime error; otherwise it returns a `SesCredentials` value containing the three pieces.
-
-**Call relations**: `SesEmailSender._assume_role` calls this after a successful STS response. The returned credentials are later used by `_sigv4_headers` to sign the SES request.
-
-*Call graph*: called by 1 (_assume_role); 2 external calls (__init__, fromstring).
-
-
-##### `_parse_assume_role_credentials.credential`  (lines 248–252)
-
-```
-def credential(name: str) -> str
-```
-
-**Purpose**: This nested helper fetches one named credential field from the parsed STS XML. It prevents missing AWS credential fields from being treated as empty strings.
-
-**Data flow**: It receives the name of one credential field, searches the parsed XML tree for that field, and returns its text value. If the value is absent, it raises a runtime error naming the missing field.
-
-**Call relations**: It is used inside `_parse_assume_role_credentials` three times, once for each required AWS credential field. This keeps the XML lookup and error checking consistent.
-
-
-##### `_sigv4_headers`  (lines 261–294)
-
-```
-def _sigv4_headers(host: str, body: bytes, region: str, credentials: SesCredentials, now: datetime) -> dict[str, str]
-```
-
-**Purpose**: This helper creates the authentication headers AWS requires for an SES request. AWS Signature Version 4 is a signing process that proves the request was made by someone holding valid AWS credentials.
-
-**Data flow**: It receives the destination host, request body bytes, AWS region, temporary credentials, and current time. It hashes the body, builds AWS’s canonical request text, derives a signing key, computes the signature, and returns HTTP headers including the authorization value and session token.
-
-**Call relations**: `SesEmailSender.send` calls this after it has built the SES request body and obtained credentials. `_sigv4_headers` calls `_signing_key` for the cryptographic key material, then hands signed headers back to the sender for the actual HTTP POST.
-
-*Call graph*: calls 1 internal fn (_signing_key); called by 1 (send); 3 external calls (strftime, sha256, new).
-
-
-##### `_signing_key`  (lines 297–301)
-
-```
-def _signing_key(secret_key: str, date_stamp: str, region: str) -> bytes
-```
-
-**Purpose**: This helper derives the special key used to sign an AWS SES request. It follows AWS’s required step-by-step HMAC process, where HMAC is a hash-based way to prove knowledge of a secret without sending the secret itself.
-
-**Data flow**: It receives the AWS secret key, date stamp, and region. It repeatedly mixes those values with the SES service name and the final AWS marker, producing a byte string signing key.
-
-**Call relations**: _sigv4_headers calls this while preparing the AWS authorization header. The result is not sent directly; it is used to create the final request signature.
-
-*Call graph*: called by 1 (_sigv4_headers); 1 external calls (new).
-
-
-##### `ConsoleEmailSender.send`  (lines 311–313)
-
-```
-async def send(self, email: str, code: str, expires_at: datetime, ttl: timedelta) -> None
-```
-
-**Purpose**: This method pretends to send a verification email by writing it to the application log. It is useful for local development where a developer needs the code but does not have or want an SES account.
-
-**Data flow**: It receives the same email and code details as the real sender. It builds the normal verification subject and body, then logs the recipient, subject, and text; it does not contact any outside service.
-
-**Call relations**: This method is used when `email_sender_from_env` selects console mode. It calls `verification_email` so the logged message matches the production email content.
-
-*Call graph*: calls 1 internal fn (verification_email).
-
-
-##### `email_sender_from_env`  (lines 316–330)
-
-```
-def email_sender_from_env() -> EmailSender
-```
-
-**Purpose**: This function chooses the email delivery method based on environment variables. It is the factory that turns deployment configuration into a usable sender object.
-
-**Data flow**: It reads `UFO_CONTROL_EMAIL_MODE`. If the mode is `console`, it returns a `ConsoleEmailSender`. If the mode is `ses`, it reads required SES and AWS identity settings, builds a `SesEmailSender`, and returns it. If the mode is unknown or required settings are missing, it raises a clear runtime error.
-
-**Call relations**: Startup or setup code can call this once to get an `EmailSender`. It relies on `_require_env` for mandatory settings and creates either the local logging sender or the production SES sender.
-
-*Call graph*: calls 1 internal fn (_require_env); 3 external calls (__init__, __init__, Path).
-
-
-##### `_require_env`  (lines 333–337)
-
-```
-def _require_env(name: str) -> str
-```
-
-**Purpose**: This helper reads an environment variable that must be present. It gives a clear error when required email configuration is missing.
-
-**Data flow**: It receives an environment variable name, looks up its value, and returns the value if it is non-empty. If the variable is absent or empty, it raises a runtime error explaining that the email sender requires it.
-
-**Call relations**: `email_sender_from_env` calls this when building the SES sender. It keeps configuration checks consistent and makes deployment mistakes fail loudly instead of causing confusing email failures later.
-
-*Call graph*: called by 1 (email_sender_from_env).
-
-
-### `control/src/ufo_control/gateway_invite.py`
-
-`domain_logic` · `startup and workspace-creation request handling`
-
-This file is the gatekeeper for a sensitive action: letting someone create a new workspace when they do not already belong to an existing workspace by email domain. Without it, the system could accidentally allow unlimited workspace creation, reuse old invite links, or let two people race to use the same code.
-
-The file stores invite codes in a database table, but it never stores the readable code itself. Instead, it stores a hash, which is like a one-way fingerprint: the system can later recognize the code, but someone reading the database cannot easily recover it.
-
-An invite is tied to an object number from the waitlist. The system refuses to mint a new live code for an object that already has one, and it also refuses if that object has already been identified through a consumed invite. Expired unused codes can be cleared away and replaced.
-
-Redeeming is careful because two signup attempts could happen at nearly the same time. The code row is locked in the database while it is checked and marked as consumed. This is like putting a “do not touch” sign on a library book while one librarian checks it out. The same transaction also records the invite on the claim record, so the system does not end up with a used invite that is not connected to the signup claim.
-
-#### Function details
-
-##### `mint_code`  (lines 47–51)
-
-```
-def mint_code() -> str
-```
-
-**Purpose**: Creates a new human-readable invite code. The code uses a limited alphabet chosen to avoid confusing characters, and it is grouped with dashes so it is easier to read and type.
-
-**Data flow**: It takes no input. It randomly chooses characters from the allowed invite alphabet, groups them into short chunks, joins the chunks with dashes, and returns the finished code string.
-
-**Call relations**: When InviteCodes.mint needs a fresh invite, it calls this function first. The returned readable code is shown to the operator or user once, while only its hashed version is saved later.
-
-*Call graph*: called by 1 (mint); 1 external calls (choice).
-
-
-##### `hash_invite`  (lines 54–55)
-
-```
-def hash_invite(code: str) -> str
-```
-
-**Purpose**: Turns an invite code into a secure fingerprint for storage and lookup. This lets the database recognize a code later without keeping the original readable code.
-
-**Data flow**: It receives a code string, trims extra spaces, lowercases it so typing case does not matter, converts it to bytes, and runs it through SHA-256, a standard one-way hashing method. It returns the resulting hash text.
-
-**Call relations**: InviteCodes.mint uses this before saving a new invite, and InviteCodes.redeem uses it to find the matching saved invite when someone enters a code. This keeps minting and redeeming consistent.
-
-*Call graph*: called by 2 (mint, redeem); 1 external calls (sha256).
-
-
-##### `InviteCodes.ensure_table`  (lines 92–110)
-
-```
-async def ensure_table(self) -> None
-```
-
-**Purpose**: Prepares the database table that stores invite-code records. It also protects startup or migration work so only one process changes this table at a time.
-
-**Data flow**: It uses the database connection pool stored on the InviteCodes object. It opens a database transaction, takes an advisory lock, checks whether an older incompatible invite table exists, drops that old table if needed, and then runs the table and index creation statements. It returns nothing, but leaves the database ready for invite minting and redemption.
-
-**Call relations**: This is called during setup before invite codes are used. It does not call the minting or redeeming flow; instead, it creates the safe storage those flows depend on.
-
-
-##### `InviteCodes.mint`  (lines 112–151)
-
-```
-async def mint(self, object_number: int) -> MintedInvite
-```
-
-**Purpose**: Creates a new one-time invite for a specific waitlist object number. It refuses to create a duplicate live invite or a new invite for an object that has already used one.
-
-**Data flow**: It receives an object number. It generates a readable code, calculates its expiry time, opens a database transaction, and checks existing invite rows for that object. If the object was already identified, or already has an unexpired unused code, it raises InviteError. Otherwise it removes expired unused rows for that object, stores a new row containing the code hash, object number, and expiry time, and returns a MintedInvite containing the readable code and its details.
-
-**Call relations**: This is the main path used by the admin invite flow. It calls mint_code to make the visible code, hash_invite to store only a fingerprint, and uuid4 to give the invite row a unique identity. If another process creates a live code for the same object at the same time, the database uniqueness rule catches that race and this function reports it as an InviteError.
-
-*Call graph*: calls 2 internal fn (hash_invite, mint_code); 4 external calls (__init__, __init__, now, uuid4).
-
-
-##### `InviteCodes.redeem`  (lines 153–182)
-
-```
-async def redeem(self, code: str, claim_id: UUID) -> InviteUnknown | InviteExpired | InviteConsumed | InviteAccepted
-```
-
-**Purpose**: Checks an entered invite code and, if valid, consumes it for a specific signup claim. It returns a clear result explaining whether the code was unknown, expired, already used, or accepted.
-
-**Data flow**: It receives the entered code and the claim ID that is trying to use it. It hashes the code, opens a transaction, and looks up the invite row while locking it so no other redemption can change it at the same time. If there is no row, it returns InviteUnknown. If the row is already consumed, it returns InviteConsumed. If it has expired, it returns InviteExpired. Otherwise it stamps the invite with a consumed time, writes the invite ID onto the claim record, and returns InviteAccepted with the invite ID, object number, and consumption time.
-
-**Call relations**: This is called during the workspace-creation or claim-resolution flow when a user supplies an invite code. It relies on hash_invite to find the stored fingerprint and then returns one of the invite result objects so the caller can decide what message or next step to show. Its database row lock is the key piece that prevents two simultaneous signup attempts from both using the same invite.
-
-*Call graph*: calls 1 internal fn (hash_invite); 5 external calls (__init__, __init__, __init__, __init__, now).
-
-
-### Client and browser transports
-These files present the onboarding flow to terminal and browser clients using safe command bytes and web-friendly messages.
-
-### `control/src/ufo_control/gateway_directives.py`
-
-`io_transport` · `request handling`
-
-The UFO terminal client receives server instructions as short lines of text. This file is the place that builds those instruction lines in a consistent format. You can think of it like writing labels for a conveyor belt: each label starts with an action word, followed by optional fields, separated in a predictable way so the client can read it back correctly.
-
-The main helper, `directive`, takes a command word and any extra pieces of text, escapes characters that could confuse the line format, joins everything with tab characters, adds a newline, and returns bytes ready to send. This matters because terminal output and network responses are byte streams, not Python strings.
-
-`render` is a tiny combiner. It joins already-built byte chunks into one response.
-
-The file also has one special startup behavior: `first_run_install`. When someone first runs the tool through a fresh `curl | sh` flow, the server may need to tell the shell to install the UFO binary locally. It checks an HTTP-style header called `x-ufo-installed`. If that header is not set to `1`, it returns an `install` directive. Once the local binary exists, the client reports `x-ufo-installed=1`, so the install instruction stops being sent.
-
-#### Function details
-
-##### `directive`  (lines 8–13)
-
-```
-def directive(verb: str, *fields: str) -> bytes
-```
-
-**Purpose**: Builds one server-to-client instruction line. It makes sure any text fields are escaped so tabs, newlines, and backslashes inside the data do not accidentally look like separators or new commands.
-
-**Data flow**: It receives a command word and zero or more text fields. It cleans each field by escaping backslashes, tabs, and newlines, removes carriage returns, joins the command and fields with tabs, adds a final newline, and turns the result into bytes. The output is ready to be written into a response stream.
-
-**Call relations**: This is the basic building block for directives in this file. `first_run_install` calls it when it decides the client needs an `install` instruction, relying on `directive` to format that instruction safely.
-
-*Call graph*: called by 1 (first_run_install).
-
-
-##### `render`  (lines 16–17)
-
-```
-def render(*lines: bytes) -> bytes
-```
-
-**Purpose**: Combines several already-built byte chunks into one byte response. It is useful when a screen or reply is assembled from multiple directives or pieces.
-
-**Data flow**: It receives any number of byte strings. It joins them in the same order with nothing added between them. The result is one continuous byte string suitable for sending onward.
-
-**Call relations**: This function stands as a simple final assembly step for directive output. No caller is shown in the provided graph, but its role is to gather prepared byte lines into one response body.
-
-
-##### `header_value`  (lines 20–25)
-
-```
-def header_value(headers: Mapping[str, str], name: str) -> str | None
-```
-
-**Purpose**: Looks up a header value without caring about letter case. This matters because HTTP-style header names are meant to be case-insensitive, so `X-UFO-Installed` and `x-ufo-installed` should mean the same thing.
-
-**Data flow**: It receives a mapping of header names to values and the header name to find. It compares each available header name in lowercase form against the requested name in lowercase form. It returns the matching value if found, or `None` if the header is absent.
-
-**Call relations**: `first_run_install` calls this before deciding whether to send an install directive. It supplies the small but important rule that header capitalization should not affect behavior.
-
-*Call graph*: called by 1 (first_run_install).
-
-
-##### `first_run_install`  (lines 28–35)
-
-```
-def first_run_install(headers: Mapping[str, str]) -> bytes
-```
-
-**Purpose**: Decides whether a new client session should be told to install the UFO binary. It prevents repeat install prompts by checking whether the client already says it is installed.
-
-**Data flow**: It receives request headers. It asks `header_value` for the `x-ufo-installed` header. If the value is exactly `1`, it returns empty bytes, meaning no extra instruction is needed. Otherwise, it uses `directive` to create and return an `install` instruction.
-
-**Call relations**: This function is the small decision point for first-run setup. During response building, it can be called with the incoming headers; it then uses `header_value` to read the client’s installation status and hands off to `directive` only when an install command must be sent.
-
-*Call graph*: calls 2 internal fn (directive, header_value).
-
-
-### `control/src/ufo_control/gateway_web.py`
-
-`io_transport` · `request handling`
-
-This file exists so a person can sign in through a web browser without creating a separate sign-in system. The important idea is that the browser is only another display for the same onboarding machine used elsewhere. Like two different front doors leading to the same reception desk, the web page and terminal both talk to the same underlying process.
-
-The file defines a web channel name, a helper that converts onboarding output into JSON-shaped data, and a large self-contained HTML page called LOGIN_PAGE. That page asks for the user's work email, shows messages from the onboarding flow, sends answers back to the server, and eventually shows a signed-in card with the user's email, workspace URL, and terminal install command.
-
-The onboarding machine speaks in simple directive lines such as “say this”, “ask this”, “here is a token”, or “here is the workspace”. Those lines are separated with tabs and newlines, so this file includes code to safely undo escaping. That matters because a message field might itself contain a tab or a newline, and the browser should receive the real text, not the encoded version.
-
-A notable safety detail is the debugger link. If a special operator-only debugger directive appears, the page submits the token in a form POST body instead of putting it in the URL. That keeps the bearer token out of browser history and link logs.
-
-#### Function details
-
-##### `parse_directives`  (lines 15–24)
-
-```
-def parse_directives(payload: bytes) -> list[dict[str, object]]
-```
-
-**Purpose**: This function turns the onboarding machine's plain text directive stream into a list of dictionaries that can be returned as JSON to the browser. It preserves the real contents of each field, including tabs and newlines that were escaped for safe line-based transport.
-
-**Data flow**: It receives raw bytes from the onboarding flow. It decodes them into text, splits the text into separate directive lines, ignores empty lines, separates each line into a verb and its fields, and runs each field through the unescaping helper. It returns a list like “verb plus fields”, ready for the web page's JavaScript to read.
-
-**Call relations**: When the web endpoint needs to send onboarding output to the browser, this function is the translator between the terminal-style directive format and browser-friendly JSON. For each field it finds, it asks _unescape to restore any protected tab, newline, or backslash characters before handing the cleaned directives onward.
-
-*Call graph*: calls 1 internal fn (_unescape).
-
-
-##### `_unescape`  (lines 27–40)
-
-```
-def _unescape(field: str) -> str
-```
-
-**Purpose**: This helper restores special characters that were encoded inside a directive field. It is what lets a field contain a real tab, newline, or backslash without confusing the line-and-tab format used to frame directives.
-
-**Data flow**: It receives one escaped text field. It walks through the characters from left to right; when it sees a recognized backslash escape, it replaces it with the intended character, and otherwise keeps the character as-is. It returns the restored string.
-
-**Call relations**: This function sits underneath parse_directives as the careful text cleanup step. parse_directives uses it on every directive field so the browser receives the original human-readable message or value rather than the transport-safe encoded form.
-
-*Call graph*: called by 1 (parse_directives).
-
-
-### Workspace provisioning
-These modules create or find the shared workspace, add members, prepare default agents, and run first-workspace setup.
-
-### `control/src/ufo_control/gateway_shared.py`
-
-`domain_logic` · `hosted onboarding`
-
-This file solves a hosted onboarding problem: when someone signs up with a verified domain, the system needs to put them in the shared workspace for that domain instead of creating random duplicates. Think of the domain as the building address, and the workspace as the office suite everyone from that building should share.
-
-The file first defines how to find the special database connection string used for these onboarding writes. That connection is important because workspace creation is done as the service role that is allowed to write the needed rows.
-
-The main piece is the SharedWorkspaces class. It uses a database pool to check whether a domain already has a workspace. It looks in two ways: by a deterministic workspace ID made from the domain name, and by checking the first member email in existing workspaces. This helps support both the intended stable ID scheme and older or pre-existing data.
-
-If no workspace exists, ensure creates one using a repeatable UUID based on the domain, so the same domain always points to the same workspace ID. It then adds the user as a member and creates a default agent if one is not already present. The database inserts are written to do nothing on conflicts, so repeated onboarding attempts do not create duplicate workspaces or duplicate default agents. If the lookup finds more than one workspace for the same domain, the file treats that as a serious data problem and raises an error.
-
-#### Function details
-
-##### `serve_dsn`  (lines 20–27)
-
-```
-def serve_dsn() -> str
-```
-
-**Purpose**: This function reads the database connection string used by the hosted onboarding path. It fails loudly if the required environment variable is missing, because onboarding cannot safely create workspace rows without that configured service connection.
-
-**Data flow**: It reads the UFO_CONTROL_SERVE_DSN environment variable from the process environment. If a value is present, it returns that string. If no value is present, it raises an error explaining that the hosted onboarding database role is not configured.
-
-**Call relations**: This is a small setup helper for code that needs the service database connection. It does not call other project functions; it simply protects later onboarding work from running with a missing or wrong database address.
-
-
-##### `SharedWorkspaces.exists`  (lines 37–38)
-
-```
-async def exists(self, domain: str) -> bool
-```
-
-**Purpose**: This function answers a simple question: does this verified domain already have a shared workspace? It is useful when the caller only needs to check availability, not create or join anything.
-
-**Data flow**: It receives a domain name, passes it to _existing, and waits for the database lookup. If _existing returns a workspace ID, this function returns true. If _existing returns nothing, it returns false.
-
-**Call relations**: This is the lightweight lookup path. It delegates the real domain-to-workspace search to SharedWorkspaces._existing, so it uses the same rules as the creation path in SharedWorkspaces.ensure.
-
-*Call graph*: calls 1 internal fn (_existing).
-
-
-##### `SharedWorkspaces.ensure`  (lines 40–66)
-
-```
-async def ensure(self, domain: str, email: str) -> str
-```
-
-**Purpose**: This function makes sure a shared workspace exists for a domain and that the given email address is a member of it. It also makes sure the workspace has the default agent, so a newly onboarded user lands in a usable workspace.
-
-**Data flow**: It receives a domain and an email address. First it asks _existing whether the domain already maps to a workspace. If not, it creates a stable workspace ID from the lowercased domain. It lowercases and trims the email, enters the workspace context, opens a database transaction, inserts the workspace row if missing, adds the user as a member, and inserts the default agent if that agent is not already there. It returns the workspace ID as text.
-
-**Call relations**: This is the main onboarding action in the file. It starts by calling SharedWorkspaces._existing to avoid making duplicates. Then it uses the workspace context and transaction helpers to write safely to the database, calls create_member to add the user, and uses PostgreSQL insert-on-conflict behavior so repeated calls are safe.
-
-*Call graph*: calls 1 internal fn (_existing); 6 external calls (insert, workspace_tx, create_member, ws, uuid4, uuid5).
-
-
-##### `SharedWorkspaces._existing`  (lines 68–86)
-
-```
-async def _existing(self, domain: str) -> UUID | None
-```
-
-**Purpose**: This private helper finds the one workspace that belongs to a domain, if there is one. It also protects the system from a dangerous situation where the same domain appears to point to multiple workspaces.
-
-**Data flow**: It receives a domain, lowercases it, and builds the deterministic UUID that should belong to that domain. It then borrows a database connection from the asyncpg pool and queries for matching workspace IDs in two ways: a direct match on the deterministic ID, and a match based on the domain part of the first member email in each workspace. If no rows are found, it returns nothing. If one row is found, it returns that workspace ID. If more than one row is found, it raises an error because the domain mapping is ambiguous.
-
-**Call relations**: This is the shared lookup engine used by both SharedWorkspaces.exists and SharedWorkspaces.ensure. The check-only path uses its answer to return true or false, while the ensure path uses its answer to decide whether to reuse an existing workspace or create the deterministic one.
-
-*Call graph*: called by 2 (ensure, exists); 1 external calls (uuid5).
-
-
-### `core/src/ufo/onboarding.py`
-
-`orchestration` · `first-run init`
-
-This file is the “move-in checklist” for a brand-new UFO installation. Without it, a fresh system would not have a workspace to store data in, an owner who can use it, or a default agent ready for the first conversation.
-
-The flow is careful to create the core pieces only once. Before touching the database, it checks that the chosen AI model has its required environment variable set, if the system can know that requirement ahead of time. It also checks whether extension onboarding steps need a credential store key. This avoids leaving behind a half-created workspace if setup cannot safely continue.
-
-The main `Onboarding` class then creates the durable core records in one database transaction: a workspace, the first member, and a default agent with a simple prompt and the selected model. If the database already has an owner, it raises `AlreadyInitialized` instead of creating duplicates.
-
-After the core workspace exists, the file runs onboarding steps supplied by installed extensions. Each extension receives its own scoped context, like giving each add-on its own labeled toolbox. If one extension step fails, the error is logged and the next step continues, so a broken add-on does not block the usable workspace.
-
-#### Function details
-
-##### `run_onboarding_steps`  (lines 46–74)
-
 ```
-async def run_onboarding_steps(manifests: tuple[Manifest, ...], workspace_id: UUID, credentials: CredentialStore | None) -> None
+async def retire(self) -> None
 ```
 
-**Purpose**: Runs the setup steps provided by installed extensions for a newly created workspace. It gives each extension the limited context it is allowed to use, and it keeps going even if one extension fails.
+**Purpose**: This removes the process's liveness row when the process shuts down cleanly. That lets peers see immediately that the seat is gone, rather than waiting for the heartbeat to become stale.
 
-**Data flow**: It receives the installed extension manifests, the new workspace ID, and an optional credential store. It enters that workspace’s context, looks through each manifest, skips extensions with no onboarding steps, and skips step execution if credentials are required but unavailable. For each step it builds an extension-specific context, calls the step, and logs failures instead of raising them. Nothing is returned; the effect is that extension setup code gets a chance to initialize its own data or secrets.
+**Data flow**: It reads the instance id from the `Heartbeat` object, opens a database transaction, and deletes the matching row from `runtime_instance`. It returns nothing, but the shared table no longer claims this process is alive.
 
-**Call relations**: This is called by `Onboarding.run_steps` after the core workspace and owner already exist. It calls `ws` to mark which workspace the setup belongs to, `context_for` to build the extension’s scoped handle, and `log` when steps are skipped or fail.
+**Call relations**: The serve shutdown path calls this through `ufo.serve._stop_executor`. It is the graceful counterpart to the recovery sweep: if a process exits normally, it clears its own marker instead of making others infer death from an old timestamp.
 
-*Call graph*: called by 1 (run_steps); 3 external calls (context_for, log, ws).
+*Call graph*: called by 1 (_stop_executor); 2 external calls (delete, owner_tx).
 
 
-##### `Onboarding.run`  (lines 88–91)
+##### `ExecutorRecovery.run`  (lines 116–122)
 
 ```
-async def run(self) -> Onboarded
+async def run(self) -> None
 ```
 
-**Purpose**: Runs the whole onboarding sequence from start to finish. This is the simple high-level method a caller can use when it wants a fresh workspace initialized.
+**Purpose**: This is the never-ending background loop that looks for work abandoned by dead processes. It keeps queued workflows from staying stuck under an executor that will never come back.
 
-**Data flow**: It starts with the configuration, email, model choice, credentials, and installed extension manifests stored on the `Onboarding` object. It first creates the core workspace setup, then runs extension setup steps for that workspace, and finally returns the created workspace and member IDs.
+**Data flow**: It waits for the recovery interval, calls `ExecutorRecovery.sweep`, and catches database or DBOS errors. On failure it logs the error class and continues looping, so temporary trouble delays recovery but does not permanently disable it.
 
-**Call relations**: This method is the top-level flow inside this file. It calls `Onboarding.create` to make the core records, then passes the result to `Onboarding.run_steps` so extensions can do their own setup afterward.
+**Call relations**: This loop is the scheduler for `ExecutorRecovery.sweep`. Every serve process can run it, so any surviving process can notice and recover work left behind by a crashed peer.
 
-*Call graph*: calls 2 internal fn (create, run_steps).
+*Call graph*: calls 1 internal fn (sweep); 2 external calls (sleep, log).
 
 
-##### `Onboarding.create`  (lines 93–99)
+##### `ExecutorRecovery.sweep`  (lines 124–132)
 
 ```
-async def create(self) -> Onboarded
+async def sweep(self) -> None
 ```
 
-**Purpose**: Creates the core, durable part of onboarding: the workspace, owner member, and default agent. It performs safety checks first so setup fails early before writing partial data.
+**Purpose**: This performs one recovery pass. It compares executors that still have pending workflows with executors that still have fresh heartbeats, and recovers the ones that look dead.
 
-**Data flow**: It uses the onboarding object’s chosen model, configuration, credentials, manifests, and email. It checks that the model key is present when needed, checks that extension steps have the credential support they need, then writes the workspace records. It returns an `Onboarded` value containing the new workspace ID and member ID.
+**Data flow**: It asks `_pending_executors` for executor ids attached to pending workflows. It asks `_live_executors` for executor ids with recent heartbeat rows. It subtracts the live set from the pending set, then for each remaining stranded executor it calls DBOS recovery in a worker thread and logs how many workflows were recovered.
 
-**Call relations**: This is called by `Onboarding.run` before extension setup begins. It delegates the checks to `_require_model_key` and `_require_credentials_for_steps`, then delegates the actual database creation to `_create_workspace`.
+**Call relations**: `ExecutorRecovery.run` calls this on each interval. It delegates the two facts it needs to `_pending_executors` and `_live_executors`, then hands each dead executor id to DBOS so DBOS can re-dispatch its pending workflows safely.
 
-*Call graph*: calls 3 internal fn (_create_workspace, _require_credentials_for_steps, _require_model_key); called by 1 (run).
+*Call graph*: calls 2 internal fn (_live_executors, _pending_executors); called by 1 (run); 2 external calls (to_thread, log).
 
 
-##### `Onboarding.run_steps`  (lines 101–102)
+##### `ExecutorRecovery._pending_executors`  (lines 134–146)
 
 ```
-async def run_steps(self, onboarded: Onboarded) -> None
+async def _pending_executors(self) -> set[str]
 ```
 
-**Purpose**: Runs extension onboarding for a workspace that has already been created. It separates add-on setup from the core workspace creation step.
+**Purpose**: This finds executor ids that currently have pending DBOS workflows. These are candidates for recovery, but only if their executor is no longer alive.
 
-**Data flow**: It receives an `Onboarded` result containing the workspace ID. It passes that workspace ID, along with the installed manifests and credential store from the `Onboarding` object, into the shared extension-step runner. It returns nothing; the side effects come from whatever extension steps successfully do.
+**Data flow**: It asks DBOS for pending workflows, up to a fixed scan limit, without loading the full workflow inputs or outputs. If the result reaches the limit, it logs that the scan may have hit the cap. It returns a set of executor id strings found on those pending workflow records.
 
-**Call relations**: This is called by `Onboarding.run` after `Onboarding.create` succeeds. Its only job is to hand off to `run_onboarding_steps`, which performs the per-extension loop and error logging.
+**Call relations**: `ExecutorRecovery.sweep` calls this first to find where pending work is sitting. The sweep then compares the result with `_live_executors`, because pending work alone is not a problem if its executor is still alive.
 
-*Call graph*: calls 1 internal fn (run_onboarding_steps); called by 1 (run).
+*Call graph*: called by 1 (sweep); 2 external calls (to_thread, log).
 
 
-##### `Onboarding._require_credentials_for_steps`  (lines 104–115)
+##### `ExecutorRecovery._live_executors`  (lines 148–158)
 
 ```
-def _require_credentials_for_steps(self) -> None
+async def _live_executors(self) -> set[str]
 ```
 
-**Purpose**: Stops onboarding early if installed extensions have setup steps but the credential store is not available. This prevents creating a workspace that cannot safely finish its required add-on setup.
+**Purpose**: This finds executor ids that have recently heartbeated and should be treated as alive. It prevents the recovery loop from starting a second copy of work that a live process is already running.
 
-**Data flow**: It reads the onboarding object’s credential store and extension manifests. If credentials are present, it allows setup to continue. If credentials are missing and any extension has onboarding steps, it raises an error explaining which environment variable needs to be set. It returns nothing when the check passes.
+**Data flow**: It calculates a cutoff time by subtracting the stale window from the current time. Then it reads `runtime_instance` rows whose heartbeat is newer than that cutoff. It returns those row ids as strings, one per live executor.
 
-**Call relations**: This is called by `Onboarding.create` before any database records are created. It acts as a gatekeeper so `_create_workspace` only runs when the surrounding setup has the needed secret-storage support.
+**Call relations**: `ExecutorRecovery.sweep` uses this as the safety check before recovery. Its answer comes from rows created by `record_fleet_seat` and refreshed by `Heartbeat.beat`.
 
-*Call graph*: called by 1 (create).
+*Call graph*: called by 1 (sweep); 4 external calls (now, timedelta, select, owner_tx).
 
 
-##### `Onboarding._require_model_key`  (lines 117–124)
+##### `CancelReconciler.run`  (lines 182–188)
 
 ```
-def _require_model_key(self) -> None
+async def run(self) -> None
 ```
 
-**Purpose**: Checks that the selected AI model has the environment variable it needs before the first workspace is created. This helps ensure the default agent will be usable for its first turn.
+**Purpose**: This is the never-ending loop that makes cancellation flow down from cancelled parent turns to still-running descendants. It turns cancellation from a one-turn action into an eventually consistent tree-wide cleanup.
 
-**Data flow**: It asks `_model_key_env` which environment variable, if any, is required for the selected model. If no known variable is required, it passes. If a variable is required but missing from the process environment, it raises an error. It returns nothing when the check passes.
+**Data flow**: It waits for the reconciliation interval, calls `CancelReconciler.sweep`, and catches database or DBOS errors. If one pass fails, it logs the error and keeps looping so the next tick can try again.
 
-**Call relations**: This is called by `Onboarding.create` as one of the early safety checks. It relies on `_model_key_env` to learn the correct environment variable name before deciding whether setup can continue.
+**Call relations**: This loop drives `CancelReconciler.sweep` periodically. Every serve process can run it, so a surviving process can finish cancellation cleanup even if the process that started the cancellation crashes.
 
-*Call graph*: calls 1 internal fn (_model_key_env); called by 1 (create).
+*Call graph*: calls 1 internal fn (sweep); 2 external calls (sleep, log).
 
 
-##### `Onboarding._model_key_env`  (lines 126–129)
+##### `CancelReconciler.sweep`  (lines 190–197)
 
 ```
-def _model_key_env(self) -> str | None
+async def sweep(self) -> None
 ```
 
-**Purpose**: Finds the name of the environment variable that should contain the API key for the selected model, when the core system knows it. For extension-provided model providers, it may return nothing because those providers resolve their keys later.
+**Purpose**: This performs one cancellation cleanup pass. It finds live turns that have a cancelled ancestor and cancels each of them through the normal cancellation path.
 
-**Data flow**: It reads the configuration, installed manifests, and selected model from the `Onboarding` object. It builds or queries the model registry, asks it for the required key environment variable, and returns either that variable name or `None`.
+**Data flow**: It builds and runs `_orphans_query` inside a database transaction to get descendant turns that should no longer be running. For each result, it enters that turn's workspace context, calls `cancel_one_turn` with the DBOS client and turn id, and logs the turn if it was actually cancelled.
 
-**Call relations**: This is called only by `_require_model_key`. It delegates model-provider knowledge to `model_registry`, keeping the onboarding code from hard-coding every possible model’s secret name.
+**Call relations**: `CancelReconciler.run` calls this on each interval. It relies on `_orphans_query` to find the right turns, then hands each turn to `cancel_one_turn`, which performs the actual workflow cancellation and terminal status update.
 
-*Call graph*: called by 1 (_require_model_key); 1 external calls (model_registry).
+*Call graph*: calls 1 internal fn (_orphans_query); called by 1 (run); 4 external calls (cancel_one_turn, owner_tx, log, ws).
 
 
-##### `Onboarding._create_workspace`  (lines 131–154)
+##### `CancelReconciler._orphans_query`  (lines 199–234)
 
 ```
-async def _create_workspace(self) -> Onboarded
+def _orphans_query(self) -> sa.Select
 ```
 
-**Purpose**: Writes the first workspace, owner member, and default agent into the database. It also protects against running first-time setup twice.
+**Purpose**: This builds the database query that finds non-finished turns living under a cancelled ancestor. It is how the reconciler catches not just direct children, but grandchildren and deeper descendants too.
 
-**Data flow**: It opens a workspace database transaction, checks whether any member email already exists, and raises `AlreadyInitialized` if so. If the database is still fresh, it creates new unique IDs, inserts a workspace row, creates the owner member using the provided email, inserts the default agent using the selected model and default prompt, then returns the new workspace and member IDs as an `Onboarded` value.
+**Data flow**: It starts from every turn whose status is still non-terminal, meaning not finished yet. Using a recursive database query, it walks upward through each turn's `parent_turn_id` chain until it either finds a cancelled ancestor or runs out of parents. It returns a selectable query that yields the live descendant turn id and workspace id for each match.
 
-**Call relations**: This is called by `Onboarding.create` after the prerequisite checks pass. It uses `workspace_tx` for the database boundary, SQLAlchemy helpers to read and insert rows, `create_member` to create the owner, `uuid4` for new IDs, and `Onboarded` to package the result for the rest of the onboarding flow.
+**Call relations**: `CancelReconciler.sweep` calls this to know which turns need cancellation. The query only identifies the targets; the sweep then uses `cancel_one_turn` to do the actual cancellation work in the correct workspace.
 
-*Call graph*: called by 1 (create); 7 external calls (__init__, __init__, insert, select, workspace_tx, create_member, uuid4).
+*Call graph*: called by 1 (sweep); 1 external calls (select).
 
 ## 📊 State Registers Touched
 
-- `reg-workspace-context` — The current workspace and member context that keeps every request acting inside the right tenant boundary.
-- `reg-workspaces-members-agents` — The durable records for workspaces, their members, and the agents that can act for them.
-- `reg-identity-and-session-tokens` — The identities, bearer tokens, gateway tokens, operator sessions, and other passes that prove who is allowed in.
-- `reg-onboarding-claims-invites` — The temporary signup codes, email claims, and invite records used before or during workspace creation.
-- `reg-seat-billing-state` — The workspace seat limits, granted seats, included seats, and external billing integration state.
-- `reg-secret-keyring` — Loaded signing and encryption key material used to mint/verify tokens and seal/unseal protected secrets across trusted paths.
-- `reg-hosted-domain-workspace-map` — Durable hosted onboarding mapping from verified email domains to the shared workspace used for automatic member provisioning.
+- `reg-config` — The effective deployment settings that tell the system how to start, what services to use, and what safety rules are enabled.
+- `reg-extension-set` — The saved and loaded set of extensions, packs, manifests, and contributed capabilities available to the runtime.
+- `reg-workspace-directory` — The shared record of workspaces, members, owners, agents, and workspace boundaries.
+- `reg-surface-installations` — The stored links between outside surfaces, workspaces, channels, conversations, and agents.
+- `reg-live-stream` — The live feed of turn updates, text chunks, tool events, costs, and final frames that clients and debuggers can watch.
+- `reg-runtime-fleet` — The shared heartbeat and ownership records that show which server processes are alive and which work they are responsible for.
+- `reg-cancellation-state` — The shared stop signal state used to cancel active turns, child tasks, tools, and abandoned work safely.
+- `reg-egress-policy` — The network access and proxy state that decides which sandbox traffic is allowed, audited, billed, or given injected secrets.
+- `reg-subagent-tree` — The shared parent-child work structure for delegated agents, including child turns, messages, waits, and cancellations.
+- `reg-observability-context` — The shared tracing, metrics, structured logs, and trace-parent links used to understand work across processes and turns.
+- `reg-db-schema-version` — The applied core, control-plane, and extension migration revisions that determine which persisted schema the runtime may safely use.
+- `reg-db-connection-pool` — The process-global database engine, sessions, transactions, and connection pool shared by requests, workers, jobs, and shutdown cleanup.
+- `reg-redis-backplane-pool` — The optional Redis client/backplane connection state used to share live stream infrastructure across server processes.
+- `reg-update-check-cache` — Cached version/update-check metadata used by CLI or startup paths to avoid repeated remote checks and notify operators about newer releases.

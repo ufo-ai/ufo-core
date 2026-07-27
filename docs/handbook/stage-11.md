@@ -1,1179 +1,1470 @@
-# Agent reasoning loop, tool dispatch, and subagent orchestration  `stage-11`
+# Tool catalog, dispatch, and built-in work actions  `stage-11`
 
-This stage is the agent’s main work loop for one user request. It is where a queued turn becomes real action: `engine.py` claims the turn, prepares the prompt, reads the model’s streamed decisions, runs requested tools, records costs, absorbs any new messages, and finishes, pauses, or fails safely.
+This stage is the system’s tool room during the main work loop. When the AI asks to use a tool, the registry checks that the tool exists and that its input has the right shape. The context then gives the tool only the powers it is allowed to use, like workspace access, account choices, cleanup hooks, or permission checks. The built-in tools use that context to run safe shell commands, edit files, share files, ask the user questions, load skills, connect accounts, or hand work to subagents.
 
-The built-in tools are the basic workbench: they let the agent read and edit files, run commands, ask the user questions, manage artifacts, and keep a todo list. The sandbox, browser, and website tools add a safe workshop for running code and controlling web pages. External connector and research tools let the agent use web search and business services through protected adapters, so secrets are not exposed. Document and Office tools handle PDFs, Word, PowerPoint, and spreadsheets.
-
-Subagents are helper workers. `subagents.py` starts, tracks, waits for, messages, or cancels child agent turns. Browser, research, and website delegation files package larger jobs into specialized child agents, so the main agent can split work and combine the results.
+Several tool families plug into this same catalog. Connector tools act as guarded adapters to outside services and apps. Research and memory tools look up web pages, papers, search results, or stored knowledge. Document tools inspect, repair, comment on, and export office files and PDFs. The todo extension keeps a per-conversation checklist so longer tasks can continue across turns. The object system lets extensions expose named workspace records in a controlled way, while conversations are exposed only as read-only metadata. Together these parts turn a model’s request into a checked, limited, recorded action.
 
 ## Sub-stages
 
-- [Built-in workspace, artifact, and conversation tools](stage-11.1.md) `stage-11.1` — 2 files
-- [Sandboxed code, browser, and website automation](stage-11.2.md) `stage-11.2` — 21 files
-- [External connector, research, and business-tool execution](stage-11.3.md) `stage-11.3` — 12 files
-- [Document, Office, PDF, and skill-script execution](stage-11.4.md) `stage-11.4` — 19 files
+- [External connector and brokered app tools](stage-11.1.md) `stage-11.1` — 18 files
+- [Research, search, recall, and knowledge lookup tools](stage-11.2.md) `stage-11.2` — 4 files
+- [Document, office, PDF, and artifact automation tools](stage-11.3.md) `stage-11.3` — 23 files
 
 ## Files in this stage
 
-### Turn execution loop
-Core turn orchestration claims the request, streams model work, dispatches tools, tracks usage, absorbs messages, and commits the final outcome.
+### Todo and object extensions
+Extension-facing workspace records let agents manage persistent todo checklists and expose conversations as safe read-only objects through the shared object system.
 
-### `core/src/ufo/loop/engine.py`
+### `extensions/todos/ufo_ext_todos.py`
 
-`orchestration` · `turn execution`
+`domain_logic` · `extension registration and request handling`
 
-Think of this file as the conductor for one conversation turn. It makes sure only one worker owns the turn, then gathers the earlier transcript and the new user message, adds useful context like time and sender, and starts asking the model what to do. If the model calls tools, the engine runs those tools, feeds the results back, and repeats until the model gives a final answer or the round limit is reached. While this happens, new user messages can arrive; the engine drains them between model rounds so the answer does not ignore someone who spoke while the bot was working. The file is careful about crashes and retries. Important actions are DBOS steps, meaning their results are recorded so a replay can resume without re-calling the model or re-running side-effecting tools. It also protects the system from runaway cost by checking spend caps, records token usage for billing, parks a turn when limits are hit, and publishes live updates like streamed text, tool activity, and cost ticks. It also keeps large tool outputs and images out of replay logs by writing them to files or blob storage and returning references instead.
+This file solves a simple but important problem: when an agent is doing several steps, both the user and the agent need a visible progress board. Without this file, the agent would have no durable checklist tool for saying what it plans to do, what is currently being worked on, and what is finished.
+
+The file defines two tools. The first, `update_todo_list`, creates or replaces the whole checklist. It is meant to be used at the start of complex work. The second, `update_todo_status`, changes the status of one or more existing tasks, such as moving a task from `pending` to `in_progress` or `completed`.
+
+The checklist is stored in the extension’s own store, keyed by the conversation ID. In plain terms, each conversation gets its own little clipboard. The agent does not have to keep the list only in its chat memory; the extension can read it back later.
+
+The file also defines the shapes of the data using Pydantic models, which are validation classes that make sure the tool inputs and saved board have the expected fields. The `manifest` function announces the extension’s name, tools, input formats, and prompt text so the larger system knows how to offer these tools to the agent.
 
 #### Function details
 
-##### `_claim_turn`  (lines 164–206)
+##### `_require_ext`  (lines 82–85)
 
 ```
-async def _claim_turn(turn_id: UUID, attempt: str) -> bool
+def _require_ext(ctx: ToolContext) -> ExtensionContext
 ```
 
-**Purpose**: Marks a queued or parked turn as running for one specific execution attempt. This prevents two workers from doing the same turn at the same time.
+**Purpose**: This helper makes sure a tool call has access to the todos extension context. The extension context is the part that gives the tool its private storage area, so the todo tools cannot work without it.
 
-**Data flow**: It receives a turn id and an attempt id, reads the turn's conversation, locks that conversation row, and updates the turn if it is claimable. It returns true when this attempt owns the turn, and false when another execution has it or it is already finished.
+**Data flow**: It receives the current tool context. If the context contains an extension object, it returns that object. If not, it stops immediately with an error, because there would be nowhere reliable to save or read the checklist.
 
-**Call relations**: TurnEngine._mark_running uses this at the start of a run. _claim_turn_with_handoff also uses it before looking for a following queued turn to hand off.
+**Call relations**: Both `update_todo_list` and `update_todo_status` call this first because they need the extension store. It acts like checking that you have the right notebook before trying to write or edit the todo list.
 
-*Call graph*: called by 2 (_mark_running, _claim_turn_with_handoff); 6 external calls (and_, delete, or_, select, update, workspace_tx).
-
-
-##### `_claim_turn_with_handoff`  (lines 217–274)
-
-```
-async def _claim_turn_with_handoff(turn_id: UUID, attempt: str) -> tuple[bool, _TurnHandoff | None]
-```
-
-**Purpose**: Claims the current turn and, if possible, reserves the next queued turn in the same conversation for later dispatch. This keeps work moving in order.
-
-**Data flow**: It receives a turn id and attempt id, first tries to claim the turn, then locks the conversation and searches for the next queued turn. It returns whether the claim succeeded and, when a next turn was stamped for dispatch, a small handoff record describing it.
-
-**Call relations**: It builds on _claim_turn. It is meant for dispatch code that wants to claim one turn while also preparing the next one without racing another worker.
-
-*Call graph*: calls 1 internal fn (_claim_turn); 5 external calls (__init__, select, update, workspace_tx, uuid4).
+*Call graph*: called by 2 (update_todo_list, update_todo_status).
 
 
-##### `ModelStreamError.__init__`  (lines 358–359)
+##### `_board_key`  (lines 88–89)
 
 ```
-def __init__(self, error_class: str, message: str, partial_output: str='') -> None
+def _board_key(ctx: ToolContext) -> str
 ```
 
-**Purpose**: Stores the model provider's original error class, message, and any partial text already streamed. This lets the engine bill and recover from partial model output instead of losing it.
+**Purpose**: This helper builds the storage key used to save the todo board for the current conversation. It keeps different conversations from overwriting each other’s checklists.
 
-**Data flow**: It receives the model error name, message, and optional partial output, and places all three into the exception's arguments. The exception object then carries those details through later error handling.
+**Data flow**: It receives the tool context, reads the current conversation ID from the turn information, and combines it with the `todo/` prefix. The result is a string key that points to this conversation’s saved todo board.
 
-**Call relations**: TurnEngine._stream_recovering_overflow creates this after a recorded model round reports an error. Later engine logic can inspect the stored fields instead of treating every stream failure the same.
+**Call relations**: `update_todo_list` uses this key when writing a new board, and `update_todo_status` uses it when reading and writing an existing board. It is the shared address system that lets both tools find the same checklist.
 
-*Call graph*: called by 1 (_stream_recovering_overflow).
+*Call graph*: called by 2 (update_todo_list, update_todo_status).
 
 
-##### `ModelStreamError.__str__`  (lines 361–363)
+##### `_board_result`  (lines 92–93)
+
+```
+def _board_result(board: TodoBoard) -> ToolResult
+```
+
+**Purpose**: This helper turns the current todo board into the standard tool response returned to the agent. Returning the full board lets the model immediately see the latest checklist state after every change.
+
+**Data flow**: It receives a `TodoBoard`, converts it to JSON text, wraps that text in a text content object, and then wraps that in a tool result. The output is the formatted response expected by the tool system.
+
+**Call relations**: Both todo tools call this after they have created or updated the board. It hands the finished board back to the larger tool framework in the format that framework expects.
+
+*Call graph*: called by 2 (update_todo_list, update_todo_status); 3 external calls (__init__, __init__, model_dump_json).
+
+
+##### `_read_board`  (lines 96–98)
+
+```
+async def _read_board(ext: ExtensionContext, key: str) -> TodoBoard | None
+```
+
+**Purpose**: This helper reads a saved todo board from the extension store. It returns either a validated board or nothing if no board has been created yet.
+
+**Data flow**: It receives the extension context and a storage key. It asks the extension store for the saved data at that key. If nothing is found, it returns `None`; otherwise, it validates the stored data as a `TodoBoard` and returns that board.
+
+**Call relations**: `update_todo_status` calls this before applying status changes. That status tool needs to start from the current saved checklist, rather than inventing a new one.
+
+*Call graph*: called by 1 (update_todo_status).
+
+
+##### `update_todo_list`  (lines 101–105)
+
+```
+async def update_todo_list(ctx: ToolContext, args: UpdateTodoListInput) -> ToolResult
+```
+
+**Purpose**: This is the tool that creates or replaces the complete todo checklist for a conversation. It is used when the agent starts or revises a multi-step plan.
+
+**Data flow**: It receives the tool context and the requested list details: a title, the full set of tasks, and a short user-facing description. It checks that extension storage is available, builds a `TodoBoard`, saves that board under the conversation-specific key, and returns the board as JSON text in a tool result. Because the task list replaces the existing list entirely, the saved board after the call matches the new input.
+
+**Call relations**: When the agent needs a checklist, the tool framework calls this function. It relies on `_require_ext` for storage access, `_board_key` to choose the right conversation slot, and `_board_result` to return the final board to the agent and user interface.
+
+*Call graph*: calls 3 internal fn (_board_key, _board_result, _require_ext); 2 external calls (__init__, loads).
+
+
+##### `update_todo_status`  (lines 108–119)
+
+```
+async def update_todo_status(ctx: ToolContext, args: UpdateTodoStatusInput) -> ToolResult
+```
+
+**Purpose**: This is the tool that updates the status of existing todo items. It is used while work is underway, so the checklist can show what is pending, in progress, or completed.
+
+**Data flow**: It receives the tool context and one or more status updates. It checks that extension storage is available, finds the saved board for the current conversation, and refuses to continue if no list exists yet. For each update, it checks that the given task number is valid, converts the user-facing 1-based number to the internal list position, changes that task’s status, saves the whole updated board back to storage, and returns the current board.
+
+**Call relations**: The tool framework calls this whenever the agent reports progress on checklist items. It depends on `_read_board` to load the existing list, `_board_key` to locate the right conversation’s board, `_require_ext` to ensure storage exists, and `_board_result` to return the updated checklist.
+
+*Call graph*: calls 4 internal fn (_board_key, _board_result, _read_board, _require_ext); 1 external calls (loads).
+
+
+##### `manifest`  (lines 122–141)
+
+```
+def manifest() -> Manifest
+```
+
+**Purpose**: This function describes the todos extension to the larger system. It names the extension, lists the tools it provides, explains their inputs, and includes prompt text that teaches the agent how to use the checklist.
+
+**Data flow**: It takes no input. It builds a manifest object containing the extension name and version, two tool definitions, and one prompt section loaded from the nearby markdown file. The result is a complete registration record for this extension.
+
+**Call relations**: The host system calls this during extension discovery or startup so it can learn that `update_todo_list` and `update_todo_status` are available. The manifest connects the human-facing tool descriptions, input validation models, and actual handler functions into one package.
+
+*Call graph*: 3 external calls (__init__, __init__, __init__).
+
+
+### `core/src/ufo/conversations.py`
+
+`domain_logic` · `request handling`
+
+A conversation can be the place where an artifact was created or where a scheduled task reports back. This file gives the object system a safe way to resolve those links. It is like a directory card for a meeting: it tells you which room the meeting is in, who it belongs to if it is private, and when it was created, but it does not reveal what was said inside.
+
+The main rule is visibility. Shared conversations, with no specific member attached, can be seen by anyone in the workspace. Private conversations can only be seen by the matching audience member. The file builds database queries that enforce that rule before returning anything.
+
+The file defines `ConversationSpec`, the small public shape of a conversation: its surface, such as the chat area it lives on, and an optional member ID. `ConversationObjects` is the read-only store used by the object system. It can list visible conversations, fetch one visible conversation by its ID, and report no separate status. It deliberately rejects apply and delete operations because conversations are created by chat surfaces and removed by retention cleanup, not authored through this object interface.
+
+At the bottom, `CONVERSATION_OBJECT` registers this behavior as the core `conversation` object kind, including guidance that transcripts are not exposed.
+
+#### Function details
+
+##### `ConversationObjects.list`  (lines 50–59)
+
+```
+async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage
+```
+
+**Purpose**: Shows a page of conversations the caller is allowed to see. Each item is only a summary: the conversation ID, the chat surface, and the creation date.
+
+**Data flow**: It receives the caller context and a list query with paging or filtering choices. It asks for all database rows visible to that caller, turns each row into a simple object-list entry, and then passes those entries through the object paging helper. The result is an `ObjectPage` containing only safe, visible conversation summaries.
+
+**Call relations**: This is the list path for the registered conversation object. It relies on `_visible_rows` to do the privacy-aware database read, then hands the formatted rows to the shared object paging helper so conversation listing behaves like other object kinds.
+
+*Call graph*: calls 1 internal fn (_visible_rows); 2 external calls (__init__, object_page).
+
+
+##### `ConversationObjects.get`  (lines 61–72)
+
+```
+async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[ConversationSpec] | None
+```
+
+**Purpose**: Fetches one conversation by its name, where the name is expected to be the conversation's UUID-style ID. It returns only the public metadata if the conversation exists and is visible to the caller.
+
+**Data flow**: It receives the caller context and a conversation name string. It asks `_find` to parse the name and look up a matching visible row. If no row is found, it returns `None`; otherwise it builds a `ConversationSpec` with the surface and optional member ID, wraps it with creation and update timestamps, and returns that detail object.
+
+**Call relations**: This is the detail path for conversation links. When another object points to a conversation, this method is what can resolve that pointer into safe metadata, while `_find` performs the actual permission-filtered lookup.
+
+*Call graph*: calls 1 internal fn (_find); 2 external calls (__init__, __init__).
+
+
+##### `ConversationObjects.status`  (lines 74–75)
+
+```
+async def status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None
+```
+
+**Purpose**: Reports that conversations have no separate live status through this object interface. The metadata returned by `get` is all this object kind exposes.
+
+**Data flow**: It receives the caller context and conversation name, but does not read the database or inspect the name. It always returns `None`, meaning there is no additional status document.
+
+**Call relations**: This fits the standard object-store shape, where object kinds may offer a status view. For conversations, the file intentionally leaves that view empty so callers do not expect transcript or runtime state here.
+
+
+##### `ConversationObjects.apply`  (lines 77–80)
+
+```
+async def apply(self, ctx: ToolContext, name: str, spec: ConversationSpec, old: ConversationSpec | None) -> None
+```
+
+**Purpose**: Rejects attempts to create or update a conversation through the object system. This protects the rule that conversations are made by chat surfaces, not by general object writes.
+
+**Data flow**: It receives the caller context, target name, desired conversation spec, and possibly the old spec. Instead of saving anything, it raises a `VerbNotSupported` error with a message explaining that conversations are surface-made.
+
+**Call relations**: This is called when the object framework tries to apply a desired state. Rather than handing off to storage, it stops the flow immediately so no caller can author or edit conversation rows through this route.
+
+*Call graph*: 1 external calls (__init__).
+
+
+##### `ConversationObjects.delete`  (lines 82–83)
+
+```
+async def delete(self, ctx: ToolContext, name: str) -> None
+```
+
+**Purpose**: Rejects attempts to delete a conversation through the object system. Conversation cleanup is left to retention rules, not manual object deletion.
+
+**Data flow**: It receives the caller context and target name. It does not look up or change any row; it raises a `VerbNotSupported` error with the standard explanation.
+
+**Call relations**: This is the delete path for the object framework. It deliberately mirrors `apply`: any mutation request is refused so this file stays a read-only link resolver.
+
+*Call graph*: 1 external calls (__init__).
+
+
+##### `ConversationObjects._find`  (lines 85–95)
+
+```
+async def _find(self, ctx: ToolContext, name: str) -> sa.Row | None
+```
+
+**Purpose**: Looks up one visible conversation row by ID. It also quietly rejects names that are not valid UUIDs, because conversation names are stored as UUID-style identifiers.
+
+**Data flow**: It receives the caller context and a name string. First it tries to turn the name into a UUID; if that fails, it returns `None`. If parsing succeeds, it opens a workspace database transaction, builds the standard visibility-filtered query, adds a condition for the specific conversation ID, and returns either one matching row or `None`.
+
+**Call relations**: `get` uses this helper so the public detail method does not have to repeat ID parsing or database access. `_find` in turn uses `_visible` to make sure the same privacy rule is applied for single-item lookup as for listing.
+
+*Call graph*: calls 1 internal fn (_visible); called by 1 (get); 2 external calls (workspace_tx, UUID).
+
+
+##### `ConversationObjects._visible_rows`  (lines 97–100)
+
+```
+async def _visible_rows(self, ctx: ToolContext) -> tuple[sa.Row, ...]
+```
+
+**Purpose**: Reads all conversation rows that the caller is allowed to see in the current workspace. It is the database-reading helper behind the public list operation.
+
+**Data flow**: It receives the caller context. It opens a workspace database transaction, runs the visibility-filtered select query from `_visible`, collects all returned rows, and turns them into an immutable tuple before returning them.
+
+**Call relations**: `list` calls this before formatting conversations for display. By relying on `_visible`, it shares the same workspace and member-privacy rules used by single conversation lookup.
+
+*Call graph*: calls 1 internal fn (_visible); called by 1 (list); 1 external calls (workspace_tx).
+
+
+##### `ConversationObjects._visible`  (lines 102–121)
+
+```
+def _visible(self, ctx: ToolContext) -> sa.Select
+```
+
+**Purpose**: Builds the database query that defines which conversations are visible to the caller. This is the central privacy gate for this file.
+
+**Data flow**: It receives the caller context and reads the caller's audience member ID, if any, plus the current workspace ID. It creates a database select for conversation ID, surface, member ID, and timestamps. The query is limited to the current workspace and to rows that are shared, or, when there is a caller member ID, rows belonging to that member.
+
+**Call relations**: Both `_find` and `_visible_rows` call this helper before touching conversation data. That means every public read path goes through the same rule: shared conversations are visible broadly, while member-bound conversations are only visible to that member.
+
+*Call graph*: called by 2 (_find, _visible_rows); 3 external calls (or_, select, ws_current).
+
+
+### `core/src/ufo/objects.py`
+
+`domain_logic` · `startup for object-kind registration; request handling for object tools`
+
+A workspace object is a durable item addressed by a kind and a name, like `calendar/reminders` or `note/project-plan`. This file gives the project one common way to work with those objects instead of every extension inventing its own rules. Without it, object names, YAML shape, permissions, paging, and tool responses could drift apart and become unsafe or confusing.
+
+The file has three main jobs. First, it defines the basic shapes: object references, links between objects, list rows, pages, specs, and store interfaces. A store is the extension-owned code that actually reads and writes its own tables. Second, it validates registrations at startup. Each object kind must have a unique kind name, a strict Pydantic spec model, JSON-friendly fields, and no secret fields, because specs are stored and shown back to users. Third, it exposes five tools through `ObjectVerbs`: list, get, explain, apply, and delete.
+
+A useful analogy is a building front desk. The front desk checks that the visitor wrote the right room number and filled out the form correctly, then sends them to the right office. The office still decides the real domain action. This file is that front desk: strict about shared rules, but it lets each object kind decide what creation, updates, deletion, and refusal mean.
+
+#### Function details
+
+##### `ObjectRef.validate_kind`  (lines 67–70)
+
+```
+def validate_kind(cls, value: str) -> str
+```
+
+**Purpose**: Checks that an object reference uses a valid kind name. This prevents references such as `Bad Kind` or names with punctuation from entering the system.
+
+**Data flow**: It receives the proposed kind string, compares it with the allowed pattern, and either returns the same string unchanged or raises an error explaining the rule.
+
+**Call relations**: Pydantic calls this automatically when an `ObjectRef` is built. It protects every later use of the reference, including links, search hits, and object lookups.
+
+
+##### `ObjectRef.validate_name`  (lines 74–80)
+
+```
+def validate_name(cls, value: str) -> str
+```
+
+**Purpose**: Checks that an object reference uses a valid object name. The name must be short enough and use the shared lowercase-and-dashes style.
+
+**Data flow**: It receives the proposed name, checks both its length and its pattern, and returns it unchanged if valid. If not, it raises an error that includes the allowed rule.
+
+**Call relations**: Pydantic calls this while constructing an `ObjectRef`. This keeps object links and references using the same name grammar that `object_apply` enforces for new objects.
+
+
+##### `ObjectRef.__str__`  (lines 82–83)
 
 ```
 def __str__(self) -> str
 ```
 
-**Purpose**: Formats a model stream error as readable text while keeping the provider's error class visible. That matters because other code detects context-size failures from the error text.
+**Purpose**: Turns an object reference into the human-readable form `kind/name`. This is the compact address used in messages and displays.
 
-**Data flow**: It reads the stored error class and message from the exception and returns a single string like 'SomeError: message'. It deliberately leaves out the partial output.
+**Data flow**: It reads the reference's `kind` and `name` fields and joins them with a slash. The result is a plain string.
 
-**Call relations**: This is used whenever the exception is converted to text, such as logging or terminal error recording.
+**Call relations**: It is used whenever code or logs need a simple text version of an object reference rather than the structured model.
 
 
-##### `ModelStreamError.model_error_class`  (lines 366–368)
+##### `_ObjectCursor.validate_rank`  (lines 180–185)
 
 ```
-def model_error_class(self) -> str
+def validate_rank(self) -> '_ObjectCursor'
 ```
 
-**Purpose**: Gives callers the model provider's original error class name. The engine uses that distinction to decide whether an error is recoverable.
+**Purpose**: Checks that a paging cursor's stored value matches the type category it claims to have. This stops broken or tampered cursor tokens from producing confusing list results.
 
-**Data flow**: It reads the first stored exception argument and returns it unchanged. Nothing else is modified.
+**Data flow**: It reads the cursor's rank and value. If the pair makes sense, such as numeric rank with a number, it returns the cursor; otherwise it raises an error.
 
-**Call relations**: The stream recovery and commit paths use this information to preserve the model's own error identity.
+**Call relations**: Pydantic calls this when `object_page` decodes a cursor from a previous listing. It helps `object_page` safely continue from the correct place.
 
 
-##### `ModelStreamError.partial_output`  (lines 371–373)
+##### `object_page`  (lines 188–267)
 
 ```
-def partial_output(self) -> str
+def object_page(rows: tuple[ObjectRow, ...], query: ObjectListQuery) -> ObjectPage
 ```
 
-**Purpose**: Returns text or tool-call fragments that arrived before the model stream failed. This can be saved so the next attempt can salvage work already paid for.
+**Purpose**: Applies the shared list behavior for one object kind: searching, exact filters, sorting, and paging. Store implementations can hand it lightweight rows and get consistent list results.
 
-**Data flow**: It reads the stored partial output from the exception arguments and returns it. It does not write anything itself.
+**Data flow**: It receives rows plus a query. It rejects invalid fields, filters rows by search text and exact filter values, sorts them with `_sortable`, trims the result to the page size, and returns an `ObjectPage` with rows and possibly a next cursor.
 
-**Call relations**: TurnEngine._model_round uses this after a truncation-style stream failure to offload partial content and tell the model where to find it.
+**Call relations**: Member-owned object stores call it from `MemberOwnedObjects.list` after visibility has already been checked. It calls `_sortable` to make different field types sort predictably and creates `_ObjectCursor` values for follow-up pages.
 
+*Call graph*: calls 1 internal fn (_sortable); called by 1 (list); 2 external calls (__init__, __init__).
 
-##### `ModelStreamError.model_error_message`  (lines 376–378)
 
-```
-def model_error_message(self) -> str
-```
-
-**Purpose**: Gives callers the model provider's original error message. This keeps terminal failures useful and specific.
-
-**Data flow**: It reads the stored message from the exception arguments and returns it. No state changes.
-
-**Call relations**: TurnEngine._commit_once uses this kind of information when building a terminal frame for a failed turn.
-
-
-##### `TurnParked.__init__`  (lines 385–387)
-
-```
-def __init__(self, message: str) -> None
-```
-
-**Purpose**: Creates the special exception used when a turn must pause because a spend or seat limit was hit. Parking is not a failure; it is a resumable stop.
-
-**Data flow**: It receives a message for the user or surface, stores it on the exception, and passes it to the base exception. The message later becomes the parked-frame reason.
-
-**Call relations**: TurnEngine._enforce_spend raises this. TurnEngine.run catches it and calls _park to record the resumable parked state.
-
-*Call graph*: called by 1 (_enforce_spend).
-
-
-##### `_dispatch_segments`  (lines 390–414)
-
-```
-def _dispatch_segments(tools: ToolRegistry, tool_calls: tuple[ToolUseBlock, ...]) -> Iterator[tuple[ToolUseBlock, ...]]
-```
-
-**Purpose**: Splits model-requested tool calls into safe execution groups. Tools marked safe for parallel work can run together; other tools become ordered barriers.
-
-**Data flow**: It receives the tool registry and the model's ordered tool calls. It checks each tool's safety flag and yields groups of calls that can be dispatched together without changing the intended order.
-
-**Call relations**: TurnEngine._model_round uses this before running tools. The resulting groups let the engine speed up independent reads while keeping risky or unknown actions serialized.
-
-*Call graph*: calls 1 internal fn (get); called by 1 (_model_round).
-
-
-##### `_parse_args`  (lines 417–419)
-
-```
-def _parse_args(partials: list[str]) -> dict[str, object]
-```
-
-**Purpose**: Turns streamed JSON fragments for a tool call into a Python dictionary. If the model supplied no arguments, it returns an empty dictionary.
-
-**Data flow**: It receives a list of partial JSON strings, joins them, and parses the result when it contains non-whitespace text. The output is the tool input object used to build a ToolUseBlock.
-
-**Call relations**: TurnEngine._stream_once calls this after the model stream finishes assembling each tool call.
-
-*Call graph*: called by 1 (_stream_once); 1 external calls (loads).
-
-
-##### `_context_tag`  (lines 422–432)
-
-```
-def _context_tag(context: TurnContext | None, admitted_at: datetime) -> str
-```
-
-**Purpose**: Builds the small context header placed before a user's message, including when it was admitted and who sent it. This gives the model time and speaker information it would not otherwise know.
-
-**Data flow**: It receives optional turn context and an admission timestamp. It chooses the sender's timezone when available, formats the time, adds the sender name when present, and returns a '<context>' text block.
-
-**Call relations**: TranscriptRepair.load_messages uses it for the founding message. TurnEngine._render_arrival uses it for later messages absorbed while the turn is running.
-
-*Call graph*: called by 2 (load_messages, _render_arrival); 2 external calls (astimezone, ZoneInfo).
-
-
-##### `_bounded`  (lines 435–441)
-
-```
-def _bounded(content: str) -> str
-```
-
-**Purpose**: Cuts overly large text down to the maximum size allowed for a tool result. This keeps model context and logs from being overwhelmed.
-
-**Data flow**: It receives a string. If it is short enough, it returns it unchanged; otherwise it returns the beginning plus a note saying how much was truncated.
-
-**Call relations**: TurnEngine._dispatch_step uses it for large error text. TurnEngine._model_round uses it when reporting finish-tool validation errors back to the model.
-
-*Call graph*: called by 2 (_dispatch_step, _model_round).
-
-
-##### `_final_act`  (lines 444–462)
-
-```
-def _final_act(tool_calls: tuple[ToolUseBlock, ...], results: tuple[ToolResultBlock, ...], tool_name: str, model: type[PayloadT]) -> PayloadT | None
-```
-
-**Purpose**: Detects whether the last tool call in a round was a successful final action, such as asking the user or requesting credentials. It extracts the structured payload from that tool's result.
-
-**Data flow**: It receives the round's tool calls, their results, the expected final tool name, and a validation model. It checks the last call and result, parses JSON from the result text, validates it, and returns the payload or None.
-
-**Call relations**: TurnEngine._model_round calls this after tool dispatch to decide whether the turn should end with a question, credential request, or account connection request.
-
-*Call graph*: called by 1 (_model_round); 1 external calls (loads).
-
-
-##### `_total_usage`  (lines 465–471)
-
-```
-def _total_usage(usage_events: list[Usage]) -> Usage
-```
-
-**Purpose**: Adds many token-usage records into one total. This gives billing, cost display, and spend checks a single number to work with.
-
-**Data flow**: It receives a list of usage events and sums input, output, cache-read, and cache-write tokens separately. It returns one Usage object containing those totals.
-
-**Call relations**: The engine uses this in cost publishing, spend enforcement, terminal commit, parking, and cancellation billing.
-
-*Call graph*: called by 5 (_bill_cancelled, _commit_once, _enforce_spend, _park, _publish_cost); 1 external calls (__init__).
-
-
-##### `TranscriptRepair.resolve`  (lines 486–510)
-
-```
-async def resolve(self) -> TerminalFrame | None
-```
-
-**Purpose**: Republishes a terminal result for a turn that is already finished but whose live notification may have been missed. This helps a waiting client complete after a crash or duplicate delivery.
-
-**Data flow**: It reads the turn's stored terminal frame from the database. If no terminal exists, it returns None; otherwise it persists the inbound transcript if needed, publishes the terminal to the hub, and returns the frame.
-
-**Call relations**: TurnEngine._resolve_unclaimed reaches this when the current execution cannot claim the turn. It uses persist_inbound before publishing so the transcript is not lost.
-
-*Call graph*: calls 1 internal fn (persist_inbound); 5 external calls (__init__, model_validate, select, workspace_tx, log).
-
-
-##### `TranscriptRepair.persist_transcript`  (lines 512–519)
-
-```
-async def persist_transcript(self, messages: tuple[Message, ...], answer: str, system: str, injected: str) -> None
-```
-
-**Purpose**: Writes the completed conversation transcript after a successful answer. It includes the assistant's final answer along with the messages the model saw.
-
-**Data flow**: It receives the messages, answer, system prompt, and injected prompt text. It appends an assistant message containing the answer and passes the full conversation to write_conversation.
-
-**Call relations**: TurnEngine._persist_transcript delegates here after a done terminal is committed.
-
-*Call graph*: calls 1 internal fn (write_conversation); 1 external calls (__init__).
-
-
-##### `TranscriptRepair.persist_inbound`  (lines 521–528)
-
-```
-async def persist_inbound(self, arrivals: tuple[Message, ...]=()) -> None
-```
-
-**Purpose**: Preserves user messages when the turn ends without a normal assistant answer, such as failure, cancellation, or parking. This prevents user input from disappearing from future context.
-
-**Data flow**: It loads prior messages plus the founding inbound, appends any absorbed arrival messages, and writes that conversation. It does not persist partial assistant error text.
-
-**Call relations**: TranscriptRepair.resolve may call this for repair. TurnEngine._persist_inbound delegates here on non-done exits.
-
-*Call graph*: calls 2 internal fn (load_messages, write_conversation); called by 1 (resolve).
-
-
-##### `TranscriptRepair.load_messages`  (lines 530–538)
-
-```
-async def load_messages(self) -> tuple[Message, ...]
-```
-
-**Purpose**: Builds the message list that starts this turn: prior transcript plus this turn's inbound user message. For normal member turns, it prefixes the inbound with the context tag.
-
-**Data flow**: It reads the turn's inbound text and prior transcript. It adds context for non-subagent turns, wraps the inbound as a user message, and returns the combined tuple.
-
-**Call relations**: TurnEngine._load_messages and TranscriptRepair.persist_inbound use this as the canonical way to reconstruct the turn's starting conversation.
-
-*Call graph*: calls 2 internal fn (_prior_messages, _context_tag); called by 1 (persist_inbound); 1 external calls (__init__).
-
-
-##### `TranscriptRepair._prior_messages`  (lines 540–546)
-
-```
-async def _prior_messages(self) -> tuple[Message, ...]
-```
-
-**Purpose**: Reads the saved conversation before this turn, while avoiding accidentally reading this turn's own transcript during a replay. This keeps replay context clean.
-
-**Data flow**: It asks the transcript store for the latest saved conversation. If none exists, or if the saved sequence is at or after this turn, it returns an empty tuple; otherwise it returns the stored messages.
-
-**Call relations**: TranscriptRepair.load_messages calls this before appending the current inbound.
-
-*Call graph*: called by 1 (load_messages).
-
-
-##### `TranscriptRepair.write_conversation`  (lines 548–568)
-
-```
-async def write_conversation(self, messages: tuple[Message, ...], system: str | None=None, injected: str | None=None) -> None
-```
-
-**Purpose**: Writes a conversation record to durable transcript storage with a few retries. This makes transcript persistence more tolerant of short storage outages.
-
-**Data flow**: It receives messages plus optional system and injected text, builds a Conversation object, and tries to write it. On failure it logs, waits briefly, and retries before giving up silently after the configured attempts.
-
-**Call relations**: persist_transcript and persist_inbound both use this final writer.
-
-*Call graph*: called by 2 (persist_inbound, persist_transcript); 3 external calls (__init__, sleep, log).
-
-
-##### `TurnEngine.__post_init__`  (lines 603–610)
-
-```
-def __post_init__(self) -> None
-```
-
-**Purpose**: Checks a subagent safety rule after the engine is created. A subagent that needs a special finish tool must not also have a normal tool with the same name.
-
-**Data flow**: It inspects output_model and the tool registry. If a finish tool name conflict exists, it raises an error; otherwise it leaves the engine unchanged.
-
-**Call relations**: This runs automatically after TurnEngine is constructed, before run begins.
-
-
-##### `TurnEngine.run`  (lines 612–761)
-
-```
-async def run(self) -> TerminalFrame | None
-```
-
-**Purpose**: Runs the whole turn lifecycle. It claims ownership, prepares context, loops through model and tool work, commits the terminal state, and cleans up resources.
-
-**Data flow**: It starts with the turn, agent, prompt, model, tools, storage, and live hub already wired into the engine. It collects usage and arrivals, fires hooks, calls model rounds, commits done/failed/parked states, writes transcripts, bills usage, publishes live frames, and returns the terminal frame when the turn finishes.
-
-**Call relations**: This is the main body used by the turn workflow. It calls most helper methods in this file and is the place where errors, cancellation, parking, and successful completion are routed to the right cleanup path.
-
-*Call graph*: calls 11 internal fn (_bill_cancelled, _commit, _load_messages, _mark_running, _model_round, _park, _persist_inbound, _persist_transcript, _release_unabsorbed, _resolve_unclaimed (+1 more)); 7 external calls (__init__, __init__, __init__, __init__, emit_metric, log, turn_span).
-
-
-##### `TurnEngine.run.rank_find`  (lines 625–642)
-
-```
-async def rank_find(system: str, user: str) -> str
-```
-
-**Purpose**: Lets the browser find tool ask the model to rank page elements. It is a host-side helper, not code run inside the sandbox.
-
-**Data flow**: It receives a system prompt and user prompt, builds a small model request with reasoning off, streams text chunks into a string, and adds any usage events to the turn's running usage list. It returns the ranking text.
-
-**Call relations**: TurnEngine.run places this function into ToolContext as the find callback so browser tools can call it while their token use is still charged to the same turn.
-
-*Call graph*: 2 external calls (__init__, __init__).
-
-
-##### `TurnEngine._scheduled_system`  (lines 763–779)
-
-```
-async def _scheduled_system(self, system: str) -> str
-```
-
-**Purpose**: Adds recalled memory to the system prompt for scheduled turns. Scheduled turns do not come directly from a live user, so this gives them relevant past context.
-
-**Data flow**: It receives the current system prompt, searches memory for the turn's inbound topic with a short timeout, escapes the returned text for safe markup, and appends it when matches exist. If search fails or returns nothing, it leaves the prompt unchanged.
-
-**Call relations**: TurnEngine.run calls this only for scheduled admissions before the first model round.
-
-*Call graph*: called by 1 (run); 3 external calls (timeout, escape, log).
-
-
-##### `TurnEngine._mark_running`  (lines 781–789)
-
-```
-async def _mark_running(self) -> bool
-```
+##### `object_page.value`  (lines 212–217)
 
-**Purpose**: Claims this turn for the current engine attempt. It is the engine's wrapper around the database claim helper.
-
-**Data flow**: It passes the turn id and attempt id to _claim_turn and returns that boolean result. No other state is changed in the engine object.
-
-**Call relations**: TurnEngine.run calls this at startup. If it returns false, run switches to the repair path instead of executing the turn.
-
-*Call graph*: calls 1 internal fn (_claim_turn); called by 1 (run).
-
-
-##### `TurnEngine._repair`  (lines 791–792)
-
-```
-def _repair(self) -> TranscriptRepair
-```
-
-**Purpose**: Builds a TranscriptRepair helper tied to this turn, transcript store, and hub. This keeps transcript repair behavior separate from the main engine object.
-
-**Data flow**: It reads the engine's turn, transcript, and hub fields and returns a new TranscriptRepair instance. It does not perform I/O by itself.
-
-**Call relations**: The engine's load, persist, and unclaimed-resolution helpers all create a repair helper through this method.
-
-*Call graph*: called by 4 (_load_messages, _persist_inbound, _persist_transcript, _resolve_unclaimed); 1 external calls (__init__).
-
-
-##### `TurnEngine._load_messages`  (lines 794–795)
-
-```
-async def _load_messages(self) -> tuple[Message, ...]
-```
-
-**Purpose**: Loads the starting messages for this turn through the transcript repair helper. It keeps the main run method from knowing transcript details.
-
-**Data flow**: It creates a TranscriptRepair and asks it to load messages. The output is the message tuple used as the initial model context.
-
-**Call relations**: TurnEngine.run calls this when preparing either a normal prompt or a denied prompt path.
-
-*Call graph*: calls 1 internal fn (_repair); called by 1 (run).
-
-
-##### `TurnEngine._model_round`  (lines 797–942)
-
-```
-async def _model_round(self, context: ToolContext, messages: tuple[Message, ...], usage_events: list[Usage], system: str, arrival_log: list[Message], absorbed_ids: list[UUID]) -> tuple[tuple[Message,
-```
-
-**Purpose**: Runs the repeated model/tool loop until the model gives a final answer or the engine forces one. This is where most turn work actually happens.
-
-**Data flow**: It receives tool context, current messages, usage list, system prompt, and arrival tracking lists. Each loop absorbs new arrivals, checks spending, compacts context if needed, streams one model response, dispatches any tools, feeds results back, and eventually returns final messages, answer text, and any pending question or request object.
-
-**Call relations**: TurnEngine.run calls this after setup. It coordinates _absorb_arrivals, _stream_recovering_overflow, _dispatch, _publish_cost, _force_final, and _force_finish.
-
-*Call graph*: calls 11 internal fn (_absorb_arrivals, _dispatch, _enforce_spend, _force_final, _force_finish, _offload, _publish_cost, _stream_recovering_overflow, _bounded, _dispatch_segments (+1 more)); called by 1 (run); 6 external calls (__init__, __init__, __init__, gather, emit_metric, log).
-
-
-##### `TurnEngine._absorb_arrivals`  (lines 944–966)
-
 ```
-async def _absorb_arrivals(self, messages: tuple[Message, ...], arrival_log: list[Message], absorbed_ids: list[UUID]) -> tuple[Message, ...]
+def value(row: ObjectRow, name: str) -> JsonValue
 ```
-
-**Purpose**: Adds queued user messages that arrived while the turn was running. This lets one long-running turn respond to fresh input instead of closing over stale context.
 
-**Data flow**: It receives the current message list and tracking lists. It claims arrivals, records their ids, turns rendered arrivals into user messages, appends them to the model context and arrival log, and returns the expanded message tuple.
+**Purpose**: Looks up the value of one sortable or filterable field from a list row. It hides the difference between built-in fields and custom row fields.
 
-**Call relations**: TurnEngine._model_round calls this at the start of each round. It delegates the durable queue drain to _claim_arrivals.
+**Data flow**: It receives a row and a field name. For `name` and `summary` it returns the row's direct values; otherwise it reads the value from the row's extra fields.
 
-*Call graph*: calls 1 internal fn (_claim_arrivals); called by 1 (_model_round); 1 external calls (__init__).
+**Call relations**: This helper lives inside `object_page` and is used while searching, filtering, ordering, and building the paging cursor.
 
 
-##### `TurnEngine._render_arrival`  (lines 968–991)
+##### `_sortable`  (lines 270–283)
 
 ```
-async def _render_arrival(self, body: str, context: TurnContext | None, speaker_member_id: UUID | None, created_at: datetime) -> str | None
+def _sortable(value: JsonValue, field_name: str) -> tuple[_SortRank, str | int | float]
 ```
 
-**Purpose**: Turns one queued inbound message into the exact text the model should see. It applies prompt hooks and adds context like time and speaker.
+**Purpose**: Converts a list field value into a form that can be sorted consistently. It allows only simple scalar values, such as strings and numbers, because complex objects do not have an obvious order.
 
-**Data flow**: It receives the arrival body, context, speaker id, and creation time. It fires the user prompt hook, returns None if denied, otherwise prefixes a context tag and appends any injected context in a separate block.
+**Data flow**: It receives a JSON-like value and the field name being sorted. It returns a rank plus a comparable value, or raises an error if the value is a list, object, or another non-sortable shape.
 
-**Call relations**: TurnEngine._claim_arrivals calls this for every claimed inbound row so the recorded arrival batch includes final rendered text.
+**Call relations**: Only `object_page` calls it. It is the small rulebook that lets `object_page` sort names, summaries, booleans, numbers, strings, and missing values in a stable way.
 
-*Call graph*: calls 1 internal fn (_context_tag); called by 1 (_claim_arrivals); 1 external calls (__init__).
+*Call graph*: called by 1 (object_page).
 
 
-##### `TurnEngine._claim_arrivals`  (lines 994–1036)
+##### `ObjectStore.list`  (lines 294–294)
 
 ```
-async def _claim_arrivals(self, absorbed: tuple[UUID, ...]) -> tuple[Arrival, ...]
+async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage
 ```
 
-**Purpose**: Durably drains pending inbound messages for this conversation into the current turn. It is recorded as a DBOS step so replay sees the same batch.
+**Purpose**: Defines the required list operation for every object kind's storage layer. A concrete store uses it to return a page of lightweight object rows.
 
-**Data flow**: It receives ids already absorbed by this run, stamps claimable inbound rows with this turn id, reads their content and metadata, renders them, and returns Arrival records in sequence order.
+**Data flow**: It receives a tool context and an `ObjectListQuery`, then should read that kind's storage and return an `ObjectPage`. The protocol itself does not implement the work; it states the contract.
 
-**Call relations**: TurnEngine._absorb_arrivals calls this between model rounds. Because it is memoized, a crash replay does not consume a different set of arrivals or re-fire hooks for an already recorded drain.
+**Call relations**: `ObjectVerbs._list` calls this on the resolved kind's store. Implementations may use helpers such as `object_page` to follow the shared listing rules.
 
-*Call graph*: calls 1 internal fn (_render_arrival); called by 1 (_absorb_arrivals); 6 external calls (__init__, model_validate, and_, or_, update, workspace_tx).
 
+##### `ObjectStore.get`  (lines 296–296)
 
-##### `TurnEngine._release_unabsorbed`  (lines 1038–1057)
-
 ```
-async def _release_unabsorbed(self, absorbed: tuple[UUID, ...]) -> None
+async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[SpecT] | None
 ```
 
-**Purpose**: Returns arrivals that were claimed but not fully absorbed when a run fails or is cancelled. This reduces the chance of losing a message in an awkward crash window.
+**Purpose**: Defines the required read operation for one object instance. A concrete store uses it to return the saved spec, timestamps, and links, or report that the object is missing.
 
-**Data flow**: It receives ids known to have been absorbed, then clears the consumed marker for other inbound rows stamped by this turn. If the database operation fails, it logs and continues.
+**Data flow**: It receives a tool context and object name. The expected output is an `ObjectDetail` or `None` if no visible matching object exists.
 
-**Call relations**: TurnEngine.run calls this on cancellation and failures so a later turn can drain those messages.
+**Call relations**: `ObjectVerbs._get`, `_apply`, and `_delete` call this before reading, updating, or deleting. Store implementations decide how to retrieve the row from their own tables.
 
-*Call graph*: called by 1 (run); 3 external calls (update, workspace_tx, log).
 
+##### `ObjectStore.status`  (lines 298–298)
 
-##### `TurnEngine._force_final`  (lines 1059–1087)
-
 ```
-async def _force_final(self, messages: tuple[Message, ...], usage_events: list[Usage], system: str) -> tuple[tuple[Message, ...], str]
+async def status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None
 ```
-
-**Purpose**: Produces a best-effort closing answer when the normal tool-use round budget is exhausted. This avoids failing a turn just because the model kept looping.
 
-**Data flow**: It receives messages, usage, and system prompt, logs the budget exhaustion, checks spending, compacts context, and either forces a subagent finish tool call or asks the model for one final no-tool answer. It returns updated messages and final text.
+**Purpose**: Defines how an object kind can report live state beside the stored spec. This is for changing information such as last sync time or next scheduled run.
 
-**Call relations**: TurnEngine._model_round calls this after all normal rounds are used. It may call _force_finish for schema-bound subagents.
+**Data flow**: It receives a tool context and object name, then should return a JSON-like dictionary of status values or `None`. It does not change the stored object.
 
-*Call graph*: calls 4 internal fn (_enforce_spend, _force_finish, _publish_cost, _stream_recovering_overflow); called by 1 (_model_round); 3 external calls (__init__, emit_metric, log).
+**Call relations**: `ObjectVerbs._get` calls it after fetching the object detail so the tool response can include both the durable spec and current state.
 
 
-##### `TurnEngine._force_finish`  (lines 1089–1114)
+##### `ObjectStore.apply`  (lines 300–300)
 
 ```
-async def _force_finish(self, messages: tuple[Message, ...], usage_events: list[Usage], system: str) -> tuple[tuple[Message, ...], str]
+async def apply(self, ctx: ToolContext, name: str, spec: SpecT, old: SpecT | None) -> None
 ```
 
-**Purpose**: Forces a subagent to end through the special finish tool. This guarantees the parent receives data shaped like the subagent's declared output schema.
+**Purpose**: Defines the create-or-update operation for an object kind. The concrete store receives a spec that core has already validated.
 
-**Data flow**: It receives messages, usage, and system prompt, makes one model call where only finish is offered and required, publishes cost, validates the tool arguments against the output model, and returns canonical JSON. It raises if the model does not produce a valid lone finish call.
+**Data flow**: It receives a context, object name, new spec, and the old spec if the object already existed. It performs the kind-specific write or raises a clear refusal/error.
 
-**Call relations**: TurnEngine._model_round uses this when a subagent answered in prose. _force_final also uses it when a subagent runs out of rounds.
+**Call relations**: `ObjectVerbs._apply` calls this after parsing YAML, validating the name, validating the spec, and reading any existing object.
 
-*Call graph*: calls 2 internal fn (_publish_cost, _stream_recovering_overflow); called by 2 (_force_final, _model_round).
 
+##### `ObjectStore.delete`  (lines 302–302)
 
-##### `TurnEngine._stream_recovering_overflow`  (lines 1116–1153)
-
 ```
-async def _stream_recovering_overflow(self, messages: tuple[Message, ...], usage_events: list[Usage], system: str, offer_tools: bool=True, force_finish: bool=False) -> tuple[tuple[Message, ...], str,
+async def delete(self, ctx: ToolContext, name: str) -> None
 ```
-
-**Purpose**: Runs one model stream and retries once after forced context compaction if the provider says the prompt is too large. This gives the turn a chance to recover from context overflow.
 
-**Data flow**: It receives messages, usage, system prompt, and tool-offering flags. It calls _stream_once, adds usage, converts recorded stream errors into ModelStreamError, and on context overflow compacts the messages and retries once. It returns the possibly compacted messages, text, and tool calls.
+**Purpose**: Defines the delete operation for an object kind. The concrete store removes or deactivates the named object according to that kind's rules.
 
-**Call relations**: _model_round, _force_final, and _force_finish use this for model calls. It is the layer between raw streaming and higher-level turn logic.
+**Data flow**: It receives a context and object name. It changes storage as appropriate and returns no payload, or raises an error if deletion is not allowed.
 
-*Call graph*: calls 2 internal fn (__init__, _stream_once); called by 3 (_force_final, _force_finish, _model_round); 3 external calls (is_context_overflow, emit_metric, log).
+**Call relations**: `ObjectVerbs._delete` calls this only after confirming the object exists and saving its old spec for the response.
 
 
-##### `TurnEngine._enforce_spend`  (lines 1155–1192)
+##### `MemberOwnedObjects.list`  (lines 343–351)
 
 ```
-async def _enforce_spend(self, usage_events: list[Usage]) -> None
+async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage
 ```
 
-**Purpose**: Checks whether the turn may continue spending tokens before another model call. If caps or seat rules are violated, it parks the turn instead of letting costs run past limits.
+**Purpose**: Lists only the member-owned objects that the current actor is allowed to see. It keeps private rows from appearing in list results.
 
-**Data flow**: It receives the usage events so far, checks seat admission when relevant, calculates pending cost from token usage, asks the spend evaluator for a decision, and raises TurnParked if the turn must pause. If no limits apply or the decision allows spending, it returns normally.
+**Data flow**: It reads whether the speaker is a workspace owner and who the acting member is. It asks `_owned_rows` for all rows, keeps only rows allowed by `_visible`, converts them to simple list rows, and passes them to `object_page`.
 
-**Call relations**: TurnEngine._model_round calls this before each model round. _force_final also calls it before the forced closing round.
+**Call relations**: Concrete member-owned stores inherit this method instead of rewriting visibility checks. It calls subclass data via `_owned_rows`, uses `_visible` for the gate, and delegates search/sort/page behavior to `object_page`.
 
-*Call graph*: calls 2 internal fn (__init__, _total_usage); called by 2 (_force_final, _model_round); 6 external calls (__init__, __init__, applicable_caps_absent, workspace_tx, gate_member, seat_gate_absent).
+*Call graph*: calls 4 internal fn (_owned_rows, _visible, object_page, speaker_is_owner); 1 external calls (__init__).
 
 
-##### `TurnEngine._stream_once`  (lines 1195–1302)
+##### `MemberOwnedObjects.get`  (lines 353–359)
 
 ```
-async def _stream_once(self, messages: tuple[Message, ...], system: str, offer_tools: bool=True, force_finish: bool=False) -> StreamResult
+async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[SpecT] | None
 ```
 
-**Purpose**: Performs one actual model request and records the result as a DBOS step. It streams live text to listeners while collecting final text, tool calls, and usage.
+**Purpose**: Reads one member-owned object only if it is visible to the current actor. Invisible objects look the same as missing objects.
 
-**Data flow**: It receives messages, system prompt, and flags controlling tool availability. It builds a model request, consumes streamed text, tool-call starts, tool-call argument fragments, and usage events, flushes text deltas to the hub, and returns a StreamResult. If the stream errors mid-way, it returns the error details and partial output inside the result instead of raising.
+**Data flow**: It looks up the object's owner with `_owner`, checks visibility using the acting member and owner status, and returns `None` if the actor should not see it. If visible, it asks `_detail` for the full object detail.
 
-**Call relations**: TurnEngine._stream_recovering_overflow is the only caller. Because this is a memoized step, replay can reuse the recorded model round rather than spending tokens again.
+**Call relations**: `ObjectVerbs._get` reaches this through a concrete store. The method calls subclass code only after the shared permission check has passed.
 
-*Call graph*: calls 1 internal fn (_parse_args); called by 1 (_stream_recovering_overflow); 5 external calls (__init__, __init__, __init__, __init__, monotonic).
+*Call graph*: calls 4 internal fn (_detail, _owner, _visible, speaker_is_owner).
 
 
-##### `TurnEngine._stream_once.flush`  (lines 1251–1257)
+##### `MemberOwnedObjects.status`  (lines 361–367)
 
 ```
-async def flush() -> None
+async def status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None
 ```
 
-**Purpose**: Sends buffered text chunks from a model stream to live listeners. It batches small chunks so the hub is not flooded.
+**Purpose**: Reads live status for a member-owned object only if the current actor may see that object. It applies the same privacy rule as `get`.
 
-**Data flow**: It reads the local text buffer, publishes a TextDelta when there is content, clears the buffer, resets the pending byte count, and updates the last-flush time.
+**Data flow**: It finds the owner, checks whether the actor can see the row, and returns `None` when missing or hidden. If visible, it asks `_status` for the kind-specific status values.
 
-**Call relations**: This helper lives inside _stream_once and is called during streaming and once at the end to publish any remaining text.
+**Call relations**: `ObjectVerbs._get` can reach this through the store's `status` method. It uses `_owner` and `_visible` before handing off to subclass-specific `_status` code.
 
-*Call graph*: 2 external calls (__init__, monotonic).
+*Call graph*: calls 4 internal fn (_owner, _status, _visible, speaker_is_owner).
 
 
-##### `TurnEngine._publish_cost`  (lines 1304–1317)
+##### `MemberOwnedObjects.apply`  (lines 369–379)
 
 ```
-async def _publish_cost(self, usage_events: list[Usage]) -> None
+async def apply(self, ctx: ToolContext, name: str, spec: SpecT, old: SpecT | None) -> None
 ```
 
-**Purpose**: Publishes the turn's current token and cost total as a live update. This lets user interfaces show a running cost meter before the turn commits.
+**Purpose**: Creates or updates a member-owned object while enforcing who may change an existing row. It lets owners edit their own rows, workspace owners edit visible rows, and blocks everyone else.
 
-**Data flow**: It totals usage events, prices them for the agent's model, counts all token types, builds a CostTick frame, and sends it through _publish. It does not write billing records itself.
+**Data flow**: It looks up any current owner. If the row exists, it checks visibility, ownership, workspace-owner status, and optional live-speaker requirements. If the checks pass, it calls `_apply_owned` with the new spec, old spec, and owner information.
 
-**Call relations**: _model_round, _force_final, and _force_finish call this after model calls. Final durable billing happens later in commit, park, or cancellation code.
+**Call relations**: `ObjectVerbs._apply` reaches this after core validation. This method performs the common access gate, then hands the actual mutation to the subclass through `_apply_owned`.
 
-*Call graph*: calls 2 internal fn (_publish, _total_usage); called by 3 (_force_final, _force_finish, _model_round); 1 external calls (__init__).
+*Call graph*: calls 5 internal fn (_apply_owned, _owned, _owner, _visible, speaker_is_owner); 2 external calls (__init__, __init__).
 
 
-##### `TurnEngine._dispatch`  (lines 1319–1346)
+##### `MemberOwnedObjects.delete`  (lines 381–392)
 
 ```
-async def _dispatch(self, context: ToolContext, call: ToolUseBlock) -> ToolResultBlock
+async def delete(self, ctx: ToolContext, name: str) -> None
 ```
 
-**Purpose**: Runs one tool call and turns its stored, replay-safe result back into the format the model expects. It rehydrates any images that were kept out of the DBOS step log.
+**Purpose**: Deletes a member-owned object only when the current actor is allowed to remove it. Hidden rows are reported as not found, while visible-but-not-owned rows are refused as owner-required.
 
-**Data flow**: It receives the tool context and a tool call, calls _dispatch_step, and if no images are referenced returns a text ToolResultBlock. If images are referenced, it fetches their base64 data from blob storage and returns a result containing text and image blocks.
+**Data flow**: It finds the owner, rejects missing or invisible rows, checks whether the actor owns the row or is the workspace owner, checks any live-speaker requirement, and then calls `_delete_owned`.
 
-**Call relations**: TurnEngine._model_round calls this for each tool call segment. It wraps _dispatch_step so the memoized step output stays small while the model still receives images.
+**Call relations**: `ObjectVerbs._delete` reaches this through a concrete store. It uses `_owner`, `_visible`, and `_owned` for the shared gate before delegating the deletion itself.
 
-*Call graph*: calls 1 internal fn (_dispatch_step); called by 1 (_model_round); 4 external calls (__init__, __init__, __init__, __init__).
+*Call graph*: calls 5 internal fn (_delete_owned, _owned, _owner, _visible, speaker_is_owner); 2 external calls (__init__, __init__).
 
 
-##### `TurnEngine._offload`  (lines 1348–1358)
+##### `MemberOwnedObjects._owned`  (lines 394–398)
 
 ```
-async def _offload(self, name: str, content: str) -> str
+def _owned(self, owner: ObjectOwner, acting: UUID | None) -> bool
 ```
 
-**Purpose**: Writes large text content to the sandbox's private tool-output directory and returns the path. This keeps huge tool output or salvaged model output out of the prompt.
+**Purpose**: Answers whether the acting member is the member-owner of a row. Owner-only rows, which have no member id, are never counted as member-owned.
 
-**Data flow**: It receives a file name and content, ensures the tool-output directory is usable, writes the content bytes into the sandbox, and returns the sandbox path. It logs if it had to reclaim the directory.
+**Data flow**: It receives an `ObjectOwner` and the acting member id. It returns true only when the row has a member id and that id equals the acting member id.
 
-**Call relations**: TurnEngine._dispatch_step uses this for large tool outputs. TurnEngine._model_round uses it to save partial output after a truncated model response.
+**Call relations**: `_visible`, `apply`, and `delete` call this as part of access decisions. Workspace-owner authority is checked separately, so this function stays focused on member ownership.
 
-*Call graph*: called by 2 (_dispatch_step, _model_round); 2 external calls (emit_metric, log).
+*Call graph*: called by 3 (_visible, apply, delete).
 
 
-##### `TurnEngine._dispatch_step`  (lines 1361–1480)
+##### `MemberOwnedObjects._visible`  (lines 400–401)
 
 ```
-async def _dispatch_step(self, context: ToolContext, call: ToolUseBlock) -> DispatchResult
+def _visible(self, owner: ObjectOwner, acting: UUID | None, is_owner: bool) -> bool
 ```
 
-**Purpose**: Executes one tool call end to end as a memoized DBOS step. It validates inputs, runs hooks, calls the tool, bounds or offloads large output, protects untrusted content, and records image references.
+**Purpose**: Decides whether a row should be visible to the current actor. A row is visible if it is shared, owned by the acting member, or the speaker is a workspace owner.
 
-**Data flow**: It receives tool context and a ToolUseBlock. It publishes tool activity, validates the tool name and arguments, lets pre-tool hooks deny or modify input, runs the handler, collects text and images, applies error handling, offloading, untrusted-content wrapping, post-tool hooks, image resizing, and blob storage, then returns a DispatchResult.
+**Data flow**: It receives the row owner, acting member id, and a boolean saying whether the speaker is a workspace owner. It combines those facts and returns true or false.
 
-**Call relations**: TurnEngine._dispatch calls this and then reassembles the model-facing ToolResultBlock. Because this step is recorded, replay avoids re-running side-effecting tools.
+**Call relations**: `list`, `get`, `status`, `apply`, and `delete` call this before showing or changing member-owned rows. It calls `_owned` for the member-owner part of the rule.
 
-*Call graph*: calls 4 internal fn (_bounded_image, _offload, _publish_activity, _bounded); called by 1 (_dispatch); 8 external calls (__init__, __init__, __init__, __init__, __init__, __init__, __init__, replace).
+*Call graph*: calls 1 internal fn (_owned); called by 5 (apply, delete, get, list, status).
 
 
-##### `TurnEngine._bounded_image`  (lines 1482–1510)
+##### `MemberOwnedObjects._owner`  (lines 403–404)
 
 ```
-async def _bounded_image(self, image: ImageBlock) -> ImageBlock
+async def _owner(self, ctx: ToolContext, name: str) -> ObjectOwner | None
 ```
 
-**Purpose**: Shrinks oversized tool-result images before they are sent back to the model. This avoids provider limits and wasted image detail.
+**Purpose**: Finds the ownership record for one named member-owned object. This lets the shared gate make a decision before fetching full details or changing storage.
 
-**Data flow**: It receives an ImageBlock with base64 data, decodes it, opens it with Pillow, and if its largest edge is over the limit, resizes and re-encodes it. If image processing fails, it logs and returns the original image.
+**Data flow**: It asks `_owned_rows` for the available rows, searches for the requested name, and returns that row's `ObjectOwner` or `None` if there is no match.
 
-**Call relations**: TurnEngine._dispatch_step calls this before storing image data in the blob store.
+**Call relations**: `get`, `status`, `apply`, and `delete` call this. The actual row list comes from the subclass implementation of `_owned_rows`.
 
-*Call graph*: called by 1 (_dispatch_step); 7 external calls (__init__, __init__, to_thread, b64decode, b64encode, BytesIO, log).
+*Call graph*: calls 1 internal fn (_owned_rows); called by 4 (apply, delete, get, status).
 
 
-##### `TurnEngine._publish_activity`  (lines 1512–1531)
+##### `MemberOwnedObjects._owned_rows`  (lines 406–407)
 
 ```
-async def _publish_activity(self, call: ToolUseBlock) -> None
+async def _owned_rows(self, ctx: ToolContext) -> tuple[OwnedRow, ...]
 ```
 
-**Purpose**: Publishes a live notice that a tool call is starting. This helps users see what the agent is doing during long tool-heavy turns.
+**Purpose**: Placeholder method that subclasses must implement to provide the names, summaries, and owners of their rows. The base class needs this data to enforce visibility.
 
-**Data flow**: It receives a tool call, builds either a SkillLoad frame for the load_skill tool or a ToolCall frame with a short argument preview and optional user description, then sends it through _publish.
+**Data flow**: It receives a tool context and is expected to return a tuple of `OwnedRow` values. In the base class it raises `NotImplementedError`, meaning concrete stores must supply it.
 
-**Call relations**: TurnEngine._dispatch_step calls this before validating and running the tool. Publication failures are swallowed by _publish so they do not break the turn.
+**Call relations**: `MemberOwnedObjects.list` and `_owner` call this. Subclasses provide the storage-specific read while the base class provides the permission logic.
 
-*Call graph*: calls 1 internal fn (_publish); called by 1 (_dispatch_step); 3 external calls (__init__, __init__, dumps).
+*Call graph*: called by 2 (_owner, list).
 
 
-##### `TurnEngine._commit`  (lines 1533–1578)
+##### `MemberOwnedObjects._detail`  (lines 409–410)
 
 ```
-async def _commit(self, status: TerminalStatus, usage_events: list[Usage], answer: str='', error: BaseException | None=None, question: AskUserInput | None=None, credential_request: CredentialRequest |
+async def _detail(self, ctx: ToolContext, name: str) -> ObjectDetail[SpecT] | None
 ```
 
-**Purpose**: Retries until the turn's terminal result is durably written, then publishes it live. This makes the database state the source of truth even during outages.
+**Purpose**: Placeholder method that subclasses must implement to fetch full object details after access has been approved.
 
-**Data flow**: It receives status, usage, answer or error details, optional pending requests, and arrival-safety options. It repeatedly calls _commit_once with backoff until it gets a result, then publishes a Terminal frame, emits metrics, logs, and returns the frame or None.
+**Data flow**: It receives a context and object name and should return an `ObjectDetail` or `None`. The base class raises `NotImplementedError` because it does not know the subclass's storage.
 
-**Call relations**: TurnEngine.run calls this for done and failed outcomes. If _commit_once returns None because new arrivals must be absorbed first, run continues the model loop.
+**Call relations**: `MemberOwnedObjects.get` calls this only after `_visible` says the actor may see the object.
 
-*Call graph*: calls 2 internal fn (_commit_once, _publish); called by 1 (run); 4 external calls (__init__, sleep, emit_metric, log).
+*Call graph*: called by 1 (get).
 
 
-##### `TurnEngine._commit_once`  (lines 1580–1678)
+##### `MemberOwnedObjects._status`  (lines 412–413)
 
 ```
-async def _commit_once(self, status: TerminalStatus, usage_events: list[Usage], answer: str, error: BaseException | None, question: AskUserInput | None, credential_request: CredentialRequest | None, c
+async def _status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None
 ```
 
-**Purpose**: Performs one database attempt to record the final terminal frame and billing. It also protects against closing a foreground turn while unread arrivals exist.
+**Purpose**: Placeholder method that subclasses must implement to fetch live status for an approved object.
 
-**Data flow**: It totals usage, optionally locks the conversation and checks for pending or unabsorbed inbound messages, records turn usage, reads final cost, builds a TerminalFrame, and updates the turn row. If another execution already committed, it reads and returns the existing terminal frame.
+**Data flow**: It receives a context and object name and should return a JSON-like status dictionary or `None`. The base class raises `NotImplementedError` until a concrete kind supplies the behavior.
 
-**Call relations**: TurnEngine._commit wraps this with retry and live publication. It is the durable commit point for successful and failed turns.
+**Call relations**: `MemberOwnedObjects.status` calls this after the common owner and visibility checks pass.
 
-*Call graph*: calls 1 internal fn (_total_usage); called by 1 (_commit); 9 external calls (__init__, model_validate, and_, or_, select, update, read_turn_cost, record_turn_usage, workspace_tx).
+*Call graph*: called by 1 (status).
 
 
-##### `TurnEngine._park`  (lines 1680–1717)
+##### `MemberOwnedObjects._apply_owned`  (lines 415–423)
 
 ```
-async def _park(self, message: str, usage_events: list[Usage]) -> None
+async def _apply_owned(self, ctx: ToolContext, name: str, spec: SpecT, old: SpecT | None, owner: ObjectOwner | None) -> None
 ```
 
-**Purpose**: Records a turn as parked when it hits a cap or loses seat permission. Parking saves spent usage and leaves the turn resumable later.
+**Purpose**: Placeholder method that subclasses must implement to actually create or update a member-owned object. The shared base class performs the gate; this method performs the domain write.
 
-**Data flow**: It receives the parked message and usage events, updates the turn to parked if still non-terminal, records usage for this attempt, releases all inbound rows consumed by this turn, then publishes a Parked frame and emits metrics.
+**Data flow**: It receives the context, name, validated spec, old spec, and owner information. A concrete implementation writes to storage or raises a domain-specific error; the base version raises `NotImplementedError`.
 
-**Call relations**: TurnEngine.run calls this after catching TurnParked from _enforce_spend.
+**Call relations**: `MemberOwnedObjects.apply` calls this after checking visibility, ownership, and any live-speaker requirement.
 
-*Call graph*: calls 2 internal fn (_publish, _total_usage); called by 1 (run); 6 external calls (__init__, update, record_turn_usage, workspace_tx, emit_metric, log).
+*Call graph*: called by 1 (apply).
 
 
-##### `TurnEngine._publish`  (lines 1719–1728)
+##### `MemberOwnedObjects._delete_owned`  (lines 425–426)
 
 ```
-async def _publish(self, frame: LiveFrame) -> None
+async def _delete_owned(self, ctx: ToolContext, name: str, owner: ObjectOwner) -> None
 ```
 
-**Purpose**: Sends a live frame to the hub without letting publish failures break the turn. Durable database state remains authoritative.
+**Purpose**: Placeholder method that subclasses must implement to actually delete a member-owned object. It runs only after the shared delete permission checks pass.
 
-**Data flow**: It receives a live frame, tries to publish it for this turn id, and logs any exception. It returns nothing and does not re-raise publish errors.
+**Data flow**: It receives the context, object name, and owner record. A concrete implementation removes the row or performs the kind-specific delete action; the base version raises `NotImplementedError`.
 
-**Call relations**: Cost, activity, parked, and terminal paths all use this helper so live updates are best-effort everywhere.
+**Call relations**: `MemberOwnedObjects.delete` calls this after confirming the row exists, is visible, and may be deleted by the actor.
 
-*Call graph*: called by 4 (_commit, _park, _publish_activity, _publish_cost); 1 external calls (log).
+*Call graph*: called by 1 (delete).
 
 
-##### `TurnEngine._bill_cancelled`  (lines 1730–1749)
+##### `object_registry`  (lines 456–473)
 
 ```
-async def _bill_cancelled(self, usage_events: list[Usage]) -> None
+def object_registry(bound: tuple[BoundKind, ...]) -> dict[str, BoundKind]
 ```
 
-**Purpose**: Best-effort billing for tokens consumed before a cancellation. It avoids losing cost records when a workflow is stopped.
+**Purpose**: Builds the lookup table of registered object kinds for one deployment and rejects unsafe or conflicting registrations. This is the startup gate for the object system.
 
-**Data flow**: It totals usage events and tries to record them in the database with this attempt id. If billing fails, it logs the failure and does not block cancellation.
+**Data flow**: It receives bound object kinds from core and extensions. It checks each kind name, detects duplicates, validates the spec model with `_validate_spec_model`, and returns a dictionary keyed by kind name.
 
-**Call relations**: TurnEngine.run calls this when DBOS or asyncio cancellation interrupts the turn.
+**Call relations**: Startup code uses this before serving tools. It calls `_validate_spec_model` so bad extensions fail early rather than causing unsafe behavior during a user request.
 
-*Call graph*: calls 1 internal fn (_total_usage); called by 1 (run); 3 external calls (record_turn_usage, workspace_tx, log).
+*Call graph*: calls 1 internal fn (_validate_spec_model).
 
 
-##### `TurnEngine._resolve_unclaimed`  (lines 1751–1756)
+##### `_validate_spec_model`  (lines 476–499)
 
 ```
-async def _resolve_unclaimed(self) -> TerminalFrame | None
+def _validate_spec_model(owner: str, kind: ObjectKind) -> None
 ```
 
-**Purpose**: Handles the case where this execution cannot claim the turn. It repairs missed terminal publication if the turn is already finished, or does nothing if another execution is still running it.
+**Purpose**: Checks that an object kind's spec model is safe to store and show back to users. It blocks unknown fields, undeclared list fields, secret-bearing fields, and values that cannot be represented as JSON.
 
-**Data flow**: It creates a TranscriptRepair helper and asks it to resolve the situation. The result is a terminal frame when one was already committed, or None when there is nothing for this duplicate execution to do.
+**Data flow**: It receives the registering owner name and object kind. It compares list fields with model fields, walks nested models, checks Pydantic configuration and annotations, and asks Pydantic to produce a JSON schema. It raises a clear error if any rule fails.
 
-**Call relations**: TurnEngine.run calls this immediately after _mark_running returns false.
+**Call relations**: `object_registry` calls this for every kind. It uses `_reachable_models` and `_annotation_types` to inspect nested Pydantic models, not just the top-level spec.
 
-*Call graph*: calls 1 internal fn (_repair); called by 1 (run).
+*Call graph*: calls 2 internal fn (_annotation_types, _reachable_models); called by 1 (object_registry).
 
 
-##### `TurnEngine._persist_transcript`  (lines 1758–1761)
+##### `_reachable_models`  (lines 502–516)
 
 ```
-async def _persist_transcript(self, messages: tuple[Message, ...], answer: str, system: str, injected: str) -> None
+def _reachable_models(model: type[BaseModel]) -> tuple[type[BaseModel], ...]
 ```
 
-**Purpose**: Persists the full successful transcript through the repair helper. It is a small wrapper that keeps run's finalization code simple.
+**Purpose**: Finds all Pydantic models nested inside a spec model. This matters because safety rules must apply to nested structures too.
 
-**Data flow**: It receives final messages, answer, system prompt, and injected prompt text, creates a TranscriptRepair helper, and delegates transcript writing. It returns nothing.
+**Data flow**: It starts with one model, follows field type annotations to discover nested Pydantic models, avoids repeats, and returns the full set it found.
 
-**Call relations**: TurnEngine.run calls this after a done terminal is committed.
+**Call relations**: `_validate_spec_model` calls this before checking strictness and secret fields. It relies on `_annotation_types` to unpack types such as lists, unions, or optional fields.
 
-*Call graph*: calls 1 internal fn (_repair); called by 1 (run).
+*Call graph*: calls 1 internal fn (_annotation_types); called by 1 (_validate_spec_model).
 
 
-##### `TurnEngine._persist_inbound`  (lines 1763–1764)
+##### `_annotation_types`  (lines 519–526)
 
 ```
-async def _persist_inbound(self, arrivals: tuple[Message, ...]=()) -> None
+def _annotation_types(annotation: object) -> tuple[object, ...]
 ```
-
-**Purpose**: Persists only inbound user messages when the turn does not produce a normal answer. This preserves context for the next turn.
-
-**Data flow**: It receives optional absorbed arrival messages, creates a TranscriptRepair helper, and delegates inbound-only transcript writing. It returns nothing.
 
-**Call relations**: TurnEngine.run calls this on failed, cancelled, parked, or non-done terminal paths where assistant output should not be saved.
-
-*Call graph*: calls 1 internal fn (_repair); called by 1 (run).
-
-
-### Subagent orchestration
-Subagent support lets the main turn delegate work to child agents and manage their lifecycle, messages, waiting, and cancellation.
-
-### `core/src/ufo/loop/subagents.py`
-
-`orchestration` · `during turn execution when a parent agent spawns, waits for, messages, or cancels subagents`
-
-A subagent is like sending a specialist to work on a side task while the main agent keeps control of the overall job. This file defines the list of allowed specialist profiles, builds the instructions each specialist receives, and creates the database and queue records needed to run the specialist as its own turn.
-
-The main problem it solves is safe delegation. A parent turn can spawn a child turn with a named profile, a checked input shape, its own conversation, and its own queue partition. That separation matters: it lets the parent wait for the child without blocking the queue in a way that would deadlock both of them.
-
-The file also supports reliable retries. If the caller gives a deduplication key, the child turn ID is derived from the parent and that key, so a repeated attempt reconnects to the same already-created child instead of creating and charging for a duplicate.
-
-When a child finishes, its final message is read from the durable terminal record, validated against the profile’s output schema, and returned to the parent. Background children can be started now and checked later. The parent can also cancel them or send a follow-up message, but only if the turn really belongs to that parent.
-
-#### Function details
-
-##### `SubagentRegistry.__post_init__`  (lines 77–81)
-
-```
-def __post_init__(self) -> None
-```
+**Purpose**: Flattens a type annotation into the concrete pieces inside it. For example, it can look through container or union types so validators can inspect the real field types.
 
-**Purpose**: This checks the registry as soon as it is created to make sure no two subagent profiles use the same name. Without this, asking for a profile by name could be ambiguous.
+**Data flow**: It receives a type annotation, asks Python's typing system for its arguments, recursively expands any nested arguments, and returns a tuple of discovered pieces.
 
-**Data flow**: It reads the names from the profile list stored in the registry → looks for repeated names → either leaves the registry unchanged or raises an error naming the duplicates.
+**Call relations**: `_validate_spec_model` and `_reachable_models` call this while inspecting spec fields. It calls `typing.get_args` to understand compound type hints.
 
-**Call relations**: This runs automatically after a SubagentRegistry is built. It protects later lookups done by SubagentRegistry.get and, through that, every subagent spawn.
+*Call graph*: called by 2 (_reachable_models, _validate_spec_model); 1 external calls (get_args).
 
 
-##### `SubagentRegistry.get`  (lines 83–90)
+##### `ObjectVerbs.tools`  (lines 564–627)
 
 ```
-def get(self, name: str) -> SubagentProfile
+def tools(self) -> tuple[ToolDef, ...]
 ```
 
-**Purpose**: This finds the subagent profile with a requested name. It is the gatekeeper that turns a plain profile name into the full profile definition used to run a child agent.
+**Purpose**: Creates the five tool definitions exposed to the model: list, get, explain, apply, and delete. These definitions describe what each tool does, what input shape it expects, and whether it can change state.
 
-**Data flow**: It takes a profile name → searches the registry’s stored profiles → returns the matching profile. If none exists, it raises an UnknownSubagentProfile error that includes the valid names.
+**Data flow**: It reads the `ObjectVerbs` instance and returns a tuple of `ToolDef` objects. Each tool definition points to one private handler method on the same object.
 
-**Call relations**: Subagents.spawn uses this before creating a child turn, and Subagents._untrusted_output uses it to decide whether a finished child’s output should be trusted. If the name is unknown, the flow stops loudly instead of running an undefined subagent.
+**Call relations**: Tool registration code calls this to make object operations available. The returned handlers later call `_list`, `_get`, `_explain`, `_apply`, and `_delete` during requests.
 
 *Call graph*: 1 external calls (__init__).
 
 
-##### `subagent_system_prompt`  (lines 93–125)
+##### `ObjectVerbs._list`  (lines 629–655)
 
 ```
-def subagent_system_prompt(profile: SubagentProfile, *, skills: Sequence[tuple[str, str]]=CORE_SKILL_INDEX, preload: tuple[RuntimeSkill, ...]=()) -> str
+async def _list(self, ctx: ToolContext, args: ObjectListInput) -> ToolResult
 ```
 
-**Purpose**: This builds the system prompt, meaning the core instruction text, for a subagent. It combines the profile’s instructions, optional skill information, shared citation and output rules, and the final requirement that the subagent must call the finish tool with its final answer.
+**Purpose**: Implements the `object_list` tool. It either lists registered kinds or lists instances of one kind with search, filters, sorting, and paging.
 
-**Data flow**: It takes a subagent profile, a list of available skills, and optional preloaded skill bodies → fills the skill-index placeholder, checks that no template placeholders were left unresolved, optionally appends preloaded skill instructions within a size limit → returns the complete prompt string sent to the child agent.
+**Data flow**: It receives the current tool context and list arguments. With no kind, it returns kind names and descriptions; with a kind, it resolves the kind, binds the context to its extension, builds an `ObjectListQuery`, calls the store's list method, and returns JSON.
 
-**Call relations**: This is used wherever the engine prepares a subagent’s model instructions. It calls the prompt-rendering helpers to build the skill list and detect unresolved prompt variables, so bad prompts fail before reaching the model.
+**Call relations**: This is the handler installed by `ObjectVerbs.tools`. It uses `_resolve` to find the kind, `_bound_ctx` to run under the owning extension context, and `_json_result` to format the response.
 
-*Call graph*: 2 external calls (findall, render_skill_index).
+*Call graph*: calls 3 internal fn (_bound_ctx, _resolve, _json_result); 1 external calls (__init__).
 
 
-##### `Subagents.spawn`  (lines 137–181)
+##### `ObjectVerbs._get`  (lines 657–672)
 
 ```
-async def spawn(self, profile: str, payload: dict[str, Any], background: bool=False, dedup_key: str | None=None) -> SpawnResult
+async def _get(self, ctx: ToolContext, args: ObjectGetInput) -> ToolResult
 ```
 
-**Purpose**: This starts a child subagent turn. It can either return immediately with the child turn ID for background work, or wait until the child finishes and return its validated output.
+**Purpose**: Implements the `object_get` tool. It reads one object and returns its spec, live status, links, and timestamps.
 
-**Data flow**: It takes a profile name, an input payload, a background flag, and an optional deduplication key → finds the profile, validates the input, chooses or derives a child conversation ID and turn ID, admits the child turn into the database, enqueues it for execution, and then either returns the ID immediately or waits for the terminal result → returns a SpawnResult containing the child ID and, for foreground work, the parsed output.
+**Data flow**: It receives the context plus kind and name. It resolves the kind, binds the context, asks the store for details, raises `UnknownObject` if missing, asks for status, converts the result into YAML text, and returns a tool result.
 
-**Call relations**: This is the main public path for delegation. It relies on SubagentRegistry.get for the profile, _admit to create durable records, _enqueue to place the child on the work queue, and _await_terminal when the parent must wait. It creates SpawnResult objects for successful starts or completions, and raises an untrusted-content error when a profile marked as untrusted returns output that does not match its contract.
+**Call relations**: This is the get handler installed by `ObjectVerbs.tools`. It depends on `_resolve` and `_bound_ctx`, then hands the actual read to the kind's store.
 
-*Call graph*: calls 3 internal fn (_admit, _await_terminal, _enqueue); 5 external calls (__init__, __init__, turn_id_for, uuid4, uuid5).
+*Call graph*: calls 2 internal fn (_bound_ctx, _resolve); 4 external calls (__init__, __init__, __init__, safe_dump).
 
 
-##### `Subagents.wait`  (lines 183–202)
+##### `ObjectVerbs._explain`  (lines 674–686)
+
+```
+async def _explain(self, ctx: ToolContext, args: ObjectExplainInput) -> ToolResult
+```
+
+**Purpose**: Implements the `object_explain` tool. It tells a caller how to author objects of a kind before they try to apply one.
+
+**Data flow**: It receives a kind name, resolves it, and returns JSON containing the kind description, guidance, name rule, and generated JSON schema for the spec.
+
+**Call relations**: This handler is installed by `ObjectVerbs.tools`. It calls `_resolve` and `_json_result`; it does not call the store because it explains the registered kind, not a stored instance.
+
+*Call graph*: calls 2 internal fn (_resolve, _json_result).
+
+
+##### `ObjectVerbs._apply`  (lines 688–709)
+
+```
+async def _apply(self, ctx: ToolContext, args: ObjectApplyInput) -> ToolResult
+```
+
+**Purpose**: Implements the `object_apply` tool for creating or updating an object from a YAML manifest. It validates the shared envelope and the kind-specific spec before any store write happens.
+
+**Data flow**: It receives manifest text, parses it with `_parse_envelope`, resolves the kind, validates the name, validates the spec model, reads any existing object, calls the store's apply method with the old spec if present, and returns whether the result was created or updated.
+
+**Call relations**: This handler is installed by `ObjectVerbs.tools`. It uses `_parse_envelope`, `_validate_name`, `_resolve`, `_bound_ctx`, and `_json_result`, then delegates the actual mutation to the kind's store.
+
+*Call graph*: calls 5 internal fn (_bound_ctx, _resolve, _json_result, _parse_envelope, _validate_name); 1 external calls (__init__).
+
+
+##### `ObjectVerbs._delete`  (lines 711–725)
+
+```
+async def _delete(self, ctx: ToolContext, args: ObjectDeleteInput) -> ToolResult
+```
+
+**Purpose**: Implements the `object_delete` tool. It deletes one object and echoes the deleted spec so the user can recreate it if deletion was accidental and the kind supports creation.
+
+**Data flow**: It receives kind and name, resolves the kind, binds the context, reads the old object, raises `UnknownObject` if missing, calls the store's delete method, and returns JSON with the deleted spec.
+
+**Call relations**: This handler is installed by `ObjectVerbs.tools`. It uses `_resolve`, `_bound_ctx`, and `_json_result`, and relies on the store for the actual delete operation.
+
+*Call graph*: calls 3 internal fn (_bound_ctx, _resolve, _json_result); 1 external calls (__init__).
+
+
+##### `ObjectVerbs._resolve`  (lines 727–732)
+
+```
+def _resolve(self, kind: str) -> BoundKind
+```
+
+**Purpose**: Looks up an object kind in the registry and gives a helpful error if it is not registered. This turns a bare kind string into the full registered kind plus its owning context.
+
+**Data flow**: It receives a kind name and reads the registry mapping. If found, it returns the `BoundKind`; if not, it raises `UnknownKind` with the list of available kinds.
+
+**Call relations**: All five object handlers call this before doing kind-specific work. It is the common doorway from user-supplied kind names to registered object implementations.
+
+*Call graph*: called by 5 (_apply, _delete, _explain, _get, _list); 1 external calls (__init__).
+
+
+##### `ObjectVerbs._bound_ctx`  (lines 734–735)
+
+```
+def _bound_ctx(self, ctx: ToolContext, bound: BoundKind) -> ToolContext
+```
+
+**Purpose**: Rebinds the current tool context to the extension that owns the object kind. This ensures the store runs with the right extension-specific context.
+
+**Data flow**: It receives the current `ToolContext` and a `BoundKind`. It returns a copied context whose extension context is replaced with the bound kind's context.
+
+**Call relations**: `_list`, `_get`, `_apply`, and `_delete` call this before calling a store method. It lets shared object verbs dispatch safely into extension-owned storage code.
+
+*Call graph*: called by 4 (_apply, _delete, _get, _list); 1 external calls (replace).
+
+
+##### `_parse_envelope`  (lines 738–756)
+
+```
+def _parse_envelope(manifest: str) -> tuple[str, str, Mapping[str, object]]
+```
+
+**Purpose**: Parses and checks the YAML manifest used by `object_apply`. It enforces the required top-level shape: exactly `kind`, `name`, and `spec`.
+
+**Data flow**: It receives manifest text, rejects it if it is too large, parses YAML safely, checks that the result is a mapping with exactly the required keys, checks that kind and name are strings and spec is a mapping, then returns those three pieces.
+
+**Call relations**: `ObjectVerbs._apply` calls this before resolving the kind or validating the spec. It uses YAML parsing and raises `InvalidManifest` for malformed input.
+
+*Call graph*: called by 1 (_apply); 2 external calls (__init__, safe_load).
+
+
+##### `_validate_name`  (lines 759–764)
+
+```
+def _validate_name(name: str) -> None
+```
+
+**Purpose**: Checks that a new or updated object's name follows the shared object-name rule. This keeps all kinds using the same address format.
+
+**Data flow**: It receives a name string and checks length plus pattern. If the name is valid it returns nothing; otherwise it raises `InvalidName` with the rule.
+
+**Call relations**: `ObjectVerbs._apply` calls this after parsing the manifest and before validating or writing the spec.
+
+*Call graph*: called by 1 (_apply); 1 external calls (__init__).
+
+
+##### `_json_result`  (lines 767–768)
+
+```
+def _json_result(payload: Mapping[str, object]) -> ToolResult
+```
+
+**Purpose**: Wraps a plain mapping as a JSON tool response. It is the small common formatter for object tool handlers that return JSON.
+
+**Data flow**: It receives a payload mapping, serializes it with `json.dumps`, places the text in a `TextContent`, and returns a `ToolResult` containing that text.
+
+**Call relations**: `ObjectVerbs._list`, `_explain`, `_apply`, and `_delete` call this to format their responses consistently. `_get` uses YAML instead because it returns a fuller object document.
+
+*Call graph*: called by 4 (_apply, _delete, _explain, _list); 3 external calls (__init__, __init__, dumps).
+
+
+### Built-in tool handlers
+The built-in tools bridge model requests to protected shell, file, sharing, question, skill, account connection, and subagent actions.
+
+### `core/src/ufo/tools/builtins.py`
+
+`orchestration` · `tool execution during request handling`
+
+This file is like the agent’s toolbox catalog plus the instructions for using each tool safely. When the agent asks to read a file, run a command, share an artifact, or delegate work to a subagent, the tool system calls one of these handlers.
+
+The most important rule here is safety around the workspace. File discovery, reading, editing, and searching happen inside the sandbox, which is an isolated container rather than the host machine. That means large files, PDFs, images, and searches are processed where the files live, and only bounded results come back. The file also remembers which paths have been read in the current turn, so edits and overwrites cannot blindly change a file the model has not seen.
+
+For sharing files, it streams the file from the sandbox into blob storage and returns a temporary download link. That is the controlled doorway from private workspace files to the outside user.
+
+The file also supports human interaction and delegation. It can ask the user for missing information, request secrets through a private channel, start OAuth account connection, load reusable skill instructions into the workspace, and coordinate background subagents. At the end, all these handlers are registered as `BUILTIN_TOOLS`, which tells the tool runtime their names, input shapes, descriptions, and whether they are safe to run in parallel.
+
+#### Function details
+
+##### `bash_handler`  (lines 275–285)
+
+```
+async def bash_handler(ctx: ToolContext, args: BashInput) -> ToolResult
+```
+
+**Purpose**: Runs a shell command inside the sandboxed workspace and returns what the command printed. It marks the tool result as an error if the command exits unsuccessfully.
+
+**Data flow**: It receives the tool context and a command with an optional timeout. It caps the timeout to the allowed maximum, asks the sandbox to run the command, combines standard output and standard error, and returns that text. If the command failed, it adds the exit code and marks the result as an error.
+
+**Call relations**: This is the handler behind the built-in `bash` tool. The tool runtime calls it when the agent chooses to run a command, and it hands the actual execution to the sandbox so the command cannot escape the protected workspace.
+
+*Call graph*: 2 external calls (__init__, __init__).
+
+
+##### `_require_str`  (lines 288–291)
+
+```
+def _require_str(value: object, field: str) -> str
+```
+
+**Purpose**: Checks that a value returned by the sandbox is a real, non-empty string. It is used when building image or document results where missing fields would make the response invalid.
+
+**Data flow**: It receives a value and the name of the field being checked. If the value is a non-empty string, it returns it unchanged. Otherwise it raises an error explaining that the sandbox response was missing that field.
+
+**Call relations**: This is a small guard used by `read_handler` and `_pdf_result`. Those functions rely on it before creating image blocks, so malformed sandbox output fails clearly instead of producing confusing partial content.
+
+*Call graph*: called by 2 (_pdf_result, read_handler).
+
+
+##### `_pdf_result`  (lines 294–339)
+
+```
+def _pdf_result(result: dict[str, object]) -> ToolResult
+```
+
+**Purpose**: Turns the sandbox’s PDF or PowerPoint read result into model-readable content. It combines extracted text, page or slide progress notes, and rendered page images when available.
+
+**Data flow**: It receives a dictionary from the sandbox describing a PDF or PPTX read. It gathers any text, page counts, notes, and rendered images, validates required image fields, then returns a tool result made of text and image blocks. If nothing usable is present, it raises an error.
+
+**Call relations**: `read_handler` calls this when the sandbox says the file is a PDF or PPTX. `_pdf_result` uses `_require_str` to validate image data before wrapping it in content blocks for the model.
+
+*Call graph*: calls 1 internal fn (_require_str); called by 1 (read_handler); 3 external calls (__init__, __init__, __init__).
+
+
+##### `read_handler`  (lines 342–379)
+
+```
+async def read_handler(ctx: ToolContext, args: ReadInput) -> ToolResult
+```
+
+**Purpose**: Reads a workspace file through the sandbox and returns content in a form the model can use. It supports text files, images, PDFs, and PowerPoint files, with paging for large documents.
+
+**Data flow**: It receives a file path and optional offset and limit. It asks the sandbox file tool to read that slice, records the path as having been read this turn, then formats the result as text, image content, or a document preview. For text files, it adds a footer showing which lines were returned and how to continue reading if more remains.
+
+**Call relations**: This is the handler behind the `read` tool. It calls `_pdf_result` for paginated documents and `_require_str` for image fields. Its record of read paths is later used by `write_handler` and `edit_handler` to prevent blind file changes.
+
+*Call graph*: calls 2 internal fn (_pdf_result, _require_str); 3 external calls (__init__, __init__, __init__).
+
+
+##### `write_handler`  (lines 382–403)
+
+```
+async def write_handler(ctx: ToolContext, args: WriteInput) -> ToolResult
+```
+
+**Purpose**: Creates or overwrites a text file in the workspace, while protecting existing files from being changed before they have been read. It returns a short JSON summary of what was written.
+
+**Data flow**: It receives a target path and text content. It checks whether the file already exists; if it does and the path has not been read this turn, it refuses to write. Otherwise it writes the bytes into the sandbox, marks the path as read, counts size and lines, and returns those facts.
+
+**Call relations**: This is the handler behind the `write` tool. It depends on the read-path tracking set by `read_handler`, so the normal flow is: read an existing file first, then write or edit it.
+
+*Call graph*: 3 external calls (__init__, __init__, dumps).
+
+
+##### `edit_handler`  (lines 406–414)
+
+```
+async def edit_handler(ctx: ToolContext, args: EditInput) -> ToolResult
+```
+
+**Purpose**: Applies exact string replacements to a file that has already been read in the current turn. This helps ensure the agent edits content it has actually inspected.
+
+**Data flow**: It receives a file path and one or more requested replacements. It refuses to continue if the file path has not been read. Then it converts the edits into simple dictionaries, sends them to the sandbox file tool, and returns the sandbox’s JSON result.
+
+**Call relations**: This is the handler behind the `edit` tool. It is meant to follow `read_handler`; after the model sees the file, this handler delegates the careful replacement work to the sandbox-side editor.
+
+*Call graph*: 3 external calls (__init__, __init__, dumps).
+
+
+##### `glob_handler`  (lines 417–423)
+
+```
+async def glob_handler(ctx: ToolContext, args: GlobInput) -> ToolResult
+```
+
+**Purpose**: Finds files whose names match a pattern, such as `**/*.py`, inside the sandboxed workspace. It is the safer built-in alternative to using shell commands like `find` or `ls` for discovery.
+
+**Data flow**: It receives a glob pattern and an optional starting directory. It asks the sandbox file tool to match paths from that directory, defaulting to the workspace root, then returns the matches as JSON text.
+
+**Call relations**: This is the handler behind the `glob` tool. The tool runtime calls it for file discovery, and it keeps the directory traversal inside the sandbox so only the matched path list comes back.
+
+*Call graph*: 3 external calls (__init__, __init__, dumps).
+
+
+##### `grep_handler`  (lines 426–444)
+
+```
+async def grep_handler(ctx: ToolContext, args: GrepInput) -> ToolResult
+```
+
+**Purpose**: Searches workspace file contents for a regular expression, meaning a text pattern with matching rules. It limits the number of results so broad searches do not flood the model.
+
+**Data flow**: It receives the search pattern plus optional file filters, context lines, case handling, output mode, and result limit. It builds a sandbox search request, fills in a default result cap if none is provided, sends it to the sandbox file tool, and returns the matches as JSON text.
+
+**Call relations**: This is the handler behind the `grep` tool. It delegates the heavy scanning to sandbox-side ripgrep, so the host does not pull every file across just to search it.
+
+*Call graph*: 3 external calls (__init__, __init__, dumps).
+
+
+##### `share_file_handler`  (lines 447–524)
+
+```
+async def share_file_handler(ctx: ToolContext, args: ShareFileInput) -> ToolResult
+```
+
+**Purpose**: Makes a workspace file available to the user through a temporary download link. This is the controlled path for moving a produced file out of the sandbox.
+
+**Data flow**: It receives a workspace file path, an optional download name, and an optional caption. It first checks that artifact sharing is configured, then runs a small sandbox preflight to compute file size, digest, and whether it looks like text. It chooses a safe filename, streams the file into blob storage, records the shared artifact in the database, creates a time-limited token, and returns the URL and file metadata.
+
+**Call relations**: This is the handler behind the `share_file` tool. It talks to the sandbox for file inspection and export, to blob storage for durable file bytes, to the database for the shared-artifact record, and to the artifact token code to create the download link.
+
+*Call graph*: 15 external calls (__init__, __init__, now, dumps, loads, guess_type, PurePosixPath, quote, insert, select (+5 more)).
+
+
+##### `spawn_subagent_handler`  (lines 527–538)
+
+```
+async def spawn_subagent_handler(ctx: ToolContext, args: SpawnSubagentInput) -> ToolResult
+```
+
+**Purpose**: Starts a child agent to work on a typed subtask. It can either wait for the child’s validated answer or return immediately with the child turn id for background work.
+
+**Data flow**: It receives a subagent profile name, a payload, and a background flag. It asks the tool context to spawn the subagent. If the profile is unknown, it returns a recoverable error; if the child is running in the background, it returns the child turn id; otherwise it returns the child’s structured output.
+
+**Call relations**: This is the handler behind `spawn_subagent`. It hands the actual delegation to `ToolContext.spawn`, and its results can later be followed up through the wait, cancel, and message subagent tools.
+
+*Call graph*: 3 external calls (__init__, __init__, spawn).
+
+
+##### `load_sessions_handler`  (lines 541–601)
+
+```
+async def load_sessions_handler(ctx: ToolContext, args: LoadSessionsInput) -> ToolResult
+```
+
+**Purpose**: Loads selected past conversation transcripts that belong to the same workspace and the appropriate audience member. It reports bad or inaccessible session ids without failing the whole request.
+
+**Data flow**: It receives a list of session id strings. It separates malformed UUIDs, queries the database for conversations that are in scope, fetches each transcript from blob storage, decodes it, extracts user and assistant text, and returns successful sessions plus a list of failed ids.
+
+**Call relations**: This is the handler behind `load_sessions`. It combines database scoping, blob transcript lookup, and transcript decoding so the agent can recall specific prior conversations without getting access to unrelated ones.
+
+*Call graph*: 8 external calls (__init__, __init__, dumps, select, workspace_tx, decode, transcript_key, UUID).
+
+
+##### `ask_user_handler`  (lines 609–619)
+
+```
+async def ask_user_handler(ctx: ToolContext, args: AskUserInput) -> ToolResult
+```
+
+**Purpose**: Packages one or more questions for the agent to ask in its normal chat reply. It tells the agent to end the turn so the user’s answer can arrive as the next message.
+
+**Data flow**: It receives a structured question request. It turns the title and questions into JSON, prefixes it with a clear instruction to ask and wait, and returns that text as the tool result.
+
+**Call relations**: This is the handler behind `ask_user`. It does not open a separate prompt or side channel; instead it gives the model and chat surface the structured content needed to ask the user in the conversation.
+
+*Call graph*: 3 external calls (__init__, __init__, dumps).
+
+
+##### `load_skill_handler`  (lines 622–630)
+
+```
+async def load_skill_handler(ctx: ToolContext, args: LoadSkillInput) -> ToolResult
+```
+
+**Purpose**: Loads a named skill and any skills it depends on into the workspace. A skill is a bundle of instructions and supporting files that helps the agent follow a specialized workflow.
+
+**Data flow**: It receives a skill name. It asks the skill registry for the full dependency chain, mounts each skill’s files into the sandbox workspace, builds the combined skill context, and returns the instructions and mounted file tree as text.
+
+**Call relations**: This is the handler behind `load_skill`. It uses the skills runtime to both place files where the agent can read them and produce the written workflow the model should follow.
+
+*Call graph*: 4 external calls (__init__, __init__, loaded_context, mount_skill).
+
+
+##### `connect_account_handler`  (lines 639–647)
+
+```
+async def connect_account_handler(ctx: ToolContext, args: ConnectAccountInput) -> ToolResult
+```
+
+**Purpose**: Starts a private account-connection flow for an external provider such as GitHub or Google. It validates the provider and returns instructions telling the member to use a private connection control, not a chat-visible URL.
+
+**Data flow**: It receives a provider name and whether the account should be shared with the workspace. It requires a speaking member, validates that the provider is known, builds a connection request, and returns a directive plus the request JSON.
+
+**Call relations**: This is the handler behind `connect_account`. It relies on the installed connection-flow service to validate providers, then hands structured instructions back to the chat surface so authorization happens privately.
+
+*Call graph*: 4 external calls (__init__, __init__, __init__, installed_connect_flow).
+
+
+##### `request_credentials_handler`  (lines 656–681)
+
+```
+async def request_credentials_handler(ctx: ToolContext, args: RequestCredentialsInput) -> ToolResult
+```
+
+**Purpose**: Requests secret values, such as API keys, through a private channel instead of the chat transcript. It only allows the workspace owner to fill these credential slots.
+
+**Data flow**: It receives a reason and a small list of credential prompts. It checks that there is a speaking member, that the request is in that member’s private audience, that credential storage is configured, and that the speaker is the owner. It seals the requested slots into a signed request and returns a directive plus structured credential-request JSON.
+
+**Call relations**: This is the handler behind `request_credentials`. It calls the context to confirm owner status, uses the configured credential sealer to protect the request, and returns information a capable user surface can turn into private prompts.
+
+*Call graph*: calls 1 internal fn (speaker_is_owner); 3 external calls (__init__, __init__, __init__).
+
+
+##### `wait_for_subagents_handler`  (lines 684–697)
+
+```
+async def wait_for_subagents_handler(ctx: ToolContext, args: WaitForSubagentsInput) -> ToolResult
+```
+
+**Purpose**: Waits for one or more background subagents to finish and reports their final status and answer. It also marks the result as untrusted if any child result is untrusted.
+
+**Data flow**: It receives subagent id strings. It checks that subagent control exists, converts the ids to UUIDs, asks the subagent controller to wait for them, then returns a JSON list with each child’s id, status, and output text.
+
+**Call relations**: This is the handler behind `wait_for_subagents`. It is used after `spawn_subagent_handler` starts background work, giving the parent agent a way to pause until those children complete.
+
+*Call graph*: 4 external calls (__init__, __init__, dumps, UUID).
+
+
+##### `cancel_subagent_handler`  (lines 700–712)
+
+```
+async def cancel_subagent_handler(ctx: ToolContext, args: CancelSubagentInput) -> ToolResult
+```
+
+**Purpose**: Cancels a running background subagent and reports its current status. If the subagent has already finished, the operation leaves its final state alone.
+
+**Data flow**: It receives a subagent id string. It checks that subagent control is available, converts the id to a UUID, asks the subagent controller to cancel it, and returns the subagent id and resulting status as JSON.
+
+**Call relations**: This is the handler behind `cancel_subagent`. It is part of the same subagent-control flow as spawning and waiting, and it lets the parent stop work it no longer needs.
+
+*Call graph*: 4 external calls (__init__, __init__, dumps, UUID).
+
+
+##### `message_subagent_handler`  (lines 715–728)
+
+```
+async def message_subagent_handler(ctx: ToolContext, args: MessageSubagentInput) -> ToolResult
+```
+
+**Purpose**: Sends a follow-up message to a background subagent. The message becomes the subagent’s next turn after its current work reaches a stopping point.
+
+**Data flow**: It receives a subagent id and a message. It checks that subagent control is available, converts the id to a UUID, queues the message through the subagent controller, and returns the id and status for the queued follow-up.
+
+**Call relations**: This is the handler behind `message_subagent`. It complements `spawn_subagent_handler` and `wait_for_subagents_handler` by letting the parent agent steer a child that is already running in the background.
+
+*Call graph*: 4 external calls (__init__, __init__, dumps, UUID).
+
+
+### Tool package foundations
+The tools package defines the controlled execution context, standardized outputs and cleanup, and the registry used to describe and dispatch callable tools.
+
+### `core/src/ufo/tools/__init__.py`
+
+`other` · `import/package discovery`
+
+This is a package marker file. In Python, an `__init__.py` file tells Python that a folder should be treated as an importable package, like a labeled drawer in a filing cabinet. Here, the drawer is `ufo.tools`. The only content is a short documentation string explaining what the package is about: tools, including the registry that keeps track of available tools, the context passed to tool handlers, and the built-in set of tools shipped with the project. There is no executable code here and no functions to call. Its value is organizational: without this file, depending on the Python version and packaging setup, imports from this folder could be less explicit or fail in some environments, and newcomers would have one less signpost for understanding what the `tools` package contains.
+
+
+### `core/src/ufo/tools/context.py`
+
+`domain_logic` · `tool execution during a turn, with cleanup at turn end`
+
+A tool in this system should not be able to freely touch the whole program. This file is the boundary box it receives instead. Think of it like a visitor badge: it says which files, accounts, browser session, search service, blob storage, credentials, and child agents the tool may use for this one turn.
+
+The file defines simple output blocks, such as text and images, and wraps them in ToolResult so the rest of the system can tell whether a tool succeeded, failed, or returned untrusted outside content. It also defines protocols for spawning subagents and controlling background subagents. A protocol is a promised shape: the real implementation lives elsewhere, but tool code can rely on these methods existing.
+
+The central object is ToolContext. It carries the current turn, agent, sandbox, permissions, extension workspace, selected browser/search providers, connector registry, and a per-turn cleanup list. Its helper methods enforce important safety rules. For example, credential authorization only works for the speaking workspace owner, in that speaker’s private audience, and only for credential slots declared by the extension. Connector account lookup only returns accounts granted to this turn’s agent and allowed for the acting member. Without this file, tools would either lack the information they need or would have to duplicate delicate permission checks in many places.
+
+#### Function details
+
+##### `Spawn.__call__`  (lines 120–126)
+
+```
+async def __call__(self, profile: str, payload: dict[str, Any], background: bool=False, dedup_key: str | None=None) -> SpawnResult
+```
+
+**Purpose**: This is the promised interface for starting a child agent, called a subagent, to work on a smaller task. A tool uses it when it wants to delegate work and optionally wait for a typed, validated answer.
+
+**Data flow**: The caller provides a profile name, an input payload, and choices such as whether the child should run in the background and whether a repeat call should reuse the same child. The real implementation checks the profile and payload, starts or reconnects to the child turn, and returns a SpawnResult containing the child turn id and, if waited for, its output.
+
+**Call relations**: Tool handlers call this through ToolContext.spawn when they need another agent to do part of the work. This file only defines the callable shape; the subagent workflow elsewhere supplies the actual behavior.
+
+
+##### `SubagentControl.wait`  (lines 135–135)
 
 ```
 async def wait(self, turn_ids: tuple[UUID, ...]) -> tuple[SubagentStatus, ...]
 ```
 
-**Purpose**: This waits for one or more background subagents to finish and reports what happened to each. It is used when the parent previously started background work and later wants to collect the results.
+**Purpose**: This is the promised interface for waiting until one or more background subagents finish. A tool uses it after it previously started subagents in the background and now needs their final results.
 
-**Data flow**: It takes a tuple of child turn IDs → first confirms each one was spawned by this parent and remembers its profile → waits for each child’s terminal record → returns a tuple of SubagentStatus objects with each child’s status, final text, and trust flag.
+**Data flow**: The caller gives child turn ids. The implementation waits for those child turns to reach a finished state and returns a status record for each one, including its final text and whether the output should be treated as untrusted.
 
-**Call relations**: This completes the background-spawn loop started by Subagents.spawn. It uses _require_child to prevent a parent from waiting on unrelated turns, _await_terminal to poll durable completion records, and _untrusted_output to mark outputs from untrusted or missing profiles.
-
-*Call graph*: calls 3 internal fn (_await_terminal, _require_child, _untrusted_output); 1 external calls (__init__).
+**Call relations**: Tools reach this through ToolContext.subagents. The actual waiting logic belongs to the subagent system; this protocol lets tool code use it without knowing how subagents are scheduled internally.
 
 
-##### `Subagents.cancel`  (lines 204–221)
+##### `SubagentControl.cancel`  (lines 137–137)
 
 ```
 async def cancel(self, turn_id: UUID) -> SubagentStatus
 ```
 
-**Purpose**: This cancels a child subagent turn that belongs to the current parent. It gives the parent a controlled way to stop work it no longer needs.
+**Purpose**: This is the promised interface for stopping a running background subagent. A tool uses it when a delegated task is no longer needed or should not continue.
 
-**Data flow**: It takes a child turn ID → verifies the child belongs to this parent → calls the shared cancellation routine → reads the turn’s current status and terminal text from the database → returns a SubagentStatus summarizing the cancelled or already-finished child.
+**Data flow**: The caller gives one child turn id. The implementation asks that child turn to stop and returns its terminal status, including the final message explaining what happened.
 
-**Call relations**: This is called when parent-side logic wants to stop a background child. It uses _require_child as a safety check, hands the actual cancellation to cancel_one_turn, then reads the resulting terminal frame inside a workspace database transaction.
-
-*Call graph*: calls 1 internal fn (_require_child); 5 external calls (__init__, model_validate, select, cancel_one_turn, workspace_tx).
+**Call relations**: Tools call this through ToolContext.subagents. The file defines the contract, while the subagent workflow elsewhere performs the cancellation.
 
 
-##### `Subagents.message`  (lines 223–297)
+##### `SubagentControl.message`  (lines 139–139)
 
 ```
 async def message(self, turn_id: UUID, text: str) -> SubagentStatus
 ```
 
-**Purpose**: This sends a follow-up message to a background subagent by creating the next turn in that child’s own conversation. It lets the parent continue an existing subagent thread instead of starting a new one.
+**Purpose**: This is the promised interface for sending a follow-up message to a background subagent. A tool uses it when an already-spawned child needs more instructions or clarification.
 
-**Data flow**: It takes an existing child turn ID and message text → verifies the child belongs to this parent → reads the child conversation and profile from the database → locks the conversation, computes the next sequence number, inserts a new queued turn with the follow-up text, and marks it ready for dispatch if no earlier queued turn is ahead of it → enqueues it when appropriate and returns a queued SubagentStatus for the new follow-up turn.
+**Data flow**: The caller gives the child turn id and the text message. The implementation delivers that message as the child’s next turn and returns the resulting terminal status when that follow-up completes.
 
-**Call relations**: This is the parent’s follow-up path after a background spawn. It uses _require_child to enforce ownership and _enqueue to start the new turn when the child conversation is ready. The database locking keeps messages in order, like adding tickets to a single numbered line.
-
-*Call graph*: calls 2 internal fn (_enqueue, _require_child); 8 external calls (__init__, exists, insert, select, update, workspace_tx, current_traceparent, turn_id_for).
+**Call relations**: Tools access this through ToolContext.subagents. The implementation is supplied by the subagent system, so this file acts as the shared agreement between tools and that system.
 
 
-##### `Subagents._untrusted_output`  (lines 299–305)
+##### `TurnCleanup.register`  (lines 153–154)
 
 ```
-def _untrusted_output(self, profile: str) -> bool
+def register(self, aclose: Callable[[], Awaitable[None]]) -> None
 ```
 
-**Purpose**: This decides whether a child’s output should be treated as untrusted. It errs on the safe side: if the profile cannot be found anymore, the output is treated as untrusted.
+**Purpose**: This records an asynchronous cleanup action to run when the current turn ends. Tools use it when they open a per-turn resource, such as a browser connection, that must be closed later.
 
-**Data flow**: It takes a profile name → tries to look it up in the registry → returns the profile’s untrusted-output setting, or returns true if the profile is unknown.
+**Data flow**: A caller passes in an async close function. The function is added to an internal list; nothing is closed immediately.
 
-**Call relations**: Subagents.wait calls this when building each SubagentStatus. It uses SubagentRegistry.get indirectly as a trust check, so missing profile definitions do not accidentally become trusted output.
-
-*Call graph*: called by 1 (wait).
+**Call relations**: A tool registers cleanup when it first creates a resource for the turn. Later, the turn loop calls TurnCleanup.drain to run all registered close functions.
 
 
-##### `Subagents._require_child`  (lines 307–318)
+##### `TurnCleanup.drain`  (lines 156–162)
 
 ```
-async def _require_child(self, turn_id: UUID) -> str
+async def drain(self) -> None
 ```
 
-**Purpose**: This verifies that a turn ID really belongs to a subagent spawned by the current parent turn. It prevents one parent from interfering with or reading another turn’s children.
+**Purpose**: This closes all resources that were registered for the turn, even if the turn ended with an error or cancellation. It helps prevent leaked network connections, browser sessions, or other temporary leases.
 
-**Data flow**: It takes a turn ID → reads that turn’s parent ID and subagent profile from the database → returns the profile name if the parent matches, or raises an error if the turn is missing or belongs elsewhere.
+**Data flow**: It reads the stored list of close functions, removes them one by one in reverse order, and awaits each close. If one close fails, it logs the failure and continues closing the rest.
 
-**Call relations**: Subagents.wait, Subagents.cancel, and Subagents.message all call this before acting on a child turn. It is the ownership check that makes those public operations safe.
+**Call relations**: The turn-running code calls this at turn end. It uses the logging system when a cleanup action throws an exception, so one bad cleanup does not stop the remaining cleanup work.
 
-*Call graph*: called by 3 (cancel, message, wait); 2 external calls (select, workspace_tx).
-
-
-##### `Subagents._admit`  (lines 320–388)
-
-```
-async def _admit(self, conversation_id: UUID, turn_id: UUID, profile: str, inbound: str) -> bool
-```
-
-**Purpose**: This creates the database records for a new child conversation and its first turn. It is careful to be repeatable, so retrying the same deterministic spawn does not create duplicate work.
-
-**Data flow**: It takes a child conversation ID, turn ID, profile name, and serialized input text → inserts the conversation if it does not already exist, inserts the first child turn if it does not already exist, reads the turn status, and marks queued turns as dispatch-ready → returns true if this turn should be enqueued now, or false if it is already past the queued state.
-
-**Call relations**: Subagents.spawn calls this before trying to enqueue the child. It writes the durable records that the rest of the system will run, wait for, or reconnect to after a retry. It also stores the current tracing context so observability can connect the child’s work back to the parent.
-
-*Call graph*: called by 1 (spawn); 4 external calls (select, update, workspace_tx, current_traceparent).
+*Call graph*: 1 external calls (log).
 
 
-##### `Subagents._enqueue`  (lines 390–419)
+##### `ToolContext.acting_member_id`  (lines 191–204)
 
 ```
-async def _enqueue(self, turn_id: UUID, conversation_id: UUID) -> None
+def acting_member_id(self) -> UUID | None
 ```
 
-**Purpose**: This asks the DBOS queue system to run a child or follow-up turn. DBOS is the durable workflow runner used here to execute queued turn workflows reliably.
+**Purpose**: This chooses which workspace member the turn is acting for when using private resources. Usually that is the speaking member, but scheduled work or delegated subagents may carry an on-behalf-of member instead.
 
-**Data flow**: It takes a turn ID and conversation ID → builds queue options including the queue name, workflow name, workflow ID, queue partition, and app version → calls the DBOS client to enqueue the work. If enqueueing is cancelled or fails, it clears the dispatch marker in the database so the turn can be picked up later; ordinary failures are logged instead of crashing this path.
+**Data flow**: It reads speaker_member_id first. If there is a speaker, it returns that id; otherwise it returns on_behalf_of_member_id, which may also be absent.
 
-**Call relations**: Subagents.spawn calls this for a newly admitted child, and Subagents.message calls it for a follow-up turn when no earlier queued message blocks it. It is the bridge between durable database admission and actual asynchronous execution.
-
-*Call graph*: called by 2 (message, spawn); 3 external calls (update, workspace_tx, log).
+**Call relations**: Connector account lookup uses this identity to decide which private connections are available. It keeps scheduled jobs and subagents tied to the member who delegated them, while anonymous internal turns get no private member identity.
 
 
-##### `Subagents._await_terminal`  (lines 421–431)
+##### `ToolContext.speaker_is_owner`  (lines 206–215)
 
 ```
-async def _await_terminal(self, turn_id: UUID) -> TerminalFrame
+async def speaker_is_owner(self) -> bool
 ```
 
-**Purpose**: This waits until a turn has a terminal record, meaning the durable final result of that turn. It is a simple polling loop used by foreground spawns and background waits.
+**Purpose**: This checks whether the current speaking member is the workspace owner. It is used before actions that affect shared workspace-wide resources, such as authorizing an extension credential slot.
 
-**Data flow**: It takes a turn ID → repeatedly reads the turn’s terminal field from the database → if no terminal exists yet, sleeps briefly and checks again → once present, validates it as a TerminalFrame and returns it.
+**Data flow**: If there is no speaking member, it immediately returns false. Otherwise it opens a workspace database transaction, asks for the workspace owner member id, compares it to the speaker, and returns true only if they match.
 
-**Call relations**: Subagents.spawn uses this when the parent wants a foreground answer, and Subagents.wait uses it to collect background child results. It is the common waiting point for all child completion reads.
+**Call relations**: Several object and credential operations call this before allowing owner-only actions. The credential authorization helper also calls it so only the workspace owner can approve stored extension credentials.
 
-*Call graph*: called by 2 (spawn, wait); 4 external calls (sleep, model_validate, select, workspace_tx).
+*Call graph*: called by 16 (apply, delete, apply, delete, get, list, status, request_credentials_handler, _credential_authorization, connect_github (+6 more)); 2 external calls (workspace_tx, owner_member_id).
 
 
-### Delegated specialist tools
-Extension tools package specialized browser, research, and website-building tasks for execution by dedicated subagents.
+##### `ToolContext.begin_credential_authorization`  (lines 217–219)
 
-### `extensions/browser/ufo_ext_browser/delegation.py`
+```
+async def begin_credential_authorization(self, slot: str, payload: str) -> str
+```
 
-`orchestration` · `request handling`
+**Purpose**: This starts the process of authorizing a credential slot for an extension. It creates a sealed authorization token or link-like value that can later be opened or fulfilled.
 
-This file is a bridge between a parent agent and a separate browser agent. Instead of giving the parent direct control of a browser, it asks a child agent with the browser profile to do the web work and return a summary. That keeps browser automation isolated, easier to time-limit, and scoped to the right tools.
+**Data flow**: The caller provides the credential slot name and a payload. The function first asks _credential_authorization to verify that this turn is allowed to request the credential, then calls the credential request service to create the authorization value and returns it.
 
-There are two main tools here. `browser_task` is for one complete browser session, such as opening a site, clicking through pages, filling a form, or extracting information. Each call starts a fresh browser session, so the task description must include all needed context. The file also protects the parent agent from getting stuck forever: if the browser task runs past its time budget, the child task is cancelled and an error result is returned.
+**Call relations**: Extension code such as GitHub and Slack connection flows call this when they need the workspace owner to approve a credential. It relies on _credential_authorization to enforce the safety checks before handing off to the credential request service.
 
-`wide_browse` is for batch work. It reads a workspace file containing one URL or site name per line, removes duplicates, and sends each item to a browser subagent. It limits how many browser jobs run at once, like a checkout line with only a fixed number of open registers. Results are gathered into `wide_browse.json` in the workspace and also returned to the caller. It uses stable deduplication keys so that, after recovery from a crash, already-started child tasks can be reconnected to instead of launched again.
+*Call graph*: calls 1 internal fn (_credential_authorization); called by 2 (connect_github, _oauth_link).
+
+
+##### `ToolContext.open_credential_authorization`  (lines 221–223)
+
+```
+async def open_credential_authorization(self, slot: str, sealed: str) -> str
+```
+
+**Purpose**: This opens an existing sealed credential authorization so the flow can continue safely. It is part of the controlled path for handling secrets rather than letting tools read or write them freely.
+
+**Data flow**: The caller gives the credential slot and sealed authorization value. The function verifies permission through _credential_authorization, then asks the credential request service to open the sealed value for this workspace, member, and slot, returning the opened payload.
+
+**Call relations**: It is a companion to begin_credential_authorization. Both route through the same permission helper so every credential step follows the same owner, speaker, audience, extension, and deployment checks.
+
+*Call graph*: calls 1 internal fn (_credential_authorization).
+
+
+##### `ToolContext.fulfill_credential_authorization`  (lines 225–230)
+
+```
+async def fulfill_credential_authorization(self, slot: str, sealed: str, plaintext: str) -> None
+```
+
+**Purpose**: This completes an approved credential authorization by storing the plaintext secret in the workspace credential store. It is the point where an allowed secret actually gets saved.
+
+**Data flow**: The caller provides the slot, sealed authorization value, and plaintext secret. The function verifies the authorization rules, opens the sealed value to confirm it matches this workspace, member, and slot, then writes the plaintext credential into the current workspace store.
+
+**Call relations**: It calls _credential_authorization for permission checks and then uses ws_current to reach the active workspace storage. It is used after an authorization flow has proved that the workspace owner approved storing the credential.
+
+*Call graph*: calls 1 internal fn (_credential_authorization); 1 external calls (ws_current).
+
+
+##### `ToolContext._credential_authorization`  (lines 232–243)
+
+```
+async def _credential_authorization(self, slot: str) -> tuple[CredentialRequests, UUID]
+```
+
+**Purpose**: This is the shared gatekeeper for all credential authorization steps. It prevents tools from requesting or storing secrets unless the current turn is exactly allowed to do so.
+
+**Data flow**: It reads the speaker, audience, extension declaration, credential request service, and workspace ownership. It raises clear errors if there is no speaker, the audience is not the speaker’s private audience, the extension did not declare the slot, the deployment cannot store secrets, or the speaker is not the owner. If all checks pass, it returns the credential request service and speaker member id.
+
+**Call relations**: begin_credential_authorization, open_credential_authorization, and fulfill_credential_authorization all call this before doing their work. It calls speaker_is_owner as the final owner-only check, keeping the credential rules centralized in one place.
+
+*Call graph*: calls 1 internal fn (speaker_is_owner); called by 3 (begin_credential_authorization, fulfill_credential_authorization, open_credential_authorization).
+
+
+##### `ToolContext.connector_account`  (lines 245–272)
+
+```
+async def connector_account(self, provider: str, account_id: str | None=None) -> str
+```
+
+**Purpose**: This picks one connected external account for a connector tool to use, such as an account held by a broker service. It makes sure the tool can only use accounts granted to this turn’s workspace and agent.
+
+**Data flow**: The caller gives a provider name and optionally a specific account id. The function asks _connector_account_tiers for private and shared accounts. If a specific id was requested, it returns it only if available. If no id was requested, it prefers the acting member’s private accounts, falls back to shared accounts, and requires exactly one choice; otherwise it raises an error explaining what is missing or ambiguous.
+
+**Call relations**: Connector extensions call this before executing external tools through the broker. It delegates grant lookup to _connector_account_tiers, then applies the user-facing selection rules so the extension gets one safe account id.
+
+*Call graph*: calls 1 internal fn (_connector_account_tiers); called by 2 (call_external_tool, _connector_execute).
+
+
+##### `ToolContext.connector_accounts`  (lines 274–282)
+
+```
+async def connector_accounts(self, provider: str) -> tuple[str, ...]
+```
+
+**Purpose**: This lists all connected account ids that the turn may use for one provider. It is useful when a tool needs to show or resolve the available choices instead of picking exactly one.
+
+**Data flow**: The caller gives a provider name. The function asks _connector_account_tiers for private and shared accounts, combines them, removes duplicates, sorts them, and returns them as a tuple.
+
+**Call relations**: Source-related extension code calls this when resolving which external account is available. It uses the same lower-level grant lookup as connector_account so listing and selecting accounts follow the same permission model.
+
+*Call graph*: calls 1 internal fn (_connector_account_tiers); called by 1 (_resolved_account).
+
+
+##### `ToolContext._connector_account_tiers`  (lines 284–297)
+
+```
+async def _connector_account_tiers(self, provider: str) -> tuple[list[str], list[str]]
+```
+
+**Purpose**: This is the shared grant lookup for connector accounts. It separates accounts into private accounts for the acting member and shared accounts for the agent.
+
+**Data flow**: It first checks that a grant store exists; if not, it raises ConnectUnavailable because account grants cannot be checked. It reads the acting member id, asks the grant store for active grants in this workspace and agent, filters them by provider, then returns two sorted lists: private matching grants for the acting member and shared matching grants.
+
+**Call relations**: connector_account and connector_accounts both call this so they use the same source of truth. It is the part that talks to the grant system; the public methods then decide whether to choose one account or return all allowed accounts.
+
+*Call graph*: called by 2 (connector_account, connector_accounts); 1 external calls (__init__).
+
+
+### `core/src/ufo/tools/registry.py`
+
+`data_model` · `startup and tool dispatch`
+
+This file solves a simple but important problem: when the model asks to use a tool, the engine needs a trustworthy catalog that says which tools exist, what arguments they accept, and which function should run. Without this registry, the engine could not reliably show tool definitions to the model or dispatch a requested tool name to the right code.
+
+A ToolDef is one tool’s “business card.” It stores the tool name, a human-readable description, the Pydantic input model that describes valid arguments, and the async handler function that actually runs the tool. It also carries safety flags. For example, untrusted means the tool may return attacker-controlled text, such as a web page, so the engine should treat that text as data rather than instructions. side_effecting means the tool can change something outside the system, such as making a POST request or writing durable data, so the engine may attach an idempotency key, a repeat-safe label that helps avoid doing the same external action twice.
+
+ToolRegistry is the frozen catalog of ToolDef entries. When it is created, it refuses duplicate tool names, because two tools with the same name would make dispatch ambiguous. Later, it can produce wire schemas for the model or find a tool by name when the engine needs to run it.
 
 #### Function details
 
-##### `_browser_task`  (lines 86–111)
+##### `ToolDef.schema`  (lines 37–42)
 
 ```
-async def _browser_task(ctx: ToolContext, args: BrowserTaskInput) -> ToolResult
+def schema(self) -> ToolSchema
 ```
 
-**Purpose**: Runs one full browser automation job by spawning a browser subagent. It waits for that child job to finish, cancels it if it takes too long, and returns the browser agent's final result.
+**Purpose**: Builds the public schema for one tool, which is the compact description sent to the model client. Someone uses this when they need to tell the model what the tool is called, what it does, and what input format it must use.
 
-**Data flow**: It receives the tool context and a `BrowserTaskInput` containing the starting URL, task instructions, task name, timeout, and user-facing description. It checks that subagent control is available, starts a fresh browser child turn with the task details, and waits within the requested time limit. If the timeout expires, it cancels the child and returns an error message. If the child finishes successfully, it reads the child's text as a `BrowserResult`, converts it back to JSON, and returns that JSON as tool output.
+**Data flow**: It starts with a ToolDef that already knows its name, description, and Pydantic input model. It asks the input model for its JSON schema, which is a standard machine-readable description of valid fields, then wraps the name, description, and input schema into a ToolSchema object. The result is a wire-ready tool description; the ToolDef itself is not changed.
 
-**Call relations**: This is the handler behind the `browser_task` tool definition. When the tool is invoked, it uses `ToolContext.spawn` to create the browser child session, waits through the subagent control interface, and packages the result with `TextContent` and `ToolResult` so the parent agent receives a normal tool response.
+**Call relations**: This function is used by ToolRegistry.schemas when the system needs the full list of tool descriptions. It hands the finished ToolSchema to the registry, which gathers schemas for all registered tools.
 
-*Call graph*: 5 external calls (__init__, __init__, timeout, spawn, model_validate_json).
-
-
-##### `_read_lines`  (lines 114–125)
-
-```
-async def _read_lines(ctx: ToolContext, path: str) -> list[str]
-```
-
-**Purpose**: Reads a workspace text file and turns it into a clean list of unique, non-empty lines. In this file, those lines are the URLs or site names that `wide_browse` should visit.
-
-**Data flow**: It receives the tool context and a file path. It asks the sandbox to run `cat` on that path, checks whether reading succeeded, then walks through the file line by line. Blank lines are ignored, surrounding spaces are removed, and repeated entries are skipped. The output is an ordered list of unique entities.
-
-**Call relations**: `_wide_browse` calls this first to learn what browser jobs need to be launched. It does the file-reading cleanup before the wider fan-out logic begins, so `_wide_browse` can work with a simple list instead of raw file text.
-
-*Call graph*: called by 1 (_wide_browse); 1 external calls (dumps).
+*Call graph*: 1 external calls (__init__).
 
 
-##### `_wide_browse`  (lines 128–155)
+##### `ToolRegistry.__post_init__`  (lines 49–53)
 
 ```
-async def _wide_browse(ctx: ToolContext, args: WideBrowseInput) -> ToolResult
+def __post_init__(self) -> None
 ```
 
-**Purpose**: Runs the same kind of browser task across many URLs or site names in parallel, then saves all results to a JSON file. It is meant for broad data collection where each item can be visited independently.
+**Purpose**: Checks the registry right after it is built to make sure no two tools share the same name. This prevents a later tool call from becoming a guessing game.
 
-**Data flow**: It receives the tool context and a `WideBrowseInput` containing the entities file, a prompt template, an output schema file, and a user-facing description. It reads and deduplicates the entities, rejects the request if there are too many, optionally reads a JSON schema to tell each browser job what shape to return, and creates a semaphore, which is a limit on how many jobs may run at once. It then launches a visit task for each entity, waits for all of them with `asyncio.gather`, writes the collected rows to `wide_browse.json`, and returns a JSON message containing both the rows and the output file name.
+**Data flow**: It reads the names from every ToolDef in the registry. It looks for any name that appears more than once. If all names are unique, nothing changes and construction succeeds; if duplicates exist, it raises a ValueError with the duplicate names.
 
-**Call relations**: This is the handler behind the `wide_browse` tool definition. It first relies on `_read_lines` to prepare the batch input. Then it uses its nested `_wide_browse.visit` helper for each entity, gathers all visit results, writes the combined output through the sandbox, and returns the final summary as a normal tool result.
-
-*Call graph*: calls 1 internal fn (_read_lines); 5 external calls (__init__, __init__, Semaphore, gather, dumps).
+**Call relations**: This runs automatically after a ToolRegistry is created. It is an early safety gate, so later code such as tool dispatch can assume each tool name points to exactly one tool.
 
 
-##### `_wide_browse.visit`  (lines 136–149)
+##### `ToolRegistry.schemas`  (lines 55–56)
 
 ```
-async def visit(entity: str) -> dict[str, object]
+def schemas(self) -> tuple[ToolSchema, ...]
 ```
 
-**Purpose**: Runs the browser subtask for one entity inside a wider batch browse. It builds the specific prompt for that entity and returns one result row.
+**Purpose**: Returns the model-facing descriptions for every registered tool. This is used when the system needs to advertise its available tools in a form the model client understands.
 
-**Data flow**: It receives one entity, such as a URL or site name. It waits for permission from the semaphore so the batch does not start too many browser jobs at once, replaces `{entity}` in the prompt template, appends the output schema text if one was available, and spawns a browser subagent with a deterministic deduplication key. It returns a small dictionary containing the original entity and the browser job's JSON output, or an empty string if there was no output.
+**Data flow**: It starts with the registry’s tuple of ToolDef objects. For each tool, it calls ToolDef.schema to turn that internal definition into a ToolSchema. It returns a tuple of those schemas and does not modify the registry.
 
-**Call relations**: This helper lives inside `_wide_browse` and is used once per entity in the batch. `_wide_browse` schedules all these visits together with `asyncio.gather`, while the semaphore inside `visit` keeps the parallel browser fan-out bounded.
+**Call relations**: This is the registry’s bulk export path. It relies on each ToolDef to describe itself, then packages those descriptions together for whichever part of the system is preparing tool information for the model.
 
 
-### `extensions/research/ufo_ext_research/delegation.py`
-
-`orchestration` · `request handling during wide_research tool execution`
-
-This file exists for cases where a user needs the same kind of research done for many entities, such as a list of companies, people, or topics. Instead of asking one agent to work through the whole list one by one, `wide_research` spreads the work across several research subagents at the same time. An everyday analogy is handing a stack of index cards to a small team: each person researches one card, then everyone’s notes are collected into one folder.
-
-The tool starts by reading an entities file from the sandbox, where each non-empty line is one research target. It removes duplicates while keeping the original order, so the same entity is not researched twice. It also enforces a maximum list size to avoid launching too much work at once.
-
-For each entity, it fills `{entity}` into a prompt template. If an output schema file can be read, it appends that schema to the research instruction so each subagent knows what shape of answer is expected. The file uses a semaphore, which is a limit that prevents too many tasks from running at once, to keep parallel research bounded.
-
-Each child research task is spawned with a deterministic deduplication key based on the parent call and the entity name. That matters for crash recovery: if the same batch is resumed, already-started or completed child jobs can be reconnected to instead of duplicated. Finally, all results are written to `wide_research.json` and also returned in the tool response.
-
-#### Function details
-
-##### `_read_lines`  (lines 41–52)
+##### `ToolRegistry.get`  (lines 58–62)
 
 ```
-async def _read_lines(ctx: ToolContext, path: str) -> list[str]
+def get(self, name: str) -> ToolDef[Any]
 ```
 
-**Purpose**: Reads a text file from the sandbox and turns it into a clean list of unique entities. It is used so the rest of the tool can work with a simple list instead of raw file text.
+**Purpose**: Finds the registered tool definition for a requested tool name. The engine uses this when the model has asked to call a tool and the system must locate the exact handler to run.
 
-**Data flow**: It receives a tool context and a file path. It asks the sandbox to run `cat` on that path, checks whether the read succeeded, then splits the file into lines. Blank lines are ignored, surrounding spaces are removed, and repeated entries are skipped. It returns the cleaned list of entity names, or raises an error if the file cannot be read.
+**Data flow**: It receives a name string and scans the registry’s tools in order. If it finds a ToolDef with a matching name, it returns that definition, including its input model, handler, and safety flags. If no match exists, it raises a KeyError so the mistake is loud rather than silently ignored.
 
-**Call relations**: The main `_wide_research` function calls `_read_lines` at the start of the batch. `_read_lines` prepares the list that drives the rest of the fan-out, so no research subagents are started until this file-reading step succeeds.
+**Call relations**: core/src/ufo/loop/engine._dispatch_segments calls this during tool dispatch. In that flow, the engine receives or identifies a requested tool name, asks the registry for the matching ToolDef, and then can use that definition to validate inputs and run the correct handler.
 
-*Call graph*: called by 1 (_wide_research); 1 external calls (dumps).
-
-
-##### `_wide_research`  (lines 55–82)
-
-```
-async def _wide_research(ctx: ToolContext, args: WideResearchInput) -> ToolResult
-```
-
-**Purpose**: Runs the full wide research workflow: read the entity list, start several research subagents in parallel, collect their answers, write a JSON output file, and return a summary to the caller.
-
-**Data flow**: It receives the tool context and validated input fields: the entities file, prompt template, optional schema file, and user description. It reads and checks the entity list, tries to read the schema file, creates a concurrency limit, then launches one `visit` task per entity. When all visits finish, it writes the combined rows to `wide_research.json` in the sandbox and returns a tool result containing the rows and output filename.
-
-**Call relations**: This is the handler connected to the `WIDE_RESEARCH_TOOL` definition, so it is called when the user invokes `wide_research`. It calls `_read_lines` to prepare the targets, uses `asyncio.gather` to wait for all child visits, and wraps the final JSON text in `TextContent` and `ToolResult` so the tool system can send it back to the user.
-
-*Call graph*: calls 1 internal fn (_read_lines); 5 external calls (__init__, __init__, Semaphore, gather, dumps).
-
-
-##### `_wide_research.visit`  (lines 63–76)
-
-```
-async def visit(entity: str) -> dict[str, object]
-```
-
-**Purpose**: Researches one entity from the batch by building that entity’s prompt and spawning a research subagent. It is the per-item worker used by the wider batch process.
-
-**Data flow**: It receives a single entity name from the outer `_wide_research` loop and uses the shared input arguments and schema text from that outer scope. It waits for permission from the semaphore so only a limited number of visits run at once, fills the entity into the prompt template, optionally appends the expected output schema, then calls `ctx.spawn` to run the research profile. It returns a dictionary containing the entity name and the child agent’s serialized result text, or an empty string if there was no output.
-
-**Call relations**: `_wide_research` creates one `visit` task for each entity and waits for all of them together. Each `visit` hands the actual research work off to the research subagent profile, using a deduplication key based on the parent idempotency key and the entity so repeated or recovered runs do not duplicate completed work.
-
-
-### `extensions/sites/ufo_ext_sites/delegation.py`
-
-`orchestration` · `request handling`
-
-This file exists so the main agent does not have to build an entire website by itself. Instead, it can delegate that work to a focused helper agent that knows how to build, serve, and check websites inside the sandbox. Think of it like a project manager handing a full brief to a specialist contractor, then waiting for the contractor's report.
-
-The file defines a clear input shape called `BuildWebsiteInput`. It requires an `objective`, which must describe the whole site because the child agent does not inherit the parent conversation. It can also include a friendly `task_name`, a list of `preload_skills` so the child starts with useful instructions already loaded, and an `extended_context` flag for larger jobs that may need more working time.
-
-The actual tool function, `_build_website`, calls `ctx.spawn`, which starts the `website_building` subagent using the current tool context. This matters because the child runs within the allowed tools and limits of the current profile, rather than getting unrestricted access. The result from the child is turned into plain text and wrapped as a standard tool result. Finally, `DELEGATION_TOOLS` registers this as the public `build_website` tool that other parts of the system can expose to the agent.
-
-#### Function details
-
-##### `_build_website`  (lines 47–50)
-
-```
-async def _build_website(ctx: ToolContext, args: BuildWebsiteInput) -> ToolResult
-```
-
-**Purpose**: This is the tool's action function. When the agent asks to build a website, this function starts a fresh `website_building` child agent session with the requested objective and options, then returns the child agent's summary as the tool output.
-
-**Data flow**: It receives a tool context, which is the safe doorway for starting child agents, and a `BuildWebsiteInput` object containing the website brief and optional settings. It converts that input into a plain data dictionary, leaving out options that were not provided, then passes it to `ctx.spawn` to run the website-building subagent. When the child finishes, it takes the child's output, converts it to JSON text if there is any output, and wraps that text in a `ToolResult` containing `TextContent`.
-
-**Call relations**: This function is registered as the handler for the `build_website` tool in `DELEGATION_TOOLS`. When that tool is invoked, `_build_website` hands the work to `ToolContext.spawn`, using the shared `WEBSITE_BUILDING_NAME` so the correct subagent is started. After the subagent returns, it hands the final summary back through the normal tool-result format.
-
-*Call graph*: 4 external calls (__init__, __init__, spawn, model_dump).
+*Call graph*: called by 1 (_dispatch_segments).
 
 ## 📊 State Registers Touched
 
-- `reg-workspace-context` — The current workspace and member context that keeps every request acting inside the right tenant boundary.
-- `reg-workspaces-members-agents` — The durable records for workspaces, their members, and the agents that can act for them.
-- `reg-connected-credentials` — The encrypted store of outside account connections and secrets that tools and sync jobs may use safely.
-- `reg-permission-grants` — The permission ledger saying which agent may use which connected account or provider access.
-- `reg-extension-state-store` — The per-workspace key-value storage area where extensions keep their own persistent settings and data.
-- `reg-capability-registry` — The loaded menu of extension-provided routes, tools, skills, hooks, jobs, credentials, models, and search backends.
-- `reg-tool-catalog` — The shared list of tools the agent may call, including their names, inputs, safety labels, and handlers.
-- `reg-model-catalog` — The model switchboard that maps model names to providers, credentials, request formats, and prices.
-- `reg-connector-catalog` — The shared directory of external service connectors and broker-backed provider access.
-- `reg-search-index-state` — The searchable content indexes, chunks, embeddings, and search backend choices used for recall and source replay.
-- `reg-sandbox-session-policy` — The safe execution room state: sandbox handles, mounted workspace files, storage access, and restrictions.
-- `reg-egress-proxy-state` — The controlled network gateway state that decides which outside sites sandboxed work may contact and how usage is counted.
-- `reg-browser-session` — The browser connection state used when a turn needs a Chrome endpoint or computer-use actions.
-- `reg-conversation-transcript` — The saved conversation thread, messages, transcript edits, and compacted summaries.
-- `reg-turn-queue-run-state` — The durable state of each agent turn, including whether it is queued, claimed, running, parked, finished, failed, or cancelled.
-- `reg-live-event-stream` — The live progress channel that lets clients attach, resume, and receive streamed turn updates.
-- `reg-artifact-blob-store` — The shared file and blob storage used for uploaded content, generated artifacts, and token-protected downloads.
-- `reg-source-sync-state` — The remembered external sources, imported pages, raw bodies, change records, cursors, errors, and deletion markers.
-- `reg-memory-store` — The workspace memory facts, episodes, ownership labels, confidence, and consolidation indexes used for recall.
-- `reg-scheduled-task-calendar` — The durable calendar of one-time and repeating tasks that workers can safely claim and run later.
-- `reg-accounting-ledger-spend` — The usage ledger, spend caps, exports, and cost totals for models, egress, and other billable work.
-- `reg-observability-trace-state` — The logs, metrics, traces, traceparent links, and redaction rules used to monitor work safely.
-- `reg-workspace-object-catalog` — The named workspace objects and object-type registry used to list, inspect, validate, change, or delete stored things.
-- `reg-prompt-governance` — The saved prompt digests, prompt-change proposals, approvals, and experiment evidence that control instruction changes.
-- `reg-subagent-work-tree` — The parent-child turn links, delegated work state, and message flow between main agents and subagents.
-- `reg-action-proposal-state` — Durable non-governance proposals created by agents or tools for later user/operator review, approval, rejection, or commit.
-- `reg-turn-cleanup-finalizers` — Per-turn cleanup/finalizer stack for resources acquired during runtime assembly and tool execution so result commit or shutdown can release them safely.
-- `reg-agent-todo-goal-state` — The agent-maintained goal/todo checklist state that tools update and later prompt/runtime assembly can reload as working context.
+- `reg-extension-set` — The saved and loaded set of extensions, packs, manifests, and contributed capabilities available to the runtime.
+- `reg-credential-store` — The encrypted secrets and credential slots used to let tools and connectors act for a workspace without exposing raw secrets.
+- `reg-connection-grants` — The saved approvals and safe account handles for connected external accounts such as Slack, GitHub, Composio, and Pipedream.
+- `reg-conversation-transcript` — The stored conversation history, messages, files, speakers, and outcomes that later stages read and append to.
+- `reg-tool-catalog` — The shared catalog of tools the model may call, including their names, schemas, handlers, and safety properties.
+- `reg-tool-context` — The per-run authority envelope that gives tools only the workspace, credentials, cleanup hooks, and permissions they are allowed to use.
+- `reg-sandbox-session` — The sandbox handle and lifecycle state for the safe workspace where code, files, browsers, and commands run.
+- `reg-workspace-storage` — The shared file, blob, artifact, and mount state that stores workspace bytes and files shared back to users.
+- `reg-egress-policy` — The network access and proxy state that decides which sandbox traffic is allowed, audited, billed, or given injected secrets.
+- `reg-browser-session` — The browser automation connection state used when tools need a controlled browser for a turn.
+- `reg-skill-inventory` — The built-in and user-created skill folders, metadata, dependencies, and workspace-specific skill records.
+- `reg-source-pages` — The source connections, sync cursors, imported pages, removal markers, and page-change records from outside systems.
+- `reg-search-index` — The searchable text chunks, embeddings, and selected index backend used to find relevant stored content.
+- `reg-memory-store` — The durable memories, memory pages, recall events, and consolidation state used for long-term recall.
+- `reg-extension-store` — The per-workspace extension-owned storage where plugins keep their own durable records without private tables.
+- `reg-todo-checklist` — The per-conversation persistent checklist or task-progress state maintained by the todo extension across agent turns.
+- `reg-eval-environment-fixtures` — Workspace-scoped fake email and calendar records used by the evaluation environment connectors and tools.
+- `reg-turn-admission-context` — Durable per-turn requester/speaker/on-behalf-of, timezone, surface context, and authorization-link metadata used to attribute, resume, and safely handle work.
+- `reg-turn-replay-journal` — Durable per-turn execution checkpoints for model calls, tool results, and side-effect/idempotency markers used to resume work without duplicating paid calls or irreversible actions.

@@ -1,142 +1,273 @@
-# Core, control, and pack import package markers  `stage-19.4`
+# Surface, channel, and agent-binding migrations  `stage-19.4`
 
-This stage is quiet behind-the-scenes support. It does not start the program, run the main loop, or shut anything down. Instead, it sets up the “addresses” Python uses to find code. In Python, an __init__.py file marks a folder as a package, meaning other code can import from it by name.
+This stage is part of the behind-the-scenes database setup that lets the product grow from one conversation place into many. A database migration is a versioned recipe that changes what the database can store. Here, the recipes teach the system which “surfaces” are valid, meaning the places where conversations happen, such as Slack or the web.
 
-The root markers create the main import doors: ufo_control for control code, ufo for the core system, and ufo_pack_yc for the YC pack. Inside the core tree, more markers divide the project into stable neighborhoods. ufo.ext is for extensions. ufo.loop and ufo.loop.prompts support the main loop and its prompt text. ufo.models holds model-related code. ufo.sandbox and ufo.sandbox.proxy mark isolated execution and proxy areas. ufo.schema, ufo.sdk, ufo.skills, ufo.sources, and ufo.surfaces mark their own import areas. ufo.tools also names the tools area and briefly says it contains the tool registry, handler context, and built-in tools.
+The Slack migration adds Slack as a supported surface and creates a delivery-tracking table, so outgoing replies can be recorded, retried, and not lost. The web migration does the same kind of permission work for the web interface, so web conversations and identities are accepted. The surface seam migration removes older fixed limits on surface names and adds storage for files or other shared artifacts attached to a single conversation turn. The workspace keys migration makes delivery records workspace-aware, so two workspaces can use the same surface names without clashing. Finally, the agent migrations add an internet-access setting for each agent and require conversations and surface installations to be linked to the agent that owns them.
 
 ## Files in this stage
 
-### Top-level package roots
-These markers establish the primary import boundaries for the control and core UFO packages.
+### Surface and channel foundations
+Introduces Slack and web as valid conversation origins, then relaxes surface constraints while adding shared turn artifacts.
 
-### `control/src/ufo_control/__init__.py`
+### `core/src/ufo/schema/migrations/versions/0009_slack.py`
 
-`other` · `import/package discovery`
+`data_model` · `database migration`
 
-This is an empty Python package marker. In Python projects, an `__init__.py` file tells Python that a folder should be treated as an importable package. That means other files can write imports such as `import ufo_control...` and Python will know where that package begins. Think of it like a label on a binder: the label does not contain the documents, but it tells you the binder is a named collection you can open and use. Because this file has no code, it does not start anything, configure anything, or change program behavior directly. Its value is structural: without it, some tooling or older Python import setups might not recognize `ufo_control` as a package, which could break imports elsewhere in the project.
+This file is an Alembic migration, which means it is a recipe for changing the database structure as the application evolves. Here, the project is adding Slack support. Before this migration, conversations and identities only allowed older surfaces such as the command line and subagents. This migration widens those rules so Slack can be recorded as a valid source.
 
+It also adds an idempotency key to each turn. An idempotency key is like a receipt number: if the same Slack event arrives twice, the system can recognize that it already handled it instead of creating duplicate work. A unique index ties that key to a workspace so duplicates are blocked within the same workspace.
 
-### `core/src/ufo/__init__.py`
+The other major addition is the `writeback` table. This table tracks whether a generated reply still needs to be sent, has been claimed by a worker, was delivered, or failed. That matters because sending messages back to Slack is not always instant or guaranteed. The table gives the system a durable checklist, so work is not lost if a process crashes.
 
-`other` · `import/package discovery`
+The downgrade reverses these changes, returning the database to the older pre-Slack shape.
 
-This is an empty package marker file. In Python, a directory with an `__init__.py` file is treated as a package, which means code elsewhere can import modules inside it using names like `ufo.some_module`. Think of it like putting a label on a folder so the Python import system knows the folder belongs on the project’s map. Because this file contains no code, it does not set up configuration, run startup logic, or expose helper functions. Its importance is mostly structural: without it, depending on the Python version and packaging setup, imports from the `ufo` package might fail or behave differently. It exists so the rest of the project can treat `core/src/ufo` as a coherent Python namespace.
+#### Function details
 
+##### `upgrade`  (lines 12–43)
 
-### Core extension and loop namespaces
-These package markers make extension code, loop orchestration code, and loop prompt assets importable.
+```
+def upgrade() -> None
+```
 
-### `core/src/ufo/ext/__init__.py`
+**Purpose**: Applies the forward database change for Slack support. It adds storage for duplicate-detection, allows Slack as a conversation surface, and creates a table for tracking replies that need to be sent back.
 
-`other` · `import/package discovery`
+**Data flow**: The input is the current database schema at the previous migration version. The function adds a nullable `idempotency_key` column to `turn`, creates a unique workspace-plus-key index, relaxes `conversation.member_id` so Slack conversations do not always need a member, expands check rules to allow `slack`, and creates the `writeback` table with status rules and foreign keys. The output is an updated database schema ready to store Slack conversations and delivery state.
 
-This is an empty package marker file. In Python, a folder can be treated as an importable package when it contains an `__init__.py` file. That means code elsewhere can refer to modules under `ufo.ext` using normal import paths. Think of it like a label on a drawer: the drawer may contain useful tools, but this label itself does not do the work. Without this file, some Python setups or packaging tools might not recognize the directory as part of the project’s import structure, which could make extension modules harder or impossible to import consistently. There are no functions, classes, settings, or side effects here. Its value is structural: it helps define the shape of the codebase.
+**Call relations**: When Alembic runs migrations forward, it calls `upgrade`. This function delegates the actual database edits to Alembic operations such as adding columns, creating indexes, altering tables in batches, and creating the new table; SQLAlchemy objects describe the columns, constraints, and data types used in those edits.
 
+*Call graph*: 11 external calls (add_column, batch_alter_table, create_index, create_table, CheckConstraint, Column, DateTime, ForeignKeyConstraint, PrimaryKeyConstraint, Text (+1 more)).
 
-### `core/src/ufo/loop/__init__.py`
 
-`other` · `import time`
+##### `downgrade`  (lines 46–56)
 
-In Python, an `__init__.py` file is the front door to a folder of code. Even when it is empty, it tells Python that the folder should be treated as an importable package. Here, the package is named `ufo.loop`, which likely contains code related to loop or event-loop behavior elsewhere in the same directory. This file does not run setup code, expose shortcuts, or define shared values. Its main value is structural: without it, some Python tooling or older import rules might not recognize the folder as a package, and imports that expect `ufo.loop` to exist could fail. Think of it like a label on a drawer: the drawer may hold useful tools in other files, but this label lets the rest of the project find the drawer reliably.
+```
+def downgrade() -> None
+```
 
+**Purpose**: Reverses the Slack-related schema changes made by `upgrade`. It is used if the database must be rolled back to the earlier version.
 
-### `core/src/ufo/loop/prompts/__init__.py`
+**Data flow**: The input is a database schema that includes the Slack additions. The function drops the `writeback` table, changes the allowed surface values back to the older lists, makes `conversation.member_id` required again, removes the idempotency index, and removes the `idempotency_key` column. The output is a database schema matching the previous migration version.
 
-`other` · `import time`
+**Call relations**: When Alembic rolls migrations backward, it calls `downgrade`. This function hands each reversal to Alembic operations, undoing the table, constraint, index, and column changes in an order that keeps the database consistent while stepping back from Slack support.
 
-This is an empty Python package file. In Python, a file named `__init__.py` tells the language that the folder should be treated as an importable package. You can think of it like putting a label on a drawer: the drawer may contain useful things, but this label is what lets the rest of the program find and refer to it in an organized way.
+*Call graph*: 5 external calls (batch_alter_table, drop_column, drop_index, drop_table, Uuid).
 
-Here, the drawer is `ufo.loop.prompts`, which likely contains code or resources related to prompts used during a loop in the larger system. This file does not create prompts, load files, configure settings, or run any logic. Its value is structural: without it, some Python environments or tooling might not recognize the folder as a package, and imports that expect `ufo.loop.prompts` to exist could fail or behave inconsistently.
 
+### `core/src/ufo/schema/migrations/versions/0010_web.py`
 
-### Core model, sandbox, and schema namespaces
-These markers define importable boundaries for model definitions, sandbox infrastructure, sandbox proxy code, and schemas.
+`data_model` · `database migration`
 
-### `core/src/ufo/models/__init__.py`
+This file is a small step in the database’s history. The project stores a field called `surface`, which means the user-facing place where something happened, such as the command line, Slack, or a subagent. The database protects this field with a check constraint, which is a rule that says “only these exact values are allowed.” This migration updates those rules to include a new value: `web`.
 
-`data_model` · `import time`
+Think of the database like a guest list at a door. Before this migration, `web` was not on the list, so even if the application tried to save a web conversation, the database would turn it away. The `upgrade` function edits the guest list so `web` is accepted for conversations and surface identities. The `downgrade` function does the opposite: it removes `web` again, returning the rules to the previous version.
 
-This is an empty package marker file. In Python, a file named `__init__.py` tells the language that the surrounding folder should be treated as an importable package. Here, it makes `core/src/ufo/models` available as `ufo.models` to the rest of the project.
+The file uses Alembic, a tool for applying database changes in order. Its revision markers tell Alembic where this migration fits in the chain: it comes after migration `0009` and is named `0010`.
 
-Because the file is empty, it does not create classes, run setup code, or expose shortcuts for other modules. Its value is structural: it helps organize the project so model code can live under a clear namespace. Think of it like a label on a drawer. The label does not contain the tools, but it makes the drawer recognizable and usable by the rest of the workspace.
+#### Function details
 
-Without this file, depending on the Python version and packaging setup, imports that expect `ufo.models` to be a regular package could fail or behave differently. Keeping it present makes the package boundary explicit.
+##### `upgrade`  (lines 11–21)
 
+```
+def upgrade() -> None
+```
 
-### `core/src/ufo/sandbox/__init__.py`
+**Purpose**: This function applies the forward database change. It expands the allowed `surface` values so the database accepts `web` alongside the existing options.
 
-`other` · `import time`
+**Data flow**: It reads no application data directly. When Alembic runs it, it opens safe table-editing blocks for the `conversation` and `surface_identity` tables, removes each old check rule, and creates a replacement rule that includes `web`. After it finishes, new rows using the web surface can be stored without failing the database rule.
 
-This is an empty Python package marker. In Python, a folder can be treated as an importable package when it contains an `__init__.py` file. That is the main job here: it tells Python and project tools that `core/src/ufo/sandbox` is a named part of the codebase. Without this file, some import styles or packaging tools might not recognize the `sandbox` folder consistently, especially in older Python setups or stricter build environments.
+**Call relations**: Alembic calls this when moving the database schema up to revision `0010`. Inside the function, it hands each table change to `alembic.op.batch_alter_table`, which provides the temporary editing context used to drop and recreate the constraints safely.
 
-There is no runtime logic in this file. It does not create objects, load settings, or run sandbox code. Think of it like a label on a drawer: the label does not contain the tools, but it lets people and systems know the drawer exists and can be opened by name.
+*Call graph*: 1 external calls (batch_alter_table).
 
 
-### `core/src/ufo/sandbox/proxy/__init__.py`
+##### `downgrade`  (lines 24–32)
 
-`other` · `import/package discovery`
+```
+def downgrade() -> None
+```
 
-This is an empty package marker file. In Python, a folder with an `__init__.py` file is treated as an importable package, meaning code elsewhere can refer to modules inside `ufo.sandbox.proxy` using normal import paths. Think of it like putting a label on a drawer: the drawer may hold useful tools in other files, but this label is what lets the rest of the system find the drawer by name. Without this file, depending on the Python version and packaging setup, imports from this folder could fail or behave differently. Since it has no code, it does not create objects, run setup steps, or change state. Its main value is structural: it defines the package boundary for the sandbox proxy area of the project.
+**Purpose**: This function reverses the migration. It restores the older database rules where `web` is not an allowed `surface` value.
 
+**Data flow**: It reads no application data directly. When Alembic runs it during a rollback, it opens editing blocks for `surface_identity` and `conversation`, removes the newer check rules, and recreates the previous rules without `web`. After it finishes, the database once again rejects rows whose surface is `web`.
 
-### `core/src/ufo/schema/__init__.py`
+**Call relations**: Alembic calls this when rolling the database schema back from revision `0010` to the earlier version. Like `upgrade`, it uses `alembic.op.batch_alter_table` to perform the table changes in controlled batches.
 
-`other` · `import time`
+*Call graph*: 1 external calls (batch_alter_table).
 
-This is an empty package marker file. In Python, a folder can act like an importable package when it contains an `__init__.py` file. That means other parts of the project can refer to code under this directory using names like `ufo.schema.some_module`. Think of it like putting a label on a drawer: the drawer may contain useful papers, but this label mainly tells Python, “this drawer is part of the organized system.” Because the file is empty, it does not create objects, run setup code, or change behavior at runtime. Its value is structural: without it, depending on the Python version and packaging setup, imports from `ufo.schema` might fail or behave differently than expected.
 
+### `core/src/ufo/schema/migrations/versions/0018_surface_seam.py`
 
-### Core SDK and capability namespaces
-These markers expose SDK, skill, source, surface, and tool-related code as stable importable packages.
+`data_model` · `database migration`
 
-### `core/src/ufo/sdk/__init__.py`
+This migration updates the database so the application can store shared artifacts, such as uploaded or generated files, in a structured way. A database migration is like a renovation instruction sheet: it tells the system exactly what to add or remove so every environment can move from one database version to the next safely.
 
-`other` · `import time`
+First, the migration removes two old check rules from the conversation and surface_identity tables. A check rule is a database guardrail that only allows certain values. Here, the old guardrails limited which “surface” names could be stored, such as cli, slack, or web. Removing them creates a seam where the application can support more flexible or newer surface types without the database rejecting them.
 
-This is an empty package initializer. In Python, a file named `__init__.py` tells Python that the surrounding folder should be treated as an importable package. Here, that means code elsewhere can refer to modules under `ufo.sdk` using normal import paths.
+Then it creates a shared_artifact table. Each row connects a stored blob, identified by blob_key, to a specific turn in a conversation and a workspace. It also records user-friendly details like filename, subject, media type, file size, and timestamps. The table uses foreign keys, which are database links that make sure the referenced turn and workspace really exist. It also checks that file size is never negative.
 
-Because the file is empty, it does not run setup code, expose shortcuts, or define shared values. Its job is more like putting a label on a drawer: it says “the SDK pieces live here,” but it does not contain the tools itself. Without this file, depending on the Python version and packaging setup, imports from `ufo.sdk` could become less predictable or fail in environments that expect traditional Python packages.
+The downgrade function reverses this: it drops the new table and restores the older surface restrictions.
 
+#### Function details
 
-### `core/src/ufo/skills/__init__.py`
+##### `upgrade`  (lines 12–32)
 
-`other` · `import time`
+```
+def upgrade() -> None
+```
 
-This is an empty Python package marker file. In Python, a folder can contain an `__init__.py` file to say, “treat this folder as an importable package.” That matters because code elsewhere can then refer to modules under `ufo.skills` in a clean, organized way.
+**Purpose**: Moves the database forward to revision 0018. It loosens old database restrictions on surface names and creates the shared_artifact table so the system can record files tied to conversation turns and workspaces.
 
-There is no executable logic here: no functions, classes, or setup code. Its value is structural. Think of it like a label on a drawer: the label does not do the work, but it lets people and tools know that the drawer contains a particular category of things. Without this file, depending on the Python version and packaging setup, imports involving `ufo.skills` might be less reliable or might not work in some environments.
+**Data flow**: It starts with the existing database schema. It removes two named check constraints from existing tables, then defines a new table with columns for the artifact’s turn, storage key, workspace, filename, optional subject, media type, size, and timestamps. The result is a database that can accept shared artifact records and no longer enforces the old fixed surface lists in those two places.
 
-Because it is empty, it has no runtime side effects. Importing `ufo.skills` simply succeeds as a package import and does not initialize any skill objects or load extra code.
+**Call relations**: This function is called by Alembic, the database migration tool, when the project is upgraded from revision 0017 to 0018. It uses Alembic table-alteration and table-creation helpers, plus SQLAlchemy column and constraint definitions, to describe the exact database changes Alembic should apply.
 
+*Call graph*: 10 external calls (batch_alter_table, create_table, BigInteger, CheckConstraint, Column, DateTime, ForeignKeyConstraint, PrimaryKeyConstraint, Text, Uuid).
 
-### `core/src/ufo/sources/__init__.py`
 
-`other` · `import time`
+##### `downgrade`  (lines 35–44)
 
-This is an empty Python package file. In Python projects, a file named `__init__.py` tells Python that the surrounding folder should be treated as an importable package. Think of it like a label on a drawer: the drawer may hold useful tools in other files, and this label lets the rest of the program refer to that drawer by name. Here, the drawer is `ufo.sources`, which likely contains code related to different input sources elsewhere in the same directory. Because this file is empty, it does not create objects, run setup steps, or change behavior directly. Its importance is structural: without it, some Python environments or tooling might not recognize `ufo.sources` as a package, and imports that expect that package path could fail.
+```
+def downgrade() -> None
+```
 
+**Purpose**: Moves the database backward from revision 0018 to revision 0017. It removes the shared_artifact table and puts back the older rules that limit allowed surface names.
 
-### `core/src/ufo/surfaces/__init__.py`
+**Data flow**: It starts with a database that has the shared_artifact table and loosened surface checks. It drops the shared_artifact table, then recreates the check constraints on surface_identity and conversation with their older allowed value lists. The result is a schema shaped like the previous revision, but any data stored only in shared_artifact would be removed when the table is dropped.
 
-`other` · `import time`
+**Call relations**: This function is called by Alembic when someone rolls the database back to the previous migration. It hands the work to Alembic’s drop-table and table-alteration helpers so the rollback happens in the correct database-specific way.
 
-This is an empty package initializer. In Python, a file named `__init__.py` tells Python that the surrounding folder should be treated as an importable package. Think of it like a label on a drawer: the drawer may contain useful tools, but the label itself does not do the work. Here, the drawer is `ufo.surfaces`, which is likely where surface-related modules live elsewhere in the project. Because this file is empty, importing `ufo.surfaces` does not set up extra state, expose shortcut names, or run custom startup code. Its value is structural: without it, some Python tooling or older import setups might not recognize this directory as a package, and imports that expect `ufo.surfaces` to exist could fail.
+*Call graph*: 2 external calls (batch_alter_table, drop_table).
 
 
-### `core/src/ufo/tools/__init__.py`
+### Workspace-scoped deliveries
+Updates surface delivery keys and indexes so delivery records are safely partitioned by workspace.
 
-`other` · `import time`
+### `core/src/ufo/schema/migrations/versions/0030_surface_workspace_keys.py`
 
-This is a package marker file. In Python, an `__init__.py` file is what turns a folder into an importable package, meaning other code can refer to the folder as `ufo.tools`. This particular file does not run any setup code, define functions, or expose extra names. Its main value is orientation: the docstring acts like a label on a drawer, saying that the `tools` package is where the project keeps its tool registry, the context passed to tool handlers, and the built-in tool set.
+`data_model` · `database migration`
 
-In practical terms, this file helps make the surrounding folder a clear, named part of the system. Without it, depending on the Python version and packaging setup, imports involving `ufo.tools` could be less explicit or fail in some environments. More importantly for a newcomer, it provides a quick clue about the purpose of the package before they open the files inside it.
+This file is an Alembic migration, which is a scripted change to the database structure. Its job is to move the database from version 0029 to version 0030. The main idea is that a “surface” — an outside channel or place where messages are delivered — now needs to be tied more clearly to a workspace. Without this change, records from different workspaces could be forced to share identifiers that should really be separate, like two apartment buildings both having an apartment 2B.
 
+The migration creates a new table called surface_installation. That table records, for each workspace and surface, which external installation belongs to it, along with creation and update times. It also prevents blank installation IDs and makes sure each workspace/surface pair is unique.
 
-### Pack namespace marker
-This marker establishes the YC pack as an importable UFO pack package.
+It then changes existing rules on two tables. In surface_identity, the primary key now includes workspace_id, so identities are unique inside a workspace rather than globally. In conversation, the uniqueness rule for queue keys also gains workspace_id, so queue identifiers only need to be unique within the same workspace and surface.
 
-### `packs/yc/ufo_pack_yc/__init__.py`
+Finally, it adds an index on writeback records that are still pending or claimed. An index is like a book index: it helps the database quickly find work that is due without scanning everything.
 
-`other` · `import/package discovery`
+#### Function details
 
-This is an empty Python package marker file. In Python, a file named `__init__.py` tells the interpreter that the surrounding folder should be treated as an importable package. That matters because other parts of the project may want to refer to code inside `packs/yc/ufo_pack_yc` using normal Python import paths. Think of it like putting a label on a folder in a filing cabinet: the label does not contain the documents, but it lets people find and refer to the folder reliably. Since this file contains no code, it does not run any setup steps, create any objects, or change program behavior directly. Its main value is structural: without it, some Python environments or tools might not recognize this directory as a package, which could make imports fail or behave inconsistently.
+##### `upgrade`  (lines 17–51)
+
+```
+def upgrade() -> None
+```
+
+**Purpose**: Applies the new database shape for version 0030. It adds the surface_installation table, changes uniqueness rules to include workspace_id, and adds a faster lookup path for unfinished writeback work.
+
+**Data flow**: It starts with the existing database schema from the previous migration. It creates a new table with workspace, surface, installation, and timestamp columns; rewrites selected primary-key and unique-key rules on existing tables; and creates an index for pending or claimed writebacks. After it runs, the database can store surface and queue relationships separately per workspace.
+
+**Call relations**: Alembic calls this function when the application or deployment process upgrades the database. Inside it, the function hands each structural change to Alembic operations such as table creation, table alteration, and index creation, while SQLAlchemy objects describe the columns and constraints to create.
+
+*Call graph*: 12 external calls (batch_alter_table, create_index, create_table, CheckConstraint, Column, DateTime, ForeignKeyConstraint, PrimaryKeyConstraint, Text, UniqueConstraint (+2 more)).
+
+
+##### `downgrade`  (lines 54–64)
+
+```
+def downgrade() -> None
+```
+
+**Purpose**: Reverses the version 0030 database changes. Someone would use it if they needed to roll the database back to the previous schema version.
+
+**Data flow**: It starts with a database that already has the version 0030 changes. It removes the writeback index, restores the older conversation uniqueness rule, restores the older surface_identity primary key, and drops the surface_installation table. After it runs, the database is back to the older structure where these keys are not workspace-qualified in the same way.
+
+**Call relations**: Alembic calls this function during a rollback. It performs the mirror image of upgrade, handing table and index changes to Alembic so the database can step backward safely and in the correct order.
+
+*Call graph*: 3 external calls (batch_alter_table, drop_index, drop_table).
+
+
+### Agent settings and ownership
+Adds agent internet-access configuration and makes agent ownership explicit for surface installations and conversations.
+
+### `core/src/ufo/schema/migrations/versions/0050_agent_internet_access.py`
+
+`data_model` · `database migration`
+
+This migration changes the shape of the database, specifically the table that stores agents. Before this file runs, an agent record has no dedicated place to say whether internet access is allowed. After it runs, the `agent` table has a new required true-or-false field called `internet_access_allowed`.
+
+The migration gives existing and future agents a default value of `true`, meaning internet access is allowed unless something later changes that setting. This matters because adding a required database field can break existing rows if no value is provided. The default acts like filling in a new checkbox on every old form so none are left blank.
+
+The file follows Alembic’s migration pattern. Alembic is a tool that applies database changes in order. The `upgrade` function moves the database forward to this version. The `downgrade` function reverses the change by removing the column. Together, they let the project safely evolve its database while still having a way back if needed.
+
+#### Function details
+
+##### `upgrade`  (lines 12–21)
+
+```
+def upgrade() -> None
+```
+
+**Purpose**: This function applies the migration by adding the `internet_access_allowed` column to the `agent` table. It is used when the database is being moved forward to revision `0050`.
+
+**Data flow**: It starts with the existing `agent` table. It builds a new Boolean column, meaning a true-or-false value, marks it as required, and gives it a database-side default of `true`. After it runs, every agent row can store whether internet access is allowed, and existing rows receive the default value.
+
+**Call relations**: Alembic calls this function when applying this migration. Inside it, the function asks SQLAlchemy to describe the new column and then hands that description to Alembic’s `add_column` operation so the actual database table is changed.
+
+*Call graph*: 4 external calls (add_column, Boolean, Column, true).
+
+
+##### `downgrade`  (lines 24–25)
+
+```
+def downgrade() -> None
+```
+
+**Purpose**: This function reverses the migration by removing the `internet_access_allowed` column from the `agent` table. It is used if the database is rolled back from revision `0050` to the previous revision.
+
+**Data flow**: It starts with an `agent` table that includes the internet access column. It tells Alembic to drop that column. After it runs, agent rows no longer have a stored internet-access permission field from this migration.
+
+**Call relations**: Alembic calls this function during a rollback. The function hands off the table name and column name to Alembic’s `drop_column` operation, which performs the database change.
+
+*Call graph*: 1 external calls (drop_column).
+
+
+### `core/src/ufo/schema/migrations/versions/0051_agent_bindings.py`
+
+`data_model` · `database migration during deploy or schema setup`
+
+This file changes the database shape during an upgrade. Before this migration, rows in the `surface_installation` and `conversation` tables did not have to point to an agent. After it runs, each row gets a new `agent_id` field, and that field must point to a real row in the `agent` table. In plain terms, it adds a required “assigned agent” label to two kinds of records.
+
+The migration is careful about existing data. It first adds the new field as optional, because old rows do not yet have a value. Then it fills in each old row by choosing the earliest-created agent in the same workspace. This is like adding a required “driver” column to a trip log: before making the column mandatory, the migration goes back through old trips and assigns the first available driver from the same office. Once every row has a value, it changes the column to required and adds a database rule that prevents the value from pointing to a missing agent.
+
+The important assumption is that each relevant workspace already has at least one agent. If not, the backfill would leave some rows empty and the “required” step would fail. The downgrade reverses the change by removing the rule and the column.
+
+#### Function details
+
+##### `upgrade`  (lines 17–27)
+
+```
+def upgrade() -> None
+```
+
+**Purpose**: This applies the forward database change. It adds an `agent_id` column to surface installations and conversations, fills old rows with a suitable agent, then makes the link required and protected by a foreign key, which is a database rule saying “this value must match a real agent.”
+
+**Data flow**: It reads the existing `surface_installation`, `conversation`, and `agent` tables. For each target table, it adds an empty `agent_id` field, looks up the earliest agent in the same workspace for each row, writes that agent’s id into the new field, then changes the field so it can no longer be empty and must reference the `agent` table. The result is an updated database schema and updated existing rows.
+
+**Call relations**: Alembic, the migration tool, calls this when moving the database from revision `0050` to `0051`. During that process, this function asks Alembic and SQLAlchemy to change table definitions and run the backfill SQL so later application code can rely on every surface installation and conversation having an agent.
+
+*Call graph*: 4 external calls (batch_alter_table, execute, Column, Uuid).
+
+
+##### `downgrade`  (lines 30–34)
+
+```
+def downgrade() -> None
+```
+
+**Purpose**: This reverses the migration if the database needs to go back to the previous version. It removes the required link from surface installations and conversations to agents.
+
+**Data flow**: It works on the two tables that were changed by `upgrade`. For each one, it first removes the database rule that requires `agent_id` to point to a real agent, then removes the `agent_id` column itself. The result is a schema that matches the older version, with no stored agent binding on those records.
+
+**Call relations**: Alembic calls this when rolling the database back from revision `0051` to `0050`. It uses Alembic’s table-altering helper to undo the structural changes made by `upgrade`, so older code that does not know about `agent_id` can run against the database again.
+
+*Call graph*: 1 external calls (batch_alter_table).

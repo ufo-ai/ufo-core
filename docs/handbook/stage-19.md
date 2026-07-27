@@ -1,192 +1,275 @@
-# Configuration, adapters, utilities, and conformance scaffolding  `stage-19` (cross-cutting infrastructure)
+# Data schema, migrations, and persistence models  `stage-19` (cross-cutting infrastructure)
 
-This stage is shared support used across the whole system, especially during startup and testing. It is the wiring and labeling layer that tells UFO what settings to use, what outside services it can talk to, and where different extension code lives.
+This stage is the system’s long-term filing cabinet. It is shared behind-the-scenes support used during startup, normal requests, background jobs, and cleanup. It defines what can be stored, how storage changes over time, and how different parts of the product read the same records safely.
 
-The configuration file loader reads ufo.toml and checks that important choices are clear and safe before the program runs. The bundle builder creates a repeatable Docker deployment package, freezing which extensions and settings should be used on another machine. Adapter manifests and registries act like a front-desk directory, mapping provider names to the code for Redis hubs, source connectors, models, search, sandbox, browser, and related services.
+At the center, schema/tables.py is the main blueprint for database tables, columns, links, and lookup shortcuts. db.py is the safe doorway that opens database connections, runs transactions for the right workspace, applies migrations, and shuts access down cleanly. The package files simply make the schema and model folders importable.
 
-The evaluation pack definitions provide safe, repeatable tool bundles for tests, replacing real services with controlled fake ones when needed. The sample extension and pack scaffolding proves that the public SDK can load tools, skills, routes, hooks, connectors, and setup actions correctly. The many package marker files are small but important: they make folders importable in Python, like labels on drawers, so later stages can find core code, platform integrations, and user-facing extensions.
+The sub-stages fill in the cabinet. Control-plane setup creates gateway tables and workspace safety fences. Transcript and record formats preserve conversations and turn state. Core and feature migrations create and evolve tables for workspaces, members, agents, credentials, channels, sources, pages, inbound messages, scheduled tasks, runtimes, grants, billing, exports, seats, memories, search chunks, knowledge graphs, and extension-owned data. Together, they let the codebase upgrade its stored data without losing the history that later work depends on.
 
 ## Sub-stages
 
-- [Adapter manifests and provider registries](stage-19.1.md) `stage-19.1` — 2 files
-- [Evaluation pack definitions](stage-19.2.md) `stage-19.2` — 3 files
-- [Sample extension and pack conformance scaffolding](stage-19.3.md) `stage-19.3` — 3 files
-- [Core, control, and pack import package markers](stage-19.4.md) `stage-19.4` — 15 files
-- [User-facing capability extension package markers](stage-19.5.md) `stage-19.5` — 16 files
-- [Platform and integration extension package markers](stage-19.6.md) `stage-19.6` — 12 files
+- [Control-plane database setup and row isolation](stage-19.1.md) `stage-19.1` — 2 files
+- [Durable transcript and shared record formats](stage-19.2.md) `stage-19.2` — 4 files
+- [Core migration runner and initial platform schema](stage-19.3.md) `stage-19.3` — 5 files
+- [Surface, channel, and agent-binding migrations](stage-19.4.md) `stage-19.4` — 6 files
+- [Source and page persistence migrations](stage-19.5.md) `stage-19.5` — 7 files
+- [Turn execution, admission, and inbound-message migrations](stage-19.6.md) `stage-19.6` — 11 files
+- [Runtime, grants, scheduling, and fleet migrations](stage-19.7.md) `stage-19.7` — 11 files
+- [Ledger, spend, export, and seat migrations](stage-19.8.md) `stage-19.8` — 9 files
+- [Memory, indexing, and knowledge extension migrations](stage-19.9.md) `stage-19.9` — 12 files
+- [Special-purpose extension migrations](stage-19.10.md) `stage-19.10` — 3 files
 
 ## Files in this stage
 
-### Deployment configuration and bundling
-Builds reproducible UFO deployment bundles around a validated ufo.toml configuration.
+### Database schema and access
+Core persistence files that expose database access, package schema/model namespaces, and define the shared SQLAlchemy table blueprint.
 
-### `core/src/ufo/bundle.py`
+### `core/src/ufo/db.py`
 
-`domain_logic` · `bundle creation / packaging time`
+`io_transport` · `startup, migrations, request/job transactions, teardown`
 
-This file supports the `ufoctl bundle` command. A bundle is like packing a lunchbox before a trip: it copies the needed config, writes down the exact extension versions and checksums to use, and prepares instructions for building a container image. Without this step, a deployment could accidentally run with different extensions, missing extensions, or changed extension contents when moved to another environment.
+The main problem this file solves is tenant safety: one running server may serve many workspaces, but data from one workspace must not accidentally be visible to another. It does this by making `workspace_tx` the normal way to talk to the database. A transaction is a short-lived database session where a group of reads and writes happen together. When the database is PostgreSQL, `workspace_tx` pins the current workspace ID into the transaction so row-level security, meaning database rules that filter rows automatically, can allow only that workspace’s rows.
 
-The main class, `Bundle`, takes the current config file, an optional extension catalog, and an output folder. When `build` runs, it first decides which extensions must be pinned. A “pin” means a recorded name and digest, where the digest is a fingerprint proving the installed extension is exactly the expected one. If a lockfile already exists, the bundle starts from those already-pinned extensions. If not, it pins every discovered installed extension. If a catalog is available, it also includes extensions marked as bundle-only: these are disabled during normal store install, but intentionally included when creating a bundle.
+The file keeps its database engines private, like keeping the master keys in a locked cabinet. Code elsewhere gets a transaction, not the raw engine. There is one special exception: `owner_tx`, used for background sweeps that must first find work across all workspaces. It deliberately does not set a workspace, so callers must only use it to find identifiers and then switch back into a normal workspace transaction.
 
-After that, the file creates the output directory, copies the config to `ufo.toml`, writes a fresh `ufo.lock`, and writes a Dockerfile. The Dockerfile installs a local `ufo` wheel into a small Python image, copies in the config and lockfile, and starts `ufoctl serve` by default.
-
-#### Function details
-
-##### `wheel_name`  (lines 25–28)
-
-```
-def wheel_name() -> str
-```
-
-**Purpose**: Builds the filename of the local `ufo` Python wheel that the Dockerfile will install. A wheel is a packaged Python distribution, and here it is expected to exist beside the Docker build context rather than being downloaded from a public package index.
-
-**Data flow**: It reads the current `ufo` version from the extension store version helper, places that version into the standard wheel filename pattern, and returns the resulting string. Nothing is written or changed.
-
-**Call relations**: The Dockerfile text generator calls this when it needs to name the wheel in the `COPY`, `pip install`, and cleanup commands. This keeps the Dockerfile tied to the same `ufo` version that the bundle records elsewhere.
-
-*Call graph*: called by 1 (_dockerfile); 1 external calls (ufo_version).
-
-
-##### `Bundle.build`  (lines 49–62)
-
-```
-def build(self) -> BundleResult
-```
-
-**Purpose**: Creates the complete bundle folder on disk. It gathers the extension pins, copies the deploy config, writes a new lockfile, writes a Dockerfile, and returns a summary of what it produced.
-
-**Data flow**: It starts with the `Bundle` object's config path, optional catalog, and output directory. It asks `_pins` for the exact extensions to freeze, creates the output folder if needed, copies the config text into `ufo.toml`, writes `ufo.lock` with the current `ufo` version and extension pins, writes the Dockerfile text from `_dockerfile`, and returns a `BundleResult` containing the created paths and pins.
-
-**Call relations**: This is the main action method for the file. It calls `_pins` first so the lockfile reflects the intended extension set, then calls `_dockerfile` so the Docker build context knows how to run that locked deployment. Other code can call `build` as the single high-level operation for producing a bundle.
-
-*Call graph*: calls 2 internal fn (_dockerfile, _pins); 3 external calls (__init__, __init__, ufo_version).
-
-
-##### `Bundle._pins`  (lines 64–78)
-
-```
-def _pins(self) -> tuple[ExtensionPin, ...]
-```
-
-**Purpose**: Chooses and verifies the extensions that must be frozen into the bundle. This protects the bundle from naming an extension that is not actually installed in the current environment.
-
-**Data flow**: It reads the installed extensions, checks where the current lockfile should be, and then chooses a base list: existing lockfile entries if a lockfile exists, or all discovered installed extensions if not. If a catalog is available, it adds catalog entries marked disabled, because those are treated as bundle-only additions. It removes duplicate names while keeping order, asks the store to create a verified pin for each name, and returns the pins as a tuple.
-
-**Call relations**: The `build` method calls this before writing the lockfile. `_pins` relies on extension loader helpers to see what is installed and what is already locked, and on `pin_for` to turn each chosen extension name into a digest-checked pin.
-
-*Call graph*: called by 1 (build); 4 external calls (discovered, lockfile_path, read_lockfile, pin_for).
-
-
-##### `Bundle._dockerfile`  (lines 80–94)
-
-```
-def _dockerfile(self) -> str
-```
-
-**Purpose**: Creates the text of the Dockerfile used to build the runnable container image. The Dockerfile installs the local `ufo` wheel, copies in the frozen config and lockfile, and sets the container to run `ufoctl serve` by default.
-
-**Data flow**: It uses fixed bundle filenames and the wheel filename from `wheel_name` to assemble Dockerfile lines. The result is one string ending with a newline; it does not write the file itself.
-
-**Call relations**: The `build` method calls this after preparing the config and lockfile paths, then writes the returned text to `Dockerfile`. It calls `wheel_name` so the Dockerfile refers to the exact wheel filename expected for the current `ufo` version.
-
-*Call graph*: calls 1 internal fn (wheel_name); called by 1 (build).
-
-
-### `core/src/ufo/config.py`
-
-`config` · `config load and startup`
-
-This file is the project’s configuration contract. It says, in one place, what settings a UFO deployment must provide: database connection strings, blob storage, model choices, sandbox behavior, browser transport, connector options, extension settings, and more. Think of it like the checklist a building inspector uses before letting the system open for business.
-
-The file uses Pydantic models, which are Python classes that validate incoming data. Each section of `ufo.toml` maps to one small class, such as `DatabaseConfig`, `BlobConfig`, or `ModelsConfig`. These classes reject unknown fields, so a typo in the config does not silently do nothing. Some classes also fill in safe derived values. For example, if the DBOS system database URL is not written explicitly, `DatabaseConfig` derives a sibling database name from the main application database URL.
-
-The top-level `Config` class gathers all sections into one complete object. Many optional subsystems have defaults, while core pieces like `database` and `blob` must be present. At the bottom, `config_path` decides where the config file lives, using the `UFO_CONFIG` environment variable if set, otherwise `ufo.toml`. `load_config` reads that TOML file, parses it, and validates it into a `Config`. Without this file, startup code would not have a reliable, checked source of truth for how this deployment is supposed to run.
+The file also has startup and maintenance duties. It builds SQLAlchemy asynchronous engines, forces their first connection to happen safely before multiple event loops can use them, applies Alembic migrations so tables match the code, and sets SQLite options that make local database use safer and more predictable.
 
 #### Function details
 
-##### `DatabaseConfig._derive_system_url`  (lines 36–49)
+##### `_build_engine`  (lines 41–52)
 
 ```
-def _derive_system_url(self) -> 'DatabaseConfig'
+def _build_engine(url: str) -> AsyncEngine
 ```
 
-**Purpose**: This validator fills in the DBOS system-store database URL when the config does not provide one. It keeps the operator from having to repeat a predictable related database address, while still allowing an explicit override.
+**Purpose**: Creates an asynchronous database engine from a database URL. It also adds SQLite-specific safety settings when the URL points to SQLite, then warms the engine up before the rest of the program can share it.
 
-**Data flow**: It starts with a `DatabaseConfig` that already has the main database `url` and may or may not have `system_url`. If `system_url` is already set, it leaves everything alone. If not, it splits the main URL at the final slash, builds a sibling database or file name ending in `_dbos`, adjusts the driver name for synchronous DBOS use, stores that back on the config object, and returns the updated object.
+**Data flow**: It receives a database URL. It creates a SQLAlchemy async engine without a connection pool, adds SQLite connection hooks if needed, forces one open-and-close connection to complete setup, and returns the ready engine.
 
-**Call relations**: This runs automatically while Pydantic is building a `DatabaseConfig`, usually as part of `load_config` validating the whole `Config`. Other startup code can then read `database.system_url` without needing to know whether it came from the TOML file or was derived here.
+**Call relations**: This is the shared engine factory used during database startup. `init_db` uses it for the normal application database path, and `init_owner_db` uses it for the special cross-workspace owner path. Before it returns, it hands the engine to `_first_connect` so later code does not trip over first-use setup.
 
-
-##### `BlobConfig._backend_complete`  (lines 73–78)
-
-```
-def _backend_complete(self) -> 'BlobConfig'
-```
-
-**Purpose**: This validator checks that the chosen blob storage backend has its minimum required setting. Filesystem storage needs a local root folder, while S3 storage needs a bucket name.
-
-**Data flow**: It receives a `BlobConfig` after its fields have been parsed. If the backend is `filesystem`, it checks that `root` is present. If the backend is `s3`, it checks that `bucket` is present. Missing required information becomes a clear validation error; otherwise the same config object is returned unchanged.
-
-**Call relations**: This is called automatically during config validation, before the rest of the system tries to store transcripts, artifacts, workspaces, or other blob data. It prevents later, harder-to-understand failures caused by an incomplete storage setup.
+*Call graph*: calls 1 internal fn (_first_connect); called by 2 (init_db, init_owner_db); 1 external calls (create_async_engine).
 
 
-##### `ModelsConfig._auto_model_concrete`  (lines 93–96)
+##### `init_db`  (lines 55–59)
 
 ```
-def _auto_model_concrete(self) -> 'ModelsConfig'
+def init_db(url: str) -> None
 ```
 
-**Purpose**: This validator makes sure the deployment pins `auto` model selection to a real model ID. It prevents an agent setting of `model = "auto"` from resolving to another vague `auto` value at runtime.
+**Purpose**: Starts the normal database connection path for the process. It is meant to run once near startup, before code tries to open workspace transactions.
 
-**Data flow**: It receives a `ModelsConfig` with an `auto_model` value. If that value is empty or equal to the special `AUTO_MODEL` placeholder, it raises a validation error. Otherwise it returns the config unchanged, meaning future agent turns have a concrete model name to use.
+**Data flow**: It receives a database URL. If the normal engine already exists, it stops with an error; otherwise it builds the engine and stores it privately for later transaction helpers to use.
 
-**Call relations**: This runs during configuration validation, typically inside `load_config`. Later model-selection code can rely on `models.auto_model` being a real backend model identifier instead of having to repeat this safety check.
+**Call relations**: This is the setup step that makes `workspace_tx` possible. It delegates the actual engine creation to `_build_engine`, then later request, job, or command code can use the stored engine indirectly through transaction helpers.
 
-
-##### `config_path`  (lines 263–264)
-
-```
-def config_path() -> Path
-```
-
-**Purpose**: This function decides which config file path should be used. It lets operators override the default `ufo.toml` location with the `UFO_CONFIG` environment variable.
-
-**Data flow**: It reads the process environment for `UFO_CONFIG`. If that variable exists, its value becomes the path. If not, it uses the default `ufo.toml`. It wraps the chosen string in a `Path` object and returns it.
-
-**Call relations**: `load_config` calls this when no path is passed in directly. This keeps path selection separate from file reading, so tests or callers can provide a specific path while normal startup uses the environment-aware default.
-
-*Call graph*: called by 1 (load_config); 1 external calls (Path).
+*Call graph*: calls 1 internal fn (_build_engine).
 
 
-##### `load_config`  (lines 267–273)
+##### `init_owner_db`  (lines 62–71)
 
 ```
-def load_config(path: Path | None=None) -> Config
+def init_owner_db(url: str) -> None
 ```
 
-**Purpose**: This function reads the deployment config file and turns it into a validated `Config` object. It is the main entry point other code uses when it needs the system’s settings.
+**Purpose**: Starts the special owner database connection path used for the rare case where code must enumerate work across all workspaces. This is separate from normal workspace-scoped access so the exception is explicit.
 
-**Data flow**: It receives an optional path. If no path is given, it asks `config_path` for the right location. It checks that the file exists; if not, it raises a clear `FileNotFoundError` explaining how to fix it. If the file exists, it reads the text, parses the TOML into ordinary data, validates that data through the `Config` model, and returns the resulting typed config object.
+**Data flow**: It receives an owner database URL. If an owner engine already exists, it raises an error; otherwise it builds and stores the owner engine for `owner_tx` to use later.
 
-**Call relations**: This function ties together path selection, disk reading, TOML parsing, and Pydantic validation. Startup code calls it before constructing the rest of the application, and the validators on classes like `DatabaseConfig`, `BlobConfig`, and `ModelsConfig` run as part of the object-building process it triggers.
+**Call relations**: This is called during setups that need cross-workspace background scans. It uses `_build_engine` just like the normal initializer, but the resulting engine is only exposed through `owner_tx`, not through ordinary workspace transactions.
 
-*Call graph*: calls 1 internal fn (config_path); 1 external calls (loads).
+*Call graph*: calls 1 internal fn (_build_engine).
+
+
+##### `_first_connect`  (lines 74–94)
+
+```
+def _first_connect(engine: AsyncEngine) -> None
+```
+
+**Purpose**: Forces the engine’s one-time database setup to happen immediately and safely. This avoids a subtle deadlock risk when different event loops in the same process try to use the engine for the first time at once.
+
+**Data flow**: It receives an async engine. It starts a fresh thread, opens and closes one connection there, waits for that thread to finish, and re-raises any error that happened in the thread.
+
+**Call relations**: This is called by `_build_engine` before the engine is published for general use. Its nested `run` function does the actual thread work and calls `_open_and_close` to trigger the database driver’s first-connection setup.
+
+*Call graph*: called by 1 (_build_engine); 1 external calls (Thread).
+
+
+##### `_first_connect.run`  (lines 81–88)
+
+```
+def run() -> None
+```
+
+**Purpose**: Runs the first database connection attempt inside a new event loop on a separate thread. This gives the warm-up code a clean place to run even if the caller is already inside an asynchronous loop.
+
+**Data flow**: It creates a new event loop, uses it to run `_open_and_close` on the engine, records any exception into a shared error list, and closes the loop afterward.
+
+**Call relations**: This is the worker body launched by `_first_connect`. It hands the engine to `_open_and_close`, then `_first_connect` waits for this worker to finish and reports any failure back to the original caller.
+
+*Call graph*: calls 1 internal fn (_open_and_close); 1 external calls (new_event_loop).
+
+
+##### `_open_and_close`  (lines 97–99)
+
+```
+async def _open_and_close(engine: AsyncEngine) -> None
+```
+
+**Purpose**: Opens one database connection and immediately closes it. Its job is not to do useful database work, but to trigger the engine’s first-use initialization.
+
+**Data flow**: It receives an async engine. It enters a connection context, does nothing inside it, and exits, which closes or releases the connection.
+
+**Call relations**: This is called only by `_first_connect.run` during engine warm-up. It is the small action that makes SQLAlchemy and the database driver finish their initial setup before the engine is used elsewhere.
+
+*Call graph*: called by 1 (run); 1 external calls (connect).
+
+
+##### `dispose_db`  (lines 102–109)
+
+```
+async def dispose_db() -> None
+```
+
+**Purpose**: Cleanly shuts down any database engines this module created. This is used when the process, test, or command is done with database access.
+
+**Data flow**: It reads the stored normal and owner engines. For each one that exists, it asks SQLAlchemy to dispose of it and then clears the stored reference so the module no longer considers the database initialized.
+
+**Call relations**: This is the teardown counterpart to `init_db` and `init_owner_db`. After other code has finished using transactions, this function releases the database resources held by the module.
+
+
+##### `workspace_tx`  (lines 113–123)
+
+```
+async def workspace_tx() -> AsyncIterator[AsyncConnection]
+```
+
+**Purpose**: Opens the normal safe database transaction for the current workspace. This is the main path application code should use when reading or writing workspace-owned data.
+
+**Data flow**: It checks that the normal engine exists, opens a transaction, reads the current workspace ID from the ambient context, and, for PostgreSQL, stores that workspace ID in the transaction setting used by row-level security. It yields the database connection to the caller, then commits or rolls back when the context ends.
+
+**Call relations**: Request, turn, or job code is expected to set the current workspace before entering this helper. `workspace_tx` then gives the caller a scoped connection. For PostgreSQL it uses a SQL text statement to set the workspace value that database policies read.
+
+*Call graph*: 1 external calls (text).
+
+
+##### `owner_tx`  (lines 127–140)
+
+```
+async def owner_tx() -> AsyncIterator[AsyncConnection]
+```
+
+**Purpose**: Opens the one deliberately unscoped transaction path for cross-workspace enumeration. It exists for background sweeps that need to find work across workspaces, not for reading tenant data in detail.
+
+**Data flow**: It chooses the owner engine if one was initialized, otherwise it falls back to the normal engine. It opens a transaction and yields the connection without setting any workspace value.
+
+**Call relations**: Background code can use this to find rows or identifiers that point to different workspaces. The important next step happens outside this function: callers are expected to re-enter the correct workspace context and use `workspace_tx` before doing scoped work on each item.
+
+
+##### `apply_migrations`  (lines 143–168)
+
+```
+def apply_migrations(url: str, pack: str | None=None) -> None
+```
+
+**Purpose**: Updates the database schema to match the code by running Alembic migrations. A migration is a recorded database change, such as creating or changing tables.
+
+**Data flow**: It receives a database URL and optionally a pack name. It builds an Alembic configuration, combines the core migration folder with active extension migration folders, checks for duplicate revision identifiers, and upgrades the database to all current migration heads.
+
+**Call relations**: This is used during command-line startup, tests, or deployment setup rather than during normal request handling. It asks the extension loader for migration locations, validates Alembic’s migration graph, and then hands control to Alembic to perform the actual schema changes.
+
+*Call graph*: 6 external calls (__init__, upgrade, from_config, migration_locations, catch_warnings, simplefilter).
+
+
+##### `_sqlite_on_connect`  (lines 171–177)
+
+```
+def _sqlite_on_connect(dbapi_connection: Any, _connection_record: Any) -> None
+```
+
+**Purpose**: Applies SQLite settings whenever a SQLite connection is opened. These settings make local SQLite use behave more like a reliable application database.
+
+**Data flow**: It receives a raw SQLite connection from the database driver. It switches SQLAlchemy-controlled transaction behavior off for that connection, enables write-ahead logging, turns on foreign key checks, sets a busy timeout, and closes the temporary cursor it used.
+
+**Call relations**: This function is registered by `_build_engine` only for SQLite engines. SQLAlchemy calls it automatically on each new SQLite connection so callers using `workspace_tx` or `owner_tx` get the safer settings without doing anything extra.
+
+
+##### `_sqlite_begin_immediate`  (lines 180–182)
+
+```
+def _sqlite_begin_immediate(connection: sa.Connection) -> None
+```
+
+**Purpose**: Starts SQLite transactions in a way that claims the single writer slot up front. This turns some lock conflicts into waiting in line instead of failing later during a write.
+
+**Data flow**: It receives a SQLAlchemy connection and sends the raw SQL command `begin immediate` to SQLite. That changes the start of the transaction so write access is reserved early.
+
+**Call relations**: This function is registered by `_build_engine` for SQLite transaction begins. SQLAlchemy calls it when a SQLite transaction starts, so the rest of the database code can use the same transaction helpers while SQLite gets behavior suited to its locking model.
+
+*Call graph*: 1 external calls (exec_driver_sql).
+
+
+### `core/src/ufo/models/__init__.py`
+
+`data_model` · `import time`
+
+This is an empty package initializer. In Python, a file named `__init__.py` tells the language that the folder should be treated as an importable package. You can think of it like a label on a drawer: the drawer may contain useful files, but the label itself does not do the work. Here, the drawer is `ufo.models`, which likely holds data model definitions elsewhere in the directory. Without this file, depending on the Python version and packaging setup, imports that expect `ufo.models` to be a normal package could fail or behave differently. Since the file contains no code, it does not create objects, run setup logic, or change program state beyond enabling the package structure.
+
+
+### `core/src/ufo/schema/__init__.py`
+
+`other` · `import time`
+
+This is an empty package initializer. In Python, a file named `__init__.py` is used to say, “the files in this folder belong together as an importable package.” Here, that package is `ufo.schema`, which likely contains code elsewhere for describing or validating structured data. Think of it like a label on a folder in a filing cabinet: the label does not contain the documents, but it tells people and tools what kind of documents belong inside. Because this file is empty, it does not run setup code, expose shortcuts, or change behavior when the package is imported. Its value is mostly organizational: it helps keep schema-related code grouped under one clear namespace.
+
+
+### `core/src/ufo/schema/tables.py`
+
+`data_model` · `database setup and cross-cutting database access`
+
+This file is like the floor plan for the project’s database. It does not run business logic itself. Instead, it names every kind of record the system stores and sets the rules that keep those records consistent.
+
+The central object is `metadata`, a SQLAlchemy `MetaData` collection. SQLAlchemy is a Python library that lets code describe database tables in Python instead of writing separate SQL by hand. Each `sa.Table` added to `metadata` becomes part of the shared schema.
+
+The tables describe the main world of the app: workspaces, members, agents, conversations, turns in those conversations, incoming messages, billing ledger entries, spend caps, credentials, authorization grants, proposals, writebacks, shared files, extension storage, runtime heartbeats, synced sources, scheduled tasks, and indexed pages.
+
+The file also defines safety rails. Foreign keys connect records that must belong together, such as a member belonging to a workspace or a turn belonging to a conversation. Unique constraints stop duplicate names, emails, or queue keys where duplicates would confuse the system. Check constraints enforce simple rules, such as positive seat limits, valid turn statuses, and valid billing amounts. Indexes help the database quickly find common sets of records, such as parked turns, pending messages, due writebacks, due sync sources, and scheduled tasks ready to run.
+
+Without this file, the rest of the system would not have one reliable definition of what can be stored and how records relate to each other.
 
 ## 📊 State Registers Touched
 
-- `reg-effective-config` — The combined settings that tell the service which features, adapters, limits, and deployment options to use.
-- `reg-extension-pack-lock` — The saved choice of active packs and installed extensions for a workspace.
-- `reg-capability-registry` — The loaded menu of extension-provided routes, tools, skills, hooks, jobs, credentials, models, and search backends.
-- `reg-tool-catalog` — The shared list of tools the agent may call, including their names, inputs, safety labels, and handlers.
-- `reg-model-catalog` — The model switchboard that maps model names to providers, credentials, request formats, and prices.
-- `reg-connector-catalog` — The shared directory of external service connectors and broker-backed provider access.
-- `reg-search-index-state` — The searchable content indexes, chunks, embeddings, and search backend choices used for recall and source replay.
-- `reg-sandbox-session-policy` — The safe execution room state: sandbox handles, mounted workspace files, storage access, and restrictions.
-- `reg-egress-proxy-state` — The controlled network gateway state that decides which outside sites sandboxed work may contact and how usage is counted.
-- `reg-browser-session` — The browser connection state used when a turn needs a Chrome endpoint or computer-use actions.
-- `reg-live-event-stream` — The live progress channel that lets clients attach, resume, and receive streamed turn updates.
-- `reg-background-job-registry` — The registered set of built-in and extension background workflows that the scheduler can run.
-- `reg-extension-catalog-cache` — The discovered extension/pack catalog and update metadata used to show available extensions and resolve pinned installs before loading capabilities.
-- `reg-evaluation-replay-state` — Durable evaluation corpora, replay runs, scores, and judgments used by self-improvement and conformance workflows beyond prompt approval records.
-- `reg-redis-connection-pool` — Process-wide Redis client/connection pool and stream backend handles used to distribute live turn events across server processes.
-- `reg-adapter-implementation-registry` — Process-wide mapping from configured backend/provider names to implementation adapters for Redis hubs, sandboxes, browsers, models, search, sources, and related services.
+- `reg-workspace-directory` — The shared record of workspaces, members, owners, agents, and workspace boundaries.
+- `reg-onboarding-state` — The invite codes, email claim codes, onboarding records, and first-workspace setup state for new hosted users.
+- `reg-credential-store` — The encrypted secrets and credential slots used to let tools and connectors act for a workspace without exposing raw secrets.
+- `reg-connection-grants` — The saved approvals and safe account handles for connected external accounts such as Slack, GitHub, Composio, and Pipedream.
+- `reg-seat-entitlements` — The shared seat and access-limit state that decides which members may use the agent in a workspace.
+- `reg-surface-installations` — The stored links between outside surfaces, workspaces, channels, conversations, and agents.
+- `reg-inbound-message-queue` — The durable queue of incoming messages and uploads before they are admitted into conversation turns.
+- `reg-conversation-transcript` — The stored conversation history, messages, files, speakers, and outcomes that later stages read and append to.
+- `reg-turn-state` — The durable status of each unit of agent work, including whether it is waiting, running, paused, finished, failed, or cancelled.
+- `reg-runtime-fleet` — The shared heartbeat and ownership records that show which server processes are alive and which work they are responsible for.
+- `reg-cancellation-state` — The shared stop signal state used to cancel active turns, child tasks, tools, and abandoned work safely.
+- `reg-prompt-state` — The agent instructions, rendered prompt templates, fingerprints, and governed prompt-change proposals.
+- `reg-compaction-state` — The saved summaries and reduced conversation versions used when a conversation is too large for a model call.
+- `reg-sandbox-session` — The sandbox handle and lifecycle state for the safe workspace where code, files, browsers, and commands run.
+- `reg-workspace-storage` — The shared file, blob, artifact, and mount state that stores workspace bytes and files shared back to users.
+- `reg-skill-inventory` — The built-in and user-created skill folders, metadata, dependencies, and workspace-specific skill records.
+- `reg-subagent-tree` — The shared parent-child work structure for delegated agents, including child turns, messages, waits, and cancellations.
+- `reg-source-pages` — The source connections, sync cursors, imported pages, removal markers, and page-change records from outside systems.
+- `reg-memory-store` — The durable memories, memory pages, recall events, and consolidation state used for long-term recall.
+- `reg-knowledge-graph` — The stored entities and relationships extracted from pages so the system can look up connected facts.
+- `reg-scheduled-jobs` — The background job and scheduled-task state that records what should run later, what is claimed, and what repeats.
+- `reg-accounting-ledger` — The usage, price, spend-cap, billing, export, and cost records used to track and limit money spent by workspaces and turns.
+- `reg-extension-store` — The per-workspace extension-owned storage where plugins keep their own durable records without private tables.
+- `reg-observability-context` — The shared tracing, metrics, structured logs, and trace-parent links used to understand work across processes and turns.
+- `reg-db-schema-version` — The applied core, control-plane, and extension migration revisions that determine which persisted schema the runtime may safely use.
+- `reg-db-connection-pool` — The process-global database engine, sessions, transactions, and connection pool shared by requests, workers, jobs, and shutdown cleanup.
+- `reg-todo-checklist` — The per-conversation persistent checklist or task-progress state maintained by the todo extension across agent turns.
+- `reg-source-sync-backoff` — Per-source sync error counters, retry/backoff state, and last-result throttling used to decide when background imports should run again.
+- `reg-slack-connect-provisioning` — Durable Slack Connect customer-channel and invitation provisioning state, including retry/idempotency progress for admin background jobs.
+- `reg-eval-environment-fixtures` — Workspace-scoped fake email and calendar records used by the evaluation environment connectors and tools.
+- `reg-turn-admission-context` — Durable per-turn requester/speaker/on-behalf-of, timezone, surface context, and authorization-link metadata used to attribute, resume, and safely handle work.
+- `reg-agent-runtime-settings` — Persistent non-prompt agent configuration such as selected runtime profile, workflow/tool policy, internet-access setting, and conversation or surface agent bindings.
+- `reg-sample-extension-note` — Workspace-scoped note stored by the sample extension to prove extension migrations and SDK storage contracts work end to end.
