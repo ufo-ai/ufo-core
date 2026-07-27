@@ -774,7 +774,35 @@ async def test_attachment_failure_retries_from_the_recorded_reply(db: None, tmp_
 async def test_live_delivery_renews_its_claim_before_a_peer_can_recover_it(
     db: None, tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(surface_module, "WRITEBACK_CLAIM_REFRESH_SECONDS", 0.01)
+    cycles: dict[UUID, int] = {}
+    refreshed_once: set[UUID] = set()
+    refreshed_twice: set[UUID] = set()
+    all_refreshed_once = asyncio.Event()
+    all_refreshed_twice = asyncio.Event()
+    next_refresh = asyncio.Event()
+    hold_renewals = asyncio.Event()
+    refresh_claim = WritebackPoller._refresh_claim
+
+    async def controlled_refresh(self: WritebackPoller, turn_id: UUID) -> None:
+        cycle = cycles.get(turn_id, 0) + 1
+        cycles[turn_id] = cycle
+        await refresh_claim(self, turn_id)
+        if cycle == 1:
+            refreshed_once.add(turn_id)
+            if len(refreshed_once) == len(turn_ids):
+                all_refreshed_once.set()
+            await next_refresh.wait()
+            return
+        if cycle == 2:
+            refreshed_twice.add(turn_id)
+            if len(refreshed_twice) == len(turn_ids):
+                all_refreshed_twice.set()
+            await hold_renewals.wait()
+            return
+        raise AssertionError(f"unexpected refresh cycle {cycle}")
+
+    monkeypatch.setattr(surface_module, "WRITEBACK_CLAIM_REFRESH_SECONDS", 0.0)
+    monkeypatch.setattr(WritebackPoller, "_refresh_claim", controlled_refresh)
     workspace_id, _, _ = await _seed()
     turn_ids = (
         await _seed_turn(workspace_id, "CLEASE:1.0", "done", "slow"),
@@ -786,26 +814,22 @@ async def test_live_delivery_renews_its_claim_before_a_peer_can_recover_it(
     first = _fleet_poller(contexts, surface, worker_id="worker-1")
     running = asyncio.create_task(first.drain())
     try:
-        await asyncio.wait_for(surface.blocked.wait(), timeout=1)
+        await asyncio.wait_for(
+            asyncio.gather(surface.blocked.wait(), all_refreshed_once.wait()), timeout=1
+        )
         expired = datetime.now(UTC) - timedelta(seconds=1)
         for turn_id in turn_ids:
             await _set_writeback(turn_id, claim_expires_at=expired)
-        forced_expiries = {
+        expired_claims = {
             turn_id: (await _writeback(turn_id)).claim_expires_at for turn_id in turn_ids
         }
-        deadline = asyncio.get_running_loop().time() + 1
-        while True:
-            current = {
-                turn_id: (await _writeback(turn_id)).claim_expires_at for turn_id in turn_ids
-            }
-            if all(current[turn_id] != forced_expiries[turn_id] for turn_id in turn_ids):
-                break
-            assert asyncio.get_running_loop().time() < deadline
-            await asyncio.sleep(0.01)
+        next_refresh.set()
+        await asyncio.wait_for(all_refreshed_twice.wait(), timeout=1)
         for turn_id in turn_ids:
             renewed = await _writeback(turn_id)
             assert renewed.status == WRITEBACK_CLAIMED
             assert renewed.claimed_by == "worker-1"
+            assert renewed.claim_expires_at != expired_claims[turn_id]
         peer_surface = RecordingSurface()
         await _fleet_poller(contexts, peer_surface, worker_id="worker-2").drain()
         assert peer_surface.posted == []

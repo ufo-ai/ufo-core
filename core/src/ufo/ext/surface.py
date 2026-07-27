@@ -1387,22 +1387,25 @@ class WritebackPoller:
     async def _renew_claim(self, turn_id: UUID) -> None:
         while True:
             await asyncio.sleep(WRITEBACK_CLAIM_REFRESH_SECONDS)
-            now = datetime.now(UTC)
-            async with workspace_tx() as connection:
-                renewed = await connection.execute(
-                    sa.update(tables.writeback)
-                    .where(
-                        tables.writeback.c.turn_id == turn_id,
-                        tables.writeback.c.status == WRITEBACK_CLAIMED,
-                        tables.writeback.c.claimed_by == self.worker_id,
-                    )
-                    .values(
-                        claim_expires_at=now + timedelta(seconds=WRITEBACK_CLAIM_SECONDS),
-                        updated_at=sa.func.now(),
-                    )
+            await self._refresh_claim(turn_id)
+
+    async def _refresh_claim(self, turn_id: UUID) -> None:
+        now = datetime.now(UTC)
+        async with workspace_tx() as connection:
+            renewed = await connection.execute(
+                sa.update(tables.writeback)
+                .where(
+                    tables.writeback.c.turn_id == turn_id,
+                    tables.writeback.c.status == WRITEBACK_CLAIMED,
+                    tables.writeback.c.claimed_by == self.worker_id,
                 )
-            if renewed.rowcount != 1:
-                raise _WritebackClaimLost(str(turn_id))
+                .values(
+                    claim_expires_at=now + timedelta(seconds=WRITEBACK_CLAIM_SECONDS),
+                    updated_at=sa.func.now(),
+                )
+            )
+        if renewed.rowcount != 1:
+            raise _WritebackClaimLost(str(turn_id))
 
     async def _build(self, turn_id: UUID) -> tuple[Writeback, str]:
         async with workspace_tx() as connection:
