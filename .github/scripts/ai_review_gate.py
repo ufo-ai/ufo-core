@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from collections.abc import Mapping
@@ -18,6 +19,10 @@ CLAUDE_REVIEWERS = frozenset({"claude", "claude[bot]", "claude-code[bot]"})
 DECISIVE_STATES = frozenset({"APPROVED", "CHANGES_REQUESTED", "DISMISSED"})
 DISMISSIBLE_STATES = frozenset({"APPROVED", "CHANGES_REQUESTED"})
 STATUS_CONTEXT = "AI Review Gate"
+VERDICT_MARKER = re.compile(
+    r"<!-- claude-review-verdict head=([0-9a-f]{40}) "
+    r"verdict=(APPROVED|CHANGES_REQUESTED) -->"
+)
 
 JsonObject = Mapping[str, object]
 
@@ -28,6 +33,12 @@ class Review:
     reviewer: str
     state: str
     commit_oid: str | None
+
+
+@dataclass(frozen=True)
+class IssueComment:
+    author: str
+    body: str
 
 
 def main() -> int:
@@ -42,7 +53,7 @@ def main() -> int:
     for number in numbers:
         head_oid = pull_request_head(owner, repo, number)
         reviews = pull_request_reviews(owner, repo, number)
-        verdict = claude_verdict(reviews, head_oid)
+        verdict = claude_verdict(reviews, issue_comments(owner, repo, number), head_oid)
         state, description = gate_state(verdict)
         saw_blocking = saw_blocking or state != "success"
         print(f"PR #{number}: {description}.")
@@ -55,7 +66,9 @@ def main() -> int:
     return 1 if dry_run and saw_blocking else 0
 
 
-def claude_verdict(reviews: tuple[Review, ...], head_oid: str) -> str | None:
+def claude_verdict(
+    reviews: tuple[Review, ...], comments: tuple[IssueComment, ...], head_oid: str
+) -> str | None:
     decisive = [
         item.state
         for item in reviews
@@ -63,9 +76,22 @@ def claude_verdict(reviews: tuple[Review, ...], head_oid: str) -> str | None:
         and item.commit_oid == head_oid
         and item.state in DECISIVE_STATES
     ]
-    if not decisive or decisive[-1] == "DISMISSED":
+    if decisive:
+        return None if decisive[-1] == "DISMISSED" else decisive[-1]
+    markers = [
+        verdict
+        for item in comments
+        if item.author.lower() in CLAUDE_REVIEWERS
+        and (verdict := marker_verdict(item.body, head_oid)) is not None
+    ]
+    return markers[-1] if markers else None
+
+
+def marker_verdict(body: str, head_oid: str) -> str | None:
+    marker = VERDICT_MARKER.fullmatch(body.strip())
+    if marker is None or marker[1] != head_oid:
         return None
-    return decisive[-1]
+    return marker[2]
 
 
 def stale_claude_reviews(reviews: tuple[Review, ...], head_oid: str) -> tuple[Review, ...]:
@@ -112,6 +138,10 @@ def target_pull_requests(owner: str, repo: str) -> tuple[int, ...]:
     pull_request = event.get("pull_request")
     if isinstance(pull_request, Mapping):
         return (json_int(pull_request.get("number"), "pull_request.number"),)
+
+    issue = event.get("issue")
+    if isinstance(issue, Mapping) and isinstance(issue.get("pull_request"), Mapping):
+        return (json_int(issue.get("number"), "issue.number"),)
 
     return ()
 
@@ -181,6 +211,24 @@ def pull_request_reviews(owner: str, repo: str, number: int) -> tuple[Review, ..
     )
 
 
+def issue_comments(owner: str, repo: str, number: int) -> tuple[IssueComment, ...]:
+    result = run(
+        [
+            "gh",
+            "api",
+            "--paginate",
+            "--slurp",
+            f"repos/{owner}/{repo}/issues/{number}/comments?per_page=100",
+        ]
+    )
+    pages = json_list(json.loads(result.stdout), "issue comment pages")
+    return tuple(
+        issue_comment(json_object(node, "issue comment"))
+        for page in pages
+        for node in json_list(page, "issue comment page")
+    )
+
+
 def review(node: JsonObject) -> Review:
     user = node.get("user")
     return Review(
@@ -192,6 +240,18 @@ def review(node: JsonObject) -> Review:
         ),
         state=json_str(node.get("state"), "review.state"),
         commit_oid=json_optional_str(node.get("commit_id"), "review.commit_id"),
+    )
+
+
+def issue_comment(node: JsonObject) -> IssueComment:
+    user = node.get("user")
+    return IssueComment(
+        author=(
+            ""
+            if user is None
+            else json_str(json_object(user, "comment.user").get("login"), "user.login")
+        ),
+        body=json_str(node.get("body"), "comment.body"),
     )
 
 

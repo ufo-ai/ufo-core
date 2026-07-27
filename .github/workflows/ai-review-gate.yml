@@ -5,6 +5,8 @@ on:
     types: [opened, synchronize, reopened, ready_for_review]
   pull_request_review:
     types: [submitted, edited, dismissed]
+  issue_comment:
+    types: [created, edited, deleted]
   # The pull_request_target and pull_request_review triggers above drive this in real time;
   # the cron is only a backstop for a missed event, so every 30 minutes is plenty.
   schedule:
@@ -17,6 +19,7 @@ on:
 
 permissions:
   contents: read
+  issues: read
   pull-requests: write
   statuses: write
 
@@ -25,7 +28,7 @@ jobs:
     name: Publish AI review status
     # A COMMENTED review carries no verdict, so it can never change the status; skipping the job
     # allocates no runner. contains() is case-insensitive, which the lowercase webhook state needs.
-    if: ${{ !contains(github.event.review.state, 'commented') }}
+    if: ${{ (github.event_name != 'issue_comment' || github.event.issue.pull_request) && !contains(github.event.review.state, 'commented') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

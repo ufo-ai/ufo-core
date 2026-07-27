@@ -37,6 +37,10 @@ def test_claude_code_review_skill_requires_a_current_head_verdict() -> None:
     assert "Re-read `headRefOid` immediately before writing" in skill
     assert "--request-changes" in skill
     assert "--approve" in skill
+    assert "only because Claude authored the pull request" in skill
+    assert "<!-- claude-review-verdict head=<full head SHA> verdict=APPROVED -->" in skill
+    assert "<!-- claude-review-verdict head=<full head SHA> verdict=CHANGES_REQUESTED -->" in skill
+    assert "Never use the marker for another review failure" in skill
 
 
 def test_claude_code_review_skill_keeps_prose_findings_out_of_the_gate() -> None:

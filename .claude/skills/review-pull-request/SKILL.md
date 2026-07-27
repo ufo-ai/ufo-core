@@ -93,12 +93,19 @@ For each validated issue, blocking or advisory, create one inline comment with
 - Blocking findings of either kind: `gh pr review <number> --request-changes --body "<reason>"`
 - No blocking findings: `gh pr review <number> --approve`, naming any advisory findings in the body
 
-Finish only after the decisive review command succeeds.
+If GitHub refuses that command only because Claude authored the pull request, re-read the full
+current head SHA. If it still matches the reviewed head, post one pull request comment containing
+only `<!-- claude-review-verdict head=<full head SHA> verdict=APPROVED -->` for an attempted
+approval or `<!-- claude-review-verdict head=<full head SHA> verdict=CHANGES_REQUESTED -->` for an
+attempted changes request.
+
+Finish only after GitHub records the verdict as a decisive review or the exact self-review marker.
 
 ## Gotchas
 
 | Failure | Response |
 | --- | --- |
+| GitHub refuses a decisive review because Claude authored the pull request | Publish the exact-head marker matching the attempted verdict. Never use the marker for another review failure. |
 | A pipe, redirect, or compound Bash command is rejected | Save command output under `$RUNNER_TEMP`, then inspect the file in a separate call. Do not retry an equivalent shell shape. |
 | `gh pr view --comments` fails through an unnecessary GraphQL field | Request only the explicit JSON fields listed above. |
 | Diff or log output is too large | Read the saved file in bounded chunks; do not rerun the producing command. |
