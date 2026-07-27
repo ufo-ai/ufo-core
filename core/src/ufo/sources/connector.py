@@ -37,7 +37,6 @@ class PaginationStrategy(StrEnum):
     next_cursor = "next_cursor"
     next_link = "next_link"
     offset_limit = "offset_limit"
-    time_window = "time_window"
     none = "none"
 
 
@@ -46,8 +45,8 @@ class Pagination:
     """Declarative pagination for a `StreamSpec`, run by `RestConnector.paginate_from_strategy`.
     Per-strategy required knobs: `next_cursor` needs `record_path`, `cursor_path`, `cursor_param`;
     `next_link` needs `record_path`; `offset_limit` needs `record_path`, `offset_param`,
-    `limit_param`, `page_size`; `time_window` needs `cursor_param` and reads the value from the
-    run's cursor; `none` is a single GET."""
+    `limit_param`, `page_size`; `none` marks a stream whose connector implements bespoke
+    pagination."""
 
     strategy: PaginationStrategy = PaginationStrategy.none
     path: str | None = None

@@ -259,11 +259,11 @@ class RestConnector(Connector):
             raise NotImplementedError(
                 f"{type(self).__name__}.paginate not implemented for stream {stream.name!r}"
             )
-        async for page in self.paginate_from_strategy(stream, client=client, cursor=cursor):
+        async for page in self.paginate_from_strategy(stream, client=client):
             yield page
 
     async def paginate_from_strategy(
-        self, stream: StreamSpec, *, client: httpx.AsyncClient, cursor: str | None
+        self, stream: StreamSpec, *, client: httpx.AsyncClient
     ) -> AsyncIterator[list[dict[str, Any]]]:
         """Run a stream's declared `Pagination`. One shared loop per strategy; per-stream variation
         is the `Pagination` instance. Records are read at `record_path`, yielded as `list[dict]`."""
@@ -324,21 +324,6 @@ class RestConnector(Connector):
                 params=dict(spec.extra_params or {}),
             ):
                 yield page
-            return
-        if spec.strategy is PaginationStrategy.time_window:
-            if not spec.cursor_param:
-                raise ValueError(
-                    f"{type(self).__name__}.{stream.name}: time_window needs cursor_param"
-                )
-            params = dict(spec.extra_params or {})
-            if cursor:
-                params[spec.cursor_param] = cursor
-            if spec.page_size_param and spec.page_size is not None:
-                params.setdefault(spec.page_size_param, spec.page_size)
-            data = await self._get(client, path, params=params)
-            records = records_at(data, spec.record_path)
-            if records:
-                yield records
             return
 
     async def _get_link_header_pages(

@@ -733,9 +733,7 @@ class HubSpotConnector(RestConnector):
         cursor: str | None,
     ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
         if stream.pagination is not None:
-            async for strategy_page in self.paginate_from_strategy(
-                stream, client=client, cursor=cursor
-            ):
+            async for strategy_page in self.paginate_from_strategy(stream, client=client):
                 yield strategy_page
             return
         if stream.name in _JUNCTION_STREAMS:

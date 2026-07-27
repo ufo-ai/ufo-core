@@ -177,26 +177,6 @@ async def test_offset_limit_strategy_advances_until_short_page() -> None:
     assert _ids(await _pages(_ProbeConnector(stream, handle))) == {1, 2, 3}
 
 
-async def test_time_window_strategy_sends_the_cursor_value() -> None:
-    def handle(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200, json={"data": [{"id": 1, "after": request.url.params.get("after")}]}
-        )
-
-    stream = StreamSpec(
-        name="win",
-        source_object="win",
-        pagination=Pagination(
-            strategy=PaginationStrategy.time_window,
-            path="/win",
-            record_path="data",
-            cursor_param="after",
-        ),
-    )
-    [page] = await _pages(_ProbeConnector(stream, handle), cursor="2026-01-01")
-    assert isinstance(page, list) and page[0]["after"] == "2026-01-01"
-
-
 async def test_undeclared_pagination_raises() -> None:
     def handle(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json=[])
