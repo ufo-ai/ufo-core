@@ -11,9 +11,6 @@ from ufo.accounting import (
     DimensionTotal as DimensionTotal,
 )
 from ufo.accounting import (
-    PriceDigestTotal as PriceDigestTotal,
-)
-from ufo.accounting import (
     SpendReport as SpendReport,
 )
 from ufo.accounting import (
