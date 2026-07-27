@@ -39,7 +39,6 @@ EXTENSIONS = (
     "skill_create",
     "index_default",
     "embed_openai",
-    "knowledge_graph",
     "ufo",
     "debugger",
 )

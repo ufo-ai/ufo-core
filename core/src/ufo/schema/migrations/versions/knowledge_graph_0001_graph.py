@@ -4,9 +4,9 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "knowledge_graph_0001"
-down_revision: str | None = None
+down_revision: str | None = "0001"
 branch_labels: tuple[str, ...] | None = ("knowledge_graph",)
-depends_on: str | None = "0001"
+depends_on: str | None = None
 
 
 def upgrade() -> None:

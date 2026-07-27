@@ -10,7 +10,7 @@ Apply in order; earlier rules win.
    never what they don't see. Every signal lands somewhere durable (an observation at least);
    drop nothing silently.
 2. **Proximity weighs.** The same comment counts more from a direct report than from two levels
-   away. Place a person with `graph_search` against the synced org chart before weighing them.
+   away. Place a person with `memory_search` against the synced org chart before weighing them.
 3. **Substance over ceremony.** Weigh what was said, not the length or seniority of the meeting it
    came from. Two Slack lines can outrank an hour-long review.
 4. **Three independent sources make a pattern.** One mention of a risk is a data point. Before

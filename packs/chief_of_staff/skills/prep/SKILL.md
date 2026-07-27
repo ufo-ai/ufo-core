@@ -9,8 +9,8 @@ metadata:
 
 Given a name:
 
-1. **Place them.** `graph_search` the name (team, manager line, active topics) and `memory_search`
-   their people file from the state repo.
+1. **Place them.** `memory_search` the name for their people file and the org-chart lines that
+   place them — team, manager line, active topics.
 2. **Pull the open threads.** Focused `memory_search` passes: `1:1 <name> — raise` (the agenda),
    `observation — <name>` (fresh context), `kudos — <name>` (wins not yet named), and the bare
    name (anything recent the conventions missed).

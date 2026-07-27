@@ -2,7 +2,7 @@
 
 One member's working world — Google Meet transcripts and Gemini smart notes, the Slack channels
 that matter, a markdown state repo of people files, the org chart, and daily logs — syncs into
-memory and the knowledge graph, and the member drives everything from one Slack front door. A
+memory, and the member drives everything from one Slack front door. A
 scheduled `sync` run reviews what accumulated and proposes a routed fan-out (observations, 1:1
 agenda items, todos, decisions, kudos, follow-through watches) the member approves in chat before
 anything writes; `prep` assembles a 1:1 brief from the same state; `triage` is the written-down
@@ -26,7 +26,6 @@ EXTENSIONS = (
     "memory",
     "index_default",
     "embed_openai",
-    "knowledge_graph",
     "slack",
     "ufo",
     "scheduled_tasks",

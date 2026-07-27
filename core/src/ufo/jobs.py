@@ -413,16 +413,16 @@ class PageChangeRunner:
     """The core batched cursor-runner behind the data-plane `page_change` hook. `consumers` reads
     the registered page_change hooks out of the active manifests; `core_jobs` registers one JobSpec
     per consumer, so each `drive` runs as its own per-minute DBOS workflow — the memory page indexer
-    and the knowledge-graph extractor are independent failure domains again, a backlog or a raise in
-    one never delaying or blocking the other. `drive` is the one home for the cursor loop every page
+    and the fact deriver are independent failure domains, a backlog or a raise in one never delaying
+    or blocking the other. `drive` is the one home for the cursor loop every page
     consumer shares: it replays each source page changed since that consumer's own cursor and hands
     the batch to its handler, then advances and persists the cursor. Each cursor lives in that
     extension's own ScopedStore under a per-consumer key
     (`{PAGE_CHANGE_CURSOR_KEY}:{discriminator}`), so two hooks in one extension keep independent
     cursors and a restart resumes each exactly where it left off; the handlers stay idempotent, so a
     replayed batch settles on the same state. Each handler runs with the extension's scoped
-    ExtensionContext built the jobs way — the model wired — so a consumer like graph extraction's
-    Tier-B pass reaches ctx.model. A
+    ExtensionContext built the jobs way — the model wired — so a consumer like the fact deriver's
+    distillation pass reaches ctx.model. A
     handler that raises propagates out of `drive` (failing that one workflow) before its cursor
     advances, so the tick makes no progress and the next tick retries from the same place.
     Batch-at-interval and fed only by the source pipeline, so it can never fire on the derived rows
@@ -573,9 +573,9 @@ def core_jobs(
     spend enforcement, sandbox lifecycle, and the page-change fan-out are core. The sync driver
     polls each source and lands its pages; the page-change runner contributes one
     `page_change:<ext>:<hook>` job per registered consumer, each replaying those pages to that
-    consumer's hook off its own cursor as its own workflow (the memory page indexer, the memory
-    fact deriver, and the graph extractor among them); the turn dispatcher recovers queued outbox
-    rows and re-admits parked turns their caps now allow; the sandbox
+    consumer's hook off its own cursor as its own workflow (the memory page indexer and fact
+    deriver among them); the turn dispatcher recovers queued outbox rows and re-admits parked turns
+    their caps now allow; the sandbox
     reaper destroys the disposable container behind each idle conversation through the carrier seam.
     None fires on its own writes. (Memory-item indexing stays the memory extension's own job; page
     derivation is a page_change hook this runner drives.)"""

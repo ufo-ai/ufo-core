@@ -1,4 +1,5 @@
 import os
+import sqlite3
 import warnings
 from datetime import UTC, datetime
 from pathlib import Path
@@ -133,9 +134,8 @@ def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None
     over core's — `apply_migrations` ran clean in the fixture — and the graph has exactly one head
     per owner (core's chain plus each extension branch), so `upgrade heads` is deterministic,
     core-first. The base-pinned index_default and memory extensions own their chunk and memory_item
-    tables, the sample probe owns its note table, skill_create owns the user_skill table,
-    knowledge-graph owns the graph_entity and graph_edge tables, and eval_env owns the fake
-    mailbox and calendar tables.
+    tables, the sample probe owns its note table, skill_create owns the user_skill table, and
+    eval_env owns the fake mailbox and calendar tables.
 
     Every revision id is unique: two files claiming one id collapse into a single graph node, so a
     deploy already stamped with that id plans nothing and the losing file's DDL is skipped while
@@ -154,15 +154,52 @@ def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None
         heads = scripts.get_heads()
     assert scripts.get_revision("memory_0008").dependencies == "0049"
     assert {
-        "0051",
+        "0052",
         "index_default_0002",
         "memory_0009",
         "sample_ext_note_0001",
         "skill_create_0001",
-        "knowledge_graph_0001",
         "eval_env_0001",
     } <= set(heads)
-    assert len(heads) == 7
+    assert len(heads) == 6
+
+
+@pytest.mark.parametrize("graph_installed", [False, True])
+def test_one_memory_surface_advances_both_old_heads(tmp_path: Path, graph_installed: bool) -> None:
+    database_path = tmp_path / f"graph-revision-{graph_installed}.db"
+    url = f"sqlite+aiosqlite:///{database_path}"
+    config = Config()
+    config.set_main_option("script_location", str(MIGRATIONS_DIR))
+    config.set_main_option("version_locations", str(MIGRATIONS_DIR / "versions"))
+    config.set_main_option("path_separator", "os")
+    config.set_main_option("sqlalchemy.url", url)
+    command.upgrade(config, "0051")
+    if graph_installed:
+        command.upgrade(config, "knowledge_graph_0001")
+
+    with sqlite3.connect(database_path) as connection:
+        tables = {
+            row[0]
+            for row in connection.execute("select name from sqlite_master where type = 'table'")
+        }
+    if graph_installed:
+        assert {"graph_entity", "graph_edge"} <= tables
+    else:
+        assert not {"graph_entity", "graph_edge"} & tables
+
+    apply_migrations(url)
+
+    with sqlite3.connect(database_path) as connection:
+        tables = {
+            row[0]
+            for row in connection.execute("select name from sqlite_master where type = 'table'")
+        }
+        revisions = {
+            row[0] for row in connection.execute("select version_num from alembic_version")
+        }
+    assert not {"graph_entity", "graph_edge"} & tables
+    assert "0052" in revisions
+    assert "knowledge_graph_0001" not in revisions
 
 
 def test_memory_as_of_migration_repairs_page_derived_rows(tmp_path: Path) -> None:

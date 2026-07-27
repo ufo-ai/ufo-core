@@ -19,8 +19,8 @@ review what recall surfaces as recent and say the run is seeding.
 ## 2 — Gather
 
 - The roster: `memory_search` the org chart and people files (the state repo syncs them).
-- Per person who matters now: `memory_search` their name; `graph_search` to place them (triage
-  rule 2). Note fresh facts, commitments, concerns.
+- Per person who matters now: `memory_search` their name and where the org chart places them
+  (triage rule 2). Note fresh facts, commitments, concerns.
 - The inbox: what the member dropped in this channel since the last run is in the conversation.
 - Standing loops: `list_page_watches`.
 

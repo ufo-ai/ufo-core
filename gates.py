@@ -451,12 +451,12 @@ def _str_sequence(node: ast.expr | None) -> tuple[str, ...]:
             return ()
 
 
-Revision = tuple[Path, str, str, str | None, tuple[str, ...]]
+Revision = tuple[Path, str, str, tuple[str, ...], tuple[str, ...]]
 
 
 def _revisions(trees: dict[Path, ast.Module]) -> list[Revision]:
     """Every alembic revision across core and the extensions, as (path, owner, revision,
-    down_revision, depends_on). A file is a revision iff it assigns a module-level `revision`."""
+    down_revisions, depends_on). A file is a revision iff it assigns a module-level `revision`."""
     found: list[Revision] = []
     for rel, tree in trees.items():
         owner = _migration_owner(rel)
@@ -477,7 +477,7 @@ def _revisions(trees: dict[Path, ast.Module]) -> list[Revision]:
                 rel,
                 owner,
                 revision,
-                _str_or_none(constants.get("down_revision")),
+                _str_sequence(constants.get("down_revision")),
                 _str_sequence(constants.get("depends_on")),
             )
         )
@@ -486,12 +486,11 @@ def _revisions(trees: dict[Path, ast.Module]) -> list[Revision]:
 
 def _migration_failures(trees: dict[Path, ast.Module]) -> list[str]:
     """The migration seam's single-head discipline, generalized across owners so it composes with
-    optional table-owning extensions. Each owner (core, each extension) is one linear chain: a
-    single base and a single head, chaining only within itself — an extension never chains onto core
-    or a sibling via down_revision (that would fork core or dangle when the sibling is not pinned),
-    it attaches by declaring depends_on a core revision so `upgrade heads` applies core's shared
-    tables first. So the DAG is deterministic and core-first, with exactly one head per owner and no
-    orphan reference."""
+    optional table-owning extensions. Each owner (core, each extension) has one base and one head,
+    chaining only within itself — an extension never chains onto core or a sibling via down_revision
+    (that would fork core or dangle when the sibling is not pinned), it attaches by declaring
+    depends_on a core revision so `upgrade heads` applies core's shared tables first. So the DAG is
+    deterministic and core-first, with no orphan reference."""
     revisions = _revisions(trees)
     owner_of = {revision: owner for _, owner, revision, _, _ in revisions}
     failures: list[str] = []
@@ -505,11 +504,11 @@ def _migration_failures(trees: dict[Path, ast.Module]) -> list[str]:
     down_by_owner: dict[str, set[str]] = defaultdict(set)
     revs_by_owner: dict[str, set[str]] = defaultdict(set)
     bases_by_owner: dict[str, list[str]] = defaultdict(list)
-    for rel, owner, revision, down, depends in revisions:
+    for rel, owner, revision, downs, depends in revisions:
         revs_by_owner[owner].add(revision)
-        if down is None:
+        if not downs:
             bases_by_owner[owner].append(revision)
-        else:
+        for down in downs:
             down_by_owner[owner].add(down)
             if down not in owner_of:
                 failures.append(
@@ -523,7 +522,7 @@ def _migration_failures(trees: dict[Path, ast.Module]) -> list[str]:
                 )
         if (
             owner != CORE_OWNER
-            and down is None
+            and not downs
             and not any(owner_of.get(dep) == CORE_OWNER for dep in depends)
         ):
             failures.append(
@@ -535,7 +534,7 @@ def _migration_failures(trees: dict[Path, ast.Module]) -> list[str]:
         if len(heads) != 1:
             failures.append(
                 f"migrations: owner {owner!r} has {len(heads)} heads {sorted(heads)}; "
-                f"each owner is one linear chain with a single head"
+                f"each owner has a single head"
             )
         if len(bases_by_owner[owner]) != 1:
             failures.append(

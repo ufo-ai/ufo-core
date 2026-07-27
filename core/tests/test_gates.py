@@ -17,6 +17,16 @@ CORE_FILE = Path("core/src/ufo/db.py")
 EXT_TEST = Path("extensions/exa/tests/test_ext_exa.py")
 EXT_SHIPPED_MODULE = Path("extensions/exa/ufo_ext_exa.py")
 EXT_SHIPPED_PACKAGE = Path("extensions/memory/ufo_ext_memory/store.py")
+CORE_MIGRATIONS = Path("core/src/ufo/schema/migrations/versions")
+EXT_MIGRATIONS = Path("extensions/probe/migrations")
+
+
+def _migration(revision: str, down: str, depends: str = "None") -> ast.Module:
+    return ast.parse(
+        f"revision: str = {revision!r}\n"
+        f"down_revision: str | tuple[str, ...] | None = {down}\n"
+        f"depends_on: str | None = {depends}\n"
+    )
 
 
 def test_sdk_only_gate_rejects_core_internal_import_from_extensions() -> None:
@@ -142,6 +152,48 @@ def test_skill_content_is_held_out_of_the_code_gates() -> None:
         gates.SAMPLE_MODULE: ast.parse(sample_src),
     }
     assert gates._conformance_failures(trees) == []
+
+
+def test_migration_gate_allows_one_core_merge_head() -> None:
+    trees = {
+        CORE_MIGRATIONS / "a.py": _migration("a", "None"),
+        CORE_MIGRATIONS / "b.py": _migration("b", "'a'"),
+        CORE_MIGRATIONS / "c.py": _migration("c", "'a'"),
+        CORE_MIGRATIONS / "d.py": _migration("d", "('b', 'c')"),
+    }
+    assert gates._migration_failures(trees) == []
+
+
+def test_migration_gate_checks_every_merge_parent() -> None:
+    trees = {
+        CORE_MIGRATIONS / "a.py": _migration("a", "None"),
+        CORE_MIGRATIONS / "b.py": _migration("b", "'a'"),
+        CORE_MIGRATIONS / "merge.py": _migration("merge", "('b', 'missing')"),
+    }
+    failures = gates._migration_failures(trees)
+    assert any("references no known revision" in failure for failure in failures)
+
+
+def test_migration_gate_rejects_cross_owner_merge_parents() -> None:
+    trees = {
+        CORE_MIGRATIONS / "a.py": _migration("a", "None"),
+        CORE_MIGRATIONS / "b.py": _migration("b", "'a'"),
+        CORE_MIGRATIONS / "merge.py": _migration("merge", "('b', 'probe_1')"),
+        EXT_MIGRATIONS / "probe_1.py": _migration("probe_1", "None", "'a'"),
+    }
+    failures = gates._migration_failures(trees)
+    assert any("chains across owners" in failure for failure in failures)
+
+
+def test_migration_gate_still_rejects_multiple_heads_with_a_merge() -> None:
+    trees = {
+        CORE_MIGRATIONS / "a.py": _migration("a", "None"),
+        CORE_MIGRATIONS / "b.py": _migration("b", "'a'"),
+        CORE_MIGRATIONS / "c.py": _migration("c", "'a'"),
+        CORE_MIGRATIONS / "merge.py": _migration("merge", "('b',)"),
+    }
+    failures = gates._migration_failures(trees)
+    assert any("has 2 heads" in failure for failure in failures)
 
 
 def test_job_selector_gate_rejects_a_jobspec_without_candidates() -> None:

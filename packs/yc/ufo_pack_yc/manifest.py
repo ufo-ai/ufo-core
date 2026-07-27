@@ -12,7 +12,6 @@ EXTENSIONS = (
     "memory",
     "index_default",
     "embed_openai",
-    "knowledge_graph",
     "documents",
     "scheduled_tasks",
     "todos",

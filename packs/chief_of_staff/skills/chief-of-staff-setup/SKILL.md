@@ -49,8 +49,8 @@ backend = "folder"
 config = { root = "/absolute/path/to/the/repo" }
 ```
 
-Every file becomes a recallable page; the org chart feeds `graph_search`. The member keeps
-editing the repo with their own tools — nothing edits canon from here.
+Every file becomes a recallable page; the org chart is how `memory_search` places a person. The
+member keeps editing the repo with their own tools — nothing edits canon from here.
 
 ## 4 — The cadence
 

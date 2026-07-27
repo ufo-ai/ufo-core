@@ -154,9 +154,9 @@ async def _raise(ctx: HookContext) -> HookOutcome:
 
 def test_each_page_change_consumer_registers_as_its_own_job(tmp_path: object) -> None:
     """core_jobs fans a `page_change:<ext>:<hook>` job out per registered consumer, so the memory
-    page indexer and the graph extractor are independent DBOS workflows again — each keyed in the
-    core namespace under its extension and its handler-name discriminator, so two hooks in one
-    extension get two jobs rather than colliding on one name."""
+    page indexer and fact deriver are independent DBOS workflows — each keyed in the core namespace
+    under its extension and its handler-name discriminator, so two hooks in one extension get two
+    jobs rather than colliding on one name."""
     blob = FilesystemBlobStore(root=tmp_path)
     boom = Manifest(
         name="boom_ext", version="0", hooks=(HookSpec(event="page_change", handler=_raise),)

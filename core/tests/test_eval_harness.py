@@ -27,6 +27,7 @@ from dbos import error as dbos_error
 from httpx import AsyncClient
 
 import evals.harness.target as harness_target
+from evals import cos_workflows
 from evals.__main__ import EVAL_SHARE_BUCKET_ENV, _task_reports
 from evals.__main__ import _run as run_evals
 from evals.__main__ import main as eval_main
@@ -37,6 +38,7 @@ from evals.closing_message import (
     no_backreference_scorer,
 )
 from evals.compaction.target import CompactionTarget
+from evals.cos_workflows import COS_WORKFLOWS_PACKS
 from evals.driver import (
     CANDIDATE_AGENT_NAME,
     WorkspaceDriver,
@@ -167,6 +169,33 @@ def test_yc_evals_require_explicit_selection() -> None:
         "yc_workflows",
     ]
     assert {task.name for task in TASKS} >= {"yc_recall", "yc_workflows"}
+
+
+def test_cos_workflows_is_opt_in_and_grades_memory_routing_under_the_cos_pack() -> None:
+    task = next(task for task in TASKS if task.name == "cos_workflows")
+
+    assert COS_WORKFLOWS_PACKS == ("chief_of_staff",)
+    assert task.name not in {existing.name for existing in selected_run_tasks()}
+    assert task.cases == ("prep-one-on-one", "triage-weigh-signal", "sync-place-people")
+    statements = [grading_statement(case.grader) for case in cos_workflows.CASES]
+    assert all("memory_search" in statement for statement in statements)
+    assert [
+        skill
+        for skill, statement in zip(("prep", "triage", "sync"), statements, strict=True)
+        if f"loads {skill!r}" in statement
+    ] == ["prep", "triage", "sync"]
+
+
+def test_cos_workflows_refuses_to_run_outside_the_chief_of_staff_pack(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(
+        "evals.__main__.load_config",
+        lambda: SimpleNamespace(pack=SimpleNamespace(name="assistant")),
+    )
+    with pytest.raises(SystemExit):
+        eval_main(["--only", "cos_workflows", "--out", str(tmp_path)])
+    assert "cos_workflows requires [pack] name in ('chief_of_staff',)" in capsys.readouterr().err
 
 
 def test_registry_pins_judge_and_simulator_models_by_workload() -> None:

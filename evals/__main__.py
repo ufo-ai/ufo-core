@@ -31,6 +31,7 @@ from ufo_ext_memory.events import MEMORY_RECALL_EVENT
 
 from evals.compaction.runner import CompactionRun, load_compaction
 from evals.compaction.target import CompactionTarget
+from evals.cos_workflows import COS_WORKFLOWS_PACKS
 from evals.document_visual import (
     WORKFLOW_WAIT_SECONDS as DOCUMENT_VISUAL_WORKFLOW_WAIT_SECONDS,
 )
@@ -379,6 +380,13 @@ def main(argv: list[str] | None = None) -> None:
         )
     if wandr_tasks is not None and config.pack.name not in WANDR_PACKS:
         parser.error(f"wandr requires [pack] name in {WANDR_PACKS}, found {config.pack.name!r}")
+    if any(task.name == "cos_workflows" for task in tasks) and (
+        config.pack.name not in COS_WORKFLOWS_PACKS
+    ):
+        parser.error(
+            f"cos_workflows requires [pack] name in {COS_WORKFLOWS_PACKS}, "
+            f"found {config.pack.name!r}"
+        )
     workspace_id = args.workspace
     recall_workspace_id = (
         memory_run.readiness.workspace_id

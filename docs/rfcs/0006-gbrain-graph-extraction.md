@@ -1,15 +1,16 @@
 ---
 rfc: 0006
 title: "RFC — gbrain graph extraction from pages"
-status: implemented
+status: superseded
 date: 2026-07-06
 ---
 
 # RFC — gbrain graph extraction from pages
 
-**Status:** implemented. **Scope:** a source-page → knowledge-graph derivation, delivered as an
-extension. **Verdict:** gbrain ships it; metalcraft shipped a reduced heuristic slice; selfhost
-ships none. It is buildable today on existing seams as a pure extension — no core change.
+**Status:** superseded by [0019](0019-shared-brain.md), which leaves `memory_search` as the one
+knowledge surface. **Scope:** a source-page → knowledge-graph derivation, delivered as an extension.
+**Verdict:** gbrain ships it; metalcraft shipped a reduced heuristic slice; selfhost ships none. It
+is buildable today on existing seams as a pure extension — no core change.
 
 | System | Entity nodes | Typed relations | Graph store | Traversal query | Overall |
 |---|---|---|---|---|---|

@@ -6,11 +6,11 @@ audit working record); proposals never implemented on `main` live in [`archive/`
 their reasoning intact — nothing is deleted. Start from [`0000-template.md`](0000-template.md).
 
 **Status:** `proposed` (open) · `accepted` (agreed, unbuilt) · `implemented` (built + merged) ·
-`rejected` · `withdrawn`.
+`superseded` (built, then replaced by a later RFC) · `rejected` · `withdrawn`.
 
 | # | Title | Status |
 |---|---|---|
-| [0006](0006-gbrain-graph-extraction.md) | gbrain graph extraction — the `knowledge_graph` extension | implemented |
+| [0006](0006-gbrain-graph-extraction.md) | gbrain graph extraction | superseded |
 | [0008](0008-durable-recovery.md) | Durable recovery — sub-turn checkpointing, `wide_*` + browser resume | implemented |
 | [0009](0009-context-compression.md) | Structured context compression — a pipeline, not one summarize call | implemented |
 | [0010](0010-degraded-features-audit.md) | Degraded-features audit — what was silently crippled | accepted |
@@ -21,7 +21,9 @@ their reasoning intact — nothing is deleted. Start from [`0000-template.md`](0
 | [0018](0018-model-spec-single-source.md) | Model spec — one record per model, the single source of truth | accepted |
 | [0019](0019-shared-brain.md) | Shared brain — scope and audience | proposed |
 
-`0010` is an audit, not a proposal — `accepted` marks its findings as the working record.
+`0006` shipped and `0019` replaced its member-facing surface with `memory_search`; the record stays
+for its reasoning. `0010` is an audit, not a proposal — `accepted` marks its findings as the working
+record.
 
 ## Archive — not implemented on `main`
 

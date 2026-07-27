@@ -8,6 +8,7 @@ from evals import (
     closing_message,
     coding_subagent,
     connector_refs,
+    cos_workflows,
     document_visual,
     memory_hygiene,
     object_tools,
@@ -78,6 +79,7 @@ TASKS: tuple[EvalTask, ...] = (
     scenario_task("memory_hygiene", memory_hygiene.CASES, simulator_model=SCENARIO_SIMULATOR_MODEL),
     capability_task("yc_recall", yc_recall.CASES),
     capability_task("yc_workflows", yc_workflows.CASES),
+    capability_task("cos_workflows", cos_workflows.CASES),
 )
 
 

@@ -49,7 +49,6 @@ EXTENSIONS = (
     "sandbox_chrome",
     "skill_create",
     "embed_openai",
-    "knowledge_graph",
     "metronome",
 )
 

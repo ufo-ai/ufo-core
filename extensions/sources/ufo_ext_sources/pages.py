@@ -66,7 +66,7 @@ def _require_ext(ctx: ToolContext) -> ExtensionContext:
 
 def _audience_subjects(ctx: ToolContext) -> frozenset[str]:
     """The visibility subjects the caller may read: the shared space plus, when the turn has an
-    audience member, that member's private space — mirroring the memory/knowledge_graph readers so
+    audience member, that member's private space — mirroring the memory readers so
     a member never reads another member's private page."""
     if ctx.audience_member_id is None:
         return frozenset({SHARED_SUBJECT})
