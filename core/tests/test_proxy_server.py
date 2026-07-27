@@ -734,6 +734,77 @@ async def test_client_reset_while_awaiting_the_request_line_does_not_crash_the_s
         await proxy.stop()
 
 
+async def test_client_reset_during_the_mitm_handshake_does_not_crash_the_server(db: None) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, turn_id, *_ = await _seed_turn(connection)
+    rules = (
+        ScopeRule(allowed_hosts=frozenset({MODEL_HOST})),
+        InjectionRule(host=MODEL_HOST, header="x-api-key", sentinel="s", real="REAL-KEY"),
+    )
+    cert, key = await generate_ca()
+    proxy = _egress(_fixed(rules), ca_cert=cert, ca_key=key)
+    endpoint = await proxy.start(bind_host="127.0.0.1")
+    loop = asyncio.get_running_loop()
+    unhandled: list[dict] = []
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: unhandled.append(context))
+    try:
+        token = RUN_TOKENS.encode(RunToken(workspace_id, turn_id))
+        reader, writer = await asyncio.open_connection("127.0.0.1", endpoint.port)
+        writer.write(
+            f"CONNECT {MODEL_HOST}:443 HTTP/1.1\r\n"
+            f"Proxy-Authorization: {_basic(token)}\r\n\r\n".encode()
+        )
+        await writer.drain()
+        assert (await reader.readline()).startswith(b"HTTP/1.1 200")
+        sock = writer.get_extra_info("socket")
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        writer.close()
+        await asyncio.sleep(0.2)
+        assert unhandled == []
+        assert await _connect(endpoint.port, MODEL_HOST) == 403
+    finally:
+        loop.set_exception_handler(previous)
+        await proxy.stop()
+
+
+async def test_client_reset_after_the_mitm_handshake_does_not_crash_the_server(db: None) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, turn_id, *_ = await _seed_turn(connection)
+    rules = (
+        ScopeRule(allowed_hosts=frozenset({MODEL_HOST})),
+        InjectionRule(host=MODEL_HOST, header="x-api-key", sentinel="s", real="REAL-KEY"),
+    )
+    cert, key = await generate_ca()
+    proxy = _egress(_fixed(rules), ca_cert=cert, ca_key=key)
+    endpoint = await proxy.start(bind_host="127.0.0.1")
+    loop = asyncio.get_running_loop()
+    unhandled: list[dict] = []
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: unhandled.append(context))
+
+    try:
+        token = RUN_TOKENS.encode(RunToken(workspace_id, turn_id))
+        reader, writer = await asyncio.open_connection("127.0.0.1", endpoint.port)
+        writer.write(
+            f"CONNECT {MODEL_HOST}:443 HTTP/1.1\r\n"
+            f"Proxy-Authorization: {_basic(token)}\r\n\r\n".encode()
+        )
+        await writer.drain()
+        assert (await reader.readuntil(b"\r\n\r\n")).startswith(b"HTTP/1.1 200")
+        context = ssl.create_default_context(cadata=cert)
+        await writer.start_tls(context, server_hostname=MODEL_HOST)
+        sock = writer.get_extra_info("socket")
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        writer.transport.abort()
+        await asyncio.sleep(0.2)
+        assert unhandled == []
+        assert await _connect(endpoint.port, MODEL_HOST) == 403
+    finally:
+        loop.set_exception_handler(previous)
+        await proxy.stop()
+
+
 async def test_pre_auth_header_deadline_closes_a_stalled_connection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

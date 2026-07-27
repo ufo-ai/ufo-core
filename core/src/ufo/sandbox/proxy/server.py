@@ -617,10 +617,14 @@ class EgressProxy:
         credential is injected server-side, never here); otherwise the sentinel Authorization value
         is swapped for its account's real key (selected among this host's injections by the exact
         sentinel) and the request re-originates upstream over verified TLS — the response streams
-        straight back."""
+        straight back. A sandbox that stalls or vanishes during the handshake or before sending its
+        request ends the exchange silently; internal faults before the handshake still propagate."""
         leaf_context = await self._leaf_context(host)
-        client_reader, client_writer = await _start_tls_server(reader, writer, leaf_context)
-        request = await _read_request_head(client_reader)
+        try:
+            client_reader, client_writer = await _start_tls_server(reader, writer, leaf_context)
+            request = await _read_request_head(client_reader)
+        except (OSError, ssl.SSLError):
+            return
         if isinstance(request, _HeaderRefusal):
             await _respond(client_writer, request.status, request.message)
             return
