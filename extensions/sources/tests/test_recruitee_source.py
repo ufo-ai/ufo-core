@@ -8,7 +8,7 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
-from ufo_ext_sources.recruitee import RecruiteeConnector
+from ufo_ext_sources.recruitee import PAGE_SIZE, RecruiteeConnector
 
 from ufo.connectors import Credential
 from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig
@@ -37,15 +37,27 @@ def _refs(result: SyncResult) -> set[str]:
     return {page.source_ref for page in result.pages}
 
 
-async def test_candidates_unwrap_the_named_envelope() -> None:
+async def test_candidates_paginate_the_named_envelope() -> None:
+    seen_pages: list[str] = []
+
     def handle(request: httpx.Request) -> httpx.Response:
         assert request.url.host == "api.recruitee.com"
         assert request.url.path == "/c/acme/candidates"
-        assert request.url.params.get("page") == "1"
-        return httpx.Response(200, json={"candidates": [{"id": 1, "name": "Ada"}]})
+        assert request.url.params.get("limit") == str(PAGE_SIZE)
+        page = request.url.params["page"]
+        seen_pages.append(page)
+        if page == "1":
+            candidates = [{"id": candidate_id} for candidate_id in range(1, PAGE_SIZE + 1)]
+        else:
+            assert page == "2"
+            candidates = [{"id": PAGE_SIZE + 1}]
+        return httpx.Response(200, json={"candidates": candidates})
 
     result = await _fetch("candidates", handle)
-    assert _refs(result) == {"candidates/1"}
+    assert seen_pages == ["1", "2"]
+    assert _refs(result) == {
+        f"candidates/{candidate_id}" for candidate_id in range(1, PAGE_SIZE + 2)
+    }
     assert result.snapshot is False
     assert result.next_cursor is None
 

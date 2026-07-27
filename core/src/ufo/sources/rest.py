@@ -308,22 +308,6 @@ class RestConnector(Connector):
             ):
                 yield page
             return
-        if spec.strategy is PaginationStrategy.page_number:
-            if not spec.cursor_param or spec.page_size is None:
-                raise ValueError(
-                    f"{type(self).__name__}.{stream.name}: page_number needs cursor_param+page_size"
-                )
-            async for page in self._get_page_number_pages(
-                client,
-                path,
-                records_path=spec.record_path,
-                page_size=spec.page_size,
-                page_param=spec.cursor_param,
-                page_size_param=spec.page_size_param,
-                params=dict(spec.extra_params or {}),
-            ):
-                yield page
-            return
         if spec.strategy is PaginationStrategy.offset_limit:
             if not spec.offset_param or not spec.limit_param or spec.page_size is None:
                 raise ValueError(

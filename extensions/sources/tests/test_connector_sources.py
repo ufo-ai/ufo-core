@@ -177,26 +177,6 @@ async def test_offset_limit_strategy_advances_until_short_page() -> None:
     assert _ids(await _pages(_ProbeConnector(stream, handle))) == {1, 2, 3}
 
 
-async def test_page_number_strategy_advances_until_short_page() -> None:
-    def handle(request: httpx.Request) -> httpx.Response:
-        if request.url.params.get("page") == "2":
-            return httpx.Response(200, json={"rows": [{"id": 3}]})
-        return httpx.Response(200, json={"rows": [{"id": 1}, {"id": 2}]})
-
-    stream = StreamSpec(
-        name="list",
-        source_object="list",
-        pagination=Pagination(
-            strategy=PaginationStrategy.page_number,
-            path="/list",
-            record_path="rows",
-            cursor_param="page",
-            page_size=2,
-        ),
-    )
-    assert _ids(await _pages(_ProbeConnector(stream, handle))) == {1, 2, 3}
-
-
 async def test_time_window_strategy_sends_the_cursor_value() -> None:
     def handle(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
