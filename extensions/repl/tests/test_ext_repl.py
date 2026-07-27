@@ -6,6 +6,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+import ufo_ext_documents.manifest as documents
 import ufo_ext_repl.manifest as repl
 from ufo_ext_repl.manifest import JsReplInput, XlsxReplInput
 
@@ -127,6 +128,14 @@ def test_data_skills_parse_and_index() -> None:
         "data-visualization",
     ):
         assert name in index
+
+
+def test_data_visualization_pulls_design_foundations() -> None:
+    registry = skill_registry((documents.manifest(), repl.manifest()))
+    assert [entry.skill.name for entry in registry.closure("data-visualization")] == [
+        "data-visualization",
+        "design-foundations",
+    ]
 
 
 async def test_js_repl_first_call_writes_fresh_and_runs_node(tmp_path: Path) -> None:

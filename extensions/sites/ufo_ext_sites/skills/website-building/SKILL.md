@@ -8,8 +8,6 @@ Build distinctive, production-grade websites that avoid generic "AI slop" aesthe
 
 **This skill covers everything for web projects.** When loaded via `load_skill(name="website-building")`, all files mount under `.skills/website-building/`. Read sub-files as needed based on your project type. For web applications, load the child skill: `load_skill(name="website-building/webapp")`.
 
-**Universal design principles** (color philosophy, default palette, font selection) are shared with other skills via `design-foundations`. This skill's shared files extend those foundations with web-specific implementation (CSS variables, responsive tokens, base stylesheets). You don't need to load `design-foundations` separately — the web-specific versions in `shared/` are comprehensive.
-
 Use `read` with the path relative to this skill, e.g. `shared/01-design-tokens.md`
 
 ---
@@ -88,7 +86,7 @@ All paths above are relative to this skill's mounted directory (`.skills/website
 ## Use Every Tool
 
 - **Research first.** Search the web for reference sites, trends, and competitor examples before designing. Browse award-winning examples of the specific site type. Fetch any URLs the user provides.
-- **Use real, considered visuals — generously.** Every long page needs visual rhythm, not a wall of text: heroes, section illustrations, editorial feature visuals, atmospheric backgrounds. Build that rhythm from craft you author directly — custom inline SVG (logos, marks, illustrations, patterns, filters), CSS gradients and backgrounds, and considered layout (see `shared/07-toolkit.md` for SVG patterns/filters and `design-foundations` for the color and imagery philosophy). For photographic content, use assets the user provided or real images you fetch into the workspace; never hallucinate image URLs, and never ship lorem/placeholder text or grey placeholder boxes. When no real image is available, design the section with type, color, and SVG rather than leaving a gap. Generate a custom SVG logo for every project (see below) — SVG is for logos only unless the user specifically requests SVG output.
+- **Use real, considered visuals — generously.** Every long page needs visual rhythm, not a wall of text: heroes, section illustrations, editorial feature visuals, atmospheric backgrounds. Build that rhythm from craft you author directly — custom inline SVG (logos, marks, illustrations, patterns, filters), CSS gradients and backgrounds, and considered layout (see `shared/07-toolkit.md` for SVG patterns/filters). For photographic content, use assets the user provided or real images you fetch into the workspace; never hallucinate image URLs, and never ship lorem/placeholder text or grey placeholder boxes. When no real image is available, design the section with type, color, and SVG rather than leaving a gap. Generate a custom SVG logo for every project (see below) — SVG is for logos only unless the user specifically requests SVG output.
 - **Screenshot via Playwright (complex sites only).** For multi-page sites, web apps, dashboards, and games, read `shared/12-playwright-interactive.md` to screenshot at desktop (1280px+) and mobile (375px) with `js_repl`. Skip Playwright for simple single-page static sites — see Visual QA below.
 - **Write production code directly.** HTML, CSS, JS, SVG. Use bash for build tools and file processing.
 

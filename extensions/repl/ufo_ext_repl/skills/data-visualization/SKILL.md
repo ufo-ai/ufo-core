@@ -1,10 +1,13 @@
 ---
 name: data-visualization
 description: Load when visualizing data — choosing chart types and producing plots that communicate distributions, trends, or comparisons.
+metadata:
+  depends:
+  - design-foundations
 ---
 # Data Visualization
 
-Chart selection, Python patterns, and design principles. See `.skills/design-foundations/references/color.md` for color palettes and `.skills/design-foundations/SKILL.md` for foundational design rules.
+Chart selection, Python patterns, and design principles. Read `.skills/design-foundations/references/color.md` for color palettes and `.skills/design-foundations/SKILL.md` for foundational design rules.
 
 ## Render, Inspect, Revise
 
