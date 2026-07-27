@@ -23,6 +23,8 @@ leans on the provider's own timeout alone."""
 
 import os
 import shlex
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import Protocol, cast
@@ -65,7 +67,9 @@ SANDBOX_ENV: dict[str, str] = {
     "NODE_PATH": NODE_GLOBAL_MODULES,
     "PLAYWRIGHT_BROWSERS_PATH": PLAYWRIGHT_BROWSERS_DIR,
 }
-DEFAULT_TIMEOUT_SECONDS = 300
+DEFAULT_IDLE_SECONDS = 300
+SANDBOX_LEASE_SECONDS = 900
+EXEC_LEASE_MARGIN_SECONDS = 60
 EXEC_TIMEOUT_CODE = 124
 CONVERSATION_METADATA_KEY = "ufo.conversation_id"
 E2B_LIFECYCLE: SandboxLifecycle = {"on_timeout": "pause", "auto_resume": True}
@@ -150,6 +154,12 @@ class E2BSandbox(Protocol):
 
     async def pause(self, **opts: object) -> bool: ...
 
+    async def set_timeout(
+        self,
+        timeout: int,  # noqa: ASYNC109
+        **opts: object,
+    ) -> None: ...
+
     def get_host(self, port: int) -> str: ...
 
 
@@ -176,33 +186,47 @@ class E2BSdk(Protocol):
 E2B_SDK = cast(E2BSdk, E2BSdkSandbox)
 
 
+@dataclass(frozen=True, slots=True)
+class _Lease:
+    """A live sandbox and the moment its provider clock runs out, measured before the call that set
+    it so the deadline held here is always earlier than the real one — a lease believed shorter than
+    it is costs a spare renewal, one believed longer loses the container mid-command."""
+
+    sandbox: E2BSandbox
+    expires_at: float
+
+
 @dataclass(frozen=True)
 class E2BCarrier:
     api_key: str
     template: str
-    timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS
+    idle_seconds: int = DEFAULT_IDLE_SECONDS
+    """The span every piece of work needs the container to survive regardless of its own length: it
+    is the model's thinking between two tool calls, not the calls, a lease has to outlast."""
     sdk: E2BSdk = E2B_SDK
-    _live: dict[UUID, E2BSandbox] = field(default_factory=dict)
+    clock: Callable[[], float] = time.monotonic
+    _live: dict[UUID, _Lease] = field(default_factory=dict)
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         egress_env = _egress_env(spec.proxy, spec.run_token)
         public_url = cast(str, spec.proxy.public_url)
         live = self._live.get(spec.conversation_id)
-        resume_id = live.sandbox_id if live is not None else spec.resume_id
+        resume_id = live.sandbox.sandbox_id if live is not None else spec.resume_id
+        opened = self.clock()
         if resume_id is not None:
             sandbox = await self.sdk.connect(
-                resume_id, timeout=self.timeout_seconds, api_key=self.api_key
+                resume_id, timeout=SANDBOX_LEASE_SECONDS, api_key=self.api_key
             )
         else:
             sandbox = await self.sdk.create(
                 template=self.template,
-                timeout=self.timeout_seconds,
+                timeout=SANDBOX_LEASE_SECONDS,
                 metadata={CONVERSATION_METADATA_KEY: str(spec.conversation_id)},
                 lifecycle=E2B_LIFECYCLE,
                 api_key=self.api_key,
             )
             await sandbox.files.make_dir(WORKSPACE_DIR)
-        self._live[spec.conversation_id] = sandbox
+        self._live[spec.conversation_id] = _Lease(sandbox, opened + SANDBOX_LEASE_SECONDS)
         await self._install_ca(sandbox, spec.proxy.ca_cert)
         await self._mount_s3(
             sandbox,
@@ -292,8 +316,13 @@ class E2BCarrier:
         non-zero exit and a command timeout arrive as SDK exceptions, mapped to the ExecResult the
         session reads exactly as the shell's own exit code would. It runs under the turn's egress
         env, so its every network call routes through the proxy with the turn's run token — the raw
-        model key never enters the sandbox and every request is metered."""
-        sandbox = await self._sandbox(handle)
+        model key never enters the sandbox and every request is metered. What it needs of the lease
+        is its own timeout with room for the provider to return, so the sandbox cannot expire
+        mid-command, and never less than the idle span, which is what carries the container across
+        the model's thinking between one command and the next."""
+        sandbox = await self._sandbox(
+            handle, max(self.idle_seconds, timeout_s + EXEC_LEASE_MARGIN_SECONDS)
+        )
         command = shlex.join(argv)
         try:
             result = await sandbox.commands.run(
@@ -312,7 +341,7 @@ class E2BCarrier:
         """Upload through the sandbox's filesystem API, which creates the parent directories and
         streams the body as its own request — e2b's only channel that carries bytes off the command
         line, since `commands.run` takes a shell string with no stdin."""
-        sandbox = await self._sandbox(handle)
+        sandbox = await self._sandbox(handle, self.idle_seconds)
         await sandbox.files.write(path, content)
 
     async def export(self, handle: SandboxHandle, path: str, blob: BlobStore, key: str) -> None:
@@ -335,7 +364,7 @@ class E2BCarrier:
         token. The generic inbound path for any service the turn started inside the container (a
         browser's CDP endpoint, a site's dev-server preview). `get_host` is pure address formatting,
         no round trip."""
-        sandbox = await self._sandbox(handle)
+        sandbox = await self._sandbox(handle, self.idle_seconds)
         return sandbox.get_host(port)
 
     async def destroy(self, handle: SandboxHandle) -> None:
@@ -347,24 +376,48 @@ class E2BCarrier:
         gone (paused past e2b's own retention, or reaped by a concurrent process) raises
         SandboxNotFoundException on reconnect — also a no-op, since nothing is left to pause."""
         live = self._live.pop(handle.conversation_id, None)
-        if live is None and handle.container_id:
+        sandbox = live.sandbox if live is not None else None
+        if sandbox is None and handle.container_id:
             try:
-                live = await self.sdk.connect(
-                    handle.container_id, timeout=self.timeout_seconds, api_key=self.api_key
+                sandbox = await self.sdk.connect(
+                    handle.container_id, timeout=self.idle_seconds, api_key=self.api_key
                 )
             except SandboxNotFoundException:
                 return
-        if live is not None:
-            await live.pause(api_key=self.api_key)
+        if sandbox is not None:
+            await sandbox.pause(api_key=self.api_key)
 
-    async def _sandbox(self, handle: SandboxHandle) -> E2BSandbox:
+    async def _sandbox(self, handle: SandboxHandle, needed_seconds: int) -> E2BSandbox:
+        """The conversation's sandbox, guaranteed to outlive the work about to run on it. e2b's
+        timeout is a wall clock the provider enforces from the moment it is set, not an idle timer:
+        it expires while a command is still running and `E2B_LIFECYCLE` pauses the container out
+        from under it, tearing down the command's own stream. So every caller states the span it
+        needs, and a lease that already covers it is used as it stands — renewal is a control-plane
+        round trip on the critical path of every tool call, and the standing lease is sized so a
+        working turn buys one about every ten minutes instead of one per command.
+
+        Reading the deadline locally is safe because a renewal never asks for less than
+        `SANDBOX_LEASE_SECONDS` and nothing the tool surface can ask for reaches it — `bash`'s
+        ceiling is the largest need and lands well under, which the suite pins — so every renewal
+        buys that same span, and another replica can only push the real expiry further out than the
+        deadline recorded here, never nearer. The `max` below guards a need that outgrew the lease
+        rather than a branch taken today, and stays sound because the turn queue is partitioned by
+        conversation: one sandbox has one process working it at a time. The lease is opened by
+        `create`, or by the reconnect below when a process's first touch of a handle is the work
+        itself, and ended by `destroy`."""
         live = self._live.get(handle.conversation_id)
-        if live is not None:
-            return live
-        sandbox = await self.sdk.connect(
-            handle.container_id, timeout=self.timeout_seconds, api_key=self.api_key
-        )
-        self._live[handle.conversation_id] = sandbox
+        renewed = self.clock()
+        if live is not None and live.expires_at - renewed >= needed_seconds:
+            return live.sandbox
+        span = max(SANDBOX_LEASE_SECONDS, needed_seconds)
+        if live is None:
+            sandbox = await self.sdk.connect(
+                handle.container_id, timeout=span, api_key=self.api_key
+            )
+        else:
+            sandbox = live.sandbox
+            await sandbox.set_timeout(span, api_key=self.api_key)
+        self._live[handle.conversation_id] = _Lease(sandbox, renewed + span)
         return sandbox
 
 

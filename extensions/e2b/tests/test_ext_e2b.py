@@ -11,6 +11,7 @@ the live SDK throws."""
 
 import shlex
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -24,13 +25,16 @@ from ufo_ext_e2b import (
     CA_SANDBOX_PATH,
     CA_STAGING_PATH,
     CONVERSATION_METADATA_KEY,
+    DEFAULT_IDLE_SECONDS,
     E2B_API_KEY_ENV,
     E2B_LIFECYCLE,
     E2B_TEMPLATE_NAME,
+    EXEC_LEASE_MARGIN_SECONDS,
     EXEC_TIMEOUT_CODE,
     INSTALL_CA_COMMAND,
     NODE_GLOBAL_MODULES,
     PLAYWRIGHT_BROWSERS_DIR,
+    SANDBOX_LEASE_SECONDS,
     SENTINEL_MODEL_KEY,
     SYSTEM_CA_BUNDLE,
     E2BCarrier,
@@ -54,6 +58,7 @@ from ufo.sdk.sandbox import (
     prepare_token_staging_command,
 )
 from ufo.serve import _select_carrier
+from ufo.tools.builtins import MAX_BASH_TIMEOUT_MS
 
 
 @dataclass
@@ -134,10 +139,21 @@ class _Sandbox:
     files: _Files = field(default_factory=_Files)
     paused: int = 0
     traffic_access_token: str | None = "traffic-tok"
+    leases: list[int] = field(default_factory=list)
+    on_call: Callable[[], None] | None = None
 
     async def pause(self, **opts: object) -> bool:
         self.paused += 1
         return True
+
+    async def set_timeout(
+        self,
+        timeout: int,  # noqa: ASYNC109
+        **opts: object,
+    ) -> None:
+        if self.on_call is not None:
+            self.on_call()
+        self.leases.append(timeout)
 
     def get_host(self, port: int) -> str:
         return f"{port}-{self.sandbox_id}.e2b.test"
@@ -147,6 +163,7 @@ class _Sandbox:
 class _Sdk:
     created: list[dict[str, object]] = field(default_factory=list)
     connected: list[str] = field(default_factory=list)
+    connect_leases: list[int] = field(default_factory=list)
     sandboxes: dict[str, _Sandbox] = field(default_factory=dict)
     counter: int = 0
     command_fail_on: tuple[str, ...] = ()
@@ -154,6 +171,7 @@ class _Sdk:
     command_timeout_on: tuple[str, ...] = ()
     command_timeout_counts: dict[str, int] = field(default_factory=dict)
     not_found: frozenset[str] = frozenset()
+    on_call: Callable[[], None] | None = None
 
     async def create(
         self,
@@ -164,10 +182,13 @@ class _Sdk:
         lifecycle: object,
         api_key: str,
     ) -> _Sandbox:
+        if self.on_call is not None:
+            self.on_call()
         self.counter += 1
         sandbox_id = f"sbx-{self.counter}"
         sandbox = _Sandbox(
             sandbox_id=sandbox_id,
+            on_call=self.on_call,
             commands=_Commands(
                 fail_on=self.command_fail_on,
                 fail_counts=dict(self.command_fail_counts),
@@ -194,7 +215,10 @@ class _Sdk:
         timeout: int,  # noqa: ASYNC109
         api_key: str,
     ) -> _Sandbox:
+        if self.on_call is not None:
+            self.on_call()
         self.connected.append(sandbox_id)
+        self.connect_leases.append(timeout)
         if sandbox_id in self.not_found:
             raise SandboxNotFoundException(f"Paused sandbox {sandbox_id} not found")
         return self.sandboxes[sandbox_id]
@@ -541,6 +565,160 @@ async def test_exec_runs_the_joined_command_in_the_workspace_and_maps_the_result
     assert command == "bash -lc 'echo hi'"
     assert cwd == WORKSPACE_DIR
     assert timeout == 60
+
+
+class _Clock:
+    """A hand-wound monotonic clock, so a lease running low is a fact the test states rather than
+    a wall-clock wait."""
+
+    def __init__(self) -> None:
+        self.now = 1_000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+async def test_a_standing_lease_covers_a_command_without_a_round_trip() -> None:
+    """The lease `create` opens already outlives anything the bash tool can ask for, so the common
+    case reaches the provider once, for the command itself. Renewing per call would put a
+    control-plane round trip in front of every tool call a turn makes."""
+    sdk = _Sdk()
+    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk)
+    handle = await carrier.create(_spec(uuid4()))
+
+    for _ in range(5):
+        await carrier.exec(handle, ("bash", "-lc", "sleep 590"), 600)
+
+    assert sdk.created[0]["timeout"] == SANDBOX_LEASE_SECONDS
+    assert sdk.sandboxes["sbx-1"].leases == []
+
+
+async def test_a_command_longer_than_the_standing_lease_extends_it() -> None:
+    """The lease is sized to outlast the tool's own ceiling, but the carrier does not assume that
+    ceiling: a command asking for more than the standing lease gets a lease sized to the command,
+    so raising the tool's cap can never silently reintroduce a container that dies mid-command."""
+    sdk = _Sdk()
+    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk)
+    handle = await carrier.create(_spec(uuid4()))
+
+    await carrier.exec(handle, ("bash", "-lc", "sleep 3500"), 3_600)
+
+    assert sdk.sandboxes["sbx-1"].leases == [3_600 + EXEC_LEASE_MARGIN_SECONDS]
+
+
+async def test_a_turn_still_working_when_the_lease_runs_low_renews_it() -> None:
+    """The regression. e2b's timeout is a wall clock, not an idle timer, so one lease counts down
+    across a whole turn and whichever command straddles its end is paused out from under and its
+    stream torn down. A turn still working as the lease runs low buys another."""
+    clock = _Clock()
+    sdk = _Sdk()
+    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk, clock=clock)
+    handle = await carrier.create(_spec(uuid4()))
+
+    await carrier.exec(handle, ("bash", "-lc", "sleep 240"), 300)
+    assert sdk.sandboxes["sbx-1"].leases == []
+
+    clock.advance(SANDBOX_LEASE_SECONDS - 100)
+    await carrier.exec(handle, ("bash", "-lc", "sleep 240"), 300)
+
+    assert sdk.sandboxes["sbx-1"].leases == [SANDBOX_LEASE_SECONDS]
+
+
+def test_the_standing_lease_covers_the_longest_command_the_tool_can_ask_for() -> None:
+    """Skipping the renewal is only safe while every renewal buys the same span, and that holds
+    only while no need reaches the standing lease. `bash`'s ceiling is the largest need the tool
+    surface can raise, so lifting it past the lease is the one edit that would quietly turn the
+    guard below into a live branch — pinned here rather than argued in a docstring."""
+    longest_need = MAX_BASH_TIMEOUT_MS // 1000 + EXEC_LEASE_MARGIN_SECONDS
+
+    assert longest_need <= SANDBOX_LEASE_SECONDS
+
+
+async def test_a_renewed_lease_carries_the_calls_after_it() -> None:
+    """A renewal has to leave behind a deadline the next call can trust. A renewed lease recorded
+    as anything already past would still buy the right span from the provider and still look right
+    in the call it makes — and then force a round trip on every remaining call of the conversation,
+    which is the whole cost this skip exists to avoid."""
+    clock = _Clock()
+    sdk = _Sdk()
+    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk, clock=clock)
+    handle = await carrier.create(_spec(uuid4()))
+    clock.advance(SANDBOX_LEASE_SECONDS - 100)
+    await carrier.exec(handle, ("bash", "-lc", "sleep 240"), 300)
+    assert sdk.sandboxes["sbx-1"].leases == [SANDBOX_LEASE_SECONDS]
+
+    for _ in range(3):
+        await carrier.exec(handle, ("bash", "-lc", "sleep 240"), 300)
+
+    assert sdk.sandboxes["sbx-1"].leases == [SANDBOX_LEASE_SECONDS]
+
+
+async def test_the_lease_deadline_is_taken_before_the_call_that_sets_it() -> None:
+    """The provider starts counting when it handles the request, not when the reply lands, so both
+    the open and the renewal read the clock before the call goes out. Recording it after would
+    believe the lease runs later than it does — the one direction that loses a container
+    mid-command. Each round trip here burns 100s, and each renewal below is due only if that 100s
+    is charged against the lease."""
+    clock = _Clock()
+    sdk = _Sdk(on_call=lambda: clock.advance(100))
+    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk, clock=clock)
+    opened = clock.now
+    handle = await carrier.create(_spec(uuid4()))
+
+    clock.now = opened + SANDBOX_LEASE_SECONDS - DEFAULT_IDLE_SECONDS + 1
+    renewed_at = clock.now
+    await carrier.exec(handle, ("bash", "-lc", "echo hi"), 2)
+
+    clock.now = renewed_at + SANDBOX_LEASE_SECONDS - DEFAULT_IDLE_SECONDS + 1
+    await carrier.exec(handle, ("bash", "-lc", "echo hi"), 2)
+
+    assert sdk.sandboxes["sbx-1"].leases == [SANDBOX_LEASE_SECONDS, SANDBOX_LEASE_SECONDS]
+
+
+async def test_a_write_renews_a_lease_that_no_longer_covers_the_idle_span() -> None:
+    """A write is the same kind of work and renews the same lease. The span it asks for is the idle
+    one, not its own duration: what has to survive is the model's thinking after the write, so a
+    turn offloading a run of results must not lose the container between two of them."""
+    clock = _Clock()
+    sdk = _Sdk()
+    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk, clock=clock)
+    handle = await carrier.create(_spec(uuid4()))
+    clock.advance(SANDBOX_LEASE_SECONDS - 100)
+
+    await carrier.write(handle, "/workspace/out.txt", b"payload")
+
+    assert sdk.sandboxes["sbx-1"].leases == [SANDBOX_LEASE_SECONDS]
+
+
+async def test_a_host_lookup_renews_a_lease_that_no_longer_covers_the_idle_span() -> None:
+    """A caller asking for the public host is about to dial the service behind it, so the lookup
+    renews the same lease — an address is worthless if the container pauses before the dial."""
+    clock = _Clock()
+    sdk = _Sdk()
+    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk, clock=clock)
+    handle = await carrier.create(_spec(uuid4()))
+    clock.advance(SANDBOX_LEASE_SECONDS - 100)
+
+    assert await carrier.host(handle, 9223) == "9223-sbx-1.e2b.test"
+    assert sdk.sandboxes["sbx-1"].leases == [SANDBOX_LEASE_SECONDS]
+
+
+async def test_a_process_that_reconnects_carries_the_lease_on_connect() -> None:
+    """A process that never created the sandbox reaches it through `connect`, which sets the
+    timeout itself — so the first command after a restart is covered exactly like any later one,
+    with no unleased window between attaching and running."""
+    sdk = _Sdk()
+    opener = E2BCarrier(api_key="k", template="t", sdk=sdk)
+    handle = await opener.create(_spec(uuid4()))
+    restarted = E2BCarrier(api_key="k", template="t", sdk=sdk)
+
+    await restarted.exec(handle, ("bash", "-lc", "sleep 500"), 540)
+
+    assert sdk.connect_leases == [SANDBOX_LEASE_SECONDS]
+    assert sdk.sandboxes["sbx-1"].leases == []
 
 
 async def test_write_uploads_through_the_filesystem_api() -> None:
