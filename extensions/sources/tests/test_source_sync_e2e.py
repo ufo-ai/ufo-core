@@ -28,6 +28,7 @@ from ufo_ext_sources.klaviyo import KLAVIYO_REVISION, KlaviyoConnector
 from ufo_ext_sources.registry import binding_name
 from ufo_ext_sources.tools import SourceObjects, SourceSpec
 
+from ufo.agent_scope import agent
 from ufo.blob import FilesystemBlobStore
 from ufo.config import Config
 from ufo.connectors import DIRECT_ACCOUNT, AuthProxy, ConnectorEntry, ConnectorRegistry
@@ -181,16 +182,15 @@ def _selected_fallback(store: CredentialStore, broker: object) -> DirectAuthProx
 async def _register_grant(
     state: State, grants: GrantStore, provider: str, account: str, host: str
 ) -> None:
-    await grants.record(
-        workspace_id=state.workspace_id,
-        agent_id=state.agent_id,
-        provider=provider,
-        account_id=account,
-        host=host,
-        grantor_member_id=state.member_id,
-        conversation_id=state.conversation_id,
-        shared=False,
-    )
+    with ws(state.workspace_id), agent(state.agent_id):
+        await grants.record(
+            provider=provider,
+            account_id=account,
+            host=host,
+            grantor_member_id=state.member_id,
+            conversation_id=state.conversation_id,
+            shared=False,
+        )
 
 
 async def _sync_and_search(
@@ -203,7 +203,7 @@ async def _sync_and_search(
     database_url: str,
     tmp_path: Path,
 ) -> str:
-    with ws(state.workspace_id):
+    with ws(state.workspace_id), agent(state.agent_id):
         await SourceObjects().apply(
             context,
             binding_name(provider, account, None),
@@ -462,7 +462,7 @@ async def test_keyed_source_reaches_memory_search_with_the_broker_namespace_inst
         KlaviyoConnector, "base_url", f"http://127.0.0.1:{listener.sockets[0].getsockname()[1]}"
     )
     try:
-        with ws(state.workspace_id):
+        with ws(state.workspace_id), agent(state.agent_id):
             await ws_current().put_credential("klaviyo", KLAVIYO_KEY)
         recalled = await _sync_and_search(
             state,

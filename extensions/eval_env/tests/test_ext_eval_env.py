@@ -51,7 +51,7 @@ BOB = "bob@evalco.test"
 class _Grants(GrantStore):
     providers: tuple[tuple[str, str], ...]
 
-    async def active_grants(self, _workspace_id: UUID, _agent_id: UUID) -> tuple[Grant, ...]:
+    async def active_grants(self) -> tuple[Grant, ...]:
         return tuple(
             Grant(
                 provider=provider,

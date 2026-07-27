@@ -10,6 +10,7 @@ from uuid import UUID
 import sqlalchemy as sa
 from dbos import DBOS, DBOSClient, EnqueueOptions, Queue
 
+from ufo.agent_scope import agent
 from ufo.blob import BlobStore, FilesystemBlobStore, S3BlobStore
 from ufo.browser import CdpProvider
 from ufo.config import Config
@@ -153,8 +154,26 @@ async def _execute_turn(workspace_id: str, turn_id: str) -> str:
     runtime = _runtime
     if runtime is None:
         raise RuntimeError("runtime not initialized (init_runtime runs in serve)")
-    with ws(UUID(workspace_id)):
-        return await _run_turn(runtime, turn_id)
+    workspace_uuid = UUID(workspace_id)
+    turn_uuid = UUID(turn_id)
+    with ws(workspace_uuid):
+        try:
+            async with workspace_tx() as connection:
+                agent_id = (
+                    await connection.execute(
+                        sa.select(tables.turn.c.agent_id).where(
+                            tables.turn.c.id == turn_uuid,
+                            tables.turn.c.workspace_id == workspace_uuid,
+                        )
+                    )
+                ).scalar_one()
+            with agent(agent_id):
+                return await _run_turn(runtime, turn_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            await _commit_failed_terminal(runtime.hub, turn_uuid, error)
+            return "failed"
 
 
 async def _enqueue_handoff(
@@ -594,7 +613,7 @@ async def _grant_cli_env(
         if turn.speaker_member_id is not None
         else turn.on_behalf_of_member_id
     )
-    granted = await grants.active_grants(turn.workspace_id, turn.agent_id)
+    granted = await grants.active_grants()
     env: dict[str, str] = {}
     for provider, cli in clis.items():
         private = sorted(

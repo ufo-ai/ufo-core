@@ -18,6 +18,7 @@ import pytest
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
 
+from ufo.agent_scope import agent
 from ufo.blob import FilesystemBlobStore, S3BlobStore
 from ufo.connectors import CliCredential, ForwardedResponse
 from ufo.credentials import CredentialStore, HostChoice
@@ -36,6 +37,7 @@ from ufo.sandbox.session import (
 )
 from ufo.schema import tables
 from ufo.schema.records import Turn
+from ufo.workspace import ws
 
 PROXY = ProxyEndpoint(port=8080, ca_cert="ca-pem")
 RUN_TOKENS = RunTokenCodec(b"sandbox-handle-test-secret")
@@ -348,16 +350,15 @@ async def _seed_grant(workspace_id: UUID, conversation_id: UUID, shared: bool) -
                 updated_at=sa.func.now(),
             )
         )
-    await GrantStore().record(
-        workspace_id=workspace_id,
-        agent_id=agent_id,
-        provider="hub",
-        account_id="acct-1",
-        host="api.hub.test",
-        grantor_member_id=member_id,
-        conversation_id=conversation_id,
-        shared=shared,
-    )
+    with ws(workspace_id), agent(agent_id):
+        await GrantStore().record(
+            provider="hub",
+            account_id="acct-1",
+            host="api.hub.test",
+            grantor_member_id=member_id,
+            conversation_id=conversation_id,
+            shared=shared,
+        )
     return agent_id, member_id
 
 
@@ -376,19 +377,20 @@ async def test_open_sandbox_exports_the_acting_members_grant_sentinels(
         update={"agent_id": agent_id, "speaker_member_id": member_id}
     )
 
-    await _open_sandbox(
-        carrier,
-        "e2b",
-        blob,
-        None,
-        PROXY,
-        RUN_TOKENS,
-        turn,
-        GrantStore(),
-        {"hub": HUB_CLI},
-        None,
-        (),
-    )
+    with ws(workspace_id), agent(agent_id):
+        await _open_sandbox(
+            carrier,
+            "e2b",
+            blob,
+            None,
+            PROXY,
+            RUN_TOKENS,
+            turn,
+            GrantStore(),
+            {"hub": HUB_CLI},
+            None,
+            (),
+        )
 
     assert carrier.specs[0].env == {**GIT_PROXY_AUTH_ENV, "HUB_TOKEN": grant_sentinel("acct-1")}
 
@@ -405,19 +407,20 @@ async def test_open_sandbox_exports_nothing_for_a_foreign_private_grant(
     blob = FilesystemBlobStore(root=tmp_path)
     turn = _turn(workspace_id, conversation_id).model_copy(update={"agent_id": agent_id})
 
-    await _open_sandbox(
-        carrier,
-        "e2b",
-        blob,
-        None,
-        PROXY,
-        RUN_TOKENS,
-        turn,
-        GrantStore(),
-        {"hub": HUB_CLI},
-        None,
-        (),
-    )
+    with ws(workspace_id), agent(agent_id):
+        await _open_sandbox(
+            carrier,
+            "e2b",
+            blob,
+            None,
+            PROXY,
+            RUN_TOKENS,
+            turn,
+            GrantStore(),
+            {"hub": HUB_CLI},
+            None,
+            (),
+        )
 
     assert carrier.specs[0].env == GIT_PROXY_AUTH_ENV
 
@@ -430,35 +433,35 @@ async def test_open_sandbox_exports_the_private_sentinel_over_the_shared_one(
     for members without one — mirroring `connector_account`'s preference."""
     workspace_id, conversation_id = await _conversation()
     agent_id, member_id = await _seed_grant(workspace_id, conversation_id, shared=False)
-    await GrantStore().record(
-        workspace_id=workspace_id,
-        agent_id=agent_id,
-        provider="hub",
-        account_id="acct-shared",
-        host="api.hub.test",
-        grantor_member_id=member_id,
-        conversation_id=conversation_id,
-        shared=True,
-    )
+    with ws(workspace_id), agent(agent_id):
+        await GrantStore().record(
+            provider="hub",
+            account_id="acct-shared",
+            host="api.hub.test",
+            grantor_member_id=member_id,
+            conversation_id=conversation_id,
+            shared=True,
+        )
     carrier = _ResumeRecordingCarrier(container_id="sbx-1")
     blob = FilesystemBlobStore(root=tmp_path)
     turn = _turn(workspace_id, conversation_id).model_copy(
         update={"agent_id": agent_id, "speaker_member_id": member_id}
     )
 
-    await _open_sandbox(
-        carrier,
-        "e2b",
-        blob,
-        None,
-        PROXY,
-        RUN_TOKENS,
-        turn,
-        GrantStore(),
-        {"hub": HUB_CLI},
-        None,
-        (),
-    )
+    with ws(workspace_id), agent(agent_id):
+        await _open_sandbox(
+            carrier,
+            "e2b",
+            blob,
+            None,
+            PROXY,
+            RUN_TOKENS,
+            turn,
+            GrantStore(),
+            {"hub": HUB_CLI},
+            None,
+            (),
+        )
 
     assert carrier.specs[0].env == {**GIT_PROXY_AUTH_ENV, "HUB_TOKEN": grant_sentinel("acct-1")}
 
@@ -471,16 +474,15 @@ async def test_open_sandbox_exports_nothing_when_the_shared_tier_is_ambiguous(
     skipped there too, not only when the member's own tier is ambiguous."""
     workspace_id, conversation_id = await _conversation()
     agent_id, member_id = await _seed_grant(workspace_id, conversation_id, shared=True)
-    await GrantStore().record(
-        workspace_id=workspace_id,
-        agent_id=agent_id,
-        provider="hub",
-        account_id="acct-shared-2",
-        host="api.hub.test",
-        grantor_member_id=member_id,
-        conversation_id=conversation_id,
-        shared=True,
-    )
+    with ws(workspace_id), agent(agent_id):
+        await GrantStore().record(
+            provider="hub",
+            account_id="acct-shared-2",
+            host="api.hub.test",
+            grantor_member_id=member_id,
+            conversation_id=conversation_id,
+            shared=True,
+        )
     other_member = uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
@@ -498,19 +500,20 @@ async def test_open_sandbox_exports_nothing_when_the_shared_tier_is_ambiguous(
         update={"agent_id": agent_id, "speaker_member_id": other_member}
     )
 
-    await _open_sandbox(
-        carrier,
-        "e2b",
-        blob,
-        None,
-        PROXY,
-        RUN_TOKENS,
-        turn,
-        GrantStore(),
-        {"hub": HUB_CLI},
-        None,
-        (),
-    )
+    with ws(workspace_id), agent(agent_id):
+        await _open_sandbox(
+            carrier,
+            "e2b",
+            blob,
+            None,
+            PROXY,
+            RUN_TOKENS,
+            turn,
+            GrantStore(),
+            {"hub": HUB_CLI},
+            None,
+            (),
+        )
 
     assert carrier.specs[0].env == GIT_PROXY_AUTH_ENV
 
@@ -524,35 +527,35 @@ async def test_open_sandbox_exports_nothing_when_the_account_is_ambiguous(
     authenticate instead of acting as whichever account sorts first."""
     workspace_id, conversation_id = await _conversation()
     agent_id, member_id = await _seed_grant(workspace_id, conversation_id, shared=False)
-    await GrantStore().record(
-        workspace_id=workspace_id,
-        agent_id=agent_id,
-        provider="hub",
-        account_id="acct-2",
-        host="api.hub.test",
-        grantor_member_id=member_id,
-        conversation_id=conversation_id,
-        shared=False,
-    )
+    with ws(workspace_id), agent(agent_id):
+        await GrantStore().record(
+            provider="hub",
+            account_id="acct-2",
+            host="api.hub.test",
+            grantor_member_id=member_id,
+            conversation_id=conversation_id,
+            shared=False,
+        )
     carrier = _ResumeRecordingCarrier(container_id="sbx-1")
     blob = FilesystemBlobStore(root=tmp_path)
     turn = _turn(workspace_id, conversation_id).model_copy(
         update={"agent_id": agent_id, "speaker_member_id": member_id}
     )
 
-    await _open_sandbox(
-        carrier,
-        "e2b",
-        blob,
-        None,
-        PROXY,
-        RUN_TOKENS,
-        turn,
-        GrantStore(),
-        {"hub": HUB_CLI},
-        None,
-        (),
-    )
+    with ws(workspace_id), agent(agent_id):
+        await _open_sandbox(
+            carrier,
+            "e2b",
+            blob,
+            None,
+            PROXY,
+            RUN_TOKENS,
+            turn,
+            GrantStore(),
+            {"hub": HUB_CLI},
+            None,
+            (),
+        )
 
     assert carrier.specs[0].env == GIT_PROXY_AUTH_ENV
 

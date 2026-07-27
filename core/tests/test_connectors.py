@@ -22,6 +22,7 @@ import sqlalchemy as sa
 import ufo_ext_sample as sample
 from cryptography.fernet import Fernet
 
+from ufo.agent_scope import agent
 from ufo.config import Config
 from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
@@ -34,6 +35,7 @@ from ufo.schema.records import Agent, ConnectRequest, TerminalFrame, Turn
 from ufo.serve import _connect_flow, _connect_redirect_uri
 from ufo.tools.builtins import ConnectAccountInput, connect_account_handler
 from ufo.tools.context import ToolContext
+from ufo.workspace import ws
 
 UNGRANTED_HOST = "api.ungranted.test"
 PUBLIC_BASE_URL = "https://ufo.example.com"
@@ -199,20 +201,20 @@ async def test_connector_account_is_scoped_to_the_turn_agents_own_grants(db: Non
     conversation_id = await _conversation(workspace_id, member_id)
     store = GrantStore()
     for agent_id, account in ((agent_a, "acct-a"), (agent_b, "acct-b")):
-        await store.record(
-            workspace_id=workspace_id,
-            agent_id=agent_id,
-            provider=sample.CONNECTOR_PROVIDER,
-            account_id=account,
-            host=sample.CONNECTOR_HOST,
-            grantor_member_id=member_id,
-            conversation_id=conversation_id,
-            shared=False,
-        )
+        with ws(workspace_id), agent(agent_id):
+            await store.record(
+                provider=sample.CONNECTOR_PROVIDER,
+                account_id=account,
+                host=sample.CONNECTOR_HOST,
+                grantor_member_id=member_id,
+                conversation_id=conversation_id,
+                shared=False,
+            )
     ctx_a = _turn_context(workspace_id, agent_a, conversation_id, member_id, grants=store)
-    assert await ctx_a.connector_account(sample.CONNECTOR_PROVIDER) == "acct-a"
-    with pytest.raises(ValueError, match="acct-b"):
-        await ctx_a.connector_account(sample.CONNECTOR_PROVIDER, account_id="acct-b")
+    with ws(workspace_id), agent(agent_a):
+        assert await ctx_a.connector_account(sample.CONNECTOR_PROVIDER) == "acct-a"
+        with pytest.raises(ValueError, match="acct-b"):
+            await ctx_a.connector_account(sample.CONNECTOR_PROVIDER, account_id="acct-b")
 
 
 async def test_connector_account_selects_the_named_account(db: None) -> None:
@@ -223,23 +225,24 @@ async def test_connector_account_selects_the_named_account(db: None) -> None:
     member_id, agent_id = await _member_agent(workspace_id)
     conversation_id = await _conversation(workspace_id, member_id)
     store = GrantStore()
-    for account in ("acct-1", "acct-2"):
-        await store.record(
-            workspace_id=workspace_id,
-            agent_id=agent_id,
-            provider=sample.CONNECTOR_PROVIDER,
-            account_id=account,
-            host=sample.CONNECTOR_HOST,
-            grantor_member_id=member_id,
-            conversation_id=conversation_id,
-            shared=False,
+    with ws(workspace_id), agent(agent_id):
+        for account in ("acct-1", "acct-2"):
+            await store.record(
+                provider=sample.CONNECTOR_PROVIDER,
+                account_id=account,
+                host=sample.CONNECTOR_HOST,
+                grantor_member_id=member_id,
+                conversation_id=conversation_id,
+                shared=False,
+            )
+        ctx = _turn_context(workspace_id, agent_id, conversation_id, member_id, grants=store)
+        with pytest.raises(ValueError, match=r"multiple active.*pass account_id"):
+            await ctx.connector_account(sample.CONNECTOR_PROVIDER)
+        assert (
+            await ctx.connector_account(sample.CONNECTOR_PROVIDER, account_id="acct-2") == "acct-2"
         )
-    ctx = _turn_context(workspace_id, agent_id, conversation_id, member_id, grants=store)
-    with pytest.raises(ValueError, match=r"multiple active.*pass account_id"):
-        await ctx.connector_account(sample.CONNECTOR_PROVIDER)
-    assert await ctx.connector_account(sample.CONNECTOR_PROVIDER, account_id="acct-2") == "acct-2"
-    with pytest.raises(ValueError, match="acct-9"):
-        await ctx.connector_account(sample.CONNECTOR_PROVIDER, account_id="acct-9")
+        with pytest.raises(ValueError, match="acct-9"):
+            await ctx.connector_account(sample.CONNECTOR_PROVIDER, account_id="acct-9")
 
 
 async def test_connector_accounts_lists_only_the_turn_agents_provider_accounts(db: None) -> None:
@@ -252,18 +255,18 @@ async def test_connector_accounts_lists_only_the_turn_agents_provider_accounts(d
         (sample.CONNECTOR_PROVIDER, "acct-1"),
         ("other", "acct-other"),
     ):
-        await store.record(
-            workspace_id=workspace_id,
-            agent_id=agent_id,
-            provider=provider,
-            account_id=account,
-            host=sample.CONNECTOR_HOST,
-            grantor_member_id=member_id,
-            conversation_id=conversation_id,
-            shared=False,
-        )
+        with ws(workspace_id), agent(agent_id):
+            await store.record(
+                provider=provider,
+                account_id=account,
+                host=sample.CONNECTOR_HOST,
+                grantor_member_id=member_id,
+                conversation_id=conversation_id,
+                shared=False,
+            )
     ctx = _turn_context(workspace_id, agent_id, conversation_id, member_id, grants=store)
-    assert await ctx.connector_accounts(sample.CONNECTOR_PROVIDER) == ("acct-1", "acct-2")
+    with ws(workspace_id), agent(agent_id):
+        assert await ctx.connector_accounts(sample.CONNECTOR_PROVIDER) == ("acct-1", "acct-2")
 
 
 async def test_connector_account_prefers_the_acting_members_private_account(db: None) -> None:
@@ -286,35 +289,37 @@ async def test_connector_account_prefers_the_acting_members_private_account(db: 
             )
         )
     store = GrantStore()
-    for account, shared in (("acct-m", False), ("acct-shared", True)):
-        await store.record(
-            workspace_id=workspace_id,
-            agent_id=agent_id,
-            provider=sample.CONNECTOR_PROVIDER,
-            account_id=account,
-            host=sample.CONNECTOR_HOST,
-            grantor_member_id=member_m,
-            conversation_id=conversation_id,
-            shared=shared,
+    with ws(workspace_id), agent(agent_id):
+        for account, shared in (("acct-m", False), ("acct-shared", True)):
+            await store.record(
+                provider=sample.CONNECTOR_PROVIDER,
+                account_id=account,
+                host=sample.CONNECTOR_HOST,
+                grantor_member_id=member_m,
+                conversation_id=conversation_id,
+                shared=shared,
+            )
+        ctx_m = _turn_context(workspace_id, agent_id, conversation_id, member_m, grants=store)
+        assert await ctx_m.connector_account(sample.CONNECTOR_PROVIDER) == "acct-m"
+        assert await ctx_m.connector_accounts(sample.CONNECTOR_PROVIDER) == (
+            "acct-m",
+            "acct-shared",
         )
-    ctx_m = _turn_context(workspace_id, agent_id, conversation_id, member_m, grants=store)
-    assert await ctx_m.connector_account(sample.CONNECTOR_PROVIDER) == "acct-m"
-    assert await ctx_m.connector_accounts(sample.CONNECTOR_PROVIDER) == ("acct-m", "acct-shared")
-    assert (
-        await ctx_m.connector_account(sample.CONNECTOR_PROVIDER, account_id="acct-shared")
-        == "acct-shared"
-    )
-    ctx_n = _turn_context(workspace_id, agent_id, conversation_id, member_n, grants=store)
-    assert await ctx_n.connector_account(sample.CONNECTOR_PROVIDER) == "acct-shared"
-    assert await ctx_n.connector_accounts(sample.CONNECTOR_PROVIDER) == ("acct-shared",)
-    with pytest.raises(ValueError, match="acct-m"):
-        await ctx_n.connector_account(sample.CONNECTOR_PROVIDER, account_id="acct-m")
-    scheduled = replace(
-        ctx_m,
-        speaker_member_id=None,
-        on_behalf_of_member_id=member_m,
-    )
-    assert await scheduled.connector_account(sample.CONNECTOR_PROVIDER) == "acct-m"
+        assert (
+            await ctx_m.connector_account(sample.CONNECTOR_PROVIDER, account_id="acct-shared")
+            == "acct-shared"
+        )
+        ctx_n = _turn_context(workspace_id, agent_id, conversation_id, member_n, grants=store)
+        assert await ctx_n.connector_account(sample.CONNECTOR_PROVIDER) == "acct-shared"
+        assert await ctx_n.connector_accounts(sample.CONNECTOR_PROVIDER) == ("acct-shared",)
+        with pytest.raises(ValueError, match="acct-m"):
+            await ctx_n.connector_account(sample.CONNECTOR_PROVIDER, account_id="acct-m")
+        scheduled = replace(
+            ctx_m,
+            speaker_member_id=None,
+            on_behalf_of_member_id=member_m,
+        )
+        assert await scheduled.connector_account(sample.CONNECTOR_PROVIDER) == "acct-m"
 
 
 def _turn_context(

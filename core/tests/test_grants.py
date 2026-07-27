@@ -13,6 +13,7 @@ from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
+from ufo.agent_scope import AgentUnbound, agent
 from ufo.connectors import CliCredential, ForwardedResponse
 from ufo.db import workspace_tx
 from ufo.grants import (
@@ -23,6 +24,7 @@ from ufo.grants import (
     ConnectUnavailable,
     Grant,
     GrantStore,
+    GrantSummary,
     OAuthAccount,
     UnknownProvider,
     grant_summaries,
@@ -45,6 +47,7 @@ from ufo.schema.records import Agent, ConnectRequest, TerminalFrame, Turn
 from ufo.surfaces.cli import callback_router
 from ufo.tools.builtins import ConnectAccountInput, connect_account_handler
 from ufo.tools.context import ToolContext
+from ufo.workspace import ws
 
 GRANTED_HOST = "api.granted.test"
 UNGRANTED_HOST = "api.ungranted.test"
@@ -123,6 +126,66 @@ async def _member_agent(workspace_id: UUID) -> tuple[UUID, UUID]:
     return member_id, agent_id
 
 
+async def _record(
+    store: GrantStore,
+    workspace_id: UUID,
+    agent_id: UUID,
+    provider: str,
+    account_id: str,
+    host: str,
+    grantor_member_id: UUID,
+    conversation_id: UUID,
+    shared: bool,
+) -> None:
+    with ws(workspace_id), agent(agent_id):
+        await store.record(
+            provider=provider,
+            account_id=account_id,
+            host=host,
+            grantor_member_id=grantor_member_id,
+            conversation_id=conversation_id,
+            shared=shared,
+        )
+
+
+async def _active(store: GrantStore, workspace_id: UUID, agent_id: UUID) -> tuple[Grant, ...]:
+    with ws(workspace_id), agent(agent_id):
+        return await store.active_grants()
+
+
+async def _set_shared(
+    store: GrantStore,
+    workspace_id: UUID,
+    agent_id: UUID,
+    provider: str,
+    account_id: str,
+    shared: bool,
+) -> bool:
+    with ws(workspace_id), agent(agent_id):
+        return await store.set_shared(provider, account_id, shared)
+
+
+async def _revoke(
+    store: GrantStore,
+    workspace_id: UUID,
+    agent_id: UUID,
+    provider: str,
+    account_id: str,
+) -> bool:
+    with ws(workspace_id), agent(agent_id):
+        return await store.revoke(provider, account_id)
+
+
+async def _summaries(workspace_id: UUID, agent_id: UUID) -> tuple[GrantSummary, ...]:
+    with ws(workspace_id), agent(agent_id):
+        return await grant_summaries()
+
+
+async def test_grant_store_requires_an_agent_boundary(db: None) -> None:
+    with ws(await _workspace()), pytest.raises(AgentUnbound):
+        await GrantStore().active_grants()
+
+
 def test_derive_admits_and_meters_the_granted_host_without_injecting() -> None:
     """A grant admits and meters its host but injects nothing — the broker holds the account's token
     and runs connector tools server-side, so no secret is on the wire."""
@@ -185,9 +248,10 @@ async def test_resolver_folds_the_transfer_hosts_into_the_turns_rules(db: None) 
     conversation_id = await _conversation(workspace_id, member_id)
     turn_id = await _turn(workspace_id, agent_id, conversation_id)
     store = GrantStore()
-    await store.record(
-        workspace_id=workspace_id,
-        agent_id=agent_id,
+    await _record(
+        store,
+        workspace_id,
+        agent_id,
         provider="stub",
         account_id="acct-42",
         host=GRANTED_HOST,
@@ -208,9 +272,10 @@ async def test_grant_round_trips_carrying_only_the_account_id(db: None) -> None:
     member_id, agent_id = await _member_agent(workspace_id)
     conversation_id = await _conversation(workspace_id, member_id)
     store = GrantStore()
-    await store.record(
-        workspace_id=workspace_id,
-        agent_id=agent_id,
+    await _record(
+        store,
+        workspace_id,
+        agent_id,
         provider="stub",
         account_id="acct-42",
         host=GRANTED_HOST,
@@ -218,7 +283,7 @@ async def test_grant_round_trips_carrying_only_the_account_id(db: None) -> None:
         conversation_id=conversation_id,
         shared=False,
     )
-    grants = await store.active_grants(workspace_id, agent_id)
+    grants = await _active(store, workspace_id, agent_id)
     assert grants == (
         Grant(
             provider="stub",
@@ -237,9 +302,10 @@ async def test_record_rejects_a_control_char_account_id(db: None) -> None:
     member_id, agent_id = await _member_agent(workspace_id)
     conversation_id = await _conversation(workspace_id, member_id)
     with pytest.raises(ValueError, match="control character"):
-        await GrantStore().record(
-            workspace_id=workspace_id,
-            agent_id=agent_id,
+        await _record(
+            GrantStore(),
+            workspace_id,
+            agent_id,
             provider="stub",
             account_id="acct-42\r\nX-Injected: 1",
             host=GRANTED_HOST,
@@ -255,9 +321,10 @@ async def test_reconnecting_the_same_account_updates_not_duplicates(db: None) ->
     conversation_id = await _conversation(workspace_id, member_id)
     store = GrantStore()
     for host in (HOST_A, HOST_B):
-        await store.record(
-            workspace_id=workspace_id,
-            agent_id=agent_id,
+        await _record(
+            store,
+            workspace_id,
+            agent_id,
             provider="stub",
             account_id="acct-42",
             host=host,
@@ -270,7 +337,7 @@ async def test_reconnecting_the_same_account_updates_not_duplicates(db: None) ->
             await connection.execute(sa.select(sa.func.count()).select_from(tables.grant))
         ).scalar_one()
     assert count == 1
-    grants = await store.active_grants(workspace_id, agent_id)
+    grants = await _active(store, workspace_id, agent_id)
     assert grants[0].host == HOST_B
 
 
@@ -349,9 +416,10 @@ async def test_grant_summaries_expose_the_audit_view(db: None) -> None:
     workspace_id = await _workspace()
     member_id, agent_id = await _member_agent(workspace_id)
     conversation_id = await _conversation(workspace_id, member_id)
-    await GrantStore().record(
-        workspace_id=workspace_id,
-        agent_id=agent_id,
+    await _record(
+        GrantStore(),
+        workspace_id,
+        agent_id,
         provider="stub",
         account_id="acct-42",
         host=GRANTED_HOST,
@@ -359,7 +427,7 @@ async def test_grant_summaries_expose_the_audit_view(db: None) -> None:
         conversation_id=conversation_id,
         shared=False,
     )
-    summaries = await grant_summaries(workspace_id)
+    summaries = await _summaries(workspace_id, agent_id)
     assert len(summaries) == 1
     summary = summaries[0]
     assert (summary.agent, summary.provider, summary.account_id) == ("assistant", "stub", "acct-42")
@@ -403,9 +471,10 @@ async def test_agent_a_authenticates_only_to_its_own_granted_host(db: None) -> N
     conversation_id = await _conversation(workspace_id, member_id)
     turn_a = await _turn(workspace_id, agent_a, conversation_id)
     store = GrantStore()
-    await store.record(
-        workspace_id=workspace_id,
-        agent_id=agent_a,
+    await _record(
+        store,
+        workspace_id,
+        agent_a,
         provider="stub",
         account_id="acct-a",
         host=HOST_A,
@@ -413,9 +482,10 @@ async def test_agent_a_authenticates_only_to_its_own_granted_host(db: None) -> N
         conversation_id=conversation_id,
         shared=False,
     )
-    await store.record(
-        workspace_id=workspace_id,
-        agent_id=agent_b,
+    await _record(
+        store,
+        workspace_id,
+        agent_b,
         provider="stub",
         account_id="acct-b",
         host=HOST_B,
@@ -495,9 +565,10 @@ async def test_a_grant_recorded_after_start_is_live_for_the_next_turn(db: None) 
             )
             == 403
         )
-        await store.record(
-            workspace_id=workspace_id,
-            agent_id=agent_id,
+        await _record(
+            store,
+            workspace_id,
+            agent_id,
             provider="stub",
             account_id="acct-a",
             host=HOST_A,
@@ -742,7 +813,7 @@ async def test_connect_flow_records_the_models_shared_decision(db: None) -> None
     )
     state = parse_qs(urlparse(url).query)["state"][0]
     await flow.complete(state=state, code="c")
-    (grant,) = await store.active_grants(workspace_id, agent_id)
+    (grant,) = await _active(store, workspace_id, agent_id)
     assert grant.shared is True
     assert grant.grantor_member_id == member_id
 
@@ -753,9 +824,10 @@ async def test_a_grant_defaults_private_and_reconnect_updates_shared(db: None) -
     conversation_id = await _conversation(workspace_id, member_id)
     store = GrantStore()
     for shared in (False, True):
-        await store.record(
-            workspace_id=workspace_id,
-            agent_id=agent_id,
+        await _record(
+            store,
+            workspace_id,
+            agent_id,
             provider="stub",
             account_id="acct-42",
             host=GRANTED_HOST,
@@ -763,9 +835,9 @@ async def test_a_grant_defaults_private_and_reconnect_updates_shared(db: None) -
             conversation_id=conversation_id,
             shared=shared,
         )
-    (grant,) = await store.active_grants(workspace_id, agent_id)
+    (grant,) = await _active(store, workspace_id, agent_id)
     assert grant.shared is True
-    (summary,) = await grant_summaries(workspace_id)
+    (summary,) = await _summaries(workspace_id, agent_id)
     assert summary.shared is True
 
 
@@ -776,9 +848,10 @@ async def test_set_shared_flips_only_the_named_agents_binding(db: None) -> None:
     conversation_id = await _conversation(workspace_id, member_id)
     store = GrantStore()
     for target in (agent_id, second_agent):
-        await store.record(
-            workspace_id=workspace_id,
-            agent_id=target,
+        await _record(
+            store,
+            workspace_id,
+            target,
             provider="stub",
             account_id="acct-42",
             host=GRANTED_HOST,
@@ -786,12 +859,12 @@ async def test_set_shared_flips_only_the_named_agents_binding(db: None) -> None:
             conversation_id=conversation_id,
             shared=False,
         )
-    assert await store.set_shared(workspace_id, agent_id, "stub", "acct-42", True) is True
-    (flipped,) = await store.active_grants(workspace_id, agent_id)
+    assert await _set_shared(store, workspace_id, agent_id, "stub", "acct-42", True) is True
+    (flipped,) = await _active(store, workspace_id, agent_id)
     assert flipped.shared is True
-    (untouched,) = await store.active_grants(workspace_id, second_agent)
+    (untouched,) = await _active(store, workspace_id, second_agent)
     assert untouched.shared is False
-    assert await store.set_shared(workspace_id, agent_id, "stub", "missing", True) is False
+    assert await _set_shared(store, workspace_id, agent_id, "stub", "missing", True) is False
 
 
 async def test_revoke_removes_only_the_named_agents_binding(db: None) -> None:
@@ -801,9 +874,10 @@ async def test_revoke_removes_only_the_named_agents_binding(db: None) -> None:
     conversation_id = await _conversation(workspace_id, member_id)
     store = GrantStore()
     for target in (agent_id, second_agent):
-        await store.record(
-            workspace_id=workspace_id,
-            agent_id=target,
+        await _record(
+            store,
+            workspace_id,
+            target,
             provider="stub",
             account_id="acct-42",
             host=GRANTED_HOST,
@@ -811,11 +885,11 @@ async def test_revoke_removes_only_the_named_agents_binding(db: None) -> None:
             conversation_id=conversation_id,
             shared=False,
         )
-    assert await store.revoke(workspace_id, agent_id, "stub", "acct-42") is True
-    assert await store.active_grants(workspace_id, agent_id) == ()
-    (kept,) = await store.active_grants(workspace_id, second_agent)
+    assert await _revoke(store, workspace_id, agent_id, "stub", "acct-42") is True
+    assert await _active(store, workspace_id, agent_id) == ()
+    (kept,) = await _active(store, workspace_id, second_agent)
     assert kept.account_id == "acct-42"
-    assert await store.revoke(workspace_id, agent_id, "stub", "acct-42") is False
+    assert await _revoke(store, workspace_id, agent_id, "stub", "acct-42") is False
 
 
 async def test_connect_account_carries_the_shared_intent(db: None) -> None:
@@ -942,9 +1016,10 @@ async def test_connector_accounts_admit_only_the_speakers_own_and_shared_grants(
         ("acct-shared", other_id, True),
         ("acct-other-private", other_id, False),
     ):
-        await store.record(
-            workspace_id=workspace_id,
-            agent_id=agent_id,
+        await _record(
+            store,
+            workspace_id,
+            agent_id,
             provider="stub",
             account_id=account_id,
             host=GRANTED_HOST,
@@ -954,13 +1029,14 @@ async def test_connector_accounts_admit_only_the_speakers_own_and_shared_grants(
         )
     ctx = _turn_context(workspace_id, agent_id, conversation_id, grantor_id)
     ctx = replace(ctx, grants=store)
-    assert await ctx.connector_accounts("stub") == ("acct-private", "acct-shared")
-    speakerless = replace(
-        _turn_context(workspace_id, agent_id, conversation_id, None), grants=store
-    )
-    assert await speakerless.connector_accounts("stub") == ("acct-shared",)
-    with pytest.raises(ValueError, match="acct-other-private"):
-        await ctx.connector_account("stub", "acct-other-private")
+    with ws(workspace_id), agent(agent_id):
+        assert await ctx.connector_accounts("stub") == ("acct-private", "acct-shared")
+        speakerless = replace(
+            _turn_context(workspace_id, agent_id, conversation_id, None), grants=store
+        )
+        assert await speakerless.connector_accounts("stub") == ("acct-shared",)
+        with pytest.raises(ValueError, match="acct-other-private"):
+            await ctx.connector_account("stub", "acct-other-private")
 
 
 async def test_connector_accounts_resolve_the_on_behalf_of_member_for_speakerless_turns(
@@ -973,9 +1049,10 @@ async def test_connector_accounts_resolve_the_on_behalf_of_member_for_speakerles
     initiator_id, agent_id = await _member_agent(workspace_id)
     conversation_id = await _conversation(workspace_id, initiator_id)
     store = GrantStore()
-    await store.record(
-        workspace_id=workspace_id,
-        agent_id=agent_id,
+    await _record(
+        store,
+        workspace_id,
+        agent_id,
         provider="stub",
         account_id="acct-initiator-private",
         host=GRANTED_HOST,
@@ -989,6 +1066,8 @@ async def test_connector_accounts_resolve_the_on_behalf_of_member_for_speakerles
         on_behalf_of_member_id=initiator_id,
     )
     assert on_behalf.speaker_member_id is None
-    assert await on_behalf.connector_accounts("stub") == ("acct-initiator-private",)
+    with ws(workspace_id), agent(agent_id):
+        assert await on_behalf.connector_accounts("stub") == ("acct-initiator-private",)
     anonymous = replace(_turn_context(workspace_id, agent_id, conversation_id, None), grants=store)
-    assert await anonymous.connector_accounts("stub") == ()
+    with ws(workspace_id), agent(agent_id):
+        assert await anonymous.connector_accounts("stub") == ()

@@ -24,6 +24,7 @@ from ufo_ext_eval_env.manifest import (
 
 from evals.driver import EVAL_SURFACE
 from evals.harness.scenario import ScenarioOutcome
+from ufo.agent_scope import agent
 from ufo.db import workspace_tx
 from ufo.grants import GrantStore
 from ufo.schema import tables
@@ -202,17 +203,16 @@ async def seed_office(workspace_id: UUID, agent_id: UUID) -> None:
                 )
             )
     grants = GrantStore()
-    for provider, host in ((EMAIL_PROVIDER, EMAIL_HOST), (CALENDAR_PROVIDER, CALENDAR_HOST)):
-        await grants.record(
-            workspace_id=workspace_id,
-            agent_id=agent_id,
-            provider=provider,
-            account_id=ACCOUNT_ID,
-            host=host,
-            grantor_member_id=member_id,
-            conversation_id=conversation_id,
-            shared=True,
-        )
+    with agent(agent_id):
+        for provider, host in ((EMAIL_PROVIDER, EMAIL_HOST), (CALENDAR_PROVIDER, CALENDAR_HOST)):
+            await grants.record(
+                provider=provider,
+                account_id=ACCOUNT_ID,
+                host=host,
+                grantor_member_id=member_id,
+                conversation_id=conversation_id,
+                shared=True,
+            )
 
 
 async def seed_office_with_sent_dinner(workspace_id: UUID, agent_id: UUID) -> None:

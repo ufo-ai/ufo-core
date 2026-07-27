@@ -22,10 +22,11 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from starlette.requests import Request
 
+from ufo.agent_scope import agent, agent_current
 from ufo.db import workspace_tx
 from ufo.schema import tables
 from ufo.schema.records import TerminalFrame
-from ufo.workspace import ws
+from ufo.workspace import ws, ws_current
 
 CONNECT_STATE_TTL_SECONDS = 600
 GRANT_SENTINEL_PREFIX = "UFO_SENTINEL_GRANT_"
@@ -158,11 +159,17 @@ class GrantStore:
     holds the account's token and executes tools server-side, so nothing here is a secret — the
     grant carries only the connected-account id, the host it admits, and its audit trail."""
 
+    @property
+    def workspace_id(self) -> UUID:
+        return ws_current().workspace_id
+
+    @property
+    def agent_id(self) -> UUID:
+        return agent_current().agent_id
+
     async def record(
         self,
         *,
-        workspace_id: UUID,
-        agent_id: UUID,
         provider: str,
         account_id: str,
         host: str,
@@ -185,8 +192,8 @@ class GrantStore:
                 insert(tables.grant)
                 .values(
                     id=uuid4(),
-                    workspace_id=workspace_id,
-                    agent_id=agent_id,
+                    workspace_id=self.workspace_id,
+                    agent_id=self.agent_id,
                     provider=provider,
                     account_id=account_id,
                     host=host,
@@ -213,7 +220,7 @@ class GrantStore:
                 )
             )
 
-    async def active_grants(self, workspace_id: UUID, agent_id: UUID) -> tuple[Grant, ...]:
+    async def active_grants(self) -> tuple[Grant, ...]:
         """One agent's grants in this workspace, in the shape the proxy-rule derivation and
         connector tools read. Agent-scoped: the per-turn resolver admits and meters only the turn
         agent's own grants, so agent A's rule set never carries agent B's host, and a tool executes
@@ -228,8 +235,8 @@ class GrantStore:
                         tables.grant.c.grantor_member_id,
                         tables.grant.c.shared,
                     ).where(
-                        tables.grant.c.workspace_id == workspace_id,
-                        tables.grant.c.agent_id == agent_id,
+                        tables.grant.c.workspace_id == self.workspace_id,
+                        tables.grant.c.agent_id == self.agent_id,
                     )
                 )
             ).all()
@@ -244,9 +251,7 @@ class GrantStore:
             for row in rows
         )
 
-    async def revoke(
-        self, workspace_id: UUID, agent_id: UUID, provider: str, account_id: str
-    ) -> bool:
+    async def revoke(self, provider: str, account_id: str) -> bool:
         """Remove this agent's grant binding the provider account — the delete half of the
         connector object kind. Connecting an account to an agent is one consent act, so its
         withdrawal is that binding's row delete: the account stops resolving for the agent's
@@ -256,17 +261,15 @@ class GrantStore:
         async with workspace_tx() as connection:
             deleted = await connection.execute(
                 sa.delete(tables.grant).where(
-                    tables.grant.c.workspace_id == workspace_id,
-                    tables.grant.c.agent_id == agent_id,
+                    tables.grant.c.workspace_id == self.workspace_id,
+                    tables.grant.c.agent_id == self.agent_id,
                     tables.grant.c.provider == provider,
                     tables.grant.c.account_id == account_id,
                 )
             )
         return deleted.rowcount > 0
 
-    async def set_shared(
-        self, workspace_id: UUID, agent_id: UUID, provider: str, account_id: str, shared: bool
-    ) -> bool:
+    async def set_shared(self, provider: str, account_id: str, shared: bool) -> bool:
         """Flip the disclosure of this agent's grant binding the provider account — the
         share/unshare half of the connector object kind. `shared` means shared with this agent's
         audience, so disclosure is a property of the binding: the same account connected to
@@ -276,8 +279,8 @@ class GrantStore:
                 sa.update(tables.grant)
                 .values(shared=shared, updated_at=sa.func.now())
                 .where(
-                    tables.grant.c.workspace_id == workspace_id,
-                    tables.grant.c.agent_id == agent_id,
+                    tables.grant.c.workspace_id == self.workspace_id,
+                    tables.grant.c.agent_id == self.agent_id,
                     tables.grant.c.provider == provider,
                     tables.grant.c.account_id == account_id,
                 )
@@ -347,11 +350,9 @@ class ConnectFlow:
     async def complete(self, *, state: str, code: str) -> GrantRecorded:
         claims = self._open(state)
         descriptor = self._provider(claims.provider)
-        with ws(claims.workspace_id):
+        with ws(claims.workspace_id), agent(claims.agent_id):
             account = await descriptor.exchange(code, self.redirect_uri, claims.workspace_id, state)
             await self.store.record(
-                workspace_id=claims.workspace_id,
-                agent_id=claims.agent_id,
                 provider=descriptor.provider,
                 account_id=account.account_id,
                 host=descriptor.host,
@@ -503,15 +504,23 @@ def connect_bridge_workspace(request: Request) -> UUID | None:
         return None
 
 
-async def grant_summaries(
-    workspace_id: UUID, agent_id: UUID | None = None
-) -> tuple[GrantSummary, ...]:
-    """Grants as audit rows, provider-ordered, joined to the granted agent's name. Workspace-wide
-    for the operator surface (`ufoctl grants`); narrowed to one agent for a member surface, which
-    never sees another agent's bindings. Reads no secret, so it needs no encryption key."""
-    scope = [tables.grant.c.workspace_id == workspace_id]
-    if agent_id is not None:
-        scope.append(tables.grant.c.agent_id == agent_id)
+async def grant_summaries() -> tuple[GrantSummary, ...]:
+    """The bound agent's grants as provider-ordered audit rows."""
+    return await _grant_summaries(
+        sa.and_(
+            tables.grant.c.workspace_id == ws_current().workspace_id,
+            tables.grant.c.agent_id == agent_current().agent_id,
+        )
+    )
+
+
+async def workspace_grant_summaries(workspace_id: UUID) -> tuple[GrantSummary, ...]:
+    """One workspace's grants for the operator surface."""
+    with ws(workspace_id):
+        return await _grant_summaries(tables.grant.c.workspace_id == workspace_id)
+
+
+async def _grant_summaries(scope: sa.ColumnElement[bool]) -> tuple[GrantSummary, ...]:
     async with workspace_tx() as connection:
         rows = (
             await connection.execute(
@@ -529,7 +538,7 @@ async def grant_summaries(
                 .select_from(
                     tables.grant.join(tables.agent, tables.grant.c.agent_id == tables.agent.c.id)
                 )
-                .where(*scope)
+                .where(scope)
                 .order_by(tables.grant.c.provider)
             )
         ).all()

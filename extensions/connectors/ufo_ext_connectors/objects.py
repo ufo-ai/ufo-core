@@ -113,21 +113,17 @@ class ConnectorObjects(MemberOwnedObjects[ConnectorSpec]):
         grant = (await self._named(ctx))[name]
         if ctx.grants is None:
             raise RuntimeError("grants unavailable: no credential key configured")
-        await ctx.grants.set_shared(
-            ctx.turn.workspace_id, ctx.turn.agent_id, grant.provider, grant.account_id, spec.shared
-        )
+        await ctx.grants.set_shared(grant.provider, grant.account_id, spec.shared)
 
     async def _delete_owned(self, ctx: ToolContext, name: str, owner: ObjectOwner) -> None:
         grant = (await self._named(ctx))[name]
         if ctx.grants is None:
             raise RuntimeError("grants unavailable: no credential key configured")
-        await ctx.grants.revoke(
-            ctx.turn.workspace_id, ctx.turn.agent_id, grant.provider, grant.account_id
-        )
+        await ctx.grants.revoke(grant.provider, grant.account_id)
 
     async def _named(self, ctx: ToolContext) -> dict[str, GrantSummary]:
         grouped: dict[str, list[GrantSummary]] = {}
-        for grant in await grant_summaries(ctx.turn.workspace_id, ctx.turn.agent_id):
+        for grant in await grant_summaries():
             grouped.setdefault(f"{_slug(grant.provider)}-{_slug(grant.account_id)}", []).append(
                 grant
             )

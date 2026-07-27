@@ -44,6 +44,7 @@ from evals.harness.capability import (
 )
 from evals.harness.harness import Json, JsonObject
 from evals.harness.scorers import answer_text, combine, restraint_scorer
+from ufo.agent_scope import agent
 from ufo.db import workspace_tx
 from ufo.grants import GrantStore
 from ufo.loop.engine import TOOL_OUTPUT_DIR
@@ -294,16 +295,15 @@ def _seeding(query: str) -> EvalSeed:
                     updated_at=sa.func.now(),
                 )
             )
-        await GrantStore().record(
-            workspace_id=workspace_id,
-            agent_id=agent_id,
-            provider=CODE_PROVIDER,
-            account_id=ACCOUNT_ID,
-            host=CODE_HOST,
-            grantor_member_id=member_id,
-            conversation_id=conversation_id,
-            shared=True,
-        )
+        with agent(agent_id):
+            await GrantStore().record(
+                provider=CODE_PROVIDER,
+                account_id=ACCOUNT_ID,
+                host=CODE_HOST,
+                grantor_member_id=member_id,
+                conversation_id=conversation_id,
+                shared=True,
+            )
 
     return seed
 

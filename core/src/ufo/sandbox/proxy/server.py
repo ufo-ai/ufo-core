@@ -55,6 +55,7 @@ from ufo.accounting import (
     record_egress_request,
     record_sandbox_tokens,
 )
+from ufo.agent_scope import agent
 from ufo.connectors import CliCredential, ForwardedResponse
 from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
@@ -214,24 +215,28 @@ class PerAgentRules:
     async def resolve(self, run: RunToken | None) -> tuple[Rule, ...]:
         if run is None:
             return self.base
-        turn = await self._turn_of(run)
-        if turn is None:
-            return self.base
-        agent_id, acting_member_id, internet_access_allowed = turn
-        rules = (*self.base, *self.internet) if internet_access_allowed else self.base
-        if self.credentials is not None and self.slots:
-            rules = (
-                *rules,
-                *await derive_credential_rules(self.slots, run.workspace_id, self.credentials),
-            )
-        if self.grants is None:
-            return rules
-        granted = await self.grants.active_grants(run.workspace_id, agent_id)
-        return (
-            *rules,
-            *derive_grant_rules(granted, self.transfer_hosts),
-            *derive_cli_rules(granted, acting_member_id, self.clis),
-        )
+        with ws(run.workspace_id):
+            turn = await self._turn_of(run)
+            if turn is None:
+                return self.base
+            agent_id, acting_member_id, internet_access_allowed = turn
+            with agent(agent_id):
+                rules = (*self.base, *self.internet) if internet_access_allowed else self.base
+                if self.credentials is not None and self.slots:
+                    rules = (
+                        *rules,
+                        *await derive_credential_rules(
+                            self.slots, run.workspace_id, self.credentials
+                        ),
+                    )
+                if self.grants is None:
+                    return rules
+                granted = await self.grants.active_grants()
+                return (
+                    *rules,
+                    *derive_grant_rules(granted, self.transfer_hosts),
+                    *derive_cli_rules(granted, acting_member_id, self.clis),
+                )
 
     async def _turn_of(self, run: RunToken) -> tuple[UUID, UUID | None, bool] | None:
         """The turn's agent, acting member, and snapshotted internet policy in one indexed read.
@@ -274,15 +279,16 @@ class PerAgentRules:
         token at all is denied at CONNECT and the key never reaches the wire. Read fresh per request
         — never the per-turn rule cache — so a turn that ends between requests can no longer draw
         the key, and it costs one indexed lookup on the turn's primary key."""
-        async with workspace_tx() as connection:
-            status = (
-                await connection.execute(
-                    sa.select(tables.turn.c.status).where(
-                        tables.turn.c.id == run.turn_id,
-                        tables.turn.c.workspace_id == run.workspace_id,
+        with ws(run.workspace_id):
+            async with workspace_tx() as connection:
+                status = (
+                    await connection.execute(
+                        sa.select(tables.turn.c.status).where(
+                            tables.turn.c.id == run.turn_id,
+                            tables.turn.c.workspace_id == run.workspace_id,
+                        )
                     )
-                )
-            ).scalar_one_or_none()
+                ).scalar_one_or_none()
         return status == RUNNING
 
 

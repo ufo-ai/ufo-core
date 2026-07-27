@@ -60,7 +60,7 @@ OTHER_LABEL = "Other Widgets"
 class _Grants(GrantStore):
     accounts: tuple[str, ...]
 
-    async def active_grants(self, _workspace_id: UUID, _agent_id: UUID) -> tuple[Grant, ...]:
+    async def active_grants(self) -> tuple[Grant, ...]:
         return tuple(
             Grant(
                 provider=sample.CONNECTOR_PROVIDER,

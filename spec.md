@@ -39,6 +39,11 @@ test for the extension API — every entry must be expressible without touching 
 
 ## Workspace model
 
+Every trusted boundary — turn execution, OAuth callback, sandbox proxy — binds
+`with ws(workspace_id), agent(agent_id):` from its durable record or signed claims. Agent-scoped
+capabilities derive both keys from that scope; only durable records, admission assertions, and
+workspace-administration reads carry an explicit agent id.
+
 Tables (all keyed by `workspace_id`, `created_at`, `updated_at`):
 
 | Table | Owns |

@@ -34,6 +34,7 @@ from ufo_ext_connectors.tools import (
 )
 from ufo_ext_pipedream.broker import PipedreamBroker
 
+from ufo.agent_scope import agent
 from ufo.config import Config
 from ufo.connectors import ConnectorRegistry
 from ufo.credentials import CredentialStore
@@ -485,12 +486,13 @@ async def test_connect_binds_a_grant_and_call_external_tool_executes_via_pipedre
         ext_by_tool[tool.name],
         speaker_member_id=member_id,
     )
-    result = await tool.handler(
-        ctx,
-        tool.input_model.model_validate(
-            {"tool_name": GMAIL_ACTION, "source_id": PROVIDER, "arguments": {"to": "a@b.test"}}
-        ),
-    )
+    with ws(workspace_id), agent(agent_id):
+        result = await tool.handler(
+            ctx,
+            tool.input_model.model_validate(
+                {"tool_name": GMAIL_ACTION, "source_id": PROVIDER, "arguments": {"to": "a@b.test"}}
+            ),
+        )
     assert result.is_error is False
     assert json.loads(result.content[0].text)["exports"]["$summary"] == "sent"
     assert executed == [
@@ -514,27 +516,34 @@ async def test_call_external_tool_executes_a_workspace_owned_grant(
     conversation_id = await _conversation(workspace_id, member_id)
     turn_id = await _turn(workspace_id, agent_id, conversation_id)
     store = GrantStore()
-    await store.record(
-        workspace_id=workspace_id,
-        agent_id=agent_id,
-        provider=PROVIDER,
-        account_id=PIPEDREAM_ACCOUNT,
-        host=PROVIDER_HOST,
-        grantor_member_id=member_id,
-        conversation_id=conversation_id,
-        shared=False,
-    )
+    with ws(workspace_id), agent(agent_id):
+        await store.record(
+            provider=PROVIDER,
+            account_id=PIPEDREAM_ACCOUNT,
+            host=PROVIDER_HOST,
+            grantor_member_id=member_id,
+            conversation_id=conversation_id,
+            shared=False,
+        )
     owner = f"{pipedream.EXTERNAL_USER_PREFIX}{workspace_id}"
     executed: list[dict[str, object]] = []
     _install_transport(monkeypatch, _pipedream_handler(owner, executed=executed))
-    result = await call_external_tool(
-        _ctx(workspace_id, agent_id, conversation_id, turn_id, store, speaker_member_id=member_id),
-        CallExternalToolInput(
-            tool_name=GMAIL_ACTION,
-            source_id=PROVIDER,
-            arguments={"to": "a@b.test"},
-        ),
-    )
+    with ws(workspace_id), agent(agent_id):
+        result = await call_external_tool(
+            _ctx(
+                workspace_id,
+                agent_id,
+                conversation_id,
+                turn_id,
+                store,
+                speaker_member_id=member_id,
+            ),
+            CallExternalToolInput(
+                tool_name=GMAIL_ACTION,
+                source_id=PROVIDER,
+                arguments={"to": "a@b.test"},
+            ),
+        )
     assert result.is_error is False
     assert executed == [
         {
@@ -595,22 +604,25 @@ async def test_call_external_tool_augments_an_unknown_key_with_the_real_actions(
     conversation_id = await _conversation(workspace_id, member_id)
     turn_id = await _turn(workspace_id, agent_id, conversation_id)
     store = GrantStore()
-    await store.record(
-        workspace_id=workspace_id,
-        agent_id=agent_id,
-        provider=PROVIDER,
-        account_id=PIPEDREAM_ACCOUNT,
-        host=PROVIDER_HOST,
-        grantor_member_id=member_id,
-        conversation_id=conversation_id,
-        shared=False,
-    )
+    with ws(workspace_id), agent(agent_id):
+        await store.record(
+            provider=PROVIDER,
+            account_id=PIPEDREAM_ACCOUNT,
+            host=PROVIDER_HOST,
+            grantor_member_id=member_id,
+            conversation_id=conversation_id,
+            shared=False,
+        )
     _install_transport(
         monkeypatch,
         _pipedream_handler(pipedream.connection_user_id(workspace_id, "unknown-key")),
     )
     ctx = _ctx(workspace_id, agent_id, conversation_id, turn_id, store, speaker_member_id=member_id)
-    with pytest.raises(pipedream.PipedreamError, match=f"actions available: {GMAIL_ACTION}"):
+    with (
+        ws(workspace_id),
+        agent(agent_id),
+        pytest.raises(pipedream.PipedreamError, match=f"actions available: {GMAIL_ACTION}"),
+    ):
         await call_external_tool(
             ctx,
             CallExternalToolInput(tool_name=UNKNOWN_ACTION, source_id=PROVIDER, arguments={}),
@@ -628,16 +640,15 @@ async def test_call_external_tool_with_a_stale_grant_says_reconnect(
     conversation_id = await _conversation(workspace_id, member_id)
     turn_id = await _turn(workspace_id, agent_id, conversation_id)
     store = GrantStore()
-    await store.record(
-        workspace_id=workspace_id,
-        agent_id=agent_id,
-        provider=PROVIDER,
-        account_id="ca_composio_era",
-        host=PROVIDER_HOST,
-        grantor_member_id=member_id,
-        conversation_id=conversation_id,
-        shared=False,
-    )
+    with ws(workspace_id), agent(agent_id):
+        await store.record(
+            provider=PROVIDER,
+            account_id="ca_composio_era",
+            host=PROVIDER_HOST,
+            grantor_member_id=member_id,
+            conversation_id=conversation_id,
+            shared=False,
+        )
     base = _pipedream_handler(pipedream.connection_user_id(workspace_id, "stale"))
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -647,7 +658,11 @@ async def test_call_external_tool_with_a_stale_grant_says_reconnect(
 
     _install_transport(monkeypatch, handler)
     ctx = _ctx(workspace_id, agent_id, conversation_id, turn_id, store, speaker_member_id=member_id)
-    with pytest.raises(pipedream.PipedreamError, match="reconnect with connect_account"):
+    with (
+        ws(workspace_id),
+        agent(agent_id),
+        pytest.raises(pipedream.PipedreamError, match="reconnect with connect_account"),
+    ):
         await call_external_tool(
             ctx,
             CallExternalToolInput(tool_name=GMAIL_ACTION, source_id=PROVIDER, arguments={}),
@@ -666,16 +681,15 @@ async def test_an_in_band_action_error_says_reconnect_only_for_a_stale_account(
     conversation_id = await _conversation(workspace_id, member_id)
     turn_id = await _turn(workspace_id, agent_id, conversation_id)
     store = GrantStore()
-    await store.record(
-        workspace_id=workspace_id,
-        agent_id=agent_id,
-        provider=PROVIDER,
-        account_id=PIPEDREAM_ACCOUNT,
-        host=PROVIDER_HOST,
-        grantor_member_id=member_id,
-        conversation_id=conversation_id,
-        shared=False,
-    )
+    with ws(workspace_id), agent(agent_id):
+        await store.record(
+            provider=PROVIDER,
+            account_id=PIPEDREAM_ACCOUNT,
+            host=PROVIDER_HOST,
+            grantor_member_id=member_id,
+            conversation_id=conversation_id,
+            shared=False,
+        )
     base = _pipedream_handler(pipedream.connection_user_id(workspace_id, "in-band"))
     in_band_error: dict[str, object] = {}
 
@@ -688,7 +702,11 @@ async def test_an_in_band_action_error_says_reconnect_only_for_a_stale_account(
     ctx = _ctx(workspace_id, agent_id, conversation_id, turn_id, store, speaker_member_id=member_id)
 
     in_band_error.update({"name": "Error", "message": "External user not found"})
-    with pytest.raises(pipedream.PipedreamError, match="reconnect with connect_account"):
+    with (
+        ws(workspace_id),
+        agent(agent_id),
+        pytest.raises(pipedream.PipedreamError, match="reconnect with connect_account"),
+    ):
         await call_external_tool(
             ctx,
             CallExternalToolInput(tool_name=GMAIL_ACTION, source_id=PROVIDER, arguments={}),
@@ -696,7 +714,7 @@ async def test_an_in_band_action_error_says_reconnect_only_for_a_stale_account(
 
     in_band_error.clear()
     in_band_error.update({"name": "Error", "message": "CRM account not found for id 123"})
-    with pytest.raises(pipedream.PipedreamError) as raised:
+    with ws(workspace_id), agent(agent_id), pytest.raises(pipedream.PipedreamError) as raised:
         await call_external_tool(
             ctx,
             CallExternalToolInput(tool_name=GMAIL_ACTION, source_id=PROVIDER, arguments={}),

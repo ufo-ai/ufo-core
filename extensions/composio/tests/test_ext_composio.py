@@ -41,6 +41,7 @@ from ufo_ext_connectors.tools import (
     search_connector_tools,
 )
 
+from ufo.agent_scope import agent
 from ufo.config import Config
 from ufo.connectors import ConnectorRegistry
 from ufo.credentials import CredentialStore
@@ -877,12 +878,13 @@ async def test_connect_binds_a_grant_and_call_external_tool_executes_via_composi
         ext_by_tool[tool.name],
         speaker_member_id=member_id,
     )
-    result = await tool.handler(
-        ctx,
-        tool.input_model.model_validate(
-            {"tool_name": GITHUB_SLUG, "source_id": PROVIDER, "arguments": {"owner": "acme"}}
-        ),
-    )
+    with ws(workspace_id), agent(agent_id):
+        result = await tool.handler(
+            ctx,
+            tool.input_model.model_validate(
+                {"tool_name": GITHUB_SLUG, "source_id": PROVIDER, "arguments": {"owner": "acme"}}
+            ),
+        )
     assert result.is_error is False
     assert json.loads(result.content[0].text)["successful"] is True
     assert executed == [
@@ -971,9 +973,10 @@ async def test_open_namespace_slug_connects_describes_searches_and_executes(
     )
     assert notion_tool in [t["slug"] for t in json.loads(found.content[0].text)["tools"]]
 
-    result = await call_external_tool(
-        ctx, CallExternalToolInput(tool_name=notion_tool, source_id="notion", arguments={})
-    )
+    with ws(workspace_id), agent(agent_id):
+        result = await call_external_tool(
+            ctx, CallExternalToolInput(tool_name=notion_tool, source_id="notion", arguments={})
+        )
     assert result.is_error is False
     assert json.loads(result.content[0].text)["successful"] is True
     assert executed and executed[0]["connected_account_id"] == COMPOSIO_ACCOUNT
@@ -1070,7 +1073,11 @@ async def test_call_external_tool_without_a_grant_fails_loud(
     executed: list[dict[str, object]] = []
     monkeypatch.setattr(composio, "composio_client", lambda: _mock_client(COMPOSIO_USER, executed))
     ctx = _ctx(workspace_id, agent_id, conversation_id, turn_id, GrantStore())
-    with pytest.raises(ValueError, match="no 'github' account is available"):
+    with (
+        ws(workspace_id),
+        agent(agent_id),
+        pytest.raises(ValueError, match="no 'github' account is available"),
+    ):
         await call_external_tool(
             ctx,
             CallExternalToolInput(tool_name=GITHUB_SLUG, source_id=PROVIDER, arguments={}),
@@ -1088,19 +1095,22 @@ async def test_call_external_tool_augments_a_404_with_the_real_slugs(
     conversation_id = await _conversation(workspace_id, member_id)
     turn_id = await _turn(workspace_id, agent_id, conversation_id)
     store = GrantStore()
-    await store.record(
-        workspace_id=workspace_id,
-        agent_id=agent_id,
-        provider=PROVIDER,
-        account_id=COMPOSIO_ACCOUNT,
-        host=PROVIDER_HOST,
-        grantor_member_id=member_id,
-        conversation_id=conversation_id,
-        shared=False,
-    )
+    with ws(workspace_id), agent(agent_id):
+        await store.record(
+            provider=PROVIDER,
+            account_id=COMPOSIO_ACCOUNT,
+            host=PROVIDER_HOST,
+            grantor_member_id=member_id,
+            conversation_id=conversation_id,
+            shared=False,
+        )
     monkeypatch.setattr(composio, "composio_client", _mock_client)
     ctx = _ctx(workspace_id, agent_id, conversation_id, turn_id, store, speaker_member_id=member_id)
-    with pytest.raises(composio.ComposioError, match=f"tools available on github: {GITHUB_SLUG}"):
+    with (
+        ws(workspace_id),
+        agent(agent_id),
+        pytest.raises(composio.ComposioError, match=f"tools available on github: {GITHUB_SLUG}"),
+    ):
         await call_external_tool(
             ctx,
             CallExternalToolInput(tool_name=UNKNOWN_SLUG, source_id=PROVIDER, arguments={}),
@@ -1118,16 +1128,15 @@ async def test_call_external_tool_with_a_stale_account_says_reconnect(
     conversation_id = await _conversation(workspace_id, member_id)
     turn_id = await _turn(workspace_id, agent_id, conversation_id)
     store = GrantStore()
-    await store.record(
-        workspace_id=workspace_id,
-        agent_id=agent_id,
-        provider=PROVIDER,
-        account_id=COMPOSIO_ACCOUNT,
-        host=PROVIDER_HOST,
-        grantor_member_id=member_id,
-        conversation_id=conversation_id,
-        shared=False,
-    )
+    with ws(workspace_id), agent(agent_id):
+        await store.record(
+            provider=PROVIDER,
+            account_id=COMPOSIO_ACCOUNT,
+            host=PROVIDER_HOST,
+            grantor_member_id=member_id,
+            conversation_id=conversation_id,
+            shared=False,
+        )
     base = _composio_handler(COMPOSIO_USER)
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -1140,7 +1149,11 @@ async def test_call_external_tool_with_a_stale_account_says_reconnect(
     client = composio.ComposioClient(api_key="test", transport=httpx.MockTransport(handler))
     monkeypatch.setattr(composio, "composio_client", lambda: client)
     ctx = _ctx(workspace_id, agent_id, conversation_id, turn_id, store, speaker_member_id=member_id)
-    with pytest.raises(composio.ComposioError, match="reconnect with connect_account"):
+    with (
+        ws(workspace_id),
+        agent(agent_id),
+        pytest.raises(composio.ComposioError, match="reconnect with connect_account"),
+    ):
         await call_external_tool(
             ctx,
             CallExternalToolInput(tool_name=GITHUB_SLUG, source_id=PROVIDER, arguments={}),

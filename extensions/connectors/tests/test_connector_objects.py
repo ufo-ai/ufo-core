@@ -16,10 +16,11 @@ import yaml
 from ufo_ext_connectors.manifest import manifest
 from ufo_ext_connectors.objects import CONNECTOR_KIND
 
+from ufo.agent_scope import agent
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.ext.loader import turn_tools
-from ufo.grants import GrantStore, grant_summaries
+from ufo.grants import GrantStore, grant_summaries, workspace_grant_summaries
 from ufo.objects import OwnerRequired, UnknownObject, VerbNotSupported
 from ufo.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
 from ufo.schema import tables
@@ -112,16 +113,15 @@ async def _grant(
     provider: str,
     account_id: str,
 ) -> None:
-    await GrantStore().record(
-        workspace_id=workspace_id,
-        agent_id=agent_id,
-        provider=provider,
-        account_id=account_id,
-        host=f"api.{provider}.test",
-        grantor_member_id=grantor_id,
-        conversation_id=conversation_id,
-        shared=False,
-    )
+    with ws(workspace_id), agent(agent_id):
+        await GrantStore().record(
+            provider=provider,
+            account_id=account_id,
+            host=f"api.{provider}.test",
+            grantor_member_id=grantor_id,
+            conversation_id=conversation_id,
+            shared=False,
+        )
 
 
 def _tool_context(
@@ -165,7 +165,7 @@ async def _text(tool: ToolDef, ctx: ToolContext, **args: object) -> str:
 
 async def test_granted_accounts_list_and_read_through_the_verbs(db: None) -> None:
     workspace_id, agent_id, conversation_id, _owner, grantor_id, _other = await _seed()
-    with ws(workspace_id):
+    with ws(workspace_id), agent(agent_id):
         await _grant(
             workspace_id, agent_id, conversation_id, grantor_id, "gmail", "alice@example.com"
         )
@@ -219,7 +219,11 @@ async def test_connect_stays_the_only_create_path(db: None) -> None:
             )
         }
     )
-    with ws(workspace_id), pytest.raises(VerbNotSupported, match="connect_account"):
+    with (
+        ws(workspace_id),
+        agent(agent_id),
+        pytest.raises(VerbNotSupported, match="connect_account"),
+    ):
         await apply_tool.handler(_tool_context(workspace_id, agent_id), args)
 
 
@@ -246,40 +250,44 @@ async def test_object_verbs_touch_only_the_turn_agents_binding(db: None) -> None
             await _grant(
                 workspace_id, agent_id, conversation_id, grantor_id, "gmail", "alice@example.com"
             )
-        ctx = _tool_context(workspace_id, agent_a, grantor_id)
-        listing = json.loads(await _text(_object_tool("object_list"), ctx, kind=CONNECTOR_KIND))
-        assert [row["name"] for row in listing["objects"]] == ["gmail-alice-example-com"]
+        with agent(agent_a):
+            ctx = _tool_context(workspace_id, agent_a, grantor_id)
+            listing = json.loads(await _text(_object_tool("object_list"), ctx, kind=CONNECTOR_KIND))
+            assert [row["name"] for row in listing["objects"]] == ["gmail-alice-example-com"]
 
-        apply_tool = _object_tool("object_apply")
-        await apply_tool.handler(
-            ctx,
-            apply_tool.input_model.model_validate(
-                {
-                    "manifest": yaml.safe_dump(
-                        {
-                            "kind": CONNECTOR_KIND,
-                            "name": "gmail-alice-example-com",
-                            "spec": {
-                                "provider": "gmail",
-                                "account_id": "alice@example.com",
-                                "shared": True,
-                            },
-                        }
-                    )
-                }
-            ),
-        )
-        flipped = {grant.agent: grant.shared for grant in await grant_summaries(workspace_id)}
+            apply_tool = _object_tool("object_apply")
+            await apply_tool.handler(
+                ctx,
+                apply_tool.input_model.model_validate(
+                    {
+                        "manifest": yaml.safe_dump(
+                            {
+                                "kind": CONNECTOR_KIND,
+                                "name": "gmail-alice-example-com",
+                                "spec": {
+                                    "provider": "gmail",
+                                    "account_id": "alice@example.com",
+                                    "shared": True,
+                                },
+                            }
+                        )
+                    }
+                ),
+            )
+        flipped = {
+            grant.agent: grant.shared for grant in await workspace_grant_summaries(workspace_id)
+        }
         assert flipped == {"assistant": True, "exec": False}
 
-        delete_tool = _object_tool("object_delete")
-        await delete_tool.handler(
-            ctx,
-            delete_tool.input_model.model_validate(
-                {"kind": CONNECTOR_KIND, "name": "gmail-alice-example-com"}
-            ),
-        )
-        survivors = await grant_summaries(workspace_id)
+        with agent(agent_a):
+            delete_tool = _object_tool("object_delete")
+            await delete_tool.handler(
+                ctx,
+                delete_tool.input_model.model_validate(
+                    {"kind": CONNECTOR_KIND, "name": "gmail-alice-example-com"}
+                ),
+            )
+        survivors = await workspace_grant_summaries(workspace_id)
         assert [grant.agent for grant in survivors] == ["exec"]
         assert survivors[0].shared is False
 
@@ -287,7 +295,7 @@ async def test_object_verbs_touch_only_the_turn_agents_binding(db: None) -> None
 async def test_revoke_admits_the_grantor_and_the_owner_only(db: None) -> None:
     workspace_id, agent_id, conversation_id, owner_id, grantor_id, other_id = await _seed()
     delete_tool = _object_tool("object_delete")
-    with ws(workspace_id):
+    with ws(workspace_id), agent(agent_id):
         await _grant(
             workspace_id, agent_id, conversation_id, grantor_id, "gmail", "alice@example.com"
         )
@@ -317,7 +325,7 @@ async def test_revoke_admits_the_grantor_and_the_owner_only(db: None) -> None:
         )
         assert revoked["deleted"] is True
         assert revoked["spec"]["account_id"] == "alice@example.com"
-        assert await grant_summaries(workspace_id) == ()
+        assert await grant_summaries() == ()
 
         await _grant(
             workspace_id, agent_id, conversation_id, grantor_id, "gmail", "alice@example.com"
@@ -328,7 +336,7 @@ async def test_revoke_admits_the_grantor_and_the_owner_only(db: None) -> None:
             kind=CONNECTOR_KIND,
             name="gmail-alice-example-com",
         )
-        assert await grant_summaries(workspace_id) == ()
+        assert await grant_summaries() == ()
 
 
 def _share_manifest(account_id: str, shared: bool, name: str = "gmail-alice-example-com") -> str:
@@ -344,7 +352,7 @@ def _share_manifest(account_id: str, shared: bool, name: str = "gmail-alice-exam
 async def test_the_grantor_shares_their_account_and_get_reflects_it(db: None) -> None:
     workspace_id, agent_id, conversation_id, _owner, grantor_id, _other = await _seed()
     apply_tool = _object_tool("object_apply")
-    with ws(workspace_id):
+    with ws(workspace_id), agent(agent_id):
         await _grant(
             workspace_id, agent_id, conversation_id, grantor_id, "gmail", "alice@example.com"
         )
@@ -354,7 +362,7 @@ async def test_the_grantor_shares_their_account_and_get_reflects_it(db: None) ->
             manifest=_share_manifest("alice@example.com", True),
         )
 
-        summaries = await grant_summaries(workspace_id)
+        summaries = await grant_summaries()
         assert summaries[0].shared is True
 
         fetched = yaml.safe_load(
@@ -371,7 +379,7 @@ async def test_the_grantor_shares_their_account_and_get_reflects_it(db: None) ->
 async def test_an_unrelated_member_may_not_flip_sharing_but_the_owner_may(db: None) -> None:
     workspace_id, agent_id, conversation_id, owner_id, grantor_id, other_id = await _seed()
     apply_tool = _object_tool("object_apply")
-    with ws(workspace_id):
+    with ws(workspace_id), agent(agent_id):
         await _grant(
             workspace_id, agent_id, conversation_id, grantor_id, "gmail", "alice@example.com"
         )
@@ -391,13 +399,13 @@ async def test_an_unrelated_member_may_not_flip_sharing_but_the_owner_may(db: No
             _tool_context(workspace_id, agent_id, owner_id),
             manifest=_share_manifest("alice@example.com", False),
         )
-        assert (await grant_summaries(workspace_id))[0].shared is False
+        assert (await grant_summaries())[0].shared is False
 
 
 async def test_apply_still_refuses_everything_but_the_shared_flip(db: None) -> None:
     workspace_id, agent_id, conversation_id, _owner, grantor_id, _other = await _seed()
     apply_tool = _object_tool("object_apply")
-    with ws(workspace_id):
+    with ws(workspace_id), agent(agent_id):
         await _grant(
             workspace_id, agent_id, conversation_id, grantor_id, "gmail", "alice@example.com"
         )
@@ -418,7 +426,7 @@ async def test_apply_still_refuses_everything_but_the_shared_flip(db: None) -> N
 
 async def test_list_summary_tags_private_and_shared_accounts(db: None) -> None:
     workspace_id, agent_id, conversation_id, _owner, grantor_id, _other = await _seed()
-    with ws(workspace_id):
+    with ws(workspace_id), agent(agent_id):
         await _grant(
             workspace_id, agent_id, conversation_id, grantor_id, "gmail", "alice@example.com"
         )
@@ -437,7 +445,7 @@ async def test_list_summary_tags_private_and_shared_accounts(db: None) -> None:
 
 async def test_read_verbs_hide_other_members_private_connectors(db: None) -> None:
     workspace_id, agent_id, conversation_id, owner_id, grantor_id, other_id = await _seed()
-    with ws(workspace_id):
+    with ws(workspace_id), agent(agent_id):
         await _grant(
             workspace_id, agent_id, conversation_id, grantor_id, "gmail", "alice@example.com"
         )
@@ -489,7 +497,7 @@ async def test_reshare_and_revoke_need_a_live_speaker(db: None) -> None:
     workspace_id, agent_id, conversation_id, _owner, grantor_id, _other = await _seed()
     apply_tool = _object_tool("object_apply")
     delete_tool = _object_tool("object_delete")
-    with ws(workspace_id):
+    with ws(workspace_id), agent(agent_id):
         await _grant(
             workspace_id, agent_id, conversation_id, grantor_id, "gmail", "alice@example.com"
         )
@@ -510,6 +518,6 @@ async def test_reshare_and_revoke_need_a_live_speaker(db: None) -> None:
                     {"kind": CONNECTOR_KIND, "name": "gmail-alice-example-com"}
                 ),
             )
-        summaries = await grant_summaries(workspace_id)
+        summaries = await grant_summaries()
     assert len(summaries) == 1
     assert summaries[0].shared is False

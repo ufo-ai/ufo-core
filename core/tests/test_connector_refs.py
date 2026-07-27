@@ -15,6 +15,7 @@ from ufo_ext_eval_env.manifest import CODE_FIXTURE_PREFIX, CODE_PROVIDER, NAME
 
 from evals import connector_refs
 from evals.harness.capability import CapabilityOutput, ToolInvocation
+from ufo.agent_scope import agent
 from ufo.db import workspace_tx
 from ufo.grants import GrantStore
 from ufo.loop.engine import OFFLOAD_NOTICE, TOOL_OUTPUT_DIR
@@ -120,14 +121,14 @@ async def test_every_case_seed_lands_when_they_all_run_at_once(db: None) -> None
     workspace_id, agent_id = await _workspace_with_owner()
     seeds = [case.seed for case in connector_refs.CASES if case.seed is not None]
     assert len(seeds) == len(connector_refs.QUERIES)
-    with ws(workspace_id):
+    with ws(workspace_id), agent(agent_id):
         await asyncio.gather(*(seed(workspace_id, agent_id) for seed in seeds))
         store = ScopedStore(extension=NAME)
         landed = {
             query: await store.get(f"{CODE_FIXTURE_PREFIX}{query}")
             for query in connector_refs.QUERIES
         }
-        grants = await GrantStore().active_grants(workspace_id, agent_id)
+        grants = await GrantStore().active_grants()
 
     assert landed == connector_refs.QUERIES
     assert [grant.provider for grant in grants] == [CODE_PROVIDER]

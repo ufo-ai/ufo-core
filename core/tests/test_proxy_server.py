@@ -7,7 +7,7 @@ import re
 import socket
 import ssl
 import struct
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -24,6 +24,7 @@ from cryptography.fernet import Fernet
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 import ufo.sandbox.proxy.server as proxy_server
+from ufo.agent_scope import agent
 from ufo.connectors import CliCredential, ForwardedResponse
 from ufo.credentials import CredentialStore, HostChoice
 from ufo.db import workspace_tx
@@ -66,6 +67,7 @@ from ufo.sandbox.proxy.server import (
 from ufo.sandbox.session import RunToken, RunTokenCodec
 from ufo.schema import tables
 from ufo.schema.records import Usage
+from ufo.workspace import ws, ws_current
 
 SEARCH_HOST = "api.search.test"
 MODEL_HOST = "api.anthropic.com"
@@ -2152,16 +2154,15 @@ async def test_resolve_derives_forward_rules_for_the_acting_member(db: None) -> 
     async with workspace_tx() as connection:
         spoken = await _seed_turn(connection, speaker=True)
     store = GrantStore()
-    await store.record(
-        workspace_id=spoken.workspace_id,
-        agent_id=spoken.agent_id,
-        provider="hub",
-        account_id="acct-1",
-        host=FORWARD_HOST,
-        grantor_member_id=spoken.member_id,
-        conversation_id=spoken.conversation_id,
-        shared=False,
-    )
+    with ws(spoken.workspace_id), agent(spoken.agent_id):
+        await store.record(
+            provider="hub",
+            account_id="acct-1",
+            host=FORWARD_HOST,
+            grantor_member_id=spoken.member_id,
+            conversation_id=spoken.conversation_id,
+            shared=False,
+        )
     cli = CliCredential(env="HUB_TOKEN", header="authorization", forward=_RecordingForwarder())
     resolver = PerAgentRules(base=(), grants=store, clis={"hub": cli})
     rules = await resolver.resolve(RunToken(spoken.workspace_id, spoken.turn_id))
@@ -2177,6 +2178,30 @@ async def test_resolve_derives_forward_rules_for_the_acting_member(db: None) -> 
     resolver = PerAgentRules(base=(), grants=store, clis={"hub": cli})
     silent = await resolver.resolve(RunToken(spoken.workspace_id, spoken.turn_id))
     assert not any(isinstance(rule, ForwardRule) for rule in silent)
+
+
+async def test_proxy_turn_reads_bind_the_run_workspace(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with workspace_tx() as connection:
+        seeded = await _seed_turn(connection)
+    original = proxy_server.workspace_tx
+    scopes: list[UUID] = []
+
+    @asynccontextmanager
+    async def scoped_tx() -> AsyncIterator[AsyncConnection]:
+        scopes.append(ws_current().workspace_id)
+        async with original() as connection:
+            yield connection
+
+    monkeypatch.setattr(proxy_server, "workspace_tx", scoped_tx)
+    resolver = PerAgentRules(base=(), grants=None)
+    run = RunToken(seeded.workspace_id, seeded.turn_id)
+
+    await resolver.resolve(run)
+    await resolver.turn_live(run)
+
+    assert scopes == [seeded.workspace_id, seeded.workspace_id]
 
 
 async def test_real_git_presents_the_credential_sentinel_to_the_credentialed_host(

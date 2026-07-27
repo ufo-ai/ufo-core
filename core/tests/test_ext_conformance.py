@@ -26,6 +26,7 @@ from ufo_ext_embed_openai import EMBED_DIM
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.store import MemoryStore, PageIndexer
 
+from ufo.agent_scope import agent
 from ufo.bearer import mint_token
 from ufo.blob import FilesystemBlobStore
 from ufo.config import (
@@ -833,16 +834,15 @@ async def test_connector_execute_tool_resolves_the_bound_account_without_the_san
     workspace_id = await _workspace()
     member_id, agent_id, conversation_id = await _grantable(workspace_id)
     grants = GrantStore()
-    await grants.record(
-        workspace_id=workspace_id,
-        agent_id=agent_id,
-        provider=sample.CONNECTOR_PROVIDER,
-        account_id=sample.CONNECTOR_ACCOUNT,
-        host=sample.CONNECTOR_HOST,
-        grantor_member_id=member_id,
-        conversation_id=conversation_id,
-        shared=False,
-    )
+    with ws(workspace_id), agent(agent_id):
+        await grants.record(
+            provider=sample.CONNECTOR_PROVIDER,
+            account_id=sample.CONNECTOR_ACCOUNT,
+            host=sample.CONNECTOR_HOST,
+            grantor_member_id=member_id,
+            conversation_id=conversation_id,
+            shared=False,
+        )
     manifest = _sample_manifest()
     tools, ext_by_tool = turn_tools((manifest,), _credential_store())
     tool = next(tool for tool in tools if tool.name == sample.CONNECTOR_EXECUTE_TOOL_NAME)
@@ -872,7 +872,7 @@ async def test_connector_execute_tool_resolves_the_bound_account_without_the_san
     )
     args = tool.input_model.model_validate({"tool_name": "sample_list"})
     idempotency_key = f"{context.turn.id}/{sample.CONNECTOR_EXECUTE_TOOL_NAME}/c1"
-    with ws(workspace_id):
+    with ws(workspace_id), agent(agent_id):
         result = await tool.handler(replace(context, idempotency_key=idempotency_key), args)
         assert result.is_error is False
         assert result.content[0].text == sample.CONNECTOR_ACCOUNT

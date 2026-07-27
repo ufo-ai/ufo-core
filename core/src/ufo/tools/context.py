@@ -288,7 +288,7 @@ class ToolContext:
         if self.grants is None:
             raise ConnectUnavailable("grants unavailable: no credential key configured")
         acting = self.acting_member_id
-        granted = await self.grants.active_grants(self.turn.workspace_id, self.turn.agent_id)
+        granted = await self.grants.active_grants()
         private = sorted(
             grant.account_id
             for grant in granted

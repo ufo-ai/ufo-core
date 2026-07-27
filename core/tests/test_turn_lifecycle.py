@@ -1,14 +1,17 @@
 import asyncio
 import json
 from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
 from dbos import DBOSClient
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncConnection
 from ufo_ext_index_default import DefaultIndex
 from ufo_testsupport.stream_gate import GatingHub, StreamGate, release_when_running
 
@@ -773,10 +776,7 @@ async def test_failure_commits_terminal_bills_nothing_preserves_inbound(
     assert _bodies(stored) == ["explode"]
 
 
-async def test_backstop_terminal_carries_class_and_message(db: None) -> None:
-    """A failure outside the engine commits a terminal carrying the class AND the message — a bare
-    class name gives the debugger and CLI nothing to act on (the 2026-07-21 wedge surfaced as a
-    naked \"RuntimeError\")."""
+async def _running_turn() -> tuple[UUID, UUID]:
     workspace_id, agent_id, conversation_id, turn_id = uuid4(), uuid4(), uuid4(), uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
@@ -819,6 +819,14 @@ async def test_backstop_terminal_carries_class_and_message(db: None) -> None:
                 updated_at=sa.func.now(),
             )
         )
+    return workspace_id, turn_id
+
+
+async def test_backstop_terminal_carries_class_and_message(db: None) -> None:
+    """A failure outside the engine commits a terminal carrying the class AND the message — a bare
+    class name gives the debugger and CLI nothing to act on (the 2026-07-21 wedge surfaced as a
+    naked \"RuntimeError\")."""
+    _, turn_id = await _running_turn()
     await loop_queue._commit_failed_terminal(
         InProcessHub(), turn_id, RuntimeError("boom outside the engine")
     )
@@ -833,6 +841,40 @@ async def test_backstop_terminal_carries_class_and_message(db: None) -> None:
     assert row.status == "failed"
     assert row.terminal["error_class"] == "RuntimeError"
     assert row.terminal["error_message"] == "boom outside the engine"
+
+
+async def test_agent_scope_lookup_failure_commits_a_terminal(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace_id, turn_id = await _running_turn()
+    original = loop_queue.workspace_tx
+    first = True
+
+    @asynccontextmanager
+    async def fail_agent_lookup() -> AsyncIterator[AsyncConnection]:
+        nonlocal first
+        if first:
+            first = False
+            raise RuntimeError("agent lookup failed")
+        async with original() as connection:
+            yield connection
+
+    monkeypatch.setattr(loop_queue, "workspace_tx", fail_agent_lookup)
+    monkeypatch.setattr(loop_queue, "_runtime", SimpleNamespace(hub=InProcessHub()))
+
+    assert await loop_queue._execute_turn(str(workspace_id), str(turn_id)) == "failed"
+
+    async with original() as connection:
+        row = (
+            await connection.execute(
+                sa.select(tables.turn.c.status, tables.turn.c.terminal).where(
+                    tables.turn.c.id == turn_id
+                )
+            )
+        ).one()
+    assert row.status == "failed"
+    assert row.terminal["error_class"] == "RuntimeError"
+    assert row.terminal["error_message"] == "agent lookup failed"
 
 
 async def test_next_turn_sees_a_failed_turns_inbound(surface: Turns) -> None:

@@ -26,7 +26,7 @@ from ufo.credentials import CredentialStore
 from ufo.db import apply_migrations, dispose_db, init_db, workspace_tx
 from ufo.ext.loader import load_manifests, lockfile_path
 from ufo.ext.store import ExtensionStore, read_catalog
-from ufo.grants import GrantSummary, grant_summaries
+from ufo.grants import GrantSummary, workspace_grant_summaries
 from ufo.onboarding import DEFAULT_AGENT_MODEL, AlreadyInitialized, Onboarded, Onboarding
 from ufo.proxy_serve import OWNER_DSN_ENV
 from ufo.proxy_serve import run as proxy_run
@@ -660,7 +660,7 @@ async def _read_grants(config: Config) -> tuple[GrantSummary, ...]:
     try:
         async with workspace_tx() as connection:
             workspace_id = (await connection.execute(sa.select(tables.workspace.c.id))).scalar_one()
-        return await grant_summaries(workspace_id)
+        return await workspace_grant_summaries(workspace_id)
     finally:
         await dispose_db()
 
