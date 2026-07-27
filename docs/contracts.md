@@ -37,7 +37,7 @@ class Grant(BaseModel):            id: UUID; agent_id: UUID; kind: Literal["conn
 class Credential(BaseModel):       slot: str; ciphertext: bytes                            # encrypted at rest, values never logged
 class MemoryItem(BaseModel):       id: UUID; subject: str; body: str; item_class: Literal["fact", "episodic", "semantic"]
                                    embedding_digest: str; superseded_by: UUID | None
-class Page(BaseModel):             source_ref: str; digest: str; body: str; stream: str; title: str
+class Page(BaseModel):             source_ref: str; body: str; stream: str; title: str
                                    created_at: str | None; updated_at: str | None
 class SpendCap(BaseModel):         scope: Literal["workspace", "member", "agent"]; subject_id: UUID | None
                                    dimension: Dimension; cap: Decimal; window: Window

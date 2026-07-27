@@ -36,7 +36,7 @@ from ufo_ext_memory.store import (
 from ufo.accounting import Pricing
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
-from ufo.ext.context import ModelAccess, ScopedStore
+from ufo.ext.context import ModelAccess, ScopedStore, context_for
 from ufo.ext.manifest import (
     HookContext,
     HookOutcome,
@@ -52,7 +52,7 @@ from ufo.sandbox.local import LocalCarrier
 from ufo.schema import tables
 from ufo.schema.records import Usage
 from ufo.sources.sync import CorePageFeed, FolderSource, PageChange, SyncDriver
-from ufo.subjects import SHARED_SUBJECT
+from ufo.subjects import SHARED_SUBJECT, member_subject
 from ufo.workspace import ws
 
 WHEN = datetime(2026, 1, 1, tzinfo=UTC)
@@ -89,6 +89,21 @@ class StubModelClient:
         self.calls += 1
         yield TextDelta(text=self.payload)
         yield self.usage
+
+
+@dataclass
+class SupersedingModelClient:
+    donor_id: UUID
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(memory_item)
+                .values(superseded_by=uuid4())
+                .where(memory_item.c.id == self.donor_id)
+            )
+        yield TextDelta(text="the consolidated summary must not land")
+        yield Usage(input_tokens=10, output_tokens=5)
 
 
 def _registry(client: StubModelClient) -> ModelRegistry:
@@ -171,8 +186,45 @@ async def _seed_page(blob: FilesystemBlobStore, workspace_id: UUID, body: str) -
     return page_id
 
 
+async def _seed_page_authority(
+    workspace_id: UUID, page_id: UUID, source_id: UUID, subject: str
+) -> None:
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.source).values(
+                id=source_id,
+                workspace_id=workspace_id,
+                backend="test",
+                config={},
+                subject=subject,
+                next_sync_at=WHEN,
+                created_at=WHEN,
+                updated_at=WHEN,
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.page).values(
+                id=page_id,
+                workspace_id=workspace_id,
+                source_id=source_id,
+                digest="sha256:page",
+                body_ref=f"pages/{page_id}",
+                stream="notes",
+                title="Page",
+                subject=subject,
+                tombstone=False,
+                created_at=WHEN,
+                updated_at=WHEN,
+            )
+        )
+
+
 async def _seed_aged_fact(
-    workspace_id: UUID, body: str, vector: tuple[float, ...], confidence: int
+    workspace_id: UUID,
+    body: str,
+    vector: tuple[float, ...],
+    confidence: int,
+    created_from_page_id: UUID | None = None,
 ) -> UUID:
     """Insert a fact aged past MIN_OLDEST_AGE with its one already-derived chunk, so the
     consolidator's aged-fact query admits it and recall can surface it through the index legs."""
@@ -189,6 +241,8 @@ async def _seed_aged_fact(
                 memory_kind=KIND_FACT,
                 confidence=confidence,
                 source_ref=None,
+                created_from_page_id=created_from_page_id,
+                created_from_page_revision=(1 if created_from_page_id is not None else None),
                 embedding_digest="sha256:seeded",
                 superseded_by=None,
                 created_at=created,
@@ -240,6 +294,7 @@ def _store(workspace_id: UUID, vector: tuple[float, ...]) -> MemoryStore:
         embed=embed,
         transaction=workspace_tx,
         workspace_id=workspace_id,
+        page_states=context_for("memory", frozenset()).page_states,
     )
 
 
@@ -355,6 +410,8 @@ async def test_derive_facts_rides_its_own_cursor_independent_of_the_indexer(
 async def test_derive_facts_is_idempotent(db: None) -> None:
     workspace_id = await _workspace()
     page_id = uuid4()
+    source_id = uuid4()
+    subject = f"member:{uuid4()}"
     payload = json.dumps(
         {
             "facts": [
@@ -370,17 +427,19 @@ async def test_derive_facts_is_idempotent(db: None) -> None:
     )
     change = PageChange(
         page_id=page_id,
-        source_id=uuid4(),
-        subject=SHARED_SUBJECT,
+        source_id=source_id,
+        subject=subject,
         stream="notes",
         title="Office location",
         body="The office is in the old cannery building by the water.",
-        digest="sha256:x",
+        digest="sha256:page",
+        revision=1,
         tombstone=False,
         created_at=WHEN,
         as_of=WHEN - timedelta(days=365),
         changed_at=WHEN,
     )
+    await _seed_page_authority(workspace_id, page_id, source_id, subject)
     deriver = FactDeriver(store=_store(workspace_id, vec((2, 1.0))), model=_model(payload))
     with ws(workspace_id):
         await deriver.apply((change,))
@@ -389,7 +448,61 @@ async def test_derive_facts_is_idempotent(db: None) -> None:
     rows = [row for row in await _facts(workspace_id) if row.item_class == FACT]
     assert len(rows) == 1
     assert rows[0].body == "the office is in the old cannery building"
+    assert rows[0].subject == subject
     assert rows[0].as_of.replace(tzinfo=UTC) == change.as_of
+
+
+async def test_fact_deriver_ignores_a_stale_private_payload_after_sanitization(
+    db: None,
+) -> None:
+    workspace_id = await _workspace()
+    page_id, source_id = uuid4(), uuid4()
+    await _seed_page_authority(workspace_id, page_id, source_id, SHARED_SUBJECT)
+    payload = json.dumps(
+        {
+            "facts": [
+                {
+                    "page_id": str(page_id),
+                    "notability": "high",
+                    "body": "the acquisition plan has been redacted",
+                }
+            ]
+        }
+    )
+    client = StubModelClient(payload, Usage(input_tokens=10, output_tokens=5))
+    model = ModelAccess(_Resolver(AUTO_MODEL, CORE_PRICING, client))
+    private_subject = member_subject(uuid4())
+    private = PageChange(
+        page_id=page_id,
+        source_id=source_id,
+        subject=private_subject,
+        stream="notes",
+        title="Private plan",
+        body="the private acquisition codename is polaris",
+        digest="sha256:private",
+        revision=0,
+        tombstone=False,
+        created_at=WHEN,
+        as_of=WHEN,
+        changed_at=WHEN,
+    )
+    sanitized = replace(
+        private,
+        subject=SHARED_SUBJECT,
+        body="the acquisition plan has been redacted before sharing with the team",
+        digest="sha256:page",
+        revision=1,
+    )
+    deriver = FactDeriver(store=_store(workspace_id, vec((2, 1.0))), model=model)
+    with ws(workspace_id):
+        await deriver.apply((private,))
+        assert client.calls == 0
+        await deriver.apply((sanitized,))
+    assert client.calls == 1
+    rows = [row for row in await _facts(workspace_id) if row.item_class == FACT]
+    assert len(rows) == 1
+    assert rows[0].body == "the acquisition plan has been redacted"
+    assert rows[0].subject == SHARED_SUBJECT
 
 
 async def test_derive_facts_without_a_model_skips_but_advances_cursor(
@@ -489,7 +602,67 @@ async def test_consolidation_without_a_model_writes_nothing(db: None) -> None:
     assert all(row.superseded_by is None for row in rows if row.id in originals)
 
 
-async def _insert_fact(workspace_id: UUID, created_at: datetime) -> None:
+async def test_consolidation_excludes_page_derived_facts(db: None) -> None:
+    workspace_id = await _workspace()
+    probe = vec((6, 1.0))
+    page_id = uuid4()
+    originals = [
+        await _seed_aged_fact(
+            workspace_id,
+            f"the page-derived atlas statement {index}",
+            probe,
+            5,
+            created_from_page_id=page_id,
+        )
+        for index in range(MIN_CLUSTER_FACTS)
+    ]
+    with ws(workspace_id):
+        await MemoryConsolidator(
+            embed=StubEmbed(probe),
+            transaction=workspace_tx,
+            workspace_id=workspace_id,
+            model=_model("a summary"),
+        ).run()
+    rows = await _facts(workspace_id)
+    assert [row for row in rows if row.item_class == SEMANTIC] == []
+    assert all(row.superseded_by is None for row in rows if row.id in originals)
+
+
+async def test_consolidation_revalidates_donors_after_the_model_call(db: None) -> None:
+    workspace_id = await _workspace()
+    probe = vec((7, 1.0))
+    originals = [
+        await _seed_aged_fact(
+            workspace_id,
+            f"the orion protocol statement {index}",
+            probe,
+            5,
+        )
+        for index in range(MIN_CLUSTER_FACTS)
+    ]
+    model = ModelAccess(
+        _Resolver(
+            AUTO_MODEL,
+            CORE_PRICING,
+            SupersedingModelClient(originals[0]),
+        )
+    )
+    with ws(workspace_id):
+        await MemoryConsolidator(
+            embed=StubEmbed(probe),
+            transaction=workspace_tx,
+            workspace_id=workspace_id,
+            model=model,
+        ).run()
+    rows = await _facts(workspace_id)
+    assert [row for row in rows if row.item_class == SEMANTIC] == []
+    assert next(row for row in rows if row.id == originals[0]).superseded_by is not None
+    assert all(row.superseded_by is None for row in rows if row.id in set(originals[1:]))
+
+
+async def _insert_fact(
+    workspace_id: UUID, created_at: datetime, created_from_page_id: UUID | None = None
+) -> None:
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(memory_item).values(
@@ -501,6 +674,8 @@ async def _insert_fact(workspace_id: UUID, created_at: datetime) -> None:
                 memory_kind=KIND_FACT,
                 confidence=5,
                 source_ref=None,
+                created_from_page_id=created_from_page_id,
+                created_from_page_revision=(1 if created_from_page_id is not None else None),
                 embedding_digest="sha256:seeded",
                 superseded_by=None,
                 created_at=created_at,
@@ -516,7 +691,12 @@ async def test_consolidate_candidates_name_only_workspaces_with_a_clusterable_ba
     least MIN_CLUSTER_FACTS live facts aged past MIN_OLDEST_AGE, the consolidator's own floor. A
     workspace below the floor and one whose facts are all young are never candidates, so a fleet's
     consolidation-free workspaces run no hourly transaction."""
-    clusterable, thin, young = await _workspace(), await _workspace(), await _workspace()
+    clusterable, thin, young, page_derived = (
+        await _workspace(),
+        await _workspace(),
+        await _workspace(),
+        await _workspace(),
+    )
     aged = datetime.now(UTC) - MIN_OLDEST_AGE - timedelta(hours=1)
     fresh = datetime.now(UTC)
     for workspace_id, stamps in (
@@ -526,6 +706,8 @@ async def test_consolidate_candidates_name_only_workspaces_with_a_clusterable_ba
     ):
         for stamp in stamps:
             await _insert_fact(workspace_id, stamp)
+    for _ in range(MIN_CLUSTER_FACTS):
+        await _insert_fact(page_derived, aged, created_from_page_id=uuid4())
     consolidate = next(
         job
         for job in memory_manifest.manifest().jobs

@@ -69,6 +69,7 @@ class MemoryObjects:
 
     async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage:
         ext = _require_ext(ctx)
+        subjects = recall_subjects(ctx.audience)
         async with ext.transaction() as connection:
             rows = (
                 (
@@ -79,10 +80,12 @@ class MemoryObjects:
                             memory_item.c.subject,
                             memory_item.c.item_class,
                             memory_item.c.memory_kind,
+                            memory_item.c.created_from_page_id,
+                            memory_item.c.created_from_page_revision,
                         )
                         .where(
                             memory_item.c.workspace_id == ext.store.workspace_id,
-                            memory_item.c.subject.in_(recall_subjects(ctx.audience)),
+                            memory_item.c.subject.in_(subjects),
                             memory_item.c.superseded_by.is_(None),
                         )
                         .order_by(memory_item.c.created_at.desc(), memory_item.c.id)
@@ -92,6 +95,10 @@ class MemoryObjects:
                 .mappings()
                 .all()
             )
+        page_ids = tuple(
+            row["created_from_page_id"] for row in rows if row["created_from_page_id"] is not None
+        )
+        current = await ext.page_states(page_ids)
         return object_page(
             tuple(
                 ObjectRow(
@@ -104,6 +111,13 @@ class MemoryObjects:
                     },
                 )
                 for row in rows
+                if row["created_from_page_id"] is None
+                or (
+                    (state := current.get(row["created_from_page_id"])) is not None
+                    and state.subject == row["subject"]
+                    and state.revision == row["created_from_page_revision"]
+                    and state.subject in subjects
+                )
             ),
             query,
         )
@@ -114,6 +128,7 @@ class MemoryObjects:
         except ValueError:
             return None
         ext = _require_ext(ctx)
+        subjects = recall_subjects(ctx.audience)
         async with ext.transaction() as connection:
             row = (
                 (
@@ -121,7 +136,7 @@ class MemoryObjects:
                         sa.select(memory_item).where(
                             memory_item.c.workspace_id == ext.store.workspace_id,
                             memory_item.c.id == item_id,
-                            memory_item.c.subject.in_(recall_subjects(ctx.audience)),
+                            memory_item.c.subject.in_(subjects),
                         )
                     )
                 )
@@ -130,6 +145,17 @@ class MemoryObjects:
             )
         if row is None:
             return None
+        if row["created_from_page_id"] is not None:
+            state = (await ext.page_states((row["created_from_page_id"],))).get(
+                row["created_from_page_id"]
+            )
+            if (
+                state is None
+                or state.subject != row["subject"]
+                or state.revision != row["created_from_page_revision"]
+                or state.subject not in subjects
+            ):
+                return None
         links: list[ObjectLink] = []
         if row["created_from_page_id"] is not None:
             links.append(

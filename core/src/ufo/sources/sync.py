@@ -10,9 +10,10 @@ backends are extensions registered through the `sources` Manifest point and sour
 per source, dialect-native — Postgres `FOR UPDATE SKIP LOCKED`, SQLite the single writer), fetches,
 writes each page's body to the blob store, and upserts page rows — skipping ones unchanged by
 digest, tombstoning the ones a full-snapshot fetch no longer holds or a delta fetch explicitly
-deletes. It writes NO chunks: a changed page just bumps its `updated_at`, and `PageFeed` — the seam
-threaded onto an extension's context — replays those changes to a downstream indexer under a
-`(updated_at, id)` cursor. The core `page` row carries source substrate and browse metadata;
+deletes. It writes NO chunks: the database assigns each material change a workspace-monotonic
+revision, and `PageFeed` — the seam threaded onto an extension's context — replays those changes
+to a downstream indexer under a `(revision, id)` cursor. The core `page` row carries source
+substrate and browse metadata;
 derivation state lives in the indexer's own mirror. The driver polls; it never fires on the writes
 it makes."""
 
@@ -27,7 +28,7 @@ from typing import ClassVar, Protocol, TypeVar
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import sqlalchemy as sa
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ufo.blob import BlobStore
 from ufo.config import SourceConfig, SourceEntry
@@ -71,17 +72,20 @@ def normalize_page_timestamp(value: str) -> str:
 
 
 class Page(BaseModel):
-    """One fetched document: its stable key within the source, a content digest for change
-    detection, lightweight browse metadata, and the body the driver stores in the blob; the source
-    row's subject scopes its recall — a backend never declares disclosure."""
+    """One fetched document: its stable key within the source, body, and browse metadata."""
+
+    model_config = ConfigDict(extra="forbid")
 
     source_ref: str
-    digest: str
     body: str
     stream: str = Field(min_length=1)
     title: str = Field(min_length=1)
     created_at: str | None = None
     updated_at: str | None = None
+
+    @property
+    def digest(self) -> str:
+        return "sha256:" + hashlib.sha256(self.body.encode()).hexdigest()
 
     @field_validator("created_at", "updated_at")
     @classmethod
@@ -183,7 +187,6 @@ class FolderSource:
         pages = tuple(
             Page(
                 source_ref=source_ref,
-                digest="sha256:" + hashlib.sha256(text.encode()).hexdigest(),
                 body=text,
                 stream="files",
                 title=source_ref,
@@ -422,7 +425,10 @@ class SyncDriver:
                 record_updated_at=page.updated_at,
             )
             if existing is None or existing[:2] != (page.digest, False):
-                body_ref = f"{SOURCE_BLOB_PREFIX}/{source.source_id}/{page_id}"
+                body_ref = (
+                    f"{SOURCE_BLOB_PREFIX}/{source.source_id}/{page_id}/"
+                    f"{page.digest.removeprefix('sha256:')}"
+                )
                 await self.blob.put(body_ref, page.body.encode())
                 changed.append(
                     ChangedPage(
@@ -488,13 +494,20 @@ class SyncDriver:
         deleted: list[UUID],
         snapshot: bool,
     ) -> None:
-        """Page `created_at`/`updated_at` are stamped with one microsecond wall-clock `now` per
-        write, not the database's second-precision clock: `PageFeed`'s `(updated_at, id)` cursor
-        must strictly advance on every change, so a page re-written in the same second it was first
-        indexed is not missed."""
+        """Persist one fetched batch. The database orders material changes for `PageFeed`."""
         now = datetime.now(UTC)
         async with workspace_tx() as connection:
             workspace_id = (await connection.execute(sa.select(tables.workspace.c.id))).scalar_one()
+            authority = sa.select(tables.source.c.subject).where(
+                tables.source.c.id == source.source_id,
+                tables.source.c.workspace_id == workspace_id,
+                tables.source.c.removed_at.is_(None),
+            )
+            if connection.dialect.name == "postgresql":
+                authority = authority.with_for_update()
+            subject = (await connection.execute(authority)).scalar_one_or_none()
+            if subject is None:
+                raise RuntimeError(f"source {source.source_id} disappeared during sync")
             for changed_page in changed:
                 updated = await connection.execute(
                     sa.update(tables.page)
@@ -505,7 +518,7 @@ class SyncDriver:
                         title=changed_page.browse.title,
                         record_created_at=changed_page.browse.record_created_at,
                         record_updated_at=changed_page.browse.record_updated_at,
-                        subject=source.subject,
+                        subject=subject,
                         tombstone=False,
                         updated_at=now,
                     )
@@ -523,7 +536,7 @@ class SyncDriver:
                             title=changed_page.browse.title,
                             record_created_at=changed_page.browse.record_created_at,
                             record_updated_at=changed_page.browse.record_updated_at,
-                            subject=source.subject,
+                            subject=subject,
                             tombstone=False,
                             created_at=now,
                             updated_at=now,
@@ -560,6 +573,15 @@ class SyncDriver:
                         tables.page.c.id.not_in(fetched),
                     )
                 )
+            await connection.execute(
+                sa.update(tables.page)
+                .values(subject=subject, updated_at=now)
+                .where(
+                    tables.page.c.source_id == source.source_id,
+                    tables.page.c.tombstone.is_(False),
+                    tables.page.c.subject != subject,
+                )
+            )
             await connection.execute(
                 sa.update(tables.source)
                 .values(
@@ -626,10 +648,9 @@ PAGE_FEED_BATCH_MAX = 50
 class PageChange:
     """One page's current state as the feed replays it: the source row it belongs to, the provider
     `stream` and `title` the sync driver landed it under, the inlined body (empty when tombstoned),
-    the content digest, `as_of` — the provider's update or creation time, falling back to ingestion
-    time — and `changed_at`, the page's `updated_at` cursor field. `created_at` is when the row was
-    first indexed, so `created_at == changed_at` marks a page this replay adds rather than
-    updates."""
+    the content digest, monotonic revision, and `as_of` — the provider's update or creation time,
+    falling back to ingestion time. `created_at == changed_at` marks a page this replay adds rather
+    than updates."""
 
     page_id: UUID
     source_id: UUID
@@ -638,6 +659,7 @@ class PageChange:
     title: str
     body: str
     digest: str
+    revision: int
     tombstone: bool
     created_at: datetime
     as_of: datetime
@@ -652,16 +674,28 @@ class PageBatch:
 
 class PageFeed(Protocol):
     """The page-substrate seam an indexer reads through `ExtensionContext.pages`: replay every page
-    changed since a `changed_at|page_id` cursor, bodies inlined, in a bounded batch and total order
-    (`ORDER BY updated_at, id`) — dialect-neutral and replay-safe, so a single-owner cursor advances
+    changed since a `revision|page_id` cursor, bodies inlined, in a bounded batch and total order
+    (`ORDER BY revision, id`) — dialect-neutral and replay-safe, so a single-owner cursor advances
     monotonically and a restart resumes where it left off."""
 
     async def pages_changed_since(self, cursor: str | None, limit: int) -> PageBatch: ...
 
 
+def page_cursor(cursor: object) -> tuple[int, UUID]:
+    if not isinstance(cursor, str):
+        raise ValueError("page cursor must be a string")
+    revision, separator, page_id = cursor.partition("|")
+    if not separator or not revision.isdecimal():
+        raise ValueError(f"invalid page cursor {cursor!r}")
+    try:
+        return int(revision), UUID(page_id)
+    except ValueError as error:
+        raise ValueError(f"invalid page cursor {cursor!r}") from error
+
+
 @dataclass(frozen=True)
 class CorePageFeed:
-    """The core `PageFeed`: reads the `page` table in `(updated_at, id)` order after the cursor and
+    """The core `PageFeed`: reads the `page` table in `(revision, id)` order after the cursor and
     inlines each non-tombstoned body from the blob store, bounding every batch to
     PAGE_FEED_BATCH_MAX so the inlined bodies stay a small payload. A tombstoned page carries an
     empty body; its reader drops the page's chunks and mirror on that signal."""
@@ -678,22 +712,25 @@ class CorePageFeed:
                 tables.page.c.title,
                 tables.page.c.body_ref,
                 tables.page.c.digest,
+                tables.page.c.revision,
                 tables.page.c.tombstone,
                 tables.page.c.record_created_at,
                 tables.page.c.record_updated_at,
                 tables.page.c.created_at,
                 tables.page.c.updated_at,
             )
-            .order_by(tables.page.c.updated_at, tables.page.c.id)
+            .order_by(tables.page.c.revision, tables.page.c.id)
             .limit(min(limit, PAGE_FEED_BATCH_MAX))
         )
         if cursor is not None:
-            stamp_str, page_id_str = cursor.split("|", 1)
-            stamp, page_id = datetime.fromisoformat(stamp_str), UUID(page_id_str)
+            revision, page_id = page_cursor(cursor)
             query = query.where(
                 sa.or_(
-                    tables.page.c.updated_at > stamp,
-                    sa.and_(tables.page.c.updated_at == stamp, tables.page.c.id > page_id),
+                    tables.page.c.revision > revision,
+                    sa.and_(
+                        tables.page.c.revision == revision,
+                        tables.page.c.id > page_id,
+                    ),
                 )
             )
         async with workspace_tx() as connection:
@@ -711,6 +748,7 @@ class CorePageFeed:
                     title=row["title"],
                     body=body,
                     digest=row["digest"],
+                    revision=row["revision"],
                     tombstone=bool(row["tombstone"]),
                     created_at=row["created_at"],
                     as_of=(
@@ -721,5 +759,5 @@ class CorePageFeed:
                     changed_at=row["updated_at"],
                 )
             )
-        next_cursor = f"{rows[-1]['updated_at'].isoformat()}|{rows[-1]['id']}" if rows else None
+        next_cursor = f"{rows[-1]['revision']}|{rows[-1]['id']}" if rows else None
         return PageBatch(changes=tuple(changes), next_cursor=next_cursor)

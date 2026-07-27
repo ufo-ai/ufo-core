@@ -276,6 +276,7 @@ async def test_search_to_object_get_walks_page_provenance_end_to_end(
                     title="Cannery office",
                     body=PAGE_BODY,
                     digest="sha256:abc",
+                    revision=1,
                     tombstone=False,
                     created_at=datetime(2026, 7, 9, tzinfo=UTC),
                     as_of=datetime(2026, 7, 9, tzinfo=UTC),
@@ -534,11 +535,16 @@ async def test_links_stay_visibility_congruent_and_hidden_targets_fail_closed(
         member_id = await _member(workspace_id)
         other_id = await _member(workspace_id)
         source_id = await _seed_source(workspace_id)
-        page_id = await _seed_page(workspace_id, source_id, blob)
+        page_id = await _seed_page(workspace_id, source_id, blob, subject=member_subject(member_id))
 
         memory_ext = context_for("memory", frozenset())
         item_id = uuid4()
         async with workspace_tx() as connection:
+            revision = (
+                await connection.execute(
+                    sa.select(tables.page.c.revision).where(tables.page.c.id == page_id)
+                )
+            ).scalar_one()
             await connection.execute(
                 sa.insert(memory_item).values(
                     id=item_id,
@@ -550,6 +556,7 @@ async def test_links_stay_visibility_congruent_and_hidden_targets_fail_closed(
                     confidence=5,
                     source_ref=None,
                     created_from_page_id=page_id,
+                    created_from_page_revision=revision,
                     as_of=None,
                     embedding_digest=None,
                     superseded_by=None,

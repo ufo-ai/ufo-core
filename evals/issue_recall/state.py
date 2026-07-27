@@ -109,7 +109,7 @@ class CorpusAttestor:
             page_rows = list(
                 (
                     await connection.execute(
-                        sa.select(tables.page).order_by(tables.page.c.updated_at, tables.page.c.id)
+                        sa.select(tables.page).order_by(tables.page.c.revision, tables.page.c.id)
                     )
                 ).all()
             )
@@ -182,7 +182,11 @@ class CorpusAttestor:
             if (
                 row.workspace_id != self.workspace_id
                 or row.source_id != self.source_id
-                or row.body_ref != f"{SOURCE_BLOB_PREFIX}/{self.source_id}/{row.id}"
+                or row.body_ref
+                != (
+                    f"{SOURCE_BLOB_PREFIX}/{self.source_id}/{row.id}/"
+                    f"{page.digest.removeprefix('sha256:')}"
+                )
                 or row.digest != page.digest
                 or row.tombstone
             ):
@@ -239,7 +243,7 @@ class CorpusAttestor:
 
     @staticmethod
     def _drained(page_rows: list[sa.Row], cursors: dict[str, object]) -> None:
-        high_water = f"{page_rows[-1].updated_at.isoformat()}|{page_rows[-1].id}"
+        high_water = f"{page_rows[-1].revision}|{page_rows[-1].id}"
         expected = {
             "page_change_cursor:index_pages": high_water,
             "page_change_cursor:derive_facts": high_water,

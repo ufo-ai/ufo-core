@@ -1435,12 +1435,18 @@ async def test_sample_source_syncs_a_page_recallable_through_memory(
         transaction=workspace_tx,
         chunker=TextChunker(),
         workspace_id=workspace_id,
+        page_states=context_for("memory", frozenset()).page_states,
     )
     service = MemoryStore(
-        index=index, embed=embed, transaction=workspace_tx, workspace_id=workspace_id
+        index=index,
+        embed=embed,
+        transaction=workspace_tx,
+        workspace_id=workspace_id,
+        page_states=context_for("memory", frozenset()).page_states,
     )
 
-    await driver.run()
+    with ws(workspace_id):
+        await driver.run()
     async with workspace_tx() as connection:
         page = (
             await connection.execute(
@@ -1453,9 +1459,10 @@ async def test_sample_source_syncs_a_page_recallable_through_memory(
 
     with ws(workspace_id):
         await page_indexer.apply((await page_feed.pages_changed_since(None, 50)).changes)
-    matches = await service.search_sources(
-        "migrating orbital widget fleet", frozenset({SHARED_SUBJECT}), 5
-    )
+    with ws(workspace_id):
+        matches = await service.search_sources(
+            "migrating orbital widget fleet", frozenset({SHARED_SUBJECT}), 5
+        )
     assert matches and "orbital widget" in matches[0].text
 
 

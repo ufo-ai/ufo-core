@@ -38,6 +38,7 @@ from evals.issue_recall.state import CorpusAttestor
 from ufo.audience import conversation_audience
 from ufo.blob import FilesystemBlobStore
 from ufo.db import apply_migrations, dispose_db, init_db, workspace_tx
+from ufo.ext.context import context_for
 from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
 from ufo.models.interface import ModelEvent, ModelRequest, TextDelta
 from ufo.models.registry import ModelRegistry
@@ -175,6 +176,7 @@ async def test_materializes_the_fixture_into_a_recallable_attested_corpus(
             TopicEmbed(),
             workspace_tx,
             readiness.workspace_id,
+            context_for("memory", frozenset()).page_states,
         )
         recalled = await store.recall(
             FILINGS[0].symptom,

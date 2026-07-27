@@ -9,7 +9,6 @@ log), so the tests read those rows back through the same public surfaces core wr
 `UNDECLARED_SLOT` names a slot the Manifest never declares — the probe that a handler asking for an
 undeclared slot is refused."""
 
-import hashlib
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -434,10 +433,8 @@ class SampleSource:
     async def fetch(
         self, config: SampleSourceConfig, cursor: str | None, auth: SourceAuth
     ) -> SyncResult:
-        digest = "sha256:" + hashlib.sha256(config.topic.encode()).hexdigest()
         page = Page(
             source_ref=SOURCE_REF,
-            digest=digest,
             body=config.topic,
             stream="topics",
             title=next(line.strip() for line in config.topic.splitlines() if line.strip()),

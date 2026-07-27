@@ -298,7 +298,11 @@ async def index_memory(ctx: ExtensionContext) -> None:
     if ctx.index is None or ctx.embed is None:
         raise RuntimeError("memory_index requires the index and embed backends; none are wired")
     await MemoryIndexer(
-        index=ctx.index, embed=ctx.embed, transaction=ctx.transaction, chunker=TextChunker()
+        index=ctx.index,
+        embed=ctx.embed,
+        transaction=ctx.transaction,
+        chunker=TextChunker(),
+        page_states=ctx.page_states,
     ).run()
 
 
@@ -316,6 +320,7 @@ async def index_pages(ctx: HookContext) -> HookOutcome:
         transaction=ctx.ext.transaction,
         chunker=TextChunker(),
         workspace_id=ctx.ext.store.workspace_id,
+        page_states=ctx.ext.page_states,
     ).apply(ctx.payload.changes)
     return None
 
@@ -360,6 +365,7 @@ def _consolidatable_workspaces() -> sa.Select[tuple[UUID]]:
         sa.select(memory_item.c.workspace_id)
         .where(
             memory_item.c.item_class == FACT,
+            memory_item.c.created_from_page_id.is_(None),
             memory_item.c.superseded_by.is_(None),
             memory_item.c.created_at <= cutoff,
         )

@@ -5,7 +5,8 @@ and hook drive it — over the deploy index/embed backends and the workspace-sco
 threads onto the context. The embed client and the DefaultIndex are real dependencies, never the
 asserted thing: every assertion reads the Recalled/SourceMatch values back."""
 
-from dataclasses import replace
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
@@ -29,12 +30,23 @@ from ufo_ext_memory.store import (
 )
 
 from ufo.db import workspace_tx
-from ufo.indexing import OWNER_KIND_MEMORY_ITEM, OWNER_KIND_PAGE, Chunk, Hit, TextChunker
+from ufo.ext.context import PageState, context_for
+from ufo.indexing import (
+    OWNER_KIND_MEMORY_ITEM,
+    OWNER_KIND_PAGE,
+    Chunk,
+    Hit,
+    IndexScope,
+    TextChunker,
+)
 from ufo.schema import tables
 from ufo.sdk.audience import conversation_audience
 from ufo.sources.sync import PageChange
 from ufo.subjects import SHARED_SUBJECT, member_subject
 from ufo.workspace import ws
+
+PAGE_DIGEST = "sha256:page"
+PAGE_REVISION = 1
 
 
 def vec(*axes: tuple[int, float]) -> tuple[float, ...]:
@@ -60,6 +72,56 @@ class BrokenEmbed:
         raise RuntimeError("embed provider unreachable")
 
 
+class ReclassifyingPage:
+    def __init__(self, page_id: UUID, before: str, after: str) -> None:
+        self.page_id = page_id
+        self.before = before
+        self.after = after
+        self.calls = 0
+
+    async def __call__(self, page_ids: tuple[UUID, ...]) -> dict[UUID, PageState]:
+        self.calls += 1
+        return {
+            self.page_id: PageState(
+                subject=self.before if self.calls == 1 else self.after,
+                revision=PAGE_REVISION,
+            )
+        }
+
+
+@dataclass
+class RebindingIndex:
+    backend: DefaultIndex
+    callback: Callable[[], Awaitable[None]]
+    rebound: bool = False
+
+    async def upsert(self, chunks: tuple[Chunk, ...]) -> None:
+        await self.backend.upsert(chunks)
+
+    async def delete(self, scope: IndexScope) -> None:
+        if scope.owner_kind == OWNER_KIND_MEMORY_ITEM and not self.rebound:
+            self.rebound = True
+            await self.callback()
+        await self.backend.delete(scope)
+
+    async def prune(self, scope: IndexScope, keep: frozenset[str]) -> None:
+        await self.backend.prune(scope, keep)
+
+    async def lexical(
+        self, query: str, subjects: frozenset[str], owner_kind: str, limit: int
+    ) -> tuple[Hit, ...]:
+        return await self.backend.lexical(query, subjects, owner_kind, limit)
+
+    async def vector(
+        self,
+        embedding: tuple[float, ...],
+        subjects: frozenset[str],
+        owner_kind: str,
+        limit: int,
+    ) -> tuple[Hit, ...]:
+        return await self.backend.vector(embedding, subjects, owner_kind, limit)
+
+
 async def _workspace() -> UUID:
     workspace_id = uuid4()
     async with workspace_tx() as connection:
@@ -71,12 +133,45 @@ async def _workspace() -> UUID:
     return workspace_id
 
 
+async def _seed_page(workspace_id: UUID, page_id: UUID, source_id: UUID, subject: str) -> None:
+    now = datetime(2025, 1, 1, tzinfo=UTC)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.source).values(
+                id=source_id,
+                workspace_id=workspace_id,
+                backend="test",
+                config={},
+                subject=subject,
+                next_sync_at=now,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.page).values(
+                id=page_id,
+                workspace_id=workspace_id,
+                source_id=source_id,
+                digest=PAGE_DIGEST,
+                body_ref=f"pages/{page_id}",
+                stream="notes",
+                title="Page",
+                subject=subject,
+                tombstone=False,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+
+
 def _store(embed: object, workspace_id: UUID) -> MemoryStore:
     return MemoryStore(
         index=DefaultIndex(transaction=workspace_tx),
         embed=embed,
         transaction=workspace_tx,
         workspace_id=workspace_id,
+        page_states=context_for("memory", frozenset()).page_states,
     )
 
 
@@ -87,11 +182,23 @@ async def _seed_item(
     vector: tuple[float, ...],
     created_at: datetime | None = None,
     as_of: datetime | None = None,
+    created_from_page_id: UUID | None = None,
 ) -> UUID:
     """Insert a memory_item and its one already-derived chunk directly, so recall can be exercised
     without the derivation job in these unit tests."""
     item_id = uuid4()
     async with workspace_tx() as connection:
+        page_revision = (
+            None
+            if created_from_page_id is None
+            else (
+                await connection.execute(
+                    sa.select(tables.page.c.revision).where(
+                        tables.page.c.id == created_from_page_id
+                    )
+                )
+            ).scalar_one()
+        )
         await connection.execute(
             sa.insert(memory_item).values(
                 id=item_id,
@@ -100,6 +207,8 @@ async def _seed_item(
                 body=body,
                 item_class=FACT,
                 source_ref=None,
+                created_from_page_id=created_from_page_id,
+                created_from_page_revision=page_revision,
                 as_of=as_of,
                 embedding_digest="sha256:seeded",
                 superseded_by=None,
@@ -117,20 +226,28 @@ async def _seed_item(
 
 async def _seed_page_chunk(
     workspace_id: UUID, subject: str, body: str, vector: tuple[float, ...]
-) -> None:
-    page_id = uuid4()
+) -> UUID:
+    page_id, source_id = uuid4(), uuid4()
+    await _seed_page(workspace_id, page_id, source_id, subject)
     chunk = Chunk("p-" + page_id.hex, OWNER_KIND_PAGE, str(page_id), subject, 0, body, vector)
     with ws(workspace_id):
         await DefaultIndex(transaction=workspace_tx).upsert((chunk,))
     async with workspace_tx() as connection:
+        revision = (
+            await connection.execute(
+                sa.select(tables.page.c.revision).where(tables.page.c.id == page_id)
+            )
+        ).scalar_one()
         await connection.execute(
             sa.insert(mem_page).values(
                 page_id=page_id,
                 workspace_id=workspace_id,
                 subject=subject,
+                revision=revision,
                 created_at=sa.func.now(),
             )
         )
+    return page_id
 
 
 async def test_commit_persists_item_and_derives_no_chunk(db: None) -> None:
@@ -187,7 +304,11 @@ async def test_recommitting_a_fact_updates_in_place_not_duplicated(db: None) -> 
 
     with ws(workspace_id):
         await MemoryIndexer(
-            index=store.index, embed=embed, transaction=workspace_tx, chunker=TextChunker()
+            index=store.index,
+            embed=embed,
+            transaction=workspace_tx,
+            chunker=TextChunker(),
+            page_states=context_for("memory", frozenset()).page_states,
         ).run()
     hits = await store.recall("vault code", frozenset({SHARED_SUBJECT}), 10)
     assert len(hits) == 1
@@ -257,7 +378,11 @@ async def test_fresh_fact_recalls_before_indexing_then_via_the_index(db: None) -
 
     with ws(workspace_id):
         await MemoryIndexer(
-            index=store.index, embed=embed, transaction=workspace_tx, chunker=TextChunker()
+            index=store.index,
+            embed=embed,
+            transaction=workspace_tx,
+            chunker=TextChunker(),
+            page_states=context_for("memory", frozenset()).page_states,
         ).run()
     after = await store.recall("safe combination", frozenset({SHARED_SUBJECT}), 10)
     assert len(after) == 1
@@ -292,6 +417,32 @@ async def test_recall_returns_items_scoped_to_subject(db: None) -> None:
         "seat and wifi", recall_subjects(conversation_audience(uuid4())), 10
     )
     assert [item.subject for item in theirs] == [SHARED_SUBJECT]
+
+
+async def test_page_derived_recall_rechecks_the_current_page_subject(db: None) -> None:
+    workspace_id = await _workspace()
+    page_id, source_id = uuid4(), uuid4()
+    member = uuid4()
+    probe = vec((2, 1.0))
+    await _seed_page(workspace_id, page_id, source_id, SHARED_SUBJECT)
+    await _seed_item(
+        workspace_id,
+        SHARED_SUBJECT,
+        "the private acquisition codename is polaris",
+        probe,
+        created_from_page_id=page_id,
+    )
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.page)
+            .values(subject=member_subject(member))
+            .where(tables.page.c.id == page_id)
+        )
+    with ws(workspace_id):
+        recalled = await _store(StubEmbed(probe), workspace_id).recall(
+            "acquisition codename", frozenset({SHARED_SUBJECT}), 10
+        )
+    assert recalled == ()
 
 
 async def test_recall_skips_a_superseded_item(db: None) -> None:
@@ -334,12 +485,32 @@ async def test_pages_and_facts_do_not_crowd_each_others_candidate_window(db: Non
 
     store = _store(StubEmbed(probe), workspace_id)
     subjects = frozenset({SHARED_SUBJECT})
-    facts = await store.recall("quarterly report", subjects, 2)
-    pages = await store.search_sources("quarterly report", subjects, 2)
+    with ws(workspace_id):
+        facts = await store.recall("quarterly report", subjects, 2)
+        pages = await store.search_sources("quarterly report", subjects, 2)
 
     assert {item.memory_id for item in facts} == {fact_a, fact_b}
     assert len(pages) == 2
     assert all("quarterly report" in page.text for page in pages)
+
+
+async def test_source_search_rechecks_the_current_page_subject(db: None) -> None:
+    workspace_id = await _workspace()
+    probe = vec((5, 1.0))
+    page_id = await _seed_page_chunk(
+        workspace_id, SHARED_SUBJECT, "private quarterly forecast", probe
+    )
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.page)
+            .values(subject=member_subject(uuid4()))
+            .where(tables.page.c.id == page_id)
+        )
+    with ws(workspace_id):
+        pages = await _store(StubEmbed(probe), workspace_id).search_sources(
+            "quarterly forecast", frozenset({SHARED_SUBJECT}), 10
+        )
+    assert pages == ()
 
 
 def test_decay_factor_weights_recency_kind_and_confidence() -> None:
@@ -462,12 +633,14 @@ async def test_page_indexer_writes_the_contexts_workspace_id(db: None) -> None:
         stream="notes",
         title="Merger timing",
         body="the merger closes in the third quarter",
-        digest="sha256:seeded",
+        digest=PAGE_DIGEST,
+        revision=PAGE_REVISION,
         tombstone=False,
         created_at=datetime(2025, 1, 1, tzinfo=UTC),
         as_of=datetime(2025, 1, 1, tzinfo=UTC),
         changed_at=datetime(2025, 1, 1, tzinfo=UTC),
     )
+    await _seed_page(workspace_id, change.page_id, change.source_id, SHARED_SUBJECT)
     with ws(workspace_id):
         await PageIndexer(
             index=DefaultIndex(transaction=workspace_tx),
@@ -475,6 +648,7 @@ async def test_page_indexer_writes_the_contexts_workspace_id(db: None) -> None:
             transaction=workspace_tx,
             chunker=TextChunker(),
             workspace_id=workspace_id,
+            page_states=context_for("memory", frozenset()).page_states,
         ).apply((change,))
 
     async with workspace_tx() as connection:
@@ -484,3 +658,474 @@ async def test_page_indexer_writes_the_contexts_workspace_id(db: None) -> None:
             )
         ).one()
     assert row.workspace_id == workspace_id
+
+
+async def test_page_index_write_is_deleted_when_the_subject_changes_during_embed(
+    db: None,
+) -> None:
+    workspace_id = await _workspace()
+    page_id = uuid4()
+    index = DefaultIndex(transaction=workspace_tx)
+    now = datetime(2025, 1, 1, tzinfo=UTC)
+    with ws(workspace_id):
+        await PageIndexer(
+            index=index,
+            embed=StubEmbed(vec((7, 1.0))),
+            transaction=workspace_tx,
+            chunker=TextChunker(),
+            workspace_id=workspace_id,
+            page_states=ReclassifyingPage(page_id, SHARED_SUBJECT, member_subject(uuid4())),
+        ).apply(
+            (
+                PageChange(
+                    page_id=page_id,
+                    source_id=uuid4(),
+                    subject=SHARED_SUBJECT,
+                    stream="notes",
+                    title="Stale page",
+                    body="the stale page codename is polaris",
+                    digest="sha256:stale",
+                    revision=PAGE_REVISION,
+                    tombstone=False,
+                    created_at=now,
+                    as_of=now,
+                    changed_at=now,
+                ),
+            )
+        )
+        assert (
+            await index.lexical(
+                "page codename",
+                frozenset({SHARED_SUBJECT}),
+                OWNER_KIND_PAGE,
+                10,
+            )
+            == ()
+        )
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(mem_page.c.page_id).where(mem_page.c.page_id == page_id)
+            )
+        ).one_or_none()
+    assert row is None
+
+
+async def test_stale_private_payload_is_never_indexed_after_a_shared_sanitized_edit(
+    db: None,
+) -> None:
+    workspace_id = await _workspace()
+    page_id, source_id, member_id = uuid4(), uuid4(), uuid4()
+    await _seed_page(workspace_id, page_id, source_id, SHARED_SUBJECT)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.page)
+            .values(digest="sha256:sanitized")
+            .where(tables.page.c.id == page_id)
+        )
+    now = datetime(2025, 1, 2, tzinfo=UTC)
+    index = DefaultIndex(transaction=workspace_tx)
+    indexer = PageIndexer(
+        index=index,
+        embed=StubEmbed(vec((8, 1.0))),
+        transaction=workspace_tx,
+        chunker=TextChunker(),
+        workspace_id=workspace_id,
+        page_states=context_for("memory", frozenset()).page_states,
+    )
+    stale = PageChange(
+        page_id=page_id,
+        source_id=source_id,
+        subject=member_subject(member_id),
+        stream="notes",
+        title="Private plan",
+        body="the private acquisition codename is polaris",
+        digest="sha256:private",
+        revision=PAGE_REVISION,
+        tombstone=False,
+        created_at=now,
+        as_of=now,
+        changed_at=now,
+    )
+    sanitized = replace(
+        stale,
+        subject=SHARED_SUBJECT,
+        body="the acquisition plan has been redacted",
+        digest="sha256:sanitized",
+        revision=PAGE_REVISION + 1,
+    )
+    with ws(workspace_id):
+        await indexer.apply((stale,))
+        assert (
+            await index.lexical("polaris", frozenset({SHARED_SUBJECT}), OWNER_KIND_PAGE, 10) == ()
+        )
+        await indexer.apply((sanitized,))
+        assert (
+            await index.lexical("polaris", frozenset({SHARED_SUBJECT}), OWNER_KIND_PAGE, 10) == ()
+        )
+        assert (
+            len(await index.lexical("redacted", frozenset({SHARED_SUBJECT}), OWNER_KIND_PAGE, 10))
+            == 1
+        )
+
+
+async def test_same_subject_redaction_hides_then_removes_stale_facts(db: None) -> None:
+    workspace_id = await _workspace()
+    page_id, source_id = uuid4(), uuid4()
+    probe = vec((8, 1.0))
+    await _seed_page(workspace_id, page_id, source_id, SHARED_SUBJECT)
+    store = _store(StubEmbed(probe), workspace_id)
+    await store.commit(
+        MemoryWrite(
+            subject=SHARED_SUBJECT,
+            body="the retired acquisition codename is polaris",
+            created_from_page_id=page_id,
+            created_from_page_revision=PAGE_REVISION,
+        )
+    )
+    with ws(workspace_id):
+        await MemoryIndexer(
+            index=store.index,
+            embed=store.embed,
+            transaction=workspace_tx,
+            chunker=TextChunker(),
+            page_states=context_for("memory", frozenset()).page_states,
+        ).run()
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.page)
+                .values(digest="sha256:redacted")
+                .where(tables.page.c.id == page_id)
+            )
+        assert await store.recall("acquisition codename", frozenset({SHARED_SUBJECT}), 10) == ()
+        now = datetime(2025, 1, 2, tzinfo=UTC)
+        await PageIndexer(
+            index=store.index,
+            embed=store.embed,
+            transaction=workspace_tx,
+            chunker=TextChunker(),
+            workspace_id=workspace_id,
+            page_states=context_for("memory", frozenset()).page_states,
+        ).apply(
+            (
+                PageChange(
+                    page_id=page_id,
+                    source_id=source_id,
+                    subject=SHARED_SUBJECT,
+                    stream="notes",
+                    title="Redacted plan",
+                    body="the acquisition plan has been redacted",
+                    digest="sha256:redacted",
+                    revision=PAGE_REVISION + 1,
+                    tombstone=False,
+                    created_at=now,
+                    as_of=now,
+                    changed_at=now,
+                ),
+            )
+        )
+        assert (
+            await store.index.lexical(
+                "polaris",
+                frozenset({SHARED_SUBJECT}),
+                OWNER_KIND_MEMORY_ITEM,
+                10,
+            )
+            == ()
+        )
+    async with workspace_tx() as connection:
+        assert (
+            await connection.execute(
+                sa.select(sa.func.count())
+                .select_from(memory_item)
+                .where(memory_item.c.created_from_page_id == page_id)
+            )
+        ).scalar_one() == 0
+
+
+async def test_stale_page_cleanup_requeues_a_fact_rebound_while_its_index_is_deleted(
+    db: None,
+) -> None:
+    workspace_id, page_id, source_id = await _workspace(), uuid4(), uuid4()
+    body = "the acquisition plan has been redacted"
+    probe = vec((8, 1.0))
+    await _seed_page(workspace_id, page_id, source_id, SHARED_SUBJECT)
+    store = _store(StubEmbed(probe), workspace_id)
+    await store.commit(
+        MemoryWrite(
+            subject=SHARED_SUBJECT,
+            body=body,
+            created_from_page_id=page_id,
+            created_from_page_revision=PAGE_REVISION,
+        )
+    )
+    with ws(workspace_id):
+        await MemoryIndexer(
+            index=store.index,
+            embed=store.embed,
+            transaction=workspace_tx,
+            chunker=TextChunker(),
+            page_states=context_for("memory", frozenset()).page_states,
+        ).run()
+    new_digest = "sha256:redacted"
+    new_revision = PAGE_REVISION + 1
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.page).values(digest=new_digest).where(tables.page.c.id == page_id)
+        )
+
+    async def recommit() -> None:
+        await store.commit(
+            MemoryWrite(
+                subject=SHARED_SUBJECT,
+                body=body,
+                created_from_page_id=page_id,
+                created_from_page_revision=new_revision,
+            )
+        )
+
+    index = RebindingIndex(store.index, recommit)
+    now = datetime(2025, 1, 2, tzinfo=UTC)
+    with ws(workspace_id):
+        await PageIndexer(
+            index=index,
+            embed=store.embed,
+            transaction=workspace_tx,
+            chunker=TextChunker(),
+            workspace_id=workspace_id,
+            page_states=context_for("memory", frozenset()).page_states,
+        ).apply(
+            (
+                PageChange(
+                    page_id=page_id,
+                    source_id=source_id,
+                    subject=SHARED_SUBJECT,
+                    stream="notes",
+                    title="Redacted plan",
+                    body=body,
+                    digest=new_digest,
+                    revision=new_revision,
+                    tombstone=False,
+                    created_at=now,
+                    as_of=now,
+                    changed_at=now,
+                ),
+            )
+        )
+        await MemoryIndexer(
+            index=index,
+            embed=store.embed,
+            transaction=workspace_tx,
+            chunker=TextChunker(),
+            page_states=context_for("memory", frozenset()).page_states,
+        ).run()
+        assert (
+            len(
+                await index.lexical(
+                    "acquisition plan", frozenset({SHARED_SUBJECT}), OWNER_KIND_MEMORY_ITEM, 10
+                )
+            )
+            == 1
+        )
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(
+                    memory_item.c.created_from_page_revision,
+                    memory_item.c.embedding_digest,
+                ).where(memory_item.c.created_from_page_id == page_id)
+            )
+        ).one()
+    assert row.created_from_page_revision == new_revision
+    assert row.embedding_digest is not None
+
+
+async def test_page_indexer_narrowing_removes_stale_page_facts_without_a_model(
+    db: None,
+) -> None:
+    workspace_id = await _workspace()
+    member_id, page_id, source_id = uuid4(), uuid4(), uuid4()
+    subject = member_subject(member_id)
+    probe = vec((8, 1.0))
+    embed = StubEmbed(probe)
+    store = _store(embed, workspace_id)
+    stale_body = "the shared disclosure token is helios"
+    kept_body = "the private continuity token is selene"
+    await _seed_page(workspace_id, page_id, source_id, SHARED_SUBJECT)
+    await store.commit(
+        MemoryWrite(
+            subject=SHARED_SUBJECT,
+            body=stale_body,
+            created_from_page_id=page_id,
+            created_from_page_revision=PAGE_REVISION,
+        )
+    )
+    with ws(workspace_id):
+        await MemoryIndexer(
+            index=store.index,
+            embed=embed,
+            transaction=workspace_tx,
+            chunker=TextChunker(),
+            page_states=context_for("memory", frozenset()).page_states,
+        ).run()
+        assert (
+            len(
+                await store.index.lexical(
+                    "disclosure token", frozenset({SHARED_SUBJECT}), OWNER_KIND_MEMORY_ITEM, 10
+                )
+            )
+            == 1
+        )
+        assert (
+            await store.index.lexical(
+                "continuity token", frozenset({subject}), OWNER_KIND_MEMORY_ITEM, 10
+            )
+            == ()
+        )
+
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.page).values(subject=subject).where(tables.page.c.id == page_id)
+            )
+        await store.commit(
+            MemoryWrite(
+                subject=subject,
+                body=kept_body,
+                created_from_page_id=page_id,
+                created_from_page_revision=PAGE_REVISION + 1,
+            )
+        )
+        await MemoryIndexer(
+            index=store.index,
+            embed=embed,
+            transaction=workspace_tx,
+            chunker=TextChunker(),
+            page_states=context_for("memory", frozenset()).page_states,
+        ).run()
+        await PageIndexer(
+            index=store.index,
+            embed=embed,
+            transaction=workspace_tx,
+            chunker=TextChunker(),
+            workspace_id=workspace_id,
+            page_states=context_for("memory", frozenset()).page_states,
+        ).apply(
+            (
+                PageChange(
+                    page_id=page_id,
+                    source_id=source_id,
+                    subject=SHARED_SUBJECT,
+                    stream="messages",
+                    title="Private mailbox",
+                    body="the mailbox page is now private",
+                    digest=PAGE_DIGEST,
+                    revision=PAGE_REVISION,
+                    tombstone=False,
+                    created_at=datetime(2025, 1, 1, tzinfo=UTC),
+                    as_of=datetime(2025, 1, 1, tzinfo=UTC),
+                    changed_at=datetime(2025, 1, 2, tzinfo=UTC),
+                ),
+            )
+        )
+
+        assert (
+            await store.index.lexical(
+                "disclosure token", frozenset({SHARED_SUBJECT}), OWNER_KIND_MEMORY_ITEM, 10
+            )
+            == ()
+        )
+        assert (
+            len(
+                await store.index.lexical(
+                    "continuity token", frozenset({subject}), OWNER_KIND_MEMORY_ITEM, 10
+                )
+            )
+            == 1
+        )
+
+    async with workspace_tx() as connection:
+        rows = (
+            (
+                await connection.execute(
+                    sa.select(memory_item.c.subject, memory_item.c.body).where(
+                        memory_item.c.created_from_page_id == page_id
+                    )
+                )
+            )
+            .mappings()
+            .all()
+        )
+    assert {row["body"]: row["subject"] for row in rows} == {kept_body: subject}
+
+
+async def test_page_tombstone_removes_derived_memories_before_returning(db: None) -> None:
+    workspace_id = await _workspace()
+    page_id, source_id = uuid4(), uuid4()
+    probe = vec((9, 1.0))
+    embed = StubEmbed(probe)
+    store = _store(embed, workspace_id)
+    await _seed_page(workspace_id, page_id, source_id, SHARED_SUBJECT)
+    await store.commit(
+        MemoryWrite(
+            subject=SHARED_SUBJECT,
+            body="the retired source fact is polaris",
+            created_from_page_id=page_id,
+            created_from_page_revision=PAGE_REVISION,
+        )
+    )
+    with ws(workspace_id):
+        await MemoryIndexer(
+            index=store.index,
+            embed=embed,
+            transaction=workspace_tx,
+            chunker=TextChunker(),
+            page_states=context_for("memory", frozenset()).page_states,
+        ).run()
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.page).values(tombstone=True).where(tables.page.c.id == page_id)
+            )
+        now = datetime(2025, 1, 2, tzinfo=UTC)
+        await PageIndexer(
+            index=store.index,
+            embed=embed,
+            transaction=workspace_tx,
+            chunker=TextChunker(),
+            workspace_id=workspace_id,
+            page_states=context_for("memory", frozenset()).page_states,
+        ).apply(
+            (
+                PageChange(
+                    page_id=page_id,
+                    source_id=source_id,
+                    subject=SHARED_SUBJECT,
+                    stream="notes",
+                    title="Retired page",
+                    body="",
+                    digest="sha256:page",
+                    revision=PAGE_REVISION + 1,
+                    tombstone=True,
+                    created_at=datetime(2025, 1, 1, tzinfo=UTC),
+                    as_of=now,
+                    changed_at=now,
+                ),
+            )
+        )
+        assert (
+            await store.index.lexical(
+                "retired source fact",
+                frozenset({SHARED_SUBJECT}),
+                OWNER_KIND_MEMORY_ITEM,
+                10,
+            )
+            == ()
+        )
+    async with workspace_tx() as connection:
+        count = (
+            await connection.execute(
+                sa.select(sa.func.count())
+                .select_from(memory_item)
+                .where(memory_item.c.created_from_page_id == page_id)
+            )
+        ).scalar_one()
+    assert count == 0

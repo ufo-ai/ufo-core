@@ -15,23 +15,23 @@ internal.
 import hashlib
 import logging
 import re
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from itertools import chain
-from typing import Literal
+from typing import Literal, Self
 from uuid import UUID, uuid5
 
 import sqlalchemy as sa
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncConnection
 from sqlalchemy.sql.elements import ColumnElement
 
 from ufo.sdk.audience import Audience
-from ufo.sdk.context import ExtensionContext
+from ufo.sdk.context import ExtensionContext, PageState
 from ufo.sdk.index import (
     OWNER_KIND_MEMORY_ITEM,
     OWNER_KIND_PAGE,
@@ -75,6 +75,7 @@ MemoryKind = Literal["fact", "preference", "decision", "event", "task"]
 KIND_FACT: MemoryKind = "fact"
 
 Transaction = Callable[[], AbstractAsyncContextManager[AsyncConnection]]
+PageStates = Callable[[tuple[UUID, ...]], Awaitable[dict[UUID, PageState]]]
 
 _metadata = sa.MetaData()
 memory_item = sa.Table(
@@ -89,6 +90,7 @@ memory_item = sa.Table(
     sa.Column("confidence", sa.Integer, nullable=False),
     sa.Column("source_ref", sa.Text, nullable=True),
     sa.Column("created_from_page_id", sa.Uuid, nullable=True),
+    sa.Column("created_from_page_revision", sa.BigInteger, nullable=True),
     sa.Column("as_of", sa.DateTime(timezone=True), nullable=True),
     sa.Column("embedding_digest", sa.Text, nullable=True),
     sa.Column("embedding_claimed_at", sa.DateTime(timezone=True), nullable=True),
@@ -103,6 +105,7 @@ mem_page = sa.Table(
     sa.Column("page_id", sa.Uuid, primary_key=True),
     sa.Column("workspace_id", sa.Uuid, nullable=False),
     sa.Column("subject", sa.Text, nullable=False),
+    sa.Column("revision", sa.BigInteger, nullable=True),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
 )
 
@@ -133,6 +136,7 @@ class MemoryInventoryItem(BaseModel):
     confidence: int
     source_ref: str | None
     created_from_page_id: UUID | None
+    created_from_page_revision: int | None
     as_of: datetime | None
     embedding_digest: str | None
     embedding_claimed_at: datetime | None
@@ -179,6 +183,7 @@ async def inventory(
             confidence=row["confidence"],
             source_ref=row["source_ref"],
             created_from_page_id=row["created_from_page_id"],
+            created_from_page_revision=row["created_from_page_revision"],
             as_of=row["as_of"],
             embedding_digest=row["embedding_digest"],
             embedding_claimed_at=row["embedding_claimed_at"],
@@ -208,10 +213,10 @@ def _aware(when: datetime) -> datetime:
 class MemoryWrite(BaseModel):
     """What a commit records: the subject scoping visibility, the body, its class, its provenance,
     and the recall-decay inputs — `created_from_page_id` is the synced page a derivation distilled
-    it from (the `created_from` link), `source_ref` a free-form note for tool writes, `as_of` when
-    the source information was current, `memory_kind` selects the recency half-life
-    (fact/preference/decision/event/task), and `confidence` (1..10) scales a fact's decayed
-    rank."""
+    it from (the `created_from` link) and `created_from_page_revision` binds it to that page
+    version; `source_ref` is a free-form note for tool writes, `as_of` says when the source
+    information was current, `memory_kind` selects the recency half-life
+    (fact/preference/decision/event/task), and `confidence` (1..10) scales a fact's decayed rank."""
 
     subject: str
     body: str
@@ -220,7 +225,14 @@ class MemoryWrite(BaseModel):
     confidence: int = Field(default=DEFAULT_CONFIDENCE, ge=1, le=MAX_CONFIDENCE)
     source_ref: str | None = None
     created_from_page_id: UUID | None = None
+    created_from_page_revision: int | None = None
     as_of: datetime | None = None
+
+    @model_validator(mode="after")
+    def page_origin_is_complete(self) -> Self:
+        if (self.created_from_page_id is None) != (self.created_from_page_revision is None):
+            raise ValueError("page-derived memory needs both page id and revision")
+        return self
 
 
 class MemoryItem(BaseModel):
@@ -234,6 +246,8 @@ class MemoryItem(BaseModel):
     memory_kind: MemoryKind = KIND_FACT
     confidence: int = DEFAULT_CONFIDENCE
     source_ref: str | None = None
+    created_from_page_id: UUID | None = None
+    created_from_page_revision: int | None = None
     embedding_digest: str | None = None
     superseded_by: UUID | None = None
 
@@ -397,6 +411,7 @@ class MemoryStore:
     embed: EmbedClient
     transaction: Transaction
     workspace_id: UUID
+    page_states: PageStates
 
     async def commit(self, write: MemoryWrite) -> None:
         """Persist one memory_item with no derived state: embedding_digest stays NULL, marking the
@@ -421,6 +436,7 @@ class MemoryStore:
                 confidence=write.confidence,
                 source_ref=write.source_ref,
                 created_from_page_id=write.created_from_page_id,
+                created_from_page_revision=write.created_from_page_revision,
                 as_of=write.as_of,
                 superseded_by=None,
                 created_at=sa.func.now(),
@@ -435,6 +451,23 @@ class MemoryStore:
                         memory_item.c.source_ref: statement.excluded.source_ref,
                         memory_item.c.created_from_page_id: (
                             statement.excluded.created_from_page_id
+                        ),
+                        memory_item.c.created_from_page_revision: (
+                            statement.excluded.created_from_page_revision
+                        ),
+                        memory_item.c.embedding_claimed_at: sa.case(
+                            (
+                                sa.or_(
+                                    memory_item.c.created_from_page_id.is_distinct_from(
+                                        statement.excluded.created_from_page_id
+                                    ),
+                                    memory_item.c.created_from_page_revision.is_distinct_from(
+                                        statement.excluded.created_from_page_revision
+                                    ),
+                                ),
+                                None,
+                            ),
+                            else_=memory_item.c.embedding_claimed_at,
                         ),
                         memory_item.c.as_of: statement.excluded.as_of,
                         memory_item.c.updated_at: sa.func.now(),
@@ -458,7 +491,9 @@ class MemoryStore:
         sees the bound, so the filter lands in the row read-back alongside the superseded drop."""
         lexical, vector = await self._legs(query, subjects, OWNER_KIND_MEMORY_ITEM, limit)
         tail = await self._untail_leg(query, subjects, limit)
-        enriched = await self._enrich(fuse_recall(lexical, vector, tail, limit), start, end)
+        enriched = await self._enrich(
+            fuse_recall(lexical, vector, tail, limit), subjects, start, end
+        )
         now = datetime.now(UTC)
         ranked = tuple(
             sorted(
@@ -481,13 +516,18 @@ class MemoryStore:
         """Search synced source pages the same way recall searches facts: fuse the two index legs
         under the subject filter over the page owner kind, then read each surviving page back from
         the `mem_page` mirror — carrying its subject and dropping any outside the optional
-        `[start, end)` `created_at` window. A tombstoned page's mirror row (and chunks) are dropped
-        by the page-index job, so a removed document never surfaces here."""
+        `[start, end)` `created_at` window. The mirror's subject and revision must still match the
+        core page, so a changed or removed document cannot disclose stale chunks while its
+        page-index job catches up."""
         fused = fuse_hits(*await self._legs(query, subjects, OWNER_KIND_PAGE, limit), limit)
         if not fused:
             return ()
         ids = [UUID(hit.owner_id) for hit in fused]
-        conditions: list[ColumnElement[bool]] = [mem_page.c.page_id.in_(ids)]
+        conditions: list[ColumnElement[bool]] = [
+            mem_page.c.page_id.in_(ids),
+            mem_page.c.workspace_id == self.workspace_id,
+            mem_page.c.subject.in_(subjects),
+        ]
         if start is not None:
             conditions.append(mem_page.c.created_at >= start)
         if end is not None:
@@ -497,7 +537,10 @@ class MemoryStore:
                 (
                     await connection.execute(
                         sa.select(
-                            mem_page.c.page_id, mem_page.c.subject, mem_page.c.created_at
+                            mem_page.c.page_id,
+                            mem_page.c.subject,
+                            mem_page.c.revision,
+                            mem_page.c.created_at,
                         ).where(*conditions)
                     )
                 )
@@ -505,6 +548,7 @@ class MemoryStore:
                 .all()
             )
         by_id = {row["page_id"]: row for row in rows}
+        current = await self.page_states(tuple(by_id))
         return tuple(
             SourceMatch(
                 page_id=UUID(hit.owner_id),
@@ -515,6 +559,10 @@ class MemoryStore:
             )
             for hit in fused
             if UUID(hit.owner_id) in by_id
+            and (state := current.get(UUID(hit.owner_id))) is not None
+            and state.subject == by_id[UUID(hit.owner_id)]["subject"]
+            and state.revision == by_id[UUID(hit.owner_id)]["revision"]
+            and state.subject in subjects
         )
 
     async def _legs(
@@ -583,7 +631,11 @@ class MemoryStore:
         return vectors[0] if vectors else ()
 
     async def _enrich(
-        self, fused: tuple[Fused, ...], start: datetime | None, end: datetime | None
+        self,
+        fused: tuple[Fused, ...],
+        subjects: frozenset[str],
+        start: datetime | None,
+        end: datetime | None,
     ) -> tuple[Recalled, ...]:
         """Read the surviving (non-superseded) items back in fused order; a superseded item — or one
         outside the `[start, end)` `created_at` window — drops out here rather than being served."""
@@ -592,6 +644,8 @@ class MemoryStore:
         ids = [UUID(hit.owner_id) for hit in fused]
         conditions: list[ColumnElement[bool]] = [
             memory_item.c.id.in_(ids),
+            memory_item.c.workspace_id == self.workspace_id,
+            memory_item.c.subject.in_(subjects),
             memory_item.c.superseded_by.is_(None),
         ]
         if start is not None:
@@ -610,6 +664,8 @@ class MemoryStore:
                             memory_item.c.confidence,
                             memory_item.c.body,
                             memory_item.c.source_ref,
+                            memory_item.c.created_from_page_id,
+                            memory_item.c.created_from_page_revision,
                             memory_item.c.as_of,
                             memory_item.c.created_at,
                         ).where(*conditions)
@@ -619,6 +675,10 @@ class MemoryStore:
                 .all()
             )
         by_id = {row["id"]: row for row in rows}
+        page_ids = tuple(
+            row["created_from_page_id"] for row in rows if row["created_from_page_id"] is not None
+        )
+        current = await self.page_states(page_ids)
         return tuple(
             Recalled(
                 memory_id=UUID(hit.owner_id),
@@ -634,6 +694,16 @@ class MemoryStore:
             )
             for hit in fused
             if UUID(hit.owner_id) in by_id
+            and (
+                by_id[UUID(hit.owner_id)]["created_from_page_id"] is None
+                or (
+                    (state := current.get(by_id[UUID(hit.owner_id)]["created_from_page_id"]))
+                    is not None
+                    and state.subject == by_id[UUID(hit.owner_id)]["subject"]
+                    and state.revision == by_id[UUID(hit.owner_id)]["created_from_page_revision"]
+                    and state.subject in subjects
+                )
+            )
         )
 
 
@@ -647,6 +717,7 @@ def store_for(ext: ExtensionContext) -> MemoryStore:
         embed=ext.embed,
         transaction=ext.transaction,
         workspace_id=ext.store.workspace_id,
+        page_states=ext.page_states,
     )
 
 
@@ -662,6 +733,7 @@ class MemoryIndexer:
     embed: EmbedClient
     transaction: Transaction
     chunker: TextChunker
+    page_states: PageStates
 
     async def run(self) -> None:
         for item in await self._claim_due():
@@ -677,6 +749,8 @@ class MemoryIndexer:
                 memory_item.c.body,
                 memory_item.c.item_class,
                 memory_item.c.source_ref,
+                memory_item.c.created_from_page_id,
+                memory_item.c.created_from_page_revision,
                 memory_item.c.embedding_digest,
                 memory_item.c.superseded_by,
             )
@@ -702,6 +776,17 @@ class MemoryIndexer:
         return tuple(MemoryItem.model_validate(dict(row)) for row in rows)
 
     async def _index_item(self, item: MemoryItem) -> None:
+        if item.created_from_page_id is not None:
+            state = (await self.page_states((item.created_from_page_id,))).get(
+                item.created_from_page_id
+            )
+            if (
+                state is None
+                or state.subject != item.subject
+                or state.revision != item.created_from_page_revision
+            ):
+                await self._discard_stale(item)
+                return
         await chunk_embed_upsert(
             self.index,
             self.embed,
@@ -712,16 +797,62 @@ class MemoryIndexer:
             item.body,
         )
         digest = "sha256:" + hashlib.sha256(item.body.encode()).hexdigest()
+        current = (
+            {}
+            if item.created_from_page_id is None
+            else await self.page_states((item.created_from_page_id,))
+        )
+        if item.created_from_page_id is not None and (
+            (state := current.get(item.created_from_page_id)) is None
+            or state.subject != item.subject
+            or state.revision != item.created_from_page_revision
+        ):
+            await self._discard_stale(item)
+            return
         async with self.transaction() as connection:
-            await connection.execute(
+            updated = await connection.execute(
                 sa.update(memory_item)
                 .values(
                     embedding_digest=digest,
                     embedding_claimed_at=None,
                     updated_at=sa.func.now(),
                 )
-                .where(memory_item.c.id == item.id)
+                .where(
+                    memory_item.c.id == item.id,
+                    memory_item.c.subject == item.subject,
+                    memory_item.c.body == item.body,
+                    memory_item.c.created_from_page_id == item.created_from_page_id,
+                    memory_item.c.created_from_page_revision == item.created_from_page_revision,
+                )
             )
+        if updated.rowcount == 0:
+            async with self.transaction() as connection:
+                current_row = (
+                    await connection.execute(
+                        sa.select(memory_item.c.subject, memory_item.c.body).where(
+                            memory_item.c.id == item.id
+                        )
+                    )
+                ).one_or_none()
+            if (
+                current_row is None
+                or current_row.subject != item.subject
+                or current_row.body != item.body
+            ):
+                await self.index.delete(IndexScope(OWNER_KIND_MEMORY_ITEM, str(item.id)))
+
+    async def _discard_stale(self, item: MemoryItem) -> None:
+        async with self.transaction() as connection:
+            deleted = await connection.execute(
+                sa.delete(memory_item).where(
+                    memory_item.c.id == item.id,
+                    memory_item.c.subject == item.subject,
+                    memory_item.c.created_from_page_id == item.created_from_page_id,
+                    memory_item.c.created_from_page_revision == item.created_from_page_revision,
+                )
+            )
+        if deleted.rowcount > 0:
+            await self.index.delete(IndexScope(OWNER_KIND_MEMORY_ITEM, str(item.id)))
 
 
 @dataclass(frozen=True)
@@ -730,21 +861,38 @@ class PageIndexer:
     source-page change into index chunks + a `mem_page` mirror row, off the write path. The core
     page-change runner owns the cursor and the batch loop and hands this one delivered batch to
     apply; the derivation stays idempotent so a replayed change re-upserts the same rows. A
-    tombstoned change drops the page's chunks and mirror row; every other change chunks and embeds
-    the inlined body and upserts the mirror (subject + created_at for search's date window)."""
+    tombstoned change drops the page's chunks and mirror row; every other change removes facts
+    derived from a different subject or page revision, then accepts the payload only while both
+    still match the core page before and after embedding."""
 
     index: IndexBackend
     embed: EmbedClient
     transaction: Transaction
     chunker: TextChunker
     workspace_id: UUID
+    page_states: PageStates
 
     async def apply(self, changes: tuple[PageChange, ...]) -> None:
         for change in changes:
             await self._apply(change)
 
     async def _apply(self, change: PageChange) -> None:
+        current = (await self.page_states((change.page_id,))).get(change.page_id)
+        await self._remove_stale_memories(change.page_id, current)
         if change.tombstone:
+            if current is not None:
+                return
+            await self.index.delete(IndexScope(OWNER_KIND_PAGE, str(change.page_id)))
+            async with self.transaction() as connection:
+                await connection.execute(
+                    sa.delete(mem_page).where(mem_page.c.page_id == change.page_id)
+                )
+            return
+        if (
+            current is None
+            or current.subject != change.subject
+            or current.revision != change.revision
+        ):
             await self.index.delete(IndexScope(OWNER_KIND_PAGE, str(change.page_id)))
             async with self.transaction() as connection:
                 await connection.execute(
@@ -757,13 +905,24 @@ class PageIndexer:
             self.chunker,
             OWNER_KIND_PAGE,
             str(change.page_id),
-            change.subject,
+            current.subject,
             change.body,
         )
+        if (await self.page_states((change.page_id,))).get(change.page_id) != current:
+            await self.index.delete(IndexScope(OWNER_KIND_PAGE, str(change.page_id)))
+            async with self.transaction() as connection:
+                await connection.execute(
+                    sa.delete(mem_page).where(mem_page.c.page_id == change.page_id)
+                )
+            return
         async with self.transaction() as connection:
             updated = await connection.execute(
                 sa.update(mem_page)
-                .values(subject=change.subject, created_at=change.created_at)
+                .values(
+                    subject=current.subject,
+                    revision=current.revision,
+                    created_at=change.created_at,
+                )
                 .where(mem_page.c.page_id == change.page_id)
             )
             if updated.rowcount == 0:
@@ -771,7 +930,35 @@ class PageIndexer:
                     sa.insert(mem_page).values(
                         page_id=change.page_id,
                         workspace_id=self.workspace_id,
-                        subject=change.subject,
+                        subject=current.subject,
+                        revision=current.revision,
                         created_at=change.created_at,
                     )
                 )
+
+    async def _remove_stale_memories(self, page_id: UUID, state: PageState | None) -> None:
+        conditions: tuple[ColumnElement[bool], ...] = (
+            memory_item.c.workspace_id == self.workspace_id,
+            memory_item.c.created_from_page_id == page_id,
+        )
+        if state is not None:
+            conditions = (
+                *conditions,
+                sa.or_(
+                    memory_item.c.subject != state.subject,
+                    memory_item.c.created_from_page_revision != state.revision,
+                    memory_item.c.created_from_page_revision.is_(None),
+                ),
+            )
+        async with self.transaction() as connection:
+            stale = tuple(
+                (
+                    await connection.execute(
+                        sa.delete(memory_item).where(*conditions).returning(memory_item.c.id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        for memory_id in stale:
+            await self.index.delete(IndexScope(OWNER_KIND_MEMORY_ITEM, str(memory_id)))

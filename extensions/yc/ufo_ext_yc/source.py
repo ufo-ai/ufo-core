@@ -2,7 +2,6 @@
 
 import asyncio
 import csv
-import hashlib
 import io
 import json
 from dataclasses import dataclass
@@ -229,7 +228,6 @@ class YcSource:
             pages.append(
                 Page(
                     source_ref=f"{collection}/{row.record_id}",
-                    digest="sha256:" + hashlib.sha256(rendered.encode()).hexdigest(),
                     body=rendered,
                     stream=collection,
                     title=row.description or row.link,
@@ -262,7 +260,6 @@ class YcSource:
             pages.append(
                 Page(
                     source_ref=f"{collection}/{row.record_id}",
-                    digest="sha256:" + hashlib.sha256(rendered.encode()).hexdigest(),
                     body=rendered,
                     stream=collection,
                     title=row.link,

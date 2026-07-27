@@ -576,9 +576,14 @@ async def test_asana_source_syncs_through_the_driver_into_recallable_memory(
         transaction=workspace_tx,
         chunker=TextChunker(),
         workspace_id=workspace_id,
+        page_states=context.page_states,
     )
     service = MemoryStore(
-        index=index, embed=embed, transaction=workspace_tx, workspace_id=workspace_id
+        index=index,
+        embed=embed,
+        transaction=workspace_tx,
+        workspace_id=workspace_id,
+        page_states=context.page_states,
     )
 
     await driver.run()
@@ -588,5 +593,6 @@ async def test_asana_source_syncs_through_the_driver_into_recallable_memory(
 
     with ws(workspace_id):
         await page_indexer.apply((await page_feed.pages_changed_since(None, 50)).changes)
-    matches = await service.search_sources("Acme HQ workspace", frozenset({SHARED_SUBJECT}), 5)
+    with ws(workspace_id):
+        matches = await service.search_sources("Acme HQ workspace", frozenset({SHARED_SUBJECT}), 5)
     assert matches and "Acme HQ workspace" in matches[0].text

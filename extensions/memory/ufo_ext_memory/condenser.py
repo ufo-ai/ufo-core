@@ -115,10 +115,23 @@ class FactDeriver:
             await self._derive(self.model, group)
 
     async def _derive(self, model: ModelAccess, pages: tuple[PageChange, ...]) -> None:
-        by_id = {str(page.page_id): page for page in pages}
-        for fact in await self._extract(model, pages):
+        current = await self.store.page_states(tuple(page.page_id for page in pages))
+        authorized = tuple(
+            page
+            for page in pages
+            if (state := current.get(page.page_id)) is not None
+            and state.subject == page.subject
+            and state.revision == page.revision
+        )
+        if not authorized:
+            return
+        by_id = {str(page.page_id): page for page in authorized}
+        for fact in await self._extract(model, authorized):
             page = by_id.get(fact.page_id)
             if page is None or fact.notability.lower() not in EXTRACT_KEEP_NOTABILITY:
+                continue
+            latest = (await self.store.page_states((page.page_id,))).get(page.page_id)
+            if latest is None or latest.subject != page.subject or latest.revision != page.revision:
                 continue
             await self.store.commit(
                 MemoryWrite(
@@ -128,6 +141,7 @@ class FactDeriver:
                     memory_kind=fact.memory_kind,
                     confidence=fact.confidence,
                     created_from_page_id=page.page_id,
+                    created_from_page_revision=page.revision,
                     as_of=page.as_of,
                 )
             )
@@ -205,6 +219,7 @@ class MemoryConsolidator:
                         .where(
                             memory_item.c.workspace_id == self.workspace_id,
                             memory_item.c.item_class == FACT,
+                            memory_item.c.created_from_page_id.is_(None),
                             memory_item.c.superseded_by.is_(None),
                             memory_item.c.created_at <= cutoff,
                         )
@@ -263,7 +278,29 @@ class MemoryConsolidator:
         if not summary:
             return
         summary_id = uuid4()
+        ids = [fact.id for fact in cluster]
         async with self.transaction() as connection:
+            donors = sa.select(
+                memory_item.c.id,
+                memory_item.c.body,
+                memory_item.c.confidence,
+            ).where(
+                memory_item.c.id.in_(ids),
+                memory_item.c.workspace_id == self.workspace_id,
+                memory_item.c.subject == cluster[0].subject,
+                memory_item.c.item_class == FACT,
+                memory_item.c.created_from_page_id.is_(None),
+                memory_item.c.superseded_by.is_(None),
+            )
+            if connection.dialect.name == "postgresql":
+                donors = donors.with_for_update()
+            present = {
+                row.id: (row.body, row.confidence)
+                for row in (await connection.execute(donors)).all()
+            }
+            expected = {fact.id: (fact.body, fact.confidence) for fact in cluster}
+            if present != expected:
+                return
             await connection.execute(
                 sa.insert(memory_item).values(
                     id=summary_id,
@@ -281,11 +318,20 @@ class MemoryConsolidator:
                     updated_at=sa.func.now(),
                 )
             )
-            await connection.execute(
+            updated = await connection.execute(
                 sa.update(memory_item)
                 .values(superseded_by=summary_id, updated_at=sa.func.now())
-                .where(memory_item.c.id.in_([fact.id for fact in cluster]))
+                .where(
+                    memory_item.c.id.in_(ids),
+                    memory_item.c.workspace_id == self.workspace_id,
+                    memory_item.c.subject == cluster[0].subject,
+                    memory_item.c.item_class == FACT,
+                    memory_item.c.created_from_page_id.is_(None),
+                    memory_item.c.superseded_by.is_(None),
+                )
             )
+            if updated.rowcount != len(ids):
+                raise RuntimeError("memory consolidation donors changed while locked")
 
     async def _summarize(self, model: ModelAccess, cluster: tuple[_AgedFact, ...]) -> str:
         payload = {"facts": [fact.body[:CONSOLIDATE_FACT_CHARS] for fact in cluster]}

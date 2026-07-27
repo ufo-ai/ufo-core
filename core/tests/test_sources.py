@@ -1,7 +1,8 @@
+import asyncio
 import hashlib
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import ClassVar
 from uuid import UUID, uuid4
@@ -29,6 +30,7 @@ from ufo.ext.manifest import (
 from ufo.indexing import OWNER_KIND_PAGE, Chunk, TextChunker
 from ufo.jobs import (
     CORE_EXTENSION,
+    PAGE_CHANGE_CURSOR_KEY,
     PAGE_CHANGE_JOB,
     SANDBOX_REAP_JOB,
     TURN_DISPATCH_JOB,
@@ -133,6 +135,7 @@ def _wire(
         transaction=workspace_tx,
         chunker=TextChunker(),
         workspace_id=workspace_id,
+        page_states=context_for("memory", frozenset()).page_states,
     )
 
     async def index_pages() -> None:
@@ -141,7 +144,11 @@ def _wire(
             await indexer.apply(batch.changes)
 
     service = MemoryStore(
-        index=index, embed=embed, transaction=workspace_tx, workspace_id=workspace_id
+        index=index,
+        embed=embed,
+        transaction=workspace_tx,
+        workspace_id=workspace_id,
+        page_states=context_for("memory", frozenset()).page_states,
     )
     return driver, index_pages, service
 
@@ -515,17 +522,19 @@ async def test_edited_page_leaves_no_stale_chunk_in_search_sources(
     await _register_folder(root)
     await _sync(driver)
     await index_pages()
-    before = await service.search_sources("launch codename", frozenset({SHARED_SUBJECT}), 8)
-    assert before and "thunderbird" in before[0].text
+    with ws(workspace_id):
+        before = await service.search_sources("launch codename", frozenset({SHARED_SUBJECT}), 8)
+        assert before and "thunderbird" in before[0].text
 
     doc.write_text("the launch codename is nighthawk")
     await _make_due()
     await _sync(driver)
     await index_pages()
 
-    matches = await service.search_sources(
-        "launch codename thunderbird", frozenset({SHARED_SUBJECT}), 8
-    )
+    with ws(workspace_id):
+        matches = await service.search_sources(
+            "launch codename thunderbird", frozenset({SHARED_SUBJECT}), 8
+        )
     assert matches and all("thunderbird" not in match.text for match in matches)
     assert "nighthawk" in matches[0].text
 
@@ -739,6 +748,21 @@ async def test_page_change_drive_skips_a_workspace_unchanged_since_its_cursor(
     assert isinstance(seen_b, str) and str(page_b) in seen_b
 
 
+async def test_page_change_candidates_reject_an_invalid_cursor(db: None, tmp_path: Path) -> None:
+    workspace_id = uuid4()
+    await _seed_page(workspace_id)
+    runner = _probe_runner(tmp_path)
+    (consumer,) = runner.consumers()
+    with ws(workspace_id):
+        await ScopedStore(extension=PROBE_EXTENSION).put(
+            f"{PAGE_CHANGE_CURSOR_KEY}:{consumer.discriminator}",
+            f"{datetime(2030, 1, 1, tzinfo=UTC).isoformat()}|{uuid4()}",
+        )
+
+    with pytest.raises(ValueError, match="invalid page cursor"):
+        await runner.workspaces_with_changes(consumer)
+
+
 async def test_shared_page_scoping_excludes_a_member_only_search(
     db: None, database_url: str, tmp_path: Path
 ) -> None:
@@ -753,18 +777,19 @@ async def test_shared_page_scoping_excludes_a_member_only_search(
     await _sync(driver)
     await index_pages()
 
-    shared = await service.search_sources("expense reports due", frozenset({SHARED_SUBJECT}), 8)
-    assert len(shared) == 1 and "expense reports" in shared[0].text
+    with ws(workspace_id):
+        shared = await service.search_sources("expense reports due", frozenset({SHARED_SUBJECT}), 8)
+        assert len(shared) == 1 and "expense reports" in shared[0].text
 
-    member_only = await service.search_sources(
-        "expense reports due", frozenset({member_subject(uuid4())}), 8
-    )
-    assert member_only == ()
+        member_only = await service.search_sources(
+            "expense reports due", frozenset({member_subject(uuid4())}), 8
+        )
+        assert member_only == ()
 
-    with_shared = await service.search_sources(
-        "expense reports due", recall_subjects(conversation_audience(uuid4())), 8
-    )
-    assert len(with_shared) == 1
+        with_shared = await service.search_sources(
+            "expense reports due", recall_subjects(conversation_audience(uuid4())), 8
+        )
+        assert len(with_shared) == 1
 
 
 async def test_member_scoped_page_is_invisible_to_another_member(
@@ -803,11 +828,15 @@ async def test_member_scoped_page_is_invisible_to_another_member(
                 updated_at=sa.func.now(),
             )
         )
+        revision = await connection.scalar(
+            sa.select(tables.page.c.revision).where(tables.page.c.id == page_id)
+        )
         await connection.execute(
             sa.insert(mem_page).values(
                 page_id=page_id,
                 workspace_id=workspace_id,
                 subject=member_subject(alice),
+                revision=revision,
                 created_at=sa.func.now(),
             )
         )
@@ -827,16 +856,17 @@ async def test_member_scoped_page_is_invisible_to_another_member(
             )
         )
 
-    mine = await service.search_sources(
-        "onboarding checklist", recall_subjects(conversation_audience(alice)), 8
-    )
-    assert len(mine) == 1 and mine[0].page_id == page_id
-    assert (
-        await service.search_sources(
-            "onboarding checklist", recall_subjects(conversation_audience(bob)), 8
+    with ws(workspace_id):
+        mine = await service.search_sources(
+            "onboarding checklist", recall_subjects(conversation_audience(alice)), 8
         )
-        == ()
-    )
+        assert len(mine) == 1 and mine[0].page_id == page_id
+        assert (
+            await service.search_sources(
+                "onboarding checklist", recall_subjects(conversation_audience(bob)), 8
+            )
+            == ()
+        )
 
 
 async def test_a_failing_source_is_isolated_and_released(
@@ -907,6 +937,32 @@ class _ScriptedSource:
                 return outcome
 
 
+@dataclass
+class _BlockingSource:
+    result: SyncResult
+    config_model: ClassVar[type[SourceConfig]] = SourceConfig
+    entered: asyncio.Event = field(default_factory=asyncio.Event)
+    release: asyncio.Event = field(default_factory=asyncio.Event)
+
+    async def fetch(self, config: SourceConfig, cursor: str | None, auth: SourceAuth) -> SyncResult:
+        self.entered.set()
+        await self.release.wait()
+        return self.result
+
+
+@dataclass(frozen=True)
+class _BlockingReadBlob(FilesystemBlobStore):
+    armed: asyncio.Event = field(default_factory=asyncio.Event)
+    entered: asyncio.Event = field(default_factory=asyncio.Event)
+    release: asyncio.Event = field(default_factory=asyncio.Event)
+
+    async def get(self, key: str) -> bytes:
+        if self.armed.is_set():
+            self.entered.set()
+            await self.release.wait()
+        return await super().get(key)
+
+
 def _scripted_driver(
     outcomes: list[SyncResult | Exception], database_url: str, blob_root: Path
 ) -> tuple[SyncDriver, _ScriptedSource]:
@@ -937,6 +993,165 @@ async def _seed_scripted_source(workspace_id: UUID, cursor: str | None) -> UUID:
             )
         )
     return source_id
+
+
+async def test_sync_uses_source_subject_current_after_fetch(
+    db: None, database_url: str, tmp_path: Path
+) -> None:
+    workspace_id = await _workspace()
+    member_id, source_id = uuid4(), uuid4()
+    backend = _BlockingSource(
+        SyncResult(
+            pages=(
+                Page(
+                    source_ref="docs/plan",
+                    body="launch plan",
+                    stream="docs",
+                    title="Launch plan",
+                ),
+            )
+        )
+    )
+    driver = SyncDriver(
+        backends={SCRIPTED_BACKEND: backend},
+        blob=FilesystemBlobStore(root=tmp_path / "blobs"),
+        postgres=database_url.startswith("postgresql"),
+    )
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.insert(tables.member).values(
+                    id=member_id,
+                    workspace_id=workspace_id,
+                    email="member@example.com",
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+            await connection.execute(
+                sa.insert(tables.source).values(
+                    id=source_id,
+                    workspace_id=workspace_id,
+                    backend=SCRIPTED_BACKEND,
+                    config={"root": "/unused"},
+                    subject=member_subject(member_id),
+                    owner_member_id=member_id,
+                    cursor=None,
+                    next_sync_at=sa.func.now(),
+                    claimed_by=None,
+                    claim_expires_at=None,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+        running = asyncio.create_task(driver.run())
+        try:
+            await backend.entered.wait()
+            await context_for("probe", frozenset()).set_source_subject((source_id,), SHARED_SUBJECT)
+        finally:
+            backend.release.set()
+            await running
+        async with workspace_tx() as connection:
+            page_subject = (
+                await connection.execute(
+                    sa.select(tables.page.c.subject).where(tables.page.c.source_id == source_id)
+                )
+            ).scalar_one()
+    assert page_subject == SHARED_SUBJECT
+
+
+async def test_page_feed_reads_one_immutable_page_version_during_a_sync(
+    db: None, database_url: str, tmp_path: Path
+) -> None:
+    workspace_id = await _workspace()
+    await _seed_scripted_source(workspace_id, None)
+    old = Page(source_ref="docs/plan", body="old plan", stream="docs", title="Plan")
+    new = old.model_copy(update={"body": "new plan"})
+    blob = _BlockingReadBlob(root=tmp_path / "blobs")
+    driver = SyncDriver(
+        backends={
+            SCRIPTED_BACKEND: _ScriptedSource([SyncResult(pages=(old,)), SyncResult(pages=(new,))])
+        },
+        blob=blob,
+        postgres=database_url.startswith("postgresql"),
+    )
+
+    await _sync(driver)
+    blob.armed.set()
+    with ws(workspace_id):
+        reading = asyncio.create_task(CorePageFeed(blob).pages_changed_since(None, 1))
+        await blob.entered.wait()
+        await _make_due()
+        await driver.run()
+        blob.release.set()
+        (change,) = (await reading).changes
+
+    assert (change.body, change.digest) == (old.body, old.digest)
+    async with workspace_tx() as connection:
+        body_ref, digest = (
+            await connection.execute(
+                sa.select(tables.page.c.body_ref, tables.page.c.digest).where(
+                    tables.page.c.id == change.page_id
+                )
+            )
+        ).one()
+    assert digest == new.digest
+    assert body_ref.endswith(new.digest.removeprefix("sha256:"))
+
+
+async def test_database_revision_orders_an_old_writer_after_a_new_cursor(
+    db: None, tmp_path: Path
+) -> None:
+    workspace_id = await _workspace()
+    source_id = await _seed_scripted_source(workspace_id, None)
+    page_id = uuid4()
+    old_ref, new_ref = f"pages/{page_id}/old", f"pages/{page_id}/new"
+    blob = FilesystemBlobStore(root=tmp_path / "blobs")
+    await blob.put(old_ref, b"old body")
+    await blob.put(new_ref, b"new body")
+    old_stamp = datetime(2020, 1, 1, tzinfo=UTC)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.page).values(
+                id=page_id,
+                workspace_id=workspace_id,
+                source_id=source_id,
+                digest="sha256:old",
+                body_ref=old_ref,
+                subject=SHARED_SUBJECT,
+                tombstone=False,
+                created_at=old_stamp,
+                updated_at=old_stamp,
+            )
+        )
+        first_revision = (
+            await connection.execute(
+                sa.select(tables.page.c.revision).where(tables.page.c.id == page_id)
+            )
+        ).scalar_one()
+
+    feed = CorePageFeed(blob)
+    cursor = f"{first_revision}|{page_id}"
+    with ws(workspace_id):
+        assert (await feed.pages_changed_since(cursor, 1)).changes == ()
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.page)
+                .values(
+                    digest="sha256:new",
+                    body_ref=new_ref,
+                    updated_at=old_stamp - timedelta(days=1),
+                )
+                .where(tables.page.c.id == page_id)
+            )
+        (change,) = (await feed.pages_changed_since(cursor, 1)).changes
+        with pytest.raises(ValueError, match="invalid page cursor"):
+            await feed.pages_changed_since(
+                f"{datetime(2030, 1, 1, tzinfo=UTC).isoformat()}|{page_id}", 1
+            )
+
+    assert change.body == "new body"
+    assert change.revision > first_revision
 
 
 async def _source_state(source_id: UUID) -> sa.RowMapping:
@@ -970,7 +1185,6 @@ async def _tombstone(page_id: UUID) -> bool:
 def test_page_requires_browse_metadata() -> None:
     page = {
         "source_ref": "docs/launch",
-        "digest": "sha256:launch",
         "body": "Launch window",
         "stream": "docs",
         "title": "Launch window",
@@ -980,10 +1194,16 @@ def test_page_requires_browse_metadata() -> None:
             Page.model_validate(page | {field_name: ""})
 
 
+def test_page_derives_digest_from_body() -> None:
+    page = Page(source_ref="docs/launch", body="Launch window", stream="docs", title="Launch")
+    assert page.digest == "sha256:" + hashlib.sha256(page.body.encode()).hexdigest()
+    with pytest.raises(ValueError):
+        Page.model_validate(page.model_dump() | {"digest": "sha256:caller-controlled"})
+
+
 def test_page_normalizes_browse_timestamps() -> None:
     page = Page(
         source_ref="docs/launch",
-        digest="sha256:launch",
         body="Launch window",
         stream="docs",
         title="Launch window",
@@ -1005,7 +1225,6 @@ def test_page_normalizes_browse_timestamps() -> None:
 def test_page_normalizes_provider_timestamp_shapes(value: str, expected: str) -> None:
     page = Page(
         source_ref="docs/launch",
-        digest="sha256:launch",
         body="Launch window",
         stream="docs",
         title="Launch window",
@@ -1019,7 +1238,6 @@ def test_page_rejects_invalid_browse_timestamps(value: str) -> None:
     with pytest.raises(ValueError, match="timestamp"):
         Page(
             source_ref="docs/launch",
-            digest="sha256:launch",
             body="Launch window",
             stream="docs",
             title="Launch window",
@@ -1058,7 +1276,6 @@ async def test_cursor_expired_clears_stored_cursor_and_next_run_refetches(
     source_id = await _seed_scripted_source(workspace_id, "stale-token")
     page = Page(
         source_ref="doc",
-        digest="sha256:fresh",
         body="the launch window opens at dawn",
         stream="docs",
         title="Launch window",
@@ -1097,7 +1314,6 @@ async def test_sync_persists_backend_page_browse_metadata(
     await _seed_scripted_source(workspace_id, None)
     page = Page(
         source_ref="issues/ENG-42",
-        digest="sha256:issue",
         body="Issue body",
         stream="issues",
         title="Fix launch sequencing",
@@ -1130,7 +1346,6 @@ async def test_sync_refreshes_browse_metadata_without_replaying_unchanged_conten
     await _seed_scripted_source(workspace_id, None)
     original = Page(
         source_ref="issues/ENG-42",
-        digest="sha256:issue",
         body="Issue body",
         stream="issues",
         title="Launch sequence",
@@ -1199,7 +1414,6 @@ async def test_delta_delete_tombstones_only_named_page_never_blanket_sweeps(
     kept_id = await _seed_prior_page(workspace_id, source_id, "kept/doc")
     delta = Page(
         source_ref="delta/doc",
-        digest="sha256:delta",
         body="the launch window opens at dawn",
         stream="docs",
         title="Launch window",
@@ -1234,7 +1448,6 @@ async def test_snapshot_fetch_tombstones_prior_pages_absent_from_the_fetch(
     gone_id = await _seed_prior_page(workspace_id, source_id, "gone/doc")
     kept = Page(
         source_ref="kept/doc",
-        digest="sha256:kept",
         body="the mascot is a friendly otter named pip",
         stream="docs",
         title="Mascot",

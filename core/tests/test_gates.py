@@ -241,6 +241,39 @@ def test_schedule_authority_gate_allows_ambient_agent_selection() -> None:
     assert gates._schedule_authority_failures(trees) == []
 
 
+def test_wiring_gate_counts_database_program_reads_and_writes() -> None:
+    trees = {
+        gates.SCHEMA_TABLES: ast.parse(
+            "workspace = sa.Table(\n"
+            "    'workspace', metadata, sa.Column('page_revision', sa.BigInteger)\n"
+            ")\n"
+            "page = sa.Table('page', metadata, sa.Column('revision', sa.BigInteger))\n"
+        ),
+        CORE_MIGRATIONS / "revision.py": ast.parse(
+            'op.execute("""\n'
+            "create trigger assign_page_revision after insert on page begin\n"
+            "update workspace set page_revision = page_revision + 1;\n"
+            "update page set revision = (select page_revision from workspace);\n"
+            'end\n""")\n'
+        ),
+        CORE_FILE: ast.parse("select(page.c.revision)\n"),
+    }
+    assert gates._wiring_failures(trees) == []
+
+
+def test_wiring_gate_does_not_count_column_declaration_as_a_write() -> None:
+    trees = {
+        gates.SCHEMA_TABLES: ast.parse(
+            "page = sa.Table('page', metadata, sa.Column('revision', sa.BigInteger))\n"
+        ),
+        CORE_MIGRATIONS / "revision.py": ast.parse(
+            "op.add_column('page', sa.Column('revision', sa.BigInteger))\n"
+        ),
+        CORE_FILE: ast.parse("select(page.c.revision)\n"),
+    }
+    assert gates._wiring_failures(trees) == ["schema: page.revision has no write site"]
+
+
 WEB_SURFACE = Path("extensions/web/ufo_ext_web/surface.py")
 
 

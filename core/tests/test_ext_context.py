@@ -188,9 +188,8 @@ async def test_installation_access_preserves_fleet_wide_uniqueness(db: None) -> 
 async def test_set_source_subject_flips_the_row_and_restamps_live_pages(
     db: None, tmp_path: Path
 ) -> None:
-    """The flip restamps every live page with a fresh `updated_at` so a consumer's stored
-    PageFeed cursor — sitting exactly at the page's prior position — replays it; a tombstoned
-    page's chunks are already gone, so it is left untouched."""
+    """The flip assigns every live page a fresh revision so a consumer at the prior high-water
+    replays it; a tombstoned page's chunks are already gone, so it is left untouched."""
     workspace_id = await _workspace()
     member_id = uuid4()
     old = datetime(2026, 7, 1, tzinfo=UTC)
@@ -249,8 +248,16 @@ async def test_set_source_subject_flips_the_row_and_restamps_live_pages(
                 },
             ],
         )
+    async with workspace_tx() as connection:
+        high_water = (
+            await connection.execute(
+                sa.select(tables.page.c.revision, tables.page.c.id)
+                .order_by(tables.page.c.revision.desc(), tables.page.c.id.desc())
+                .limit(1)
+            )
+        ).one()
     feed = CorePageFeed(blob=blob)
-    cursor = f"{old.isoformat()}|{live_id}"
+    cursor = f"{high_water.revision}|{high_water.id}"
     with ws(workspace_id):
         stale = await feed.pages_changed_since(cursor, 10)
         assert stale.changes == ()

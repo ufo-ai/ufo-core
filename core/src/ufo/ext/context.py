@@ -486,6 +486,12 @@ class PageRecord:
 
 
 @dataclass(frozen=True)
+class PageState:
+    subject: str
+    revision: int
+
+
+@dataclass(frozen=True)
 class ExtensionContext:
     store: ScopedStore
     credentials: CredentialAccess
@@ -563,6 +569,29 @@ class ExtensionContext:
         if self.invoker is None:
             raise RuntimeError("invoke requires a turn invoker; none is wired")
         return await self.invoker.invoke(conversation_id, agent_id, message, idempotency_key)
+
+    async def page_states(self, page_ids: tuple[UUID, ...]) -> dict[UUID, PageState]:
+        """Current subject and revision for this workspace's live named pages."""
+        if not page_ids:
+            return {}
+        query = sa.select(
+            tables.page.c.id,
+            tables.page.c.subject,
+            tables.page.c.revision,
+        ).where(
+            tables.page.c.workspace_id == self.store.workspace_id,
+            tables.page.c.id.in_(page_ids),
+            tables.page.c.tombstone.is_(False),
+        )
+        async with workspace_tx() as connection:
+            rows = (await connection.execute(query)).all()
+        return {
+            row.id: PageState(
+                subject=row.subject,
+                revision=row.revision,
+            )
+            for row in rows
+        }
 
     async def register_source(
         self, backend: str, config: BaseModel, *, subject: str, owner_member_id: UUID | None

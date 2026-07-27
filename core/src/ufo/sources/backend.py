@@ -244,7 +244,6 @@ class ConnectorBackend:
         )
         return Page(
             source_ref=f"{stream.name}/{ref}",
-            digest="sha256:" + hashlib.sha256(body.encode()).hexdigest(),
             body=body,
             stream=stream.name,
             title=title,

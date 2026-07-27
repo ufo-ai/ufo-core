@@ -240,7 +240,6 @@ async def test_sync_driver_page_metadata_round_trips_through_object_verbs(
     source_id = await _seed_source(state, "probe")
     page = Page(
         source_ref="issues/ENG-42",
-        digest="sha256:issue",
         body="Issue body",
         stream="issues",
         title="Fix launch sequencing",

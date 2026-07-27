@@ -53,6 +53,7 @@ from ufo.sources.sync import (
     SOURCE_SYNC_SCHEDULE,
     PageFeed,
     SyncDriver,
+    page_cursor,
 )
 from ufo.workspace import ws, ws_current
 
@@ -375,19 +376,12 @@ class SandboxReaper:
         )
 
 
-def _page_beyond_cursor(updated_at: datetime, page_id: UUID, cursor: object) -> bool:
-    """Whether a page at `(updated_at, page_id)` lies past a `page_change` cursor — the same total
-    order (`{changed_at.isoformat()}|{page_id}`) `CorePageFeed` replays in, so the candidate query
-    and the feed agree on what "changed since" means. A cursor that is not a stored string (the
-    consumer never drained this workspace) leaves every page pending. Both moments are read as UTC —
-    a naive timestamp (SQLite) is the UTC wall-clock it was written as."""
-    if not isinstance(cursor, str):
+def _page_beyond_cursor(revision: int, page_id: UUID, cursor: object) -> bool:
+    """Whether a page at `(revision, page_id)` lies past a `page_change` cursor."""
+    if cursor is None:
         return True
-    stamp_str, boundary_str = cursor.split("|", 1)
-    stamp = datetime.fromisoformat(stamp_str)
-    stamp = stamp if stamp.tzinfo is not None else stamp.replace(tzinfo=UTC)
-    changed_at = updated_at if updated_at.tzinfo is not None else updated_at.replace(tzinfo=UTC)
-    return changed_at > stamp or (changed_at == stamp and page_id > UUID(boundary_str))
+    boundary_revision, boundary_id = page_cursor(cursor)
+    return revision > boundary_revision or (revision == boundary_revision and page_id > boundary_id)
 
 
 @dataclass(frozen=True)
@@ -475,7 +469,7 @@ class PageChangeRunner:
         """The workspaces this consumer has actual pending work in — those whose newest page lies
         beyond the consumer's own stored cursor. One `owner_tx` read (RLS bypass) takes each
         workspace's high-water page as a pair of correlated probes down the `page_feed` index (the
-        maximum in the feed's `(updated_at, id)` order — one probe per workspace, never a scan of
+        maximum in the feed's `(revision, id)` order — one probe per workspace, never a scan of
         the page table) and each workspace's cursor for this consumer from `ext_store`; a workspace
         whose high-water page is at or before its cursor has nothing changed since it last drained
         and is never opened, while a workspace with no cursor yet (never driven) has every page
@@ -483,9 +477,9 @@ class PageChangeRunner:
         per-tenant deploy `owner_tx` resolves to the single workspace, unchanged."""
         cursor_key = f"{PAGE_CHANGE_CURSOR_KEY}:{consumer.discriminator}"
         of_workspace = tables.page.c.workspace_id == tables.workspace.c.id
-        newest_first = (tables.page.c.updated_at.desc(), tables.page.c.id.desc())
-        newest_at = (
-            sa.select(tables.page.c.updated_at)
+        newest_first = (tables.page.c.revision.desc(), tables.page.c.id.desc())
+        newest_revision = (
+            sa.select(tables.page.c.revision)
             .where(of_workspace)
             .order_by(*newest_first)
             .limit(1)
@@ -511,7 +505,7 @@ class PageChangeRunner:
                 await connection.execute(
                     sa.select(
                         tables.workspace.c.id.label("workspace_id"),
-                        newest_at.label("updated_at"),
+                        newest_revision.label("revision"),
                         newest_id.label("id"),
                     )
                 )
@@ -519,9 +513,9 @@ class PageChangeRunner:
         cursors = {row.workspace_id: row.value for row in cursor_rows}
         pending: list[UUID] = []
         for row in page_rows:
-            if row.updated_at is None:
+            if row.revision is None:
                 continue
-            if _page_beyond_cursor(row.updated_at, row.id, cursors.get(row.workspace_id)):
+            if _page_beyond_cursor(row.revision, row.id, cursors.get(row.workspace_id)):
                 pending.append(row.workspace_id)
         return tuple(pending)
 
@@ -532,7 +526,9 @@ class PageChangeRunner:
         context = self._context_for(consumer.extension, consumer.declared)
         cursor_key = f"{PAGE_CHANGE_CURSOR_KEY}:{consumer.discriminator}"
         stored = await context.store.get(cursor_key)
-        cursor = stored if isinstance(stored, str) else None
+        if stored is not None and not isinstance(stored, str):
+            raise ValueError("page cursor must be a string")
+        cursor = stored
         while True:
             batch = await self.pages.pages_changed_since(cursor, PAGE_CHANGE_BATCH)
             if not batch.changes:

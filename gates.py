@@ -312,6 +312,23 @@ def _schema_columns(trees: dict[Path, ast.Module]) -> tuple[list[tuple[str, str]
     return columns, literals
 
 
+def _database_program_wiring(tree: ast.Module) -> tuple[set[str], set[str]]:
+    writes: set[str] = set()
+    reads: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+            continue
+        sql = node.value
+        if re.search(r"\bcreate\s+(?:function|trigger)\b", sql, re.IGNORECASE) is None:
+            continue
+        writes.update(re.findall(r"\bset\s+([a-z_][a-z0-9_]*)\s*=", sql, re.IGNORECASE))
+        writes.update(re.findall(r"\binto\s+new\.([a-z_][a-z0-9_]*)\b", sql, re.IGNORECASE))
+        reads.update(
+            re.findall(r"\b(?:select|returning)\s+([a-z_][a-z0-9_]*)\b", sql, re.IGNORECASE)
+        )
+    return writes, reads
+
+
 def _wiring_failures(trees: dict[Path, ast.Module]) -> list[str]:
     columns, literals = _schema_columns(trees)
     if not columns:
@@ -320,11 +337,12 @@ def _wiring_failures(trees: dict[Path, ast.Module]) -> list[str]:
     read_columns: set[str] = set()
     produced: set[str] = set()
     for rel, tree in trees.items():
-        if (
-            not str(rel).startswith(str(CORE_SRC))
-            or rel == SCHEMA_TABLES
-            or "migrations" in rel.parts
-        ):
+        if not str(rel).startswith(str(CORE_SRC)) or rel == SCHEMA_TABLES:
+            continue
+        if "migrations" in rel.parts:
+            database_writes, database_reads = _database_program_wiring(tree)
+            write_columns.update(database_writes)
+            read_columns.update(database_reads)
             continue
         for node in ast.walk(tree):
             match node:

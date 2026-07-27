@@ -6,6 +6,7 @@ job's context. The embed client is a real dependency counted (never asserted) to
 overlapping runs embed each row once."""
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
@@ -21,7 +22,8 @@ from ufo_ext_memory.store import (
 )
 
 from ufo.db import workspace_tx
-from ufo.indexing import TextChunker
+from ufo.ext.context import PageState, context_for
+from ufo.indexing import OWNER_KIND_MEMORY_ITEM, TextChunker
 from ufo.jobs import CORE_EXTENSION, JobRunner, bindings_from
 from ufo.schema import tables
 from ufo.sdk.audience import conversation_audience
@@ -60,6 +62,42 @@ class CountingEmbed:
         return tuple(self._vector for _ in texts)
 
 
+class CallbackEmbed:
+    def __init__(self, vector: tuple[float, ...], callback: Callable[[], Awaitable[None]]) -> None:
+        self._vector = vector
+        self._callback = callback
+
+    async def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
+        await self._callback()
+        return tuple(self._vector for _ in texts)
+
+
+class ReclassifyingPage:
+    def __init__(
+        self,
+        page_id: UUID,
+        before: str,
+        after: str,
+        before_revision: int = 1,
+        after_revision: int = 1,
+    ) -> None:
+        self.page_id = page_id
+        self.before = before
+        self.after = after
+        self.before_revision = before_revision
+        self.after_revision = after_revision
+        self.calls = 0
+
+    async def __call__(self, page_ids: tuple[UUID, ...]) -> dict[UUID, PageState]:
+        self.calls += 1
+        return {
+            self.page_id: PageState(
+                subject=self.before if self.calls == 1 else self.after,
+                revision=self.before_revision if self.calls == 1 else self.after_revision,
+            )
+        }
+
+
 async def _workspace() -> UUID:
     workspace_id = uuid4()
     async with workspace_tx() as connection:
@@ -74,10 +112,18 @@ async def _workspace() -> UUID:
 def _wire(embed: object, workspace_id: UUID) -> tuple[MemoryStore, MemoryIndexer]:
     index = DefaultIndex(transaction=workspace_tx)
     store = MemoryStore(
-        index=index, embed=embed, transaction=workspace_tx, workspace_id=workspace_id
+        index=index,
+        embed=embed,
+        transaction=workspace_tx,
+        workspace_id=workspace_id,
+        page_states=context_for("memory", frozenset()).page_states,
     )
     indexer = MemoryIndexer(
-        index=index, embed=embed, transaction=workspace_tx, chunker=TextChunker()
+        index=index,
+        embed=embed,
+        transaction=workspace_tx,
+        chunker=TextChunker(),
+        page_states=context_for("memory", frozenset()).page_states,
     )
     return store, indexer
 
@@ -120,6 +166,7 @@ async def test_overlapping_index_runs_embed_each_row_once(db: None) -> None:
             embed=embed,
             transaction=workspace_tx,
             chunker=TextChunker(),
+            page_states=context_for("memory", frozenset()).page_states,
         )
         for _ in range(2)
     )
@@ -136,6 +183,124 @@ async def test_overlapping_index_runs_embed_each_row_once(db: None) -> None:
             )
         ).scalar_one()
     assert pending == 0
+
+
+async def test_page_derived_index_write_is_deleted_when_the_page_changes_during_embed(
+    db: None,
+) -> None:
+    workspace_id = await _workspace()
+    page_id = uuid4()
+    embed = StubEmbed(vec((3, 1.0)))
+    index = DefaultIndex(transaction=workspace_tx)
+    store = MemoryStore(
+        index=index,
+        embed=embed,
+        transaction=workspace_tx,
+        workspace_id=workspace_id,
+        page_states=context_for("memory", frozenset()).page_states,
+    )
+    await store.commit(
+        MemoryWrite(
+            subject="shared",
+            body="the stale launch codename is polaris",
+            created_from_page_id=page_id,
+            created_from_page_revision=1,
+        )
+    )
+    with ws(workspace_id):
+        await MemoryIndexer(
+            index=index,
+            embed=embed,
+            transaction=workspace_tx,
+            chunker=TextChunker(),
+            page_states=ReclassifyingPage(page_id, "shared", f"member:{uuid4()}"),
+        ).run()
+        assert (
+            await index.lexical(
+                "launch codename",
+                frozenset({"shared"}),
+                OWNER_KIND_MEMORY_ITEM,
+                10,
+            )
+            == ()
+        )
+    async with workspace_tx() as connection:
+        count = (
+            await connection.execute(
+                sa.select(sa.func.count())
+                .select_from(memory_item)
+                .where(memory_item.c.created_from_page_id == page_id)
+            )
+        ).scalar_one()
+    assert count == 0
+
+
+async def test_old_indexer_cannot_delete_a_same_body_fact_rebound_to_a_new_page_revision(
+    db: None,
+) -> None:
+    workspace_id, page_id = await _workspace(), uuid4()
+    body = "the acquisition plan has been redacted"
+    index = DefaultIndex(transaction=workspace_tx)
+
+    async def recommit() -> None:
+        await store.commit(
+            MemoryWrite(
+                subject="shared",
+                body=body,
+                created_from_page_id=page_id,
+                created_from_page_revision=2,
+            )
+        )
+
+    embed = CallbackEmbed(vec((3, 1.0)), recommit)
+    store = MemoryStore(
+        index=index,
+        embed=embed,
+        transaction=workspace_tx,
+        workspace_id=workspace_id,
+        page_states=context_for("memory", frozenset()).page_states,
+    )
+    await store.commit(
+        MemoryWrite(
+            subject="shared",
+            body=body,
+            created_from_page_id=page_id,
+            created_from_page_revision=1,
+        )
+    )
+    with ws(workspace_id):
+        await MemoryIndexer(
+            index=index,
+            embed=embed,
+            transaction=workspace_tx,
+            chunker=TextChunker(),
+            page_states=ReclassifyingPage(
+                page_id,
+                "shared",
+                "shared",
+                before_revision=1,
+                after_revision=2,
+            ),
+        ).run()
+        assert (
+            len(
+                await index.lexical(
+                    "acquisition plan", frozenset({"shared"}), OWNER_KIND_MEMORY_ITEM, 10
+                )
+            )
+            == 1
+        )
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(
+                    memory_item.c.created_from_page_revision,
+                    memory_item.c.embedding_claimed_at,
+                )
+            )
+        ).one()
+    assert row.created_from_page_revision == 2
+    assert row.embedding_claimed_at is None
 
 
 async def test_committed_fact_recalls_after_indexing(db: None) -> None:
@@ -181,7 +346,11 @@ async def test_memory_index_job_fires_bound_only_on_workspaces_with_unindexed_it
     ws_empty = await _workspace()
     with ws(ws_with_work):
         store = MemoryStore(
-            index=index, embed=embed, transaction=workspace_tx, workspace_id=ws_with_work
+            index=index,
+            embed=embed,
+            transaction=workspace_tx,
+            workspace_id=ws_with_work,
+            page_states=context_for("memory", frozenset()).page_states,
         )
         await store.commit(MemoryWrite(subject="shared", body="the capital of france is paris"))
 

@@ -22,6 +22,9 @@ from ufo.ext.context import (
     PageRecord as PageRecord,
 )
 from ufo.ext.context import (
+    PageState as PageState,
+)
+from ufo.ext.context import (
     ScopedStore as ScopedStore,
 )
 from ufo.ext.context import (

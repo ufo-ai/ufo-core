@@ -22,7 +22,7 @@ from evals.memory_100.state import CorpusAttestor
 from ufo.audience import conversation_audience
 from ufo.blob import FilesystemBlobStore
 from ufo.db import apply_migrations, dispose_db, init_db, workspace_tx
-from ufo.ext.context import ScopedStore
+from ufo.ext.context import ScopedStore, context_for
 from ufo.schema import tables
 from ufo.sources.sync import page_id_for
 from ufo.workspace import ws
@@ -287,7 +287,13 @@ async def test_materializes_snapshot_through_real_memory_and_page_pipelines(
     }
 
     with ws(readiness.workspace_id):
-        store = MemoryStore(index, embed, workspace_tx, readiness.workspace_id)
+        store = MemoryStore(
+            index,
+            embed,
+            workspace_tx,
+            readiness.workspace_id,
+            context_for("memory", frozenset()).page_states,
+        )
         alice_memory = await store.recall(
             "alpha lantern", recall_subjects(conversation_audience(alice)), 8
         )
@@ -376,7 +382,10 @@ async def test_materializes_snapshot_through_real_memory_and_page_pipelines(
         assert rematerialized.corpus_digest != readiness.corpus_digest
 
         runbook_id = page_id_for(readiness.source_id, "drive/runbook.md")
-        canonical_body_ref = f"sources/{readiness.source_id}/{runbook_id}"
+        runbook_digest = content_digest("The shared incident commander is Captain Vega.")
+        canonical_body_ref = (
+            f"sources/{readiness.source_id}/{runbook_id}/{runbook_digest.removeprefix('sha256:')}"
+        )
         alternate_body_ref = f"eval-corruption/{runbook_id}"
         await blob.put(alternate_body_ref, await blob.get(canonical_body_ref))
         async with workspace_tx() as connection:

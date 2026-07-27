@@ -228,6 +228,7 @@ async def _sync_and_search(
             transaction=workspace_tx,
             chunker=TextChunker(),
             workspace_id=state.workspace_id,
+            page_states=context_for("memory", frozenset()).page_states,
         )
         await indexer.apply((await feed.pages_changed_since(None, 50)).changes)
 

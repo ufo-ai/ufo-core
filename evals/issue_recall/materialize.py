@@ -35,6 +35,7 @@ from ufo.blob import BlobStore, blob_store_for
 from ufo.config import Config, SourceConfig, SourceEntry, load_config
 from ufo.credentials import CredentialStore
 from ufo.db import dispose_db, init_db, workspace_tx
+from ufo.ext.context import context_for
 from ufo.ext.loader import embed_backend, index_backend, load_manifests
 from ufo.ext.manifest import Manifest
 from ufo.indexing import EmbedClient, IndexBackend, TextChunker
@@ -242,6 +243,7 @@ class Materializer:
             embed=self.embed,
             transaction=workspace_tx,
             workspace_id=ws_current().workspace_id,
+            page_states=context_for("memory", frozenset()).page_states,
         )
         for memory in self.ambient:
             await store.commit(
@@ -250,7 +252,11 @@ class Materializer:
 
     async def _drain_memory_index(self) -> None:
         indexer = MemoryIndexer(
-            index=self.index, embed=self.embed, transaction=workspace_tx, chunker=TextChunker()
+            index=self.index,
+            embed=self.embed,
+            transaction=workspace_tx,
+            chunker=TextChunker(),
+            page_states=context_for("memory", frozenset()).page_states,
         )
         while True:
             pending = await self._unindexed_facts()

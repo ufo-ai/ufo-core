@@ -84,6 +84,7 @@ def _indexer(embed: object) -> MemoryIndexer:
         embed=embed,
         transaction=workspace_tx,
         chunker=TextChunker(),
+        page_states=_ext(DefaultIndex(transaction=workspace_tx), embed).page_states,
     )
 
 

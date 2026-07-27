@@ -1061,6 +1061,7 @@ def _change(
         title=title or body.removeprefix("# ")[:40],
         body=body,
         digest=f"sha256:{uuid4().hex}",
+        revision=1,
         tombstone=disposition == "removed",
         created_at=created,
         as_of=now,

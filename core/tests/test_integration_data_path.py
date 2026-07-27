@@ -27,6 +27,7 @@ from ufo.audience import conversation_audience
 from ufo.blob import FilesystemBlobStore
 from ufo.config import SourceConfig, SourceEntry
 from ufo.db import workspace_tx
+from ufo.ext.context import context_for
 from ufo.indexing import TextChunker
 from ufo.schema import tables
 from ufo.schema.records import Usage
@@ -189,9 +190,14 @@ async def test_folder_source_syncs_indexes_and_is_recalled(
         transaction=workspace_tx,
         chunker=TextChunker(),
         workspace_id=workspace_id,
+        page_states=context_for("memory", frozenset()).page_states,
     )
     service = MemoryStore(
-        index=index, embed=embed, transaction=workspace_tx, workspace_id=workspace_id
+        index=index,
+        embed=embed,
+        transaction=workspace_tx,
+        workspace_id=workspace_id,
+        page_states=context_for("memory", frozenset()).page_states,
     )
     await register_sources(
         (SourceEntry(backend=FOLDER_BACKEND, config=SourceConfig(root=str(root))),)
@@ -209,9 +215,10 @@ async def test_folder_source_syncs_indexes_and_is_recalled(
         await page_indexer.apply((await page_feed.pages_changed_since(None, 50)).changes)
     assert await _chunk_count() >= 1
 
-    pages = await service.search_sources(
-        "incident escalation contact", frozenset({SHARED_SUBJECT}), 5
-    )
+    with ws(workspace_id):
+        pages = await service.search_sources(
+            "incident escalation contact", frozenset({SHARED_SUBJECT}), 5
+        )
     assert len(pages) == 1
     assert "on-call captain" in pages[0].text
 
@@ -224,10 +231,18 @@ async def test_member_fact_recall_is_isolated_from_other_members(db: None) -> No
     embed = StubEmbed(axis=2)
     index = DefaultIndex(transaction=workspace_tx)
     service = MemoryStore(
-        index=index, embed=embed, transaction=workspace_tx, workspace_id=workspace_id
+        index=index,
+        embed=embed,
+        transaction=workspace_tx,
+        workspace_id=workspace_id,
+        page_states=context_for("memory", frozenset()).page_states,
     )
     indexer = MemoryIndexer(
-        index=index, embed=embed, transaction=workspace_tx, chunker=TextChunker()
+        index=index,
+        embed=embed,
+        transaction=workspace_tx,
+        chunker=TextChunker(),
+        page_states=context_for("memory", frozenset()).page_states,
     )
     await service.commit(
         MemoryWrite(subject=member_subject(alice), body="alice keeps the vault combination")
