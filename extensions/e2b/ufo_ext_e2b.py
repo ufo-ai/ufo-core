@@ -85,8 +85,8 @@ def _egress_env(proxy: ProxyEndpoint, run_token: str) -> dict[str, str]:
     egress proxy: `HTTP(S)_PROXY` dial the proxy at its public base with the turn's run token as the
     basic-auth username (so the proxy attributes and meters the request to the turn), the model keys
     are the sentinels the proxy swaps for the real key on the wire, and the CA is the one written
-    into the sandbox so the proxy can terminate TLS the sandbox trusts. The run token is base64url,
-    so it drops into the URL's userinfo unescaped. Off-cluster means the proxy's public base is
+    into the sandbox so the proxy can terminate TLS the sandbox trusts. The signed run token is
+    URL-safe, so it drops into the URL's userinfo unescaped. Off-cluster means the public base is
     required — absent it (the guard `serve` applies at boot), the sandbox would have no metered
     route out, so this fails loud rather than build an open sandbox."""
     if proxy.public_url is None:

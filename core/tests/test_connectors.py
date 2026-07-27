@@ -28,7 +28,7 @@ from ufo.db import workspace_tx
 from ufo.grants import ConnectHandoff, GrantStore, install_connect_flow
 from ufo.sandbox.proxy.rules import REQUEST_METER_DIMENSION, MeterRule, ScopeRule
 from ufo.sandbox.proxy.server import EgressProxy, PerAgentRules, generate_ca
-from ufo.sandbox.session import RunToken
+from ufo.sandbox.session import RunToken, RunTokenCodec
 from ufo.schema import tables
 from ufo.schema.records import Agent, ConnectRequest, TerminalFrame, Turn
 from ufo.serve import _connect_flow, _connect_redirect_uri
@@ -38,6 +38,7 @@ from ufo.tools.context import ToolContext
 UNGRANTED_HOST = "api.ungranted.test"
 PUBLIC_BASE_URL = "https://ufo.example.com"
 EXPECTED_REDIRECT_URI = "https://ufo.example.com/v1/connect/callback"
+RUN_TOKENS = RunTokenCodec(b"connectors-test-run-token-secret")
 
 
 @pytest.fixture(autouse=True)
@@ -158,18 +159,22 @@ async def test_connect_binds_a_grant_and_the_proxy_admits_and_meters_the_host(
     resolver = PerAgentRules(base=(), grants=flow.store)
     cert, key = await generate_ca()
     proxy = EgressProxy(
-        resolve=resolver.resolve, authorize=resolver.turn_live, ca_cert=cert, ca_key=key
+        resolve=resolver.resolve,
+        authorize=resolver.turn_live,
+        ca_cert=cert,
+        ca_key=key,
+        run_tokens=RUN_TOKENS,
     )
     endpoint = await proxy.start(bind_host="127.0.0.1")
     try:
-        run = RunToken(workspace_id, turn_id).encode()
-        assert await _connect_status(endpoint.port, UNGRANTED_HOST, run) == 403
-        rules = await proxy._rules_for(RunToken(workspace_id, turn_id))
+        run = RunToken(workspace_id, turn_id)
+        assert await _connect_status(endpoint.port, UNGRANTED_HOST, RUN_TOKENS.encode(run)) == 403
+        rules = await proxy._rules_for(run)
         assert any(
             isinstance(r, ScopeRule) and sample.CONNECTOR_HOST in r.allowed_hosts for r in rules
         )
         assert MeterRule(host=sample.CONNECTOR_HOST, dimension=REQUEST_METER_DIMENSION) in rules
-        proxy._meter_ledger(sample.CONNECTOR_HOST, _basic(run), rules)
+        await proxy._meter_ledger(sample.CONNECTOR_HOST, run, rules)
     finally:
         await proxy.stop()
 

@@ -39,7 +39,7 @@ from ufo.sandbox.proxy.rules import (
     derive_grant_rules,
 )
 from ufo.sandbox.proxy.server import EgressProxy, PerAgentRules, generate_ca
-from ufo.sandbox.session import RunToken
+from ufo.sandbox.session import RunToken, RunTokenCodec
 from ufo.schema import tables
 from ufo.schema.records import Agent, ConnectRequest, TerminalFrame, Turn
 from ufo.surfaces.cli import callback_router
@@ -51,6 +51,7 @@ UNGRANTED_HOST = "api.ungranted.test"
 HOST_A = "api.aaa.test"
 HOST_B = "api.bbb.test"
 REDIRECT_URI = "http://surface/v1/connect/callback"
+RUN_TOKENS = RunTokenCodec(b"grants-test-run-token-secret")
 
 
 @pytest.fixture(autouse=True)
@@ -365,10 +366,8 @@ async def test_grant_summaries_expose_the_audit_view(db: None) -> None:
     assert (summary.grantor_member_id, summary.conversation_id) == (member_id, conversation_id)
 
 
-async def test_proxy_admits_the_granted_host_and_blocks_the_ungranted() -> None:
-    """A grant admits its host through the tokenless exact-rule base; an ungranted host has neither
-    an exact rule nor a turn-derived InternetRule and is refused at CONNECT. No token is
-    injected."""
+async def test_proxy_resolves_the_granted_host_but_blocks_tokenless_connect() -> None:
+    """A grant contributes an exact host rule but no unsigned caller can exercise it."""
     grant = Grant(
         provider="stub",
         account_id="acct-42",
@@ -379,11 +378,15 @@ async def test_proxy_admits_the_granted_host_and_blocks_the_ungranted() -> None:
     resolver = PerAgentRules(base=derive_grant_rules((grant,)), grants=None)
     cert, key = await generate_ca()
     proxy = EgressProxy(
-        resolve=resolver.resolve, authorize=resolver.turn_live, ca_cert=cert, ca_key=key
+        resolve=resolver.resolve,
+        authorize=resolver.turn_live,
+        ca_cert=cert,
+        ca_key=key,
+        run_tokens=RUN_TOKENS,
     )
     endpoint = await proxy.start(bind_host="127.0.0.1")
     try:
-        assert await _connect_status(endpoint.port, UNGRANTED_HOST) == 403
+        assert await _connect_status(endpoint.port, GRANTED_HOST) == 403
         rules = await proxy._rules_for(None)
     finally:
         await proxy.stop()
@@ -453,11 +456,12 @@ async def test_agent_a_authenticates_only_to_its_own_granted_host(db: None) -> N
         authorize=resolver.turn_live,
         ca_cert=cert,
         ca_key=key,
+        run_tokens=RUN_TOKENS,
         resolve_public=local_public,
     )
     endpoint = await proxy.start(bind_host="127.0.0.1")
     try:
-        run_a = RunToken(workspace_id, turn_a).encode()
+        run_a = RUN_TOKENS.encode(RunToken(workspace_id, turn_a))
         assert await _connect_status(endpoint.port, HOST_B, run_a, stub_port, b"opaque") == 200
         assert await received == b"opaque"
     finally:
@@ -481,11 +485,14 @@ async def test_a_grant_recorded_after_start_is_live_for_the_next_turn(db: None) 
         authorize=resolver.turn_live,
         ca_cert=cert,
         ca_key=key,
+        run_tokens=RUN_TOKENS,
     )
     endpoint = await proxy.start(bind_host="127.0.0.1")
     try:
         assert (
-            await _connect_status(endpoint.port, HOST_A, RunToken(workspace_id, turn_1).encode())
+            await _connect_status(
+                endpoint.port, HOST_A, RUN_TOKENS.encode(RunToken(workspace_id, turn_1))
+            )
             == 403
         )
         await store.record(

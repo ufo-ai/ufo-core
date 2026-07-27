@@ -2,6 +2,7 @@
 it refuses. GitHub stands in as a transport — the assertions are on what we send and what we do with
 what comes back, never on the fake."""
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
@@ -110,6 +111,84 @@ async def test_a_bound_workspace_mints_and_reuses_the_token_until_it_nears_expir
     scheme, _, jwt = call.headers["authorization"].partition(" ")
     assert scheme == "Bearer"
     assert len(jwt.split(".")) == 3
+
+
+async def test_concurrent_cache_misses_share_one_installation_token_mint() -> None:
+    fernet = Fernet(Fernet.generate_key())
+    workspace_id = uuid4()
+    VALUES.clear()
+    VALUES.update(
+        {(workspace_id, SLOT): seal_installation(fernet, workspace_id, SLOT, INSTALLATION)}
+    )
+    expires = (datetime.now(UTC) + timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+    calls = 0
+
+    async def github(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0)
+        return httpx.Response(201, json={"token": "ghs_shared", "expires_at": expires})
+
+    tokens = _tokens(transport=httpx.MockTransport(github))
+    store = _Store(fernet=fernet)
+    results = await asyncio.gather(*(tokens.secret(workspace_id, store) for _ in range(20)))
+    assert results == ["ghs_shared"] * 20
+    assert calls == 1
+
+
+async def test_a_cancelled_waiter_does_not_cancel_the_shared_mint() -> None:
+    fernet = Fernet(Fernet.generate_key())
+    workspace_id = uuid4()
+    VALUES.clear()
+    VALUES.update(
+        {(workspace_id, SLOT): seal_installation(fernet, workspace_id, SLOT, INSTALLATION)}
+    )
+    expires = (datetime.now(UTC) + timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def github(request: httpx.Request) -> httpx.Response:
+        entered.set()
+        await release.wait()
+        return httpx.Response(201, json={"token": "ghs_shared", "expires_at": expires})
+
+    tokens = _tokens(transport=httpx.MockTransport(github))
+    store = _Store(fernet=fernet)
+    owner = asyncio.create_task(tokens.secret(workspace_id, store))
+    await entered.wait()
+    waiter = asyncio.create_task(tokens.secret(workspace_id, store))
+    await asyncio.sleep(0)
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    release.set()
+    assert await owner == "ghs_shared"
+    assert await tokens.secret(workspace_id, store) == "ghs_shared"
+
+
+async def test_a_failed_mint_clears_the_singleflight_for_the_next_call() -> None:
+    fernet = Fernet(Fernet.generate_key())
+    workspace_id = uuid4()
+    VALUES.clear()
+    VALUES.update(
+        {(workspace_id, SLOT): seal_installation(fernet, workspace_id, SLOT, INSTALLATION)}
+    )
+    expires = (datetime.now(UTC) + timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+    calls = 0
+
+    async def github(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(503, text="Unavailable")
+        return httpx.Response(201, json={"token": "ghs_recovered", "expires_at": expires})
+
+    tokens = _tokens(transport=httpx.MockTransport(github))
+    store = _Store(fernet=fernet)
+    with pytest.raises(RuntimeError, match="minted no token"):
+        await tokens.secret(workspace_id, store)
+    assert await tokens.secret(workspace_id, store) == "ghs_recovered"
+    assert calls == 2
 
 
 async def test_a_refused_exchange_raises_rather_than_falling_back() -> None:

@@ -1,11 +1,14 @@
 import asyncio
 import base64
+import gzip
 import json
 import os
+import re
 import socket
 import ssl
 import struct
 from collections.abc import Mapping
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from http import HTTPStatus
@@ -44,12 +47,14 @@ from ufo.sandbox.proxy.rules import (
 )
 from ufo.sandbox.proxy.server import (
     MAX_FORWARD_BODY_BYTES,
+    MAX_HEADER_BYTES,
     MAX_REFUSAL_DRAIN_BYTES,
     RELAY_CHUNK_BYTES,
     EgressProxy,
+    HttpTokenUsage,
     PerAgentRules,
-    SseTokenUsage,
     _drain_refused_body,
+    _EgressMeter,
     _forward_match,
     _forward_response_bytes,
     _inject,
@@ -58,7 +63,7 @@ from ufo.sandbox.proxy.server import (
     _relay,
     generate_ca,
 )
-from ufo.sandbox.session import RunToken
+from ufo.sandbox.session import RunToken, RunTokenCodec
 from ufo.schema import tables
 from ufo.schema.records import Usage
 
@@ -68,7 +73,9 @@ MODEL_HOST = "api.anthropic.com"
 FULL_TOKEN_USAGE = Usage(
     input_tokens=1000, output_tokens=2000, cache_read_tokens=3000, cache_write_tokens=4000
 )
-ANTHROPIC_SSE = (
+RUN_TOKENS = RunTokenCodec(b"proxy-test-run-token-secret")
+SSE_RESPONSE_HEAD = b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n"
+ANTHROPIC_SSE_BODY = (
     b"event: message_start\r\n"
     b'data: {"type":"message_start","message":{"id":"m","model":"claude-opus-4-8",'
     b'"usage":{"input_tokens":1000,"cache_read_input_tokens":3000,'
@@ -82,13 +89,15 @@ ANTHROPIC_SSE = (
     b"event: message_stop\r\n"
     b'data: {"type":"message_stop"}\r\n\r\n'
 )
-OPENAI_SSE = (
+ANTHROPIC_SSE = SSE_RESPONSE_HEAD + ANTHROPIC_SSE_BODY
+OPENAI_SSE_BODY = (
     b'data: {"id":"c","object":"chat.completion.chunk","model":"gpt-5.4",'
     b'"choices":[{"delta":{"content":"hi"}}],"usage":null}\n\n'
     b'data: {"id":"c","object":"chat.completion.chunk","model":"gpt-5.4","choices":[],'
     b'"usage":{"prompt_tokens":1000000,"completion_tokens":1000000,"total_tokens":2000000}}\n\n'
     b"data: [DONE]\n\n"
 )
+OPENAI_SSE = SSE_RESPONSE_HEAD + OPENAI_SSE_BODY
 ANTHROPIC_JSON_BODY = (
     b"HTTP/1.1 200 OK\r\n"
     b"content-type: application/json\r\n"
@@ -118,7 +127,11 @@ def _egress(resolver: PerAgentRules, ca_cert: str = "x", ca_key: str = "x") -> E
     """Wire the proxy from a real resolver: its `resolve` for rules and its `turn_live` for the
     keyed-host liveness gate — both genuine `PerAgentRules` methods, never a fake."""
     return EgressProxy(
-        resolve=resolver.resolve, authorize=resolver.turn_live, ca_cert=ca_cert, ca_key=ca_key
+        resolve=resolver.resolve,
+        authorize=resolver.turn_live,
+        ca_cert=ca_cert,
+        ca_key=ca_key,
+        run_tokens=RUN_TOKENS,
     )
 
 
@@ -240,6 +253,7 @@ async def test_workspace_credential_endpoint_serves_only_while_the_turn_is_live(
         authorize=resolver.turn_live,
         ca_cert=cert,
         ca_key=key,
+        run_tokens=RUN_TOKENS,
         workspace_credentials=minter.refresh,
     )
     endpoint = await proxy.start(bind_host="127.0.0.1")
@@ -289,6 +303,7 @@ async def test_workspace_credential_endpoint_rejects_non_token_paths(
         authorize=_fixed().turn_live,
         ca_cert=cert,
         ca_key=key,
+        run_tokens=RUN_TOKENS,
         workspace_credentials=unused if wired else None,
     )
     endpoint = await proxy.start(bind_host="127.0.0.1")
@@ -310,6 +325,7 @@ async def test_workspace_credential_validation_failure_is_a_mint_failure() -> No
         authorize=_fixed().turn_live,
         ca_cert=cert,
         ca_key=key,
+        run_tokens=RUN_TOKENS,
         workspace_credentials=refresh,
     )
     endpoint = await proxy.start(bind_host="127.0.0.1")
@@ -342,10 +358,95 @@ async def test_a_resolution_error_fails_closed_to_base_and_is_not_cached() -> No
             raise RuntimeError("transient db blip")
         return granted
 
-    proxy = EgressProxy(resolve=flaky, authorize=_fixed().turn_live, ca_cert="", ca_key="")
+    proxy = EgressProxy(
+        resolve=flaky,
+        authorize=_fixed().turn_live,
+        ca_cert="",
+        ca_key="",
+        run_tokens=RUN_TOKENS,
+    )
     run = RunToken(uuid4(), uuid4())
     assert await proxy._rules_for(run) == base
     assert await proxy._rules_for(run) == granted
+
+
+async def test_concurrent_rule_cache_misses_share_one_resolution() -> None:
+    calls = 0
+    rules = (ScopeRule(allowed_hosts=frozenset({MODEL_HOST})),)
+
+    async def resolve(_run: RunToken | None) -> tuple:
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0)
+        return rules
+
+    proxy = EgressProxy(
+        resolve=resolve,
+        authorize=_fixed().turn_live,
+        ca_cert="",
+        ca_key="",
+        run_tokens=RUN_TOKENS,
+    )
+    run = RunToken(uuid4(), uuid4())
+    assert await asyncio.gather(*(proxy._rules_for(run) for _ in range(20))) == [rules] * 20
+    assert calls == 1
+
+
+async def test_cancelled_rule_waiter_leaves_shared_resolution_owned() -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+    rules = (ScopeRule(allowed_hosts=frozenset({MODEL_HOST})),)
+
+    async def resolve(_run: RunToken | None) -> tuple:
+        started.set()
+        await release.wait()
+        return rules
+
+    proxy = EgressProxy(
+        resolve=resolve,
+        authorize=_fixed().turn_live,
+        ca_cert="",
+        ca_key="",
+        run_tokens=RUN_TOKENS,
+    )
+    run = RunToken(uuid4(), uuid4())
+    waiter = asyncio.create_task(proxy._rules_for(run))
+    await started.wait()
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    shared = proxy._rule_tasks[run]
+    release.set()
+    await shared
+    assert proxy._rule_tasks == {}
+    assert await proxy._rules_for(run) == rules
+
+
+async def test_rule_cache_refreshes_before_injected_tokens_expire(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 1000.0
+    calls = 0
+
+    async def resolve(_run: RunToken | None) -> tuple:
+        nonlocal calls
+        calls += 1
+        return (InjectionRule(MODEL_HOST, "authorization", "s", f"token-{calls}"),)
+
+    monkeypatch.setattr(proxy_server.time, "monotonic", lambda: now)
+    proxy = EgressProxy(
+        resolve=resolve,
+        authorize=_fixed().turn_live,
+        ca_cert="",
+        ca_key="",
+        run_tokens=RUN_TOKENS,
+    )
+    run = RunToken(uuid4(), uuid4())
+    first = await proxy._rules_for(run)
+    now += proxy_server.RULE_CACHE_TTL_SECONDS + 1
+    second = await proxy._rules_for(run)
+    assert first != second
+    assert calls == 2
 
 
 class _Seeded(NamedTuple):
@@ -474,7 +575,10 @@ async def test_egress_write_attributes_a_row_to_the_turn(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, turn_id, *_ = await _seed_turn(connection)
     proxy = _egress(_fixed())
-    await proxy._write_egress(SEARCH_HOST, _basic(RunToken(workspace_id, turn_id).encode()))
+    run = RunToken(workspace_id, turn_id)
+    rules = (MeterRule(host=SEARCH_HOST, dimension="search"),)
+    await proxy._meter_ledger(SEARCH_HOST, run, rules)
+    await proxy.stop()
     async with workspace_tx() as connection:
         row = (
             await connection.execute(
@@ -486,7 +590,9 @@ async def test_egress_write_attributes_a_row_to_the_turn(db: None) -> None:
     assert (row.dimension, int(row.amount)) == ("egress", 1)
 
 
-async def test_meter_ledger_meters_credential_host_and_skips_model_host(db: None) -> None:
+async def test_meter_ledger_batches_credential_requests_in_one_transaction(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
     async with workspace_tx() as connection:
         workspace_id, turn_id, *_ = await _seed_turn(connection)
     rules = (
@@ -494,11 +600,23 @@ async def test_meter_ledger_meters_credential_host_and_skips_model_host(db: None
         MeterRule(host=MODEL_HOST, dimension="tokens"),
     )
     proxy = _egress(_fixed(rules))
-    header = _basic(RunToken(workspace_id, turn_id).encode())
-    proxy._meter_ledger(MODEL_HOST, header, rules)
-    assert proxy._meter_tasks == set()
-    proxy._meter_ledger(SEARCH_HOST, header, rules)
-    assert len(proxy._meter_tasks) == 1
+    run = RunToken(workspace_id, turn_id)
+    transactions = 0
+    original_workspace_tx = proxy_server.workspace_tx
+
+    @asynccontextmanager
+    async def counted_workspace_tx():
+        nonlocal transactions
+        transactions += 1
+        async with original_workspace_tx() as connection:
+            yield connection
+
+    monkeypatch.setattr(proxy_server, "workspace_tx", counted_workspace_tx)
+    await proxy._meter_ledger(MODEL_HOST, run, rules)
+    assert proxy._meter_worker is None
+    for _ in range(10):
+        await proxy._meter_ledger(SEARCH_HOST, run, rules)
+    assert proxy._meter_worker is not None
     await proxy.stop()
     async with workspace_tx() as connection:
         dimensions = (
@@ -511,18 +629,84 @@ async def test_meter_ledger_meters_credential_host_and_skips_model_host(db: None
             .all()
         )
     assert list(dimensions) == ["egress"]
-
-
-async def test_egress_write_without_attribution_writes_nothing(db: None) -> None:
     async with workspace_tx() as connection:
-        await _seed_turn(connection)
-    proxy = _egress(_fixed())
-    await proxy._write_egress(SEARCH_HOST, "")
-    async with workspace_tx() as connection:
-        count = (
-            await connection.execute(sa.select(sa.func.count()).select_from(tables.ledger))
+        amount = (
+            await connection.execute(
+                sa.select(tables.ledger.c.amount).where(tables.ledger.c.turn_id == turn_id)
+            )
         ).scalar_one()
-    assert count == 0
+    assert int(amount) == 10
+    assert transactions == 1
+
+
+async def test_meter_worker_continues_after_any_failed_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proxy = _egress(_fixed())
+    first = _EgressMeter(RunToken(uuid4(), uuid4()))
+    second = _EgressMeter(RunToken(uuid4(), uuid4()))
+    attempts: list[list[object]] = []
+
+    async def write(records: list[object]) -> None:
+        attempts.append(records)
+        if len(attempts) == 1:
+            raise RuntimeError("meter write failed outside the database driver")
+
+    monkeypatch.setattr(proxy, "_write_meter_batch", write)
+    await proxy._enqueue_meter(first)
+    await proxy._meter_queue.join()
+    assert proxy._meter_worker is not None
+    assert not proxy._meter_worker.done()
+    await proxy._enqueue_meter(second)
+    await proxy._meter_queue.join()
+    await proxy.stop()
+    assert attempts == [[first], [second]]
+
+
+async def test_failed_meter_run_does_not_drop_other_runs(db: None) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, turn_id, *_ = await _seed_turn(connection)
+    proxy = _egress(_fixed())
+    await proxy._write_meter_batch(
+        [
+            _EgressMeter(RunToken(workspace_id, uuid4())),
+            _EgressMeter(RunToken(workspace_id, turn_id)),
+        ]
+    )
+    async with workspace_tx() as connection:
+        amount = (
+            await connection.execute(
+                sa.select(tables.ledger.c.amount).where(tables.ledger.c.turn_id == turn_id)
+            )
+        ).scalar_one()
+    assert int(amount) == 1
+
+
+async def test_meter_queue_applies_backpressure_at_its_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(proxy_server, "METER_QUEUE_MAX", 1)
+    proxy = _egress(_fixed())
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def write(records: list[object]) -> None:
+        entered.set()
+        await release.wait()
+
+    monkeypatch.setattr(proxy, "_write_meter_batch", write)
+    run = RunToken(uuid4(), uuid4())
+    await proxy._enqueue_meter(_EgressMeter(run))
+    await entered.wait()
+    await proxy._enqueue_meter(_EgressMeter(run))
+    blocked = asyncio.create_task(proxy._enqueue_meter(_EgressMeter(run)))
+    await asyncio.sleep(0)
+    assert proxy._meter_queue.full()
+    assert not blocked.done()
+    release.set()
+    await blocked
+    await proxy._meter_queue.join()
+    await proxy.stop()
 
 
 async def test_client_reset_while_awaiting_the_request_line_does_not_crash_the_server() -> None:
@@ -550,6 +734,147 @@ async def test_client_reset_while_awaiting_the_request_line_does_not_crash_the_s
         await proxy.stop()
 
 
+async def test_pre_auth_header_deadline_closes_a_stalled_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(proxy_server, "PROXY_HEADER_TIMEOUT_SECONDS", 0.01)
+    proxy = await _proxy()
+    try:
+        reader, writer = await asyncio.open_connection(
+            "127.0.0.1", proxy._server.sockets[0].getsockname()[1]
+        )
+        status = await reader.readline()
+        writer.close()
+    finally:
+        await proxy.stop()
+    assert status.startswith(b"HTTP/1.1 408 ")
+
+
+async def test_pre_auth_headers_are_bounded() -> None:
+    proxy = await _proxy()
+    try:
+        port = proxy._server.sockets[0].getsockname()[1]
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        writer.write(
+            b"CONNECT example.com:443 HTTP/1.1\r\nx-padding: "
+            + b"x" * MAX_HEADER_BYTES
+            + b"\r\n\r\n"
+        )
+        await writer.drain()
+        status = await reader.readline()
+        writer.close()
+    finally:
+        await proxy.stop()
+    assert status.startswith(b"HTTP/1.1 431 ")
+
+
+async def test_post_tls_headers_are_bounded(db: None) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, turn_id, *_ = await _seed_turn(connection)
+    rules = (
+        ScopeRule(allowed_hosts=frozenset({MODEL_HOST})),
+        InjectionRule(host=MODEL_HOST, header="x-api-key", sentinel="s", real="REAL-KEY"),
+    )
+    cert, key = await generate_ca()
+    proxy = _egress(_fixed(rules), ca_cert=cert, ca_key=key)
+    endpoint = await proxy.start(bind_host="127.0.0.1")
+    token = RUN_TOKENS.encode(RunToken(workspace_id, turn_id))
+    try:
+        reader, writer = await asyncio.open_connection("127.0.0.1", endpoint.port)
+        writer.write(
+            f"CONNECT {MODEL_HOST}:443 HTTP/1.1\r\n"
+            f"Proxy-Authorization: {_basic(token)}\r\n\r\n".encode()
+        )
+        await writer.drain()
+        assert (await reader.readline()).startswith(b"HTTP/1.1 200 ")
+        while (await reader.readline()) not in (b"\r\n", b""):
+            pass
+        context = ssl.create_default_context(cadata=cert)
+        await writer.start_tls(context, server_hostname=MODEL_HOST)
+        writer.write(b"GET / HTTP/1.1\r\nx-padding: " + b"x" * MAX_HEADER_BYTES + b"\r\n\r\n")
+        await writer.drain()
+        status = await reader.readline()
+        await reader.read()
+        writer.close()
+    finally:
+        await proxy.stop()
+    assert status.startswith(b"HTTP/1.1 431 ")
+
+
+async def test_proxy_connection_count_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(proxy_server, "MAX_PROXY_CONNECTIONS", 1)
+    proxy = await _proxy()
+    port = proxy._server.sockets[0].getsockname()[1]
+    first_reader, first_writer = await asyncio.open_connection("127.0.0.1", port)
+    try:
+        for _ in range(10):
+            if proxy._active_connections == 1:
+                break
+            await asyncio.sleep(0)
+        second_reader, second_writer = await asyncio.open_connection("127.0.0.1", port)
+        assert (await second_reader.readline()).startswith(b"HTTP/1.1 503 ")
+        await second_reader.read()
+        second_writer.close()
+    finally:
+        first_writer.close()
+        await first_reader.read()
+        await proxy.stop()
+
+
+async def test_proxy_connection_limit_preserves_capacity_between_workspaces(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(proxy_server, "MAX_PROXY_CONNECTIONS", 3)
+    monkeypatch.setattr(proxy_server, "MAX_PROXY_CONNECTIONS_PER_WORKSPACE", 1)
+    async with workspace_tx() as connection:
+        first = await _seed_turn(connection)
+        second = await _seed_turn(connection)
+
+    async def upstream(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await reader.read()
+        writer.close()
+
+    stub = await asyncio.start_server(upstream, "127.0.0.1", 0)
+    stub_port = stub.sockets[0].getsockname()[1]
+    cert, key = await generate_ca()
+    resolver = _fixed((ScopeRule(allowed_hosts=frozenset({"127.0.0.1"})),))
+    proxy = EgressProxy(
+        resolve=resolver.resolve,
+        authorize=resolver.turn_live,
+        ca_cert=cert,
+        ca_key=key,
+        run_tokens=RUN_TOKENS,
+    )
+    endpoint = await proxy.start(bind_host="127.0.0.1")
+    clients: list[tuple[asyncio.StreamReader, asyncio.StreamWriter]] = []
+
+    async def connect(run: RunToken) -> int:
+        reader, writer = await asyncio.open_connection("127.0.0.1", endpoint.port)
+        clients.append((reader, writer))
+        token = RUN_TOKENS.encode(run)
+        writer.write(
+            f"CONNECT 127.0.0.1:{stub_port} HTTP/1.1\r\n"
+            f"Proxy-Authorization: {_basic(token)}\r\n\r\n".encode()
+        )
+        await writer.drain()
+        return int((await reader.readline()).split()[1])
+
+    try:
+        assert await connect(RunToken(first.workspace_id, first.turn_id)) == 200
+        assert await connect(RunToken(first.workspace_id, first.turn_id)) == 429
+        assert await connect(RunToken(second.workspace_id, second.turn_id)) == 200
+        assert proxy._workspace_connections == {
+            first.workspace_id: 1,
+            second.workspace_id: 1,
+        }
+    finally:
+        for _, writer in clients:
+            writer.close()
+        await proxy.stop()
+        stub.close()
+        await stub.wait_closed()
+
+
 async def test_a_db_fault_in_the_authorize_gate_surfaces_loud() -> None:
     """The reset guard is scoped to the client socket: an OSError out of the turn-liveness gate (the
     fresh DB connection behind it refused) is an internal fault, and must reach the loop's exception
@@ -563,14 +888,20 @@ async def test_a_db_fault_in_the_authorize_gate_surfaces_loud() -> None:
         InjectionRule(host=MODEL_HOST, header="x-api-key", sentinel="s", real="REAL-KEY"),
     )
     cert, key = await generate_ca()
-    proxy = EgressProxy(resolve=_fixed(rules).resolve, authorize=refused, ca_cert=cert, ca_key=key)
+    proxy = EgressProxy(
+        resolve=_fixed(rules).resolve,
+        authorize=refused,
+        ca_cert=cert,
+        ca_key=key,
+        run_tokens=RUN_TOKENS,
+    )
     endpoint = await proxy.start(bind_host="127.0.0.1")
     loop = asyncio.get_running_loop()
     unhandled: list[dict] = []
     previous = loop.get_exception_handler()
     loop.set_exception_handler(lambda _loop, context: unhandled.append(context))
     try:
-        token = RunToken(workspace_id=uuid4(), turn_id=uuid4()).encode()
+        token = RUN_TOKENS.encode(RunToken(workspace_id=uuid4(), turn_id=uuid4()))
         reader, writer = await asyncio.open_connection("127.0.0.1", endpoint.port)
         writer.write(
             f"CONNECT {MODEL_HOST}:443 HTTP/1.1\r\n"
@@ -604,14 +935,69 @@ async def test_keyed_host_connect_denied_without_a_live_turn(db: None) -> None:
     endpoint = await proxy.start(bind_host="127.0.0.1")
     try:
         assert await _connect(endpoint.port, MODEL_HOST) == 403
-        ended = RunToken(workspace_id, ended_turn).encode()
+        ended = RUN_TOKENS.encode(RunToken(workspace_id, ended_turn))
         assert await _connect(endpoint.port, MODEL_HOST, ended) == 403
-        unknown = RunToken(workspace_id, uuid4()).encode()
+        unknown = RUN_TOKENS.encode(RunToken(workspace_id, uuid4()))
         assert await _connect(endpoint.port, MODEL_HOST, unknown) == 403
         assert await proxy.authorize(RunToken(workspace_id, running_turn)) is True
         assert await proxy.authorize(RunToken(workspace_id, ended_turn)) is False
     finally:
         await proxy.stop()
+
+
+async def test_exact_scope_tunnel_requires_a_live_turn() -> None:
+    resolutions = 0
+
+    async def ended(_run: RunToken) -> bool:
+        return False
+
+    rules = (ScopeRule(allowed_hosts=frozenset({MODEL_HOST})),)
+
+    async def resolve(_run: RunToken | None) -> tuple:
+        nonlocal resolutions
+        resolutions += 1
+        return rules
+
+    cert, key = await generate_ca()
+    proxy = EgressProxy(
+        resolve=resolve,
+        authorize=ended,
+        ca_cert=cert,
+        ca_key=key,
+        run_tokens=RUN_TOKENS,
+    )
+    endpoint = await proxy.start(bind_host="127.0.0.1")
+    try:
+        token = RUN_TOKENS.encode(RunToken(uuid4(), uuid4()))
+        assert await _connect(endpoint.port, MODEL_HOST, token) == 403
+    finally:
+        await proxy.stop()
+    assert resolutions == 0
+
+
+async def test_forged_run_token_is_rejected_before_rule_resolution() -> None:
+    calls = 0
+
+    async def resolve(_run: RunToken | None) -> tuple:
+        nonlocal calls
+        calls += 1
+        return (ScopeRule(allowed_hosts=frozenset({MODEL_HOST})),)
+
+    cert, key = await generate_ca()
+    proxy = EgressProxy(
+        resolve=resolve,
+        authorize=_fixed().turn_live,
+        ca_cert=cert,
+        ca_key=key,
+        run_tokens=RUN_TOKENS,
+    )
+    endpoint = await proxy.start(bind_host="127.0.0.1")
+    forged = RunTokenCodec(b"attacker").encode(RunToken(uuid4(), uuid4()))
+    try:
+        assert await _connect(endpoint.port, MODEL_HOST, forged) == 403
+    finally:
+        await proxy.stop()
+    assert calls == 0
 
 
 async def test_public_internet_rejects_private_addresses_and_ended_turns(db: None) -> None:
@@ -623,13 +1009,13 @@ async def test_public_internet_rejects_private_addresses_and_ended_turns(db: Non
     proxy = _egress(resolver, ca_cert=cert, ca_key=key)
     endpoint = await proxy.start(bind_host="127.0.0.1")
     try:
-        running = RunToken(workspace_id, running_turn).encode()
-        ended = RunToken(ended_workspace, ended_turn).encode()
+        running = RUN_TOKENS.encode(RunToken(workspace_id, running_turn))
+        ended = RUN_TOKENS.encode(RunToken(ended_workspace, ended_turn))
         assert await resolver.resolve(RunToken(workspace_id, running_turn)) == (InternetRule(),)
         assert await resolver.resolve(RunToken(workspace_id, uuid4())) == ()
         assert await _connect(endpoint.port, "169.254.169.254", running) == 403
         assert await _connect(endpoint.port, "8.8.8.8", ended) == 403
-        assert await _connect(endpoint.port, "example.com", target_port="abc") == 403
+        assert await _connect(endpoint.port, "example.com", target_port="abc") == 400
         assert await _connect(endpoint.port, "example.com", running, "abc") == 400
         assert await _connect(endpoint.port, "example.com", running, 65536) == 400
         assert await _connect(endpoint.port, "a..b", running) == 403
@@ -672,7 +1058,7 @@ async def test_agent_internet_policy_is_cached_for_the_turn(db: None) -> None:
         second_run = RunToken(seeded.workspace_id, second_turn)
         assert await proxy._rules_for(first_run) == (InternetRule(),)
         assert await proxy._rules_for(second_run) == ()
-        assert await _connect(endpoint.port, "8.8.8.8", second_run.encode()) == 403
+        assert await _connect(endpoint.port, "8.8.8.8", RUN_TOKENS.encode(second_run)) == 403
     finally:
         await proxy.stop()
 
@@ -693,10 +1079,11 @@ async def test_public_internet_tunnels_and_meters_a_live_turn(db: None) -> None:
         authorize=resolver.turn_live,
         ca_cert=cert,
         ca_key=key,
+        run_tokens=RUN_TOKENS,
         resolve_public=local_public,
     )
     endpoint = await proxy.start(bind_host="127.0.0.1")
-    token = RunToken(workspace_id, turn_id).encode()
+    token = RUN_TOKENS.encode(RunToken(workspace_id, turn_id))
     try:
         assert await _connect(endpoint.port, SEARCH_HOST, token, stub_port) == 200
     finally:
@@ -747,8 +1134,8 @@ async def test_real_git_reaches_the_public_internet_only_with_the_proxy_auth_con
     present the run token that reaches that rule at all.
 
     git's default `http.proxyAuthMethod=anyauth` waits for a `407` challenge the proxy never sends,
-    so an unconfigured CONNECT arrives unattributed and resolves to the base rules — the turn's own
-    internet policy is keyed on the token it never sent. Configured, the tunnel opens and meters."""
+    so an unconfigured CONNECT arrives unattributed and is rejected before rule resolution.
+    Configured, the tunnel opens and meters."""
     async with workspace_tx() as connection:
         seeded = await _seed_turn(connection)
 
@@ -773,21 +1160,22 @@ async def test_real_git_reaches_the_public_internet_only_with_the_proxy_auth_con
         authorize=resolver.turn_live,
         ca_cert=cert,
         ca_key=key,
+        run_tokens=RUN_TOKENS,
         resolve_public=local_public,
     )
     endpoint = await proxy.start(bind_host="127.0.0.1")
-    token = RunToken(seeded.workspace_id, seeded.turn_id).encode()
+    token = RUN_TOKENS.encode(RunToken(seeded.workspace_id, seeded.turn_id))
     try:
         assert not [rule for rule in await resolver.resolve(None) if isinstance(rule, ScopeRule)]
 
         unconfigured = await _git_ls_remote(endpoint.port, token, "git.test", stub_port, {})
-        assert "403" in unconfigured
+        assert re.search(r"\b403\b", unconfigured)
         assert upstream_connections == 0
 
         configured = await _git_ls_remote(
             endpoint.port, token, "git.test", stub_port, _git_config_env(GIT_PROXY_AUTH_CONFIG)
         )
-        assert "403" not in configured
+        assert not re.search(r"\b403\b", configured)
         assert upstream_connections == 1
     finally:
         await proxy.stop()
@@ -862,7 +1250,7 @@ async def test_tunnel_meters_a_granted_host(db: None) -> None:
     cert, key = await generate_ca()
     proxy = _egress(_fixed(rules), ca_cert=cert, ca_key=key)
     endpoint = await proxy.start(bind_host="127.0.0.1")
-    run_token = RunToken(workspace_id, turn_id).encode()
+    run_token = RUN_TOKENS.encode(RunToken(workspace_id, turn_id))
     try:
         assert await _connect(endpoint.port, granted_host, run_token, stub_port) == 200
     finally:
@@ -976,20 +1364,20 @@ def test_inject_passes_a_foreign_sentinel_upstream_untouched() -> None:
 
 
 def test_sse_usage_parses_an_anthropic_stream() -> None:
-    accumulator = SseTokenUsage(MODEL_HOST)
+    accumulator = HttpTokenUsage(MODEL_HOST)
     accumulator.feed(ANTHROPIC_SSE)
     assert accumulator.usage() == ("claude-opus-4-8", FULL_TOKEN_USAGE)
 
 
 def test_sse_usage_reassembles_across_chunk_boundaries() -> None:
-    accumulator = SseTokenUsage(MODEL_HOST)
+    accumulator = HttpTokenUsage(MODEL_HOST)
     for start in range(0, len(ANTHROPIC_SSE), 7):
         accumulator.feed(ANTHROPIC_SSE[start : start + 7])
     assert accumulator.usage() == ("claude-opus-4-8", FULL_TOKEN_USAGE)
 
 
 def test_sse_usage_parses_an_openai_stream() -> None:
-    accumulator = SseTokenUsage(OPENAI_HOST)
+    accumulator = HttpTokenUsage(OPENAI_HOST)
     accumulator.feed(OPENAI_SSE)
     assert accumulator.usage() == (
         "gpt-5.4",
@@ -998,9 +1386,9 @@ def test_sse_usage_parses_an_openai_stream() -> None:
 
 
 def test_sse_usage_without_a_usage_event_is_none() -> None:
-    accumulator = SseTokenUsage(MODEL_HOST)
+    accumulator = HttpTokenUsage(MODEL_HOST)
     accumulator.feed(
-        b'event: content_block_delta\r\ndata: {"type":"content_block_delta",'
+        SSE_RESPONSE_HEAD + b'event: content_block_delta\r\ndata: {"type":"content_block_delta",'
         b'"delta":{"text":"hi"}}\r\n\r\n'
     )
     assert accumulator.usage() is None
@@ -1009,13 +1397,13 @@ def test_sse_usage_without_a_usage_event_is_none() -> None:
 def test_json_body_usage_parses_an_anthropic_response() -> None:
     """A non-streaming Anthropic response is one JSON body with a top-level `usage` block, not
     `data:` SSE events; its usage is recovered so a single-JSON in-sandbox completion is metered."""
-    accumulator = SseTokenUsage(MODEL_HOST)
+    accumulator = HttpTokenUsage(MODEL_HOST)
     accumulator.feed(ANTHROPIC_JSON_BODY)
     assert accumulator.usage() == ("claude-opus-4-8", FULL_TOKEN_USAGE)
 
 
 def test_json_body_usage_parses_an_openai_response() -> None:
-    accumulator = SseTokenUsage(OPENAI_HOST)
+    accumulator = HttpTokenUsage(OPENAI_HOST)
     accumulator.feed(OPENAI_JSON_BODY)
     assert accumulator.usage() == (
         "gpt-5.4",
@@ -1024,10 +1412,52 @@ def test_json_body_usage_parses_an_openai_response() -> None:
 
 
 def test_json_body_usage_reassembles_across_chunk_boundaries() -> None:
-    accumulator = SseTokenUsage(MODEL_HOST)
+    accumulator = HttpTokenUsage(MODEL_HOST)
     for start in range(0, len(ANTHROPIC_JSON_BODY), 7):
         accumulator.feed(ANTHROPIC_JSON_BODY[start : start + 7])
     assert accumulator.usage() == ("claude-opus-4-8", FULL_TOKEN_USAGE)
+
+
+def test_sse_usage_decodes_chunked_http_framing() -> None:
+    framed = bytearray(
+        b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n"
+    )
+    for start in range(0, len(ANTHROPIC_SSE_BODY), 11):
+        chunk = ANTHROPIC_SSE_BODY[start : start + 11]
+        framed.extend(f"{len(chunk):x}\r\n".encode())
+        framed.extend(chunk)
+        framed.extend(b"\r\n")
+    framed.extend(b"0\r\n\r\n")
+    accumulator = HttpTokenUsage(MODEL_HOST)
+    for start in range(0, len(framed), 7):
+        accumulator.feed(framed[start : start + 7])
+    assert accumulator.usage() == ("claude-opus-4-8", FULL_TOKEN_USAGE)
+
+
+def test_sse_usage_decodes_gzipped_http_body() -> None:
+    compressed = gzip.compress(OPENAI_SSE_BODY)
+    response = (
+        b"HTTP/1.1 200 OK\r\n"
+        b"content-type: text/event-stream\r\n"
+        b"content-encoding: gzip\r\n"
+        b"content-length: " + str(len(compressed)).encode() + b"\r\n\r\n" + compressed
+    )
+    accumulator = HttpTokenUsage(OPENAI_HOST)
+    for start in range(0, len(response), 7):
+        accumulator.feed(response[start : start + 7])
+    assert accumulator.usage() == (
+        "gpt-5.4",
+        Usage(input_tokens=1_000_000, output_tokens=1_000_000),
+    )
+
+
+def test_compressed_usage_overflow_is_bounded_and_refused() -> None:
+    compressed = gzip.compress(b"x" * (proxy_server.MAX_SSE_BUFFER_BYTES + 1))
+    response = b"HTTP/1.1 200 OK\r\ncontent-encoding: gzip\r\n\r\n" + compressed
+    accumulator = HttpTokenUsage(OPENAI_HOST)
+    accumulator.feed(response)
+    assert accumulator.usage() is None
+    assert accumulator._overflowed
 
 
 RELAY_EXCHANGE_TIMEOUT_SECONDS = 10
@@ -1049,7 +1479,7 @@ async def test_relay_tees_the_full_body_to_the_client_while_metering_usage() -> 
     accumulator — the meter reads the stream without holding the client's bytes back."""
     (proxy_client_r, proxy_client_w), (peer_client_r, peer_client_w) = await _stream_pair()
     (proxy_up_r, proxy_up_w), (_peer_up_r, peer_up_w) = await _stream_pair()
-    accumulator = SseTokenUsage(MODEL_HOST)
+    accumulator = HttpTokenUsage(MODEL_HOST)
     relay = asyncio.create_task(
         _relay(proxy_client_r, proxy_client_w, proxy_up_r, proxy_up_w, accumulator.feed)
     )
@@ -1170,10 +1600,10 @@ async def test_model_host_relay_meters_sandbox_tokens_to_the_turn(db: None) -> N
     async with workspace_tx() as connection:
         workspace_id, turn_id, *_ = await _seed_turn(connection)
     proxy = _egress(_fixed())
-    accumulator = SseTokenUsage(MODEL_HOST)
+    accumulator = HttpTokenUsage(MODEL_HOST)
     accumulator.feed(ANTHROPIC_SSE)
-    proxy._meter_tokens(_basic(RunToken(workspace_id, turn_id).encode()), accumulator)
-    assert len(proxy._meter_tasks) == 1
+    await proxy._meter_tokens(RunToken(workspace_id, turn_id), accumulator)
+    assert proxy._meter_worker is not None
     await proxy.stop()
     async with workspace_tx() as connection:
         row = (
@@ -1194,16 +1624,45 @@ async def test_model_host_relay_meters_sandbox_tokens_to_the_turn(db: None) -> N
     )
 
 
+async def test_meter_batch_sums_token_usage_for_the_same_run_and_model(db: None) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, turn_id, *_ = await _seed_turn(connection)
+    proxy = _egress(_fixed())
+    run = RunToken(workspace_id, turn_id)
+    first = HttpTokenUsage(MODEL_HOST)
+    first.feed(ANTHROPIC_SSE)
+    second = HttpTokenUsage(MODEL_HOST)
+    second.feed(ANTHROPIC_SSE)
+    await proxy._meter_tokens(run, first)
+    await proxy._meter_tokens(run, second)
+    await proxy.stop()
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(
+                    tables.ledger.c.amount,
+                    tables.ledger.c.priced_micro_usd,
+                    tables.ledger.c.model,
+                ).where(tables.ledger.c.turn_id == turn_id)
+            )
+        ).one()
+    assert (int(row.amount), int(row.priced_micro_usd), row.model) == (
+        20_000,
+        193_000,
+        "claude-opus-4-8",
+    )
+
+
 async def test_model_host_relay_meters_a_non_streaming_json_body(db: None) -> None:
     """A non-streaming single-JSON completion is metered through the same path as an SSE stream: the
     teed body's top-level usage is parsed and written under `sandbox_tokens`, so it is not free."""
     async with workspace_tx() as connection:
         workspace_id, turn_id, *_ = await _seed_turn(connection)
     proxy = _egress(_fixed())
-    accumulator = SseTokenUsage(MODEL_HOST)
+    accumulator = HttpTokenUsage(MODEL_HOST)
     accumulator.feed(ANTHROPIC_JSON_BODY)
-    proxy._meter_tokens(_basic(RunToken(workspace_id, turn_id).encode()), accumulator)
-    assert len(proxy._meter_tasks) == 1
+    await proxy._meter_tokens(RunToken(workspace_id, turn_id), accumulator)
+    assert proxy._meter_worker is not None
     await proxy.stop()
     async with workspace_tx() as connection:
         row = (
@@ -1228,10 +1687,12 @@ async def test_model_host_relay_skips_when_no_usage_is_reported(db: None) -> Non
     async with workspace_tx() as connection:
         workspace_id, turn_id, *_ = await _seed_turn(connection)
     proxy = _egress(_fixed())
-    accumulator = SseTokenUsage(MODEL_HOST)
-    accumulator.feed(b'data: {"type":"content_block_delta","delta":{"text":"hi"}}\n\n')
-    proxy._meter_tokens(_basic(RunToken(workspace_id, turn_id).encode()), accumulator)
-    assert proxy._meter_tasks == set()
+    accumulator = HttpTokenUsage(MODEL_HOST)
+    accumulator.feed(
+        SSE_RESPONSE_HEAD + b'data: {"type":"content_block_delta","delta":{"text":"hi"}}\n\n'
+    )
+    await proxy._meter_tokens(RunToken(workspace_id, turn_id), accumulator)
+    assert proxy._meter_worker is None
     await proxy.stop()
     async with workspace_tx() as connection:
         count = (
@@ -1296,7 +1757,7 @@ async def test_a_sentinel_cli_request_forwards_through_the_broker(db: None) -> N
     cert, key = await generate_ca()
     proxy = _egress(_fixed(rules), ca_cert=cert, ca_key=key)
     endpoint = await proxy.start(bind_host="127.0.0.1")
-    token = RunToken(workspace_id, turn_id).encode()
+    token = RUN_TOKENS.encode(RunToken(workspace_id, turn_id))
     body = b'{"title":"hi"}'
     try:
         reader, writer = await asyncio.open_connection("127.0.0.1", endpoint.port)
@@ -1356,7 +1817,7 @@ async def test_a_forward_host_connect_requires_a_live_turn(db: None) -> None:
     proxy = _egress(_fixed(rules), ca_cert=cert, ca_key=key)
     endpoint = await proxy.start(bind_host="127.0.0.1")
     try:
-        ended = RunToken(workspace_id, ended_turn).encode()
+        ended = RUN_TOKENS.encode(RunToken(workspace_id, ended_turn))
         assert await _connect(endpoint.port, FORWARD_HOST, ended) == 403
     finally:
         await proxy.stop()
@@ -1398,7 +1859,7 @@ async def test_an_over_cap_forward_body_answers_a_readable_413(db: None) -> None
     cert, key = await generate_ca()
     proxy = _egress(_fixed(rules), ca_cert=cert, ca_key=key)
     endpoint = await proxy.start(bind_host="127.0.0.1")
-    token = RunToken(workspace_id, turn_id).encode()
+    token = RUN_TOKENS.encode(RunToken(workspace_id, turn_id))
     body = b"x" * OVER_CAP_BODY_BYTES
     async with asyncio.timeout(REFUSAL_EXCHANGE_TIMEOUT_SECONDS):
         try:
@@ -1451,7 +1912,7 @@ async def test_a_mid_stream_chunked_forward_body_answers_a_readable_411(db: None
     cert, key = await generate_ca()
     proxy = _egress(_fixed(rules), ca_cert=cert, ca_key=key)
     endpoint = await proxy.start(bind_host="127.0.0.1")
-    token = RunToken(workspace_id, turn_id).encode()
+    token = RUN_TOKENS.encode(RunToken(workspace_id, turn_id))
     chunk = b"y" * RELAY_CHUNK_BYTES
     async with asyncio.timeout(REFUSAL_EXCHANGE_TIMEOUT_SECONDS):
         try:

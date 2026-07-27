@@ -256,6 +256,7 @@ async def test_egress_request_accumulates_a_priced_zero_count(db: None) -> None:
         workspace_id, turn_id = await _seed_turn(connection)
         await record_egress_request(connection, workspace_id, turn_id)
         await record_egress_request(connection, workspace_id, turn_id)
+        await record_egress_request(connection, workspace_id, turn_id, amount=8)
     async with workspace_tx() as connection:
         row = (
             await connection.execute(
@@ -266,7 +267,7 @@ async def test_egress_request_accumulates_a_priced_zero_count(db: None) -> None:
                 ).where(tables.ledger.c.turn_id == turn_id)
             )
         ).one()
-    assert (row.dimension, int(row.amount), int(row.priced_micro_usd)) == ("egress", 2, 0)
+    assert (row.dimension, int(row.amount), int(row.priced_micro_usd)) == ("egress", 10, 0)
 
 
 async def test_egress_never_double_counts_the_token_cost(db: None) -> None:

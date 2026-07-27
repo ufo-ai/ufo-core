@@ -46,7 +46,13 @@ from ufo.loop.subagents import SubagentRegistry
 from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
 from ufo.models.interface import ModelEvent, ModelRequest, TextDelta
 from ufo.models.registry import ModelRegistry
-from ufo.sandbox.session import ExecResult, ProxyEndpoint, SandboxHandle, SandboxSpec
+from ufo.sandbox.session import (
+    ExecResult,
+    ProxyEndpoint,
+    RunTokenCodec,
+    SandboxHandle,
+    SandboxSpec,
+)
 from ufo.schema import tables
 from ufo.schema.records import DEFAULT_AGENT_NAME, Usage
 from ufo.serve import _mount_shared_surfaces
@@ -479,6 +485,7 @@ def chat_server(
             search_provider=None,
             connectors=ConnectorRegistry(entries={}),
             proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
+            run_tokens=RunTokenCodec(TOKEN_SECRET.encode()),
             dbos=dbos_client,
             subagents=SubagentRegistry(()),
             subagent_grants={},

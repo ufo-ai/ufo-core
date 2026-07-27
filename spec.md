@@ -128,7 +128,10 @@ terminal frame. A client's wait always ends — the terminal state commits on th
 Every turn executes tools in a per-conversation sandbox: Docker container from a pinned image
 (baked toolchain), default-deny network egress with exactly one route out — the sandbox proxy.
 An off-cluster carrier reaches the proxy only over TLS; the per-turn proxy token is never sent on
-plaintext transport.
+plaintext transport. The token is deployment-signed, and every CONNECT is admitted only while its
+named turn is running. A process-wide connection ceiling bounds proxy state; a per-workspace share
+keeps one workspace from consuming it. Meter records cross a bounded, backpressured queue and write
+aggregated per run in workspace-scoped transactions, so one failed run cannot roll back another.
 
 **The sandbox proxy is core, not an extension** — it is the enforcement point for three core
 invariants: **sentinel swap** (processes inside see placeholder credentials; the proxy swaps real

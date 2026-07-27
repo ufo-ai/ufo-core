@@ -8,6 +8,7 @@ import pytest
 from cryptography.fernet import Fernet
 
 from ufo import proxy_serve as proxy_serve_module
+from ufo.bearer import UFO_TOKEN_SECRET_ENV
 from ufo.config import BlobConfig, Config, DatabaseConfig, load_config
 from ufo.credentials import CredentialStore
 from ufo.ext.loader import injecting_slots, load_manifests
@@ -22,9 +23,14 @@ from ufo.proxy_serve import (
     model_rule_base,
 )
 from ufo.sandbox.proxy.rules import ANTHROPIC_HOST, ScopeRule, derive_model_rules
-from ufo.sandbox.session import EGRESS_CA_CERT_ENV, EGRESS_CA_KEY_ENV
+from ufo.sandbox.session import EGRESS_CA_CERT_ENV, EGRESS_CA_KEY_ENV, RunTokenCodec
 
 ANTHROPIC_KEY = "sk-ant-test"
+
+
+@pytest.fixture(autouse=True)
+def _run_token_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(UFO_TOKEN_SECRET_ENV, "proxy-serve-test-run-token-secret")
 
 
 def _config(owner_url: str | None = "postgresql://owner@db/ufo") -> Config:
@@ -220,6 +226,7 @@ async def test_proxy_serve_wires_workspace_credential_refresh(
     refresh = captured["workspace_credentials"]
     assert isinstance(refresh, MethodType)
     assert refresh.__self__ is workspace_fs
+    assert captured["run_tokens"] == RunTokenCodec(b"proxy-serve-test-run-token-secret")
 
 
 async def test_proxy_serve_resolves_keyed_slots_per_workspace(

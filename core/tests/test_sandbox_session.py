@@ -10,6 +10,7 @@ from ufo.sandbox.session import (
     DEFAULT_EXEC_TIMEOUT_SECONDS,
     ExecResult,
     RunToken,
+    RunTokenCodec,
     SandboxHandle,
     SandboxSession,
     SandboxSpec,
@@ -17,6 +18,8 @@ from ufo.sandbox.session import (
 from ufo.schema.records import Agent, Turn
 from ufo.tools.builtins import BashInput, bash_handler
 from ufo.tools.context import SpawnResult, ToolContext
+
+RUN_TOKENS = RunTokenCodec(b"run-token-test-secret")
 
 
 def _basic(username: str) -> str:
@@ -27,27 +30,34 @@ def _basic(username: str) -> str:
 
 def test_run_token_round_trips_encode_then_proxy_auth() -> None:
     token = RunToken(workspace_id=uuid4(), turn_id=uuid4())
-    assert RunToken.from_proxy_auth(_basic(token.encode())) == token
+    assert RUN_TOKENS.from_proxy_auth(_basic(RUN_TOKENS.encode(token))) == token
 
 
 def test_encoded_token_is_url_safe_userinfo() -> None:
-    encoded = RunToken(workspace_id=uuid4(), turn_id=uuid4()).encode()
-    assert all(char.isalnum() or char in "-_" for char in encoded)
+    encoded = RUN_TOKENS.encode(RunToken(workspace_id=uuid4(), turn_id=uuid4()))
+    assert all(char.isalnum() or char in "-_." for char in encoded)
 
 
 def test_from_proxy_auth_rejects_non_basic_scheme() -> None:
     with pytest.raises(ValueError, match="basic"):
-        RunToken.from_proxy_auth("Bearer " + RunToken(uuid4(), uuid4()).encode())
+        RUN_TOKENS.from_proxy_auth("Bearer " + RUN_TOKENS.encode(RunToken(uuid4(), uuid4())))
 
 
 def test_from_proxy_auth_rejects_missing_header() -> None:
     with pytest.raises(ValueError, match="basic"):
-        RunToken.from_proxy_auth("")
+        RUN_TOKENS.from_proxy_auth("")
 
 
 def test_from_proxy_auth_rejects_a_malformed_run_token() -> None:
     with pytest.raises(ValueError):
-        RunToken.from_proxy_auth(_basic("not-a-run-token"))
+        RUN_TOKENS.from_proxy_auth(_basic("not-a-run-token"))
+
+
+def test_run_token_rejects_a_valid_shape_signed_by_another_deployment() -> None:
+    run = RunToken(uuid4(), uuid4())
+    forged = RunTokenCodec(b"other-deployment").encode(run)
+    with pytest.raises(ValueError, match="signed"):
+        RUN_TOKENS.from_proxy_auth(_basic(forged))
 
 
 class _RecordingCarrier:

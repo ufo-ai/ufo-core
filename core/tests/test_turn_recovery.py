@@ -43,7 +43,13 @@ from ufo.models.interface import (
     ToolResultBlock,
 )
 from ufo.models.registry import ModelRegistry
-from ufo.sandbox.session import ExecResult, ProxyEndpoint, SandboxHandle, SandboxSpec
+from ufo.sandbox.session import (
+    ExecResult,
+    ProxyEndpoint,
+    RunTokenCodec,
+    SandboxHandle,
+    SandboxSpec,
+)
 from ufo.schema import tables
 from ufo.schema.records import TerminalFrame, Usage
 
@@ -171,6 +177,7 @@ def _install_runtime(config: Config, registry: ModelRegistry, carrier: _Counting
             search_provider=None,
             connectors=ConnectorRegistry(entries={}),
             proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
+            run_tokens=RunTokenCodec(b"turn-recovery-test-secret"),
             dbos=DBOSClient(system_database_url=config.database.system_url),
             subagents=SubagentRegistry(()),
             subagent_grants={},

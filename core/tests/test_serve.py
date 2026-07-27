@@ -11,19 +11,26 @@ from cryptography.fernet import Fernet
 from fastapi import FastAPI
 
 from ufo import serve
+from ufo.bearer import UFO_TOKEN_SECRET_ENV
 from ufo.config import BlobConfig, Config, DatabaseConfig, SandboxConfig
 from ufo.credentials import CredentialStore
 from ufo.ext.manifest import CredentialSlot, InjectionTarget, Manifest
 from ufo.models.catalog import CORE_PRICING
 from ufo.proxy_serve import OWNER_DSN_ENV, model_rule_base
 from ufo.sandbox.fs_creds import SandboxFsCredentialMinter
-from ufo.sandbox.session import EGRESS_CA_CERT_ENV
+from ufo.sandbox.session import EGRESS_CA_CERT_ENV, RunTokenCodec
 
 CA_PEM = "-----BEGIN CERTIFICATE-----\nshared\n-----END CERTIFICATE-----\n"
 ANTHROPIC_KEY = "sk-ant-test"
 LEAF_PEM_PREFIX = "-----BEGIN CERTIFICATE-----"
 OWNER_LIBPQ_DSN = "postgresql://ufo_owner:pw@db.test/ufo"
 OWNER_ASYNCPG_DSN = "postgresql+asyncpg://ufo_owner:pw@db.test/ufo"
+RUN_TOKENS = RunTokenCodec(b"serve-test-run-token-secret")
+
+
+@pytest.fixture(autouse=True)
+def _run_token_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(UFO_TOKEN_SECRET_ENV, "serve-test-run-token-secret")
 
 
 class ShutdownProbe:
@@ -239,7 +246,7 @@ def test_hosted_proxy_endpoint_is_built_from_config_and_the_shared_ca(
     endpoint carriers thread into every sandbox from config — the stable port and public
     dial-back base — plus the shared CA cert from env, a plain value object with no bound socket."""
     monkeypatch.setenv(EGRESS_CA_CERT_ENV, CA_PEM)
-    endpoint = serve._proxy_endpoint(_hosted_config(), (), None, CORE_PRICING)
+    endpoint = serve._proxy_endpoint(_hosted_config(), (), None, CORE_PRICING, RUN_TOKENS)
     assert (endpoint.port, endpoint.ca_cert, endpoint.public_url) == (
         9443,
         CA_PEM,
@@ -252,7 +259,7 @@ def test_hosted_proxy_endpoint_fails_loud_without_the_shared_ca(
 ) -> None:
     monkeypatch.delenv(EGRESS_CA_CERT_ENV, raising=False)
     with pytest.raises(RuntimeError, match=EGRESS_CA_CERT_ENV):
-        serve._proxy_endpoint(_hosted_config(), (), None, CORE_PRICING)
+        serve._proxy_endpoint(_hosted_config(), (), None, CORE_PRICING, RUN_TOKENS)
 
 
 def test_local_proxy_mints_an_ephemeral_ca_and_needs_no_shared_ca_env(
@@ -264,7 +271,7 @@ def test_local_proxy_mints_an_ephemeral_ca_and_needs_no_shared_ca_env(
     monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv(EGRESS_CA_CERT_ENV, raising=False)
-    endpoint = serve._proxy_endpoint(_local_config(), (), None, CORE_PRICING)
+    endpoint = serve._proxy_endpoint(_local_config(), (), None, CORE_PRICING, RUN_TOKENS)
     assert endpoint.public_url is None
     assert endpoint.port != 0
     assert endpoint.ca_cert.startswith(LEAF_PEM_PREFIX)
@@ -300,12 +307,14 @@ def test_local_proxy_wires_workspace_credential_refresh(
         (),
         None,
         CORE_PRICING,
+        RUN_TOKENS,
         cast(SandboxFsCredentialMinter, workspace_fs),
     )
 
     refresh = captured["workspace_credentials"]
     assert isinstance(refresh, MethodType)
     assert refresh.__self__ is workspace_fs
+    assert captured["run_tokens"] is RUN_TOKENS
 
 
 def test_shared_owner_dsn_from_env_pins_the_async_driver(
@@ -373,7 +382,7 @@ def test_the_local_proxy_resolves_keyed_slots_per_workspace(
     monkeypatch.setattr(serve, "PerAgentRules", rules)
     credentials = CredentialStore(fernet=Fernet(Fernet.generate_key()))
     config = _local_config()
-    serve._proxy_endpoint(config, (manifest,), credentials, CORE_PRICING)
+    serve._proxy_endpoint(config, (manifest,), credentials, CORE_PRICING, RUN_TOKENS)
     assert captured["credentials"] is credentials
     assert captured["slots"] == (slot,)
     assert captured["base"] == model_rule_base(config)

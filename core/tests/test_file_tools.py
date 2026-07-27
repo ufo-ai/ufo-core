@@ -54,6 +54,7 @@ from ufo.sandbox.session import (
     MountSpec,
     ProxyEndpoint,
     RunToken,
+    RunTokenCodec,
     SandboxHandle,
     SandboxSession,
     SandboxSpec,
@@ -277,6 +278,7 @@ async def test_s3_mount_runs_s3fs_as_nobody_without_exposing_relay_secret(
         authorize=authorize,
         ca_cert=ca_cert,
         ca_key=ca_key,
+        run_tokens=RunTokenCodec(b"file-tools-test-run-token-secret"),
         workspace_credentials=minter.refresh,
     )
     endpoint = await proxy.start()

@@ -1,11 +1,10 @@
 """The sandbox proxy: scoped egress plus the root-owned workspace credential endpoint.
 
 Agent processes reach the network solely through this proxy (their HTTP(S)_PROXY). The rule set is
-resolved per request from the run token in the `Proxy-Authorization` header — the turn, hence the
-turn's agent and acting member — so a sandbox sees only its own agent's egress: the workspace's
-model and credential rules plus that agent's OAuth grants, derived fresh (never registered) and
-cached per turn. A run with no or unknown token resolves to the model and credential base alone —
-never a broad allow.
+resolved from the deployment-signed run token in the `Proxy-Authorization` header — the turn,
+hence the turn's agent and acting member — so a sandbox sees only its own agent's egress: the
+workspace's model and credential rules plus that agent's OAuth grants. An unsigned, unknown, or
+ended run reaches no host.
 
 The same listener serves s3fs's ECS metadata fetch. Its unguessable signed path token resolves one
 conversation and mints a short-lived STS credential whose inline policy reaches only that
@@ -13,11 +12,9 @@ conversation's workspace prefix. The local relay forwards the token from the pri
 
 Default-deny is a CONNECT the proxy refuses: ScopeRule admits exact model and grant hosts.
 InternetRule admits a live turn's globally routable IPv4 after resolving and pinning DNS;
-tokenless, ended-turn, private, and IPv6 destinations are refused. An admitted host carrying an
-InjectionRule or ForwardRule is MITM'd — but only for a turn the DB still reports running: the
-injection swaps in the real model or credential key, so a tokenless, unknown-turn, or terminal-turn
-CONNECT to a keyed host is refused (403) and the key never reaches the wire (the gate the local
-carrier leans on — a host process can reach the proxy directly). Authorized, the proxy terminates
+tokenless, ended-turn, private, and IPv6 destinations are refused. Every admitted host requires a
+turn the DB still reports running. An admitted host carrying an InjectionRule or ForwardRule is
+MITM'd; the injection swaps in the real model or credential key. Authorized, the proxy terminates
 TLS with a leaf minted from the per-process CA (in the container's trust store) and dispatches on
 what the request carries: a grant sentinel in a
 ForwardRule's header executes through the grant's broker under the granted account (the credential
@@ -39,10 +36,13 @@ import json
 import ssl
 import struct
 import tempfile
+import time
+import zlib
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from pathlib import Path
+from typing import Protocol
 from uuid import UUID
 
 import dns.asyncresolver
@@ -62,7 +62,7 @@ from ufo.ext.manifest import CredentialSlot
 from ufo.grants import GrantStore
 from ufo.models.catalog import CORE_PRICING
 from ufo.models.pricing import Pricing
-from ufo.o11y import emit_metric, log
+from ufo.o11y import emit_metric, log, log_error
 from ufo.sandbox.fs_creds import (
     SANDBOX_FS_CREDENTIAL_PATH,
     InvalidSandboxFsToken,
@@ -83,13 +83,17 @@ from ufo.sandbox.proxy.rules import (
     derive_credential_rules,
     derive_grant_rules,
 )
-from ufo.sandbox.session import ProxyEndpoint, RunToken
+from ufo.sandbox.session import ProxyEndpoint, RunToken, RunTokenCodec
 from ufo.schema import tables
 from ufo.schema.records import RUNNING, Usage
+from ufo.workspace import ws
 
 PROXY_BIND_HOST = "0.0.0.0"
 RELAY_CHUNK_BYTES = 65536
 MAX_HEADER_BYTES = 65536
+PROXY_HEADER_TIMEOUT_SECONDS = 10
+MAX_PROXY_CONNECTIONS = 512
+MAX_PROXY_CONNECTIONS_PER_WORKSPACE = 64
 CONNECT_UPSTREAM_TIMEOUT_SECONDS = 30
 RELAY_RESPONSE_IDLE_TIMEOUT_SECONDS = 300
 DEFAULT_HTTPS_PORT = 443
@@ -98,6 +102,10 @@ MAX_CONNECT_PORT = 65535
 CA_VALID_DAYS = "3650"
 LEAF_VALID_DAYS = "365"
 RULE_CACHE_MAX = 4096
+RULE_CACHE_TTL_SECONDS = 240
+METER_QUEUE_MAX = 4096
+METER_BATCH_MAX = 256
+METER_BATCH_WINDOW_SECONDS = 0.01
 MAX_SSE_BUFFER_BYTES = 1_048_576
 MAX_FORWARD_BODY_BYTES = 1_048_576
 MAX_REFUSAL_DRAIN_BYTES = 8 * 1_048_576
@@ -107,6 +115,42 @@ RuleResolver = Callable[["RunToken | None"], Awaitable[tuple[Rule, ...]]]
 TurnAuthorizer = Callable[["RunToken"], Awaitable[bool]]
 WorkspaceCredentials = Callable[[str, TurnAuthorizer], Awaitable[SandboxFsCredentials]]
 PublicAddressResolver = Callable[[str, int], Awaitable[str]]
+
+
+@dataclass(frozen=True, slots=True)
+class _CachedRules:
+    expires_at: float
+    rules: tuple[Rule, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _EgressMeter:
+    run: RunToken
+
+
+@dataclass(frozen=True, slots=True)
+class _TokenMeter:
+    run: RunToken
+    model: str
+    usage: Usage
+
+
+@dataclass(frozen=True, slots=True)
+class _HeaderRefusal:
+    status: HTTPStatus
+    message: str
+
+
+class _ContentDecoder(Protocol):
+    @property
+    def unconsumed_tail(self) -> bytes: ...
+
+    def decompress(self, data: bytes, max_length: int = 0) -> bytes: ...
+
+    def flush(self) -> bytes: ...
+
+
+_MeterRecord = _EgressMeter | _TokenMeter
 
 
 async def generate_ca() -> tuple[str, str]:
@@ -248,6 +292,7 @@ class EgressProxy:
     authorize: TurnAuthorizer
     ca_cert: str
     ca_key: str
+    run_tokens: RunTokenCodec
     resolve_public: PublicAddressResolver | None = None
     pricing: Pricing = CORE_PRICING
     workspace_credentials: WorkspaceCredentials | None = None
@@ -256,8 +301,16 @@ class EgressProxy:
     _contexts: dict[str, ssl.SSLContext] = field(default_factory=dict, init=False)
     _mint_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _connection_tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False)
-    _meter_tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False)
-    _rule_cache: dict[str, tuple[Rule, ...]] = field(default_factory=dict, init=False)
+    _active_connections: int = field(default=0, init=False)
+    _workspace_connections: dict[UUID, int] = field(default_factory=dict, init=False)
+    _meter_queue: asyncio.Queue[_MeterRecord | None] = field(
+        default_factory=lambda: asyncio.Queue(maxsize=METER_QUEUE_MAX), init=False
+    )
+    _meter_worker: asyncio.Task[None] | None = field(default=None, init=False)
+    _rule_cache: dict[RunToken, _CachedRules] = field(default_factory=dict, init=False)
+    _rule_tasks: dict[RunToken, asyncio.Task[tuple[Rule, ...]]] = field(
+        default_factory=dict, init=False
+    )
 
     async def start(
         self, bind_host: str = PROXY_BIND_HOST, port: int = 0, public_url: str | None = None
@@ -271,7 +324,9 @@ class EgressProxy:
         (root / "ca.crt").write_text(self.ca_cert)
         (root / "ca.key").write_text(self.ca_key)
         await _openssl("genrsa", "-out", str(root / "leaf.key"), "2048")
-        self._server = await asyncio.start_server(self._handle, bind_host, port)
+        self._server = await asyncio.start_server(
+            self._handle, bind_host, port, limit=MAX_HEADER_BYTES + 1
+        )
         bound = self._server.sockets[0].getsockname()[1]
         return ProxyEndpoint(port=bound, ca_cert=self.ca_cert, public_url=public_url)
 
@@ -294,8 +349,13 @@ class EgressProxy:
         if self._server is not None:
             await self._server.wait_closed()
             self._server = None
-        if self._meter_tasks:
-            await asyncio.gather(*self._meter_tasks, return_exceptions=True)
+        if self._meter_worker is not None:
+            if self._meter_worker.done():
+                await self._meter_worker
+            else:
+                await self._meter_queue.put(None)
+                await self._meter_worker
+            self._meter_worker = None
         if self._workdir is not None:
             self._workdir.cleanup()
             self._workdir = None
@@ -305,15 +365,30 @@ class EgressProxy:
         if self._server is None or not self._server.is_serving():
             writer.close()
             return
+        if self._active_connections >= MAX_PROXY_CONNECTIONS:
+            await _respond(writer, 503, "proxy connection capacity reached")
+            writer.close()
+            return
         task = asyncio.current_task()
         if task is None:
             raise RuntimeError("proxy connection has no asyncio task")
+        workspace_connection: UUID | None = None
+        self._active_connections += 1
         self._connection_tasks.add(task)
         try:
             try:
-                request_line = await reader.readline()
-                method, _, rest = request_line.decode(errors="replace").partition(" ")
-                target = rest.split(" ", 1)[0]
+                request = await _read_request_head(reader)
+                if isinstance(request, _HeaderRefusal):
+                    await _respond(writer, request.status, request.message)
+                    return
+                if request is None:
+                    return
+                request_line, headers = request
+                parts = request_line.decode("latin-1").split()
+                if len(parts) != 3:
+                    await _respond(writer, 400, "malformed proxy request line")
+                    return
+                method, target, _ = parts
                 if method == "GET":
                     await self._serve_workspace_credentials(writer, target)
                     return
@@ -322,24 +397,11 @@ class EgressProxy:
                     return
                 host, _, port_text = target.partition(":")
                 proxy_auth = ""
-                while (line := await reader.readline()) not in (b"\r\n", b""):
+                for line in headers:
                     name, _, value = line.decode(errors="replace").partition(":")
                     if name.strip().lower() == "proxy-authorization":
                         proxy_auth = value.strip()
             except OSError:
-                return
-            run = _run_token(proxy_auth)
-            rules = await self._rules_for(run)
-            connect_host = host
-            exactly_scoped = any(
-                isinstance(rule, ScopeRule) and host in rule.allowed_hosts for rule in rules
-            )
-            if not exactly_scoped and (
-                run is None
-                or not any(isinstance(rule, InternetRule) for rule in rules)
-                or not await self.authorize(run)
-            ):
-                await _respond(writer, 403, f"egress to {host} is not permitted")
                 return
             try:
                 port = int(port_text or DEFAULT_HTTPS_PORT)
@@ -348,6 +410,27 @@ class EgressProxy:
                 return
             if not MIN_CONNECT_PORT <= port <= MAX_CONNECT_PORT:
                 await _respond(writer, 400, "invalid CONNECT port")
+                return
+            run = self._run_token(proxy_auth)
+            if run is None:
+                await _respond(writer, 403, f"egress to {host} is not permitted")
+                return
+            if not await self.authorize(run):
+                await _respond(writer, 403, f"egress to {host} is not permitted")
+                return
+            workspace_connections = self._workspace_connections.get(run.workspace_id, 0)
+            if workspace_connections >= MAX_PROXY_CONNECTIONS_PER_WORKSPACE:
+                await _respond(writer, 429, "workspace proxy connection capacity reached")
+                return
+            self._workspace_connections[run.workspace_id] = workspace_connections + 1
+            workspace_connection = run.workspace_id
+            rules = await self._rules_for(run)
+            connect_host = host
+            exactly_scoped = any(
+                isinstance(rule, ScopeRule) and host in rule.allowed_hosts for rule in rules
+            )
+            if not exactly_scoped and not any(isinstance(rule, InternetRule) for rule in rules):
+                await _respond(writer, 403, f"egress to {host} is not permitted")
                 return
             if not exactly_scoped:
                 try:
@@ -364,16 +447,19 @@ class EgressProxy:
             forwards = [r for r in rules if isinstance(r, ForwardRule) and r.host == host]
             if not injections and not forwards:
                 await self._tunnel(
-                    reader, writer, host, port, proxy_auth, rules, connect_host=connect_host
+                    reader, writer, host, port, run, rules, connect_host=connect_host
                 )
-            elif run is None or not await self.authorize(run):
-                await _respond(writer, 403, f"egress to {host} requires a live turn")
             else:
-                await self._mitm(
-                    reader, writer, host, port, injections, forwards, proxy_auth, rules
-                )
+                await self._mitm(reader, writer, host, port, injections, forwards, run, rules)
         finally:
             writer.close()
+            if workspace_connection is not None:
+                workspace_connections = self._workspace_connections[workspace_connection] - 1
+                if workspace_connections == 0:
+                    del self._workspace_connections[workspace_connection]
+                else:
+                    self._workspace_connections[workspace_connection] = workspace_connections
+            self._active_connections -= 1
             self._connection_tasks.discard(task)
 
     async def _serve_workspace_credentials(self, writer: asyncio.StreamWriter, target: str) -> None:
@@ -406,26 +492,51 @@ class EgressProxy:
             pass
 
     async def _rules_for(self, run: RunToken | None) -> tuple[Rule, ...]:
-        """The resolved rule set for this turn's agent, cached per run token so the DB is hit once
-        per turn, not once per request. The run token is unique per turn, so a grant recorded
-        mid-serve is live for the next turn (a fresh token) without a proxy restart. Bounded by
-        RULE_CACHE_MAX, evicting the oldest entry once full. A resolution that errors fails closed
-        to the base and is NOT cached — a transient DB blip degrades one request, never the turn."""
+        """The resolved rule set for this turn's agent, bounded and refreshed before an injected
+        short-lived credential can expire. Concurrent misses for one run share one resolution. A
+        resolution error fails closed to the base and is not cached."""
         if run is None:
             return await self.resolve(None)
-        key = run.encode()
-        hit = self._rule_cache.get(key)
+        hit = self._rule_cache.get(run)
+        if hit is not None and hit.expires_at > time.monotonic():
+            return hit.rules
         if hit is not None:
-            return hit
+            del self._rule_cache[run]
+        task = self._rule_tasks.get(run)
+        if task is None:
+            task = asyncio.create_task(self._resolve_rules(run))
+            self._rule_tasks[run] = task
+        return await asyncio.shield(task)
+
+    async def _resolve_rules(self, run: RunToken) -> tuple[Rule, ...]:
+        task = asyncio.current_task()
         try:
-            rules = await self.resolve(run)
-        except Exception as error:
-            log("egress.resolve_failed", turn=str(run.turn_id), error_class=type(error).__name__)
-            return await self.resolve(None)
-        if len(self._rule_cache) >= RULE_CACHE_MAX:
-            del self._rule_cache[next(iter(self._rule_cache))]
-        self._rule_cache[key] = rules
-        return rules
+            try:
+                rules = await self.resolve(run)
+            except Exception as error:
+                log(
+                    "egress.resolve_failed",
+                    turn=str(run.turn_id),
+                    error_class=type(error).__name__,
+                )
+                return await self.resolve(None)
+            if len(self._rule_cache) >= RULE_CACHE_MAX:
+                del self._rule_cache[next(iter(self._rule_cache))]
+            self._rule_cache[run] = _CachedRules(
+                expires_at=time.monotonic() + RULE_CACHE_TTL_SECONDS, rules=rules
+            )
+            return rules
+        finally:
+            if self._rule_tasks.get(run) is task:
+                del self._rule_tasks[run]
+
+    def _run_token(self, proxy_auth: str) -> RunToken | None:
+        if not proxy_auth:
+            return None
+        try:
+            return self.run_tokens.from_proxy_auth(proxy_auth)
+        except ValueError:
+            return None
 
     async def _resolve_public_address(self, host: str, port: int) -> str:
         """Resolve and pin globally routable IPv4 with cancellable async DNS."""
@@ -467,7 +578,7 @@ class EgressProxy:
         writer: asyncio.StreamWriter,
         host: str,
         port: int,
-        proxy_auth: str,
+        run: RunToken,
         rules: tuple[Rule, ...],
         connect_host: str,
     ) -> None:
@@ -487,7 +598,7 @@ class EgressProxy:
         writer.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
         await writer.drain()
         self._meter(host, rules)
-        self._meter_ledger(host, proxy_auth, rules)
+        await self._meter_ledger(host, run, rules)
         await _relay(reader, writer, upstream_reader, upstream_writer)
 
     async def _mitm(
@@ -498,7 +609,7 @@ class EgressProxy:
         port: int,
         injections: list[InjectionRule],
         forwards: list[ForwardRule],
-        proxy_auth: str,
+        run: RunToken,
         rules: tuple[Rule, ...],
     ) -> None:
         """Terminate the sandbox's TLS with a minted leaf and dispatch on what the request carries:
@@ -510,12 +621,15 @@ class EgressProxy:
         leaf_context = await self._leaf_context(host)
         client_reader, client_writer = await _start_tls_server(reader, writer, leaf_context)
         request = await _read_request_head(client_reader)
+        if isinstance(request, _HeaderRefusal):
+            await _respond(client_writer, request.status, request.message)
+            return
         if request is None:
             return
         matched = _forward_match(request[1], forwards)
         if matched is not None:
             await self._forward_broker(
-                client_reader, client_writer, matched, request, host, proxy_auth, rules
+                client_reader, client_writer, matched, request, host, run, rules
             )
             return
         try:
@@ -531,7 +645,7 @@ class EgressProxy:
         upstream_writer.write(b"\r\n")
         await upstream_writer.drain()
         self._meter(host, rules)
-        self._meter_ledger(host, proxy_auth, rules)
+        await self._meter_ledger(host, run, rules)
         tokens_metered = any(
             isinstance(rule, MeterRule) and rule.host == host and rule.dimension == TOKENS_DIMENSION
             for rule in rules
@@ -539,11 +653,11 @@ class EgressProxy:
         if not tokens_metered:
             await _relay(client_reader, client_writer, upstream_reader, upstream_writer)
             return
-        accumulator = SseTokenUsage(host)
+        accumulator = HttpTokenUsage(host)
         await _relay(
             client_reader, client_writer, upstream_reader, upstream_writer, accumulator.feed
         )
-        self._meter_tokens(proxy_auth, accumulator)
+        await self._meter_tokens(run, accumulator)
 
     async def _forward_broker(
         self,
@@ -552,7 +666,7 @@ class EgressProxy:
         rule: ForwardRule,
         request: tuple[bytes, list[bytes]],
         host: str,
-        proxy_auth: str,
+        run: RunToken,
         rules: tuple[Rule, ...],
     ) -> None:
         """Execute one sentinel-carrying request through the grant's broker instead of
@@ -572,7 +686,7 @@ class EgressProxy:
             await _drain_refused_body(client_reader, body.pending)
             return
         self._meter(host, rules)
-        self._meter_ledger(host, proxy_auth, rules)
+        await self._meter_ledger(host, run, rules)
         try:
             response = await rule.forward.forward(
                 rule.account_id,
@@ -643,50 +757,109 @@ class EgressProxy:
             if isinstance(rule, MeterRule) and rule.host == host:
                 emit_metric("sandbox_egress_total", host=host, dimension=rule.dimension)
 
-    def _meter_ledger(self, host: str, proxy_auth: str, rules: tuple[Rule, ...]) -> None:
-        """Meter egress to the ledger off the relay path so a slow DB never stalls the sandbox's
-        egress. A metered host whose MeterRule dimension is not `tokens` writes one `egress` request
-        row keyed to the turn; the model host (dimension `tokens`) writes no egress count — its cost
-        is the token bill parsed from its teed response and written under `sandbox_tokens`."""
+    async def _meter_ledger(self, host: str, run: RunToken, rules: tuple[Rule, ...]) -> None:
         if not any(
             isinstance(rule, MeterRule) and rule.host == host and rule.dimension != TOKENS_DIMENSION
             for rule in rules
         ):
             return
-        task = asyncio.ensure_future(self._write_egress(host, proxy_auth))
-        self._meter_tasks.add(task)
-        task.add_done_callback(self._meter_tasks.discard)
+        await self._enqueue_meter(_EgressMeter(run))
 
-    async def _write_egress(self, host: str, proxy_auth: str) -> None:
-        try:
-            run = RunToken.from_proxy_auth(proxy_auth)
-            async with workspace_tx() as connection:
-                await record_egress_request(connection, run.workspace_id, run.turn_id)
-        except Exception as error:
-            log("egress.meter_failed", host=host, error_class=type(error).__name__)
-
-    def _meter_tokens(self, proxy_auth: str, accumulator: "SseTokenUsage") -> None:
-        """Meter the model host's teed response under `sandbox_tokens`, off the relay path. A stream
-        that reported no usage (a call that omitted OpenAI's `stream_options.include_usage`, or a
-        body the parser could not read) is logged and skipped, never a failed relay."""
+    async def _meter_tokens(self, run: RunToken, accumulator: "HttpTokenUsage") -> None:
         parsed = accumulator.usage()
         if parsed is None:
             log("egress.tokens_usage_absent", host=accumulator.host)
             return
         model, usage = parsed
-        task = asyncio.ensure_future(self._write_sandbox_tokens(proxy_auth, model, usage))
-        self._meter_tasks.add(task)
-        task.add_done_callback(self._meter_tasks.discard)
+        await self._enqueue_meter(_TokenMeter(run, model, usage))
 
-    async def _write_sandbox_tokens(self, proxy_auth: str, model: str, usage: Usage) -> None:
-        try:
-            run = RunToken.from_proxy_auth(proxy_auth)
-            async with workspace_tx() as connection:
-                await record_sandbox_tokens(
-                    connection, run.workspace_id, run.turn_id, model, usage, self.pricing
+    async def _enqueue_meter(self, record: _MeterRecord) -> None:
+        worker = self._meter_worker
+        if worker is None:
+            worker = asyncio.create_task(self._meter_loop())
+            self._meter_worker = worker
+        elif worker.done():
+            await worker
+        await self._meter_queue.put(record)
+
+    async def _meter_loop(self) -> None:
+        while True:
+            first = await self._meter_queue.get()
+            records: list[_MeterRecord] = []
+            batch_items = 1
+            stopping = first is None
+            if first is not None:
+                records.append(first)
+            await asyncio.sleep(METER_BATCH_WINDOW_SECONDS)
+            while batch_items < METER_BATCH_MAX:
+                try:
+                    record = self._meter_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                batch_items += 1
+                if record is None:
+                    stopping = True
+                else:
+                    records.append(record)
+            try:
+                if records:
+                    await self._write_meter_batch(records)
+            except Exception as error:
+                log_error(
+                    "egress.meter_batch_failed",
+                    records=len(records),
+                    error_class=type(error).__name__,
                 )
-        except Exception as error:
-            log("egress.tokens_meter_failed", error_class=type(error).__name__)
+            finally:
+                for _ in range(batch_items):
+                    self._meter_queue.task_done()
+            if stopping:
+                return
+
+    async def _write_meter_batch(self, records: list[_MeterRecord]) -> None:
+        egress: dict[RunToken, int] = {}
+        tokens: dict[RunToken, dict[str, Usage]] = {}
+        record_counts: dict[RunToken, int] = {}
+        for record in records:
+            match record:
+                case _EgressMeter(run=run):
+                    egress[run] = egress.get(run, 0) + 1
+                case _TokenMeter(run=run, model=model, usage=usage):
+                    run_tokens = tokens.setdefault(run, {})
+                    previous = run_tokens.get(model, Usage())
+                    run_tokens[model] = Usage(
+                        input_tokens=previous.input_tokens + usage.input_tokens,
+                        output_tokens=previous.output_tokens + usage.output_tokens,
+                        cache_read_tokens=previous.cache_read_tokens + usage.cache_read_tokens,
+                        cache_write_tokens=previous.cache_write_tokens + usage.cache_write_tokens,
+                    )
+            record_counts[run] = record_counts.get(run, 0) + 1
+        for run, count in record_counts.items():
+            try:
+                with ws(run.workspace_id):
+                    async with workspace_tx() as connection:
+                        amount = egress.get(run)
+                        if amount is not None:
+                            await record_egress_request(
+                                connection, run.workspace_id, run.turn_id, amount=amount
+                            )
+                        for model, usage in tokens.get(run, {}).items():
+                            await record_sandbox_tokens(
+                                connection,
+                                run.workspace_id,
+                                run.turn_id,
+                                model,
+                                usage,
+                                self.pricing,
+                            )
+            except Exception as error:
+                log_error(
+                    "egress.meter_run_failed",
+                    workspace_id=str(run.workspace_id),
+                    turn_id=str(run.turn_id),
+                    records=count,
+                    error_class=type(error).__name__,
+                )
 
 
 async def _start_tls_server(
@@ -710,22 +883,37 @@ async def _start_tls_server(
 
 async def _read_request_head(
     reader: asyncio.StreamReader,
-) -> tuple[bytes, list[bytes]] | None:
-    """The request line and header lines (each still terminated), bounded so a hostile client cannot
-    exhaust memory before the body is even streamed."""
-    request_line = await reader.readline()
-    if not request_line:
-        return None
-    headers: list[bytes] = []
-    total = len(request_line)
-    while True:
-        line = await reader.readline()
-        if line in (b"\r\n", b""):
-            break
-        total += len(line)
-        if total > MAX_HEADER_BYTES:
-            return None
-        headers.append(line)
+) -> tuple[bytes, list[bytes]] | _HeaderRefusal | None:
+    try:
+        async with asyncio.timeout(PROXY_HEADER_TIMEOUT_SECONDS):
+            request_line = await reader.readline()
+            if not request_line:
+                return None
+            headers: list[bytes] = []
+            total = len(request_line)
+            if total > MAX_HEADER_BYTES:
+                return _HeaderRefusal(
+                    HTTPStatus.REQUEST_HEADER_FIELDS_TOO_LARGE,
+                    "request headers exceed the proxy limit",
+                )
+            while True:
+                line = await reader.readline()
+                if line in (b"\r\n", b""):
+                    break
+                total += len(line)
+                if total > MAX_HEADER_BYTES:
+                    return _HeaderRefusal(
+                        HTTPStatus.REQUEST_HEADER_FIELDS_TOO_LARGE,
+                        "request headers exceed the proxy limit",
+                    )
+                headers.append(line)
+    except TimeoutError:
+        return _HeaderRefusal(HTTPStatus.REQUEST_TIMEOUT, "request headers timed out")
+    except ValueError:
+        return _HeaderRefusal(
+            HTTPStatus.REQUEST_HEADER_FIELDS_TOO_LARGE,
+            "request headers exceed the proxy limit",
+        )
     return request_line, headers
 
 
@@ -876,17 +1064,6 @@ def _has_crlf(value: str) -> bool:
     return "\r" in value or "\n" in value
 
 
-def _run_token(proxy_auth: str) -> RunToken | None:
-    """The turn behind a `Proxy-Authorization` header, or None when it is absent or malformed — an
-    unattributed request resolves to the base rules, never a broad allow."""
-    if not proxy_auth:
-        return None
-    try:
-        return RunToken.from_proxy_auth(proxy_auth)
-    except ValueError:
-        return None
-
-
 def _inject(headers: list[bytes], candidates: list[InjectionRule]) -> bytes:
     """Rewrite the header block: swap a header the sandbox set to a candidate's sentinel for that
     candidate's real secret — selection is by the exact sentinel seen, so among two accounts on one
@@ -976,21 +1153,20 @@ def _int_field(usage: dict[str, object], name: str) -> int:
 
 
 @dataclass
-class SseTokenUsage:
-    """Recover a model host's token usage from its teed response without buffering the whole stream:
-    forwarded chunks are fed here line by line, so only one partial line is ever held (bounded by
-    MAX_SSE_BUFFER_BYTES; a line past the bound stops parsing, never the relay). A streamed SSE
-    response reports usage in `data:` events — Anthropic input/cache on `message_start` and the
-    final `output_tokens` on `message_delta`; OpenAI (with `stream_options.include_usage`) both on a
-    terminal usage chunk. A non-streaming response is instead one JSON body whose top-level `usage`
-    block is recovered the same way (its shape is the SSE payload without the `data:` frame), so a
-    single-JSON in-sandbox completion is metered too. The two are mutually exclusive per response —
-    an SSE stream sets usage before the body branch runs — so the JSON path never re-meters a
-    stream. A response that carried no usage yields None, so the relay is metered only when the
-    model actually reported it."""
+class HttpTokenUsage:
+    """Decode one HTTP response and recover model-reported usage from its SSE or JSON body."""
 
     host: str
-    _buffer: bytearray = field(default_factory=bytearray, init=False)
+    _head: bytearray = field(default_factory=bytearray, init=False)
+    _body: bytearray = field(default_factory=bytearray, init=False)
+    _chunk_buffer: bytearray = field(default_factory=bytearray, init=False)
+    _headers_complete: bool = field(default=False, init=False)
+    _chunked: bool = field(default=False, init=False)
+    _chunk_remaining: int | None = field(default=None, init=False)
+    _chunk_needs_crlf: bool = field(default=False, init=False)
+    _chunk_done: bool = field(default=False, init=False)
+    _decompressor: _ContentDecoder | None = field(default=None, init=False)
+    _decoder_finished: bool = field(default=False, init=False)
     _overflowed: bool = field(default=False, init=False)
     _seen: bool = field(default=False, init=False)
     _model: str = field(default="", init=False)
@@ -1002,18 +1178,46 @@ class SseTokenUsage:
     def feed(self, chunk: bytes) -> None:
         if self._overflowed:
             return
-        self._buffer += chunk
-        while (newline := self._buffer.find(b"\n")) != -1:
-            line = bytes(self._buffer[:newline])
-            del self._buffer[: newline + 1]
-            self._consume(line)
-        if len(self._buffer) > MAX_SSE_BUFFER_BYTES:
-            self._overflowed = True
-            self._buffer.clear()
+        if self._headers_complete:
+            self._feed_wire_body(chunk)
+            return
+        self._head.extend(chunk)
+        marker = self._head.find(b"\r\n\r\n")
+        if marker == -1:
+            if len(self._head) > MAX_HEADER_BYTES:
+                self._fail()
+            return
+        if marker > MAX_HEADER_BYTES:
+            self._fail()
+            return
+        raw_head = bytes(self._head[:marker])
+        body = bytes(self._head[marker + 4 :])
+        self._head.clear()
+        headers: dict[bytes, bytes] = {}
+        for line in raw_head.split(b"\r\n")[1:]:
+            name, separator, value = line.partition(b":")
+            if separator:
+                headers[name.strip().lower()] = value.strip().lower()
+        transfer = headers.get(b"transfer-encoding", b"")
+        self._chunked = b"chunked" in (part.strip() for part in transfer.split(b","))
+        content_encoding = headers.get(b"content-encoding", b"identity")
+        match content_encoding:
+            case b"identity" | b"":
+                pass
+            case b"gzip":
+                self._decompressor = zlib.decompressobj(zlib.MAX_WBITS | 16)
+            case b"deflate":
+                self._decompressor = zlib.decompressobj()
+            case _:
+                self._fail()
+                return
+        self._headers_complete = True
+        self._feed_wire_body(body)
 
     def usage(self) -> tuple[str, Usage] | None:
+        self._finish_decoder()
         if not self._seen:
-            self._maybe_json_body(bytes(self._buffer).strip())
+            self._maybe_json_body(bytes(self._body).strip())
         if not self._seen:
             return None
         return self._model, Usage(
@@ -1022,6 +1226,96 @@ class SseTokenUsage:
             cache_read_tokens=self._cache_read,
             cache_write_tokens=self._cache_write,
         )
+
+    def _feed_wire_body(self, chunk: bytes) -> None:
+        if self._chunk_done:
+            return
+        if not self._chunked:
+            self._decode(chunk)
+            return
+        self._chunk_buffer.extend(chunk)
+        while not self._chunk_done:
+            if self._chunk_remaining is None:
+                marker = self._chunk_buffer.find(b"\r\n")
+                if marker == -1:
+                    if len(self._chunk_buffer) > MAX_HEADER_BYTES:
+                        self._fail()
+                    return
+                size = bytes(self._chunk_buffer[:marker]).split(b";", 1)[0]
+                del self._chunk_buffer[: marker + 2]
+                try:
+                    self._chunk_remaining = int(size, 16)
+                except ValueError:
+                    self._fail()
+                    return
+                if self._chunk_remaining < 0:
+                    self._fail()
+                    return
+                if self._chunk_remaining == 0:
+                    self._chunk_done = True
+                    self._finish_decoder()
+                    return
+            if self._chunk_remaining > 0:
+                consumed = min(self._chunk_remaining, len(self._chunk_buffer))
+                if consumed == 0:
+                    return
+                payload = bytes(self._chunk_buffer[:consumed])
+                del self._chunk_buffer[:consumed]
+                self._chunk_remaining -= consumed
+                self._decode(payload)
+                if self._chunk_remaining > 0:
+                    return
+                self._chunk_needs_crlf = True
+            if not self._chunk_needs_crlf or len(self._chunk_buffer) < 2:
+                return
+            if self._chunk_buffer[:2] != b"\r\n":
+                self._fail()
+                return
+            del self._chunk_buffer[:2]
+            self._chunk_remaining = None
+            self._chunk_needs_crlf = False
+
+    def _decode(self, chunk: bytes) -> None:
+        if self._decompressor is None:
+            self._feed_body(chunk)
+            return
+        pending = chunk
+        try:
+            while pending and not self._overflowed:
+                limit = max(1, MAX_SSE_BUFFER_BYTES - len(self._body) + 1)
+                decoded = self._decompressor.decompress(pending, limit)
+                tail = self._decompressor.unconsumed_tail
+                if not decoded and len(tail) == len(pending):
+                    self._fail()
+                    return
+                self._feed_body(decoded)
+                pending = tail
+        except zlib.error:
+            self._fail()
+
+    def _finish_decoder(self) -> None:
+        if self._decoder_finished or self._overflowed:
+            return
+        self._decoder_finished = True
+        if self._decompressor is None:
+            return
+        try:
+            self._feed_body(self._decompressor.flush())
+        except zlib.error:
+            self._fail()
+
+    def _feed_body(self, chunk: bytes) -> None:
+        if self._overflowed:
+            return
+        self._body.extend(chunk)
+        consumed = 0
+        while (newline := self._body.find(b"\n", consumed)) != -1:
+            self._consume(bytes(self._body[consumed:newline]))
+            consumed = newline + 1
+        if consumed:
+            del self._body[:consumed]
+        if len(self._body) > MAX_SSE_BUFFER_BYTES:
+            self._fail()
 
     def _consume(self, line: bytes) -> None:
         payload = line.strip()
@@ -1043,12 +1337,6 @@ class SseTokenUsage:
             self._openai(event)
 
     def _maybe_json_body(self, payload: bytes) -> None:
-        """A non-streaming completion's whole response body is a single JSON object, not `data:`
-        events: parse its top-level usage when the SSE path saw none. Guarded on `_seen`, so once a
-        stream has reported usage this never fires — the working SSE path is never re-metered.
-        Called for each non-`data:` line (a newline-terminated body) and for the un-terminated
-        trailing buffer at `usage()` (the common compact body), so either framing is recovered
-        exactly once."""
         if self._seen or not payload.startswith(b"{"):
             return
         try:
@@ -1099,6 +1387,12 @@ class SseTokenUsage:
         self._input = _int_field(usage, "prompt_tokens")
         self._output = _int_field(usage, "completion_tokens")
         self._seen = True
+
+    def _fail(self) -> None:
+        self._overflowed = True
+        self._head.clear()
+        self._body.clear()
+        self._chunk_buffer.clear()
 
 
 async def _respond(writer: asyncio.StreamWriter, status: int, message: str) -> None:

@@ -25,7 +25,13 @@ from ufo.db import workspace_tx
 from ufo.hub import Hub, InProcessHub, Terminal, TextDelta
 from ufo.loop import queue as loop_queue
 from ufo.loop.subagents import SubagentRegistry
-from ufo.sandbox.session import ExecResult, ProxyEndpoint, SandboxHandle, SandboxSpec
+from ufo.sandbox.session import (
+    ExecResult,
+    ProxyEndpoint,
+    RunTokenCodec,
+    SandboxHandle,
+    SandboxSpec,
+)
 from ufo.schema import tables
 from ufo.surfaces.admission import Admission, MemberAdmission
 from ufo.surfaces.hub_tail import tail_frames
@@ -95,6 +101,7 @@ async def live_runtime(
             search_provider=None,
             connectors=ConnectorRegistry(entries={}),
             proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
+            run_tokens=RunTokenCodec(b"live-model-test-secret"),
             dbos=runtime_dbos,
             subagents=SubagentRegistry(()),
             subagent_grants={},

@@ -87,7 +87,7 @@ from ufo.sandbox.fs_creds import SandboxFsCredentialMinter, sandbox_fs_minter
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.proxy.rules import connector_transfer_hosts, derive_manifest_rules
 from ufo.sandbox.proxy.server import EgressProxy, PerAgentRules, generate_ca
-from ufo.sandbox.session import EGRESS_CA_CERT_ENV, Carrier, ProxyEndpoint
+from ufo.sandbox.session import EGRESS_CA_CERT_ENV, Carrier, ProxyEndpoint, RunTokenCodec
 from ufo.schema.records import DBOS_APP_NAME, DBOS_APP_VERSION, DBOS_MAX_EXECUTOR_THREADS
 from ufo.search import SearchProvider
 from ufo.sources.sync import (
@@ -161,6 +161,7 @@ def run() -> None:
     memory = memory_search(manifests, credentials, index, embed)
     connectors = _connector_registry(config, manifests, credentials)
     workspace_fs = sandbox_fs_minter(config.blob)
+    run_tokens = RunTokenCodec.from_env()
     runtime = Runtime(
         config=config,
         blob=blob,
@@ -170,7 +171,10 @@ def run() -> None:
         cdp_provider=_select_cdp_provider(config, manifests, credentials),
         search_provider=_select_search_provider(config, manifests, credentials),
         connectors=connectors,
-        proxy=_proxy_endpoint(config, manifests, credentials, registry.pricing, workspace_fs),
+        proxy=_proxy_endpoint(
+            config, manifests, credentials, registry.pricing, run_tokens, workspace_fs
+        ),
+        run_tokens=run_tokens,
         dbos=dbos_client,
         subagents=SubagentRegistry((*CORE_SUBAGENT_PROFILES, *turn_subagents(manifests))),
         subagent_grants=turn_subagent_grants(manifests),
@@ -803,6 +807,7 @@ def _proxy_endpoint(
     manifests: tuple[Manifest, ...],
     credentials: CredentialStore | None,
     pricing: Pricing,
+    run_tokens: RunTokenCodec,
     workspace_fs: SandboxFsCredentialMinter | None = None,
 ) -> ProxyEndpoint:
     """The egress proxy endpoint the carrier threads into every sandbox, in the shape this deploy
@@ -814,7 +819,9 @@ def _proxy_endpoint(
     in-process, minting its own ephemeral CA — no shared trust material to source, no separate
     service to run alongside."""
     if config.sandbox.proxy_public_url is None:
-        return _local_egress_proxy(config, manifests, credentials, pricing, workspace_fs)
+        return _local_egress_proxy(
+            config, manifests, credentials, pricing, run_tokens, workspace_fs
+        )
     ca_cert = os.environ.get(EGRESS_CA_CERT_ENV)
     if not ca_cert:
         raise RuntimeError(
@@ -833,6 +840,7 @@ def _local_egress_proxy(
     manifests: tuple[Manifest, ...],
     credentials: CredentialStore | None,
     pricing: Pricing,
+    run_tokens: RunTokenCodec,
     workspace_fs: SandboxFsCredentialMinter | None,
 ) -> ProxyEndpoint:
     """The single-node sandbox's sole route out, run in-process on its own event loop — a
@@ -861,6 +869,7 @@ def _local_egress_proxy(
             authorize=resolver.turn_live,
             ca_cert=ca_cert,
             ca_key=ca_key,
+            run_tokens=run_tokens,
             pricing=pricing,
             workspace_credentials=None if workspace_fs is None else workspace_fs.refresh,
         ).start(port=config.sandbox.proxy_port)

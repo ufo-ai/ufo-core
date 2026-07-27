@@ -163,6 +163,16 @@ def test_hosted_proxy_receives_the_fleet_credential_key() -> None:
     assert "secretKeyRef: {name: ufo-serve, key: UFO_CREDENTIAL_KEY}" in PROXY_DEPLOYMENT
 
 
+def test_hosted_proxy_receives_the_run_token_signing_secret() -> None:
+    assert "name: UFO_TOKEN_SECRET" in PROXY_DEPLOYMENT
+    assert "secretKeyRef: {name: ufo-platform-secrets, key: UFO_TOKEN_SECRET}" in PROXY_DEPLOYMENT
+
+
+def test_hosted_proxy_has_resource_bounds() -> None:
+    assert "requests: {cpu: 250m, memory: 384Mi}" in PROXY_DEPLOYMENT
+    assert 'limits: {cpu: "2", memory: 768Mi}' in PROXY_DEPLOYMENT
+
+
 def test_hosted_proxy_mints_scoped_sandbox_credentials() -> None:
     assert "serviceAccountName: ufo-sandbox-proxy" in PROXY_DEPLOYMENT
     assert "eks.amazonaws.com/role-arn: ${proxy_role_arn}" in HOSTED_TEMPLATE.read_text()

@@ -16,6 +16,7 @@ for another organization's repositories. A value that does not open raises rathe
 to the member's own token, because authenticating as a different identity than the one the
 organization granted is worse than failing the clone."""
 
+import asyncio
 import os
 import time
 from base64 import urlsafe_b64encode
@@ -63,6 +64,9 @@ class GitHubAppTokens:
     installation_slot: str
     transport: httpx.AsyncBaseTransport | None = None
     minted: dict[tuple[UUID, str], tuple[str, float]] = field(default_factory=dict)
+    _minting: dict[tuple[UUID, str], asyncio.Task[tuple[str, float]]] = field(
+        default_factory=dict, init=False, compare=False
+    )
 
     async def bound(self, workspace_id: UUID, store: CredentialStore) -> bool:
         """Whether this workspace bound an installation — the stored seal's presence, no mint. A
@@ -85,13 +89,27 @@ class GitHubAppTokens:
         except CredentialSlotUnset:
             return None
         installation = open_installation(store.fernet, workspace_id, self.installation_slot, bound)
-        cached = self.minted.get((workspace_id, installation))
+        key = (workspace_id, installation)
         now = time.time()
+        cached = self.minted.get(key)
         if cached is not None and cached[1] - TOKEN_REFRESH_MARGIN_SECONDS > now:
             return cached[0]
-        token, expires = await self._installation_token(installation)
-        self.minted[(workspace_id, installation)] = (token, expires)
+        pending = self._minting.get(key)
+        if pending is None:
+            pending = asyncio.create_task(self._mint(key, installation))
+            self._minting[key] = pending
+        token, _ = await asyncio.shield(pending)
         return token
+
+    async def _mint(self, key: tuple[UUID, str], installation: str) -> tuple[str, float]:
+        task = asyncio.current_task()
+        try:
+            minted = await self._installation_token(installation)
+            self.minted[key] = minted
+            return minted
+        finally:
+            if self._minting.get(key) is task:
+                del self._minting[key]
 
     async def _installation_token(self, installation: str) -> tuple[str, float]:
         """Exchange an App JWT for the installation's own token, and answer GitHub's stated expiry

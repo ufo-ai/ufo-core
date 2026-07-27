@@ -59,6 +59,7 @@ from ufo.sandbox.session import (
     MountSpec,
     ProxyEndpoint,
     RunToken,
+    RunTokenCodec,
     SandboxHandle,
     SandboxSession,
     SandboxSpec,
@@ -105,6 +106,7 @@ class Runtime:
     search_provider: SearchProvider | None
     connectors: ConnectorRegistry
     proxy: ProxyEndpoint
+    run_tokens: RunTokenCodec
     dbos: DBOSClient
     subagents: SubagentRegistry
     subagent_grants: dict[str, frozenset[str]]
@@ -265,6 +267,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             runtime.blob,
             runtime.workspace_fs,
             runtime.proxy,
+            runtime.run_tokens,
             turn,
             GrantStore() if runtime.credentials is not None else None,
             connector_clis(runtime.manifests),
@@ -443,6 +446,7 @@ async def _open_sandbox(
     blob: BlobStore,
     workspace_fs: SandboxFsCredentialMinter | None,
     proxy: ProxyEndpoint,
+    run_tokens: RunTokenCodec,
     turn: Turn,
     grants: GrantStore | None,
     clis: Mapping[str, CliCredential],
@@ -459,12 +463,11 @@ async def _open_sandbox(
 
     git is the one sandbox client that will not present the run token unprompted: its default
     `http.proxyAuthMethod=anyauth` waits for a `407` challenge the proxy never sends, so its CONNECT
-    arrives unattributed. The proxy keys every rule on that token, so an unattributed connection
-    resolves to the base rules and reaches none of the turn's own egress — not the agent's internet
-    policy, not its grants. `GIT_PROXY_AUTH_CONFIG` presents the token on the first CONNECT as every
-    other client already does, and rides every turn whether or not it holds a grant or a key. A
-    workspace holding a git credential adds that host's extraheader to the same config, so `git
-    clone` and `git push` authenticate off the sentinel the proxy swaps."""
+    arrives unattributed and is rejected before rule resolution. `GIT_PROXY_AUTH_CONFIG` presents
+    the signed token on the first CONNECT as every other client already does, and rides every turn
+    whether or not it holds a grant or a key. A workspace holding a git credential adds that host's
+    extraheader to the same config, so `git clone` and `git push` authenticate off the sentinel the
+    proxy swaps."""
     stored = await _stored_sandbox_handle(turn.conversation_id, turn.workspace_id)
     resume_id = None if stored is None else sandbox_handle_id(backend, stored)
     run = RunToken(workspace_id=turn.workspace_id, turn_id=turn.id)
@@ -476,7 +479,7 @@ async def _open_sandbox(
                 blob, workspace_fs, turn.conversation_id, run, fresh_sandbox=resume_id is None
             ),
             proxy=proxy,
-            run_token=run.encode(),
+            run_token=run_tokens.encode(run),
             resume_id=resume_id,
             env={
                 **_git_config_env(

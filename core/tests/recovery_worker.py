@@ -44,7 +44,13 @@ from ufo.models.interface import (
 )
 from ufo.models.registry import ModelRegistry
 from ufo.runtime_instance import ExecutorRecovery, Heartbeat
-from ufo.sandbox.session import ExecResult, ProxyEndpoint, SandboxHandle, SandboxSpec
+from ufo.sandbox.session import (
+    ExecResult,
+    ProxyEndpoint,
+    RunTokenCodec,
+    SandboxHandle,
+    SandboxSpec,
+)
 from ufo.schema import tables
 from ufo.schema.records import (
     DBOS_APP_NAME,
@@ -205,6 +211,7 @@ def _install_runtime(env: _Env, model: _CrashModel | _AnswerModel) -> None:
             search_provider=None,
             connectors=ConnectorRegistry(entries={}),
             proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
+            run_tokens=RunTokenCodec(b"recovery-worker-test-secret"),
             dbos=DBOSClient(system_database_url=env.system_url),
             subagents=SubagentRegistry(()),
             subagent_grants={},

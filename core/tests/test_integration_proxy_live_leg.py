@@ -48,7 +48,7 @@ from ufo.sandbox.proxy.rules import (
     ScopeRule,
 )
 from ufo.sandbox.proxy.server import EgressProxy, PerAgentRules, generate_ca
-from ufo.sandbox.session import RunToken
+from ufo.sandbox.session import RunToken, RunTokenCodec
 from ufo.schema import tables
 from ufo.schema.records import Turn
 from ufo.workspace import ws
@@ -59,6 +59,7 @@ MODEL_HOST = ANTHROPIC_HOST
 SENTINEL_KEY = "sk-sentinel-DO-NOT-LEAK"
 REAL_KEY = "sk-real-upstream-secret"
 CLIENT_TIMEOUT_SECONDS = 15.0
+RUN_TOKENS = RunTokenCodec(b"proxy-live-leg-test-secret")
 
 KEYED_HOST = "api.us5.datadoghq.com"
 DATADOG_SITES = HostChoice(
@@ -271,11 +272,12 @@ async def test_sandbox_egress_injects_the_real_key_and_meters_sandbox_tokens(
         authorize=resolver.turn_live,
         ca_cert=ca_cert,
         ca_key=ca_key,
+        run_tokens=RUN_TOKENS,
     )
     endpoint = await proxy.start(bind_host="127.0.0.1")
     ca_path = tmp_path / "proxy_ca.crt"
     ca_path.write_text(endpoint.ca_cert)
-    run_token = RunToken(workspace_id, turn_id).encode()
+    run_token = RUN_TOKENS.encode(RunToken(workspace_id, turn_id))
     client_verify = ssl.create_default_context(cafile=str(ca_path))
 
     try:
@@ -355,9 +357,10 @@ async def test_a_terminal_turn_is_denied_before_any_upstream_dial(
         authorize=resolver.turn_live,
         ca_cert=ca_cert,
         ca_key=ca_key,
+        run_tokens=RUN_TOKENS,
     )
     endpoint = await proxy.start(bind_host="127.0.0.1")
-    run_token = RunToken(workspace_id, turn_id).encode()
+    run_token = RUN_TOKENS.encode(RunToken(workspace_id, turn_id))
     auth = base64.b64encode(f"{run_token}:".encode()).decode()
     try:
         reader, writer = await asyncio.open_connection("127.0.0.1", endpoint.port)
@@ -431,12 +434,16 @@ async def test_a_keyed_providers_two_stored_secrets_ride_one_live_request(
     ca_cert, ca_key = await generate_ca()
     resolver = PerAgentRules(base=(), grants=None, credentials=store, slots=KEYED_SLOTS)
     proxy = EgressProxy(
-        resolve=resolver.resolve, authorize=resolver.turn_live, ca_cert=ca_cert, ca_key=ca_key
+        resolve=resolver.resolve,
+        authorize=resolver.turn_live,
+        ca_cert=ca_cert,
+        ca_key=ca_key,
+        run_tokens=RUN_TOKENS,
     )
     endpoint = await proxy.start(bind_host="127.0.0.1")
     ca_path = tmp_path / "keyed_proxy_ca.crt"
     ca_path.write_text(endpoint.ca_cert)
-    run_token = RunToken(workspace_id, turn_id).encode()
+    run_token = RUN_TOKENS.encode(RunToken(workspace_id, turn_id))
 
     try:
         async with httpx.AsyncClient(
@@ -529,7 +536,11 @@ async def test_a_real_sandbox_process_reaches_a_keyed_host_with_sentinels_only(
     ca_cert, ca_key = await generate_ca()
     resolver = PerAgentRules(base=(), grants=None, credentials=store, slots=KEYED_SLOTS)
     proxy = EgressProxy(
-        resolve=resolver.resolve, authorize=resolver.turn_live, ca_cert=ca_cert, ca_key=ca_key
+        resolve=resolver.resolve,
+        authorize=resolver.turn_live,
+        ca_cert=ca_cert,
+        ca_key=ca_key,
+        run_tokens=RUN_TOKENS,
     )
     endpoint = await proxy.start(bind_host="127.0.0.1")
     turn = Turn(
@@ -551,6 +562,7 @@ async def test_a_real_sandbox_process_reaches_a_keyed_host_with_sentinels_only(
                 FilesystemBlobStore(root=tmp_path / "blob"),
                 None,
                 endpoint,
+                RUN_TOKENS,
                 turn,
                 None,
                 {},

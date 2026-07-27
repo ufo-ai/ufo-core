@@ -194,6 +194,9 @@ spec:
             - name: UFO_OWNER_DSN
               valueFrom:
                 secretKeyRef: {name: ufo-control-secrets, key: postgres-admin-dsn}
+            - name: UFO_TOKEN_SECRET
+              valueFrom:
+                secretKeyRef: {name: ufo-platform-secrets, key: UFO_TOKEN_SECRET}
             - name: UFO_SANDBOX_FS_TOKEN_SECRET
               valueFrom:
                 secretKeyRef: {name: ufo-serve, key: UFO_SANDBOX_FS_TOKEN_SECRET}
@@ -236,6 +239,9 @@ spec:
             - name: UFO_CREDENTIAL_KEY
               valueFrom:
                 secretKeyRef: {name: ufo-serve, key: UFO_CREDENTIAL_KEY}
+          resources:
+            requests: {cpu: 250m, memory: 384Mi}
+            limits: {cpu: "2", memory: 768Mi}
           volumeMounts:
             - {name: config, mountPath: /app/ufo.toml, subPath: ufo.toml}
           # No /healthz on the raw CONNECT proxy; a TCP probe confirms the bind after fail-loud boot.

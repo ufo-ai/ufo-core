@@ -166,7 +166,7 @@ async def record_workspace_usage(
 
 
 async def record_egress_request(
-    connection: AsyncConnection, workspace_id: UUID, turn_id: UUID
+    connection: AsyncConnection, workspace_id: UUID, turn_id: UUID, amount: int = 1
 ) -> None:
     """Meter one sandbox egress request as an `egress` ledger row per turn, incremented atomically
     so concurrent proxy writes never lose a count. A request COUNT priced at zero, never a dollar
@@ -184,7 +184,7 @@ async def record_egress_request(
             workspace_id=workspace_id,
             turn_id=turn_id,
             dimension=EGRESS_DIMENSION,
-            amount=1,
+            amount=amount,
             priced_micro_usd=0,
             model="",
             created_at=sa.func.now(),
@@ -192,7 +192,7 @@ async def record_egress_request(
         )
         .on_conflict_do_update(
             index_elements=[tables.ledger.c.id],
-            set_={"amount": tables.ledger.c.amount + 1, "updated_at": sa.func.now()},
+            set_={"amount": tables.ledger.c.amount + amount, "updated_at": sa.func.now()},
         )
     )
 

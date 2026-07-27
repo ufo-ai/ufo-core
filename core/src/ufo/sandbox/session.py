@@ -7,13 +7,16 @@ tool. The invariant the session exists to hold: a tool reaches only the conversa
 
 import base64
 import json
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import Protocol
 from uuid import UUID
 
+from ufo.bearer import UFO_TOKEN_SECRET_ENV
 from ufo.blob import BlobStore
+from ufo.token_signing import SignedTokenError, sign_token, verify_token
 
 WORKSPACE_DIR = "/workspace"
 TOOL_OUTPUT_DIRNAME = ".tool-output"
@@ -26,33 +29,41 @@ SANDBOX_GID = 1000
 
 @dataclass(frozen=True, slots=True)
 class RunToken:
-    """Attributes a sandbox egress request to the turn that made it. Minted per turn, carried as the
-    proxy basic-auth username in the container's HTTP(S)_PROXY URL (`http://<token>:@host:port`),
-    and recovered by the egress proxy from the `Proxy-Authorization` header so a metered request
-    keys its ledger row to (workspace, turn). The encoding is base64url of `workspace_id/turn_id`,
-    whose alphabet is URL-safe, so the token drops straight into the URL's userinfo unescaped."""
+    """The workspace and turn attributed to one sandbox egress request."""
 
     workspace_id: UUID
     turn_id: UUID
 
-    def encode(self) -> str:
-        raw = f"{self.workspace_id}/{self.turn_id}".encode()
-        return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+@dataclass(frozen=True, slots=True)
+class RunTokenCodec:
+    """Sign the per-turn proxy username and recover only tokens minted by this deployment."""
+
+    secret: bytes
 
     @classmethod
-    def from_proxy_auth(cls, header: str) -> "RunToken":
-        """Recover the turn from a `Proxy-Authorization: Basic …` header — the basic-auth username
-        is the run token. Raises on a missing, non-basic, or malformed header: an unattributed
-        metered request is a wiring fault, surfaced loud, never a silently dropped ledger row."""
+    def from_env(cls) -> "RunTokenCodec":
+        value = os.environ.get(UFO_TOKEN_SECRET_ENV)
+        if not value:
+            raise RuntimeError(f"{UFO_TOKEN_SECRET_ENV} must be set to sign sandbox run tokens")
+        return cls(secret=value.encode())
+
+    def encode(self, run: RunToken) -> str:
+        payload = f"ufo-run/{run.workspace_id}/{run.turn_id}".encode()
+        return sign_token(self.secret, payload)
+
+    def from_proxy_auth(self, header: str) -> RunToken:
         scheme, _, encoded = header.partition(" ")
         if scheme.lower() != "basic" or not encoded:
             raise ValueError("proxy authorization is not basic auth")
-        username = base64.b64decode(encoded).decode("utf-8", "replace").split(":", 1)[0]
-        padded = username + "=" * (-len(username) % 4)
-        workspace, _, turn = base64.urlsafe_b64decode(padded).decode("utf-8").partition("/")
-        if not workspace or not turn:
-            raise ValueError(f"invalid run token {username!r}")
-        return cls(workspace_id=UUID(workspace), turn_id=UUID(turn))
+        try:
+            username = base64.b64decode(encoded, validate=True).decode("utf-8").split(":", 1)[0]
+            kind, workspace, turn = verify_token(username, self.secret).decode().split("/")
+            if kind != "ufo-run":
+                raise ValueError("invalid run token domain")
+            return RunToken(workspace_id=UUID(workspace), turn_id=UUID(turn))
+        except (UnicodeDecodeError, SignedTokenError, ValueError) as error:
+            raise ValueError("invalid signed run token") from error
 
 
 @dataclass(frozen=True)

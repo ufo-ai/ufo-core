@@ -6,6 +6,7 @@ one a prior process created. Persist-on-create is proven against the real local 
 resume-read (the id core seeds and the write it skips when nothing changed) is asserted through the
 conversation row, with a stand-in carrier recording the spec core built for it."""
 
+import base64
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
@@ -26,11 +27,18 @@ from ufo.grants import GrantStore, grant_sentinel
 from ufo.loop.queue import GIT_PROXY_AUTH_CONFIG, _git_config_env, _open_sandbox
 from ufo.sandbox.fs_creds import SandboxFsCredentialMinter
 from ufo.sandbox.local import LocalCarrier
-from ufo.sandbox.session import ProxyEndpoint, SandboxHandle, SandboxSpec
+from ufo.sandbox.session import (
+    ProxyEndpoint,
+    RunToken,
+    RunTokenCodec,
+    SandboxHandle,
+    SandboxSpec,
+)
 from ufo.schema import tables
 from ufo.schema.records import Turn
 
 PROXY = ProxyEndpoint(port=8080, ca_cert="ca-pem")
+RUN_TOKENS = RunTokenCodec(b"sandbox-handle-test-secret")
 GIT_PROXY_AUTH_ENV = _git_config_env(GIT_PROXY_AUTH_CONFIG)
 
 
@@ -131,6 +139,7 @@ async def test_open_sandbox_persists_the_backend_prefixed_handle(db: None, tmp_p
         blob,
         None,
         PROXY,
+        RUN_TOKENS,
         _turn(workspace_id, conversation_id),
         None,
         {},
@@ -150,12 +159,25 @@ async def test_open_sandbox_resumes_from_the_stored_handle_without_rewriting(
     workspace_id, conversation_id = await _conversation(handle="e2b:sbx-1")
     carrier = _ResumeRecordingCarrier(container_id="sbx-1")
     blob = FilesystemBlobStore(root=tmp_path)
+    turn = _turn(workspace_id, conversation_id)
 
     await _open_sandbox(
-        carrier, "e2b", blob, None, PROXY, _turn(workspace_id, conversation_id), None, {}, None, ()
+        carrier,
+        "e2b",
+        blob,
+        None,
+        PROXY,
+        RUN_TOKENS,
+        turn,
+        None,
+        {},
+        None,
+        (),
     )
 
     assert carrier.specs[0].resume_id == "sbx-1"
+    basic = "Basic " + base64.b64encode(f"{carrier.specs[0].run_token}:".encode()).decode()
+    assert RUN_TOKENS.from_proxy_auth(basic) == RunToken(workspace_id, turn.id)
     assert await _stored_handle(conversation_id) == "e2b:sbx-1"
 
 
@@ -198,6 +220,7 @@ async def test_open_sandbox_writes_the_workspace_marker_only_on_first_create(db:
         blob,
         minter,
         PROXY,
+        RUN_TOKENS,
         _turn(workspace_id, conversation_id),
         None,
         {},
@@ -214,6 +237,7 @@ async def test_open_sandbox_writes_the_workspace_marker_only_on_first_create(db:
         blob,
         minter,
         PROXY,
+        RUN_TOKENS,
         _turn(workspace_id, conversation_id),
         None,
         {},
@@ -250,6 +274,7 @@ async def test_open_sandbox_writes_the_marker_when_taking_over_a_foreign_backend
         blob,
         minter,
         PROXY,
+        RUN_TOKENS,
         _turn(workspace_id, conversation_id),
         None,
         {},
@@ -272,7 +297,17 @@ async def test_open_sandbox_ignores_a_handle_another_backend_wrote_and_overwrite
     blob = FilesystemBlobStore(root=tmp_path)
 
     await _open_sandbox(
-        carrier, "e2b", blob, None, PROXY, _turn(workspace_id, conversation_id), None, {}, None, ()
+        carrier,
+        "e2b",
+        blob,
+        None,
+        PROXY,
+        RUN_TOKENS,
+        _turn(workspace_id, conversation_id),
+        None,
+        {},
+        None,
+        (),
     )
 
     assert carrier.specs[0].resume_id is None
@@ -342,7 +377,17 @@ async def test_open_sandbox_exports_the_acting_members_grant_sentinels(
     )
 
     await _open_sandbox(
-        carrier, "e2b", blob, None, PROXY, turn, GrantStore(), {"hub": HUB_CLI}, None, ()
+        carrier,
+        "e2b",
+        blob,
+        None,
+        PROXY,
+        RUN_TOKENS,
+        turn,
+        GrantStore(),
+        {"hub": HUB_CLI},
+        None,
+        (),
     )
 
     assert carrier.specs[0].env == {**GIT_PROXY_AUTH_ENV, "HUB_TOKEN": grant_sentinel("acct-1")}
@@ -361,7 +406,17 @@ async def test_open_sandbox_exports_nothing_for_a_foreign_private_grant(
     turn = _turn(workspace_id, conversation_id).model_copy(update={"agent_id": agent_id})
 
     await _open_sandbox(
-        carrier, "e2b", blob, None, PROXY, turn, GrantStore(), {"hub": HUB_CLI}, None, ()
+        carrier,
+        "e2b",
+        blob,
+        None,
+        PROXY,
+        RUN_TOKENS,
+        turn,
+        GrantStore(),
+        {"hub": HUB_CLI},
+        None,
+        (),
     )
 
     assert carrier.specs[0].env == GIT_PROXY_AUTH_ENV
@@ -392,7 +447,17 @@ async def test_open_sandbox_exports_the_private_sentinel_over_the_shared_one(
     )
 
     await _open_sandbox(
-        carrier, "e2b", blob, None, PROXY, turn, GrantStore(), {"hub": HUB_CLI}, None, ()
+        carrier,
+        "e2b",
+        blob,
+        None,
+        PROXY,
+        RUN_TOKENS,
+        turn,
+        GrantStore(),
+        {"hub": HUB_CLI},
+        None,
+        (),
     )
 
     assert carrier.specs[0].env == {**GIT_PROXY_AUTH_ENV, "HUB_TOKEN": grant_sentinel("acct-1")}
@@ -434,7 +499,17 @@ async def test_open_sandbox_exports_nothing_when_the_shared_tier_is_ambiguous(
     )
 
     await _open_sandbox(
-        carrier, "e2b", blob, None, PROXY, turn, GrantStore(), {"hub": HUB_CLI}, None, ()
+        carrier,
+        "e2b",
+        blob,
+        None,
+        PROXY,
+        RUN_TOKENS,
+        turn,
+        GrantStore(),
+        {"hub": HUB_CLI},
+        None,
+        (),
     )
 
     assert carrier.specs[0].env == GIT_PROXY_AUTH_ENV
@@ -466,7 +541,17 @@ async def test_open_sandbox_exports_nothing_when_the_account_is_ambiguous(
     )
 
     await _open_sandbox(
-        carrier, "e2b", blob, None, PROXY, turn, GrantStore(), {"hub": HUB_CLI}, None, ()
+        carrier,
+        "e2b",
+        blob,
+        None,
+        PROXY,
+        RUN_TOKENS,
+        turn,
+        GrantStore(),
+        {"hub": HUB_CLI},
+        None,
+        (),
     )
 
     assert carrier.specs[0].env == GIT_PROXY_AUTH_ENV
@@ -524,6 +609,7 @@ async def test_open_sandbox_exports_keyed_provider_sentinels_not_secrets(
         FilesystemBlobStore(root=tmp_path),
         None,
         PROXY,
+        RUN_TOKENS,
         _turn(workspace_id, conversation_id),
         None,
         {},
@@ -555,6 +641,7 @@ async def test_open_sandbox_exports_nothing_for_an_unfilled_keyed_slot(
         FilesystemBlobStore(root=tmp_path),
         None,
         PROXY,
+        RUN_TOKENS,
         _turn(workspace_id, conversation_id),
         None,
         {},
@@ -590,6 +677,7 @@ async def test_open_sandbox_withholds_and_warns_on_a_selection_the_row_does_not_
             FilesystemBlobStore(root=tmp_path),
             None,
             PROXY,
+            RUN_TOKENS,
             _turn(workspace_id, conversation_id),
             None,
             {},
@@ -619,7 +707,7 @@ async def test_open_sandbox_configures_git_to_authenticate_to_the_proxy(
     blob = FilesystemBlobStore(root=tmp_path)
     turn = _turn(workspace_id, conversation_id)
 
-    await _open_sandbox(carrier, "e2b", blob, None, PROXY, turn, None, {}, None, ())
+    await _open_sandbox(carrier, "e2b", blob, None, PROXY, RUN_TOKENS, turn, None, {}, None, ())
 
     assert carrier.specs[0].env == {
         "GIT_CONFIG_COUNT": "1",
@@ -661,6 +749,7 @@ async def test_open_sandbox_configures_git_to_present_the_credential_sentinel(
         FilesystemBlobStore(root=tmp_path),
         None,
         PROXY,
+        RUN_TOKENS,
         _turn(workspace_id, conversation_id),
         None,
         {},
@@ -693,6 +782,7 @@ async def test_open_sandbox_configures_no_extraheader_without_a_git_credential(
         FilesystemBlobStore(root=tmp_path),
         None,
         PROXY,
+        RUN_TOKENS,
         _turn(workspace_id, conversation_id),
         None,
         {},
@@ -746,6 +836,7 @@ async def test_open_sandbox_configures_no_git_host_the_declaration_does_not_offe
             FilesystemBlobStore(root=tmp_path),
             None,
             PROXY,
+            RUN_TOKENS,
             _turn(workspace_id, conversation_id),
             None,
             {},
@@ -796,6 +887,7 @@ async def test_open_sandbox_exports_a_keyed_sentinel_from_a_source_without_minti
         FilesystemBlobStore(root=tmp_path),
         None,
         PROXY,
+        RUN_TOKENS,
         _turn(workspace_id, conversation_id),
         None,
         {},
@@ -824,6 +916,7 @@ async def test_open_sandbox_configures_git_from_a_source_without_minting(
         FilesystemBlobStore(root=tmp_path),
         None,
         PROXY,
+        RUN_TOKENS,
         _turn(workspace_id, conversation_id),
         None,
         {},

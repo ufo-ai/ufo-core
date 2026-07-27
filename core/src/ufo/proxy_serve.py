@@ -32,7 +32,7 @@ from ufo.sandbox.proxy.rules import (
     derive_model_rules,
 )
 from ufo.sandbox.proxy.server import EgressProxy, PerAgentRules
-from ufo.sandbox.session import EGRESS_CA_CERT_ENV, EGRESS_CA_KEY_ENV
+from ufo.sandbox.session import EGRESS_CA_CERT_ENV, EGRESS_CA_KEY_ENV, RunTokenCodec
 
 MODEL_PROBES = ("claude-opus-4-8", "gpt-5")
 OWNER_DSN_ENV = "UFO_OWNER_DSN"
@@ -167,6 +167,7 @@ class ProxyServe:
             authorize=resolver.turn_live,
             ca_cert=self.ca_cert,
             ca_key=self.ca_key,
+            run_tokens=RunTokenCodec.from_env(),
             pricing=self.pricing,
             workspace_credentials=None if workspace_fs is None else workspace_fs.refresh,
         )

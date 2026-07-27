@@ -32,7 +32,13 @@ from ufo.loop.subagents import SubagentRegistry
 from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
 from ufo.models.interface import ModelEvent, ModelRequest, TextDelta
 from ufo.models.registry import ModelRegistry
-from ufo.sandbox.session import ExecResult, ProxyEndpoint, SandboxHandle, SandboxSpec
+from ufo.sandbox.session import (
+    ExecResult,
+    ProxyEndpoint,
+    RunTokenCodec,
+    SandboxHandle,
+    SandboxSpec,
+)
 from ufo.schema import tables
 from ufo.schema.records import ConnectRequest, TerminalFrame, Usage
 from ufo.serve import _mount_shared_surfaces
@@ -174,6 +180,7 @@ def dbos_runtime(
             search_provider=None,
             connectors=ConnectorRegistry(entries={}),
             proxy=proxy,
+            run_tokens=RunTokenCodec(b"web-test-run-token-secret"),
             dbos=dbos_client,
             subagents=SubagentRegistry(()),
             subagent_grants={},
