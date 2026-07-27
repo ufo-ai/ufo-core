@@ -287,6 +287,7 @@ def _seeding(query: str) -> EvalSeed:
                 sa.insert(tables.conversation).values(
                     id=conversation_id,
                     workspace_id=workspace_id,
+                    agent_id=agent_id,
                     surface=EVAL_SURFACE,
                     queue_key=f"{EVAL_SURFACE}-connector-refs-seed:{conversation_id}",
                     created_at=sa.func.now(),
