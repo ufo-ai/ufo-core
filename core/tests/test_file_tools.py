@@ -7,9 +7,7 @@ import asyncio
 import base64
 import hashlib
 import json
-import shutil
 import struct
-import subprocess
 import zlib
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
@@ -49,8 +47,6 @@ from ufo.sandbox.fs_mount import SANDBOX_FS_RELAY_SECRET_PATH, SANDBOX_FS_TOKEN_
 from ufo.sandbox.proxy.rules import Rule
 from ufo.sandbox.proxy.server import EgressProxy, generate_ca
 from ufo.sandbox.session import (
-    SANDBOX_GID,
-    SANDBOX_UID,
     MountSpec,
     ProxyEndpoint,
     RunToken,
@@ -73,26 +69,10 @@ from ufo.tools.registry import ToolDef, ToolRegistry
 
 pytestmark = pytest.mark.docker
 
-SANDBOX_TEST_IMAGE = "ufo-sandbox:test"
 OVER_INMEMORY_BYTES = 25 * 1024 * 1024
 ARTIFACT_SECRET = "file-tools-secret"
 REGISTRY = ToolRegistry(BUILTIN_TOOLS)
-IMAGE_BUILD_TIMEOUT_S = 1200
 CONTAINER_OP_TIMEOUT_S = 180
-
-
-def _docker_or_skip(
-    argv: list[str], *, timeout: int, stdin_text: str | None = None
-) -> subprocess.CompletedProcess[str]:
-    """Run a docker CLI command with a hard wall. A stalled image pull/build or a wedged daemon is
-    external, network-bound work; bounding it skips this docker-gated test with a clear reason
-    instead of hanging the whole suite forever (a client's wait always ends)."""
-    try:
-        return subprocess.run(
-            argv, input=stdin_text, capture_output=True, text=True, check=False, timeout=timeout
-        )
-    except subprocess.TimeoutExpired:
-        pytest.skip(f"docker '{argv[1]}' exceeded {timeout}s (stalled pull/build or wedged daemon)")
 
 
 MINIMAL_PDF = b"""%PDF-1.4
@@ -147,69 +127,15 @@ class _StubMemory:
         return None
 
 
-@pytest.fixture(scope="module")
-def sandbox_image() -> str:
-    if shutil.which("docker") is None:
-        pytest.skip("docker is not available")
-    from sandbox.build_template import ROOT, pod_dockerfile
-
-    built = _docker_or_skip(
-        ["docker", "build", "-t", SANDBOX_TEST_IMAGE, "-f", "-", str(ROOT)],
-        timeout=IMAGE_BUILD_TIMEOUT_S,
-        stdin_text=pod_dockerfile(),
-    )
-    if built.returncode != 0:
-        pytest.skip(f"cannot build the sandbox image: {built.stderr.strip()}")
-    return SANDBOX_TEST_IMAGE
-
-
 @pytest.fixture
-def file_ctx(sandbox_image: str, tmp_path: Path) -> Iterator[tuple[ToolContext, Path]]:
+def file_ctx(
+    sandbox_container: tuple[str, Path], tmp_path: Path
+) -> Iterator[tuple[ToolContext, Path]]:
     """A tool context over a live container whose /workspace is a host bind mount, set up exactly as
-    prod: the mount is chowned to the sandbox uid (as `_workspace_mount` does when serve runs as
-    root) and the container then runs as the image's default non-root `sandbox` user. So the tools
-    write as the real sandbox user against a real carrier and a real bind mount the export streams
-    out of — no `--user` override, no stand-in. The chown runs in a throwaway `--user 0` container,
-    so the test needs no host root; input files are created through the sandbox (as the agent would)
-    so they too are sandbox-owned."""
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    chowned = _docker_or_skip(
-        [
-            "docker",
-            "run",
-            "--rm",
-            "--user",
-            "0:0",
-            "-v",
-            f"{workspace}:/workspace",
-            sandbox_image,
-            "chown",
-            "-R",
-            f"{SANDBOX_UID}:{SANDBOX_GID}",
-            "/workspace",
-        ],
-        timeout=CONTAINER_OP_TIMEOUT_S,
-    )
-    if chowned.returncode != 0:
-        pytest.skip(f"docker cannot chown the workspace mount: {chowned.stderr.strip()}")
-    started = _docker_or_skip(
-        [
-            "docker",
-            "run",
-            "-d",
-            "--rm",
-            "-v",
-            f"{workspace}:/workspace",
-            sandbox_image,
-            "sleep",
-            "infinity",
-        ],
-        timeout=CONTAINER_OP_TIMEOUT_S,
-    )
-    if started.returncode != 0:
-        pytest.skip(f"docker cannot run the sandbox image: {started.stderr.strip()}")
-    container = started.stdout.strip()
+    prod. So the tools write as the real sandbox user against a real carrier and a real bind mount
+    the export streams out of — no `--user` override, no stand-in. Input files are created through
+    the sandbox (as the agent would) so they too are sandbox-owned."""
+    container, workspace = sandbox_container
     handle = SandboxHandle(
         conversation_id=uuid4(),
         container_id=container,
@@ -235,15 +161,7 @@ def file_ctx(sandbox_image: str, tmp_path: Path) -> Iterator[tuple[ToolContext, 
         audience_member_id=None,
         artifact_token_secret=ARTIFACT_SECRET,
     )
-    try:
-        yield ctx, workspace
-    finally:
-        subprocess.run(
-            ["docker", "rm", "-f", container],
-            capture_output=True,
-            check=False,
-            timeout=CONTAINER_OP_TIMEOUT_S,
-        )
+    yield ctx, workspace
 
 
 async def test_s3_mount_runs_s3fs_as_nobody_without_exposing_relay_secret(
@@ -297,7 +215,7 @@ async def test_s3_mount_runs_s3fs_as_nobody_without_exposing_relay_secret(
             )
         )
 
-        process = await carrier.exec(handle, ("ps", "-o", "user=", "-C", "s3fs"), b"", 30)
+        process = await carrier.exec(handle, ("ps", "-o", "user=", "-C", "s3fs"), 30)
         assert process.exit_code == 0
         assert process.stdout.strip() == "nobody"
 
@@ -320,7 +238,6 @@ async def test_s3_mount_runs_s3fs_as_nobody_without_exposing_relay_secret(
                 "$(pgrep -f '[s]bxcred'); "
                 "do tr '\\0' ' ' < /proc/$pid/cmdline; printf '\\n'; done",
             ),
-            b"",
             30,
         )
         assert process_args.exit_code == 0
@@ -331,7 +248,6 @@ async def test_s3_mount_runs_s3fs_as_nobody_without_exposing_relay_secret(
         written = await carrier.exec(
             handle,
             ("sh", "-c", "printf mounted > /workspace/proof.txt && cat /workspace/proof.txt"),
-            b"",
             30,
         )
         assert written.exit_code == 0
@@ -340,7 +256,7 @@ async def test_s3_mount_runs_s3fs_as_nobody_without_exposing_relay_secret(
             await s3_store.get(f"{workspace_key_prefix(conversation_id)}/proof.txt") == b"mounted"
         )
 
-        token_read = await carrier.exec(handle, ("cat", SANDBOX_FS_TOKEN_PATH), b"", 30)
+        token_read = await carrier.exec(handle, ("cat", SANDBOX_FS_TOKEN_PATH), 30)
         assert token_read.exit_code != 0
     finally:
         if handle is not None:

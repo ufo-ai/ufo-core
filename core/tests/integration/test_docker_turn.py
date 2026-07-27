@@ -7,9 +7,7 @@ nothing here asserts a fake carrier.
 `docker`-gated and serial (a live container + one database). Skips with a clear reason when Docker
 is absent or the image cannot build."""
 
-import shutil
-import subprocess
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -37,10 +35,7 @@ from ufo.models.interface import (
     ToolResultBlock,
     Usage,
 )
-from ufo.sandbox import session as session_module
 from ufo.sandbox.session import (
-    SANDBOX_GID,
-    SANDBOX_UID,
     MountSpec,
     SandboxHandle,
     SandboxSession,
@@ -53,7 +48,6 @@ from ufo.tools.registry import ToolRegistry
 
 pytestmark = pytest.mark.docker
 
-SANDBOX_TEST_IMAGE = "ufo-sandbox:test"
 MARKER = "sandbox-lives-42"
 
 
@@ -95,77 +89,14 @@ class BashThenAnswerModel:
         yield Usage(input_tokens=1, output_tokens=1)
 
 
-@pytest.fixture(scope="module")
-def sandbox_image() -> str:
-    if shutil.which("docker") is None:
-        pytest.skip("docker is not available")
-    image_dir = Path(session_module.__file__).parent / "image"
-    built = subprocess.run(
-        ["docker", "build", "-t", SANDBOX_TEST_IMAGE, str(image_dir)],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if built.returncode != 0:
-        pytest.skip(f"cannot build the sandbox image: {built.stderr.strip()}")
-    return SANDBOX_TEST_IMAGE
-
-
 @pytest.fixture
-def live_container(sandbox_image: str, tmp_path: Path) -> Iterator[SandboxHandle]:
-    """A real container with a host-bind-mounted /workspace, set up as prod does: the mount is
-    chowned to the sandbox uid (in a throwaway --user 0 container, so the test needs no host root)
-    and the container then runs as the image's default non-root user."""
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    chowned = subprocess.run(
-        [
-            "docker",
-            "run",
-            "--rm",
-            "--user",
-            "0:0",
-            "-v",
-            f"{workspace}:/workspace",
-            sandbox_image,
-            "chown",
-            "-R",
-            f"{SANDBOX_UID}:{SANDBOX_GID}",
-            "/workspace",
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
+def live_container(sandbox_container: tuple[str, Path]) -> SandboxHandle:
+    container, workspace = sandbox_container
+    return SandboxHandle(
+        conversation_id=uuid4(),
+        container_id=container,
+        mount=MountSpec(kind="filesystem", host_path=str(workspace)),
     )
-    if chowned.returncode != 0:
-        pytest.skip(f"docker cannot chown the workspace mount: {chowned.stderr.strip()}")
-    started = subprocess.run(
-        [
-            "docker",
-            "run",
-            "-d",
-            "--rm",
-            "-v",
-            f"{workspace}:/workspace",
-            sandbox_image,
-            "sleep",
-            "infinity",
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if started.returncode != 0:
-        pytest.skip(f"docker cannot run the sandbox image: {started.stderr.strip()}")
-    container = started.stdout.strip()
-    try:
-        yield SandboxHandle(
-            conversation_id=uuid4(),
-            container_id=container,
-            mount=MountSpec(kind="filesystem", host_path=str(workspace)),
-        )
-    finally:
-        subprocess.run(["docker", "rm", "-f", container], capture_output=True, check=False)
 
 
 async def _seed_turn(conversation_id: UUID) -> Turn:
