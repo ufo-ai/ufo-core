@@ -10,7 +10,7 @@ Respond with a SINGLE JSON object and nothing else — no prose, no markdown fen
 - `errors` (array of strings): Errors hit and how each was fixed, with any specific user feedback.
 - `decisions` (array of strings): Decisions made and problems solved.
 - `pending` (array of strings): Pending tasks the user explicitly asked for.
-- `loaded_skills` (array of strings): Names of skills mounted before this boundary, for the agent to re-mount if needed.
+- `loaded_skills` (array of strings): Only the skill names the agent passed to `load_skill` itself, for it to re-load if needed. Never a skill a header marks as a dependency of another — re-loading the skill that pulled it brings it back.
 
 Keep it faithful and concise: preserve requirements, decisions, and unresolved errors; drop repetition and transient wording. Reference files by path rather than pasting large contents.
 

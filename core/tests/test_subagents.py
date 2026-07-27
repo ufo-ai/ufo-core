@@ -23,7 +23,7 @@ from ufo.loop.subagents import (
 from ufo.o11y import current_traceparent
 from ufo.schema import tables
 from ufo.schema.records import TerminalFrame, Turn, turn_id_for
-from ufo.skills.runtime import RuntimeSkill
+from ufo.skills.runtime import LoadedSkill, RuntimeSkill
 from ufo.tools.builtins import BUILTIN_TOOLS
 from ufo.tools.context import UnknownSubagentProfile, UntrustedContentError
 
@@ -164,7 +164,7 @@ def test_subagent_prompt_keeps_the_finish_contract_after_preloaded_skills() -> N
     skill = RuntimeSkill(
         name="verbose", description="d", instructions="End with a friendly prose summary."
     )
-    prompt = subagent_system_prompt(_profile("research"), preload=(skill,))
+    prompt = subagent_system_prompt(_profile("research"), preload=(LoadedSkill(skill=skill),))
     assert "Preloaded skill(s):" in prompt
     contract_at = prompt.index(FINISH_CONTRACT)
     assert prompt.index("End with a friendly prose summary.") < contract_at
@@ -176,14 +176,14 @@ def test_subagent_prompt_bounds_the_preloaded_bodies() -> None:
         name="huge", description="d", instructions="x" * (PRELOAD_PROMPT_CHAR_BOUND + 1)
     )
     with pytest.raises(ValueError, match="over the"):
-        subagent_system_prompt(_profile("research"), preload=(oversized,))
+        subagent_system_prompt(_profile("research"), preload=(LoadedSkill(skill=oversized),))
 
 
 def test_subagent_prompt_reads_a_preloaded_skills_braces_as_content() -> None:
     templated = RuntimeSkill(
         name="vue", description="d", instructions="Interpolate with {{ message }} in the template."
     )
-    prompt = subagent_system_prompt(_profile("research"), preload=(templated,))
+    prompt = subagent_system_prompt(_profile("research"), preload=(LoadedSkill(skill=templated),))
     assert "{{ message }}" in prompt
 
 

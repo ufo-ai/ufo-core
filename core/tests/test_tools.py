@@ -1,5 +1,5 @@
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -12,7 +12,7 @@ from ufo.ext.manifest import SubagentProfile
 from ufo.loop.subagents import SubagentRegistry, Subagents
 from ufo.sandbox.session import ExecResult
 from ufo.schema.records import Agent, Turn
-from ufo.skills.runtime import CORE_SKILL_REGISTRY
+from ufo.skills.runtime import CORE_SKILL_REGISTRY, RuntimeSkill, SkillRegistry
 from ufo.tools.builtins import BUILTIN_TOOLS
 from ufo.tools.context import Spawn, SpawnResult, SubagentStatus, ToolContext
 from ufo.tools.registry import ToolRegistry
@@ -257,10 +257,33 @@ async def test_load_skill_mounts_files_under_the_workspace_and_returns_instructi
     ctx = make_context(sandbox, tmp_path)
     result = await _load_skill(ctx, "sandbox")
     assert result.is_error is False
-    assert "Loaded skill(s): sandbox" in result.content[0].text
-    assert CORE_SKILL_REGISTRY.named("sandbox").description in result.content[0].text
+    assert "# Skill: sandbox" in result.content[0].text
+    assert CORE_SKILL_REGISTRY.named("sandbox").instructions in result.content[0].text
     mounted = sandbox.files["/workspace/.skills/sandbox/SKILL.md"]
     assert b"name: sandbox" in mounted
+
+
+async def test_load_skill_mounts_and_injects_the_skill_then_each_dependency(
+    tmp_path: Path,
+) -> None:
+    """One load does the same three things per skill — mount the files, inject the workflow, print
+    the mounted tree — for the asked-for skill first, then everything it depends on."""
+    base = RuntimeSkill(name="base", description="base skill", instructions="BASE BODY")
+    leaf = RuntimeSkill(
+        name="leaf", description="leaf skill", instructions="LEAF BODY", depends=("base",)
+    )
+    sandbox = FakeSandbox()
+    ctx = replace(
+        make_context(sandbox, tmp_path), skills=SkillRegistry({"base": base, "leaf": leaf})
+    )
+
+    text = (await _load_skill(ctx, "leaf")).content[0].text
+
+    assert text.index("# Skill: leaf") < text.index("# Skill: base")
+    assert text.index("LEAF BODY") < text.index("BASE BODY") < text.index("Mounted files:")
+    assert text.count("Mounted files:") == 1
+    assert "/workspace/.skills/base/SKILL.md" in sandbox.files
+    assert "leaf skill" not in text
 
 
 async def test_load_skill_unknown_name_fails_loud(tmp_path: Path) -> None:

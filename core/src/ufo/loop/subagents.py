@@ -40,7 +40,7 @@ from ufo.schema.records import (
     Turn,
     turn_id_for,
 )
-from ufo.skills.runtime import CORE_SKILLS, RuntimeSkill
+from ufo.skills.runtime import CORE_SKILLS, LoadedSkill, loaded_context
 from ufo.tools.context import (
     SpawnResult,
     SubagentStatus,
@@ -94,7 +94,7 @@ def subagent_system_prompt(
     profile: SubagentProfile,
     *,
     skills: Sequence[tuple[str, str]] = CORE_SKILL_INDEX,
-    preload: tuple[RuntimeSkill, ...] = (),
+    preload: tuple[LoadedSkill, ...] = (),
 ) -> str:
     """The child's system prompt: the profile's own instructions with its `{{skill_index}}` slot
     filled from the loadable-skill index, then any preloaded skills' instructions, then the shared
@@ -115,7 +115,7 @@ def subagent_system_prompt(
     if unresolved := frozenset(PROMPT_VAR_RE.findall(f"{body}\n\n{SUBAGENT_OUTPUT_DISCIPLINE}")):
         raise ValueError(f"subagent prompt has unresolved slots: {', '.join(sorted(unresolved))}")
     if preload:
-        bodies = "\n\n".join(skill.prompt_body() for skill in preload)
+        bodies = loaded_context(preload)
         if len(bodies) > PRELOAD_PROMPT_CHAR_BOUND:
             raise ValueError(
                 f"preloaded skill bodies are {len(bodies)} chars, "

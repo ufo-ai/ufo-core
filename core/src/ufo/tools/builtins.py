@@ -20,8 +20,9 @@ structures a question or confirmation the agent poses in its reply, whose answer
 next message — no out-of-band prompt. `request_credentials` is its secret-collecting sibling: it
 seals which slots the speaking owner will fill and ends the turn; a capable surface prompts for the
 values privately and fulfillment lands them in the encrypted store, never the transcript.
-`load_skill` mounts a skill's `SKILL.md` and assets into the workspace and returns its workflow
-instructions; the system prompt's `<available_skills>` block is its complete per-turn index.
+`load_skill` mounts a skill's `SKILL.md` and assets — and those of the whole chain it `depends` on —
+into the workspace, and returns each one's workflow followed by one tree of everything mounted; the
+system prompt's `<available_skills>` block is its complete per-turn index.
 `wait_for_subagents`, `cancel_subagent`, and `message_subagent` reach `ctx.subagents`, the same
 Subagents workflow that backs `spawn`, to await a background child's terminal, cancel a running one,
 or queue it a follow-up message that runs as its next turn — scoped to the children this turn
@@ -52,7 +53,7 @@ from ufo.models.interface import TextBlock
 from ufo.sandbox.session import WORKSPACE_DIR, workspace_path
 from ufo.schema import tables
 from ufo.schema.records import AskUserInput, ConnectRequest, CredentialPrompt, CredentialRequest
-from ufo.skills.runtime import mount_skill
+from ufo.skills.runtime import loaded_context, mount_skill
 from ufo.tools.context import (
     ImageContent,
     TextContent,
@@ -619,15 +620,14 @@ async def ask_user_handler(ctx: ToolContext, args: AskUserInput) -> ToolResult:
 
 
 async def load_skill_handler(ctx: ToolContext, args: LoadSkillInput) -> ToolResult:
-    """Resolve the named skill and its dependency closure, mount each into the workspace under
-    `.skills/<name>/`, and return their instructions so the workflow is in front of the model at
-    once. An unknown name fails loud as a recoverable tool error."""
-    loaded = ctx.skills.tree(args.name)
-    for skill in loaded:
-        await mount_skill(ctx.sandbox, skill)
-    header = "Loaded skill(s): " + ", ".join(skill.name for skill in loaded)
-    bodies = "\n\n---\n\n".join(skill.prompt_body() for skill in loaded)
-    return ToolResult(content=(TextContent(text=f"{header}\n\n{bodies}"),))
+    """Resolve the named skill and the full chain of what it `depends` on, mount every one's files
+    into the workspace under `.skills/<name>/`, and return each one's `SKILL.md` workflow — the
+    asked-for skill first, so its workflow leads — closing with one tree of everything mounted. An
+    unknown name fails loud as a recoverable tool error."""
+    loaded = ctx.skills.closure(args.name)
+    for entry in loaded:
+        await mount_skill(ctx.sandbox, entry.skill)
+    return ToolResult(content=(TextContent(text=loaded_context(loaded)),))
 
 
 CONNECT_ACCOUNT_DIRECTIVE = (
@@ -852,8 +852,9 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         name="load_skill",
         description=(
             "Load a skill — a bundle of workflow instructions and files — so you can follow it. "
-            "The skill and anything it depends on are mounted under the workspace and its "
-            "instructions are returned at once. Load a skill proactively whenever its subject is "
+            "The skill and anything it depends on are mounted under the workspace, and each one's "
+            "instructions come back with a tree of the files it mounted, so any path the workflow "
+            "cites is already there to read. Load a skill proactively whenever its subject is "
             "relevant to the task. Cheap operation — be aggressive about loading."
         ),
         input_model=LoadSkillInput,

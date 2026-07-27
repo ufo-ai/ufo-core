@@ -1,6 +1,9 @@
 ---
 name: webapp
 description: Load when building a fullstack web application — interactive, stateful frontend with a backend, data, and routing (Express + Vite + React + Tailwind + Drizzle), beyond a static informational site.
+metadata:
+  depends:
+  - website-building
 ---
 # Fullstack Web App
 

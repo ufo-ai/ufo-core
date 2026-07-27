@@ -24,13 +24,14 @@ def test_documents_skills_parse_and_index() -> None:
 
 def test_pdf_pulls_its_design_foundations_dependency() -> None:
     registry = skill_registry((documents.manifest(),))
-    assert [skill.name for skill in registry.tree("pdf")] == ["design-foundations", "pdf"]
+    assert [entry.skill.name for entry in registry.closure("pdf")] == ["pdf", "design-foundations"]
 
 
 def test_office_pptx_and_theme_factory_pull_design_foundations() -> None:
     registry = skill_registry((documents.manifest(),))
     for name in ("office-pptx", "theme-factory"):
-        assert [skill.name for skill in registry.tree(name)] == ["design-foundations", name]
+        closure = [entry.skill.name for entry in registry.closure(name)]
+        assert closure == [name, "design-foundations"]
 
 
 def test_document_review_bundles_its_annotation_scripts() -> None:

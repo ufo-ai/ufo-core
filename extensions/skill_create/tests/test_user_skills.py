@@ -117,7 +117,7 @@ async def test_merged_registry_resolves_a_saved_user_skill(db: None) -> None:
     )
 
     merged = CORE_SKILL_REGISTRY.merged_with(await store.load_all(workspace_id))
-    assert [skill.name for skill in merged.tree("greet")] == ["greet"]
+    assert [entry.skill.name for entry in merged.closure("greet")] == ["greet"]
     assert ("greet", "greets people") in merged.index()
     assert set(CORE_SKILL_NAMES) <= set(merged.by_name)
 
@@ -169,7 +169,7 @@ def test_mutually_dependent_user_skills_resolve_without_recursing() -> None:
     alpha = RuntimeSkill(name="alpha", description="A", instructions="a", depends=("beta",))
     beta = RuntimeSkill(name="beta", description="B", instructions="b", depends=("alpha",))
     merged = CORE_SKILL_REGISTRY.merged_with((alpha, beta))
-    resolved = [skill.name for skill in merged.tree("alpha")]
+    resolved = [entry.skill.name for entry in merged.closure("alpha")]
     assert sorted(resolved) == ["alpha", "beta"]
     assert len(resolved) == 2
 
@@ -342,7 +342,7 @@ async def test_applied_skill_resolves_files_and_mounts(db: None, tmp_path) -> No
     assert fetched["status"]["description"] == "greets people"
     assert fetched["status"]["files"] == 3
     assert fetched["updated_at"] is not None
-    assert [skill.name for skill in merged.tree("greet")] == ["greet"]
+    assert [entry.skill.name for entry in merged.closure("greet")] == ["greet"]
     assert ("references/tone.md", b"warm") in merged.named("greet").files
 
 

@@ -70,11 +70,18 @@ terminal frame. A client's wait always ends — the terminal state commits on th
   the runtime routes and bills on (RFC 0018); an extension's skills ride its manifest (the `memory`
   skill ships with the memory extension); a pack may add pack-level skills of its own (see Packs).
   Every-turn content belongs in the system prompt, situational/long content in skills; skills carry
-  workflows, never restated tool docs (the tool's description is authoritative).
+  workflows, never restated tool docs (the tool's description is authoritative). `load_skill` mounts
+  each skill's files and injects its `SKILL.md` without the frontmatter, under a header that says
+  whether the agent asked for it or a dependency pulled it, closing with one tree of everything
+  mounted — the named skill first, then each skill it `depends` on. `depends` is
+  the only pull: a nested child reaches its parent by declaring it, and nesting alone pulls nothing.
+  A load costs the workflows it pulled and the paths to their files, never a restated catalog entry
+  or a mount prefix repeated once per bundled file.
 - **Typed subagents** — a registry of profiles (name, prompt, tool subset, input/output schema);
   spawn = child turn with parent linkage; foreground awaits, background returns an id. Two payload
-  knobs any profile may declare: `preload_skills` mounts the named skills and injects their
-  instructions before the child's first round; `extended_context` lifts its round budget to the
+  knobs any profile may declare: `preload_skills` mounts the named skills with their `depends`
+  closure and injects their instructions before the child's first round; `extended_context` lifts
+  its round budget to the
   main ceiling. Extensions register profiles.
 - **Compaction** — full-conversation `messages.json.lz4` transcript with monotonic seq +
   `compactions/<cid>/{before,after,summary}` records in the blob store; a deterministic pipeline

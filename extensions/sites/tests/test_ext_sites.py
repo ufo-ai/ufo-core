@@ -168,16 +168,16 @@ def test_website_building_parent_keeps_its_own_subdirs_but_not_the_child_subtree
     assert not any(path.startswith("webapp/") for path in parent_files)
 
 
-async def test_loading_the_webapp_child_resolves_it_and_pulls_the_parent_nested() -> None:
+async def test_the_webapp_child_declares_its_parent_and_mounts_it_nested() -> None:
     registry = skill_registry((sites_manifest.manifest(),))
 
     child = registry.named("website-building/webapp")
     assert child.name == "website-building/webapp"
     assert child.parent == "website-building"
 
-    assert [skill.name for skill in registry.tree("website-building/webapp")] == [
-        "website-building",
+    assert [entry.skill.name for entry in registry.closure("website-building/webapp")] == [
         "website-building/webapp",
+        "website-building",
     ]
 
     written: dict[str, bytes] = {}
@@ -186,8 +186,8 @@ async def test_loading_the_webapp_child_resolves_it_and_pulls_the_parent_nested(
         async def write_file(self, path: str, content: bytes) -> None:
             written[path] = content
 
-    for skill in registry.tree("website-building/webapp"):
-        await mount_skill(_Sandbox(), skill)
+    for entry in registry.closure("website-building/webapp"):
+        await mount_skill(_Sandbox(), entry.skill)
 
     assert "/workspace/.skills/website-building/SKILL.md" in written
     assert "/workspace/.skills/website-building/webapp/SKILL.md" in written

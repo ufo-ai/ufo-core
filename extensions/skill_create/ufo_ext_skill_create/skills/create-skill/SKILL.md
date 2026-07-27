@@ -74,7 +74,8 @@ Example inputs and expected outputs.
 **Optional fields:**
 
 - `metadata.depends`: a list of other skill names to load together with this one, when this skill
-  builds on them.
+  builds on them. Each one costs its whole workflow in context, so depend on a skill you always
+  need — and cite a file you need only sometimes by its mounted path instead.
 
 ## Instructions for Creating a New Skill
 

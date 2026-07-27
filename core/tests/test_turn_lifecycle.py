@@ -1229,7 +1229,7 @@ async def test_subagent_preload_skills_mounts_and_injects_the_skill(surface: Tur
     mounted = dict(runtime.carrier.writes)
     skill_md = next(path for path in mounted if path.endswith(f"/.skills/{skill.name}/SKILL.md"))
     assert mounted[skill_md] == skill.raw_skill_md.encode()
-    assert any(skill.prompt_body() in system for system in SEEN_SYSTEM_PROMPTS)
+    assert any(skill.instructions in system for system in SEEN_SYSTEM_PROMPTS)
 
 
 async def test_subagent_plain_text_followup_runs_without_a_spawn_payload(

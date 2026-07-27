@@ -671,8 +671,8 @@ async def test_sample_skill_parses_indexes_and_mounts_with_its_script() -> None:
         async def write_file(self, path: str, content: bytes) -> None:
             written[path] = content
 
-    for skill in registry.tree(sample.SKILL_NAME):
-        await mount_skill(_Recorder(), skill)
+    for entry in registry.closure(sample.SKILL_NAME):
+        await mount_skill(_Recorder(), entry.skill)
 
     root = f"/workspace/.skills/{sample.SKILL_NAME}"
     assert f"name: {sample.SKILL_NAME}" in written[f"{root}/SKILL.md"].decode()

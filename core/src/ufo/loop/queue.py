@@ -77,7 +77,7 @@ from ufo.schema.records import (
     TurnContext,
 )
 from ufo.search import SearchProvider
-from ufo.skills.runtime import RuntimeSkill, SkillRegistry, mount_skill
+from ufo.skills.runtime import LoadedSkill, SkillRegistry, mount_skill
 from ufo.tools.registry import ToolRegistry
 from ufo.workspace import ws
 
@@ -229,7 +229,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             for manifest in runtime.manifests
             for section in manifest.prompt_sections
         )
-        preload: tuple[RuntimeSkill, ...] = ()
+        preload: tuple[LoadedSkill, ...] = ()
         if turn.subagent_profile is None:
             resolved = agent.model_copy(update={"model": runtime.registry.resolve(agent.model)})
             tools = ToolRegistry(tuple(tool for tool in all_tools if not tool.profile_only))
@@ -244,11 +244,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
         else:
             profile = runtime.subagents.get(turn.subagent_profile)
             payload = json.loads(turn.inbound) if turn.seq == 1 else {}
-            resolved_skills: dict[str, RuntimeSkill] = {}
-            for name in payload.get("preload_skills") or ():
-                for skill in skills.tree(name):
-                    resolved_skills.setdefault(skill.name, skill)
-            preload = tuple(resolved_skills.values())
+            preload = skills.closure(*(payload.get("preload_skills") or ()))
             resolved = Agent(
                 prompt=subagent_system_prompt(profile, skills=skills.index(), preload=preload),
                 model=runtime.registry.resolve(profile.model or agent.model),
@@ -276,8 +272,8 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             injecting_slots(runtime.manifests),
         )
         sandbox = SandboxSession(carrier=runtime.carrier, handle=handle)
-        for skill in preload:
-            await mount_skill(sandbox, skill)
+        for entry in preload:
+            await mount_skill(sandbox, entry.skill)
         engine = TurnEngine(
             turn=turn,
             agent=resolved,

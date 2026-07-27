@@ -4,15 +4,18 @@ sandbox.
 A skill is a folder of files — a `SKILL.md` (YAML frontmatter + markdown workflow) plus any assets.
 A skill folder MAY nest child skills: an immediate subdirectory that itself holds a `SKILL.md` is a
 child, registered under the path-form name `<parent>/<child-dir>` and mounting nested under the
-parent. Loading a child pulls its parent first, so the parent's shared files ride along. Core ships
-exactly two, teaching its own builtins: `sandbox`, `delegation`; a CI gate holds that core set.
-Packs contribute more through the manifest `skills` point, which the loader aggregates with core's
-into one `SkillRegistry` per boot. `load_skill` resolves a skill and the closure it pulls (parent,
-then `depends`) through `SkillRegistry.tree`, then `mount_skill` writes each into the conversation's
-workspace under `.skills/<name>/` — inside the scoped subtree the sandbox permits, never the
-framework paths above it — so the agent reads the mounted `SKILL.md` and follows it. The
-instructions ride the tool result too, so the workflow is in front of the model the moment it
-loads."""
+parent. Nesting is naming only: a child that needs its parent's files says so with `depends`, the
+one mechanism that pulls another skill in. Core's own skills teach its builtins, held to a fixed set
+by `CORE_SKILL_NAMES` and a CI gate. Packs contribute more through the manifest `skills` point,
+which the loader aggregates with core's into one `SkillRegistry` per boot.
+
+`load_skill` resolves the named skill and its transitive `depends` through `SkillRegistry.closure`,
+then for each: mounts its files into the conversation's workspace under `.skills/<name>/` — inside
+the scoped subtree the sandbox permits, never the framework paths above it — and injects its
+`SKILL.md` workflow under a header saying whether the agent asked for it or a dependency pulled it.
+One tree of everything mounted closes the load, once for the whole closure rather than per skill. So
+a load costs the workflows it pulled and the paths to their files, never a restated catalog entry or
+a prefix repeated once per bundled file."""
 
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -28,6 +31,7 @@ FRONTMATTER_FENCE = "---\n"
 SKILLS_MOUNT_DIR = f"{WORKSPACE_DIR}/.skills"
 CORE_SKILLS_ROOT = Path(__file__).parent
 CORE_SKILL_NAMES = frozenset({"sandbox", "delegation"})
+TREE_INDENT = "  "
 
 
 @dataclass(frozen=True)
@@ -35,8 +39,8 @@ class RuntimeSkill:
     """One parsed skill: its identity and workflow from the frontmatter/body, the raw `SKILL.md`
     mounted verbatim (no round-trip drift), and any bundled asset files. `name` is the registry
     name — plain for a top-level skill, the path form `<parent>/<child-dir>` for a child. `parent`,
-    when set, is the enclosing skill a child pulls in before itself. `depends` names the sibling
-    skills that load with it."""
+    when set, is the enclosing skill the child's name and mount path nest under — it carries no
+    pull. `depends` names the skills that mount alongside this one."""
 
     name: str
     description: str
@@ -52,12 +56,23 @@ class RuntimeSkill:
     def mount_root(self) -> str:
         return f"{SKILLS_MOUNT_DIR}/{self.name}"
 
+
+@dataclass(frozen=True)
+class LoadedSkill:
+    """One skill in a load, with the skill whose `depends` pulled it — `None` when the agent asked
+    for this one by name. The header says which, so the workflow the agent chose is never confused
+    with one that rode along behind it, and a chain names the link that pulled each hop."""
+
+    skill: RuntimeSkill
+    dependency_of: str | None = None
+
     def prompt_body(self) -> str:
-        sections = [f"# Skill: {self.name}", self.description, self.instructions]
-        if self.files:
-            listing = "\n".join(f"- {self.mount_root()}/{path}" for path, _ in self.files)
-            sections.append(f"Bundled files:\n{listing}")
-        return "\n\n".join(section for section in sections if section)
+        """What one skill contributes to the context: a header naming it and how it got here, then
+        its `SKILL.md` workflow. Nothing else — the frontmatter's `description` and `depends` are
+        load-time routing metadata, not instructions the agent acts on, and no bundled file's
+        content is ever injected. A file is reached by its mounted path, which the tree lists."""
+        pulled = f" (dependency of {self.dependency_of})" if self.dependency_of is not None else ""
+        return f"# Skill: {self.skill.name}{pulled}\n\n{self.skill.instructions}"
 
 
 def _split_frontmatter(text: str) -> tuple[str, str]:
@@ -164,10 +179,9 @@ CORE_SKILLS: tuple[RuntimeSkill, ...] = tuple(CORE_SKILLS_BY_NAME.values())
 class SkillRegistry:
     """Every skill a turn can load — core's plus each active pack's contributed skills (parents and
     their nested children), keyed by registry name — built once per boot by the loader from the
-    active manifests. `load_skill` resolves a name and the closure it pulls (parent, then `depends`)
-    through `tree`; the system prompt's `{{skill_index}}` renders `index`. A name collision (a pack
-    shadowing another skill) is refused where the registry is built, so a lookup here is always
-    unambiguous."""
+    active manifests. `load_skill` resolves what one load pulls through `closure`; the system
+    prompt's `{{skill_index}}` renders `index`. A name collision (a pack shadowing another skill) is
+    refused where the registry is built, so a lookup here is always unambiguous."""
 
     by_name: dict[str, RuntimeSkill]
 
@@ -178,27 +192,29 @@ class SkillRegistry:
             available = ", ".join(sorted(self.by_name)) or "none"
             raise ValueError(f"unknown skill {name!r} (available: {available})") from error
 
-    def tree(self, name: str) -> tuple[RuntimeSkill, ...]:
-        """The skill plus the skills it pulls in — its parent (and the parent's closure) first, then
-        its transitive `depends`, then the skill itself, each once. The set `load_skill` mounts for
-        one request: loading a child brings its parent's shared files along. `depends` is
-        member-authored (a saved user-skill can name any other), so the walk is cycle-safe — an
-        in-progress skill re-entered through a dependency cycle (A↔B, or a self-dep) is skipped
-        rather than recursed, yielding each skill once instead of a RecursionError."""
-        loaded: dict[str, RuntimeSkill] = {}
-        visiting: set[str] = set()
+    def closure(self, *names: str) -> tuple[LoadedSkill, ...]:
+        """One load of the named skills: every name first in the order given, then the transitive
+        `depends` of each, once apiece and paired with the skill that pulled it. `depends` is the
+        only pull — a child skill reaches its parent by declaring it, never by nesting — so this is
+        both the set mounted and the order injected, the asked-for workflows leading. A named skill
+        is always direct, never labelled a dependency, even when another named skill also depends on
+        it: seeding every name before the walk is what makes that hold whatever order they arrive
+        in. Claiming a skill before walking its dependencies keeps the walk cycle-safe, so a
+        member-authored cycle (A↔B, or a self-dep) yields each skill once, not a RecursionError."""
+        loaded: dict[str, LoadedSkill] = {
+            name: LoadedSkill(skill=self.named(name)) for name in dict.fromkeys(names)
+        }
 
-        def add(skill: RuntimeSkill) -> None:
-            if skill.name in loaded or skill.name in visiting:
+        def add(skill: RuntimeSkill, dependency_of: str | None) -> None:
+            if skill.name in loaded:
                 return
-            visiting.add(skill.name)
-            if skill.parent is not None:
-                add(self.named(skill.parent))
+            loaded[skill.name] = LoadedSkill(skill=skill, dependency_of=dependency_of)
             for dependency in skill.depends:
-                add(self.named(dependency))
-            loaded[skill.name] = skill
+                add(self.named(dependency), skill.name)
 
-        add(self.named(name))
+        for name in dict.fromkeys(names):
+            for dependency in self.named(name).depends:
+                add(self.named(dependency), name)
         return tuple(loaded.values())
 
     def index(self) -> tuple[tuple[str, str], ...]:
@@ -227,6 +243,35 @@ class SkillRegistry:
 
 
 CORE_SKILL_REGISTRY = SkillRegistry(dict(CORE_SKILLS_BY_NAME))
+
+
+def _mounted_tree(loaded: tuple[LoadedSkill, ...]) -> str:
+    """Everything a load mounted, as one indented tree under the mount dir: each directory named
+    once and each file named by its own segment, so a bundle of eighty files costs eighty short
+    lines instead of eighty repetitions of the same prefix. One tree for the whole closure, not one
+    per skill — a nested child's files land under the parent's directory, where they in fact are."""
+    lines = [f"{SKILLS_MOUNT_DIR}/"]
+    directories: set[tuple[str, ...]] = set()
+    mounted = sorted(
+        f"{entry.skill.name}/{path}" for entry in loaded for path in entry.skill.mounted_files()
+    )
+    for path in mounted:
+        parts = PurePosixPath(path).parts
+        for depth in range(len(parts) - 1):
+            branch = parts[: depth + 1]
+            if branch not in directories:
+                directories.add(branch)
+                lines.append(f"{TREE_INDENT * (depth + 1)}{parts[depth]}/")
+        lines.append(f"{TREE_INDENT * len(parts)}{parts[-1]}")
+    return "\n".join(lines)
+
+
+def loaded_context(loaded: tuple[LoadedSkill, ...]) -> str:
+    """What one load puts in front of the model: each skill's header and workflow in closure order —
+    the asked-for skill, then what it pulled — and one tree of everything mounted, at the end.
+    Shared by `load_skill` and a subagent's `preload_skills`, so a skill reads the same each way."""
+    workflows = "\n\n---\n\n".join(entry.prompt_body() for entry in loaded)
+    return f"{workflows}\n\nMounted files:\n{_mounted_tree(loaded)}"
 
 
 async def mount_skill(sandbox: SandboxSession, skill: RuntimeSkill) -> None:
