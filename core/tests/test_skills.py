@@ -7,6 +7,7 @@ from ufo.skills.runtime import (
     CORE_SKILL_REGISTRY,
     CORE_SKILLS,
     LoadedSkill,
+    LoadedSkills,
     RuntimeSkill,
     SkillRegistry,
     discover_skills,
@@ -144,6 +145,82 @@ def test_loaded_context_closes_with_one_tree_for_the_whole_closure(tmp_path: Pat
         "    scripts/\n"
         "      run.py"
     )
+
+
+def test_a_skill_already_in_context_costs_a_note_instead_of_its_workflow(tmp_path: Path) -> None:
+    """A repeat load: every file still mounts and the tree still names the whole closure, but the
+    workflow the model is already reading is not sent a second time."""
+    base_dir = _write_skill(tmp_path, "base", "base skill", "BASE BODY")
+    leaf_dir = _write_skill(tmp_path, "leaf", "leaf skill", "LEAF BODY", depends=("base",))
+    registry = SkillRegistry({"base": parse_skill(base_dir), "leaf": parse_skill(leaf_dir)})
+
+    text = loaded_context(registry.closure("leaf"), {"leaf", "base"})
+
+    assert "BODY" not in text
+    assert "# Skill:" not in text
+    assert text.startswith("Already in context above, not repeated: leaf, base\n\nMounted files:")
+    assert "/workspace/.skills/\n  base/\n    SKILL.md\n  leaf/\n    SKILL.md" in text
+
+
+def test_a_dependency_already_in_context_still_injects_the_asked_for_workflow(
+    tmp_path: Path,
+) -> None:
+    """Suppression is per skill inside one closure: loading a skill whose dependency is already in
+    context pays for the one workflow that is new and names the other."""
+    base_dir = _write_skill(tmp_path, "base", "base skill", "BASE BODY")
+    leaf_dir = _write_skill(tmp_path, "leaf", "leaf skill", "LEAF BODY", depends=("base",))
+    registry = SkillRegistry({"base": parse_skill(base_dir), "leaf": parse_skill(leaf_dir)})
+
+    text = loaded_context(registry.closure("leaf"), {"base"})
+
+    assert "# Skill: leaf\n\nLEAF BODY" in text
+    assert "BASE BODY" not in text
+    assert "Already in context above, not repeated: base" in text
+    assert text.index("LEAF BODY") < text.index("not repeated: base") < text.index("Mounted files:")
+
+
+def test_loaded_skills_reseeds_from_the_closure_a_load_injected(tmp_path: Path) -> None:
+    """The tracker takes a load as the closure it resolved to: every entry names a skill whose
+    workflow is in context, and only an entry no other skill pulled is one the agent asked for."""
+    base_dir = _write_skill(tmp_path, "base", "base skill", "BASE BODY")
+    leaf_dir = _write_skill(tmp_path, "leaf", "leaf skill", "LEAF BODY", depends=("base",))
+    registry = SkillRegistry({"base": parse_skill(base_dir), "leaf": parse_skill(leaf_dir)})
+    tracker = LoadedSkills()
+
+    tracker.reseed((registry.closure("leaf"),))
+
+    assert tracker.in_context == {"leaf", "base"}
+    assert tracker.asked_for == {"leaf"}
+
+
+def test_loaded_skills_reseed_replaces_rather_than_accumulates() -> None:
+    """The window is the record: a load the window no longer carries is dropped, so a shrunk window
+    never leaves the tracker claiming a workflow the model can no longer read."""
+    gone = RuntimeSkill(name="gone", description="d", instructions="body")
+    kept = RuntimeSkill(name="kept", description="d", instructions="body")
+    tracker = LoadedSkills()
+
+    tracker.reseed(((LoadedSkill(skill=gone),),))
+    assert tracker.in_context == {"gone"}
+
+    tracker.reseed(((LoadedSkill(skill=kept),),))
+    assert tracker.in_context == {"kept"}
+    assert tracker.asked_for == {"kept"}
+
+    tracker.reseed(())
+    assert tracker.in_context == set()
+
+
+def test_loaded_skills_drain_yields_the_asked_for_names_and_empties_the_tracker() -> None:
+    leaf = RuntimeSkill(name="leaf", description="d", instructions="LEAF", depends=("base",))
+    base = RuntimeSkill(name="base", description="d", instructions="BASE")
+    tracker = LoadedSkills()
+    tracker.reseed(((LoadedSkill(skill=leaf), LoadedSkill(skill=base, dependency_of="leaf")),))
+
+    assert tracker.drain() == ("leaf",)
+    assert tracker.in_context == set()
+    assert tracker.asked_for == set()
+    assert tracker.drain() == ()
 
 
 def test_closure_follows_a_dependency_chain_to_its_end(tmp_path: Path) -> None:

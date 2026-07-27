@@ -30,6 +30,7 @@ from ufo.models.interface import (
     ToolUseBlock,
 )
 from ufo.schema.records import Usage
+from ufo.skills.runtime import LoadedSkills, RuntimeSkill, SkillRegistry
 from ufo.transcript import CompactionSummary, FileRef
 
 HEAD_FACT = "the deploy key is rotated every 30 days HEADSECRET"
@@ -367,6 +368,47 @@ async def test_offloaded_tool_output_paths_are_re_referenced_after_compaction(
     assert f"- {head_path}\n" in rendered or rendered.endswith(f"- {head_path}")
     assert head_path in rendered
     assert tail_path not in rendered
+
+
+async def test_loaded_skills_come_from_the_tracker_and_the_tracker_ends_empty(
+    tmp_path: Path,
+) -> None:
+    """The one summary field the pipeline fills: the tracker knows which workflows the head held, so
+    the model's answer for it is ignored, and draining it is what tells the rest of the turn those
+    bodies are gone from the window."""
+    invented = CompactionSummary(
+        intent="condensed history",
+        current_work="mid-turn",
+        next_step="answer",
+        loaded_skills=("invented-by-the-model",),
+    )
+    docx = RuntimeSkill(name="office-docx", description="d", instructions="BODY", depends=("base",))
+    base = RuntimeSkill(name="base", description="d", instructions="B")
+    tracker = LoadedSkills()
+    tracker.reseed((SkillRegistry({"office-docx": docx, "base": base}).closure("office-docx"),))
+    compaction = _compaction(
+        tmp_path,
+        model=SummaryModel(summary=invented),
+        trigger_tokens=10,
+        keep_messages=2,
+        loaded_skills=tracker,
+    )
+
+    result, _ = await compaction.maybe_compact(_history())
+
+    record = await compaction.read_record(1)
+    assert record is not None
+    assert record.summary.loaded_skills == ("office-docx",)
+    assert "## Loaded skills\n- office-docx" in str(result[0].content)
+    assert "invented-by-the-model" not in str(result[0].content)
+    assert tracker.in_context == set()
+    assert tracker.asked_for == set()
+
+
+async def test_a_turn_that_loaded_no_skill_renders_no_loaded_skills_section(tmp_path: Path) -> None:
+    compaction = _compaction(tmp_path, trigger_tokens=10, keep_messages=2)
+    result, _ = await compaction.maybe_compact(_history())
+    assert "## Loaded skills" not in str(result[0].content)
 
 
 async def test_summarize_recovers_from_a_prompt_too_long_overflow(tmp_path: Path) -> None:

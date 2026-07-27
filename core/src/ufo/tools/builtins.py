@@ -622,12 +622,15 @@ async def ask_user_handler(ctx: ToolContext, args: AskUserInput) -> ToolResult:
 async def load_skill_handler(ctx: ToolContext, args: LoadSkillInput) -> ToolResult:
     """Resolve the named skill and the full chain of what it `depends` on, mount every one's files
     into the workspace under `.skills/<name>/`, and return each one's `SKILL.md` workflow — the
-    asked-for skill first, so its workflow leads — closing with one tree of everything mounted. An
-    unknown name fails loud as a recoverable tool error."""
+    asked-for skill first, so its workflow leads — closing with one tree of everything mounted. A
+    workflow the context already holds is named in one note instead of injected again, while its
+    files still mount, so re-loading is cheap and self-healing rather than an error. An unknown name
+    fails loud as a recoverable tool error."""
     loaded = ctx.skills.closure(args.name)
     for entry in loaded:
         await mount_skill(ctx.sandbox, entry.skill)
-    return ToolResult(content=(TextContent(text=loaded_context(loaded)),))
+    text = loaded_context(loaded, ctx.loaded_skills.in_context)
+    return ToolResult(content=(TextContent(text=text),))
 
 
 CONNECT_ACCOUNT_DIRECTIVE = (

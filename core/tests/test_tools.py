@@ -286,6 +286,58 @@ async def test_load_skill_mounts_and_injects_the_skill_then_each_dependency(
     assert "leaf skill" not in text
 
 
+async def test_a_second_load_of_a_skill_in_context_mounts_again_without_its_workflow(
+    tmp_path: Path,
+) -> None:
+    """The agent re-loads a skill whose workflow it is already reading: the files are written again
+    (cheap, idempotent, and it restores whatever the agent did to them), the tree still lists them,
+    and the instructions are named rather than repeated. Never an error — re-loading is fair."""
+    sandbox = FakeSandbox()
+    ctx = make_context(sandbox, tmp_path)
+    skill = CORE_SKILL_REGISTRY.named("sandbox")
+
+    first = (await _load_skill(ctx, "sandbox")).content[0].text
+    ctx.loaded_skills.reseed((ctx.skills.closure("sandbox"),))
+    sandbox.files.clear()
+    repeat = await _load_skill(ctx, "sandbox")
+
+    text = repeat.content[0].text
+    tree = first[first.index("Mounted files:") :]
+    assert repeat.is_error is False
+    assert skill.instructions not in text
+    assert text == f"Already in context above, not repeated: sandbox\n\n{tree}"
+    assert sandbox.files["/workspace/.skills/sandbox/SKILL.md"] == skill.raw_skill_md.encode()
+
+
+async def test_a_load_whose_dependency_is_in_context_still_injects_the_new_workflow(
+    tmp_path: Path,
+) -> None:
+    """Two skills sharing a dependency: the second load pays for its own workflow only."""
+    base = RuntimeSkill(name="base", description="base skill", instructions="BASE BODY")
+    first_skill = RuntimeSkill(
+        name="first", description="first skill", instructions="FIRST BODY", depends=("base",)
+    )
+    second_skill = RuntimeSkill(
+        name="second", description="second skill", instructions="SECOND BODY", depends=("base",)
+    )
+    sandbox = FakeSandbox()
+    ctx = replace(
+        make_context(sandbox, tmp_path),
+        skills=SkillRegistry({"base": base, "first": first_skill, "second": second_skill}),
+    )
+
+    await _load_skill(ctx, "first")
+    ctx.loaded_skills.reseed((ctx.skills.closure("first"),))
+    text = (await _load_skill(ctx, "second")).content[0].text
+
+    assert "# Skill: second\n\nSECOND BODY" in text
+    assert "BASE BODY" not in text
+    assert "Already in context above, not repeated: base" in text
+    assert text.endswith(
+        "Mounted files:\n/workspace/.skills/\n  base/\n    SKILL.md\n  second/\n    SKILL.md"
+    )
+
+
 async def test_load_skill_unknown_name_fails_loud(tmp_path: Path) -> None:
     ctx = make_context(FakeSandbox(), tmp_path)
     with pytest.raises(ValueError, match="unknown skill 'nope'"):

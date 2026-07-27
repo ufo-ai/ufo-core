@@ -68,6 +68,7 @@ from ufo.loop.engine import (
     _claim_turn_with_handoff,
     _dispatch_segments,
     _final_act,
+    _loaded_skill_closures,
 )
 from ufo.loop.prompts.render import COMPACTION_SYSTEM_PROMPT, rendered_prompt
 from ufo.loop.transcript import Transcript
@@ -101,6 +102,13 @@ from ufo.schema.records import (
     TurnAdmissionSource,
     TurnContext,
     Usage,
+)
+from ufo.skills.runtime import (
+    CORE_SKILL_REGISTRY,
+    LoadedSkills,
+    RuntimeSkill,
+    SkillRegistry,
+    loaded_context,
 )
 from ufo.tools.builtins import (
     BUILTIN_TOOLS,
@@ -655,6 +663,7 @@ def _engine(
     member_id: UUID | None = None,
     requestable_credentials: CredentialRequests | None = None,
     memory: MemorySearch | None = None,
+    skills: SkillRegistry = CORE_SKILL_REGISTRY,
 ) -> TurnEngine:
     carrier = carrier or RecordingCarrier()
     blob = FilesystemBlobStore(root=tmp_path)
@@ -685,6 +694,7 @@ def _engine(
         grants=None,
         requestable_credentials=requestable_credentials,
         memory=memory,
+        skills=skills,
     )
 
 
@@ -978,6 +988,338 @@ async def test_multi_tool_round_publishes_skill_then_tool_activity_frames_in_ord
         SkillLoad(skill="demo"),
         ToolCall(tool="bash", preview='{"command":"echo hi"}'),
     ]
+
+
+@dataclass
+class SkillLoadRoundsModel:
+    """Loads the named skills, one per round, then answers — the shape a long turn takes when the
+    agent reaches again for a workflow it already has. Records the tool-result texts it was handed
+    on its last call, so a test reads back what each load put in front of it."""
+
+    names: tuple[str, ...]
+    results: list[str] = field(default_factory=list)
+    seen: set[str] = field(default_factory=set)
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        for message in request.messages:
+            if not isinstance(message.content, tuple):
+                continue
+            for block in message.content:
+                if isinstance(block, ToolResultBlock) and isinstance(block.content, str):
+                    if block.tool_use_id not in self.seen:
+                        self.seen.add(block.tool_use_id)
+                        self.results.append(block.content)
+        if len(self.results) >= len(self.names):
+            yield TextDelta(text="done")
+            yield Usage(input_tokens=1, output_tokens=1)
+            return
+        call_id = f"s{len(self.results) + 1}"
+        yield ToolCallStart(id=call_id, name="load_skill")
+        yield ToolCallDelta(
+            id=call_id, partial_json=json.dumps({"name": self.names[len(self.results)]})
+        )
+        yield Usage(input_tokens=2, output_tokens=2)
+
+
+@dataclass
+class OverflowBetweenSkillLoadsModel:
+    """Loads a skill, then raises a provider context-overflow so the engine force-compacts and
+    retries inside the same round, and loads the same skill again on that retry — the one shape that
+    reaches the overflow-recovery compaction with tools still offered. Records the tool-result texts
+    it was handed on each call, so a test reads back what the post-recovery load cost."""
+
+    results: list[str] = field(default_factory=list)
+    overflowed: bool = False
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        self.results = [
+            block.content
+            for message in request.messages
+            if isinstance(message.content, tuple)
+            for block in message.content
+            if isinstance(block, ToolResultBlock) and isinstance(block.content, str)
+        ]
+        if len(self.results) >= 2:
+            yield TextDelta(text="done")
+            yield Usage(input_tokens=1, output_tokens=1)
+            return
+        if self.results and not self.overflowed:
+            self.overflowed = True
+            raise RuntimeError("input is too long for the context window")
+        call_id = f"s{len(self.results) + 1}"
+        yield ToolCallStart(id=call_id, name="load_skill")
+        yield ToolCallDelta(id=call_id, partial_json=json.dumps({"name": "sandbox"}))
+        yield Usage(input_tokens=2, output_tokens=2)
+
+
+async def test_a_load_after_an_overflow_compaction_costs_no_workflow(
+    db: None, tmp_path: Path
+) -> None:
+    """The overflow recovery force-compacts and retries with tools still offered, and draining the
+    tracker into the summary empties it. The kept tail still carries the first load, so the retry's
+    load must re-mount and name the skill rather than inject the workflow a second time."""
+    turn = await _seed_turn("queued", None, seq=2)
+    carrier = RecordingCarrier()
+    model = OverflowBetweenSkillLoadsModel()
+    blob = FilesystemBlobStore(root=tmp_path)
+    await Transcript(blob=blob, conversation_id=turn.conversation_id).write(
+        Conversation(
+            seq=1,
+            messages=tuple(
+                Message(role="user" if index % 2 == 0 else "assistant", content=f"history {index}")
+                for index in range(6)
+            ),
+        )
+    )
+    compaction = Compaction(
+        client=EchoModel(),
+        model="claude-opus-4-8",
+        blob=blob,
+        conversation_id=turn.conversation_id,
+        trigger_tokens=1_000_000,
+        keep_messages=4,
+    )
+
+    frame = await _engine(turn, model, tmp_path, carrier=carrier, compaction=compaction).run()
+
+    assert frame is not None and frame.status == "done"
+    assert model.overflowed
+    assert await compaction.read_record(1) is not None
+    first, second = model.results
+    instructions = CORE_SKILL_REGISTRY.named("sandbox").instructions
+    assert instructions in first
+    assert instructions not in second
+    assert second.startswith("Already in context above, not repeated: sandbox\n\nMounted files:")
+
+
+async def test_a_second_load_of_a_skill_still_in_the_window_costs_no_workflow(
+    db: None, tmp_path: Path
+) -> None:
+    """The window is the tracker's source: round two's load sees round one's headers still in front
+    of the model, so it re-mounts the files and names the skill instead of injecting it twice."""
+    turn = await _seed_turn("queued", None)
+    carrier = RecordingCarrier()
+    model = SkillLoadRoundsModel(names=("sandbox", "sandbox"))
+
+    frame = await _engine(turn, model, tmp_path, carrier=carrier).run()
+
+    assert frame is not None and frame.status == "done"
+    first, second = model.results
+    instructions = CORE_SKILL_REGISTRY.named("sandbox").instructions
+    assert instructions in first
+    assert instructions not in second
+    assert second.startswith("Already in context above, not repeated: sandbox\n\nMounted files:")
+    mounts = [path for path, _ in carrier.writes if path.endswith("/.skills/sandbox/SKILL.md")]
+    assert len(mounts) == 2
+
+
+async def test_a_load_after_a_mid_round_compaction_costs_no_workflow(
+    db: None, tmp_path: Path
+) -> None:
+    """The round loop compacts before it calls the model, and draining the tracker into the summary
+    empties it. The kept tail still carries round one's load, so round two's load must re-mount and
+    name the skill rather than inject the workflow the model can already see."""
+    turn = await _seed_turn("queued", None)
+    carrier = RecordingCarrier()
+    model = SkillLoadRoundsModel(names=("sandbox", "sandbox"))
+    compaction = Compaction(
+        client=EchoModel(),
+        model="claude-opus-4-8",
+        blob=FilesystemBlobStore(root=tmp_path),
+        conversation_id=turn.conversation_id,
+        trigger_tokens=1,
+        keep_messages=2,
+    )
+
+    frame = await _engine(turn, model, tmp_path, carrier=carrier, compaction=compaction).run()
+
+    assert frame is not None and frame.status == "done"
+    assert await compaction.read_record(1) is not None
+    first, second = model.results
+    instructions = CORE_SKILL_REGISTRY.named("sandbox").instructions
+    assert instructions in first
+    assert instructions not in second
+    assert second.startswith("Already in context above, not repeated: sandbox\n\nMounted files:")
+
+
+async def test_a_load_whose_result_was_offloaded_injects_the_workflow_again(
+    db: None, tmp_path: Path
+) -> None:
+    """A workflow past the result cap never reached the model whole: the offload notice ends the
+    text where the body was severed, so the tracker must not claim it and the re-load must inject
+    it again rather than answer with a note pointing at instructions the model cannot read."""
+    huge = RuntimeSkill(
+        name="huge",
+        description="an oversized skill",
+        instructions="HUGE BODY\n" + "detail line\n" * (MAX_TOOL_RESULT_CHARS // 4),
+        raw_skill_md="---\nname: huge\ndescription: an oversized skill\n---\nbody\n",
+    )
+    turn = await _seed_turn("queued", None)
+    model = SkillLoadRoundsModel(names=("huge", "huge"))
+
+    frame = await _engine(turn, model, tmp_path, skills=SkillRegistry({"huge": huge})).run()
+
+    assert frame is not None and frame.status == "done"
+    first, second = model.results
+    assert TOOL_OUTPUT_DIR in first
+    assert "# Skill: huge\n\nHUGE BODY" in first
+    assert "# Skill: huge\n\nHUGE BODY" in second
+    assert "Already in context" not in second
+
+
+def _load_round(call_id: str, name: str, result: str) -> tuple[Message, Message]:
+    return (
+        Message(
+            role="assistant",
+            content=(ToolUseBlock(id=call_id, name="load_skill", input={"name": name}),),
+        ),
+        Message(role="user", content=(ToolResultBlock(tool_use_id=call_id, content=result),)),
+    )
+
+
+def test_the_skill_tracker_seeds_only_from_intact_load_skill_results() -> None:
+    """What seeds the tracker for a turn: a `load_skill` call whose result the window still carries
+    whole. A result the dispatch step offloaded is skipped — its workflow was cut off — and so is a
+    header that arrived in some other tool's output, which mounts nothing and proves nothing."""
+    body = loaded_context(CORE_SKILL_REGISTRY.closure("sandbox"))
+    window = (
+        *_load_round("s1", "sandbox", body),
+        Message(
+            role="assistant",
+            content=(ToolUseBlock(id="c1", name="bash", input={"command": "cat notes"}),),
+        ),
+        Message(
+            role="user",
+            content=(
+                ToolResultBlock(tool_use_id="c1", content="# Skill: delegation\n\nnot a real load"),
+            ),
+        ),
+    )
+    tracker = LoadedSkills()
+
+    tracker.reseed(_loaded_skill_closures(window, CORE_SKILL_REGISTRY))
+    assert tracker.in_context == {"sandbox"}
+    assert tracker.asked_for == {"sandbox"}
+
+    offloaded = _load_round(
+        "s1",
+        "sandbox",
+        body[:TOOL_RESULT_PREVIEW_CHARS]
+        + OFFLOAD_NOTICE.format(total=len(body), path="/workspace/.tool-output/s1.txt"),
+    )
+    tracker.reseed(_loaded_skill_closures(offloaded, CORE_SKILL_REGISTRY))
+    assert tracker.in_context == set()
+
+
+def test_a_skill_body_quoting_the_header_format_marks_nothing_loaded() -> None:
+    """A `SKILL.md` body is member-authored text. One that quotes the header format — a skill
+    teaching how a load renders, say — marks only itself: what a load put in context comes from the
+    registry, so the quoted skill's own load is never suppressed and its workflow reaches the
+    model."""
+    quoting = RuntimeSkill(
+        name="create-skill",
+        description="d",
+        instructions="A load writes a header per workflow:\n\n# Skill: office-docx\n\nthe body.",
+    )
+    registry = SkillRegistry(
+        {
+            "create-skill": quoting,
+            "office-docx": RuntimeSkill(name="office-docx", description="d", instructions="DOCX"),
+        }
+    )
+    window = _load_round("s1", "create-skill", loaded_context(registry.closure("create-skill")))
+    tracker = LoadedSkills()
+
+    tracker.reseed(_loaded_skill_closures(window, registry))
+
+    assert tracker.in_context == {"create-skill"}
+    assert tracker.asked_for == {"create-skill"}
+
+
+def test_a_load_the_window_carries_no_result_for_counts_for_nothing() -> None:
+    """The model called `load_skill` and the round died before the result: no workflow ever reached
+    the model, so the skill has to load again rather than be suppressed."""
+    window = (
+        Message(
+            role="assistant",
+            content=(ToolUseBlock(id="s1", name="load_skill", input={"name": "sandbox"}),),
+        ),
+    )
+    tracker = LoadedSkills()
+
+    tracker.reseed(_loaded_skill_closures(window, CORE_SKILL_REGISTRY))
+
+    assert tracker.in_context == set()
+
+
+def test_a_load_the_registry_cannot_resolve_reseeds_without_raising() -> None:
+    """The window holds whatever the model emitted, and a transcript outlives the pack that shaped
+    it: a departed skill name, a call with no `name` at all, and a non-string name all resolve to
+    nothing. None of them may take down the round the reseed runs on."""
+    window = (
+        Message(
+            role="assistant",
+            content=(
+                ToolUseBlock(id="s1", name="load_skill", input={"name": "departed"}),
+                ToolUseBlock(id="s2", name="load_skill", input={"skill": "sandbox"}),
+                ToolUseBlock(id="s3", name="load_skill", input={"name": ["sandbox"]}),
+            ),
+        ),
+        Message(
+            role="user",
+            content=(
+                ToolResultBlock(tool_use_id="s1", content="# Skill: departed\n\nBODY"),
+                ToolResultBlock(tool_use_id="s2", content="loaded"),
+                ToolResultBlock(tool_use_id="s3", content="loaded"),
+            ),
+        ),
+    )
+    tracker = LoadedSkills()
+
+    tracker.reseed(_loaded_skill_closures(window, CORE_SKILL_REGISTRY))
+
+    assert tracker.in_context == set()
+
+
+async def test_a_load_of_a_dependency_an_earlier_load_pulled_costs_no_workflow(
+    db: None, tmp_path: Path
+) -> None:
+    """A dependency rode into context behind the skill that pulled it, so loading it directly a
+    round later is a re-mount and a note — the closure the first load injected is what the tracker
+    holds, dependencies included."""
+    base = RuntimeSkill(name="base", description="base skill", instructions="BASE BODY")
+    leaf = RuntimeSkill(
+        name="leaf", description="leaf skill", instructions="LEAF BODY", depends=("base",)
+    )
+    turn = await _seed_turn("queued", None)
+    model = SkillLoadRoundsModel(names=("leaf", "base"))
+
+    frame = await _engine(
+        turn, model, tmp_path, skills=SkillRegistry({"base": base, "leaf": leaf})
+    ).run()
+
+    assert frame is not None and frame.status == "done"
+    first, second = model.results
+    assert "# Skill: base (dependency of leaf)\n\nBASE BODY" in first
+    assert "BASE BODY" not in second
+    assert second.startswith("Already in context above, not repeated: base\n\nMounted files:")
+
+
+async def test_a_preloaded_skill_counts_as_already_in_context(db: None, tmp_path: Path) -> None:
+    """`preload_skills` renders a workflow into a subagent's system prompt, not a tool result, so
+    there is no call in the window to read: the engine carries the closure it mounted. The child's
+    own load of a skill it was handed re-mounts the files and names it instead of paying for those
+    instructions a second time."""
+    turn = await _seed_turn("queued", None)
+    model = SkillLoadRoundsModel(names=("sandbox",))
+    engine = replace(_engine(turn, model, tmp_path), preload=CORE_SKILL_REGISTRY.closure("sandbox"))
+
+    frame = await engine.run()
+
+    assert frame is not None and frame.status == "done"
+    (only,) = model.results
+    assert CORE_SKILL_REGISTRY.named("sandbox").instructions not in only
+    assert only.startswith("Already in context above, not repeated: sandbox\n\nMounted files:")
 
 
 @dataclass(frozen=True)

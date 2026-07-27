@@ -37,6 +37,7 @@ from ufo.models.interface import (
 )
 from ufo.sandbox.session import TOOL_OUTPUT_DIRNAME
 from ufo.schema.records import Agent, Turn, Usage
+from ufo.skills.runtime import LoadedSkills
 from ufo.transcript import (
     CompactionRecord,
     CompactionSummary,
@@ -91,7 +92,10 @@ class Compaction:
     summarize call) and `post_compact` (after) turn hooks off the turn's chain — fired here, not in
     the engine, because only this flow knows past every compactibility guard that compaction will
     truly happen. The trigger derives from the model's real window less the summary's own output
-    reserve and a buffer; `trigger_tokens` overrides the derivation for a test or an operator."""
+    reserve and a buffer; `trigger_tokens` overrides the derivation for a test or an operator.
+    `loaded_skills` is the turn's skill-load tracker, shared with the tool context: the boundary
+    drops the workflow bodies the head held, so this flow drains the tracker into the summary and
+    leaves it empty — the one summary field the pipeline knows and the model does not."""
 
     client: ModelClient
     model: str
@@ -103,6 +107,7 @@ class Compaction:
     keep_messages: int = COMPACTION_KEEP_MESSAGES
     max_ptl_retries: int = MAX_PTL_RETRIES
     hooks: HookChain = field(default_factory=HookChain)
+    loaded_skills: LoadedSkills = field(default_factory=LoadedSkills)
     turn: Turn | None = None
     agent: Agent | None = None
     audience_member_id: UUID | None = None
@@ -137,7 +142,9 @@ class Compaction:
         tokens re-spent) nor duplicates a compaction record at a fresh index, and the observe-only
         compaction hooks do not double-fire. `maybe_compact`'s guards stay outside the step —
         deterministic reads of the window — so a round that does not compact records no step and the
-        step sequence lines up on replay."""
+        step sequence lines up on replay. The summary's `loaded_skills` is drained from the tracker
+        here rather than asked of the model: the tracker knows which workflows the head actually
+        held, and draining it is what tells the rest of the turn those bodies are gone."""
         selection = self._select(messages)
         if selection is None:
             return messages, ()
@@ -153,6 +160,7 @@ class Compaction:
         )
         index = await self._next_index()
         summary, usages = await self._summarize(head_rounds)
+        summary = summary.model_copy(update={"loaded_skills": self.loaded_skills.drain()})
         references = self._references(head_rounds, tail)
         rendered = self._render(summary, references)
         after = (Message(role="user", content=rendered), *tail)

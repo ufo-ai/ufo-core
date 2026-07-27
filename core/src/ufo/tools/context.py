@@ -11,6 +11,8 @@ API, resolved from the turn-agent's grants admitted to the speaking member (thei
 so a tool reaches only the accounts the speaker may use. `skills` is the loadable
 skill set for the deploy (core plus the active packs') that `load_skill` resolves against; it
 defaults to the core floor so a context built without the loader still resolves the core three.
+`loaded_skills` is the turn's live record of which of those workflows the context already holds, so
+a repeat `load_skill` re-mounts the files without injecting the instructions twice.
 `cdp_provider` is the turn's selected browser transport and `find` its host-side element-ranking
 hook — the browser tools build one per-turn surface from them on first use and register its `aclose`
 on `cleanup`, the per-turn registry the loop drains at turn end so a CDP connection never outlives
@@ -41,7 +43,7 @@ from ufo.sandbox.session import SandboxSession
 from ufo.schema.records import Agent, Turn
 from ufo.search import SearchProvider
 from ufo.seats import owner_member_id
-from ufo.skills.runtime import CORE_SKILL_REGISTRY, SkillRegistry
+from ufo.skills.runtime import CORE_SKILL_REGISTRY, LoadedSkills, SkillRegistry
 from ufo.workspace import ws_current
 
 
@@ -178,6 +180,7 @@ class ToolContext:
     read_paths: set[str] = field(default_factory=set)
     idempotency_key: str | None = None
     skills: SkillRegistry = CORE_SKILL_REGISTRY
+    loaded_skills: LoadedSkills = field(default_factory=LoadedSkills)
     ext: ExtensionContext | None = None
     cdp_provider: CdpProvider | None = None
     search_provider: SearchProvider | None = None

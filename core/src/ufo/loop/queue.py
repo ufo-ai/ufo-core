@@ -326,6 +326,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             attempt=attempt,
             max_rounds=max_rounds,
             skills=skills,
+            preload=preload,
             output_model=output_model,
         )
         frame = await engine.run()

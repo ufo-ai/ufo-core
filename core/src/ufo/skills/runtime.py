@@ -15,10 +15,12 @@ the scoped subtree the sandbox permits, never the framework paths above it — a
 `SKILL.md` workflow under a header saying whether the agent asked for it or a dependency pulled it.
 One tree of everything mounted closes the load, once for the whole closure rather than per skill. So
 a load costs the workflows it pulled and the paths to their files, never a restated catalog entry or
-a prefix repeated once per bundled file."""
+a prefix repeated once per bundled file. A workflow already in the context is not injected a second
+time: `LoadedSkills` tracks what the window holds, so a repeat load re-mounts the files and names
+the skill in one line instead of paying for its instructions again."""
 
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Container, Iterable, Mapping
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
 import yaml
@@ -32,6 +34,10 @@ SKILLS_MOUNT_DIR = f"{WORKSPACE_DIR}/.skills"
 CORE_SKILLS_ROOT = Path(__file__).parent
 CORE_SKILL_NAMES = frozenset({"sandbox", "delegation"})
 TREE_INDENT = "  "
+SKILL_HEADER_PREFIX = "# Skill: "
+DEPENDENCY_SUFFIX = " (dependency of {puller})"
+SKILL_BLOCK_SEPARATOR = "\n\n---\n\n"
+ALREADY_LOADED_NOTE = "Already in context above, not repeated: {names}"
 
 
 @dataclass(frozen=True)
@@ -71,8 +77,56 @@ class LoadedSkill:
         its `SKILL.md` workflow. Nothing else — the frontmatter's `description` and `depends` are
         load-time routing metadata, not instructions the agent acts on, and no bundled file's
         content is ever injected. A file is reached by its mounted path, which the tree lists."""
-        pulled = f" (dependency of {self.dependency_of})" if self.dependency_of is not None else ""
-        return f"# Skill: {self.skill.name}{pulled}\n\n{self.skill.instructions}"
+        pulled = (
+            ""
+            if self.dependency_of is None
+            else DEPENDENCY_SUFFIX.format(puller=self.dependency_of)
+        )
+        return f"{SKILL_HEADER_PREFIX}{self.skill.name}{pulled}\n\n{self.skill.instructions}"
+
+
+@dataclass(eq=False)
+class LoadedSkills:
+    """Which skills' workflows the model's context already holds, so `load_skill` never pays for the
+    same instructions twice. Derived from the window rather than accumulated: each load in it is
+    re-expanded through the registry, so the tracker is right across the turns of one conversation
+    (an earlier turn's load is still in the transcript), across a compaction that dropped those
+    bodies, and across a DBOS replay that never re-ran the handler. `asked_for` is the subset the
+    agent named itself — what a compaction summary carries past the boundary, since re-loading one
+    of those brings its dependencies back with it."""
+
+    in_context: set[str] = field(default_factory=set)
+    asked_for: set[str] = field(default_factory=set)
+
+    def reseed(
+        self, loads: Iterable[tuple[LoadedSkill, ...]], preloaded: tuple[LoadedSkill, ...] = ()
+    ) -> None:
+        """Replace the tracker with the skills the given loads put in front of the model — one
+        registry closure per load, the same entries `loaded_context` rendered for it, so what the
+        tracker claims is what the model was handed rather than what some text says.
+
+        `preloaded` is a subagent's `preload_skills` closure. Those workflows render into the
+        child's system prompt rather than a tool result, and unlike a transcript body they outlive
+        a compaction, so they stay in context for the whole turn — but the child never asked for
+        them, so they stay out of `asked_for` and out of the summary telling it what to load."""
+        self.reset()
+        for entries in loads:
+            for entry in entries:
+                self.in_context.add(entry.skill.name)
+                if entry.dependency_of is None:
+                    self.asked_for.add(entry.skill.name)
+        self.in_context.update(entry.skill.name for entry in preloaded)
+
+    def drain(self) -> tuple[str, ...]:
+        """The names the agent asked for, clearing the tracker — what a boundary that drops every
+        workflow body from the window carries forward for the agent to re-load."""
+        names = tuple(sorted(self.asked_for))
+        self.reset()
+        return names
+
+    def reset(self) -> None:
+        self.in_context.clear()
+        self.asked_for.clear()
 
 
 def _split_frontmatter(text: str) -> tuple[str, str]:
@@ -266,12 +320,21 @@ def _mounted_tree(loaded: tuple[LoadedSkill, ...]) -> str:
     return "\n".join(lines)
 
 
-def loaded_context(loaded: tuple[LoadedSkill, ...]) -> str:
+def loaded_context(
+    loaded: tuple[LoadedSkill, ...], in_context: Container[str] = frozenset()
+) -> str:
     """What one load puts in front of the model: each skill's header and workflow in closure order —
-    the asked-for skill, then what it pulled — and one tree of everything mounted, at the end.
-    Shared by `load_skill` and a subagent's `preload_skills`, so a skill reads the same each way."""
-    workflows = "\n\n---\n\n".join(entry.prompt_body() for entry in loaded)
-    return f"{workflows}\n\nMounted files:\n{_mounted_tree(loaded)}"
+    the asked-for skill, then what it pulled — and one tree of everything mounted, at the end. A
+    skill named in `in_context` is already in front of the model, so it contributes its name to one
+    note instead of its workflow a second time; suppression is per skill, so loading a skill whose
+    dependency is already there still injects the one workflow that is new. Every skill in the
+    closure still mounts and still appears in the tree, so the files a repeat load rewrites are
+    reachable whatever the agent did to them. Shared by `load_skill` and a subagent's
+    `preload_skills`, so a skill reads the same each way."""
+    blocks = [entry.prompt_body() for entry in loaded if entry.skill.name not in in_context]
+    if repeated := tuple(entry.skill.name for entry in loaded if entry.skill.name in in_context):
+        blocks.append(ALREADY_LOADED_NOTE.format(names=", ".join(repeated)))
+    return SKILL_BLOCK_SEPARATOR.join(blocks) + f"\n\nMounted files:\n{_mounted_tree(loaded)}"
 
 
 async def mount_skill(sandbox: SandboxSession, skill: RuntimeSkill) -> None:

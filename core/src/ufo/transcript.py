@@ -64,7 +64,8 @@ class CompactionSummary(BaseModel):
     record — so it is a validated BaseModel, not a freeform blob: every field is a section the
     reconstruction renders deterministically, so the same summary always yields the same window.
     Sections adapted from Claude Code's compaction prompt, trimmed for a headless multi-surface
-    agent."""
+    agent. Every field but `loaded_skills` comes from the summarizing model; `loaded_skills` the
+    pipeline fills from the turn's skill-load tracker, which knows what the head actually held."""
 
     intent: str
     current_work: str

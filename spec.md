@@ -76,7 +76,12 @@ terminal frame. A client's wait always ends — the terminal state commits on th
   mounted — the named skill first, then each skill it `depends` on. `depends` is
   the only pull: a nested child reaches its parent by declaring it, and nesting alone pulls nothing.
   A load costs the workflows it pulled and the paths to their files, never a restated catalog entry
-  or a mount prefix repeated once per bundled file.
+  or a mount prefix repeated once per bundled file. **A workflow enters the context once**: the turn
+  tracks which skills the window holds by expanding each `load_skill` call's own requested name
+  through the registry closure — never by reading a skill's prose, which is member-authored and may
+  quote the header format — so it holds across turns, across a compaction, and across replay, and a
+  repeat load re-mounts the files and names the skill in one line. A result the engine offloaded or
+  truncated cut the workflow off, so that one loads again.
 - **Typed subagents** — a registry of profiles (name, prompt, tool subset, input/output schema);
   spawn = child turn with parent linkage; foreground awaits, background returns an id. Two payload
   knobs any profile may declare: `preload_skills` mounts the named skills with their `depends`
@@ -87,7 +92,12 @@ terminal frame. A client's wait always ends — the terminal state commits on th
   `compactions/<cid>/{before,after,summary}` records in the blob store; a deterministic pipeline
   groups the over-window head into API rounds, compresses it into a validated structured
   `CompactionSummary` (one metered model call, bounded prompt-too-long retry), re-references the
-  durable `.tool-output` files it offloaded, and keeps the recent tail verbatim. The trigger derives
+  durable `.tool-output` files it offloaded, and keeps the recent tail verbatim. The summary's
+  `loaded_skills` is the one field the pipeline fills rather than the model: it drains the turn's
+  skill-load tracker, which knows what the head held. Draining empties the tracker, so a compaction
+  that may be followed by another `load_skill` re-derives it from the window it just wrote — the kept
+  tail can still carry a load whose workflow is still in front of the model. The compaction forcing a
+  final answer is the exception: that round never offers the tool again. The trigger derives
   from the model's real window less the summary reserve, so a long turn never exceeds it.
 - **Memory** — an extension, not core: it owns the `memory_item` table, the `memory_search`/
   `memory_update` tools, the read-only `memory` object kind (each search hit carries its
