@@ -31,6 +31,11 @@ from evals.__main__ import EVAL_SHARE_BUCKET_ENV, _task_reports
 from evals.__main__ import _run as run_evals
 from evals.__main__ import main as eval_main
 from evals.browser_nav import CASES as BROWSER_CASES
+from evals.closing_message import (
+    brief_scorer,
+    inlined_scorer,
+    no_backreference_scorer,
+)
 from evals.compaction.target import CompactionTarget
 from evals.driver import (
     CANDIDATE_AGENT_NAME,
@@ -49,6 +54,7 @@ from evals.harness.capability import (
     SharedArtifact,
     ToolInvocation,
     TurnLog,
+    UndeliveredRound,
     WorkspaceFile,
     _linked_artifacts,
     _page_images,
@@ -182,6 +188,8 @@ def test_registry_pins_judge_and_simulator_models_by_workload() -> None:
     assert tasks["document_visual"].simulator_model is None
     assert tasks["response_register"].judge_model == SEMANTIC_JUDGE_MODEL
     assert tasks["response_register"].simulator_model is None
+    assert tasks["closing_message"].judge_model == SEMANTIC_JUDGE_MODEL
+    assert tasks["closing_message"].simulator_model is None
     assert all(
         task.judge_model is None and task.simulator_model is None
         for name, task in tasks.items()
@@ -195,6 +203,7 @@ def test_registry_pins_judge_and_simulator_models_by_workload() -> None:
             "object_tools_flows",
             "document_visual",
             "response_register",
+            "closing_message",
         }
     )
 
@@ -452,6 +461,8 @@ class StubWorker:
     child_artifact: tuple[str, bytes] | None = None
     child_turn_id: UUID = field(default_factory=uuid4)
     expected_reference: tuple[str, bytes] | None = None
+    expected_head: tuple[Message, ...] = ()
+    seq: int = 1
     idempotency_keys: list[str] = field(default_factory=list)
     tokens: int = 0
     cost_micro_usd: int = 0
@@ -465,6 +476,9 @@ class StubWorker:
         if self.expected_reference is not None:
             path, content = self.expected_reference
             assert await self.blob.get(workspace_key(conversation_id, path)) == content
+        if self.expected_head:
+            seeded = decode(await self.blob.get(transcript_key(conversation_id)))
+            assert seeded.messages == self.expected_head
         turn_id = uuid4()
         async with workspace_tx() as connection:
             await connection.execute(
@@ -473,7 +487,7 @@ class StubWorker:
                     workspace_id=self.workspace_id,
                     conversation_id=conversation_id,
                     agent_id=agent_id,
-                    seq=1,
+                    seq=self.seq,
                     status=self.status,
                     inbound=message,
                     terminal={
@@ -489,7 +503,7 @@ class StubWorker:
             )
         if self.transcript is not None:
             await Transcript(blob=self.blob, conversation_id=conversation_id).write(
-                Conversation(seq=1, messages=self.transcript)
+                Conversation(seq=self.seq, messages=self.transcript)
             )
         if self.child_transcript is not None:
             child_conversation_id = uuid4()
@@ -770,6 +784,7 @@ class DbConversations:
         member_key: str | None = None,
         workspace_files: tuple[WorkspaceFile, ...] = (),
         prior_messages: tuple[str, ...] = (),
+        undelivered: tuple[UndeliveredRound, ...] = (),
     ) -> UUID:
         conversation_id = uuid4()
         async with workspace_tx() as connection:
@@ -927,9 +942,12 @@ async def test_a_capability_seed_establishes_state_before_the_conversation_opens
             member_key: str | None = None,
             workspace_files: tuple[WorkspaceFile, ...] = (),
             prior_messages: tuple[str, ...] = (),
+            undelivered: tuple[UndeliveredRound, ...] = (),
         ) -> UUID:
             order.append("open")
-            return await super().open(case_name, member_key, workspace_files, prior_messages)
+            return await super().open(
+                case_name, member_key, workspace_files, prior_messages, undelivered
+            )
 
     async def seed(seeded_workspace: UUID, seeded_agent: UUID) -> None:
         order.append(f"seed:{seeded_workspace}:{seeded_agent}")
@@ -954,6 +972,65 @@ async def test_a_capability_seed_establishes_state_before_the_conversation_opens
     assert result.passed, result.reason
     assert order == [f"seed:{workspace_id}:{agent_id}", "open"]
     assert case.payload()["seed"] != CapabilityCase("x", "y", case.grader).payload().get("seed")
+
+
+async def test_a_case_carrying_undelivered_rounds_seeds_them_before_the_turn_runs(
+    db: None, tmp_path
+) -> None:
+    """The rounds reach the conversation from the real run path, not just from a direct driver
+    call: `InProcessTarget.run` threads five positional arguments into `open`, which is where a
+    case's rounds would silently arrive as its workspace files. The turn reads the transcript it
+    was handed as it is admitted, so that is where this checks it."""
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    seeded = (
+        Message(role="user", content="tighten the email"),
+        Message(
+            role="assistant",
+            content=(
+                TextBlock(text="Here is the draft:\n\nHi Dana,"),
+                ToolUseBlock(
+                    id="undelivered-0",
+                    name="read",
+                    input={"file_path": "/workspace/outreach/segments.csv"},
+                ),
+            ),
+        ),
+        Message(
+            role="user",
+            content=(
+                ToolResultBlock(tool_use_id="undelivered-0", content="segment,who\nA,operations"),
+            ),
+        ),
+    )
+    worker = StubWorker(blob, workspace_id, _research_transcript(), expected_head=seeded, seq=2)
+    target = InProcessTarget(
+        ctx=_context(blob, worker),
+        agent_id=agent_id,
+        conversations=WorkspaceDriver(workspace_id, agent_id, PROMPT, blob, UNCALLED_DBOS),
+        outcome=CorpusOutcome(_context(blob, worker)),
+        blob=blob,
+    )
+    case = CapabilityCase(
+        "interrupted-case",
+        "who owns the account?",
+        required_tools_scorer(("search_web",)),
+        prior_messages=("tighten the email",),
+        undelivered=(
+            UndeliveredRound(
+                narration="Here is the draft:\n\nHi Dana,",
+                tool="read",
+                input={"file_path": "/workspace/outreach/segments.csv"},
+                result="segment,who\nA,operations",
+            ),
+        ),
+    )
+
+    with ws(workspace_id):
+        result = await run_capability_case(case, target)
+
+    assert result.passed, result.reason
 
 
 async def _persist_compaction(
@@ -988,6 +1065,7 @@ async def test_in_process_target_reads_durable_compaction_state(
             member_key: str | None = None,
             workspace_files: tuple[WorkspaceFile, ...] = (),
             prior_messages: tuple[str, ...] = (),
+            undelivered: tuple[UndeliveredRound, ...] = (),
         ) -> UUID:
             return self.conversation_id
 
@@ -1837,6 +1915,95 @@ async def test_conversational_scorer_flags_bullets_without_any_header() -> None:
     assert not verdict.passed
     assert "2 bullet lines" in verdict.reason
     assert "section headers" not in verdict.reason
+
+
+async def test_no_backreference_scorer_flags_a_pointer_at_undelivered_prose() -> None:
+    pointing = CapabilityOutput("Owen Sparks owns it. See above for the tightened email.", ())
+    verdict = await no_backreference_scorer()(pointing)
+    assert not verdict.passed
+    assert verdict.evidence == {"backreference": "See above"}
+    claimed = CapabilityOutput("Owen Sparks owns it, and the rewrite I gave still stands.", ())
+    assert not (await no_backreference_scorer()(claimed)).passed
+    standing = CapabilityOutput("Owen Sparks owns it. Here is the draft:\n\nHi Dana,", ())
+    assert (await no_backreference_scorer()(standing)).passed
+
+
+async def test_no_backreference_scorer_leaves_a_reference_inside_the_message_alone() -> None:
+    """A reply that carries its deliverable and then points back at it is delivering, not
+    stranding, so the scorer flags only a phrase that cannot mean same-message content. What a
+    missing deliverable costs is the anchors, which the delivery scorer owns."""
+    for intact in (
+        "| Atlas | $6,300 |\n\nThe numbers above put Atlas ahead.",
+        "Staged by region, dark launch, big-bang.\n\nOf the options above, take the first.",
+        "Northwind $8,200, Atlas $6,300.\n\nThe comparison above settles it.",
+    ):
+        assert (await no_backreference_scorer()(CapabilityOutput(intact, ()))).passed
+
+
+async def test_no_backreference_scorer_reads_the_question_the_turn_ended_on() -> None:
+    """A draft handed over for sign-off rides in the `ask_user` question, so that is where a
+    pointer back at the working prose lands — and a closing message that says nothing wrong on its
+    own does not clear it."""
+    ask = ToolInvocation(
+        "ask_user",
+        {"title": "Send the tightened email? See above for the wording.", "questions": []},
+        result="ok",
+        has_result=True,
+    )
+    pointing = CapabilityOutput("Ready when you are.", (ask,))
+    verdict = await no_backreference_scorer()(pointing)
+    assert not verdict.passed
+    assert verdict.evidence == {"backreference": "See above"}
+    whole = CapabilityOutput(
+        "Ready when you are.",
+        (
+            ToolInvocation(
+                "ask_user",
+                {"title": "Send this?\n\nHi Dana, the pilot starts Monday.", "questions": []},
+                result="ok",
+                has_result=True,
+            ),
+        ),
+    )
+    assert (await no_backreference_scorer()(whole)).passed
+
+
+async def test_inlined_scorer_separates_a_delivered_draft_from_a_promise_of_one() -> None:
+    pointer = CapabilityOutput("Owen Sparks owns it, and the tightened email is ready.", ())
+    verdict = await inlined_scorer(("Dana", "Halyard"), min_words=20)(pointer)
+    assert not verdict.passed
+    assert "delivered without 'Dana', 'Halyard'" in verdict.reason
+    assert "under the 20" in verdict.reason
+    whole = CapabilityOutput("Hi Dana, " + "the Halyard pilot runs thirty days " * 5, ())
+    assert (await inlined_scorer(("Dana", "Halyard"), min_words=20)(whole)).passed
+
+
+async def test_inlined_scorer_counts_a_draft_delivered_inside_the_terminating_question() -> None:
+    """An `ask_user` question renders on the surface, so a draft the member is asked to approve
+    inside one reached them exactly as the closing message would have — but only when asking ended
+    the turn. The engine recomputes the pending question every round and clears it the moment the
+    turn works on, so a question asked and then worked past is as undelivered as any other mid-turn
+    prose."""
+    ask = ToolInvocation(
+        "ask_user",
+        {"title": "Approve this reply to Dana?", "questions": [{"question": "Send it?"}]},
+        result="ok",
+        has_result=True,
+    )
+    read = ToolInvocation("read", {"file_path": "/workspace/plan.md"}, result="", has_result=True)
+    ended_on_the_question = CapabilityOutput("Ready to send once you approve.", (read, ask))
+    assert (await inlined_scorer(("Dana",), min_words=5)(ended_on_the_question)).passed
+    worked_past_it = CapabilityOutput("Ready to send once you approve.", (ask, read))
+    assert not (await inlined_scorer(("Dana",), min_words=5)(worked_past_it)).passed
+
+
+async def test_brief_scorer_flags_an_answer_that_restates_its_source() -> None:
+    dumped = CapabilityOutput("07:15 UTC. " + "the config also sets reindex and skips " * 10, ())
+    verdict = await brief_scorer(("07:15",), max_words=20)(dumped)
+    assert not verdict.passed
+    assert "over the 20 budget" in verdict.reason
+    answered = CapabilityOutput("07:15 UTC, and it skips weekends.", ())
+    assert (await brief_scorer(("07:15",), max_words=20)(answered)).passed
 
 
 async def test_measure_ignores_structure_inside_a_fenced_block() -> None:
@@ -2803,6 +2970,81 @@ async def test_workspace_driver_seeds_case_history_and_files(db: None, tmp_path)
     )
     assert image == b"image"
     assert seqs == [1]
+
+
+async def test_workspace_driver_seeds_an_undelivered_round_behind_the_case_message(
+    db: None, tmp_path
+) -> None:
+    """The seeded round lands as the pair it was — narration and tool call in one assistant
+    message, its result in the user turn that follows — so the model reads it as its own working
+    prose rather than as a reply the member already received."""
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    driver = WorkspaceDriver(workspace_id, agent_id, PROMPT, blob, UNCALLED_DBOS)
+    case = CapabilityCase(
+        "interrupted",
+        "who owns the account?",
+        exact_scorer("done"),
+        prior_messages=("tighten the email",),
+        undelivered=(
+            UndeliveredRound(
+                narration="Here it is tightened:\n\nHi Dana,",
+                tool="read",
+                input={"file_path": "/workspace/outreach/segments.csv"},
+                result="segment,who\nA,operations",
+            ),
+        ),
+    )
+
+    with ws(workspace_id):
+        conversation_id = await driver.open(
+            case.name,
+            case.member_key,
+            case.workspace_files,
+            case.prior_messages,
+            case.undelivered,
+        )
+        transcript = decode(await blob.get(transcript_key(conversation_id)))
+
+    assert transcript == Conversation(
+        seq=1,
+        messages=(
+            Message(role="user", content="tighten the email"),
+            Message(
+                role="assistant",
+                content=(
+                    TextBlock(text="Here it is tightened:\n\nHi Dana,"),
+                    ToolUseBlock(
+                        id="undelivered-0",
+                        name="read",
+                        input={"file_path": "/workspace/outreach/segments.csv"},
+                    ),
+                ),
+            ),
+            Message(
+                role="user",
+                content=(
+                    ToolResultBlock(
+                        tool_use_id="undelivered-0", content="segment,who\nA,operations"
+                    ),
+                ),
+            ),
+        ),
+    )
+
+
+def test_an_undelivered_round_requires_the_member_message_it_answers() -> None:
+    with pytest.raises(ValueError, match="prior_messages must end on one"):
+        CapabilityCase(
+            "unanchored",
+            "carry on",
+            exact_scorer("done"),
+            prior_messages=("tighten the email", "acknowledged"),
+            undelivered=(
+                UndeliveredRound(narration="drafting", tool="read", input={}, result="body"),
+            ),
+        )
 
 
 async def test_workspace_driver_reads_a_terminal_transcript_at_the_turn_sequence(

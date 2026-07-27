@@ -19,7 +19,7 @@ import sqlalchemy as sa
 from dbos import DBOSClient, WorkflowHandleAsync
 from dbos import error as dbos_error
 
-from evals.harness.capability import WorkspaceFile
+from evals.harness.capability import UndeliveredRound, WorkspaceFile
 from ufo.blob import BlobNotFound, BlobStore
 from ufo.cancellation import cancel_one_turn
 from ufo.db import workspace_tx
@@ -28,7 +28,7 @@ from ufo.ext.surface import workspace_key
 from ufo.governance import prompt_digest
 from ufo.schema import tables
 from ufo.schema.records import PENDING
-from ufo.sdk.models import Message
+from ufo.sdk.models import Message, TextBlock, ToolResultBlock, ToolUseBlock
 from ufo.transcript import Conversation, TranscriptDecodeError, decode, encode, transcript_key
 from ufo.workspace import ws
 
@@ -149,10 +149,12 @@ class WorkspaceDriver:
         member_key: str | None = None,
         workspace_files: tuple[WorkspaceFile, ...] = (),
         prior_messages: tuple[str, ...] = (),
+        undelivered: tuple[UndeliveredRound, ...] = (),
     ) -> UUID:
         """Open one isolated eval conversation. A member-bound case names its member by the exact
         workspace `member.email`; an absent email fails rather than degrading to shared-only
-        recall."""
+        recall. Seeded undelivered rounds land as the narration-plus-tool-call pairs they were, so
+        the case message reads to the model as a member writing into a turn already at work."""
         conversation_id = uuid4()
         async with workspace_tx() as connection:
             member_id = None
@@ -202,6 +204,22 @@ class WorkspaceDriver:
                 Message(role="user" if index % 2 == 0 else "assistant", content=content)
                 for index, content in enumerate(prior_messages)
             )
+            for index, round in enumerate(undelivered):
+                call_id = f"undelivered-{index}"
+                messages = (
+                    *messages,
+                    Message(
+                        role="assistant",
+                        content=(
+                            TextBlock(text=round.narration),
+                            ToolUseBlock(id=call_id, name=round.tool, input=round.input),
+                        ),
+                    ),
+                    Message(
+                        role="user",
+                        content=(ToolResultBlock(tool_use_id=call_id, content=round.result),),
+                    ),
+                )
             await self.blob.put(
                 transcript_key(conversation_id), encode(Conversation(seq=1, messages=messages))
             )

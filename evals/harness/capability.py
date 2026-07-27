@@ -216,6 +216,20 @@ class WorkspaceFile:
 
 
 @dataclass(frozen=True)
+class UndeliveredRound:
+    """One round the agent had already run when the member's message arrived: the prose it wrote,
+    the tool it called, and the result that came back. Seeded ahead of the case message so the live
+    turn opens where a real one does once a member writes into a working turn — the agent's own
+    narration behind it, streamed to a tailing surface and delivered to nobody. A case that seeds
+    one is asking what the closing message does with content only the model can see."""
+
+    narration: str
+    tool: str
+    input: JsonObject
+    result: str
+
+
+@dataclass(frozen=True)
 class CapabilitySample:
     output: CapabilityOutput
     verdict: CapabilityVerdict
@@ -234,7 +248,8 @@ class CapabilityCase:
     — both reach the model judge only after the deterministic grader passes, and both require a
     judge model on the task. `seed`, when set, receives (workspace_id, agent_id) before the case's
     conversation opens and establishes the state the case runs against, resetting whatever it
-    owns."""
+    owns. `undelivered` seeds rounds the agent ran before the case message arrived, so they answer
+    the last of the `prior_messages`."""
 
     name: str
     message: str
@@ -247,6 +262,7 @@ class CapabilityCase:
     member_key: str | None = None
     workspace_files: tuple[WorkspaceFile, ...] = ()
     prior_messages: tuple[str, ...] = ()
+    undelivered: tuple[UndeliveredRound, ...] = ()
     references: tuple[CapabilityReference, ...] = ()
     followup: CapabilityFollowup | None = None
     seed: EvalSeed | None = None
@@ -255,6 +271,10 @@ class CapabilityCase:
         paths = tuple(reference.path for reference in self.references)
         if len(paths) != len(set(paths)):
             raise ValueError("capability reference paths must be unique")
+        if self.undelivered and len(self.prior_messages) % 2 == 0:
+            raise ValueError(
+                "an undelivered round answers a member message: prior_messages must end on one"
+            )
 
     def payload(self) -> JsonObject:
         payload: JsonObject = {
@@ -282,6 +302,16 @@ class CapabilityCase:
         if self.prior_messages:
             payload["priorMessages"] = [
                 sha256(message.encode()).hexdigest() for message in self.prior_messages
+            ]
+        if self.undelivered:
+            payload["undelivered"] = [
+                {
+                    "narration": sha256(round.narration.encode()).hexdigest(),
+                    "tool": round.tool,
+                    "input": round.input,
+                    "result": sha256(round.result.encode()).hexdigest(),
+                }
+                for round in self.undelivered
             ]
         if self.references:
             payload["references"] = [

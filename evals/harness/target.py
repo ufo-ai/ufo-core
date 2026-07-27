@@ -27,6 +27,7 @@ from evals.harness.capability import (
     StoredCompaction,
     ToolInvocation,
     TurnLog,
+    UndeliveredRound,
     WorkspaceFile,
 )
 from evals.harness.harness import Json
@@ -133,6 +134,7 @@ class EvalConversations(Protocol):
         member_key: str | None = None,
         workspace_files: tuple[WorkspaceFile, ...] = (),
         prior_messages: tuple[str, ...] = (),
+        undelivered: tuple[UndeliveredRound, ...] = (),
     ) -> UUID: ...
 
     async def stage(self, conversation_id: UUID, path: str, source: Path) -> None: ...
@@ -181,7 +183,11 @@ class InProcessTarget:
         if case.seed is not None:
             await case.seed(ws_current().workspace_id, self.agent_id)
         conversation_id = await self.conversations.open(
-            case.name, case.member_key, case.workspace_files, case.prior_messages
+            case.name,
+            case.member_key,
+            case.workspace_files,
+            case.prior_messages,
+            case.undelivered,
         )
         for reference in case.references:
             await self.conversations.stage(
