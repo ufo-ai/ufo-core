@@ -2309,6 +2309,43 @@ async def test_dispatch_offload_preview_is_walled_for_an_untrusted_tool(
     )
 
 
+async def test_dispatch_offloads_on_the_handler_text_not_the_walled_result(
+    db: None, tmp_path: Path
+) -> None:
+    """The budget is what the handler produced, and the wall is what the model reads it through. A
+    result at the cap stays whole even though wrapping it carries the emitted block past the cap —
+    otherwise a tool that shaped its result to fit (a connector condensing a repeated record to just
+    inside the budget) would be offloaded anyway by the notice wrapped around it, and no producer
+    could aim at a budget it cannot see."""
+    turn = await _seed_turn("queued", None)
+    full = "u" * MAX_TOOL_RESULT_CHARS
+    engine = replace(
+        _engine(turn, EchoModel(), tmp_path),
+        tools=ToolRegistry((_fixed_result_tool("at_cap", full, untrusted=True),)),
+    )
+    context = ToolContext(
+        sandbox=engine.sandbox,
+        blob=engine.blob,
+        turn=engine.turn,
+        agent=engine.agent,
+        spawn=engine.spawn,
+        speaker_member_id=engine.turn.speaker_member_id,
+        audience_member_id=engine.audience_member_id,
+        artifact_token_secret=engine.artifact_token_secret,
+        grants=engine.grants,
+    )
+    block = await engine._dispatch(context, ToolUseBlock(id="c1", name="at_cap", input={}))
+    assert not block.is_error
+    assert block.content == (
+        UNTRUSTED_RESULT_NOTICE.format(source="at_cap")
+        + UNTRUSTED_RESULT_OPEN.format(source="at_cap")
+        + full
+        + UNTRUSTED_RESULT_CLOSE
+    )
+    assert len(block.content) > MAX_TOOL_RESULT_CHARS, "the wall must carry the block past the cap"
+    assert TOOL_OUTPUT_DIR not in block.content
+
+
 async def test_dispatch_walls_a_result_marked_untrusted_by_its_handler(
     db: None, tmp_path: Path
 ) -> None:

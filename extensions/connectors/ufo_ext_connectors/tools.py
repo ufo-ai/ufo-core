@@ -17,7 +17,9 @@ tool produces (`file_outputs`, presigned URLs on the broker's file store) is fet
 the grant's declared transfer hosts — the bytes never cross the serve process. Base64 a provider
 inlines in its own JSON result already has, so it is translated in place before the result enters
 context: decoded text inline, anything binary or large written to `/workspace/connector_files/`
-through the sandbox's write seam and replaced by a reference."""
+through the sandbox's write seam and replaced by a reference. An identical object a provider repeats
+per list item crosses once the same way: the first occurrence in full, every later copy the
+`same_as` pointer naming it."""
 
 import asyncio
 import base64
@@ -65,6 +67,10 @@ BASE64_WHITESPACE = {ord(char): None for char in string.whitespace}
 MAX_INLINE_DECODED_CHARS = 64 * 1024
 MAX_DECODE_CHARS = 2 * 1024 * 1024
 MAX_TRANSLATE_DEPTH = 100
+DEDUPE_REFERENCE_KEY = "same_as"
+MIN_DEDUPE_BYTES = 512
+MAX_DEDUPE_CHARS = 1024 * 1024
+MAX_DEDUPE_TOKENS = 24_000
 DATA_URL_PREFIX = "data:"
 DATA_URL_RE = re.compile(
     r"\Adata:(?P<mime>[\w.+-]+/[\w.+-]+)?(?:;[\w.+-]+=[\w.+-]+)*;base64,(?P<payload>.*)\Z",
@@ -185,22 +191,35 @@ async def call_external_tool(ctx: ToolContext, args: CallExternalToolInput) -> T
     entry = _registry(ctx).entry(args.source_id)
     account_id = await ctx.connector_account(args.source_id, args.account_id)
     call = _ConnectorCall(ctx=ctx, entry=entry, slug=args.tool_name)
-    return _json_result(await call.run(args.arguments, account_id))
+    return ToolResult(content=(TextContent(text=await call.run(args.arguments, account_id)),))
 
 
 @dataclass(frozen=True)
 class _ConnectorCall:
     """One connector tool execution, top to bottom: stage every `workspace_file` argument to the
     broker's file store, execute server-side with the granted account, fetch the produced files
-    back into the workspace, and translate the base64 the provider inlined in its own result — the
-    private steps below in execution order. Both transfers run inside the sandbox, so the bytes
-    never cross the serve process."""
+    back into the workspace, translate the base64 the provider inlined in its own result, and
+    replace every object that result repeats identically with a pointer to its first occurrence —
+    the private steps below in execution order. Both transfers run inside the sandbox, so the bytes
+    never cross the serve process.
+
+    The flow hands back the result already serialized, because condensing it has to serialize the
+    response to bound its own work: a result nothing was condensed in crosses on that one string,
+    and a condensed one is serialized again from the smaller form it became.
+
+    Condensing runs in a worker thread. It is bounded (`MAX_DEDUPE_TOKENS`), but the bound counts
+    nodes and the cost of a node is hardware: shapes measuring 8 to 9.5 ms on one box measured 3 to
+    5 times that on another, past the budget for holding the one loop, which is when doctrine says
+    the work goes to a pool deliberately. A pool is worth taking here, unlike for the base64 decode
+    below: this is interpreted bytecode, so the interpreter hands the GIL back every switch interval
+    and the loop keeps serving — on a 38 ms walk the loop's worst stall drops from 38.7 ms to
+    6.3 ms — where a single `b64decode` holds the GIL start to finish and can only be refused."""
 
     ctx: ToolContext
     entry: ConnectorEntry
     slug: str
 
-    async def run(self, arguments: dict[str, JsonValue], account_id: str) -> dict[str, object]:
+    async def run(self, arguments: dict[str, JsonValue], account_id: str) -> str:
         staged = {key: await self._staged_value(item) for key, item in arguments.items()}
         response = await self.entry.broker.execute(
             self.ctx.turn.workspace_id,
@@ -212,7 +231,8 @@ class _ConnectorCall:
         )
         files = await self._fetched_files(self.entry.broker.file_outputs(response))
         translated = await self._translated_node(response)
-        return {**translated, WORKSPACE_FILES_RESULT_KEY: files} if files else translated
+        payload = {**translated, WORKSPACE_FILES_RESULT_KEY: files} if files else translated
+        return await asyncio.to_thread(self._deduped, payload)
 
     async def _staged_value(self, value: object) -> object:
         """An argument value with every `{"workspace_file": path}` staged to the broker's file
@@ -427,6 +447,150 @@ class _ConnectorCall:
             )
         return {"name": safe, "workspace_path": target, "mimetype": mimetype, "bytes": len(data)}
 
+    def _deduped(self, payload: dict[str, object]) -> str:
+        """The result as its text, with every object it repeats identically replaced by a pointer to
+        the first occurrence. A denormalized list response embeds the parent record in every element
+        so each element stands alone — a code search scoped to one repository answers 30 items
+        carrying 30 byte-identical copies of that repository, 85% of the payload. The first copy
+        stays whole and each later one becomes `{"same_as": "<JSON Pointer>"}` naming it, so nothing
+        is projected away and the whole record is one hop from the element that needs it.
+
+        What that buys is a result the model still holds. Dispatch offloads any result over
+        `MAX_TOOL_RESULT_CHARS` to a workspace file and keeps a preview, so boilerplate does not
+        only cost tokens — it pushes the answer out of context and into a file the model has to
+        filter to read. That search is 141K chars and offloads; condensed it is 21K and stays
+        inline, the same facts without the round trip. A cross-repo search carries a different
+        record per hit, so nothing collapses and it offloads either way, which is the correct
+        outcome and not a shortfall: only a real repeat is ever replaced.
+
+        The text is what this returns because deciding whether to run costs one serialization and
+        the result needed one anyway: a payload left alone is handed back as the string already
+        built, a condensed one is serialized from its condensed form, the smaller of the two.
+        Serializing is itself per-node work — 12 ms for a 1 MiB response of 27.5K three-field
+        objects — so paying for it twice is the same defect as walking unbounded.
+
+        Structural identity is what a repeat is, so the pass keys on the bytes a node serializes to
+        and never on a field name: any provider's denormalization collapses and none is
+        special-cased. The pointer only reads as ours while the provider's own JSON does not use the
+        key, so a payload already carrying it anywhere crosses exactly as it came rather than
+        rewritten into something its reader cannot tell from provider data.
+
+        Two bounds decide whether the pass runs at all, and each caps a different kind of work.
+        `MAX_DEDUPE_CHARS` caps the byte-proportional part — the serialization and the hashing. What
+        the ceiling gives up is condensing above it: rarely a result that would have come under the
+        inline budget, more often one that would still have offloaded but as a smaller file for the
+        model to filter. Both are real, and both are traded for not spending the byte work on
+        megabytes that mostly cannot be brought back into context.
+        `MAX_DEDUPE_TOKENS` caps the node-proportional part, which is what the walk is: it visits
+        every node, so 1 MiB is 38 ms as 95K short strings and 5.4 ms as a 470 KB 100-hit search
+        page. Structural tokens (`,` and `:` in the serialization) are that count, read in two C
+        scans of a string already built — an over-count wherever a string carries one, so the bound
+        errs toward leaving a payload alone.
+
+        At the bound a walk measures 8 to 9.5 ms across the densest shapes (numeric ids, metric
+        rows, short strings); a real 30-hit search is 6K tokens and 1.6 ms, a full 100-hit page 20K
+        and 5.4 ms. What the bound excludes is a result made of tens of thousands of small leaves —
+        which is what a result with no repeated object worth replacing looks like, so the refusal
+        costs nothing that could have been saved."""
+        serialized = json.dumps(payload)
+        if (
+            len(serialized) > MAX_DEDUPE_CHARS
+            or serialized.count(",") + serialized.count(":") > MAX_DEDUPE_TOKENS
+            or DEDUPE_REFERENCE_KEY in serialized
+        ):
+            return serialized
+        first: dict[bytes, str] = {}
+        return json.dumps(
+            {
+                key: self._condensed(item, f"/{_escaped(key)}", 1, first)[0]
+                for key, item in payload.items()
+            }
+        )
+
+    def _condensed(
+        self, value: object, pointer: str, depth: int, first: dict[bytes, str]
+    ) -> tuple[object, bytes, int]:
+        """One node condensed, with the digest that identifies it and the bytes it occupies as the
+        provider sent it. The digest is built from its children's digests rather than from its own
+        serialization, so the pass costs one hash per node instead of one per node per level and a
+        deeply nested payload cannot turn into quadratic work on the loop. Each kind of node tags
+        its own stream and every key is length-prefixed, so no two nodes that differ can hash the
+        same bytes; the digest is sha256 in full for the reason the decoded-bytes path uses it — a
+        provider chooses this content, and any digest it can collide lets one record be read as
+        another.
+
+        The size a node reports is the one it came in at, never the one it was rewritten to. Both
+        numbers describe the node as the provider sent it, so two nodes with equal digests always
+        clear the floor alike: a record whose own child was pointed away earlier still collapses
+        whole rather than surviving as a partially-pointered copy of a record already in the result.
+
+        A node under `MIN_DEDUPE_BYTES` is neither replaced nor recorded. A pointer costs ~35 bytes,
+        so the floor is not break-even: it is where a result stays readable. Measured on two real
+        payloads, any floor from 256 to 768 bytes yields the identical full structural saving (85%
+        off a code search, 15% off an issue list); dropping it to zero buys a further 1.0% while
+        tripling the pointers a reader must follow, and raising it to 1024 loses the issue list's
+        saving entirely.
+
+        A leaf renders itself rather than going through the JSON encoder, whose per-value call setup
+        made a result of numeric leaves twice the cost of the same count of string leaves (18 ms
+        against 9 ms at the bound). `str` tells every JSON scalar apart — `1`, `1.0`, `True` and
+        `None` all render differently, and a string that renders the same carries a different tag —
+        and it is JSON's own width for every scalar a provider realistically sends, `true`/`false`/
+        `null` included. Only a non-finite float renders shorter than JSON writes it, which can
+        shade a size against the floor by a few bytes and can never affect an identity.
+
+        Only an object is replaced. A pointer in an array's place would change that field's type,
+        and an array is not what a provider repeats — its elements are. Past `MAX_TRANSLATE_DEPTH` a
+        node takes a digest of its own position, unique by construction, so nothing at or above it
+        is ever judged identical to anything else: the pass never calls two subtrees the same when
+        it stopped short of comparing them."""
+        if depth >= MAX_TRANSLATE_DEPTH:
+            return value, hashlib.sha256(b"@" + pointer.encode()).digest(), 0
+        match value:
+            case dict():
+                walked: dict[str, object] = {}
+                stream = [b"{"]
+                size = 2 + max(len(value) - 1, 0)
+                for key, item in value.items():
+                    child, digest, contributed = self._condensed(
+                        item, f"{pointer}/{_escaped(key)}", depth + 1, first
+                    )
+                    walked[key] = child
+                    name = key.encode()
+                    stream += (b"%d:" % len(name), name, digest)
+                    size += len(name) + 3 + contributed
+                node = hashlib.sha256(b"".join(stream)).digest()
+                if size < MIN_DEDUPE_BYTES:
+                    return walked, node, size
+                repeated = first.get(node)
+                if repeated is None:
+                    first[node] = pointer
+                    return walked, node, size
+                return {DEDUPE_REFERENCE_KEY: repeated}, node, size
+            case list():
+                items: list[object] = []
+                stream = [b"["]
+                size = 2 + max(len(value) - 1, 0)
+                for index, item in enumerate(value):
+                    child, digest, contributed = self._condensed(
+                        item, f"{pointer}/{index}", depth + 1, first
+                    )
+                    items.append(child)
+                    stream.append(digest)
+                    size += contributed
+                return items, hashlib.sha256(b"".join(stream)).digest(), size
+            case str():
+                return value, hashlib.sha256(b"s" + value.encode()).digest(), len(value) + 2
+            case _:
+                rendered = str(value)
+                return value, hashlib.sha256(b"n" + rendered.encode()).digest(), len(rendered)
+
+
+def _escaped(token: str) -> str:
+    """One JSON Pointer reference token (RFC 6901): a key holding `/` or `~` still names exactly the
+    node it came from."""
+    return token.replace("~", "~0").replace("/", "~1")
+
 
 def _decoded_base64(value: object) -> tuple[bytes, str | None] | None:
     """The bytes a marked field holds and their text, or None when the value is not valid base64 —
@@ -549,7 +713,9 @@ CONNECTOR_TOOLS: tuple[ToolDef, ...] = (
             "provider returned as base64 (e.g. a file's 'content') arrives decoded: small text as "
             "the decoded string in place, anything binary or large as a "
             "{name, workspace_path, mimetype, bytes} reference — read those bytes from "
-            "'workspace_path' rather than treating the object as an error."
+            "'workspace_path' rather than treating the object as an error. An object the result "
+            'repeats identically appears once: later copies are {"same_as": "<JSON Pointer>"}, '
+            "identical in every field to the object at that pointer in this same result."
         ),
         input_model=CallExternalToolInput,
         handler=call_external_tool,

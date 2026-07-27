@@ -39,6 +39,7 @@ from ufo_ext_connectors.tools import (
 from ufo.connectors import BrokerFile, ConnectorEntry, ConnectorRegistry, StagedUpload
 from ufo.ext.loader import turn_tools
 from ufo.grants import Grant, GrantStore
+from ufo.loop.engine import MAX_TOOL_RESULT_CHARS
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import (
     WORKSPACE_DIR,
@@ -1026,3 +1027,488 @@ async def test_decoded_bytes_are_never_written_straight_to_their_shared_path(
     assert target not in recorder.writes, "bytes went straight to the shared content-addressed path"
     assert all(path.endswith(".part") for path in recorder.writes)
     assert (workspace / Path(target).relative_to(WORKSPACE_DIR)).read_bytes() == blob
+
+
+REPOSITORY_URL_KEYS = (
+    "forks",
+    "keys",
+    "collaborators",
+    "teams",
+    "hooks",
+    "issue_events",
+    "events",
+    "assignees",
+    "branches",
+    "tags",
+    "blobs",
+    "git_tags",
+    "git_refs",
+    "trees",
+    "statuses",
+    "languages",
+    "stargazers",
+    "contributors",
+    "subscribers",
+    "subscription",
+    "commits",
+    "git_commits",
+    "comments",
+    "issue_comment",
+    "contents",
+    "compare",
+    "merges",
+    "archive",
+    "downloads",
+    "issues",
+    "pulls",
+    "milestones",
+    "notifications",
+    "labels",
+    "releases",
+    "deployments",
+)
+
+
+def _repository(owner: str = "acme", name: str = "widgets") -> dict[str, object]:
+    """The parent record GitHub's `/search/code` embeds in every hit, in its real shape: 46
+    top-level fields, one of them a nested `owner` of 19 more, measured at 4,056 bytes against 501
+    bytes of per-hit signal. Nothing in the pass reads any of these names — the fixture is realistic
+    so the measured saving is, not because the code knows what a repository is. Naming the owner and
+    repository is what a cross-repo search varies: two hits in different repositories carry records
+    that differ in every field derived from them."""
+    api = f"https://api.github.com/repos/{owner}/{name}"
+    return {
+        "id": 1292760912 + len(f"{owner}/{name}"),
+        "node_id": f"R_kgDOTQ33{owner}",
+        "name": name,
+        "full_name": f"{owner}/{name}",
+        "private": True,
+        "owner": {
+            "login": owner,
+            "id": 295985267 + len(owner),
+            "node_id": f"O_kgDOEaRgcw{owner}",
+            "avatar_url": f"https://avatars.githubusercontent.com/u/{owner}?v=4",
+            "gravatar_id": "",
+            "url": f"https://api.github.com/users/{owner}",
+            "html_url": f"https://github.com/{owner}",
+            "followers_url": f"https://api.github.com/users/{owner}/followers",
+            "following_url": f"https://api.github.com/users/{owner}/following{{/other_user}}",
+            "gists_url": f"https://api.github.com/users/{owner}/gists{{/gist_id}}",
+            "starred_url": f"https://api.github.com/users/{owner}/starred{{/owner}}{{/repo}}",
+            "subscriptions_url": f"https://api.github.com/users/{owner}/subscriptions",
+            "organizations_url": f"https://api.github.com/users/{owner}/orgs",
+            "repos_url": f"https://api.github.com/users/{owner}/repos",
+            "events_url": f"https://api.github.com/users/{owner}/events{{/privacy}}",
+            "received_events_url": f"https://api.github.com/users/{owner}/received_events",
+            "type": "Organization",
+            "user_view_type": "public",
+            "site_admin": False,
+        },
+        "html_url": f"https://github.com/{owner}/{name}",
+        "description": None,
+        "fork": False,
+        "url": api,
+        **{f"{key}_url": f"{api}/{key}{{/id}}" for key in REPOSITORY_URL_KEYS},
+        "git_url": f"git://github.com/{owner}/{name}.git",
+        "ssh_url": f"git@github.com:{owner}/{name}.git",
+        "clone_url": f"https://github.com/{owner}/{name}.git",
+        "svn_url": f"https://github.com/{owner}/{name}",
+        "homepage": None,
+        "size": 148_320,
+    }
+
+
+def _code_search(hits: int, spread: bool = False) -> dict[str, object]:
+    """A denormalized list response: every hit self-contained, so the repository it belongs to is
+    repeated in full per hit. `spread` is the cross-repo query — every hit in a different
+    repository, so the records are all distinct and none of the payload is a repeat."""
+    return {
+        "total_count": 72,
+        "incomplete_results": False,
+        "items": [
+            {
+                "name": f"stage-{index}.md",
+                "path": f"docs/handbook/stage-{index}.md",
+                "sha": f"{index:040x}",
+                "url": f"https://api.github.com/repositories/1292760912/contents/{index}",
+                "git_url": f"https://api.github.com/repositories/1292760912/git/blobs/{index}",
+                "html_url": f"https://github.com/acme/widgets/blob/main/docs/{index}.md",
+                "score": 1.0,
+                "repository": _repository(f"org{index}", f"repo{index}")
+                if spread
+                else _repository(),
+            }
+            for index in range(hits)
+        ],
+    }
+
+
+def _resolved(pointer: str, document: object) -> object:
+    node = document
+    for token in pointer.split("/")[1:]:
+        key = token.replace("~1", "/").replace("~0", "~")
+        node = node[int(key)] if isinstance(node, list) else node[key]
+    return node
+
+
+def _expanded(value: object, document: object) -> object:
+    """Every `same_as` pointer resolved back to the object it names, recursively — the inverse the
+    losslessness claim rests on. A pointer always names an earlier node, so this terminates."""
+    key = connector_tools.DEDUPE_REFERENCE_KEY
+    match value:
+        case Mapping() if set(value) == {key}:
+            return _expanded(_resolved(value[key], document), document)
+        case Mapping():
+            return {key: _expanded(item, document) for key, item in value.items()}
+        case list():
+            return [_expanded(item, document) for item in value]
+        case _:
+            return value
+
+
+async def test_a_repeated_parent_object_crosses_once_and_expands_to_the_original(
+    tmp_path: Path,
+) -> None:
+    """The measured defect, through the real tool: a 30-hit code search carries 30 byte-identical
+    copies of the one repository it searched, ~85% of the payload, and every copy is re-read on
+    every later round of the turn. The first copy crosses whole and the other 29 become pointers to
+    it — and expanding those pointers reproduces the provider's response byte for byte, which is
+    what makes replacing them safe."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    search = _code_search(30)
+    original = json.dumps(search)
+    assert len({json.dumps(hit["repository"]) for hit in search["items"]}) == 1
+    assert len(json.dumps(search["items"][0]["repository"])) > 3_500
+    result = await call_external_tool(
+        _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
+        CallExternalToolInput(
+            tool_name=sample.BROKER_TOOL_SLUG,
+            source_id=sample.CONNECTOR_PROVIDER,
+            arguments=search,
+        ),
+    )
+    payload = _payload(result)
+    items = payload["arguments"]["items"]
+    assert items[0]["repository"] == _repository()
+    assert [item["repository"] for item in items[1:]] == [
+        {"same_as": "/arguments/items/0/repository"}
+    ] * 29
+    condensed = json.dumps(payload["arguments"])
+    assert len(condensed) < len(original) / 4, f"{len(original)} chars became {len(condensed)}"
+    assert json.dumps(_expanded(payload, payload)["arguments"]) == original
+
+
+async def test_a_single_repo_search_lands_inside_the_engine_inline_budget(tmp_path: Path) -> None:
+    """What condensing buys the member, composed with the cap the engine applies after the handler
+    returns: a 30-hit search scoped to one repository is far past `MAX_TOOL_RESULT_CHARS`, so the
+    engine would write it to a `.tool-output` file and leave the model a preview plus a path to
+    filter. Condensed, the same result fits the inline budget and stays whole in context — the same
+    facts, no file round-trip. The order is what makes this hold: the handler condenses, then
+    dispatch measures what the handler returned."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    search = _code_search(30)
+    result = await call_external_tool(
+        _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
+        CallExternalToolInput(
+            tool_name=sample.BROKER_TOOL_SLUG,
+            source_id=sample.CONNECTOR_PROVIDER,
+            arguments=search,
+        ),
+    )
+    text = result.content[0].text
+    assert len(json.dumps(search)) > MAX_TOOL_RESULT_CHARS, "the raw response must be offload-bound"
+    assert len(text) <= MAX_TOOL_RESULT_CHARS, f"{len(text)} chars is past the inline budget"
+    payload = _payload(result)
+    assert payload["arguments"]["items"][0]["repository"]["name"] == "widgets"
+    assert json.dumps(_expanded(payload, payload)["arguments"]) == json.dumps(search)
+
+
+async def test_a_cross_repo_search_still_offloads(tmp_path: Path) -> None:
+    """The other side of that composition: a cross-repo search carries a different repository per
+    hit, so there is nothing identical to collapse and the result must still be over the cap when
+    the engine measures it. Condensing may never buy the inline budget by collapsing records that
+    merely resemble each other — no pointer is emitted here at all."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    search = _code_search(30, spread=True)
+    assert len({json.dumps(hit["repository"]) for hit in search["items"]}) == 30
+    result = await call_external_tool(
+        _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
+        CallExternalToolInput(
+            tool_name=sample.BROKER_TOOL_SLUG,
+            source_id=sample.CONNECTOR_PROVIDER,
+            arguments=search,
+        ),
+    )
+    text = result.content[0].text
+    assert connector_tools.DEDUPE_REFERENCE_KEY not in text
+    assert len(text) > MAX_TOOL_RESULT_CHARS, f"{len(text)} chars would wrongly stay inline"
+    assert _payload(result)["arguments"] == search
+
+
+async def test_a_repeat_across_two_lists_points_at_the_first_occurrence(tmp_path: Path) -> None:
+    """The walk is over the whole result, not one list: the same record embedded under a second key
+    is the same waste, and it resolves against the copy that already crossed."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    result = await call_external_tool(
+        _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
+        CallExternalToolInput(
+            tool_name=sample.BROKER_TOOL_SLUG,
+            source_id=sample.CONNECTOR_PROVIDER,
+            arguments={
+                "hits": [{"path": "a.md", "repository": _repository()}],
+                "pinned": {"path": "b.md", "repository": _repository()},
+            },
+        ),
+    )
+    payload = _payload(result)
+    assert payload["arguments"]["pinned"]["repository"] == {
+        "same_as": "/arguments/hits/0/repository"
+    }
+    assert _expanded(payload, payload)["arguments"]["pinned"]["repository"] == _repository()
+
+
+async def test_a_pointer_escapes_a_key_holding_a_slash_or_a_tilde(tmp_path: Path) -> None:
+    """A provider names its own keys, and JSON Pointer gives `/` and `~` structural meaning, so both
+    are escaped (RFC 6901 `~1`, `~0`) — in that order, since escaping `/` first would leave the `~1`
+    it wrote to be re-escaped and the pointer would name a node that does not exist. The literal
+    pointer is asserted, then resolved back to the record it names."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    arguments = {
+        "acme/widgets~main": {"repository": _repository()},
+        "acme/widgets~dev": {"repository": _repository()},
+    }
+    result = await call_external_tool(
+        _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
+        CallExternalToolInput(
+            tool_name=sample.BROKER_TOOL_SLUG,
+            source_id=sample.CONNECTOR_PROVIDER,
+            arguments=arguments,
+        ),
+    )
+    payload = _payload(result)
+    assert payload["arguments"]["acme/widgets~dev"] == {"same_as": "/arguments/acme~1widgets~0main"}
+    assert json.dumps(_expanded(payload, payload)["arguments"]) == json.dumps(arguments)
+
+
+async def test_small_repeated_objects_are_left_whole(tmp_path: Path) -> None:
+    """A pointer costs ~35 bytes, so churning small structs into pointers trades a readable result
+    for a saving that measures 1% on a real payload. Under the floor every copy crosses in full."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    stub = {"login": "acme", "id": 295985267, "type": "Organization"}
+    assert len(json.dumps(stub)) < connector_tools.MIN_DEDUPE_BYTES
+    result = await call_external_tool(
+        _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
+        CallExternalToolInput(
+            tool_name=sample.BROKER_TOOL_SLUG,
+            source_id=sample.CONNECTOR_PROVIDER,
+            arguments={"rows": [{"user": dict(stub)} for _ in range(20)]},
+        ),
+    )
+    assert _payload(result)["arguments"]["rows"] == [{"user": stub}] * 20
+
+
+async def test_a_repeated_array_keeps_its_type(tmp_path: Path) -> None:
+    """Only an object is replaced. A pointer where a field's array belongs would change that field's
+    type for every reader of the result, and an array is not what a provider repeats — its elements
+    are, and those are deduped inside it."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    result = await call_external_tool(
+        _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
+        CallExternalToolInput(
+            tool_name=sample.BROKER_TOOL_SLUG,
+            source_id=sample.CONNECTOR_PROVIDER,
+            arguments={
+                "first": {"owner": "acme", "repositories": [_repository()]},
+                "second": {"owner": "globex", "repositories": [_repository()]},
+            },
+        ),
+    )
+    echoed = _payload(result)["arguments"]
+    assert isinstance(echoed["second"]["repositories"], list)
+    assert echoed["second"]["repositories"] == [{"same_as": "/arguments/first/repositories/0"}]
+
+
+async def test_objects_differing_only_in_key_order_both_cross_whole(tmp_path: Path) -> None:
+    """Identity is the bytes a node serializes to, key order included. Two objects a provider wrote
+    in different orders are not interchangeable if the result must reproduce exactly, so neither
+    becomes a pointer to the other — while the sub-object they do share verbatim still crosses once,
+    and expanding it restores the field in the place and order the provider wrote it."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    repository = _repository()
+    reordered = {key: repository[key] for key in reversed(list(repository))}
+    result = await call_external_tool(
+        _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
+        CallExternalToolInput(
+            tool_name=sample.BROKER_TOOL_SLUG,
+            source_id=sample.CONNECTOR_PROVIDER,
+            arguments={"a": repository, "b": reordered},
+        ),
+    )
+    payload = _payload(result)
+    echoed = payload["arguments"]
+    assert json.dumps(echoed["a"]) == json.dumps(repository)
+    assert list(echoed["b"]) == list(reordered)
+    assert echoed["b"]["owner"] == {"same_as": "/arguments/a/owner"}
+    assert json.dumps(_expanded(payload, payload)["arguments"]["b"]) == json.dumps(reordered)
+
+
+async def test_a_payload_that_uses_the_reference_key_itself_is_never_rewritten(
+    tmp_path: Path,
+) -> None:
+    """A pointer only reads as ours while the provider's own JSON does not use the key. A response
+    already carrying it anywhere crosses exactly as it came, so no reader has to guess whether a
+    `same_as` object is a pointer or the provider's data."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    arguments = {
+        "same_as": "provider field",
+        "rows": [{"repository": _repository()}, {"repository": _repository()}],
+    }
+    result = await call_external_tool(
+        _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
+        CallExternalToolInput(
+            tool_name=sample.BROKER_TOOL_SLUG,
+            source_id=sample.CONNECTOR_PROVIDER,
+            arguments=arguments,
+        ),
+    )
+    assert _payload(result)["arguments"] == arguments
+
+
+async def test_a_response_past_the_dedupe_cap_is_never_rewritten(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pass is bounded by the size at which the engine offloads the whole tool result to a
+    workspace file: past it the result never enters context in full, so there is nothing to save and
+    nothing is walked."""
+    monkeypatch.setattr(connector_tools, "MAX_DEDUPE_CHARS", 4_096)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    search = _code_search(4)
+    result = await call_external_tool(
+        _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
+        CallExternalToolInput(
+            tool_name=sample.BROKER_TOOL_SLUG,
+            source_id=sample.CONNECTOR_PROVIDER,
+            arguments=search,
+        ),
+    )
+    assert _payload(result)["arguments"] == search
+
+
+async def test_records_differing_only_in_a_leafs_type_are_never_collapsed(tmp_path: Path) -> None:
+    """A leaf renders itself rather than going through the JSON encoder, which is what keeps a
+    numeric-leaf result off the encoder's per-value call cost — so the rendering has to keep every
+    scalar apart. Five records differing only in one leaf (`1`, `1.0`, `True`, `"1"`, `None`) must
+    all cross whole; collapsing any pair would report one provider value as another."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    leaves: tuple[object, ...] = (1, 1.0, True, "1", None)
+    arguments = {
+        f"record{index}": {"repository": _repository(), "count": leaf}
+        for index, leaf in enumerate(leaves)
+    }
+    result = await call_external_tool(
+        _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
+        CallExternalToolInput(
+            tool_name=sample.BROKER_TOOL_SLUG,
+            source_id=sample.CONNECTOR_PROVIDER,
+            arguments=arguments,
+        ),
+    )
+    payload = _payload(result)
+    echoed = payload["arguments"]
+    assert [echoed[f"record{index}"]["count"] for index in range(len(leaves))] == list(leaves)
+    assert echoed["record0"]["repository"] == _repository()
+    assert [echoed[f"record{index}"]["repository"] for index in range(1, len(leaves))] == [
+        {"same_as": "/arguments/record0/repository"}
+    ] * (len(leaves) - 1)
+    assert json.dumps(_expanded(payload, payload)["arguments"]) == json.dumps(arguments)
+
+
+async def test_a_node_dense_response_is_never_walked(tmp_path: Path) -> None:
+    """The walk visits every node, so its cost tracks node count, not payload size: a result made of
+    tens of thousands of small leaves is what blows the serve loop's budget, and it is also a result
+    with nothing worth deduping. Past the structural-token bound nothing is walked — proven by a
+    repeat that would otherwise have collapsed crossing whole."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    dense = {
+        "hits": _code_search(2)["items"],
+        "ids": [f"v{index:06d}" for index in range(connector_tools.MAX_DEDUPE_TOKENS)],
+    }
+    result = await call_external_tool(
+        _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
+        CallExternalToolInput(
+            tool_name=sample.BROKER_TOOL_SLUG,
+            source_id=sample.CONNECTOR_PROVIDER,
+            arguments=dense,
+        ),
+    )
+    assert _payload(result)["arguments"] == dense
+
+
+async def test_a_record_whose_child_was_pointed_away_still_collapses_whole(
+    tmp_path: Path,
+) -> None:
+    """A node's size is the one it came in at, so two nodes with equal digests clear the floor
+    alike. Here the same record appears under three keys: the shared `owner` inside it collapses
+    first, and the records above it must still collapse whole rather than surviving as
+    partially-pointered copies of a record already in the result."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    record = {"repository": _repository()}
+    result = await call_external_tool(
+        _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
+        CallExternalToolInput(
+            tool_name=sample.BROKER_TOOL_SLUG,
+            source_id=sample.CONNECTOR_PROVIDER,
+            arguments={"one": record, "two": dict(record), "three": dict(record)},
+        ),
+    )
+    payload = _payload(result)
+    echoed = payload["arguments"]
+    assert echoed["two"] == {"same_as": "/arguments/one"}
+    assert echoed["three"] == {"same_as": "/arguments/one"}
+    assert _expanded(payload, payload)["arguments"]["three"] == record
+
+
+async def test_deep_subtrees_are_never_judged_identical_past_the_depth_cap(tmp_path: Path) -> None:
+    """Past the depth cap the pass stops comparing, so it must stop claiming: two subtrees identical
+    down to the cap and different below it would collapse into one if the node took a digest of what
+    it could still see. Both cross whole, while a repeat at ordinary depth in the same response is
+    still replaced."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    def chain(leaf: str) -> dict[str, object]:
+        node: dict[str, object] = {"leaf": leaf}
+        for _ in range(connector_tools.MAX_TRANSLATE_DEPTH + 20):
+            node = {"nested": node, "filler": "x" * 40}
+        return node
+
+    broker = _FileBroker(
+        response={
+            "left": chain("left"),
+            "right": chain("right"),
+            "one": _repository(),
+            "two": _repository(),
+        }
+    )
+    result = await call_external_tool(
+        _ctx(_file_registry(broker), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
+        CallExternalToolInput(tool_name="ANY", source_id=sample.CONNECTOR_PROVIDER, arguments={}),
+    )
+    payload = _payload(result)
+    assert payload["two"] == {"same_as": "/one"}
+    assert json.dumps(payload["left"]) == json.dumps(chain("left"))
+    assert json.dumps(payload["right"]) == json.dumps(chain("right"))
+    assert json.dumps(_expanded(payload, payload)) == json.dumps(broker.response)
