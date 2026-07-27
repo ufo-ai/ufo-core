@@ -2,7 +2,7 @@
 
 A scheduled task is a workspace object (RFC 0017): the agent creates, updates, lists, and deletes
 recurring tasks through the generic object verbs, and this module supplies the kind — spec model,
-store handlers over the workspace-scoped `ScheduleStore`, cron validation on every apply. Each
+store handlers over the scoped `ScheduleStore`, cron validation on every apply. Each
 apply runs inside a turn, so the row binds the applying turn's conversation and agent: a fire
 later re-enters that conversation as that agent. Pause rows (`@once`) are workflow internals,
 never objects — `ScheduleStore.list` excludes them, and `pause_and_wait` stays a plain tool that
@@ -181,7 +181,6 @@ class ScheduledTaskObjects(MemberOwnedObjects[ScheduledTaskSpec]):
         schedule = validate_cron(spec.schedule)
         await _require_scheduler(ctx).create(
             conversation_id=ctx.turn.conversation_id,
-            agent_id=ctx.turn.agent_id,
             name=name,
             schedule=schedule,
             prompt=spec.prompt,
@@ -238,7 +237,6 @@ async def pause_and_wait(ctx: ToolContext, args: PauseAndWaitInput) -> ToolResul
     }
     pause = await scheduler.pause(
         conversation_id=ctx.turn.conversation_id,
-        agent_id=ctx.turn.agent_id,
         prompt="Resume the paused workflow.\n" + json.dumps(wakeup),
         description=args.reason,
         next_run_at=resume_at,

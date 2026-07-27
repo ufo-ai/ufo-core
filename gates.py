@@ -24,6 +24,8 @@ COMPOSITION_ROOTS = (CORE_SRC / "serve.py", CORE_SRC / "proxy_serve.py")
 ROLE_PACKAGES = ("ufo.surfaces", "ufo.loop", "ufo.jobs", "ufo.sandbox.proxy")
 ENVELOPE_COLUMNS = {"workspace_id", "created_at", "updated_at"}
 SCHEMA_TABLES = CORE_SRC / "schema" / "tables.py"
+SCHEDULING_MODULE = CORE_SRC / "scheduling.py"
+AMBIENT_SCHEDULE_METHODS = frozenset({"create", "pause", "_upsert", "cancel", "list", "inspect"})
 EXTENSIONS_ROOT = "extensions"
 PACKS_ROOT = "packs"
 EXT_SCAFFOLD_DIRS = frozenset({"tests"})
@@ -257,6 +259,29 @@ def _job_selector_failures(trees: dict[Path, ast.Module]) -> list[str]:
                             f"{rel}: JobSpec {CANDIDATES_FIELD}=None — a job selector must name "
                             f"candidate workspaces, never None"
                         )
+    return failures
+
+
+def _schedule_authority_failures(trees: dict[Path, ast.Module]) -> list[str]:
+    """Schedule member paths and their write primitive accept no agent selector."""
+    tree = trees.get(SCHEDULING_MODULE)
+    if tree is None:
+        return []
+    failures = []
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef) or node.name != "ScheduleStore":
+            continue
+        for method in node.body:
+            if not isinstance(method, ast.AsyncFunctionDef):
+                continue
+            if method.name not in AMBIENT_SCHEDULE_METHODS:
+                continue
+            parameters = (*method.args.posonlyargs, *method.args.args, *method.args.kwonlyargs)
+            if any("agent" in parameter.arg.casefold() for parameter in parameters):
+                failures.append(
+                    f"{SCHEDULING_MODULE}: ScheduleStore.{method.name} accepts an agent selector — "
+                    "member-facing schedule authority is ambient"
+                )
     return failures
 
 
@@ -622,6 +647,7 @@ def main() -> int:
     failures.extend(_sdk_import_failures(trees))
     failures.extend(_conformance_failures(trees))
     failures.extend(_job_selector_failures(trees))
+    failures.extend(_schedule_authority_failures(trees))
     failures.extend(_wiring_failures(trees))
     failures.extend(_live_frame_failures(trees))
     failures.extend(_to_thread_failures(trees))

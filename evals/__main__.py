@@ -97,6 +97,7 @@ from evals.wandr.runner import (
 from evals.wandr.runner import (
     load_boundary as load_wandr_boundary,
 )
+from ufo.agent_scope import agent
 from ufo.blob import blob_store_for
 from ufo.config import Config, config_path, load_config
 from ufo.credentials import CredentialStore
@@ -523,7 +524,7 @@ async def _run(
             if ctx.model is None:
                 raise RuntimeError("eval context requires model access")
             slots = asyncio.Semaphore(concurrency)
-            with ws(workspace_id):
+            with ws(workspace_id), agent(agent_id):
                 loadable_skills: frozenset[str] | None = None
                 if any(task.suite == "skill_loading" for task in tasks):
                     loadable_skills = frozenset(

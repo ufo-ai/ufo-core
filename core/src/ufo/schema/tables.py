@@ -409,7 +409,7 @@ scheduled_task = sa.Table(
     sa.Column("claim_expires_at", sa.DateTime(timezone=True), nullable=True),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
-    sa.UniqueConstraint("workspace_id", "name", name="scheduled_task_name"),
+    sa.UniqueConstraint("workspace_id", "agent_id", "name", name="scheduled_task_name"),
     sa.Index("scheduled_task_due", "next_run_at"),
     sa.Index(
         "scheduled_task_pause",

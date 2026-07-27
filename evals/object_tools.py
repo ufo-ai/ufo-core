@@ -27,6 +27,7 @@ from evals.harness.capability import (
 )
 from evals.harness.scenario import ScenarioCase, ScenarioOutcome, ScenarioUser
 from evals.harness.scorers import combine, required_tools_scorer, skill_scorer
+from ufo.agent_scope import agent
 from ufo.db import workspace_tx
 from ufo.scheduling import ScheduledTask, ScheduleStore
 from ufo.schema import tables
@@ -398,7 +399,8 @@ def _seeded(*names: str):
         async with workspace_tx() as connection:
             await connection.execute(
                 sa.delete(tables.scheduled_task).where(
-                    tables.scheduled_task.c.workspace_id == workspace_id
+                    tables.scheduled_task.c.workspace_id == workspace_id,
+                    tables.scheduled_task.c.agent_id == agent_id,
                 )
             )
             await connection.execute(
@@ -412,18 +414,18 @@ def _seeded(*names: str):
                     updated_at=sa.func.now(),
                 )
             )
-        store = ScheduleStore()
-        for name in names:
-            prompt, schedule = SEEDED[name]
-            await store.create(
-                conversation_id=conversation_id,
-                agent_id=agent_id,
-                name=name,
-                schedule=schedule,
-                prompt=prompt,
-                description=prompt,
-                next_run_at=next_fire(schedule, datetime.now(UTC)),
-            )
+        with agent(agent_id):
+            store = ScheduleStore()
+            for name in names:
+                prompt, schedule = SEEDED[name]
+                await store.create(
+                    conversation_id=conversation_id,
+                    name=name,
+                    schedule=schedule,
+                    prompt=prompt,
+                    description=prompt,
+                    next_run_at=next_fire(schedule, datetime.now(UTC)),
+                )
 
     return seed
 

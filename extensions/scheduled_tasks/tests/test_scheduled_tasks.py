@@ -16,6 +16,7 @@ from uuid import UUID, uuid4
 import pytest
 import sqlalchemy as sa
 import yaml
+from sqlalchemy.exc import NoResultFound
 from ufo_ext_scheduled_tasks.cron import next_fire
 from ufo_ext_scheduled_tasks.manifest import NAME, RUNNER_JOB, manifest
 from ufo_ext_scheduled_tasks.runner import FINAL_FIRE_INSTRUCTION, ScheduledTaskRunner
@@ -33,6 +34,7 @@ from evals.object_tools import (
     _graded_final_fire_result_and_check_in,
     _graded_operational_task_stays_open,
 )
+from ufo.agent_scope import AgentUnbound, agent
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, context_for
 from ufo.ext.loader import skill_registry, turn_tools
@@ -169,6 +171,34 @@ async def _seed(surface: str = "cli") -> tuple[UUID, UUID, UUID]:
     return workspace_id, agent_id, conversation_id
 
 
+async def _second_agent(workspace_id: UUID) -> tuple[UUID, UUID]:
+    agent_id, conversation_id = uuid4(), uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=agent_id,
+                workspace_id=workspace_id,
+                name=f"second-{agent_id.hex[:8]}",
+                prompt="be brief",
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=conversation_id,
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                surface="cli",
+                queue_key=f"session-{conversation_id.hex[:8]}",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return agent_id, conversation_id
+
+
 async def _unavailable_spawn(
     profile: str, payload: dict[str, object], background: bool = False
 ) -> SpawnResult:
@@ -226,7 +256,7 @@ async def test_applied_task_writes_durable_row_bound_to_the_turn(db: None) -> No
     workspace_id, agent_id, conversation_id = await _seed()
     creator = await _member(workspace_id)
     ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=creator)
-    with ws(workspace_id):
+    with ws(workspace_id), agent(agent_id):
         applied = json.loads(
             await _dispatch(
                 _object_tool("object_apply"),
@@ -264,7 +294,7 @@ async def test_pause_and_wait_runs_tool_to_timer_to_resumed_turn(db: None) -> No
     invoker = AdmissionInvoker(
         admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
     )
-    with ws(workspace_id):
+    with ws(workspace_id), agent(agent_id):
         result = await pause_and_wait(
             ctx,
             PauseAndWaitInput(
@@ -379,10 +409,9 @@ async def test_rejected_timer_resume_removes_its_one_time_pause(db: None) -> Non
     invoker = AdmissionInvoker(
         admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
     )
-    with ws(workspace_id):
+    with ws(workspace_id), agent(agent_id):
         await ScheduleStore().pause(
             conversation_id,
-            agent_id,
             "resume",
             "resume",
             datetime.now(UTC) - timedelta(minutes=1),
@@ -407,7 +436,7 @@ async def test_new_message_resumes_pause_and_cancels_timer(db: None) -> None:
     dbos = StubDbos()
     admission = Admission(dbos=dbos, durable_surfaces=frozenset())
     member_admission = MemberAdmission(admission=admission, workspace_id=workspace_id)
-    with ws(workspace_id):
+    with ws(workspace_id), agent(agent_id):
         await pause_and_wait(
             ctx,
             PauseAndWaitInput(
@@ -470,7 +499,7 @@ async def test_pause_does_not_arm_after_a_newer_member_was_admitted(db: None) ->
         admission=Admission(dbos=StubDbos(), durable_surfaces=frozenset()),
         workspace_id=workspace_id,
     )
-    with ws(workspace_id):
+    with ws(workspace_id), agent(agent_id):
         member_turn_id = await member_admission.admit(
             conversation_id,
             "new message",
@@ -528,7 +557,7 @@ async def test_internal_arrivals_do_not_block_the_pause_timer(db: None) -> None:
         admission=Admission(dbos=StubDbos(), durable_surfaces=frozenset()),
         workspace_id=workspace_id,
     )
-    with ws(workspace_id):
+    with ws(workspace_id), agent(agent_id):
         background_turn_id = await invoker.invoke(conversation_id, agent_id, "background note")
         result = await pause_and_wait(
             ctx,
@@ -557,7 +586,7 @@ async def test_redelivered_terminal_message_does_not_cancel_a_later_pause(db: No
     dbos = StubDbos()
     admission = Admission(dbos=dbos, durable_surfaces=frozenset())
     member_admission = MemberAdmission(admission=admission, workspace_id=workspace_id)
-    with ws(workspace_id):
+    with ws(workspace_id), agent(agent_id):
         turn_id = await member_admission.admit(
             conversation_id,
             "The approval arrived.",
@@ -627,7 +656,7 @@ async def test_failed_member_enqueue_preserves_pause_for_the_same_turn_retry(db:
     member_admission = MemberAdmission(
         admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
     )
-    with ws(workspace_id):
+    with ws(workspace_id), agent(agent_id):
         await pause_and_wait(
             ctx,
             PauseAndWaitInput(
@@ -689,10 +718,9 @@ async def test_redundant_enqueue_survives_an_ambiguous_failure_until_claim(db: N
     member_admission = MemberAdmission(
         admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
     )
-    with ws(workspace_id):
+    with ws(workspace_id), agent(agent_id):
         await ScheduleStore().pause(
             conversation_id,
-            agent_id,
             "resume",
             "approval",
             datetime.now(UTC) + timedelta(minutes=10),
@@ -752,7 +780,7 @@ async def test_background_turn_does_not_cancel_pause(db: None) -> None:
     invoker = AdmissionInvoker(
         admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
     )
-    with ws(workspace_id):
+    with ws(workspace_id), agent(agent_id):
         await pause_and_wait(
             ctx,
             PauseAndWaitInput(
@@ -764,7 +792,6 @@ async def test_background_turn_does_not_cancel_pause(db: None) -> None:
         )
         await ScheduleStore().create(
             conversation_id,
-            agent_id,
             "scheduled-check",
             DAILY_9AM,
             "check something else",
@@ -791,7 +818,7 @@ async def test_internal_invoke_does_not_cancel_pause(db: None) -> None:
         admission=Admission(dbos=StubDbos(), durable_surfaces=frozenset()),
         workspace_id=workspace_id,
     )
-    with ws(workspace_id):
+    with ws(workspace_id), agent(agent_id):
         await pause_and_wait(
             ctx,
             PauseAndWaitInput(
@@ -826,10 +853,9 @@ async def test_member_admission_wins_against_an_already_claimed_pause(db: None) 
     invoker = AdmissionInvoker(admission=admission, workspace_id=workspace_id)
     store = ScheduleStore(invoker)
     runner = ScheduledTaskRunner(ctx=_runner_ctx(invoker))
-    with ws(workspace_id):
+    with ws(workspace_id), agent(agent_id):
         await store.pause(
             conversation_id,
-            agent_id,
             "resume",
             "resume",
             due_at,
@@ -877,10 +903,9 @@ async def test_rearmed_pause_rejects_the_old_claim(db: None) -> None:
         admission=Admission(dbos=StubDbos(), durable_surfaces=frozenset()),
         workspace_id=workspace_id,
     )
-    with ws(workspace_id):
+    with ws(workspace_id), agent(agent_id):
         original = await store.pause(
             conversation_id,
-            agent_id,
             "resume old",
             "old",
             now - timedelta(minutes=1),
@@ -889,7 +914,6 @@ async def test_rearmed_pause_rejects_the_old_claim(db: None) -> None:
         [claimed] = await store.claim_due(now, 300)
         rearmed = await store.pause(
             conversation_id,
-            agent_id,
             "resume new",
             "new",
             now + timedelta(minutes=10),
@@ -920,10 +944,9 @@ async def test_one_time_pause_rejects_runtime_instruction(db: None) -> None:
         admission=Admission(dbos=StubDbos(), durable_surfaces=frozenset()),
         workspace_id=workspace_id,
     )
-    with ws(workspace_id):
+    with ws(workspace_id), agent(agent_id):
         await ScheduleStore().pause(
             conversation_id,
-            agent_id,
             "resume workflow",
             "waiting",
             now - timedelta(minutes=1),
@@ -943,10 +966,9 @@ async def test_member_message_takes_over_a_timer_waiting_to_enqueue(db: None) ->
     member_admission = MemberAdmission(admission=admission, workspace_id=workspace_id)
     store = ScheduleStore(invoker)
     runner = ScheduledTaskRunner(ctx=_runner_ctx(invoker))
-    with ws(workspace_id):
+    with ws(workspace_id), agent(agent_id):
         await store.pause(
             conversation_id,
-            agent_id,
             "timer resume",
             "timer",
             now - timedelta(minutes=1),
@@ -992,10 +1014,9 @@ async def test_member_takes_over_the_timer_while_internal_work_queues(db: None) 
     member_admission = MemberAdmission(admission=admission, workspace_id=workspace_id)
     store = ScheduleStore(invoker)
     runner = ScheduledTaskRunner(ctx=_runner_ctx(invoker))
-    with ws(workspace_id):
+    with ws(workspace_id), agent(agent_id):
         await store.pause(
             conversation_id,
-            agent_id,
             "timer resume",
             "timer",
             now - timedelta(minutes=1),
@@ -1055,10 +1076,9 @@ async def test_later_member_joins_the_first_queued_turn(db: None) -> None:
     dbos = _FirstBlockingDbos()
     admission = Admission(dbos=dbos, durable_surfaces=frozenset())
     member_admission = MemberAdmission(admission=admission, workspace_id=workspace_id)
-    with ws(workspace_id):
+    with ws(workspace_id), agent(agent_id):
         await ScheduleStore().pause(
             conversation_id,
-            agent_id,
             "timer resume",
             "timer",
             datetime.now(UTC) + timedelta(minutes=10),
@@ -1112,10 +1132,9 @@ async def test_pause_recovers_the_member_turn_after_process_death(db: None) -> N
     blocked = _BlockingDbos()
     admission = Admission(dbos=blocked, durable_surfaces=frozenset())
     member_admission = MemberAdmission(admission=admission, workspace_id=workspace_id)
-    with ws(workspace_id):
+    with ws(workspace_id), agent(agent_id):
         await ScheduleStore().pause(
             conversation_id,
-            agent_id,
             "timer resume",
             "timer",
             datetime.now(UTC) + timedelta(minutes=10),
@@ -1193,7 +1212,7 @@ async def test_reapplied_name_updates_in_place(db: None) -> None:
     creator = await _member(workspace_id)
     ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=creator)
     apply = _object_tool("object_apply")
-    with ws(workspace_id):
+    with ws(workspace_id), agent(agent_id):
         await _dispatch(ctx=ctx, tool=apply, manifest=_task_manifest("report", DAILY_9AM, "daily"))
         second = json.loads(
             await _dispatch(
@@ -1207,7 +1226,7 @@ async def test_reapplied_name_updates_in_place(db: None) -> None:
     assert tasks[0].prompt == "weekly"
 
 
-async def test_concurrent_first_create_converges_by_workspace_name(db: None) -> None:
+async def test_concurrent_first_create_converges_by_agent_name(db: None) -> None:
     workspace_id, agent_id, conversation_id = await _seed()
     second_conversation = uuid4()
     async with workspace_tx() as connection:
@@ -1230,11 +1249,10 @@ async def test_concurrent_first_create_converges_by_workspace_name(db: None) -> 
         )
     store = ScheduleStore()
     due_at = datetime.now(UTC) + timedelta(minutes=10)
-    with ws(workspace_id):
+    with ws(workspace_id), agent(agent_id):
         first, second = await asyncio.gather(
             store.create(
                 conversation_id,
-                agent_id,
                 "scheduled-shared-name",
                 DAILY_9AM,
                 "first",
@@ -1243,7 +1261,6 @@ async def test_concurrent_first_create_converges_by_workspace_name(db: None) -> 
             ),
             store.create(
                 second_conversation,
-                agent_id,
                 "scheduled-shared-name",
                 DAILY_9AM,
                 "second",
@@ -1265,10 +1282,9 @@ async def test_runner_fires_due_task_into_a_turn(db: None) -> None:
     invoker = AdmissionInvoker(
         admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
     )
-    with ws(workspace_id):
+    with ws(workspace_id), agent(agent_id):
         await store.create(
             conversation_id,
-            agent_id,
             "scheduled-daily",
             DAILY_9AM,
             "check inbox",
@@ -1336,10 +1352,9 @@ async def test_runner_replaces_final_permitted_fire_with_check_in(db: None) -> N
         admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
     )
     store = ScheduleStore(invoker)
-    with ws(workspace_id):
+    with ws(workspace_id), agent(agent_id):
         await store.create(
             conversation_id,
-            agent_id,
             "bounded-daily",
             DAILY_9AM,
             "check inbox",
@@ -1373,7 +1388,7 @@ async def test_task_horizon_round_trips_through_spec_and_status(db: None) -> Non
     creator = await _member(workspace_id)
     expires_at = datetime.now(UTC) + timedelta(days=7)
     ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=creator)
-    with ws(workspace_id):
+    with ws(workspace_id), agent(agent_id):
         await _dispatch(
             _object_tool("object_apply"),
             ctx,
@@ -1411,10 +1426,9 @@ async def test_expired_task_is_cancelled_without_invoking(db: None) -> None:
     invoker = AdmissionInvoker(
         admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
     )
-    with ws(workspace_id):
+    with ws(workspace_id), agent(agent_id):
         await ScheduleStore().create(
             conversation_id,
-            agent_id,
             "expired-digest",
             DAILY_9AM,
             "send the digest",
@@ -1439,10 +1453,9 @@ async def test_expiry_after_claim_cancels_before_invoking(db: None) -> None:
     )
     store = ScheduleStore(invoker)
     runner = ScheduledTaskRunner(ctx=_runner_ctx(invoker))
-    with ws(workspace_id):
+    with ws(workspace_id), agent(agent_id):
         await store.create(
             conversation_id,
-            agent_id,
             "claim-race-digest",
             DAILY_9AM,
             "send the digest",
@@ -1462,10 +1475,9 @@ async def test_unclaimed_task_cannot_be_retired(db: None) -> None:
     workspace_id, agent_id, conversation_id = await _seed()
     now = datetime.now(UTC)
     store = ScheduleStore()
-    with ws(workspace_id):
+    with ws(workspace_id), agent(agent_id):
         task = await store.create(
             conversation_id,
-            agent_id,
             "unclaimed-digest",
             DAILY_9AM,
             "send the digest",
@@ -1486,10 +1498,9 @@ async def test_future_expiry_allows_claimed_task_to_invoke(db: None) -> None:
     )
     store = ScheduleStore(invoker)
     runner = ScheduledTaskRunner(ctx=_runner_ctx(invoker))
-    with ws(workspace_id):
+    with ws(workspace_id), agent(agent_id):
         await store.create(
             conversation_id,
-            agent_id,
             "unexpired-digest",
             DAILY_9AM,
             "send the digest",
@@ -1516,10 +1527,9 @@ async def test_batch_backlog_does_not_skip_next_cron_occurrence(db: None) -> Non
     )
     store = ScheduleStore(invoker)
     runner = ScheduledTaskRunner(ctx=_runner_ctx(invoker))
-    with ws(workspace_id):
+    with ws(workspace_id), agent(agent_id):
         await store.create(
             conversation_id,
-            agent_id,
             "minutely-digest",
             "* * * * *",
             "send the digest",
@@ -1545,10 +1555,9 @@ async def test_expired_stale_claim_never_invokes(db: None) -> None:
     )
     store = ScheduleStore(invoker)
     runner = ScheduledTaskRunner(ctx=_runner_ctx(invoker))
-    with ws(workspace_id):
+    with ws(workspace_id), agent(agent_id):
         await store.create(
             conversation_id,
-            agent_id,
             "reclaimed-digest",
             DAILY_9AM,
             "send the digest",
@@ -1568,10 +1577,9 @@ async def test_expired_stale_claim_never_invokes(db: None) -> None:
 async def test_expired_task_with_future_fire_is_a_workspace_candidate(db: None) -> None:
     workspace_id, agent_id, conversation_id = await _seed()
     now = datetime.now(UTC)
-    with ws(workspace_id):
+    with ws(workspace_id), agent(agent_id):
         await ScheduleStore().create(
             conversation_id,
-            agent_id,
             "expired-before-next-fire",
             DAILY_9AM,
             "send the digest",
@@ -1607,7 +1615,7 @@ async def test_update_from_another_conversation_keeps_reporting_home(db: None) -
             )
         )
     apply = _object_tool("object_apply")
-    with ws(workspace_id):
+    with ws(workspace_id), agent(agent_id):
         await _dispatch(
             ctx=replace(
                 _tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=member_id
@@ -1640,9 +1648,9 @@ async def test_claim_due_caps_a_sweep_at_its_batch_limit(db: None) -> None:
     store = ScheduleStore()
     older = datetime.now(UTC) - timedelta(minutes=10)
     newer = datetime.now(UTC) - timedelta(minutes=5)
-    with ws(workspace_id):
-        await store.create(conversation_id, agent_id, "first", DAILY_9AM, "a", "a", older)
-        await store.create(conversation_id, agent_id, "second", DAILY_9AM, "b", "b", newer)
+    with ws(workspace_id), agent(agent_id):
+        await store.create(conversation_id, "first", DAILY_9AM, "a", "a", older)
+        await store.create(conversation_id, "second", DAILY_9AM, "b", "b", newer)
         first_sweep = await store.claim_due(datetime.now(UTC), 300, limit=1)
         assert [task.name for task in first_sweep] == ["first"]
         second_sweep = await store.claim_due(datetime.now(UTC), 300, limit=1)
@@ -1659,10 +1667,9 @@ async def test_fire_into_a_durable_surface_conversation_registers_delivery(db: N
         admission=Admission(dbos=StubDbos(), durable_surfaces=frozenset({"slack"})),
         workspace_id=workspace_id,
     )
-    with ws(workspace_id):
+    with ws(workspace_id), agent(agent_id):
         await store.create(
             conversation_id,
-            agent_id,
             "scheduled-daily",
             DAILY_9AM,
             "check inbox",
@@ -1693,10 +1700,9 @@ async def test_second_poll_does_not_refire_an_advanced_task(db: None) -> None:
             admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
         ),
     )
-    with ws(workspace_id):
+    with ws(workspace_id), agent(agent_id):
         await store.create(
             conversation_id,
-            agent_id,
             "scheduled-daily",
             DAILY_9AM,
             "check inbox",
@@ -1716,10 +1722,9 @@ async def test_next_recurring_fire_admits_a_distinct_turn(db: None) -> None:
         workspace_id=workspace_id,
     )
     runner = ScheduledTaskRunner(ctx=_runner_ctx(invoker))
-    with ws(workspace_id):
+    with ws(workspace_id), agent(agent_id):
         task = await ScheduleStore().create(
             conversation_id,
-            agent_id,
             "scheduled-daily",
             DAILY_9AM,
             "check inbox",
@@ -1746,7 +1751,7 @@ async def test_deleted_task_stops_and_leaves_the_listing(db: None) -> None:
     workspace_id, agent_id, conversation_id = await _seed()
     creator = await _member(workspace_id)
     ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=creator)
-    with ws(workspace_id):
+    with ws(workspace_id), agent(agent_id):
         await _dispatch(
             _object_tool("object_apply"), ctx, manifest=_task_manifest("watcher", DAILY_9AM, "x")
         )
@@ -1771,14 +1776,14 @@ async def test_applied_task_rejects_non_five_field_cron(db: None) -> None:
     args = apply.input_model.model_validate(
         {"manifest": _task_manifest("too-many", "0 9 * * * *", "too many fields")}
     )
-    with ws(workspace_id), pytest.raises(ValueError, match="5-field"):
+    with ws(workspace_id), agent(agent_id), pytest.raises(ValueError, match="5-field"):
         await apply.handler(ctx, args)
 
 
 async def test_pause_rows_never_surface_as_objects(db: None) -> None:
     workspace_id, agent_id, conversation_id = await _seed()
     ctx = _tool_ctx(workspace_id, conversation_id, agent_id)
-    with ws(workspace_id):
+    with ws(workspace_id), agent(agent_id):
         await pause_and_wait(
             ctx,
             PauseAndWaitInput(
@@ -1809,10 +1814,9 @@ async def test_bounded_daily_eval_rejects_open_ended_and_accepts_ten_fires(db: N
         final_fire = next_fire(DAILY_9AM, final_fire)
     expires_at = next_fire(DAILY_9AM, final_fire)
     store = ScheduleStore()
-    with ws(workspace_id):
+    with ws(workspace_id), agent(agent_id):
         await store.create(
             conversation_id,
-            agent_id,
             "mccarren-park-events",
             DAILY_9AM,
             "Report McCarren Park events.",
@@ -1822,7 +1826,6 @@ async def test_bounded_daily_eval_rejects_open_ended_and_accepts_ten_fires(db: N
         assert not (await _graded_bounded_daily(CapabilityOutput("", ()))).passed
         await store.create(
             conversation_id,
-            agent_id,
             "mccarren-park-events",
             DAILY_9AM,
             "Report McCarren Park events. On the final scheduled fire, also offer Continue same "
@@ -1834,7 +1837,6 @@ async def test_bounded_daily_eval_rejects_open_ended_and_accepts_ten_fires(db: N
         assert not (await _graded_bounded_daily(CapabilityOutput("", ()))).passed
         await store.create(
             conversation_id,
-            agent_id,
             "mccarren-park-events",
             DAILY_9AM,
             "Report McCarren Park events.",
@@ -1849,10 +1851,9 @@ async def test_operational_eval_requires_an_open_ended_task(db: None) -> None:
     workspace_id, agent_id, conversation_id = await _seed()
     first_fire = datetime(2026, 8, 1, 9, tzinfo=UTC)
     store = ScheduleStore()
-    with ws(workspace_id):
+    with ws(workspace_id), agent(agent_id):
         await store.create(
             conversation_id,
-            agent_id,
             "credential-refresh",
             "0 * * * *",
             "Refresh integration credentials so synchronization keeps access.",
@@ -1863,7 +1864,6 @@ async def test_operational_eval_requires_an_open_ended_task(db: None) -> None:
         assert not (await _graded_operational_task_stays_open(CapabilityOutput("", ()))).passed
         await store.create(
             conversation_id,
-            agent_id,
             "credential-refresh",
             "0 * * * *",
             "Refresh integration credentials so synchronization keeps access.",
@@ -1990,10 +1990,9 @@ def test_manifest_exposes_pause_as_a_side_effecting_tool() -> None:
 async def test_manifest_job_fires_through_job_runner(db: None) -> None:
     workspace_id, agent_id, conversation_id = await _seed()
     due_at = datetime.now(UTC) - timedelta(minutes=1)
-    with ws(workspace_id):
+    with ws(workspace_id), agent(agent_id):
         await ScheduleStore().create(
             conversation_id,
-            agent_id,
             "scheduled-daily",
             DAILY_9AM,
             "check inbox",
@@ -2006,7 +2005,7 @@ async def test_manifest_job_fires_through_job_runner(db: None) -> None:
         bindings=bindings_from((manifest(),), ()),
         invoker_factory=lambda wid: AdmissionInvoker(admission=admission, workspace_id=wid),
     )
-    with ws(workspace_id):
+    with ws(workspace_id), agent(agent_id):
         for workspace_id in await runner.candidates(f"{NAME}:{RUNNER_JOB}"):
             await runner.fire(f"{NAME}:{RUNNER_JOB}", workspace_id)
     turns = await _turns(conversation_id)
@@ -2024,10 +2023,8 @@ async def test_invoke_without_invoker_fails_loud(db: None) -> None:
     store = ScheduleStore()
     due_at = datetime.now(UTC) - timedelta(minutes=1)
     ctx = _runner_ctx(None)
-    with ws(workspace_id):
-        await store.create(
-            conversation_id, agent_id, "scheduled-x", DAILY_9AM, "do it", "do it", due_at
-        )
+    with ws(workspace_id), agent(agent_id):
+        await store.create(conversation_id, "scheduled-x", DAILY_9AM, "do it", "do it", due_at)
         with pytest.raises(RuntimeError, match="scheduled task fires failed"):
             await ScheduledTaskRunner(ctx=ctx).run()
 
@@ -2035,10 +2032,9 @@ async def test_invoke_without_invoker_fails_loud(db: None) -> None:
 async def test_failed_pause_resume_keeps_its_one_time_timer(db: None) -> None:
     workspace_id, agent_id, conversation_id = await _seed()
     due_at = datetime.now(UTC) - timedelta(minutes=1)
-    with ws(workspace_id):
+    with ws(workspace_id), agent(agent_id):
         task = await ScheduleStore().pause(
             conversation_id,
-            agent_id,
             "resume",
             "resume",
             due_at,
@@ -2066,10 +2062,9 @@ async def test_pause_resume_retries_the_same_turn_after_enqueue_failure(db: None
         workspace_id=workspace_id,
     )
     runner = ScheduledTaskRunner(ctx=_runner_ctx(invoker))
-    with ws(workspace_id):
+    with ws(workspace_id), agent(agent_id):
         task = await ScheduleStore().pause(
             conversation_id,
-            agent_id,
             "resume",
             "resume",
             due_at,
@@ -2151,7 +2146,7 @@ async def test_apply_captures_the_creating_member(db: None) -> None:
     workspace_id, agent_id, conversation_id = await _seed()
     creator = await _member(workspace_id)
     ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=creator)
-    with ws(workspace_id):
+    with ws(workspace_id), agent(agent_id):
         await _dispatch(
             _object_tool("object_apply"),
             ctx,
@@ -2172,10 +2167,9 @@ async def test_scheduled_fire_runs_on_behalf_of_the_creator(db: None) -> None:
     invoker = AdmissionInvoker(
         admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
     )
-    with ws(workspace_id):
+    with ws(workspace_id), agent(agent_id):
         await ScheduleStore().create(
             conversation_id,
-            agent_id,
             "digest",
             DAILY_9AM,
             "send the digest",
@@ -2209,11 +2203,15 @@ async def test_a_stranger_cannot_hijack_or_read_another_members_task(db: None) -
     get = _object_tool("object_get")
     listing = _object_tool("object_list")
     delete = _object_tool("object_delete")
-    with ws(workspace_id):
+    with ws(workspace_id), agent(agent_id):
         await _dispatch(
             apply,
             creator_ctx,
-            manifest=_task_manifest("digest", DAILY_9AM, "creator's private prompt"),
+            manifest=_task_manifest(
+                "digest",
+                DAILY_9AM,
+                "Check my oncology portal and summarize the biopsy result.",
+            ),
         )
         strangers_view = json.loads(
             await _dispatch(listing, stranger_ctx, kind=SCHEDULED_TASK_KIND)
@@ -2240,8 +2238,122 @@ async def test_a_stranger_cannot_hijack_or_read_another_members_task(db: None) -
         tasks = await ScheduleStore().list()
     assert [row["name"] for row in creators_view["objects"]] == ["digest"]
     assert len(tasks) == 1
-    assert tasks[0].prompt == "creator's private prompt"
+    assert tasks[0].prompt == "Check my oncology portal and summarize the biopsy result."
     assert tasks[0].created_by_member_id == creator
+
+
+async def test_task_namespace_and_conversation_are_ambient_agent_scoped(db: None) -> None:
+    workspace_id, first_agent, first_conversation = await _seed()
+    second_agent, second_conversation = await _second_agent(workspace_id)
+    store = ScheduleStore()
+    due_at = datetime.now(UTC) + timedelta(hours=1)
+
+    with ws(workspace_id):
+        with pytest.raises(AgentUnbound):
+            await store.list()
+        with agent(first_agent):
+            first = await store.create(
+                first_conversation,
+                "digest",
+                DAILY_9AM,
+                "first agent digest",
+                "first",
+                due_at,
+            )
+            with pytest.raises(NoResultFound):
+                await store.create(
+                    second_conversation,
+                    "crossed",
+                    DAILY_9AM,
+                    "crossed",
+                    "crossed",
+                    due_at,
+                )
+            with pytest.raises(NoResultFound):
+                await store.pause(
+                    second_conversation,
+                    "crossed",
+                    "crossed",
+                    due_at,
+                    0,
+                )
+        with agent(second_agent):
+            assert await store.inspect("digest") is None
+            second_due_at = due_at + timedelta(minutes=1)
+            second = await store.create(
+                second_conversation,
+                "digest",
+                DAILY_9AM,
+                "second agent digest",
+                "second",
+                second_due_at,
+            )
+            second_rows = await store.list()
+            second_inspection = await store.inspect("digest")
+            assert second_inspection is not None
+            assert second_inspection.next_run_at.replace(tzinfo=UTC) == second_due_at
+        with agent(first_agent):
+            first_rows = await store.list()
+            first_inspection = await store.inspect("digest")
+            assert first_inspection is not None
+            assert first_inspection.next_run_at.replace(tzinfo=UTC) == due_at
+            assert await store.cancel("digest") is True
+            assert await store.inspect("digest") is None
+        with agent(second_agent):
+            surviving_rows = await store.list()
+            surviving_inspection = await store.inspect("digest")
+            assert surviving_inspection is not None
+            assert surviving_inspection.next_run_at.replace(tzinfo=UTC) == second_due_at
+
+    assert first.id != second.id
+    assert [(task.agent_id, task.prompt) for task in first_rows] == [
+        (first_agent, "first agent digest")
+    ]
+    assert [(task.agent_id, task.prompt) for task in second_rows] == [
+        (second_agent, "second agent digest")
+    ]
+    assert surviving_rows == second_rows
+
+
+async def test_workspace_clock_fires_exact_records_across_agents(db: None) -> None:
+    workspace_id, first_agent, first_conversation = await _seed()
+    second_agent, second_conversation = await _second_agent(workspace_id)
+    dbos = StubDbos()
+    invoker = AdmissionInvoker(
+        admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
+    )
+    due_at = datetime.now(UTC) - timedelta(minutes=1)
+
+    with ws(workspace_id):
+        with agent(first_agent):
+            await ScheduleStore().create(
+                first_conversation,
+                "digest",
+                DAILY_9AM,
+                "first agent digest",
+                "first",
+                due_at,
+            )
+        with agent(second_agent):
+            await ScheduleStore().create(
+                second_conversation,
+                "digest",
+                DAILY_9AM,
+                "second agent digest",
+                "second",
+                due_at,
+            )
+        await ScheduledTaskRunner(ctx=_runner_ctx(invoker)).run()
+        first_turns = await _turns(first_conversation)
+        second_turns = await _turns(second_conversation)
+
+    assert len(first_turns) == 1
+    assert first_turns[0]["agent_id"] == first_agent
+    assert "first agent digest" in first_turns[0]["inbound"]
+    assert len(second_turns) == 1
+    assert second_turns[0]["agent_id"] == second_agent
+    assert "second agent digest" in second_turns[0]["inbound"]
+    assert set(dbos.enqueued) == {str(first_turns[0]["id"]), str(second_turns[0]["id"])}
 
 
 async def test_reapply_preserves_the_original_creator(db: None) -> None:
@@ -2253,10 +2365,9 @@ async def test_reapply_preserves_the_original_creator(db: None) -> None:
     editor = await _member(workspace_id)
     store = ScheduleStore()
     when = datetime.now(UTC)
-    with ws(workspace_id):
+    with ws(workspace_id), agent(agent_id):
         first = await store.create(
             conversation_id,
-            agent_id,
             "digest",
             DAILY_9AM,
             "v1",
@@ -2266,7 +2377,6 @@ async def test_reapply_preserves_the_original_creator(db: None) -> None:
         )
         second = await store.create(
             conversation_id,
-            agent_id,
             "digest",
             "0 17 * * 1",
             "v2",
@@ -2289,10 +2399,9 @@ async def test_owner_edits_a_task_no_member_created(db: None) -> None:
     owner = await _member(workspace_id, created_at=datetime(2020, 1, 1, tzinfo=UTC))
     owner_ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=owner)
     apply = _object_tool("object_apply")
-    with ws(workspace_id):
+    with ws(workspace_id), agent(agent_id):
         await ScheduleStore().create(
             conversation_id,
-            agent_id,
             "intel",
             DAILY_9AM,
             "v1",
@@ -2320,7 +2429,7 @@ async def test_owner_may_delete_but_not_edit_another_members_task(db: None) -> N
     owner_ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=owner)
     apply = _object_tool("object_apply")
     delete = _object_tool("object_delete")
-    with ws(workspace_id):
+    with ws(workspace_id), agent(agent_id):
         await _dispatch(
             apply, creator_ctx, manifest=_task_manifest("digest", DAILY_9AM, "creator's prompt")
         )
