@@ -15,10 +15,13 @@ conversation adds its own id (surfaced as `status.subscriber_id`) to be alerted 
 synced content changes, and removes it to stop. That edit is gated on visibility, not ownership,
 and may only toggle the caller's own id — a conversation cannot subscribe or unsubscribe another,
 nor reach a source private to someone else. The `page_change` hook reads a changed binding's
-subscribers and invokes one alert turn per subscribed conversation, referencing the changed pages
-as `page/<id>` objects (only the shared pages a subscriber may read)."""
+subscribers and invokes one alert turn per subscribed conversation, carrying per-stream counts of
+what changed (only the shared pages a subscriber may read) and writing the whole delta — one JSON
+line per page — into that conversation's workspace for the agent to read with its file tools."""
 
+import json
 import re
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 from typing import ClassVar
@@ -47,8 +50,10 @@ from ufo_ext_sources.registry import CONNECTORS, SOURCE_KIND, binding_name
 
 SUMMARY_MAX = 120
 SUBSCRIBERS_PREFIX = "subscribers:"
-ALERT_LABELS_MAX = 5
+ALERT_NAMED_MAX = 5
 ALERT_LABEL_CHARS = 60
+CHANGE_LOG_DIR = ".sources"
+DISPOSITIONS = ("added", "updated", "removed")
 DOMAIN_LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
 TENANT_URL_RULES: dict[str, tuple[re.Pattern[str], re.Pattern[str], str]] = {
     "active_campaign": (
@@ -497,11 +502,14 @@ class SourceObjects(MemberOwnedObjects[SourceSpec]):
 
 async def on_page_change(ctx: HookContext) -> HookOutcome:
     """Alert each changed source's subscribers: group the batch by binding, and for every binding
-    with subscribers invoke one turn per subscribed conversation, referencing the changed pages as
-    `page/<id>` objects. Only shared changes are surfaced — a page private to some member is never
-    referenced, counted, or cause to alert, so its existence never leaks to a subscriber who
-    cannot read it. Idempotency-keyed on binding + conversation + latest change, so a replayed
-    batch never double-alerts; a changed row no binding claims alerts nothing."""
+    with subscribers invoke one turn per subscribed conversation. The turn carries per-stream
+    added/updated/removed counts and the path to a change log holding every changed page, written
+    into that conversation's own workspace — a delta runs to a full batch of pages, so counts are
+    what the agent reads to decide and the file is what it reads to drill in. Only shared changes
+    are surfaced — a page private to some member is never referenced, counted, logged, or cause to
+    alert, so its existence never leaks to a subscriber who cannot read it. Idempotency-keyed on
+    binding + conversation + latest change, so a replayed batch never double-alerts; a changed row
+    no binding claims alerts nothing."""
     match ctx.payload:
         case PageChangeBatch(changes=changes):
             pass
@@ -526,37 +534,106 @@ async def on_page_change(ctx: HookContext) -> HookOutcome:
         if not shared:
             continue
         latest = max(change.changed_at for change in shared).isoformat()
-        message = _alert_message(binding, shared)
         for conversation, agent in subscribers.items():
+            conversation_id = UUID(conversation)
+            path = await _write_change_log(ctx.ext, conversation_id, binding, latest, shared)
             await ctx.ext.invoke(
-                UUID(conversation),
+                conversation_id,
                 UUID(agent),
-                message,
+                _alert_message(binding, shared, path),
                 idempotency_key=f"source-sub:{binding.name}:{conversation}:{latest}",
             )
     return None
 
 
-def _alert_message(binding: _Binding, changes: list[PageChange]) -> str:
-    references = [_page_reference(change) for change in changes[:ALERT_LABELS_MAX]]
-    more = len(changes) - len(references)
-    listing = "; ".join(references) + (f"; +{more} more" if more else "")
-    removed = sum(1 for change in changes if change.tombstone)
-    removed_note = f" ({removed} removed)" if removed else ""
-    noun = "page" if len(changes) == 1 else "pages"
+async def _write_change_log(
+    ext: ExtensionContext,
+    conversation_id: UUID,
+    binding: _Binding,
+    latest: str,
+    changes: list[PageChange],
+) -> str | None:
+    """The whole delta as one JSON line per changed page, written into the subscribed
+    conversation's workspace so the alerted agent reads it with its file tools instead of carrying
+    it in context. Named for the same `latest` stamp the alert's idempotency key carries, so a
+    replayed batch overwrites its own line-for-line identical file rather than appending a
+    duplicate. A failed write propagates: the page feed inlines every body through this same blob
+    store, so storage being unreachable fails the batch before the hook runs, and a handler that
+    raises leaves the cursor unadvanced for the next tick to retry."""
+    if ext.files is None:
+        return None
+    directory = f"{CHANGE_LOG_DIR}/{binding.name}"
+    body = "".join(
+        json.dumps(
+            {
+                "page": f"{PAGE_KIND}/{change.page_id}",
+                "stream": change.stream,
+                "title": change.title,
+                "change": _disposition(change),
+                "as_of": change.as_of.isoformat(),
+            },
+            sort_keys=True,
+        )
+        + "\n"
+        for change in changes
+    )
+    path = await ext.files.write(conversation_id, f"{directory}/{latest}.jsonl", body.encode())
+    await ext.files.prune(conversation_id, directory)
+    return path
+
+
+def _disposition(change: PageChange) -> str:
+    """Which of the three things this replay did to the page. The sync driver stamps one `now` into
+    both `created_at` and `updated_at` when it first indexes a row and only `updated_at` when it
+    rewrites one, so equal stamps mark a page this batch adds."""
+    if change.tombstone:
+        return "removed"
+    return "added" if change.created_at == change.changed_at else "updated"
+
+
+def _stream_counts(changes: list[PageChange]) -> str:
+    """What changed, per stream — `pull_requests: 3 added, 47 updated; issues: 1 removed`. Counts
+    are what the alert carries; the page ids live in the change log."""
+    counted: dict[str, Counter[str]] = defaultdict(Counter)
+    for change in changes:
+        counted[change.stream][_disposition(change)] += 1
+    return "; ".join(
+        f"{stream}: "
+        + ", ".join(
+            f"{tally[disposition]} {disposition}"
+            for disposition in DISPOSITIONS
+            if tally[disposition]
+        )
+        for stream, tally in sorted(counted.items())
+    )
+
+
+def _alert_message(binding: _Binding, changes: list[PageChange], log_path: str | None) -> str:
+    if len(changes) <= ALERT_NAMED_MAX:
+        detail = (
+            "Changed pages (object_get each to read what changed): "
+            f"{'; '.join(_page_reference(change) for change in changes)}."
+        )
+    elif log_path is not None:
+        detail = (
+            f"Every changed page is one JSON line in {log_path} — narrow it with bash (jq, grep) "
+            "or read it with offset/limit, then object_get the ones that matter."
+        )
+    else:
+        detail = (
+            "List them with object_list page, filtered on this source and stream and ordered by "
+            "updated_at desc."
+        )
     return (
         f"The source {binding.name!r} ({binding.summary()}) you subscribed to changed — "
-        f"{len(changes)} synced {noun}{removed_note}. Changed pages (object_get each to read what "
-        f"changed): {listing}. Then tell the member what is new and why it matters."
+        f"{_stream_counts(changes)}. {detail} Then tell the member what is new and why it matters."
     )
 
 
 def _page_reference(change: PageChange) -> str:
     """The changed page as its `page` object reference, so the alerted agent can object_get it —
-    a label from the body's first line makes the reference legible."""
-    label = "an empty page"
-    if not change.tombstone and change.body:
-        label = change.body.splitlines()[0].lstrip("# ")[:ALERT_LABEL_CHARS]
+    the synced title makes the reference legible."""
+    label = change.title[:ALERT_LABEL_CHARS] if change.title else "an untitled page"
     return f"{PAGE_KIND}/{change.page_id} ({label})"
 
 

@@ -1055,6 +1055,11 @@ async def _seed_trajectory(
     return agent_id
 
 
+async def _sole_conversation() -> UUID:
+    async with workspace_tx() as connection:
+        return (await connection.execute(sa.select(tables.conversation.c.id))).scalar_one()
+
+
 async def test_job_reads_trajectories_and_opens_a_governed_proposal(
     db: None, tmp_path: Path
 ) -> None:
@@ -1070,6 +1075,12 @@ async def test_job_reads_trajectories_and_opens_a_governed_proposal(
         scoped = ScopedStore(extension=sample.NAME)
         assert await scoped.get(sample.TRAJECTORY_KEY) == {"count": 1}
         assert await scoped.get(sample.PROPOSAL_KEY) is not None
+        conversation_id = await _sole_conversation()
+        assert await scoped.get(sample.JOB_WORKSPACE_KEY) == {
+            "path": f"/workspace/{sample.JOB_WORKSPACE_REL}"
+        }
+        landed = await blob.get(workspace_key(conversation_id, sample.JOB_WORKSPACE_REL))
+        assert landed.decode() == sample.JOB_WORKSPACE_BODY
 
     async with workspace_tx() as connection:
         proposal = (

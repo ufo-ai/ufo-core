@@ -8,6 +8,7 @@ its pages, and revival on an identical re-registration. A source is private to i
 member by default; sharing it and deleting it are gated to the registrar or the workspace owner."""
 
 import json
+from collections import Counter
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
@@ -21,12 +22,14 @@ from ufo_ext_sources.manifest import NAME, manifest
 from ufo_ext_sources.pages import PAGE_KIND
 from ufo_ext_sources.registry import CONNECTORS, binding_name
 from ufo_ext_sources.tools import (
+    CHANGE_LOG_DIR,
     SOURCE_KIND,
     _subscribers_map,
     _validated_base_url,
     on_page_change,
 )
 
+from ufo.blob import FilesystemBlobStore
 from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.context import context_for
@@ -1028,17 +1031,29 @@ def _subscribe_manifest(name: str, subscribers: tuple[str, ...], *, shared: bool
 
 
 def _change(
-    source_id: UUID, body: str, changed_at: datetime | None = None, subject: str = SHARED_SUBJECT
+    source_id: UUID,
+    body: str,
+    changed_at: datetime | None = None,
+    subject: str = SHARED_SUBJECT,
+    stream: str = "tasks",
+    title: str = "",
+    disposition: str = "added",
 ) -> PageChange:
+    """One replayed page. `disposition` shapes the three fields the alert reads it from: a removed
+    page is tombstoned, an added page carries equal create/change stamps, an updated page's change
+    stamp is later — exactly what `SyncDriver._write` leaves behind."""
     now = changed_at or datetime(2026, 7, 20, tzinfo=UTC)
+    created = now - timedelta(days=1) if disposition == "updated" else now
     return PageChange(
         page_id=uuid4(),
         source_id=source_id,
         subject=subject,
+        stream=stream,
+        title=title or body.removeprefix("# ")[:40],
         body=body,
         digest=f"sha256:{uuid4().hex}",
-        tombstone=False,
-        created_at=now,
+        tombstone=disposition == "removed",
+        created_at=created,
         as_of=now,
         changed_at=now,
     )
@@ -1139,7 +1154,7 @@ async def test_page_change_alerts_only_subscribed_conversations_idempotently(db:
         await on_page_change(HookContext(ext=ext, payload=batch))
         (turn,) = await _turns(state.conversation_id)
         assert name in turn["inbound"]
-        assert "2 synced pages" in turn["inbound"]
+        assert "tasks: 2 added" in turn["inbound"]
         assert f"{PAGE_KIND}/{shipped.page_id}" in turn["inbound"]
         assert f"{PAGE_KIND}/{legal.page_id}" in turn["inbound"]
 
@@ -1175,16 +1190,24 @@ async def test_multi_stream_binding_alerts_once_per_conversation(db: None) -> No
                 ext=ext,
                 payload=PageChangeBatch(
                     changes=(
-                        _change(tasks_id, "# t", changed_at=datetime(2026, 7, 20, 9, tzinfo=UTC)),
                         _change(
-                            projects_id, "# p", changed_at=datetime(2026, 7, 20, 10, tzinfo=UTC)
+                            tasks_id,
+                            "# t",
+                            changed_at=datetime(2026, 7, 20, 9, tzinfo=UTC),
+                            stream="tasks",
+                        ),
+                        _change(
+                            projects_id,
+                            "# p",
+                            changed_at=datetime(2026, 7, 20, 10, tzinfo=UTC),
+                            stream="projects",
                         ),
                     )
                 ),
             )
         )
         (turn,) = await _turns(state.conversation_id)
-        assert "2 synced pages" in turn["inbound"]
+        assert "projects: 1 added; tasks: 1 added" in turn["inbound"]
 
 
 async def test_alert_never_surfaces_a_member_private_page(db: None) -> None:
@@ -1202,9 +1225,164 @@ async def test_alert_never_surfaces_a_member_private_page(db: None) -> None:
             HookContext(ext=ext, payload=PageChangeBatch(changes=(shared, private)))
         )
         (turn,) = await _turns(state.conversation_id)
-        assert "1 synced page" in turn["inbound"]
+        assert "tasks: 1 added" in turn["inbound"]
         assert f"{PAGE_KIND}/{shared.page_id}" in turn["inbound"]
         assert str(private.page_id) not in turn["inbound"]
+
+
+async def _change_log(blob: FilesystemBlobStore, conversation_id: UUID, name: str) -> list[dict]:
+    """Every line of the one change log written for this binding, read back out of the blob store
+    at the key the sandbox mounts as `/workspace`."""
+    entries = await blob.list(f"conversations/{conversation_id}/workspace/{CHANGE_LOG_DIR}/{name}/")
+    assert len(entries) == 1, [entry.key for entry in entries]
+    body = (await blob.get(entries[0].key)).decode()
+    return [json.loads(line) for line in body.splitlines()]
+
+
+async def test_alert_counts_by_stream_and_never_truncates(db: None, tmp_path) -> None:
+    """A batch past the naming bound carries per-stream added/updated/removed counts and the path
+    to the change log — never a prefix of page ids and an opaque `+N more`. Every changed page is
+    in the log, so nothing the agent needs is dropped."""
+    state = await _workspace()
+    name, tasks_id = await _register(state, subject=SHARED_SUBJECT, owner=state.owner_id)
+    _, projects_id = await _register(
+        state, subject=SHARED_SUBJECT, owner=state.owner_id, stream="projects"
+    )
+    blob = FilesystemBlobStore(root=tmp_path / "blobs")
+    caller = state.conversation_id.hex
+    with ws(state.workspace_id):
+        await _apply(
+            _context(state, None),
+            _manifest_text(
+                ASANA,
+                ("projects", "tasks"),
+                name,
+                account_id="acct-one",
+                shared=True,
+                subscribers=(caller,),
+            ),
+        )
+        ext = context_for(
+            NAME, DECLARED_PROVIDERS, blob=blob, invoker=_admitting(state.workspace_id)
+        )
+        changes = (
+            *(_change(tasks_id, f"# task {n}", stream="tasks") for n in range(3)),
+            *(
+                _change(tasks_id, f"# stale {n}", stream="tasks", disposition="updated")
+                for n in range(4)
+            ),
+            *(
+                _change(projects_id, f"# gone {n}", stream="projects", disposition="removed")
+                for n in range(2)
+            ),
+        )
+        await on_page_change(HookContext(ext=ext, payload=PageChangeBatch(changes=changes)))
+
+        (turn,) = await _turns(state.conversation_id)
+        assert "projects: 2 removed; tasks: 3 added, 4 updated" in turn["inbound"]
+        assert "more" not in turn["inbound"]
+        assert not any(str(change.page_id) in turn["inbound"] for change in changes)
+
+        logged = await _change_log(blob, state.conversation_id, name)
+        assert f"/workspace/{CHANGE_LOG_DIR}/{name}/" in turn["inbound"]
+        assert {entry["page"] for entry in logged} == {
+            f"{PAGE_KIND}/{change.page_id}" for change in changes
+        }
+        assert Counter(entry["change"] for entry in logged) == {
+            "added": 3,
+            "updated": 4,
+            "removed": 2,
+        }
+        assert {entry["stream"] for entry in logged} == {"tasks", "projects"}
+
+
+async def test_change_log_replay_rewrites_rather_than_appends(db: None, tmp_path) -> None:
+    """The log is named for the same latest-change stamp the alert's idempotency key carries, so a
+    replayed batch overwrites one file instead of appending its pages a second time."""
+    state = await _workspace()
+    name, source_id = await _register(state, subject=SHARED_SUBJECT, owner=state.owner_id)
+    blob = FilesystemBlobStore(root=tmp_path / "blobs")
+    caller = state.conversation_id.hex
+    with ws(state.workspace_id):
+        await _apply(_context(state, None), _subscribe_manifest(name, (caller,), shared=True))
+        ext = context_for(
+            NAME, DECLARED_PROVIDERS, blob=blob, invoker=_admitting(state.workspace_id)
+        )
+        batch = PageChangeBatch(changes=tuple(_change(source_id, f"# task {n}") for n in range(6)))
+        await on_page_change(HookContext(ext=ext, payload=batch))
+        await on_page_change(HookContext(ext=ext, payload=batch))
+
+        assert len(await _turns(state.conversation_id)) == 1
+        logged = await _change_log(blob, state.conversation_id, name)
+        assert len(logged) == 6
+
+
+async def test_change_log_omits_a_member_private_page(db: None, tmp_path) -> None:
+    """The shared-only filter governs the log as well as the message — a private page is not
+    written to a file a subscriber who cannot read it will open."""
+    state = await _workspace()
+    name, source_id = await _register(state, subject=SHARED_SUBJECT, owner=state.owner_id)
+    blob = FilesystemBlobStore(root=tmp_path / "blobs")
+    caller = state.conversation_id.hex
+    with ws(state.workspace_id):
+        await _apply(_context(state, None), _subscribe_manifest(name, (caller,), shared=True))
+        ext = context_for(
+            NAME, DECLARED_PROVIDERS, blob=blob, invoker=_admitting(state.workspace_id)
+        )
+        shared = tuple(_change(source_id, f"# task {n}") for n in range(6))
+        private = _change(source_id, "# secret", subject=member_subject(state.member_id))
+        await on_page_change(
+            HookContext(ext=ext, payload=PageChangeBatch(changes=(*shared, private)))
+        )
+
+        logged = await _change_log(blob, state.conversation_id, name)
+        assert {entry["page"] for entry in logged} == {
+            f"{PAGE_KIND}/{change.page_id}" for change in shared
+        }
+
+
+async def test_change_log_failure_propagates_rather_than_degrading(db: None, tmp_path) -> None:
+    """A change log that cannot be written fails the batch instead of quietly alerting without it.
+    Here the subscribed conversation no longer resolves in this workspace — internal state, not
+    external flakiness — so it raises, the cursor stays put for the next tick, and no alert claims
+    a delta whose detail was dropped."""
+    state = await _workspace()
+    name, source_id = await _register(state, subject=SHARED_SUBJECT, owner=state.owner_id)
+    blob = FilesystemBlobStore(root=tmp_path / "blobs")
+    caller = state.conversation_id.hex
+    with ws(state.workspace_id):
+        await _apply(_context(state, None), _subscribe_manifest(name, (caller,), shared=True))
+        ext = context_for(
+            NAME, DECLARED_PROVIDERS, blob=blob, invoker=_admitting(state.workspace_id)
+        )
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.delete(tables.conversation).where(
+                    tables.conversation.c.id == state.conversation_id
+                )
+            )
+        changes = tuple(_change(source_id, f"# task {n}") for n in range(6))
+        with pytest.raises(ValueError):
+            await on_page_change(HookContext(ext=ext, payload=PageChangeBatch(changes=changes)))
+
+        assert await _turns(state.conversation_id) == []
+
+
+async def test_alert_degrades_to_counts_when_no_blob_is_wired(db: None) -> None:
+    """No blob store means no change log; the alert still reports what changed and names the
+    object_list route rather than losing the turn to plumbing."""
+    state = await _workspace()
+    name, source_id = await _register(state, subject=SHARED_SUBJECT, owner=state.owner_id)
+    caller = state.conversation_id.hex
+    with ws(state.workspace_id):
+        await _apply(_context(state, None), _subscribe_manifest(name, (caller,), shared=True))
+        ext = context_for(NAME, DECLARED_PROVIDERS, invoker=_admitting(state.workspace_id))
+        changes = tuple(_change(source_id, f"# task {n}") for n in range(6))
+        await on_page_change(HookContext(ext=ext, payload=PageChangeBatch(changes=changes)))
+
+        (turn,) = await _turns(state.conversation_id)
+        assert "tasks: 6 added" in turn["inbound"]
+        assert "object_list page" in turn["inbound"]
 
 
 async def test_alert_skipped_when_only_member_private_changes(db: None) -> None:

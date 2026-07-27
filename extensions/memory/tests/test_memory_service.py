@@ -458,6 +458,8 @@ async def test_page_indexer_writes_the_contexts_workspace_id(db: None) -> None:
         page_id=uuid4(),
         source_id=uuid4(),
         subject=SHARED_SUBJECT,
+        stream="notes",
+        title="Merger timing",
         body="the merger closes in the third quarter",
         digest="sha256:seeded",
         tombstone=False,

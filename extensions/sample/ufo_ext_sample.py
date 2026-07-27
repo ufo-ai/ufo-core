@@ -142,6 +142,9 @@ TOOL_KEY = "tool:echo"
 JOB_KEY = "job:ran"
 TRAJECTORY_KEY = "job:trajectories"
 PROPOSAL_KEY = "job:proposal"
+JOB_WORKSPACE_KEY = "job:workspace_file"
+JOB_WORKSPACE_REL = "sample-job/tick.txt"
+JOB_WORKSPACE_BODY = "the sample job wrote this off-turn"
 ROUTE_KEY = "route:hit"
 ONBOARDING_KEY = "onboarding:done"
 CONNECTOR_EXECUTE_KEY = "connector:executed"
@@ -287,6 +290,12 @@ async def _tick(ctx: ExtensionContext) -> None:
         )
     )
     await ctx.store.put(PROPOSAL_KEY, {"proposal_id": str(ref.proposal_id)})
+    if ctx.files is None:
+        return
+    path = await ctx.files.write(
+        target.conversation_id, JOB_WORKSPACE_REL, JOB_WORKSPACE_BODY.encode()
+    )
+    await ctx.store.put(JOB_WORKSPACE_KEY, {"path": path})
 
 
 async def _hook(ctx: ExtensionContext, request: Request) -> Response:

@@ -611,14 +611,18 @@ PAGE_FEED_BATCH_MAX = 50
 
 @dataclass(frozen=True)
 class PageChange:
-    """One page's current state as the feed replays it: the source row it belongs to, the inlined
-    body (empty when tombstoned), the content digest, `as_of` — the provider's update or creation
-    time, falling back to ingestion time — and `changed_at`, the page's `updated_at` cursor
-    field."""
+    """One page's current state as the feed replays it: the source row it belongs to, the provider
+    `stream` and `title` the sync driver landed it under, the inlined body (empty when tombstoned),
+    the content digest, `as_of` — the provider's update or creation time, falling back to ingestion
+    time — and `changed_at`, the page's `updated_at` cursor field. `created_at` is when the row was
+    first indexed, so `created_at == changed_at` marks a page this replay adds rather than
+    updates."""
 
     page_id: UUID
     source_id: UUID
     subject: str
+    stream: str
+    title: str
     body: str
     digest: str
     tombstone: bool
@@ -657,6 +661,8 @@ class CorePageFeed:
                 tables.page.c.id,
                 tables.page.c.source_id,
                 tables.page.c.subject,
+                tables.page.c.stream,
+                tables.page.c.title,
                 tables.page.c.body_ref,
                 tables.page.c.digest,
                 tables.page.c.tombstone,
@@ -688,6 +694,8 @@ class CorePageFeed:
                     page_id=row["id"],
                     source_id=row["source_id"],
                     subject=row["subject"],
+                    stream=row["stream"],
+                    title=row["title"],
                     body=body,
                     digest=row["digest"],
                     tombstone=bool(row["tombstone"]),

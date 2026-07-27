@@ -372,6 +372,8 @@ async def test_derive_facts_is_idempotent(db: None) -> None:
         page_id=page_id,
         source_id=uuid4(),
         subject=SHARED_SUBJECT,
+        stream="notes",
+        title="Office location",
         body="The office is in the old cannery building by the water.",
         digest="sha256:x",
         tombstone=False,

@@ -264,6 +264,8 @@ async def test_search_to_object_get_walks_page_provenance_end_to_end(
                     page_id=page_id,
                     source_id=source_id,
                     subject=SHARED_SUBJECT,
+                    stream="notes",
+                    title="Cannery office",
                     body=PAGE_BODY,
                     digest="sha256:abc",
                     tombstone=False,

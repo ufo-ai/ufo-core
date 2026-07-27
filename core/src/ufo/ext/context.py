@@ -34,7 +34,7 @@ from ufo.credentials import (
     seal_installation,
 )
 from ufo.db import workspace_tx
-from ufo.ext.surface import SurfaceInstallationAccess
+from ufo.ext.surface import SurfaceInstallationAccess, workspace_key
 from ufo.governance import Governance, prompt_digest
 from ufo.indexing import EmbedClient, IndexBackend
 from ufo.models.interface import (
@@ -49,6 +49,7 @@ from ufo.models.interface import (
 )
 from ufo.models.pricing import Pricing
 from ufo.o11y import log
+from ufo.sandbox.session import WORKSPACE_DIR
 from ufo.scheduling import ScheduleInvoker, ScheduleStore
 from ufo.schema import tables
 from ufo.schema.records import AgentChange, ProposalRef, Usage
@@ -199,10 +200,10 @@ TRAJECTORY_CORPUS_CONVERSATIONS = 200
 
 @dataclass(frozen=True)
 class TrajectoryCorpus:
-    """The one blob reach a handler gets: this workspace's conversation transcripts, read only. The
-    store stays module-private (`_blob`), so the only operation exposed is enumerating this
-    workspace's trajectories — never an arbitrary blob get or put over another conversation or an
-    artifact. The read is bounded to the `limit` most recently created conversations, so a
+    """A handler's read reach into blob storage: this workspace's conversation transcripts, read
+    only. The store stays module-private (`_blob`), so the only operation exposed is enumerating
+    this workspace's trajectories — never an arbitrary blob get or put over another conversation or
+    an artifact. The read is bounded to the `limit` most recently created conversations, so a
     workspace with a long history hands a job a bounded corpus, never every transcript it ever
     produced. A conversation whose transcript is missing or corrupt is skipped-with-log, never
     aborting the whole corpus."""
@@ -266,6 +267,55 @@ class TrajectoryCorpus:
                 )
             )
         return tuple(trajectories)
+
+
+CONVERSATION_FILES_KEEP = 50
+
+
+@dataclass(frozen=True)
+class ConversationFiles:
+    """Write a file into one conversation's agent-visible workspace, off-turn. The store stays
+    module-private (`_blob`), so the only operations exposed are a scoped write and a scoped prune
+    over one conversation's `workspace/` subtree — never an arbitrary get or put over a transcript
+    or an artifact. That subtree is the same one the sandbox mounts at `/workspace`, so a file
+    written here is one the agent reads with its file tools on its next turn, whether or not a
+    sandbox is running. Every write resolves the conversation against the ambient workspace first,
+    so a handler holding another tenant's conversation id writes nothing — the scoping is in the
+    predicate, not left to the RLS tier."""
+
+    _blob: BlobStore
+
+    async def write(self, conversation_id: UUID, rel: str, content: bytes) -> str:
+        """Land `content` at `rel` inside the conversation's workspace and return the `/workspace`
+        path the agent will see. Raises on an unknown conversation or a path that escapes."""
+        await self._require_conversation(conversation_id)
+        await self._blob.put(workspace_key(conversation_id, rel), content)
+        return f"{WORKSPACE_DIR}/{rel}"
+
+    async def prune(
+        self, conversation_id: UUID, rel_prefix: str, keep: int = CONVERSATION_FILES_KEEP
+    ) -> None:
+        """Keep only the newest `keep` files under `rel_prefix`, deleting the rest — the bound on an
+        off-turn writer that appends unattended. Entries sort by key, so a timestamp-named file
+        sorts chronologically."""
+        await self._require_conversation(conversation_id)
+        prefix = workspace_key(conversation_id, rel_prefix)
+        entries = await self._blob.list(prefix if prefix.endswith("/") else f"{prefix}/")
+        for entry in entries[: max(len(entries) - keep, 0)]:
+            await self._blob.delete(entry.key)
+
+    async def _require_conversation(self, conversation_id: UUID) -> None:
+        async with workspace_tx() as connection:
+            found = (
+                await connection.execute(
+                    sa.select(tables.conversation.c.id).where(
+                        tables.conversation.c.id == conversation_id,
+                        tables.conversation.c.workspace_id == ws_current().workspace_id,
+                    )
+                )
+            ).one_or_none()
+        if found is None:
+            raise ValueError(f"conversation {conversation_id} is not in this workspace")
 
 
 def trajectory_workspaces() -> WorkspaceCandidates:
@@ -445,6 +495,7 @@ class ExtensionContext:
     embed: EmbedClient | None = None
     pages: PageFeed | None = None
     corpus: TrajectoryCorpus | None = None
+    files: ConversationFiles | None = None
     scheduler: ScheduleStore | None = None
     invoker: TurnInvoker | None = None
     model: ModelAccess | None = None
@@ -782,6 +833,7 @@ def context_for(
         embed=embed,
         pages=pages,
         corpus=None if blob is None else TrajectoryCorpus(blob),
+        files=None if blob is None else ConversationFiles(blob),
         scheduler=ScheduleStore(schedule_invoker),
         invoker=invoker,
         model=None if model_resolver is None else ModelAccess(model_resolver),

@@ -214,7 +214,10 @@ backends,
 `pages` (the `PageFeed` replaying
 source-page changes under a resumable cursor), `transaction()` over the extension's own tables,
 `invoke(agent, input, conversation=...)`, metered `model.complete(...)`/`model.turn(...)`,
-`schedule(job)`, `trajectories.read(...)` (transcript/turn evidence), and
+`schedule(job)`, `trajectories.read(...)` (transcript/turn evidence),
+`files.write(conversation, path, bytes)` (a file into that conversation's `workspace/` subtree, so
+an off-turn handler hands the agent a payload too large for context and it reads it with its file
+tools next turn — scoped to the ambient workspace, never another's), and
 `agents.propose_change(...)` — the governed promotion path: an extension never edits agent config
 directly; it opens a proposal (prompt, skills, tool grants) that applies through the same
 grant/approval flow chat uses. This is what makes a full self-improvement extension expressible —
