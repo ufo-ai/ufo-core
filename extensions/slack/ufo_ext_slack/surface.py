@@ -20,6 +20,18 @@ overwrites it rather than stacking a second indicator, and within a process the 
 thread's one writer. It rides the lossy live leg by design: the durable reply is the poller's job,
 so a crashed status task costs a stale status, never a lost answer.
 
+A one-line status is enough while a turn takes seconds; a turn taking minutes leaves the member
+unable to tell progress from a stall, so a second per-turn task tails the same frames and posts
+interim progress into the turn's own destination each time the wait doubles — two and a half minutes
+in, then five, ten, twenty, forty — until it settles at one post every thirty. Unlike the status
+these are messages, so exactly one delivery may start one: Slack sends both `app_mention` and
+`message` for a channel mention and every replica runs its own tasks, so the reporter starts on the
+delivery without a twin and never on a retry, leaving one reporter per turn across the fleet. These
+are side-channel writes: the turn is never told, so a post neither ends it nor stalls it, and its
+terminal reply still lands through the poller exactly as it does for a turn that never ran long
+enough to post one. Each post carries what the tail saw — the latest completed narration, the step
+it is in, the tally since the last — and a signalless checkpoint is skipped, never filled.
+
 A reply whose turn ended by asking the user (`Writeback.question`) renders the whole ask as Block
 Kit — the title, every question, and each single-choice question's options as a button row; a
 richer question (multi-select, free-text, attachments, too many options) lists its options as text
@@ -57,8 +69,9 @@ import logging
 import os
 import re
 import time
-from collections.abc import AsyncIterator, Awaitable, Mapping
-from dataclasses import dataclass
+from collections import Counter
+from collections.abc import AsyncIterator, Awaitable, Iterator, Mapping
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Literal
 from urllib.parse import parse_qs, urlencode, urlparse
@@ -592,6 +605,18 @@ STATUS_TEXT_LIMIT = 200
 STATUS_UPDATE_MIN_SECONDS = 1.0
 STATUS_REFRESH_SECONDS = 90.0
 
+PROGRESS_BASE_SECONDS = 150.0
+PROGRESS_CAP_SECONDS = 1_800.0
+PROGRESS_NARRATION_LIMIT = 600
+PROGRESS_ACTIVITY_LIMIT = 200
+PROGRESS_TALLY_TOOLS = 4
+PROGRESS_NARRATION_LINE = "> {narration}"
+PROGRESS_ACTIVITY_LINE = "*Now:* {activity}"
+PROGRESS_TALLY_LINE = "_{elapsed} in · {calls} tool calls since the last update: {tally}_"
+PROGRESS_QUIET_LINE = "_{elapsed} in · no new activity since the last update_"
+PROGRESS_ELAPSED_LINE = "_{elapsed} in_"
+PROGRESS_WRITING_STEP = "writing — {characters} characters so far"
+
 ASK_ACTION_ID_PREFIX = "ask:"
 CONNECT_ACTION_ID = "connect"
 MAX_ANSWER_BUTTONS = 10
@@ -602,6 +627,7 @@ SLACK_REPLAY_SECONDS = 300
 MAX_SLACK_EVENT_BYTES = 1024 * 1024
 SLACK_RAW_BODY_STATE_KEY = "slack_raw_body"
 MESSAGE_EVENT_TYPES = ("app_mention", "message")
+SLACK_RETRY_HEADER = "x-slack-retry-num"
 MEMBER_MESSAGE_SUBTYPES = (None, "file_share", "thread_broadcast")
 
 AMBIENT_FETCH_LIMIT = 100
@@ -685,6 +711,13 @@ class Inbound:
     body: str
     files: tuple[InboundFile, ...]
     conversation_id: UUID | None
+    has_mention_twin: bool
+    """Whether an `app_mention` delivery of this same message also reaches ingest. Slack sends both
+    event types for a mention in a channel the bot belongs to, and both admit the one turn through
+    the idempotency key — the overlap admission exists to absorb. Anything spawned *per delivery*
+    rather than per turn must therefore pick one of the pair, and the twin is identifiable from the
+    payload alone: only a channel `message` carrying the mention has one, because a bot outside the
+    channel receives no `message` events and a DM has no mention to fire `app_mention`."""
 
 
 def verify_slack_signature(
@@ -1127,6 +1160,8 @@ async def ingest(ctx: SurfaceContext, request: Request) -> Response:
         speaker_member_id=member_id,
     )
     _track_status(ctx, turn_id, inbound.queue_key, inbound.ts)
+    if not inbound.has_mention_twin and SLACK_RETRY_HEADER not in request.headers:
+        _track_progress(ctx, turn_id, inbound.queue_key)
     return JSONResponse({"ok": True})
 
 
@@ -1175,6 +1210,7 @@ async def _to_inbound(
         body=str(event.get("text") or ""),
         files=_inbound_files(event),
         conversation_id=conversation_id,
+        has_mention_twin=event.get("type") == "message" and not is_dm and addressed,
     )
 
 
@@ -1579,6 +1615,276 @@ async def _run_status(status: ThreadStatus) -> None:
 
 
 @dataclass(frozen=True)
+class ProgressCadence:
+    """The interim-update schedule: how long a turn runs before its first progress post, and the
+    longest it may go unreported afterwards. One value object, so the schedule a member experiences
+    is testable on its own rather than arithmetic buried in a loop."""
+
+    base_seconds: float
+    cap_seconds: float
+
+    def __post_init__(self) -> None:
+        if self.base_seconds <= 0:
+            raise ValueError("progress base interval must be positive")
+        if self.cap_seconds < self.base_seconds:
+            raise ValueError("progress cap must be at least the base interval")
+
+    def intervals(self) -> Iterator[float]:
+        """Each wait in order. The first is `base_seconds`; every later one is however long the
+        turn has already been running, so a post lands each time the elapsed time doubles — two and
+        a half minutes in, then five, ten, twenty, forty — until a wait would outrun `cap_seconds`
+        and every one after settles there. Reporting scaled to how long the member has already
+        waited: dense while the wait is new and the question live, sparse once it is plainly a long
+        one."""
+        elapsed = 0.0
+        wait = self.base_seconds
+        while True:
+            yield wait
+            elapsed += wait
+            wait = min(elapsed, self.cap_seconds)
+
+
+@dataclass
+class TurnActivity:
+    """What a turn's tail has seen, reduced to what a progress post says. `narration` is the model's
+    own prose from its latest *completed* narration — text it streamed before calling a tool —
+    never the text in flight, which is either that narration unfinished or the final answer a
+    progress post must not preempt. `activity` is the step it is inside right now, and `tools`
+    tallies the calls since the last post, so a post distinguishes a turn making progress from one
+    wedged inside a single call."""
+
+    narration: str = ""
+    activity: str = ""
+    streaming: list[str] = field(default_factory=list)
+    tools: Counter[str] = field(default_factory=Counter)
+
+    def tool(self, tool: str, description: str) -> None:
+        self._close_narration()
+        step = f"`{tool}` — {description}" if description else f"`{tool}`"
+        self.activity = step[:PROGRESS_ACTIVITY_LIMIT]
+        self.tools[tool] += 1
+
+    def skill(self, skill: str) -> None:
+        self._close_narration()
+        self.activity = f"loading the `{skill}` skill"[:PROGRESS_ACTIVITY_LIMIT]
+
+    def stream(self, text: str) -> None:
+        self.streaming.append(text)
+
+    def checkpoint(self) -> None:
+        self.tools.clear()
+
+    def current_step(self) -> str:
+        """The step to report now. Text in flight is the live step and outranks the last tool call,
+        which by then has finished: a turn that runs long purely by streaming — extended reasoning,
+        a long written answer, no tools at all — is working, and reporting it with the size it has
+        reached is what separates it from a stall across checkpoints. The text itself is never
+        quoted; it is the narration unfinished, or the answer this post must not preempt."""
+        writing = sum(len(part) for part in self.streaming)
+        if writing:
+            return PROGRESS_WRITING_STEP.format(characters=f"{writing:,}")
+        return self.activity
+
+    def _close_narration(self) -> None:
+        text = "".join(self.streaming).strip()
+        self.streaming.clear()
+        if text:
+            self.narration = text[:PROGRESS_NARRATION_LIMIT]
+
+    def report(self, elapsed_seconds: float) -> str | None:
+        """This checkpoint's post, or None when the turn produced no signal at all — a checkpoint
+        with nothing but the clock behind it is skipped, never filled with a placeholder. One that
+        saw no *new* call still posts: naming the step the turn has sat in for the whole interval
+        answers "is it stalled?", the question that earns the post. The closing line carries the
+        tally when calls landed, the clock alone while text is in flight (the growing size above it
+        already says the turn is producing), and the stall clause otherwise."""
+        step = self.current_step()
+        if not self.narration and not step:
+            return None
+        hours, minutes = divmod(int(elapsed_seconds // 60), 60)
+        elapsed = f"{hours}h {minutes:02d}m" if hours else f"{minutes}m"
+        lines = []
+        if self.narration:
+            lines.append(PROGRESS_NARRATION_LINE.format(narration=self.narration))
+        if step:
+            lines.append(PROGRESS_ACTIVITY_LINE.format(activity=step))
+        calls = sum(self.tools.values())
+        if not calls:
+            quiet = PROGRESS_ELAPSED_LINE if self.streaming else PROGRESS_QUIET_LINE
+            lines.append(quiet.format(elapsed=elapsed))
+            return "\n".join(lines)
+        busiest = self.tools.most_common(PROGRESS_TALLY_TOOLS)
+        tally = ", ".join(f"{tool} x{count}" for tool, count in busiest)
+        if len(self.tools) > len(busiest):
+            tally = f"{tally}, +{len(self.tools) - len(busiest)} more"
+        lines.append(PROGRESS_TALLY_LINE.format(elapsed=elapsed, calls=calls, tally=tally))
+        return "\n".join(lines)
+
+
+@dataclass(frozen=True)
+class ThreadProgress:
+    """Interim progress for one long-running turn, posted where the turn's own reply will land — the
+    member's thread in a channel, the DM top level. A side-channel write driven by the turn's live
+    tail: the turn is never told, so a post can neither end it nor stall it, and the terminal reply
+    stays the poller's alone.
+
+    Posts land each time the elapsed time doubles, measured from admission, so a turn that finishes
+    inside the first interval posts nothing at all and a long one reports less often the longer it
+    runs. Each post carries what the tail actually saw — the model's latest completed narration, the
+    step it is inside (text in flight reported by its size, never its content, so a tool-free turn
+    that only streams still reports), the tool tally since the last post — and a signalless
+    checkpoint is
+    skipped. Best-effort per checkpoint, never per turn: a rejected post costs that one update and
+    the next checkpoint posts as usual, because a transient rate limit must not silence the rest
+    of a long turn — the silence this exists to end. Bounded like the thread
+    status: the tail ends on the durable terminal state (its own poll, not the lossy hub), so the
+    task always ends within a second of the commit."""
+
+    ctx: SurfaceContext
+    turn_id: UUID
+    queue_key: str
+    cadence: ProgressCadence
+
+    async def run(self) -> None:
+        bot_token = await self.ctx.credential(SLACK_BOT_TOKEN_SLOT)
+        async with httpx.AsyncClient(timeout=SLACK_API_TIMEOUT_SECONDS) as client:
+            await self._follow(client, bot_token)
+
+    async def _follow(self, client: httpx.AsyncClient, bot_token: str) -> None:
+        started = time.monotonic()
+        intervals = self.cadence.intervals()
+        deadline = started + next(intervals)
+        activity = TurnActivity()
+        frames = aiter(self.ctx.tail(self.turn_id))
+        upcoming = asyncio.ensure_future(anext(frames))
+        try:
+            while True:
+                waiting = max(deadline - time.monotonic(), 0.0)
+                done, _pending = await asyncio.wait([upcoming], timeout=waiting)
+                if not done:
+                    await self._post(client, bot_token, activity, time.monotonic() - started)
+                    activity.checkpoint()
+                    deadline = time.monotonic() + next(intervals)
+                    continue
+                try:
+                    _cursor, frame = upcoming.result()
+                except StopAsyncIteration:
+                    return
+                upcoming = asyncio.ensure_future(anext(frames))
+                match frame:
+                    case Terminal() | Parked():
+                        return
+                    case ToolCall(tool=tool, description=description):
+                        activity.tool(tool, description)
+                    case SkillLoad(skill=skill):
+                        activity.skill(skill)
+                    case TextDelta(text=text):
+                        activity.stream(text)
+                    case _:
+                        continue
+        finally:
+            upcoming.cancel()
+            await asyncio.gather(upcoming, return_exceptions=True)
+
+    async def _post(
+        self,
+        client: httpx.AsyncClient,
+        bot_token: str,
+        activity: TurnActivity,
+        elapsed_seconds: float,
+    ) -> None:
+        """One checkpoint's post, contained: a rejection costs this update and returns, never the
+        loop. The body is the member's to read in the thread and never rides the log — it carries
+        the model's own narration, which is turn content, and no field name that would survive
+        `redact_payload` may hold it — so the event logs its size and the thread holds the text."""
+        text = activity.report(elapsed_seconds)
+        if text is None:
+            log(
+                "slack.thread_progress.skipped",
+                turn=str(self.turn_id),
+                elapsed_seconds=int(elapsed_seconds),
+            )
+            return
+        channel, separator, thread_ts = self.queue_key.partition(":")
+        try:
+            await _slack_ok(
+                client.post(
+                    SLACK_CHAT_POST_MESSAGE_URL,
+                    content=slack_reply_body(
+                        channel, thread_ts if separator else None, text, metadata=None
+                    ),
+                    headers={
+                        "Authorization": f"Bearer {bot_token}",
+                        "Content-Type": "application/json; charset=utf-8",
+                    },
+                )
+            )
+        except Exception as error:
+            log(
+                "slack.thread_progress.failed",
+                turn=str(self.turn_id),
+                elapsed_seconds=int(elapsed_seconds),
+                error=repr(error),
+            )
+            return
+        log(
+            "slack.thread_progress.posted",
+            turn=str(self.turn_id),
+            elapsed_seconds=int(elapsed_seconds),
+            characters=len(text),
+        )
+
+
+_PROGRESS_TASKS: dict[UUID, asyncio.Task[None]] = {}
+
+
+def _track_progress(ctx: SurfaceContext, turn_id: UUID, queue_key: str) -> None:
+    """Spawn one ThreadProgress task per admitted turn. A progress post is a message, not the
+    status's idempotent overwrite state, so a second reporter doubles the member's updates for the
+    turn's whole life rather than costing a redundant write — and the fleet runs more than one
+    replica, so this dict cannot be the only guard. Each entry point calls this for exactly one
+    request per turn — ingest for the delivery with no mention twin, interactivity for the click
+    whose body won the answer key — and neither on a Slack retry, which belongs to the request it
+    retries. So one turn has one reporter across the fleet; the dict holds that line in-process.
+
+    One reporter is guaranteed against every request a replica can tell apart. Two concurrent taps
+    of one button by one member are not tellable apart — same body, same answer key, neither a
+    retry — and a second replica taking the twin doubles that turn's interim updates. The trade is
+    deliberate: the window is open only until the click's `chat.update` replaces the buttons, both
+    reporters read the same frames and neither touches the turn or its reply, so the cost is a
+    repeated update, paid against a durable per-turn claim this surface would otherwise need."""
+    if turn_id in _PROGRESS_TASKS:
+        return
+    progress = ThreadProgress(
+        ctx=ctx,
+        turn_id=turn_id,
+        queue_key=queue_key,
+        cadence=ProgressCadence(
+            base_seconds=PROGRESS_BASE_SECONDS, cap_seconds=PROGRESS_CAP_SECONDS
+        ),
+    )
+    task = asyncio.create_task(_run_progress(progress))
+    _PROGRESS_TASKS[turn_id] = task
+    task.add_done_callback(lambda _done: _PROGRESS_TASKS.pop(turn_id, None))
+
+
+async def _run_progress(progress: ThreadProgress) -> None:
+    """The task-level backstop for what a single post's own containment cannot survive — the
+    credential read, the tail itself. A rejected post never reaches here: it is contained per
+    checkpoint so the turn keeps reporting, so anything that does reach here abandons the turn's
+    remaining updates and says so."""
+    try:
+        await progress.run()
+    except Exception as error:
+        log(
+            "slack.thread_progress.abandoned",
+            turn=str(progress.turn_id),
+            queue_key=progress.queue_key,
+            error=repr(error),
+        )
+
+
+@dataclass(frozen=True)
 class AnswerClick:
     """A verified button click on an ask_user question, reduced to what admission and the message
     rewrite need. The answer rides the button `value`; the question's index (from the `action_id`)
@@ -1615,9 +1921,12 @@ async def interactive(ctx: SurfaceContext, request: Request) -> Response:
     message, so a double click or a second member's click joins the turn the first click won — and
     rewrite the buttons into the winning answer with who answered. Only the click whose exact body
     the answer key stored (`admitted_body` — the turn it opened or the queue row it landed as)
-    rewrites, so a losing click never displays an answer the agent won't see. The rewrite rides
-    its own task so the ack beats Slack's three-second budget — Block Kit allows no message in
-    the direct response, only the ack."""
+    rewrites, so a losing click never displays an answer the agent won't see. That same winning
+    click starts the turn's progress reporter, and only when this request is not a retry: all clicks
+    on one question row share its answer key, so a second member's click and a retry of the winner
+    both reach the one turn, and a reporter is a stream of messages a second replica would double.
+    The rewrite rides its own task so the ack beats Slack's three-second budget — Block Kit allows
+    no message in the direct response, only the ack."""
     try:
         raw = await _slack_request_body(request)
     except SlackBodyTooLarge:
@@ -1672,6 +1981,8 @@ async def interactive(ctx: SurfaceContext, request: Request) -> Response:
             )
             _track_status(ctx, turn_id, click.queue_key, click.message_ts)
             if await ctx.admitted_body(answer_key) == body:
+                if SLACK_RETRY_HEADER not in request.headers:
+                    _track_progress(ctx, turn_id, click.queue_key)
                 _rewrite_in_background(bot_token, click)
     return JSONResponse({"ok": True})
 
