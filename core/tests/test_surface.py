@@ -827,17 +827,18 @@ async def test_the_delivered_commit_never_contends_with_its_own_claim_renewal(
     refresh for a turn is ever in flight when that turn is marked delivered."""
     in_flight: dict[UUID, int] = {}
     contended = 0
-    monkeypatch.setattr(surface_module, "WRITEBACK_CLAIM_REFRESH_SECONDS", 0.0)
-    renew_claim = WritebackPoller._renew_claim
     mark_delivered = WritebackPoller._mark_delivered
+    all_renewing = asyncio.Event()
+    hold_renewals = asyncio.Event()
 
     async def tracked_renew(self: WritebackPoller, turn_id: UUID) -> None:
-        while True:
-            in_flight[turn_id] = in_flight.get(turn_id, 0) + 1
-            try:
-                await renew_claim(self, turn_id)
-            finally:
-                in_flight[turn_id] -= 1
+        in_flight[turn_id] = in_flight.get(turn_id, 0) + 1
+        if len(in_flight) == len(turn_ids):
+            all_renewing.set()
+        try:
+            await hold_renewals.wait()
+        finally:
+            in_flight[turn_id] -= 1
 
     async def watched_mark(self: WritebackPoller, turn_id: UUID) -> None:
         nonlocal contended
@@ -856,7 +857,10 @@ async def test_the_delivered_commit_never_contends_with_its_own_claim_renewal(
     surface = BlockingSurface(blocked_workspace=workspace_id)
     running = asyncio.create_task(_fleet_poller(contexts, surface, worker_id="worker-1").drain())
     try:
-        await asyncio.wait_for(surface.blocked.wait(), timeout=1)
+        await asyncio.wait_for(
+            asyncio.gather(surface.blocked.wait(), all_renewing.wait()), timeout=1
+        )
+        assert all(in_flight.get(turn_id) == 1 for turn_id in turn_ids)
     finally:
         surface.release.set()
         await asyncio.wait_for(running, timeout=5)
