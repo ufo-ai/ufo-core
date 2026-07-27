@@ -528,6 +528,7 @@ async def _run(
                         client=await registry.client_for(resolved_model),
                         model=resolved_model,
                         blob=blob,
+                        context_window=registry.spec(resolved_model).context_window,
                     )
                 target = InProcessTarget(
                     ctx=ctx,

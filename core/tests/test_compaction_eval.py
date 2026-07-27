@@ -15,7 +15,12 @@ from evals.compaction.target import CompactionTarget
 from evals.harness.capability import CapabilityOutput, EvalTrajectory, ToolInvocation
 from evals.harness.target import TargetResult
 from ufo.blob import FilesystemBlobStore
-from ufo.loop.compaction import MAX_REFERENCE_PATHS, TOOL_OUTPUT_PATH_RE
+from ufo.loop.compaction import (
+    AUTOCOMPACT_BUFFER_TOKENS,
+    COMPACTION_SUMMARY_MAX_TOKENS,
+    MAX_REFERENCE_PATHS,
+    TOOL_OUTPUT_PATH_RE,
+)
 from ufo.models.interface import (
     ImageBlock,
     ImageSource,
@@ -32,6 +37,9 @@ from ufo.transcript import CompactionSummary, Conversation, decode, encode, tran
 
 TEST_TARGET_TOKENS = 9_000
 TEST_TRIGGER_TOKENS = int(TEST_TARGET_TOKENS * 0.9)
+TEST_CONTEXT_WINDOW = (
+    TEST_TRIGGER_TOKENS + COMPACTION_SUMMARY_MAX_TOKENS + AUTOCOMPACT_BUFFER_TOKENS
+)
 
 
 @dataclass(frozen=True)
@@ -89,11 +97,16 @@ def _summary(**overrides: object) -> CompactionSummary:
     return CompactionSummary.model_validate(base)
 
 
-def _lab(blob_root: Path, summary: CompactionSummary) -> CompactionTarget:
+def _lab(
+    blob_root: Path, summary: CompactionSummary, context_window: int = TEST_CONTEXT_WINDOW
+) -> CompactionTarget:
+    """The default window puts the live trigger exactly at `TEST_TRIGGER_TOKENS`, so a probe-model
+    window built at `TEST_TARGET_TOKENS` clears it just as a full-scale one clears production's."""
     return CompactionTarget(
         client=ScriptedSummaryModel(summary),
         model="claude-opus-4-8",
         blob=FilesystemBlobStore(root=blob_root),
+        context_window=context_window,
     )
 
 
@@ -484,6 +497,29 @@ async def test_behavior_probes_fail_when_compaction_never_fired(
     report = await suite.run(target, asyncio.Semaphore(1))  # type: ignore[arg-type]
     assert not report.passed
     assert all("compaction never fired" in result.reason for result in report.cases)
+
+
+async def test_behavior_refuses_a_window_the_probe_model_never_compacts(
+    snapshot_dir: Path, tmp_path: Path
+) -> None:
+    """`claude-opus-5` declares a 1M-token window, so the engine triggers compaction at 950k and a
+    snapshot sized for the 200k default can never reach it. Refuse before spending a turn, naming
+    both numbers, instead of running every probe and blaming the model for a compaction that was
+    unreachable by construction."""
+    snapshot = load_snapshot(snapshot_dir)
+    case = next(case for case in snapshot.cases if case.leaf == "behavior")
+    lab = _lab(tmp_path, _summary(), context_window=1_000_000)
+    target = ScriptedStepTarget(lab, uuid4(), {SEED_MESSAGE: _clean("ready")})
+    suite = CompactionSuite(
+        leaf="behavior", cases=(case,), digest="test", trigger_tokens=TEST_TRIGGER_TOKENS
+    )
+    report = await suite.run(target, asyncio.Semaphore(1))  # type: ignore[arg-type]
+    assert not report.passed
+    assert len(report.cases) == len(case.probes)
+    for result in report.cases:
+        assert "1,000,000-token context window" in result.reason
+        assert "compaction triggers at 950,000" in result.reason
+    assert target.steps == []
 
 
 async def test_grade_probe_reports_unclean_turns(snapshot_dir: Path) -> None:

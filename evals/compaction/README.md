@@ -1,10 +1,17 @@
 # compaction
 
 The compaction suite measures what survives the context boundary. Each case is a full-scale
-message window (default ~181k estimated tokens, crossing the auto-compaction trigger) synthesized
+message window (default 152k estimated tokens, crossing the auto-compaction trigger) synthesized
 from this repo's own docs and source, with generated facts spliced in. Every fact carries a
 distinctive numeric literal proven absent from the window's filler at build time, so grading is a
 deterministic substring check — presence after the boundary can only mean survival. No judge.
+
+The default target is `DEFAULT_CONTEXT_WINDOW_TOKENS` less the summary's output reserve and the
+autocompact buffer, so a window clears the trigger of a model declaring a 200k-token context
+window. That is the scale the suite is built and calibrated at. A target agent on a longer-window
+model triggers proportionally later — `claude-opus-5` declares 1M and triggers at 950k — and the
+live leaves refuse such a run by name rather than reporting a compaction that never fired; point
+`--agent` at an agent whose model declares a 200k-token window.
 
 The suite is built to have a structural ceiling below a perfect score: the planted decisions
 overload the summary's token budget, so the leaves measure prioritization under forced loss, not
@@ -12,7 +19,7 @@ retrieval.
 
 | Leaf | Cases | Measures | Pass bar |
 |---|---:|---|---|
-| `compaction.overload` | 2 | importance-weighted recall of 120 decisions vs. an 8k-token summary budget; distractor selectivity | weighted recall ≥ 30% |
+| `compaction.overload` | 2 | importance-weighted recall of 120 decisions vs. a 20k-token summary budget; distractor selectivity | weighted recall ≥ 30% |
 | `compaction.buried` | 1 | recall of 40 operative values stated only inside tool-result text, against 40 matched spoken decisions — the channel gap | buried recall ≥ 20% |
 | `compaction.supersession` | 1 | corrected values recalled, superseded values absent | correction recall ≥ 60%, stale rate ≤ 20% |
 | `compaction.chain` | 1 | survival of critical (weight ≥ 4) facts across three compaction generations, the window refilled between each | gen-3 critical survival ≥ 25% |
@@ -36,7 +43,7 @@ transcript blob for the fixture window, and drives probe turns through the engin
 fires on the first probe exactly as in production. Chain metrics (`survival_gen1..3`) and leaf
 rates surface as report metrics in stdout and the viewer.
 
-Cost: each artifact generation and each behavioral first-probe summarizes a ~180k-token head with
+Cost: each artifact generation and each behavioral first-probe summarizes a ~150k-token head with
 the target model; a full run is on the order of 2M input tokens.
 
 ## Build the snapshot

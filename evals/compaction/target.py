@@ -6,7 +6,12 @@ from dataclasses import dataclass
 from uuid import UUID
 
 from ufo.blob import BlobStore
-from ufo.loop.compaction import Compaction
+from ufo.loop.compaction import (
+    AUTOCOMPACT_BUFFER_TOKENS,
+    COMPACTION_SUMMARY_MAX_TOKENS,
+    DEFAULT_CONTEXT_WINDOW_TOKENS,
+    Compaction,
+)
 from ufo.models.interface import Message, ModelClient
 from ufo.transcript import Conversation, encode, transcript_key
 
@@ -15,9 +20,22 @@ WORKSPACE_PREFIX = "/workspace/"
 
 @dataclass(frozen=True)
 class CompactionTarget:
+    """`context_window` is the declared window of the model the live leaves' probe turns run on —
+    the same number `queue.py` hands the engine's `Compaction`. Artifact leaves override the trigger
+    to the snapshot's own scale, so they never consult it; behavior and real leaves cannot, and
+    their windows have to clear the model's real trigger to compact at all."""
+
     client: ModelClient
     model: str
     blob: BlobStore
+    context_window: int = DEFAULT_CONTEXT_WINDOW_TOKENS
+
+    @property
+    def live_trigger_tokens(self) -> int:
+        """The trigger a probe turn will actually be measured against — `Compaction`'s own
+        derivation with `trigger_tokens` unset, mirrored so a mismatch is reportable before a turn
+        is spent rather than surfacing as a compaction that never fired."""
+        return self.context_window - COMPACTION_SUMMARY_MAX_TOKENS - AUTOCOMPACT_BUFFER_TOKENS
 
     def compactor(self, conversation_id: UUID, trigger_tokens: int | None = None) -> Compaction:
         return Compaction(

@@ -37,7 +37,11 @@ from evals.harness.harness import (
 )
 from evals.harness.registry import EvalTask, gather_cases
 from evals.harness.target import CapabilityTarget, EvalConversations, TargetResult
-from ufo.loop.compaction import COMPACTED_CONTEXT_PREFIX, MAX_REFERENCE_PATHS
+from ufo.loop.compaction import (
+    COMPACTED_CONTEXT_PREFIX,
+    DEFAULT_CONTEXT_WINDOW_TOKENS,
+    MAX_REFERENCE_PATHS,
+)
 
 COMPACTION_GRADER_REVISION = "literal-survival-2"
 SEED_MESSAGE = "Reply with the single word: ready."
@@ -396,6 +400,9 @@ class CompactionSuite:
     async def _behavior_case(
         self, case: CompactionCase, target: CompactionRunTarget, lab: CompactionTarget
     ) -> list[EvalCaseResult]:
+        window_tokens = estimate_tokens(case.messages)
+        if window_tokens <= lab.live_trigger_tokens:
+            return _unreachable_trigger(case, lab, window_tokens)
         conversation_id = await target.conversations.open(case.id)
         seed = await target.step(conversation_id, SEED_MESSAGE, f"{case.id}:{conversation_id}:seed")
         if not seed.clean:
@@ -522,6 +529,31 @@ class CompactionSuite:
                 )
             case _:
                 return ()
+
+
+def _unreachable_trigger(
+    case: CompactionCase, lab: CompactionTarget, window_tokens: int
+) -> list[EvalCaseResult]:
+    """A live leaf whose window cannot reach the probe model's trigger is a mis-sized run, not a
+    model failure. The snapshot is built against `DEFAULT_CONTEXT_WINDOW_TOKENS`; a target agent on
+    a longer-window model moves the trigger out of reach and every probe would otherwise report a
+    compaction that never fired. Refuse before a turn is spent, and name both numbers."""
+    reason = (
+        f"snapshot window is {window_tokens:,} estimated tokens but {lab.model} declares a "
+        f"{lab.context_window:,}-token context window, so compaction triggers at "
+        f"{lab.live_trigger_tokens:,} — {lab.live_trigger_tokens - window_tokens:,} beyond the "
+        f"window. Point --agent at an agent whose model declares a "
+        f"{DEFAULT_CONTEXT_WINDOW_TOKENS:,}-token window"
+    )
+    return [
+        EvalCaseResult(
+            name=f"{case.id}.{probe.id}",
+            passed=False,
+            reason=reason,
+            evidence={"question": probe.question, "grading": _probe_grading(probe)},
+        )
+        for probe in case.probes
+    ]
 
 
 def _probe_grading(probe: CompactionProbe) -> str:
