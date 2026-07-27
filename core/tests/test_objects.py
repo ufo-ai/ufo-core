@@ -24,17 +24,22 @@ from ufo_ext_connectors.objects import CONNECTOR_OBJECT
 from ufo_ext_scheduled_tasks.tools import SCHEDULED_TASK_OBJECT
 from ufo_ext_sources.tools import SOURCE_OBJECT
 
+import ufo.conversations as conversations
 from ufo.agents import AGENT_KIND
 from ufo.artifact_token import verify_artifact_token
-from ufo.artifacts import ARTIFACT_KIND, MATERIALIZE_MAX_BYTES, artifact_object_names
+from ufo.artifacts import ARTIFACT_KIND, artifact_object_names
 from ufo.blob import FilesystemBlobStore
+from ufo.conversations import CONVERSATION_KIND, CONVERSATION_OBJECT
 from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.context import JsonValue
 from ufo.ext.loader import load_manifests, turn_tools, validate_ext_tools
 from ufo.ext.manifest import Manifest
 from ufo.governance import Governance, prompt_digest
+from ufo.loop.transcript import Transcript
+from ufo.models.interface import Message, TextBlock, ToolUseBlock
 from ufo.objects import (
+    MATERIALIZE_MAX_BYTES,
     OBJECT_LIST_PAGE,
     OBJECT_NAME_MAX_LENGTH,
     OBJECT_NAME_PATTERN,
@@ -69,6 +74,7 @@ from ufo.schema import tables
 from ufo.schema.records import Agent, AgentChange, Turn
 from ufo.tools.context import SpawnResult, TextContent, ToolContext, ToolResult
 from ufo.tools.registry import ToolDef
+from ufo.transcript import Conversation, transcript_key
 from ufo.workspace import ws
 
 SANDBOX_UNTOUCHED = "object verbs run against stores and must not reach the sandbox"
@@ -799,7 +805,7 @@ async def test_agent_apply_and_pending_proposal_write_disjoint_fields(db: None) 
 ARTIFACT_TEST_SECRET = "artifact-test-secret"
 
 
-async def _turn_row(workspace_id: UUID) -> Turn:
+async def _turn_row(workspace_id: UUID, member_id: UUID | None = None) -> Turn:
     agent_id = await _agent_row(workspace_id, name=f"agent-{uuid4().hex[:8]}")
     conversation_id, turn_id = uuid4(), uuid4()
     async with workspace_tx() as connection:
@@ -810,7 +816,7 @@ async def _turn_row(workspace_id: UUID) -> Turn:
                 agent_id=agent_id,
                 surface="cli",
                 queue_key=f"objects-{conversation_id.hex[:8]}",
-                member_id=None,
+                member_id=member_id,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -840,10 +846,11 @@ async def _turn_row(workspace_id: UUID) -> Turn:
     )
 
 
-async def _artifact_context(turn: Turn, tmp_path: Path) -> tuple[ToolContext, Path]:
+async def _workspace_context(
+    turn: Turn, tmp_path: Path, audience_member_id: UUID | None = None
+) -> tuple[ToolContext, Path]:
     """A context whose sandbox is the real local carrier over a temp workspace and whose blob
-    store is a real temp filesystem store — `share_file` and the artifact kind's workspace copy
-    both run their true paths, no stand-ins."""
+    store is a real temp filesystem store — object materialization runs its true path."""
     workspace_dir = tmp_path / "workspace"
     carrier = LocalCarrier()
     handle = await carrier.create(
@@ -861,8 +868,8 @@ async def _artifact_context(turn: Turn, tmp_path: Path) -> tuple[ToolContext, Pa
         turn=turn,
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=_unavailable_spawn,
-        speaker_member_id=None,
-        audience_member_id=None,
+        speaker_member_id=audience_member_id,
+        audience_member_id=audience_member_id,
         artifact_token_secret=ARTIFACT_TEST_SECRET,
     )
     return ctx, workspace_dir
@@ -917,7 +924,7 @@ async def test_share_file_lands_an_artifact_object_and_get_copies_the_latest_bac
     tools = _object_tools()
     with ws(workspace_id):
         turn = await _turn_row(workspace_id)
-        ctx, workspace_dir = await _artifact_context(turn, tmp_path)
+        ctx, workspace_dir = await _workspace_context(turn, tmp_path)
         await ctx.sandbox.bash("printf 'quarterly numbers' > report.txt")
 
         name = f"{turn.conversation_id.hex[:8]}-report-txt"
@@ -1010,7 +1017,7 @@ async def test_artifact_kind_refuses_apply_and_delete_removes_every_version(
     with ws(workspace_id):
         turn = await _turn_row(workspace_id)
         name = f"{turn.conversation_id.hex[:8]}-report-txt"
-        ctx, _ = await _artifact_context(turn, tmp_path)
+        ctx, _ = await _workspace_context(turn, tmp_path)
         await ctx.sandbox.bash("printf 'v1' > report.txt")
         await _text(tools, "share_file", ctx, file_path="report.txt")
         await ctx.sandbox.bash("printf 'v2' > report.txt")
@@ -1141,6 +1148,194 @@ async def test_same_filename_across_conversations_stays_distinct(db: None) -> No
         assert names == sorted(
             f"{turn.conversation_id.hex[:8]}-report-txt" for turn in (turn_a, turn_b)
         )
+
+
+LAUNCH_EXCHANGE = Conversation(
+    seq=2,
+    messages=(
+        Message(role="user", content="remind me about the launch"),
+        Message(
+            role="assistant",
+            content=(
+                ToolUseBlock(id="t1", name="memory_search", input={"queries": ["launch"]}),
+                TextBlock(text="the launch is march 3"),
+            ),
+        ),
+    ),
+)
+
+
+async def test_conversation_get_materializes_the_durable_transcript(
+    db: None, tmp_path: Path
+) -> None:
+    workspace_id = await _workspace()
+    tools = _object_tools()
+    with ws(workspace_id):
+        past = await _turn_row(workspace_id)
+        reader = await _turn_row(workspace_id)
+        ctx, workspace_dir = await _workspace_context(reader, tmp_path)
+        await Transcript(blob=ctx.blob, conversation_id=past.conversation_id).write(LAUNCH_EXCHANGE)
+
+        fetched = yaml.safe_load(
+            await _text(
+                tools,
+                "object_get",
+                ctx,
+                kind=CONVERSATION_KIND,
+                name=str(past.conversation_id),
+            )
+        )
+
+    body = b"user: remind me about the launch\nassistant: the launch is march 3"
+    assert fetched["status"] == {
+        "messages": 2,
+        "size_bytes": len(body),
+        "workspace_path": f"transcripts/{past.conversation_id}.txt",
+    }
+    assert (workspace_dir / "transcripts" / f"{past.conversation_id}.txt").read_bytes() == body
+
+
+async def test_conversation_transcript_keeps_the_existing_member_gate(
+    db: None, tmp_path: Path
+) -> None:
+    workspace_id = await _workspace()
+    tools = _object_tools()
+    with ws(workspace_id):
+        member = await _member(workspace_id, OWNER_CREATED_AT)
+        other = await _member(workspace_id, JOINER_CREATED_AT)
+        private = await _turn_row(workspace_id, member_id=member)
+        reader = await _turn_row(workspace_id, member_id=other)
+        ctx, workspace_dir = await _workspace_context(reader, tmp_path, audience_member_id=other)
+        await Transcript(blob=ctx.blob, conversation_id=private.conversation_id).write(
+            LAUNCH_EXCHANGE
+        )
+
+        get_tool = tools["object_get"]
+        with pytest.raises(UnknownObject):
+            await get_tool.handler(
+                ctx,
+                get_tool.input_model.model_validate(
+                    {"kind": CONVERSATION_KIND, "name": str(private.conversation_id)}
+                ),
+            )
+        assert await CONVERSATION_OBJECT.store.status(ctx, str(private.conversation_id)) is None
+
+    assert not (workspace_dir / "transcripts").exists()
+
+
+async def test_private_turn_sees_shared_conversation_metadata_but_not_its_transcript(
+    db: None, tmp_path: Path
+) -> None:
+    workspace_id = await _workspace()
+    tools = _object_tools()
+    with ws(workspace_id):
+        member = await _member(workspace_id, OWNER_CREATED_AT)
+        shared = await _turn_row(workspace_id)
+        reader = await _turn_row(workspace_id, member_id=member)
+        ctx, workspace_dir = await _workspace_context(reader, tmp_path, audience_member_id=member)
+        await Transcript(blob=ctx.blob, conversation_id=shared.conversation_id).write(
+            LAUNCH_EXCHANGE
+        )
+
+        fetched = yaml.safe_load(
+            await _text(
+                tools,
+                "object_get",
+                ctx,
+                kind=CONVERSATION_KIND,
+                name=str(shared.conversation_id),
+            )
+        )
+
+    assert fetched["spec"]["member_id"] is None
+    assert fetched["status"] is None
+    assert not (workspace_dir / "transcripts").exists()
+
+
+async def test_conversation_transcript_uses_the_canonical_id_path(db: None, tmp_path: Path) -> None:
+    workspace_id = await _workspace()
+    tools = _object_tools()
+    with ws(workspace_id):
+        past = await _turn_row(workspace_id)
+        reader = await _turn_row(workspace_id)
+        ctx, workspace_dir = await _workspace_context(reader, tmp_path)
+        await Transcript(blob=ctx.blob, conversation_id=past.conversation_id).write(LAUNCH_EXCHANGE)
+
+        fetched = yaml.safe_load(
+            await _text(
+                tools,
+                "object_get",
+                ctx,
+                kind=CONVERSATION_KIND,
+                name=past.conversation_id.hex,
+            )
+        )
+
+    path = f"transcripts/{past.conversation_id}.txt"
+    assert fetched["status"]["workspace_path"] == path
+    assert (workspace_dir / path).is_file()
+
+
+async def test_conversation_without_a_transcript_is_empty_and_corruption_fails_loud(
+    db: None, tmp_path: Path
+) -> None:
+    workspace_id = await _workspace()
+    tools = _object_tools()
+    with ws(workspace_id):
+        empty = await _turn_row(workspace_id)
+        broken = await _turn_row(workspace_id)
+        reader = await _turn_row(workspace_id)
+        ctx, workspace_dir = await _workspace_context(reader, tmp_path)
+
+        fetched = yaml.safe_load(
+            await _text(
+                tools,
+                "object_get",
+                ctx,
+                kind=CONVERSATION_KIND,
+                name=str(empty.conversation_id),
+            )
+        )
+        assert fetched["status"] == {"messages": 0, "size_bytes": 0, "workspace_path": None}
+        assert not (workspace_dir / "transcripts").exists()
+
+        await ctx.blob.put(transcript_key(broken.conversation_id), b"not a transcript")
+        with pytest.raises(ValueError, match="unreadable transcript"):
+            await _text(
+                tools,
+                "object_get",
+                ctx,
+                kind=CONVERSATION_KIND,
+                name=str(broken.conversation_id),
+            )
+
+
+async def test_oversize_conversation_reports_size_without_writing(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace_id = await _workspace()
+    tools = _object_tools()
+    monkeypatch.setattr(conversations, "MATERIALIZE_MAX_BYTES", 8)
+    with ws(workspace_id):
+        past = await _turn_row(workspace_id)
+        reader = await _turn_row(workspace_id)
+        ctx, workspace_dir = await _workspace_context(reader, tmp_path)
+        await Transcript(blob=ctx.blob, conversation_id=past.conversation_id).write(LAUNCH_EXCHANGE)
+
+        fetched = yaml.safe_load(
+            await _text(
+                tools,
+                "object_get",
+                ctx,
+                kind=CONVERSATION_KIND,
+                name=str(past.conversation_id),
+            )
+        )
+
+    assert fetched["status"]["messages"] == 2
+    assert fetched["status"]["size_bytes"] > 8
+    assert fetched["status"]["workspace_path"] is None
+    assert not (workspace_dir / "transcripts").exists()
 
 
 class _BootSpec(BaseModel):

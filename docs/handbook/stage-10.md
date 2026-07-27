@@ -412,21 +412,6 @@ async def spawn_subagent_handler(ctx: ToolContext, args: SpawnSubagentInput) -> 
 *Call graph*: 3 external calls (__init__, __init__, spawn).
 
 
-##### `load_sessions_handler`  (lines 541–601)
-
-```
-async def load_sessions_handler(ctx: ToolContext, args: LoadSessionsInput) -> ToolResult
-```
-
-**Purpose**: Loads selected past conversation transcripts that belong to the current workspace and audience member. It lets the agent recall specific earlier sessions without exposing unrelated conversations.
-
-**Data flow**: It receives up to a fixed number of session id strings. It separates malformed ids into a failure list, checks the database for conversations in the current workspace and allowed audience scope, then fetches each transcript from blob storage. It decodes transcript messages, keeps user and assistant text, and returns JSON containing loaded sessions plus ids that failed.
-
-**Call relations**: This is the handler behind the registered `load_sessions` tool. It uses the database to verify ownership and surface information, transcript helpers to find and decode stored conversations, and blob storage to retrieve the durable transcript bytes.
-
-*Call graph*: 8 external calls (__init__, __init__, dumps, select, workspace_tx, decode, transcript_key, UUID).
-
-
 ##### `ask_user_handler`  (lines 609–619)
 
 ```

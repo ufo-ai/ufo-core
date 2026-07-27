@@ -134,6 +134,8 @@ terminal frame. A client's wait always ends — the terminal state commits on th
   is O(1) and points toward equal-or-wider visibility, so there is no edge table, no backlinks, and
   no target elision — a reverse question is a structured query over the forward column, exposed
   only when a flow needs it. A link never grants visibility.
+  A conversation get writes its text exchange to `status.workspace_path`; bulk transcript content
+  never enters the tool result.
   Everything else arrives via extensions.
   Two tools where one would do is a defect. `share_file` ports the shipped design: byte custody in
   the blob store, a TTL-bound token URL served by core's artifact route — no token, no bytes.

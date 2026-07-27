@@ -1,5 +1,5 @@
 """The builtin tool set: bash, read, write, edit, glob, grep, share_file, spawn_subagent,
-load_sessions, ask_user, request_credentials, load_skill, connect_account,
+ask_user, request_credentials, load_skill, connect_account,
 wait_for_subagents, cancel_subagent, message_subagent.
 
 Each file/shell handler reaches the workspace only through `ctx.sandbox`, so the carrier's scoping
@@ -13,9 +13,8 @@ content search happen in the container and a bounded result crosses back. `share
 produced workspace file straight out of the mount into the blob
 store under `artifacts/<uuid>/` and returns a TTL-token URL core's artifact route serves — the only
 path that hands a file back outside the sandbox, with no read cap and no whole-file buffer.
-`spawn_subagent` delegates a typed subtask to a child turn through `ctx.spawn`. `load_sessions`
-reads specific past conversation transcripts back from the blob store, scoped to the conversation
-audience member. `ask_user` is chat-native: it
+`spawn_subagent` delegates a typed subtask to a child turn through `ctx.spawn`. `ask_user` is
+chat-native: it
 structures a question or confirmation the agent poses in its reply, whose answer rides the member's
 next message — no out-of-band prompt. `request_credentials` is its secret-collecting sibling: it
 seals which slots the speaking owner will fill and ends the turn; a capable surface prompts for the
@@ -46,10 +45,8 @@ from ufo.artifact_token import (
     mint_artifact_token,
 )
 from ufo.artifacts import artifact_object_names
-from ufo.blob import BlobNotFound
 from ufo.db import workspace_tx
 from ufo.grants import installed_connect_flow
-from ufo.models.interface import TextBlock
 from ufo.sandbox.session import WORKSPACE_DIR, workspace_path
 from ufo.schema import tables
 from ufo.schema.records import AskUserInput, ConnectRequest, CredentialPrompt, CredentialRequest
@@ -62,10 +59,8 @@ from ufo.tools.context import (
     UnknownSubagentProfile,
 )
 from ufo.tools.registry import ToolDef
-from ufo.transcript import TranscriptDecodeError, decode, transcript_key
 
 GREP_HEAD_LIMIT = 100
-MAX_LOAD_SESSIONS = 25
 ARTIFACT_FALLBACK_NAME = "download"
 SHARE_PREFLIGHT_TIMEOUT_SECONDS = 300
 
@@ -199,19 +194,6 @@ class SpawnSubagentInput(BaseModel):
         default=False,
         description="Run in the background and return the child turn id immediately instead of "
         "waiting for its validated output.",
-    )
-
-
-class LoadSessionsInput(BaseModel):
-    session_ids: tuple[str, ...] = Field(
-        min_length=1,
-        max_length=MAX_LOAD_SESSIONS,
-        description="List of session IDs (full conversation UUIDs) to load. Up to 25 per call; "
-        "per-ID failures are reported and do not abort the call.",
-    )
-    user_description: str | None = Field(
-        default=None,
-        description="Brief plain-language description shown in the activity timeline.",
     )
 
 
@@ -538,69 +520,6 @@ async def spawn_subagent_handler(ctx: ToolContext, args: SpawnSubagentInput) -> 
     )
 
 
-async def load_sessions_handler(ctx: ToolContext, args: LoadSessionsInput) -> ToolResult:
-    """Load specific past conversation transcripts by id, scoped to the speaking member's own
-    conversations in this workspace. Each id resolves to its durable transcript, rendered as the
-    user/assistant text exchange; an id that is malformed, not the member's, not in this workspace,
-    or whose transcript is missing or corrupt is collected into `failed` and never aborts the
-    call."""
-    requested: dict[UUID, str] = {}
-    failed: list[str] = []
-    for raw in args.session_ids:
-        try:
-            requested[UUID(raw)] = raw
-        except ValueError:
-            failed.append(raw)
-    scope = (
-        tables.conversation.c.member_id.is_(None)
-        if ctx.audience_member_id is None
-        else tables.conversation.c.member_id == ctx.audience_member_id
-    )
-    surfaces: dict[UUID, str] = {}
-    if requested:
-        async with workspace_tx() as connection:
-            rows = (
-                (
-                    await connection.execute(
-                        sa.select(tables.conversation.c.id, tables.conversation.c.surface).where(
-                            tables.conversation.c.id.in_(list(requested)),
-                            tables.conversation.c.workspace_id == ctx.turn.workspace_id,
-                            scope,
-                        )
-                    )
-                )
-                .mappings()
-                .all()
-            )
-        surfaces = {row["id"]: row["surface"] for row in rows}
-    sessions: list[dict[str, object]] = []
-    for conversation_id, raw in requested.items():
-        if conversation_id not in surfaces:
-            failed.append(raw)
-            continue
-        try:
-            transcript = decode(await ctx.blob.get(transcript_key(conversation_id)))
-        except (BlobNotFound, TranscriptDecodeError):
-            failed.append(raw)
-            continue
-        messages: list[dict[str, str]] = []
-        for message in transcript.messages:
-            if isinstance(message.content, str):
-                text = message.content
-            else:
-                text = "\n".join(
-                    block.text for block in message.content if isinstance(block, TextBlock)
-                )
-            if text:
-                messages.append({"role": message.role, "text": text})
-        sessions.append(
-            {"session_id": raw, "surface": surfaces[conversation_id], "messages": messages}
-        )
-    return ToolResult(
-        content=(TextContent(text=json.dumps({"sessions": sessions, "failed": failed})),)
-    )
-
-
 ASK_USER_DIRECTIVE = (
     "Ask these in your reply, then end your turn — the user's answer arrives as the next message."
 )
@@ -824,17 +743,6 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         ),
         input_model=SpawnSubagentInput,
         handler=spawn_subagent_handler,
-    ),
-    ToolDef(
-        name="load_sessions",
-        description=(
-            "Load one or more past conversation transcripts by id, on demand — use when you need "
-            "to recall content from specific past conversations not already in context. Each id is "
-            "one of your own conversations; per-id failures (an unknown id, or one that is not "
-            "yours) are reported in the 'failed' list and do not abort the call."
-        ),
-        input_model=LoadSessionsInput,
-        handler=load_sessions_handler,
     ),
     ToolDef(
         name="ask_user",

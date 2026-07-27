@@ -34,6 +34,7 @@ from ufo.conversations import CONVERSATION_KIND
 from ufo.db import workspace_tx
 from ufo.ext.context import JsonValue
 from ufo.objects import (
+    MATERIALIZE_MAX_BYTES,
     ObjectDetail,
     ObjectKind,
     ObjectLink,
@@ -52,7 +53,6 @@ ARTIFACT_KIND = "artifact"
 ARTIFACTS_ARE_SHARED = (
     "artifacts exist only by sharing — write the file in the workspace and share_file it"
 )
-MATERIALIZE_MAX_BYTES = 33_554_432
 ARTIFACT_WORKSPACE_DIR = "artifacts"
 NAME_SLUG_MAX = 40
 SUMMARY_MAX = 100

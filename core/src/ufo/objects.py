@@ -44,6 +44,7 @@ OBJECT_NAME_PATTERN = re.compile(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?")
 OBJECT_NAME_MAX_LENGTH = 64
 KIND_NAME_PATTERN = re.compile(r"[a-z][a-z0-9_]*")
 OBJECT_MANIFEST_MAX_BYTES = 65_536
+MATERIALIZE_MAX_BYTES = 33_554_432
 OBJECT_LIST_PAGE = 50
 ENVELOPE_KEYS = frozenset({"kind", "name", "spec"})
 

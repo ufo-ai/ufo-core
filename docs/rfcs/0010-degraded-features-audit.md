@@ -59,7 +59,7 @@ as part of closing this out.
 
 ## Doc integrity — stale prose to correct (both-ends)
 
-`salvage.md:38` (condenser "becomes the core Condenser"), `:44` (pause_and_wait "deferred to extensions"), `:62/64` (serve_url, e2b dropped-connection); `plan.md:48/64/66` (pipeline/Condenser + sample condenser); `spec.md` §Model abstraction (`auto` routing, per-agent reasoning, keys-from-slots), §Accounting (per-tool metering), §Workspace (spend_cap dimension), §Extension (propose_change skills/grants). Also the inverse drift: `BUILTIN_TOOLS` ships 17 tools vs the spec's 8 — `glob`/`grep`/`load_sessions`/`connect_account`/`pause_and_wait` each contradict a `salvage.md` drop/fold/defer decision.
+`salvage.md:38` (condenser "becomes the core Condenser"), `:44` (pause_and_wait "deferred to extensions"), `:62/64` (serve_url, e2b dropped-connection); `plan.md:48/64/66` (pipeline/Condenser + sample condenser); `spec.md` §Model abstraction (`auto` routing, per-agent reasoning, keys-from-slots), §Accounting (per-tool metering), §Workspace (spend_cap dimension), §Extension (propose_change skills/grants). Also the inverse drift: `BUILTIN_TOOLS` ships 15 tools vs the spec's 9 — `glob`/`grep`/`connect_account` each contradict a `salvage.md` drop/fold decision.
 
 ## Verified SOUND (checked, not cripples — so we don't re-flag)
 

@@ -3,10 +3,8 @@
 `memory_update`/`memory_search` are the extension's tools and `recall_hook` its `user_prompt_submit`
 hook; each is driven here over an `ExtensionContext` carrying the deploy index/embed backends,
 exactly as core threads them onto a turn. The headline: a fact committed in one context is recalled
-in a fresh one — both by the search tool and, unprompted, by the user_prompt_submit hook.
-`load_sessions` stays a core builtin and keeps its proof here, driven with a memory-free context."""
+in a fresh one — both by the search tool and, unprompted, by the user_prompt_submit hook."""
 
-import json
 import logging
 from datetime import UTC, datetime
 from pathlib import Path
@@ -24,18 +22,13 @@ from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, context_for
 from ufo.indexing import TextChunker
-from ufo.models.interface import Message, TextBlock, ToolUseBlock
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.manifest import HookContext, InjectContext, UserPromptSubmit
 from ufo.subjects import member_subject
-from ufo.tools.builtins import BUILTIN_TOOLS
 from ufo.tools.context import SpawnResult, ToolContext, ToolResult
-from ufo.tools.registry import ToolRegistry
-from ufo.transcript import Conversation, encode, transcript_key
 from ufo.workspace import ws
 
-BUILTIN_REGISTRY = ToolRegistry(BUILTIN_TOOLS)
 MEMORY_TOOLS = {tool.name: tool for tool in memory.manifest().tools}
 
 
@@ -502,92 +495,3 @@ async def test_memory_search_interleaves_per_query_results(
         for line in found.content[0].text.splitlines()
     ]
     assert bodies == ["a-one", "b-one", "a-two"]
-
-
-async def _load_sessions(ctx: ToolContext, **args: object) -> ToolResult:
-    tool = BUILTIN_REGISTRY.get("load_sessions")
-    return await tool.handler(ctx, tool.input_model.model_validate(args))
-
-
-async def test_load_sessions_returns_named_transcripts_and_reports_the_rest(
-    db: None, tmp_path: Path
-) -> None:
-    workspace_id = await _workspace()
-    blob = FilesystemBlobStore(root=tmp_path)
-    member, other = uuid4(), uuid4()
-    conversation_id, other_conversation_id, unknown = uuid4(), uuid4(), uuid4()
-    async with workspace_tx() as connection:
-        for member_id, email in ((member, "a@example.test"), (other, "b@example.test")):
-            await connection.execute(
-                sa.insert(tables.member).values(
-                    id=member_id,
-                    workspace_id=workspace_id,
-                    email=email,
-                    created_at=sa.func.now(),
-                    updated_at=sa.func.now(),
-                )
-            )
-        agent_id = uuid4()
-        await connection.execute(
-            sa.insert(tables.agent).values(
-                id=agent_id,
-                workspace_id=workspace_id,
-                name="assistant",
-                prompt="p",
-                model="claude-opus-4-8",
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-        for cid, owner in ((conversation_id, member), (other_conversation_id, other)):
-            await connection.execute(
-                sa.insert(tables.conversation).values(
-                    id=cid,
-                    workspace_id=workspace_id,
-                    agent_id=agent_id,
-                    surface="slack",
-                    queue_key=cid.hex,
-                    member_id=owner,
-                    created_at=sa.func.now(),
-                    updated_at=sa.func.now(),
-                )
-            )
-    await blob.put(
-        transcript_key(conversation_id),
-        encode(
-            Conversation(
-                seq=2,
-                messages=(
-                    Message(role="user", content="remind me about the launch"),
-                    Message(
-                        role="assistant",
-                        content=(
-                            ToolUseBlock(id="t1", name="memory_search", input={"queries": ["x"]}),
-                            TextBlock(text="the launch is march 3"),
-                        ),
-                    ),
-                ),
-            )
-        ),
-    )
-    await blob.put(
-        transcript_key(other_conversation_id),
-        encode(Conversation(seq=1, messages=(Message(role="user", content="private"),))),
-    )
-    ctx = _tool_ctx(None, member, tmp_path, workspace_id=workspace_id, blob=blob)
-
-    with ws(workspace_id):
-        result = await _load_sessions(
-            ctx,
-            session_ids=[str(conversation_id), str(other_conversation_id), str(unknown)],
-        )
-    payload = json.loads(result.content[0].text)
-
-    assert [session["session_id"] for session in payload["sessions"]] == [str(conversation_id)]
-    session = payload["sessions"][0]
-    assert session["surface"] == "slack"
-    assert [message["text"] for message in session["messages"]] == [
-        "remind me about the launch",
-        "the launch is march 3",
-    ]
-    assert set(payload["failed"]) == {str(other_conversation_id), str(unknown)}
