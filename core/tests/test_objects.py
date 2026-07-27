@@ -25,11 +25,12 @@ from ufo_ext_scheduled_tasks.tools import SCHEDULED_TASK_OBJECT
 from ufo_ext_sources.tools import SOURCE_OBJECT
 
 import ufo.conversations as conversations
+from ufo.agent_scope import agent
 from ufo.agents import AGENT_KIND
 from ufo.artifact_token import verify_artifact_token
 from ufo.artifacts import ARTIFACT_KIND, artifact_object_names
 from ufo.blob import FilesystemBlobStore
-from ufo.conversations import CONVERSATION_KIND, CONVERSATION_OBJECT
+from ufo.conversations import CONVERSATION_KIND
 from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.context import JsonValue
@@ -182,6 +183,17 @@ async def _text(tools: dict[str, ToolDef], tool_name: str, ctx: ToolContext, **a
     block = result.content[0]
     assert isinstance(block, TextContent)
     return block.text
+
+
+async def _agent_text(
+    agent_id: UUID,
+    tools: dict[str, ToolDef],
+    tool_name: str,
+    ctx: ToolContext,
+    **args: object,
+) -> str:
+    with agent(agent_id):
+        return await _text(tools, tool_name, ctx, **args)
 
 
 def _widget_manifest(name: str, color: str = "teal", size: int = 1) -> str:
@@ -805,8 +817,11 @@ async def test_agent_apply_and_pending_proposal_write_disjoint_fields(db: None) 
 ARTIFACT_TEST_SECRET = "artifact-test-secret"
 
 
-async def _turn_row(workspace_id: UUID, member_id: UUID | None = None) -> Turn:
-    agent_id = await _agent_row(workspace_id, name=f"agent-{uuid4().hex[:8]}")
+async def _turn_row(
+    workspace_id: UUID, agent_id: UUID | None = None, member_id: UUID | None = None
+) -> Turn:
+    if agent_id is None:
+        agent_id = await _agent_row(workspace_id, name=f"agent-{uuid4().hex[:8]}")
     conversation_id, turn_id = uuid4(), uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
@@ -933,13 +948,16 @@ async def test_share_file_lands_an_artifact_object_and_get_copies_the_latest_bac
         )
         assert shared["artifact"] == name
 
-        listing = json.loads(await _text(tools, "object_list", ctx, kind=ARTIFACT_KIND))
+        listing = json.loads(
+            await _agent_text(turn.agent_id, tools, "object_list", ctx, kind=ARTIFACT_KIND)
+        )
         assert [row["name"] for row in listing["objects"]] == [name]
         assert "report.txt" in listing["objects"][0]["summary"]
         assert listing["objects"][0]["filename"] == "report.txt"
         assert listing["objects"][0]["subject"] == "Q3 numbers"
         by_filename = json.loads(
-            await _text(
+            await _agent_text(
+                turn.agent_id,
                 tools,
                 "object_list",
                 ctx,
@@ -950,7 +968,8 @@ async def test_share_file_lands_an_artifact_object_and_get_copies_the_latest_bac
         )
         assert [row["name"] for row in by_filename["objects"]] == [name]
         by_subject = json.loads(
-            await _text(
+            await _agent_text(
+                turn.agent_id,
                 tools,
                 "object_list",
                 ctx,
@@ -961,16 +980,32 @@ async def test_share_file_lands_an_artifact_object_and_get_copies_the_latest_bac
         )
         assert [row["name"] for row in by_subject["objects"]] == [name]
         filtered = json.loads(
-            await _text(tools, "object_list", ctx, kind=ARTIFACT_KIND, query="no-such-share")
+            await _agent_text(
+                turn.agent_id,
+                tools,
+                "object_list",
+                ctx,
+                kind=ARTIFACT_KIND,
+                query="no-such-share",
+            )
         )
         assert filtered["objects"] == []
         folded = json.loads(
-            await _text(tools, "object_list", ctx, kind=ARTIFACT_KIND, query="q3 NUMBERS")
+            await _agent_text(
+                turn.agent_id,
+                tools,
+                "object_list",
+                ctx,
+                kind=ARTIFACT_KIND,
+                query="q3 NUMBERS",
+            )
         )
         assert [row["name"] for row in folded["objects"]] == [name]
 
         fetched = yaml.safe_load(
-            await _text(tools, "object_get", ctx, kind=ARTIFACT_KIND, name=name)
+            await _agent_text(
+                turn.agent_id, tools, "object_get", ctx, kind=ARTIFACT_KIND, name=name
+            )
         )
         assert fetched["spec"] == {
             "filename": "report.txt",
@@ -998,10 +1033,14 @@ async def test_share_file_lands_an_artifact_object_and_get_copies_the_latest_bac
         await ctx.sandbox.bash("printf 'revised numbers' > report.txt")
         reshared = json.loads(await _text(tools, "share_file", ctx, file_path="report.txt"))
         assert reshared["artifact"] == name
-        listing = json.loads(await _text(tools, "object_list", ctx, kind=ARTIFACT_KIND))
+        listing = json.loads(
+            await _agent_text(turn.agent_id, tools, "object_list", ctx, kind=ARTIFACT_KIND)
+        )
         assert [row["name"] for row in listing["objects"]] == [name]
         refetched = yaml.safe_load(
-            await _text(tools, "object_get", ctx, kind=ARTIFACT_KIND, name=name)
+            await _agent_text(
+                turn.agent_id, tools, "object_get", ctx, kind=ARTIFACT_KIND, name=name
+            )
         )
         assert refetched["status"]["versions"] == 2
         assert (workspace_dir / "artifacts" / name / "report.txt").read_bytes() == (
@@ -1047,25 +1086,31 @@ async def test_artifact_kind_refuses_apply_and_delete_removes_every_version(
             }
         )
         with pytest.raises(VerbNotSupported, match="share_file"):
-            await apply_tool.handler(
-                ctx, apply_tool.input_model.model_validate({"manifest": manifest})
-            )
+            with agent(turn.agent_id):
+                await apply_tool.handler(
+                    ctx, apply_tool.input_model.model_validate({"manifest": manifest})
+                )
 
         deleted = json.loads(
-            await _text(tools, "object_delete", ctx, kind=ARTIFACT_KIND, name=name)
+            await _agent_text(
+                turn.agent_id, tools, "object_delete", ctx, kind=ARTIFACT_KIND, name=name
+            )
         )
         assert deleted["spec"]["filename"] == "report.txt"
-        listing = json.loads(await _text(tools, "object_list", ctx, kind=ARTIFACT_KIND))
+        listing = json.loads(
+            await _agent_text(turn.agent_id, tools, "object_list", ctx, kind=ARTIFACT_KIND)
+        )
         assert listing["objects"] == []
         for blob_key in blob_keys:
             assert not await ctx.blob.exists(blob_key)
 
         delete_tool = tools["object_delete"]
         with pytest.raises(UnknownObject):
-            await delete_tool.handler(
-                ctx,
-                delete_tool.input_model.model_validate({"kind": ARTIFACT_KIND, "name": name}),
-            )
+            with agent(turn.agent_id):
+                await delete_tool.handler(
+                    ctx,
+                    delete_tool.input_model.model_validate({"kind": ARTIFACT_KIND, "name": name}),
+                )
 
 
 async def test_artifact_over_the_copy_bound_reports_no_workspace_path(db: None) -> None:
@@ -1081,7 +1126,8 @@ async def test_artifact_over_the_copy_bound_reports_no_workspace_path(db: None) 
         ctx = _tool_context(workspace_id)
 
         fetched = yaml.safe_load(
-            await _text(
+            await _agent_text(
+                turn.agent_id,
                 tools,
                 "object_get",
                 ctx,
@@ -1104,15 +1150,16 @@ async def test_artifact_with_missing_bytes_fails_loud_on_get(db: None, tmp_path:
 
         get_tool = tools["object_get"]
         with pytest.raises(ValueError, match="no stored bytes"):
-            await get_tool.handler(
-                ctx,
-                get_tool.input_model.model_validate(
-                    {
-                        "kind": ARTIFACT_KIND,
-                        "name": f"{turn.conversation_id.hex[:8]}-gone-txt",
-                    }
-                ),
-            )
+            with agent(turn.agent_id):
+                await get_tool.handler(
+                    ctx,
+                    get_tool.input_model.model_validate(
+                        {
+                            "kind": ARTIFACT_KIND,
+                            "name": f"{turn.conversation_id.hex[:8]}-gone-txt",
+                        }
+                    ),
+                )
 
 
 async def test_artifact_slug_collisions_list_under_distinct_names(db: None) -> None:
@@ -1124,7 +1171,9 @@ async def test_artifact_slug_collisions_list_under_distinct_names(db: None) -> N
         await _shared_artifact_row(turn, f"artifacts/{uuid4()}/a_b.txt", "a_b.txt", 1)
         ctx = _tool_context(workspace_id)
 
-        listing = json.loads(await _text(tools, "object_list", ctx, kind=ARTIFACT_KIND))
+        listing = json.loads(
+            await _agent_text(turn.agent_id, tools, "object_list", ctx, kind=ARTIFACT_KIND)
+        )
         names = [row["name"] for row in listing["objects"]]
         expected = artifact_object_names(
             [(turn.conversation_id, "a b.txt"), (turn.conversation_id, "a_b.txt")]
@@ -1138,12 +1187,14 @@ async def test_same_filename_across_conversations_stays_distinct(db: None) -> No
     tools = _object_tools()
     with ws(workspace_id):
         turn_a = await _turn_row(workspace_id)
-        turn_b = await _turn_row(workspace_id)
+        turn_b = await _turn_row(workspace_id, agent_id=turn_a.agent_id)
         await _shared_artifact_row(turn_a, f"artifacts/{uuid4()}/report.txt", "report.txt", 1)
         await _shared_artifact_row(turn_b, f"artifacts/{uuid4()}/report.txt", "report.txt", 1)
         ctx = _tool_context(workspace_id)
 
-        listing = json.loads(await _text(tools, "object_list", ctx, kind=ARTIFACT_KIND))
+        listing = json.loads(
+            await _agent_text(turn_a.agent_id, tools, "object_list", ctx, kind=ARTIFACT_KIND)
+        )
         names = sorted(row["name"] for row in listing["objects"])
         assert names == sorted(
             f"{turn.conversation_id.hex[:8]}-report-txt" for turn in (turn_a, turn_b)
@@ -1172,12 +1223,13 @@ async def test_conversation_get_materializes_the_durable_transcript(
     tools = _object_tools()
     with ws(workspace_id):
         past = await _turn_row(workspace_id)
-        reader = await _turn_row(workspace_id)
+        reader = await _turn_row(workspace_id, agent_id=past.agent_id)
         ctx, workspace_dir = await _workspace_context(reader, tmp_path)
         await Transcript(blob=ctx.blob, conversation_id=past.conversation_id).write(LAUNCH_EXCHANGE)
 
         fetched = yaml.safe_load(
-            await _text(
+            await _agent_text(
+                past.agent_id,
                 tools,
                 "object_get",
                 ctx,
@@ -1195,7 +1247,7 @@ async def test_conversation_get_materializes_the_durable_transcript(
     assert (workspace_dir / "transcripts" / f"{past.conversation_id}.txt").read_bytes() == body
 
 
-async def test_conversation_transcript_keeps_the_existing_member_gate(
+async def test_conversation_transcript_keeps_member_and_agent_gates(
     db: None, tmp_path: Path
 ) -> None:
     workspace_id = await _workspace()
@@ -1204,23 +1256,48 @@ async def test_conversation_transcript_keeps_the_existing_member_gate(
         member = await _member(workspace_id, OWNER_CREATED_AT)
         other = await _member(workspace_id, JOINER_CREATED_AT)
         private = await _turn_row(workspace_id, member_id=member)
-        reader = await _turn_row(workspace_id, member_id=other)
+        reader = await _turn_row(workspace_id, agent_id=private.agent_id, member_id=other)
         ctx, workspace_dir = await _workspace_context(reader, tmp_path, audience_member_id=other)
+        correct_reader = await _turn_row(workspace_id, agent_id=private.agent_id, member_id=member)
+        correct_ctx = replace(ctx, turn=correct_reader, audience_member_id=member)
+        other_agent_reader = await _turn_row(workspace_id, member_id=member)
+        other_agent_ctx = replace(
+            ctx,
+            turn=other_agent_reader,
+            audience_member_id=member,
+        )
         await Transcript(blob=ctx.blob, conversation_id=private.conversation_id).write(
             LAUNCH_EXCHANGE
         )
 
         get_tool = tools["object_get"]
-        with pytest.raises(UnknownObject):
-            await get_tool.handler(
-                ctx,
-                get_tool.input_model.model_validate(
-                    {"kind": CONVERSATION_KIND, "name": str(private.conversation_id)}
-                ),
+        for agent_id, hidden in (
+            (private.agent_id, ctx),
+            (other_agent_reader.agent_id, other_agent_ctx),
+        ):
+            with agent(agent_id):
+                with pytest.raises(UnknownObject):
+                    await get_tool.handler(
+                        hidden,
+                        get_tool.input_model.model_validate(
+                            {"kind": CONVERSATION_KIND, "name": str(private.conversation_id)}
+                        ),
+                    )
+        assert not (workspace_dir / "transcripts").exists()
+        fetched = yaml.safe_load(
+            await _agent_text(
+                private.agent_id,
+                tools,
+                "object_get",
+                correct_ctx,
+                kind=CONVERSATION_KIND,
+                name=str(private.conversation_id),
             )
-        assert await CONVERSATION_OBJECT.store.status(ctx, str(private.conversation_id)) is None
+        )
 
-    assert not (workspace_dir / "transcripts").exists()
+    path = f"transcripts/{private.conversation_id}.txt"
+    assert fetched["status"]["workspace_path"] == path
+    assert (workspace_dir / path).is_file()
 
 
 async def test_private_turn_sees_shared_conversation_metadata_but_not_its_transcript(
@@ -1231,14 +1308,15 @@ async def test_private_turn_sees_shared_conversation_metadata_but_not_its_transc
     with ws(workspace_id):
         member = await _member(workspace_id, OWNER_CREATED_AT)
         shared = await _turn_row(workspace_id)
-        reader = await _turn_row(workspace_id, member_id=member)
+        reader = await _turn_row(workspace_id, agent_id=shared.agent_id, member_id=member)
         ctx, workspace_dir = await _workspace_context(reader, tmp_path, audience_member_id=member)
         await Transcript(blob=ctx.blob, conversation_id=shared.conversation_id).write(
             LAUNCH_EXCHANGE
         )
 
         fetched = yaml.safe_load(
-            await _text(
+            await _agent_text(
+                shared.agent_id,
                 tools,
                 "object_get",
                 ctx,
@@ -1257,12 +1335,13 @@ async def test_conversation_transcript_uses_the_canonical_id_path(db: None, tmp_
     tools = _object_tools()
     with ws(workspace_id):
         past = await _turn_row(workspace_id)
-        reader = await _turn_row(workspace_id)
+        reader = await _turn_row(workspace_id, agent_id=past.agent_id)
         ctx, workspace_dir = await _workspace_context(reader, tmp_path)
         await Transcript(blob=ctx.blob, conversation_id=past.conversation_id).write(LAUNCH_EXCHANGE)
 
         fetched = yaml.safe_load(
-            await _text(
+            await _agent_text(
+                past.agent_id,
                 tools,
                 "object_get",
                 ctx,
@@ -1283,12 +1362,13 @@ async def test_conversation_without_a_transcript_is_empty_and_corruption_fails_l
     tools = _object_tools()
     with ws(workspace_id):
         empty = await _turn_row(workspace_id)
-        broken = await _turn_row(workspace_id)
-        reader = await _turn_row(workspace_id)
+        broken = await _turn_row(workspace_id, agent_id=empty.agent_id)
+        reader = await _turn_row(workspace_id, agent_id=empty.agent_id)
         ctx, workspace_dir = await _workspace_context(reader, tmp_path)
 
         fetched = yaml.safe_load(
-            await _text(
+            await _agent_text(
+                empty.agent_id,
                 tools,
                 "object_get",
                 ctx,
@@ -1301,7 +1381,8 @@ async def test_conversation_without_a_transcript_is_empty_and_corruption_fails_l
 
         await ctx.blob.put(transcript_key(broken.conversation_id), b"not a transcript")
         with pytest.raises(ValueError, match="unreadable transcript"):
-            await _text(
+            await _agent_text(
+                empty.agent_id,
                 tools,
                 "object_get",
                 ctx,
@@ -1318,12 +1399,13 @@ async def test_oversize_conversation_reports_size_without_writing(
     monkeypatch.setattr(conversations, "MATERIALIZE_MAX_BYTES", 8)
     with ws(workspace_id):
         past = await _turn_row(workspace_id)
-        reader = await _turn_row(workspace_id)
+        reader = await _turn_row(workspace_id, agent_id=past.agent_id)
         ctx, workspace_dir = await _workspace_context(reader, tmp_path)
         await Transcript(blob=ctx.blob, conversation_id=past.conversation_id).write(LAUNCH_EXCHANGE)
 
         fetched = yaml.safe_load(
-            await _text(
+            await _agent_text(
+                past.agent_id,
                 tools,
                 "object_get",
                 ctx,
@@ -1336,6 +1418,45 @@ async def test_oversize_conversation_reports_size_without_writing(
     assert fetched["status"]["size_bytes"] > 8
     assert fetched["status"]["workspace_path"] is None
     assert not (workspace_dir / "transcripts").exists()
+
+
+async def test_artifact_reads_and_mutation_resolution_stay_inside_the_agent(db: None) -> None:
+    workspace_id = await _workspace()
+    tools = _object_tools()
+    with ws(workspace_id):
+        home = await _turn_row(workspace_id)
+        other = await _turn_row(workspace_id)
+        await _shared_artifact_row(home, f"artifacts/{uuid4()}/home.txt", "home.txt", 1)
+        await _shared_artifact_row(other, f"artifacts/{uuid4()}/other.txt", "other.txt", 1)
+        home_name = f"{home.conversation_id.hex[:8]}-home-txt"
+        other_name = f"{other.conversation_id.hex[:8]}-other-txt"
+        ctx = _tool_context(workspace_id)
+
+        with agent(home.agent_id):
+            listing = json.loads(await _text(tools, "object_list", ctx, kind=ARTIFACT_KIND))
+            assert [row["name"] for row in listing["objects"]] == [home_name]
+
+            get_tool = tools["object_get"]
+            with pytest.raises(UnknownObject):
+                await get_tool.handler(
+                    ctx,
+                    get_tool.input_model.model_validate(
+                        {"kind": ARTIFACT_KIND, "name": other_name}
+                    ),
+                )
+
+            delete_tool = tools["object_delete"]
+            with pytest.raises(UnknownObject):
+                await delete_tool.handler(
+                    ctx,
+                    delete_tool.input_model.model_validate(
+                        {"kind": ARTIFACT_KIND, "name": other_name}
+                    ),
+                )
+
+        with agent(other.agent_id):
+            listing = json.loads(await _text(tools, "object_list", ctx, kind=ARTIFACT_KIND))
+            assert [row["name"] for row in listing["objects"]] == [other_name]
 
 
 class _BootSpec(BaseModel):

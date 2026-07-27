@@ -24,6 +24,7 @@ from uuid import UUID
 import sqlalchemy as sa
 from pydantic import BaseModel, ConfigDict, Field
 
+from ufo.agent_scope import agent_current
 from ufo.artifact_token import (
     ARTIFACT_DOWNLOAD_PATH,
     ARTIFACT_TOKEN_TTL_SECONDS,
@@ -104,11 +105,11 @@ class ArtifactSpec(BaseModel):
 
 @dataclass(frozen=True)
 class ArtifactObjects:
-    """Read/delete handlers over the workspace's `shared_artifact` rows, grouped by the sharing
+    """Read/delete handlers over the agent's `shared_artifact` rows, grouped by the sharing
     conversation and filename — each group's newest share is the object's current version.
-    `status` is where get's workspace copy happens: the seam calls `status` only on `object_get`,
-    so `apply` and `delete` fetching the current spec never write into the workspace as a side
-    effect."""
+    Another agent's artifacts are not found. `status` is where get's workspace copy happens: the
+    seam calls `status` only on `object_get`, so `apply` and `delete` fetching the current spec
+    never write into the workspace as a side effect."""
 
     async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage:
         rows = tuple(
@@ -221,7 +222,10 @@ class ArtifactObjects:
                             tables.turn, tables.shared_artifact.c.turn_id == tables.turn.c.id
                         )
                     )
-                    .where(tables.shared_artifact.c.workspace_id == ws_current().workspace_id)
+                    .where(
+                        tables.shared_artifact.c.workspace_id == ws_current().workspace_id,
+                        tables.turn.c.agent_id == agent_current().agent_id,
+                    )
                 )
             ).all()
         by_identity: dict[tuple[UUID, str], list[sa.Row]] = {}
@@ -251,7 +255,7 @@ ARTIFACT_OBJECT = ObjectKind(
     name=ARTIFACT_KIND,
     description=(
         "A file shared out of a turn by share_file, one object per conversation and filename — "
-        "re-shares in the same conversation are versions: list the workspace's shared files, "
+        "re-shares in the same conversation are versions: list this agent's shared files, "
         "get one to copy its latest bytes back into the workspace, delete to remove every "
         "stored version. Create and update are refused — share_file is the producer."
     ),
@@ -260,7 +264,8 @@ ARTIFACT_OBJECT = ObjectKind(
         "named <conversation-prefix>-<filename-slug> (3f2a9c1b-report-txt; the share result "
         "carries the name), so one session's artifacts share a prefix and the same filename "
         "from different sessions stays distinct. Re-sharing a filename in the same conversation "
-        "adds a version — get, status, and the workspace copy reflect the latest share. "
+        "adds a version — get, status, and the workspace copy reflect the latest share. Another "
+        "agent's artifacts are not found. "
         "object_get copies the latest bytes back into the conversation workspace at "
         "artifacts/<name>/<filename> — the way to reuse a file an earlier turn produced — its "
         "status carries a fresh member download link (valid one hour), the share time, the "

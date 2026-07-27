@@ -28,6 +28,7 @@ from ufo_ext_sources.pages import PAGE_KIND, PAGE_OBJECT
 from ufo_ext_sources.registry import SOURCE_KIND, binding_name
 from ufo_ext_sources.tools import SOURCE_OBJECT
 
+from ufo.agent_scope import agent
 from ufo.blob import FilesystemBlobStore
 from ufo.conversations import CONVERSATION_KIND, CONVERSATION_OBJECT
 from ufo.db import workspace_tx
@@ -112,13 +113,7 @@ async def _member(workspace_id: UUID) -> UUID:
     return member_id
 
 
-async def _conversation(
-    workspace_id: UUID,
-    member_id: UUID | None,
-    surface: str = "cli",
-    created_at: datetime | None = None,
-) -> UUID:
-    conversation_id = uuid4()
+async def _agent(workspace_id: UUID) -> UUID:
     agent_id = uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
@@ -132,6 +127,18 @@ async def _conversation(
                 updated_at=sa.func.now(),
             )
         )
+    return agent_id
+
+
+async def _conversation(
+    workspace_id: UUID,
+    member_id: UUID | None,
+    agent_id: UUID,
+    surface: str = "cli",
+    created_at: datetime | None = None,
+) -> UUID:
+    conversation_id = uuid4()
+    async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.conversation).values(
                 id=conversation_id,
@@ -313,53 +320,75 @@ async def test_conversation_kind_gates_on_disclosure_and_refuses_mutation(db: No
     with ws(workspace_id):
         member_id = await _member(workspace_id)
         other_id = await _member(workspace_id)
-        shared_conversation = await _conversation(workspace_id, None, surface="slack")
-        private_conversation = await _conversation(workspace_id, member_id)
+        agent_id = await _agent(workspace_id)
+        other_agent_id = await _agent(workspace_id)
+        shared_conversation = await _conversation(workspace_id, None, agent_id, surface="slack")
+        private_conversation = await _conversation(workspace_id, member_id, agent_id)
+        other_agent_conversation = await _conversation(workspace_id, member_id, other_agent_id)
 
         anyone = _tool_ctx(workspace_id, blob)
-        shared = await _get(tools, anyone, CONVERSATION_KIND, str(shared_conversation))
-        assert shared["spec"] == {"surface": "slack", "member_id": None}
-        assert shared["links"] == []
-        assert shared["created_at"] is not None
-
         own = _tool_ctx(workspace_id, blob, member_id=member_id)
-        mine = await _get(tools, own, CONVERSATION_KIND, str(private_conversation))
-        assert mine["spec"] == {"surface": "cli", "member_id": str(member_id)}
-
         get_tool = tools["object_get"]
-        for hidden in (_tool_ctx(workspace_id, blob, member_id=other_id), anyone):
+        with agent(agent_id):
+            shared = await _get(tools, anyone, CONVERSATION_KIND, str(shared_conversation))
+            assert shared["spec"] == {"surface": "slack", "member_id": None}
+            assert shared["links"] == []
+            assert shared["created_at"] is not None
+
+            mine = await _get(tools, own, CONVERSATION_KIND, str(private_conversation))
+            assert mine["spec"] == {"surface": "cli", "member_id": str(member_id)}
+
+            for hidden in (_tool_ctx(workspace_id, blob, member_id=other_id), anyone):
+                with pytest.raises(UnknownObject):
+                    await get_tool.handler(
+                        hidden,
+                        get_tool.input_model.model_validate(
+                            {"kind": CONVERSATION_KIND, "name": str(private_conversation)}
+                        ),
+                    )
             with pytest.raises(UnknownObject):
                 await get_tool.handler(
-                    hidden,
+                    own,
                     get_tool.input_model.model_validate(
-                        {"kind": CONVERSATION_KIND, "name": str(private_conversation)}
+                        {"kind": CONVERSATION_KIND, "name": str(other_agent_conversation)}
                     ),
                 )
 
-        apply_tool = tools["object_apply"]
-        with pytest.raises(VerbNotSupported):
-            await apply_tool.handler(
-                own,
-                apply_tool.input_model.model_validate(
-                    {
-                        "manifest": yaml.safe_dump(
-                            {
-                                "kind": CONVERSATION_KIND,
-                                "name": str(shared_conversation),
-                                "spec": {"surface": "slack", "member_id": None},
-                            }
-                        )
-                    }
-                ),
-            )
-        delete_tool = tools["object_delete"]
-        with pytest.raises(VerbNotSupported):
-            await delete_tool.handler(
-                own,
-                delete_tool.input_model.model_validate(
-                    {"kind": CONVERSATION_KIND, "name": str(shared_conversation)}
-                ),
-            )
+            apply_tool = tools["object_apply"]
+            with pytest.raises(VerbNotSupported):
+                await apply_tool.handler(
+                    own,
+                    apply_tool.input_model.model_validate(
+                        {
+                            "manifest": yaml.safe_dump(
+                                {
+                                    "kind": CONVERSATION_KIND,
+                                    "name": str(shared_conversation),
+                                    "spec": {"surface": "slack", "member_id": None},
+                                }
+                            )
+                        }
+                    ),
+                )
+            delete_tool = tools["object_delete"]
+            with pytest.raises(VerbNotSupported):
+                await delete_tool.handler(
+                    own,
+                    delete_tool.input_model.model_validate(
+                        {"kind": CONVERSATION_KIND, "name": str(shared_conversation)}
+                    ),
+                )
+            with pytest.raises(UnknownObject):
+                await delete_tool.handler(
+                    own,
+                    delete_tool.input_model.model_validate(
+                        {"kind": CONVERSATION_KIND, "name": str(other_agent_conversation)}
+                    ),
+                )
+
+        with agent(other_agent_id):
+            other_mine = await _get(tools, own, CONVERSATION_KIND, str(other_agent_conversation))
+            assert other_mine["spec"] == {"surface": "cli", "member_id": str(member_id)}
 
 
 async def test_conversation_kind_lists_only_visible_rows(db: None) -> None:
@@ -369,17 +398,33 @@ async def test_conversation_kind_lists_only_visible_rows(db: None) -> None:
     with ws(workspace_id):
         member_id = await _member(workspace_id)
         other_id = await _member(workspace_id)
+        agent_id = await _agent(workspace_id)
+        other_agent_id = await _agent(workspace_id)
         older = await _conversation(
-            workspace_id, None, surface="cli", created_at=datetime(2026, 7, 8, tzinfo=UTC)
+            workspace_id,
+            None,
+            agent_id,
+            surface="cli",
+            created_at=datetime(2026, 7, 8, tzinfo=UTC),
         )
         newer = await _conversation(
-            workspace_id, None, surface="slack", created_at=datetime(2026, 7, 9, tzinfo=UTC)
+            workspace_id,
+            None,
+            agent_id,
+            surface="slack",
+            created_at=datetime(2026, 7, 9, tzinfo=UTC),
         )
         mine = await _conversation(
-            workspace_id, member_id, created_at=datetime(2026, 7, 7, tzinfo=UTC)
+            workspace_id, member_id, agent_id, created_at=datetime(2026, 7, 7, tzinfo=UTC)
         )
         theirs = await _conversation(
-            workspace_id, other_id, created_at=datetime(2026, 7, 6, tzinfo=UTC)
+            workspace_id, other_id, agent_id, created_at=datetime(2026, 7, 6, tzinfo=UTC)
+        )
+        walled = await _conversation(
+            workspace_id,
+            member_id,
+            other_agent_id,
+            created_at=datetime(2026, 7, 10, tzinfo=UTC),
         )
 
         list_tool = tools["object_list"]
@@ -390,15 +435,23 @@ async def test_conversation_kind_lists_only_visible_rows(db: None) -> None:
             )
             return json.loads(result.content[0].text)["objects"]
 
-        shared_only = await _names(_tool_ctx(workspace_id, blob))
-        assert [row["name"] for row in shared_only] == sorted((str(newer), str(older)))
-        slack_row = next(row for row in shared_only if row["name"] == str(newer))
-        assert slack_row["summary"] == "slack conversation, created 2026-07-09"
-        assert slack_row["surface"] == "slack"
+        with agent(agent_id):
+            shared_only = await _names(_tool_ctx(workspace_id, blob))
+            assert [row["name"] for row in shared_only] == sorted((str(newer), str(older)))
+            slack_row = next(row for row in shared_only if row["name"] == str(newer))
+            assert slack_row["summary"] == "slack conversation, created 2026-07-09"
+            assert slack_row["surface"] == "slack"
 
-        own = await _names(_tool_ctx(workspace_id, blob, member_id=member_id))
-        assert [row["name"] for row in own] == sorted((str(newer), str(older), str(mine)))
-        assert str(theirs) not in {row["name"] for row in own}
+            own = await _names(_tool_ctx(workspace_id, blob, member_id=member_id))
+            assert [row["name"] for row in own] == sorted((str(newer), str(older), str(mine)))
+            assert str(theirs) not in {row["name"] for row in own}
+            assert str(walled) not in {row["name"] for row in own}
+
+        with agent(other_agent_id):
+            assert [
+                row["name"]
+                for row in await _names(_tool_ctx(workspace_id, blob, member_id=member_id))
+            ] == [str(walled)]
 
 
 async def test_superseded_memory_leaves_search_and_links_to_its_replacement(
