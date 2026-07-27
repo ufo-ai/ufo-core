@@ -9,7 +9,7 @@ metadata:
 
 Under the hood, .docx is a ZIP container holding XML parts. Creation, reading, and modification all operate on this XML structure.
 
-**Visual and typographic standards:** Consult `.skills/design-foundations/SKILL.md` for color palette, typeface selection, and layout principles (single accent color with neutral tones, no decorative graphics, WCAG-compliant contrast). Use widely available sans-serif typefaces like Arial or Calibri as your baseline.
+**Visual and typographic standards:** Single accent color with neutral tones, no decorative graphics, WCAG-compliant contrast. Consult `.skills/design-foundations/references/color.md` for the palette and `.skills/design-foundations/references/typography.md` for typeface selection. Use widely available sans-serif typefaces like Arial or Calibri as your baseline.
 
 ## Choosing an approach
 

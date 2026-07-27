@@ -142,7 +142,7 @@ For canvas-drawn text, manually adjust font size and y-offset — do not use Uni
 
 ## Custom Fonts (Google Fonts)
 
-Download TTF files at runtime from Google Fonts, register with ReportLab, and they embed automatically. See `.skills/design-foundations/SKILL.md` for font pairings and rules.
+Download TTF files at runtime from Google Fonts, register with ReportLab, and they embed automatically. See `.skills/design-foundations/references/typography.md` for font pairings and rules.
 
 ```python
 import urllib.request
@@ -161,7 +161,7 @@ if not font_path.exists():
 pdfmetrics.registerFont(TTFont("Inter", str(font_path)))
 ```
 
-**Fallback**: Helvetica (built-in, no download). **Blacklist**: see `.skills/design-foundations/SKILL.md` Font Rules.
+**Fallback**: Helvetica (built-in, no download). **Blacklist**: see `.skills/design-foundations/references/typography.md` Font Rules.
 
 ## CJK Font Support
 

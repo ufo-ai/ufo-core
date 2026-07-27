@@ -88,7 +88,7 @@ Rules:
 
 Use OKLCH as your primary color space. Define a layered system with semantic roles — never hardcode hex values.
 
-**Color restraint philosophy:** See `skills/design-foundations/SKILL.md` for the full rationale. In brief: 1 accent + neutrals for most pages. Remaining palette colors (orange, gold, blue, purple, notification) are reserved for data visualization only.
+**Color restraint philosophy:** See `.skills/design-foundations/references/color.md` for the full rationale. In brief: 1 accent + neutrals for most pages. Remaining palette colors (orange, gold, blue, purple, notification) are reserved for data visualization only.
 
 ### Light & Dark Mode (Mandatory)
 
@@ -113,7 +113,7 @@ When building a custom palette (steps 1-2), maintain the same variable structure
 
 ### Nexus Design System (Fallback Palette)
 
-The Nexus palette is a monochrome gray/black system with a single amber highlight, designed as a safe fallback — not the default for every site. For the format-agnostic hex palette and full rationale, see `skills/design-foundations/SKILL.md`. Below is the CSS variable implementation.
+The Nexus palette is a monochrome gray/black system with a single amber highlight, designed as a safe fallback — not the default for every site. For the format-agnostic hex palette and full rationale, see `.skills/design-foundations/references/color.md`. Below is the CSS variable implementation.
 
 ```css
 /* NEXUS DESIGN SYSTEM — monochrome gray/black surfaces, amber accent */
