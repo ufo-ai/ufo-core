@@ -52,6 +52,7 @@ async def _turn(workspace_id: UUID, agent_id: UUID, status: str) -> UUID:
             sa.insert(tables.conversation).values(
                 id=conversation_id,
                 workspace_id=workspace_id,
+                agent_id=agent_id,
                 surface="subagent",
                 queue_key=str(turn_id),
                 member_id=None,

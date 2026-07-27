@@ -1,6 +1,6 @@
 ---
 name: coding
-description: Load before working in a source tree — code files (.py, .ts, .go, etc), a repo, or a diff. E.g. trace how something works across files; implement a described change; find and fix a failing test.
+description: Load before working in a source tree — code files (.py, .ts, .go, etc), a repo, or a diff, and before a first clone or any GitHub-connection answer. E.g. trace how something works across files; implement a described change; find and fix a failing test; clone a private repo.
 ---
 # Coding Subagent Routing
 
@@ -23,7 +23,9 @@ The main agent owns the clone/no-clone decision. Do not make the coding subagent
 
 Before calling `spawn_subagent(profile="coding", ...)`, choose exactly one setup mode and state it at the start of the objective:
 
-- **Clone a repo:** Use when the task targets a GitHub repository. Start the objective with: `Repository setup: clone https://github.com/org/repo into the workspace with git, then work inside it.` Public repositories always clone; private ones need the workspace connected to GitHub (below). Do not fall back to reading files through `gh api` when a clone fails to authenticate — say what failed and what the owner needs to do.
+- **Clone a repo:** Use when the task targets a GitHub repository. Start the objective with: `Repository setup: clone https://github.com/org/repo into the workspace with git, then work inside it.` Public repositories always clone; private ones need the workspace connected to GitHub (below).
+
+  **A clone that fails to authenticate means the workspace is not connected. Call `connect_github` — that is the next action, not a fallback route.** Reaching the files another way is the trap here, and every route is forbidden, not just the obvious one: no `gh api` file reads, and no `GITHUB_DOWNLOAD_A_REPOSITORY_ARCHIVE_ZIP`/`_TAR`, zipball, tarball, or `GITHUB_GET_RAW_REPOSITORY_CONTENT` through `call_external_tool`. A snapshot fetched that way has no `.git`, cannot push, and hides from the member that nothing is connected.
 - **Existing workspace:** Use when the repository is already present in the sandbox workspace. Start the objective with: `Repository setup: use the existing workspace at <path>. Do not clone.`
 - **No repository:** Use only for coding-adjacent tasks that do not need repository files. Start the objective with: `Repository setup: no repository clone is needed.`
 
@@ -35,7 +37,9 @@ A private clone or push needs the workspace connected, and only the owner can do
 
 For a repository outside any organization that installed the App, the fallback is the owner's own fine-grained personal access token with Contents read and write, collected privately into `github_git_token`. Never accept a token pasted into the conversation itself.
 
-With either in place, `git clone` and `git push` authenticate inside the sandbox — which holds only a sentinel, never the credential. `gh` authenticates separately, off a GitHub connector grant.
+With either in place, `git clone` and `git push` authenticate inside the sandbox — which holds only a sentinel, never the credential.
+
+**A GitHub connector grant is not git access.** It authenticates `gh` and `call_external_tool` against `api.github.com` only; git reaches `github.com`, which the grant does not cover. So when asked whether GitHub is connected, answer for the thing being asked about: a working issue read, a connected-account id, or a `credential` object proves the API works and proves nothing about clone or push. If git has no credential, the honest answer is that git is not connected and the owner needs to run the connect flow — never cite the grant as evidence that a clone should work.
 
 ## Finding the Repository
 

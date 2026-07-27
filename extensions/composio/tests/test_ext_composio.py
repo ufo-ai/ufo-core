@@ -1290,6 +1290,11 @@ async def _conversation(workspace_id: UUID, member_id: UUID) -> UUID:
             sa.insert(tables.conversation).values(
                 id=conversation_id,
                 workspace_id=workspace_id,
+                agent_id=sa.select(tables.agent.c.id)
+                .where(tables.agent.c.workspace_id == workspace_id)
+                .order_by(tables.agent.c.created_at, tables.agent.c.id)
+                .limit(1)
+                .scalar_subquery(),
                 surface="cli",
                 queue_key=uuid4().hex,
                 member_id=member_id,

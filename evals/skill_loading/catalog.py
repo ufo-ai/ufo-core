@@ -567,6 +567,26 @@ CASES: tuple[SkillLoadCase, ...] = (
         workspace_files=(REPO_SYNC, REPO_SYNC_TEST),
     ),
     SkillLoadCase(
+        "coding-clone-private-repo",
+        "Clone our private repo github.com/metalcraftai/ufo and find where the turn queue retries "
+        "a failed step.",
+        expected="coding",
+    ),
+    SkillLoadCase(
+        "coding-github-connected-for-clone",
+        "Is GitHub hooked up well enough for you to check out our private repo and push a branch?",
+        expected="coding",
+        forbidden=("code-review",),
+    ),
+    SkillLoadCase(
+        "review-github-pr-not-coding",
+        "Confirm GitHub is reachable, then review the pull request diff staged at "
+        "review/pr-418.diff for bugs before we merge it.",
+        expected="code-review",
+        forbidden=("coding",),
+        workspace_files=(PR_DIFF,),
+    ),
+    SkillLoadCase(
         "createskill-capture-workflow",
         "Capture the weekly-report process described in notes/weekly-report-process.md as a "
         "reusable skill so future turns produce the report the same way.",

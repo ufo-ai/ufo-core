@@ -69,6 +69,7 @@ async def _seed() -> tuple[UUID, UUID, UUID, UUID]:
             sa.insert(tables.conversation).values(
                 id=conversation_id,
                 workspace_id=workspace_id,
+                agent_id=agent_id,
                 surface="cli",
                 queue_key="session",
                 member_id=member_id,
@@ -149,16 +150,15 @@ async def test_idempotency_key_keeps_the_first_body(db: None) -> None:
 
 
 async def test_message_while_a_turn_is_queued_joins_its_inbound_queue(db: None) -> None:
-    workspace_id, member_id, agent_id, conversation_id = await _seed()
+    workspace_id, member_id, _, conversation_id = await _seed()
     dbos = StubDbos()
     admission = Admission(dbos=dbos, durable_surfaces=frozenset())
     first = await admission.admit_member(
-        workspace_id, conversation_id, agent_id, "first message", member_id, "C:1"
+        workspace_id, conversation_id, "first message", member_id, "C:1"
     )
     second = await admission.admit_member(
         workspace_id,
         conversation_id,
-        agent_id,
         "second message",
         member_id,
         "C:2",
@@ -194,31 +194,23 @@ async def test_message_while_a_turn_is_queued_joins_its_inbound_queue(db: None) 
 
 
 async def test_message_while_a_turn_runs_joins_its_inbound_queue(db: None) -> None:
-    workspace_id, member_id, agent_id, conversation_id = await _seed()
+    workspace_id, member_id, _, conversation_id = await _seed()
     admission = Admission(dbos=StubDbos(), durable_surfaces=frozenset())
-    first = await admission.admit_member(
-        workspace_id, conversation_id, agent_id, "one", member_id, "C:1"
-    )
+    first = await admission.admit_member(workspace_id, conversation_id, "one", member_id, "C:1")
     assert await _claim_turn(first, str(first))
-    second = await admission.admit_member(
-        workspace_id, conversation_id, agent_id, "two", member_id, "C:2"
-    )
+    second = await admission.admit_member(workspace_id, conversation_id, "two", member_id, "C:2")
     assert second == first
     assert await _turn_count(conversation_id) == 1
     assert await _queued_bodies(conversation_id) == ["two"]
 
 
 async def test_message_redelivery_joins_the_queued_row(db: None) -> None:
-    workspace_id, member_id, agent_id, conversation_id = await _seed()
+    workspace_id, member_id, _, conversation_id = await _seed()
     admission = Admission(dbos=StubDbos(), durable_surfaces=frozenset())
-    first = await admission.admit_member(
-        workspace_id, conversation_id, agent_id, "one", member_id, "C:1"
-    )
-    second = await admission.admit_member(
-        workspace_id, conversation_id, agent_id, "two", member_id, "C:2"
-    )
+    first = await admission.admit_member(workspace_id, conversation_id, "one", member_id, "C:1")
+    second = await admission.admit_member(workspace_id, conversation_id, "two", member_id, "C:2")
     redelivered = await admission.admit_member(
-        workspace_id, conversation_id, agent_id, "two", member_id, "C:2"
+        workspace_id, conversation_id, "two", member_id, "C:2"
     )
     assert second == first
     assert redelivered == first
@@ -230,9 +222,7 @@ async def test_every_admission_source_joins_the_live_turn(db: None) -> None:
     workspace_id, member_id, agent_id, conversation_id = await _seed()
     admission = Admission(dbos=StubDbos(), durable_surfaces=frozenset())
     first = await admission.invoke(workspace_id, conversation_id, agent_id, "job prompt", "job:1")
-    second = await admission.admit_member(
-        workspace_id, conversation_id, agent_id, "hello", member_id, "C:2"
-    )
+    second = await admission.admit_member(workspace_id, conversation_id, "hello", member_id, "C:2")
     third = await admission.invoke(workspace_id, conversation_id, agent_id, "another job")
     assert second == first
     assert third == first
@@ -241,11 +231,9 @@ async def test_every_admission_source_joins_the_live_turn(db: None) -> None:
 
 
 async def test_a_reject_cap_stops_arrivals_at_the_boundary(db: None) -> None:
-    workspace_id, member_id, agent_id, conversation_id = await _seed()
+    workspace_id, member_id, _, conversation_id = await _seed()
     admission = Admission(dbos=StubDbos(), durable_surfaces=frozenset())
-    first = await admission.admit_member(
-        workspace_id, conversation_id, agent_id, "one", member_id, "C:1"
-    )
+    first = await admission.admit_member(workspace_id, conversation_id, "one", member_id, "C:1")
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.spend_cap).values(
@@ -273,9 +261,7 @@ async def test_a_reject_cap_stops_arrivals_at_the_boundary(db: None) -> None:
                 updated_at=sa.func.now(),
             )
         )
-    second = await admission.admit_member(
-        workspace_id, conversation_id, agent_id, "two", member_id, "C:2"
-    )
+    second = await admission.admit_member(workspace_id, conversation_id, "two", member_id, "C:2")
     assert second != first
     assert await _queued_bodies(conversation_id) == []
     async with workspace_tx() as connection:
@@ -288,15 +274,11 @@ async def test_a_reject_cap_stops_arrivals_at_the_boundary(db: None) -> None:
 
 
 async def test_message_after_a_terminal_turn_starts_a_new_turn(db: None) -> None:
-    workspace_id, member_id, agent_id, conversation_id = await _seed()
+    workspace_id, member_id, _, conversation_id = await _seed()
     admission = Admission(dbos=StubDbos(), durable_surfaces=frozenset())
-    first = await admission.admit_member(
-        workspace_id, conversation_id, agent_id, "one", member_id, "C:1"
-    )
+    first = await admission.admit_member(workspace_id, conversation_id, "one", member_id, "C:1")
     await _finish(first)
-    second = await admission.admit_member(
-        workspace_id, conversation_id, agent_id, "two", member_id, "C:2"
-    )
+    second = await admission.admit_member(workspace_id, conversation_id, "two", member_id, "C:2")
     assert second != first
     assert await _turn_count(conversation_id) == 2
     assert await _queued_bodies(conversation_id) == []
@@ -339,15 +321,11 @@ async def test_enqueue_error_does_not_fail_a_turn_already_claimed_by_the_worker(
 async def test_redelivery_refounds_a_row_whose_turn_died_undrained(db: None) -> None:
     """A provider retry of a message whose live turn failed before draining it must not point at
     the dead turn: the row re-founds a fresh queued turn carrying the same idempotency key."""
-    workspace_id, member_id, agent_id, conversation_id = await _seed()
+    workspace_id, member_id, _, conversation_id = await _seed()
     dbos = StubDbos()
     admission = Admission(dbos=dbos, durable_surfaces=frozenset())
-    first = await admission.admit_member(
-        workspace_id, conversation_id, agent_id, "one", member_id, "C:1"
-    )
-    second = await admission.admit_member(
-        workspace_id, conversation_id, agent_id, "two", member_id, "C:2"
-    )
+    first = await admission.admit_member(workspace_id, conversation_id, "one", member_id, "C:1")
+    second = await admission.admit_member(workspace_id, conversation_id, "two", member_id, "C:2")
     assert second == first
     async with workspace_tx() as connection:
         await connection.execute(
@@ -360,7 +338,7 @@ async def test_redelivery_refounds_a_row_whose_turn_died_undrained(db: None) -> 
             .where(tables.turn.c.id == first)
         )
     redelivered = await admission.admit_member(
-        workspace_id, conversation_id, agent_id, "two", member_id, "C:2"
+        workspace_id, conversation_id, "two", member_id, "C:2"
     )
     assert redelivered != first
     async with workspace_tx() as connection:
@@ -388,21 +366,17 @@ async def test_redelivery_refounds_a_row_whose_turn_died_undrained(db: None) -> 
 async def test_fold_onto_a_parked_turn_dispatches_its_resume(db: None) -> None:
     """Caps were raised since the park: a fresh message folds onto the parked turn AND resumes it
     now, under a fresh workflow id, instead of leaving the member staring at the park notice."""
-    workspace_id, member_id, agent_id, conversation_id = await _seed()
+    workspace_id, member_id, _, conversation_id = await _seed()
     dbos = StubDbos()
     admission = Admission(dbos=dbos, durable_surfaces=frozenset())
-    first = await admission.admit_member(
-        workspace_id, conversation_id, agent_id, "one", member_id, "C:1"
-    )
+    first = await admission.admit_member(workspace_id, conversation_id, "one", member_id, "C:1")
     async with workspace_tx() as connection:
         await connection.execute(
             sa.update(tables.turn)
             .values(status="parked", updated_at=sa.func.now())
             .where(tables.turn.c.id == first)
         )
-    second = await admission.admit_member(
-        workspace_id, conversation_id, agent_id, "two", member_id, "C:2"
-    )
+    second = await admission.admit_member(workspace_id, conversation_id, "two", member_id, "C:2")
     assert second == first
     assert await _queued_bodies(conversation_id) == ["two"]
     async with workspace_tx() as connection:
@@ -424,12 +398,10 @@ async def test_redelivery_of_a_fold_resumed_turn_retries_under_a_fresh_workflow_
     but the run that parked the turn consumed its own workflow id, so a retry riding it would
     dedup against the completed workflow while re-stamping the offer, holding the sweep off a
     grace window at a time."""
-    workspace_id, member_id, agent_id, conversation_id = await _seed()
+    workspace_id, member_id, _, conversation_id = await _seed()
     dbos = StubDbos()
     admission = Admission(dbos=dbos, durable_surfaces=frozenset())
-    first = await admission.admit_member(
-        workspace_id, conversation_id, agent_id, "one", member_id, "C:1"
-    )
+    first = await admission.admit_member(workspace_id, conversation_id, "one", member_id, "C:1")
     async with workspace_tx() as connection:
         await connection.execute(
             sa.update(tables.turn)
@@ -441,7 +413,7 @@ async def test_redelivery_of_a_fold_resumed_turn_retries_under_a_fresh_workflow_
             .where(tables.turn.c.id == first)
         )
     redelivered = await admission.admit_member(
-        workspace_id, conversation_id, agent_id, "one", member_id, "C:1"
+        workspace_id, conversation_id, "one", member_id, "C:1"
     )
     assert redelivered == first
     assert dbos.enqueued == [str(first), str(first)]
@@ -481,11 +453,11 @@ async def _turn_row(turn_id: UUID) -> tuple[str, str | None]:
 
 
 async def test_unseated_speaker_is_refused_with_the_seat_message(db: None) -> None:
-    workspace_id, member_id, agent_id, conversation_id = await _seed()
+    workspace_id, member_id, _, conversation_id = await _seed()
     await _set_limit(workspace_id, 1)
     dbos = StubDbos()
     admission = Admission(dbos=dbos, durable_surfaces=frozenset({"cli"}))
-    turn_id = await admission.admit_member(workspace_id, conversation_id, agent_id, "hi", member_id)
+    turn_id = await admission.admit_member(workspace_id, conversation_id, "hi", member_id)
     assert dbos.enqueued == []
     status, text = await _turn_row(turn_id)
     assert status == "cancelled"
@@ -502,12 +474,12 @@ async def test_unseated_speaker_is_refused_with_the_seat_message(db: None) -> No
 
 
 async def test_seated_speaker_enqueues_under_a_limit(db: None) -> None:
-    workspace_id, member_id, agent_id, conversation_id = await _seed()
+    workspace_id, member_id, _, conversation_id = await _seed()
     await _set_limit(workspace_id, 1)
     await _seat(member_id)
     dbos = StubDbos()
     turn_id = await Admission(dbos=dbos, durable_surfaces=frozenset()).admit_member(
-        workspace_id, conversation_id, agent_id, "hi", member_id
+        workspace_id, conversation_id, "hi", member_id
     )
     assert dbos.enqueued == [str(turn_id)]
     status, _ = await _turn_row(turn_id)
@@ -577,16 +549,12 @@ async def test_scheduled_fire_into_an_unseated_members_conversation_is_refused(d
 
 
 async def test_unseated_speakers_message_does_not_fold_into_a_live_turn(db: None) -> None:
-    workspace_id, member_id, agent_id, conversation_id = await _seed()
+    workspace_id, member_id, _, conversation_id = await _seed()
     dbos = StubDbos()
     admission = Admission(dbos=dbos, durable_surfaces=frozenset())
-    first = await admission.admit_member(
-        workspace_id, conversation_id, agent_id, "first", member_id
-    )
+    first = await admission.admit_member(workspace_id, conversation_id, "first", member_id)
     await _set_limit(workspace_id, 1)
-    second = await admission.admit_member(
-        workspace_id, conversation_id, agent_id, "second", member_id
-    )
+    second = await admission.admit_member(workspace_id, conversation_id, "second", member_id)
     assert second != first
     status, text = await _turn_row(second)
     assert status == "cancelled"
@@ -597,7 +565,7 @@ async def test_unseated_speakers_message_does_not_fold_into_a_live_turn(db: None
 
 
 async def test_seated_reply_does_not_resume_a_seat_blocked_parked_turn(db: None) -> None:
-    workspace_id, member_id, agent_id, conversation_id = await _seed()
+    workspace_id, member_id, _, conversation_id = await _seed()
     await _set_limit(workspace_id, 2)
     await _seat(member_id)
     second_member = uuid4()
@@ -614,9 +582,7 @@ async def test_seated_reply_does_not_resume_a_seat_blocked_parked_turn(db: None)
         )
     dbos = StubDbos()
     admission = Admission(dbos=dbos, durable_surfaces=frozenset())
-    first = await admission.admit_member(
-        workspace_id, conversation_id, agent_id, "first", member_id
-    )
+    first = await admission.admit_member(workspace_id, conversation_id, "first", member_id)
     async with workspace_tx() as connection:
         await connection.execute(
             sa.update(tables.turn)
@@ -628,9 +594,7 @@ async def test_seated_reply_does_not_resume_a_seat_blocked_parked_turn(db: None)
             .values(seated_at=None, updated_at=sa.func.now())
             .where(tables.member.c.id == member_id)
         )
-    second = await admission.admit_member(
-        workspace_id, conversation_id, agent_id, "second", second_member
-    )
+    second = await admission.admit_member(workspace_id, conversation_id, "second", second_member)
     assert second != first
     first_status, _ = await _turn_row(first)
     assert first_status == "parked"
@@ -679,7 +643,7 @@ async def test_unseated_speakers_message_does_not_take_over_a_timer_turn(db: Non
     await _set_limit(workspace_id, 1)
     dbos = StubDbos()
     refused = await Admission(dbos=dbos, durable_surfaces=frozenset()).admit_member(
-        workspace_id, conversation_id, agent_id, "hey", member_id
+        workspace_id, conversation_id, "hey", member_id
     )
     assert refused != timer_turn_id
     status, text = await _turn_row(refused)
@@ -701,11 +665,11 @@ async def test_unseated_speakers_message_does_not_take_over_a_timer_turn(db: Non
 
 
 async def test_speakerless_member_message_is_refused_under_a_seat_limit(db: None) -> None:
-    workspace_id, _member_id, agent_id, conversation_id = await _seed()
+    workspace_id, _member_id, _, conversation_id = await _seed()
     await _set_limit(workspace_id, 1)
     dbos = StubDbos()
     turn_id = await Admission(dbos=dbos, durable_surfaces=frozenset()).admit_member(
-        workspace_id, conversation_id, agent_id, "who am i", None
+        workspace_id, conversation_id, "who am i", None
     )
     assert dbos.enqueued == []
     status, text = await _turn_row(turn_id)
@@ -714,24 +678,22 @@ async def test_speakerless_member_message_is_refused_under_a_seat_limit(db: None
 
 
 async def test_speakerless_member_message_passes_an_ungated_workspace(db: None) -> None:
-    workspace_id, _member_id, agent_id, conversation_id = await _seed()
+    workspace_id, _member_id, _, conversation_id = await _seed()
     dbos = StubDbos()
     turn_id = await Admission(dbos=dbos, durable_surfaces=frozenset()).admit_member(
-        workspace_id, conversation_id, agent_id, "hello", None
+        workspace_id, conversation_id, "hello", None
     )
     assert dbos.enqueued == [str(turn_id)]
 
 
 async def test_speakerless_member_message_does_not_fold_under_a_seat_limit(db: None) -> None:
-    workspace_id, member_id, agent_id, conversation_id = await _seed()
+    workspace_id, member_id, _, conversation_id = await _seed()
     await _set_limit(workspace_id, 2)
     await _seat(member_id)
     dbos = StubDbos()
     admission = Admission(dbos=dbos, durable_surfaces=frozenset())
-    first = await admission.admit_member(
-        workspace_id, conversation_id, agent_id, "first", member_id
-    )
-    ghost = await admission.admit_member(workspace_id, conversation_id, agent_id, "psst", None)
+    first = await admission.admit_member(workspace_id, conversation_id, "first", member_id)
+    ghost = await admission.admit_member(workspace_id, conversation_id, "psst", None)
     assert ghost != first
     status, text = await _turn_row(ghost)
     assert status == "cancelled"
@@ -779,7 +741,7 @@ async def test_ghost_message_does_not_take_over_a_timer_turn_under_a_seat_limit(
     await _set_limit(workspace_id, 1)
     dbos = StubDbos()
     refused = await Admission(dbos=dbos, durable_surfaces=frozenset()).admit_member(
-        workspace_id, conversation_id, agent_id, "hey", None
+        workspace_id, conversation_id, "hey", None
     )
     assert refused != timer_turn_id
     status, text = await _turn_row(refused)

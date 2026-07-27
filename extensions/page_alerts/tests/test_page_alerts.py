@@ -111,6 +111,7 @@ async def _seed(surface: str = "slack") -> tuple[UUID, UUID, UUID]:
             sa.insert(tables.conversation).values(
                 id=conversation_id,
                 workspace_id=workspace_id,
+                agent_id=agent_id,
                 surface=surface,
                 queue_key="D123",
                 member_id=member_id,

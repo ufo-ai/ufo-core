@@ -287,6 +287,7 @@ async def _seed(env: _Env) -> None:
             sa.insert(tables.conversation).values(
                 id=env.conversation_id,
                 workspace_id=env.workspace_id,
+                agent_id=env.agent_id,
                 surface="cli",
                 queue_key=str(env.turn_id),
                 member_id=env.member_id,

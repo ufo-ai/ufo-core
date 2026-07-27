@@ -176,7 +176,7 @@ class CredentialAccess:
         await ws_current().put_credential(
             slot,
             seal_installation(
-                installed_credential_requests().fernet, self.workspace_id, installation_id
+                installed_credential_requests().fernet, self.workspace_id, slot, installation_id
             ),
         )
 
@@ -503,8 +503,10 @@ class ExtensionContext:
     async def invoke(
         self, conversation_id: UUID, agent_id: UUID, message: str, idempotency_key: str
     ) -> UUID:
-        """Kick an internal turn for `agent_id` in `conversation_id`. Fails loud when no invoker is
-        wired rather than silently dropping the invocation."""
+        """Kick an internal turn in `conversation_id`, asserting the conversation is bound to
+        `agent_id` — admission refuses a mismatch, so a stored binding can never fire into another
+        agent's conversation. Fails loud when no invoker is wired rather than silently dropping
+        the invocation."""
         if self.invoker is None:
             raise RuntimeError("invoke requires a turn invoker; none is wired")
         return await self.invoker.invoke(conversation_id, agent_id, message, idempotency_key)

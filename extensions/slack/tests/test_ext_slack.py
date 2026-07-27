@@ -1295,6 +1295,11 @@ async def test_a_bare_conversation_row_is_not_participation(
             sa.insert(tables.conversation).values(
                 id=uuid4(),
                 workspace_id=workspace_id,
+                agent_id=sa.select(tables.agent.c.id)
+                .where(tables.agent.c.workspace_id == workspace_id)
+                .order_by(tables.agent.c.created_at, tables.agent.c.id)
+                .limit(1)
+                .scalar_subquery(),
                 surface=slack.SURFACE_SLACK,
                 queue_key=f"C1:{root}",
                 member_id=None,
@@ -1784,6 +1789,7 @@ async def _seed_done_turn(
             sa.insert(tables.conversation).values(
                 id=conversation_id,
                 workspace_id=workspace_id,
+                agent_id=agent_id,
                 surface=slack.SURFACE_SLACK,
                 queue_key=queue_key,
                 member_id=None,
@@ -3141,6 +3147,11 @@ async def _seed_answer_conversation(workspace_id: UUID, queue_key: str = "C5:200
             sa.insert(tables.conversation).values(
                 id=conversation_id,
                 workspace_id=workspace_id,
+                agent_id=sa.select(tables.agent.c.id)
+                .where(tables.agent.c.workspace_id == workspace_id)
+                .order_by(tables.agent.c.created_at, tables.agent.c.id)
+                .limit(1)
+                .scalar_subquery(),
                 surface=slack.SURFACE_SLACK,
                 queue_key=queue_key,
                 member_id=None,

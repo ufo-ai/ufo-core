@@ -349,15 +349,15 @@ async def owner_conversation(
     connection: AsyncConnection, workspace_id: UUID
 ) -> tuple[UUID, UUID] | None:
     """Where a workspace-level ask reaches the owner: their most recently active member-bound
-    conversation, answered by the workspace's earliest agent. None before the owner's first
-    private conversation — the asker waits and retries. Core owns the conversation and agent
-    tables, so it owns this read; an extension receives the venue, never the query."""
+    conversation, answered by that conversation's bound agent. None before the owner's first
+    private conversation — the asker waits and retries. Core owns the conversation table, so it
+    owns this read; an extension receives the venue, never the query."""
     owner = await owner_member_id(connection, workspace_id)
     if owner is None:
         return None
     conversation = (
         await connection.execute(
-            sa.select(tables.conversation.c.id)
+            sa.select(tables.conversation.c.id, tables.conversation.c.agent_id)
             .where(
                 tables.conversation.c.workspace_id == workspace_id,
                 tables.conversation.c.member_id == owner,
@@ -365,18 +365,10 @@ async def owner_conversation(
             .order_by(tables.conversation.c.updated_at.desc())
             .limit(1)
         )
-    ).scalar_one_or_none()
-    agent = (
-        await connection.execute(
-            sa.select(tables.agent.c.id)
-            .where(tables.agent.c.workspace_id == workspace_id)
-            .order_by(tables.agent.c.created_at.asc(), tables.agent.c.id.asc())
-            .limit(1)
-        )
-    ).scalar_one_or_none()
-    if conversation is None or agent is None:
+    ).one_or_none()
+    if conversation is None:
         return None
-    return conversation, agent
+    return conversation.id, conversation.agent_id
 
 
 def member_workspaces() -> WorkspaceCandidates:

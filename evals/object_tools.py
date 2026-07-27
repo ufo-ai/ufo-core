@@ -391,6 +391,7 @@ def _seeded(*names: str):
                 sa.insert(tables.conversation).values(
                     id=conversation_id,
                     workspace_id=workspace_id,
+                    agent_id=agent_id,
                     surface=EVAL_SURFACE,
                     queue_key=f"{EVAL_SURFACE}-object-tools-seed:{conversation_id}",
                     created_at=sa.func.now(),

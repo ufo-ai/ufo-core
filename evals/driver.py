@@ -174,6 +174,7 @@ class WorkspaceDriver:
                 sa.insert(tables.conversation).values(
                     id=conversation_id,
                     workspace_id=self.workspace_id,
+                    agent_id=self.agent_id,
                     surface=EVAL_SURFACE,
                     queue_key=f"{EVAL_SURFACE}:{case_name}:{conversation_id}",
                     member_id=member_id,

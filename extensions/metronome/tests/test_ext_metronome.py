@@ -144,6 +144,7 @@ async def _seed() -> tuple[UUID, UUID, UUID]:
             sa.insert(tables.conversation).values(
                 id=conversation_id,
                 workspace_id=workspace_id,
+                agent_id=agent_id,
                 surface="cli",
                 queue_key="session",
                 member_id=member_id,
@@ -489,12 +490,23 @@ async def test_manifest_job_fires_through_job_runner(
 async def _seat_seed(limit: int | None = 2) -> tuple[UUID, UUID, UUID]:
     """A workspace under a seat limit whose owner (earliest member) is seated and whose later
     joiner is not — both sides of the owner gate and the seat count in one seed."""
-    workspace_id, owner_id, joiner_id = uuid4(), uuid4(), uuid4()
+    workspace_id, owner_id, joiner_id, agent_id = uuid4(), uuid4(), uuid4(), uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.workspace).values(
                 id=workspace_id,
                 seat_limit=limit,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=agent_id,
+                workspace_id=workspace_id,
+                name=agent_id.hex[:8],
+                prompt="be brief",
+                model="claude-opus-4-8",
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -980,6 +992,7 @@ async def test_seat_approvals_ask_the_owner_once_per_unseated_member(db: None) -
             sa.insert(tables.conversation).values(
                 id=conversation_id,
                 workspace_id=workspace_id,
+                agent_id=agent_id,
                 surface="slack",
                 queue_key="dm-owner",
                 member_id=owner_id,
@@ -1034,6 +1047,11 @@ async def test_seat_approvals_stay_silent_while_an_included_seat_is_open(db: Non
             sa.insert(tables.conversation).values(
                 id=uuid4(),
                 workspace_id=workspace_id,
+                agent_id=sa.select(tables.agent.c.id)
+                .where(tables.agent.c.workspace_id == workspace_id)
+                .order_by(tables.agent.c.created_at, tables.agent.c.id)
+                .limit(1)
+                .scalar_subquery(),
                 surface="slack",
                 queue_key="dm-owner-open",
                 member_id=owner_id,
@@ -1233,6 +1251,7 @@ async def _billing_seed() -> tuple[UUID, UUID, UUID, UUID]:
             sa.insert(tables.conversation).values(
                 id=conversation_id,
                 workspace_id=workspace_id,
+                agent_id=agent_id,
                 surface="ufo",
                 queue_key="dm-owner",
                 member_id=owner_id,

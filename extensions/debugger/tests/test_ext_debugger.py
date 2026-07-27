@@ -102,6 +102,11 @@ async def _seed_conversation(
             sa.insert(tables.conversation).values(
                 id=conversation_id,
                 workspace_id=workspace_id,
+                agent_id=sa.select(tables.agent.c.id)
+                .where(tables.agent.c.workspace_id == workspace_id)
+                .order_by(tables.agent.c.created_at, tables.agent.c.id)
+                .limit(1)
+                .scalar_subquery(),
                 surface=surface,
                 queue_key=queue_key,
                 member_id=None,
@@ -245,13 +250,14 @@ async def test_app_page_serves_the_built_app_and_fails_loud_unbuilt(debug, monke
 
 async def test_workspace_meta_carries_the_slack_team(debug) -> None:
     client, _ = debug
-    workspace_id, _ = await _seed_workspace()
+    workspace_id, agent_id = await _seed_workspace()
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.surface_installation).values(
                 workspace_id=workspace_id,
                 surface="slack",
                 installation_id="team:T042",
+                agent_id=agent_id,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )

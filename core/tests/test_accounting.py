@@ -168,6 +168,7 @@ async def _seed_turn(connection: AsyncConnection) -> tuple[UUID, UUID]:
         sa.insert(tables.conversation).values(
             id=conversation_id,
             workspace_id=workspace_id,
+            agent_id=agent_id,
             surface="cli",
             queue_key="session",
             member_id=member_id,

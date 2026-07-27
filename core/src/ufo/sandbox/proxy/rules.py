@@ -11,7 +11,12 @@ from dataclasses import dataclass
 from uuid import UUID
 
 from ufo.connectors import CliCredential, RequestForwarder
-from ufo.credentials import CredentialStore, credential_host, slot_secret
+from ufo.credentials import (
+    CredentialMintFailed,
+    CredentialStore,
+    credential_host,
+    slot_secret,
+)
 from ufo.ext.manifest import CredentialSlot, Manifest, open_connector_namespace
 from ufo.grants import Grant, grant_sentinel
 from ufo.o11y import warn
@@ -128,14 +133,23 @@ async def derive_credential_rules(
     meters it once, and the egress metric counts requests rather than headers.
 
     A `git_basic_user` slot composes its header value here rather than storing it composed: the
-    secret is one rotatable value, and git's smart-HTTP wants it as the password half of Basic."""
+    secret is one rotatable value, and git's smart-HTTP wants it as the password half of Basic.
+
+    A slot that mints reaches a provider, so it can fail while nothing else about the turn has: a
+    mint failure withholds that one host's rules and is logged, rather than aborting the derivation
+    and failing a turn that never touches the credential. It never falls through to the stored
+    value — that would authenticate as a different identity than the one the workspace bound."""
     grouped: dict[str, list[InjectionRule]] = {}
     dimensions: dict[str, str] = {}
     for slot in slots:
         target = slot.injection
         if target is None:
             continue
-        real = await slot_secret(slot.name, slot.source, workspace_id, store)
+        try:
+            real = await slot_secret(slot.name, slot.source, workspace_id, store)
+        except CredentialMintFailed as error:
+            warn("egress.credential_mint_failed", slot=slot.name, error=str(error))
+            continue
         if real is None:
             continue
         host = await credential_host(store, workspace_id, target.host)

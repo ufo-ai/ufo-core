@@ -119,11 +119,24 @@ async def _conversation(
     created_at: datetime | None = None,
 ) -> UUID:
     conversation_id = uuid4()
+    agent_id = uuid4()
     async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=agent_id,
+                workspace_id=workspace_id,
+                name=agent_id.hex[:8],
+                prompt="p",
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
         await connection.execute(
             sa.insert(tables.conversation).values(
                 id=conversation_id,
                 workspace_id=workspace_id,
+                agent_id=agent_id,
                 surface=surface,
                 queue_key=conversation_id.hex,
                 member_id=member_id,

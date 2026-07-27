@@ -807,6 +807,7 @@ async def _turn_row(workspace_id: UUID) -> Turn:
             sa.insert(tables.conversation).values(
                 id=conversation_id,
                 workspace_id=workspace_id,
+                agent_id=agent_id,
                 surface="cli",
                 queue_key=f"objects-{conversation_id.hex[:8]}",
                 member_id=None,

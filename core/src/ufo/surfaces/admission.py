@@ -4,9 +4,13 @@ boundary, and no caller can bypass it. A conversation-row lock serializes seq al
 id is the DBOS workflow id, so a re-enqueue is idempotent. When an idempotency key is given, a
 redelivery of the same message joins the turn already admitted for it instead of spawning a second.
 
+Every turn executes as the conversation's bound agent: the member-admit path never names an
+agent, and a caller holding a stored binding (an extension invoke, a scheduled fire) passes it as
+an assertion that refuses on mismatch — a turn can never switch its conversation's agent.
+
 A message arriving while the conversation's newest turn is still live — queued, running, or
 parked — lands on the conversation's `inbound_message` queue instead of spawning a turn of its
-own, whoever spoke it and whichever agent it named. The engine drains that queue into the live
+own, whoever spoke it. The engine drains that queue into the live
 turn at each round boundary as separate <context>-tagged messages, and the terminal commit
 refuses to close over a non-empty queue, so one reply answers everything that arrived. Each
 queue row carries its own idempotency key, so a redelivery joins the turn that consumed it.
@@ -84,7 +88,6 @@ class Admission:
         self,
         workspace_id: UUID,
         conversation_id: UUID,
-        agent_id: UUID,
         body: str,
         speaker_member_id: UUID | None,
         idempotency_key: str | None = None,
@@ -93,7 +96,7 @@ class Admission:
         return await self._admit(
             workspace_id,
             conversation_id,
-            agent_id,
+            None,
             body,
             speaker_member_id,
             idempotency_key,
@@ -172,7 +175,7 @@ class Admission:
         self,
         workspace_id: UUID,
         conversation_id: UUID,
-        agent_id: UUID,
+        asserted_agent_id: UUID | None,
         body: str,
         speaker_member_id: UUID | None,
         idempotency_key: str | None,
@@ -188,11 +191,18 @@ class Admission:
         async with workspace_tx() as connection:
             conversation = (
                 await connection.execute(
-                    sa.select(tables.conversation.c.member_id, tables.conversation.c.surface)
+                    sa.select(
+                        tables.conversation.c.member_id,
+                        tables.conversation.c.surface,
+                        tables.conversation.c.agent_id,
+                    )
                     .where(tables.conversation.c.id == conversation_id)
                     .with_for_update()
                 )
             ).one()
+            if asserted_agent_id is not None and asserted_agent_id != conversation.agent_id:
+                raise ValueError("conversation is bound to another agent")
+            agent_id = conversation.agent_id
             if speaker_member_id is not None:
                 speaker = (
                     await connection.execute(
@@ -766,7 +776,6 @@ class MemberAdmission:
     async def admit(
         self,
         conversation_id: UUID,
-        agent_id: UUID,
         message: str,
         idempotency_key: str | None = None,
         context: TurnContext | None = None,
@@ -776,7 +785,6 @@ class MemberAdmission:
         return await self.admission.admit_member(
             self.workspace_id,
             conversation_id,
-            agent_id,
             message,
             speaker_member_id,
             idempotency_key=idempotency_key,

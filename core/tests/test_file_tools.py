@@ -422,6 +422,7 @@ async def _seed_turn_rows(turn: Turn) -> None:
             sa.insert(tables.conversation).values(
                 id=turn.conversation_id,
                 workspace_id=turn.workspace_id,
+                agent_id=turn.agent_id,
                 surface="cli",
                 queue_key="file-tools",
                 member_id=None,

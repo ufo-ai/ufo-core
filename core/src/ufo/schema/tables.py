@@ -51,6 +51,7 @@ surface_installation = sa.Table(
     ),
     sa.Column("surface", sa.Text, primary_key=True),
     sa.Column("installation_id", sa.Text, nullable=False),
+    sa.Column("agent_id", sa.Uuid, sa.ForeignKey("agent.id"), nullable=False),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     sa.UniqueConstraint(
@@ -80,6 +81,7 @@ conversation = sa.Table(
     metadata,
     sa.Column("id", sa.Uuid, primary_key=True),
     sa.Column("workspace_id", sa.Uuid, sa.ForeignKey("workspace.id"), nullable=False),
+    sa.Column("agent_id", sa.Uuid, sa.ForeignKey("agent.id"), nullable=False),
     sa.Column("surface", sa.Text, nullable=False),
     sa.Column("queue_key", sa.Text, nullable=False),
     sa.Column("member_id", sa.Uuid, sa.ForeignKey("member.id"), nullable=True),

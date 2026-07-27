@@ -52,6 +52,7 @@ from ufo.artifact_token import (
 from ufo.blob import BlobNotFound, BlobStore
 from ufo.candidates import WorkspaceCandidates, owner_candidates
 from ufo.credentials import (
+    CREDENTIAL_REQUEST_PURPOSE,
     CredentialRequestInvalid,
     CredentialRequestState,
     CredentialStore,
@@ -68,7 +69,6 @@ from ufo.hub import LiveFrame
 from ufo.o11y import log
 from ufo.schema import tables
 from ufo.schema.records import (
-    DEFAULT_AGENT_NAME,
     WRITEBACK_CLAIMED,
     WRITEBACK_DELIVERED,
     WRITEBACK_FAILED,
@@ -102,7 +102,6 @@ class MemberAdmitter(Protocol):
     async def admit(
         self,
         conversation_id: UUID,
-        agent_id: UUID,
         message: str,
         idempotency_key: str | None = None,
         context: TurnContext | None = None,
@@ -254,16 +253,37 @@ def _email_domain(email: str) -> str:
     return domain if local and domain else ""
 
 
+async def _earliest_agent(workspace_id: UUID) -> UUID:
+    """The workspace's earliest agent by (created_at, id) — the agent a binding or conversation
+    lands on when no surface binding names one, mirroring how the earliest member is the owner.
+    Onboarding creates the first agent, so a workspace without one is broken configuration."""
+    async with workspace_tx() as connection:
+        agent = (
+            await connection.execute(
+                sa.select(tables.agent.c.id)
+                .where(tables.agent.c.workspace_id == workspace_id)
+                .order_by(tables.agent.c.created_at, tables.agent.c.id)
+                .limit(1)
+            )
+        ).one_or_none()
+    if agent is None:
+        raise RuntimeError(f"workspace {workspace_id} has no agent")
+    return agent.id
+
+
 async def _bind_surface_installation(
     workspace_id: UUID, surface: str, installation_id: str
 ) -> None:
     """Upsert one surface's installation binding for a workspace, replacing any prior binding for
-    that (workspace, surface). The fleet-wide uniqueness on (surface, installation_id) raises
-    `SurfaceInstallationConflict` when the installation already belongs to another workspace. The
-    one place the binding is written — a tool (`SurfaceInstallationAccess.bind`) and a surface's own
-    OAuth callback (`SurfaceContext.bind_installation`) both land it here."""
+    that (workspace, surface). A new binding lands on the workspace's earliest agent; rebinding
+    replaces the installation identity and keeps the binding's agent. The fleet-wide uniqueness on
+    (surface, installation_id) raises `SurfaceInstallationConflict` when the installation already
+    belongs to another workspace. The one place the binding is written — a tool
+    (`SurfaceInstallationAccess.bind`) and a surface's own OAuth callback
+    (`SurfaceContext.bind_installation`) both land it here."""
     if not installation_id:
         raise ValueError("surface installation id is empty")
+    agent_id = await _earliest_agent(workspace_id)
     try:
         async with workspace_tx() as connection:
             insert = postgres_insert if connection.dialect.name == "postgresql" else sqlite_insert
@@ -273,6 +293,7 @@ async def _bind_surface_installation(
                     workspace_id=workspace_id,
                     surface=surface,
                     installation_id=installation_id,
+                    agent_id=agent_id,
                     created_at=sa.func.now(),
                     updated_at=sa.func.now(),
                 )
@@ -318,7 +339,9 @@ class SurfaceContext:
         if self._credentials is None:
             return False
         try:
-            state = open_credential_request(self._credentials.fernet, sealed)
+            state = open_credential_request(
+                self._credentials.fernet, sealed, purpose=CREDENTIAL_REQUEST_PURPOSE
+            )
         except CredentialRequestInvalid:
             return False
         if state.workspace_id != self.workspace_id or slot not in state.slots:
@@ -333,7 +356,9 @@ class SurfaceContext:
         `CredentialRequestInvalid` on a tampered or expired seal."""
         if self._credentials is None:
             raise RuntimeError(f"surface {self.surface!r} opens a seal but holds no store")
-        return open_credential_request(self._credentials.fernet, sealed)
+        return open_credential_request(
+            self._credentials.fernet, sealed, purpose=CREDENTIAL_REQUEST_PURPOSE
+        )
 
     async def fulfill_credential_request(
         self, sealed: str, slot: str, value: str, member_id: UUID | None
@@ -345,7 +370,9 @@ class SurfaceContext:
         from rendering again."""
         if self._credentials is None:
             raise RuntimeError(f"surface {self.surface!r} stores a credential but holds no store")
-        state = open_credential_request(self._credentials.fernet, sealed)
+        state = open_credential_request(
+            self._credentials.fernet, sealed, purpose=CREDENTIAL_REQUEST_PURPOSE
+        )
         if state.workspace_id != self.workspace_id:
             raise CredentialRequestInvalid("credential request was sealed for another workspace")
         if member_id is None or member_id != state.member_id:
@@ -386,20 +413,6 @@ class SurfaceContext:
             self._artifact_token_secret, artifact.blob_key, artifact.filename, expires_at
         )
         return f"{self._public_base_url.rstrip('/')}{ARTIFACT_DOWNLOAD_PATH}?token={token}"
-
-    async def default_agent(self) -> UUID:
-        async with workspace_tx() as connection:
-            agent = (
-                await connection.execute(
-                    sa.select(tables.agent.c.id).where(
-                        tables.agent.c.workspace_id == self.workspace_id,
-                        tables.agent.c.name == DEFAULT_AGENT_NAME,
-                    )
-                )
-            ).one_or_none()
-        if agent is None:
-            raise RuntimeError(f"no {DEFAULT_AGENT_NAME!r} agent for surface {self.surface!r}")
-        return agent.id
 
     async def _identity_member(self, surface: str, external_id: str) -> UUID | None:
         """The member a surface's external id is linked to, or None. `linked_member` reads this
@@ -537,11 +550,13 @@ class SurfaceContext:
 
     async def conversation_for(self, queue_key: str, member_id: UUID | None) -> UUID:
         """Get-or-create the conversation this surface keys by `queue_key`, outside any admission
-        transaction; a lost creation race re-reads the surviving row. A memberless conversation
-        whose resolver now names a member is claimed for them — a DM that began before its speaker
-        could resolve (an unconfirmed email, a not-yet-joined teammate) becomes theirs, and their
-        memory subject, from the turn that resolves them; a conversation another member already
-        owns is never re-claimed."""
+        transaction; a lost creation race re-reads the surviving row. A new conversation binds
+        permanently to the surface's agent — the surface's installation binding when one exists,
+        else the workspace's earliest agent — and admission derives every turn's agent from that
+        binding. A memberless conversation whose resolver now names a member is claimed for
+        them — a DM that began before its speaker could resolve (an unconfirmed email, a
+        not-yet-joined teammate) becomes theirs, and their memory subject, from the turn that
+        resolves them; a conversation another member already owns is never re-claimed."""
         async with workspace_tx() as connection:
             found = (await connection.execute(self._conversation_lookup(queue_key))).one_or_none()
         if found is not None:
@@ -557,12 +572,14 @@ class SurfaceContext:
                     )
             return found.id
         conversation_id = uuid4()
+        agent_id = await self._surface_agent()
         try:
             async with workspace_tx() as connection:
                 await connection.execute(
                     sa.insert(tables.conversation).values(
                         id=conversation_id,
                         workspace_id=self.workspace_id,
+                        agent_id=agent_id,
                         surface=self.surface,
                         queue_key=queue_key,
                         member_id=member_id,
@@ -576,17 +593,31 @@ class SurfaceContext:
                 return (await connection.execute(self._conversation_lookup(queue_key))).one().id
         return conversation_id
 
+    async def _surface_agent(self) -> UUID:
+        async with workspace_tx() as connection:
+            bound = (
+                await connection.execute(
+                    sa.select(tables.surface_installation.c.agent_id).where(
+                        tables.surface_installation.c.workspace_id == self.workspace_id,
+                        tables.surface_installation.c.surface == self.surface,
+                    )
+                )
+            ).one_or_none()
+        if bound is not None:
+            return bound.agent_id
+        return await _earliest_agent(self.workspace_id)
+
     async def admit(
         self,
         conversation_id: UUID,
-        agent_id: UUID,
         body: str,
         idempotency_key: str | None = None,
         context: TurnContext | None = None,
         *,
         speaker_member_id: UUID | None,
     ) -> UUID:
-        """Admit an inbound message onto the durable turn queue and return its turn id. Delivery is
+        """Admit an inbound message onto the durable turn queue and return its turn id. The turn
+        executes as the conversation's bound agent — a surface never names one. Delivery is
         admission's concern, derived from the conversation's surface: a durable-surface turn
         registers for the poller atomically with its row, a live surface's turn registers nothing
         and its member tails the hub — the surface supplies only the message, its idempotency
@@ -594,7 +625,6 @@ class SurfaceContext:
         inbound. A redelivery deduped to the turn already admitted joins it."""
         return await self._admitter.admit(
             conversation_id,
-            agent_id,
             body,
             idempotency_key=idempotency_key,
             context=context,
@@ -997,7 +1027,9 @@ class SurfaceAuth:
         if self._credentials is None:
             return None
         try:
-            return open_credential_request(self._credentials.fernet, sealed)
+            return open_credential_request(
+                self._credentials.fernet, sealed, purpose=CREDENTIAL_REQUEST_PURPOSE
+            )
         except CredentialRequestInvalid:
             return None
 

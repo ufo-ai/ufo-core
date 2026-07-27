@@ -109,6 +109,7 @@ async def _state() -> State:
             sa.insert(tables.conversation).values(
                 id=state.conversation_id,
                 workspace_id=state.workspace_id,
+                agent_id=state.agent_id,
                 surface="cli",
                 queue_key=uuid4().hex,
                 member_id=state.member_id,

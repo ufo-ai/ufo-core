@@ -99,11 +99,22 @@ def _challenge_app(tmp_path: Path) -> FastAPI:
 
 
 async def _workspace() -> UUID:
-    workspace_id = uuid4()
+    workspace_id, agent_id = uuid4(), uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.workspace).values(
                 id=workspace_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=agent_id,
+                workspace_id=workspace_id,
+                name="assistant",
+                prompt="be brief",
+                model="claude-opus-4-8",
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -191,24 +202,21 @@ async def test_pre_binding_response_skips_binding_and_releases_inherited_scope(
 async def test_surface_auth_resolves_only_the_exact_installation_to_a_workspace(db: None) -> None:
     first, second = await _workspace(), await _workspace()
     async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.surface_installation).values(
-                workspace_id=first,
-                surface="slack",
-                installation_id="team-a",
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
+        for workspace_id, team in ((first, "team-a"), (second, "team-b")):
+            await connection.execute(
+                sa.insert(tables.surface_installation).values(
+                    workspace_id=workspace_id,
+                    surface="slack",
+                    installation_id=team,
+                    agent_id=sa.select(tables.agent.c.id)
+                    .where(tables.agent.c.workspace_id == workspace_id)
+                    .order_by(tables.agent.c.created_at, tables.agent.c.id)
+                    .limit(1)
+                    .scalar_subquery(),
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
             )
-        )
-        await connection.execute(
-            sa.insert(tables.surface_installation).values(
-                workspace_id=second,
-                surface="slack",
-                installation_id="team-b",
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
     slack = SurfaceAuth(_credentials=None, _declared=frozenset(), _surface="slack")
     other = SurfaceAuth(_credentials=None, _declared=frozenset(), _surface="other")
     with ws(first):

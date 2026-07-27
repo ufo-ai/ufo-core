@@ -762,7 +762,7 @@ async def test_a_grant_defaults_private_and_reconnect_updates_shared(db: None) -
     assert summary.shared is True
 
 
-async def test_set_shared_flips_every_agents_row_for_the_account(db: None) -> None:
+async def test_set_shared_flips_only_the_named_agents_binding(db: None) -> None:
     workspace_id = await _workspace()
     member_id, agent_id = await _member_agent(workspace_id)
     second_agent = await _agent(workspace_id, "reviewer")
@@ -779,11 +779,36 @@ async def test_set_shared_flips_every_agents_row_for_the_account(db: None) -> No
             conversation_id=conversation_id,
             shared=False,
         )
-    assert await store.set_shared(workspace_id, "stub", "acct-42", True) is True
+    assert await store.set_shared(workspace_id, agent_id, "stub", "acct-42", True) is True
+    (flipped,) = await store.active_grants(workspace_id, agent_id)
+    assert flipped.shared is True
+    (untouched,) = await store.active_grants(workspace_id, second_agent)
+    assert untouched.shared is False
+    assert await store.set_shared(workspace_id, agent_id, "stub", "missing", True) is False
+
+
+async def test_revoke_removes_only_the_named_agents_binding(db: None) -> None:
+    workspace_id = await _workspace()
+    member_id, agent_id = await _member_agent(workspace_id)
+    second_agent = await _agent(workspace_id, "reviewer")
+    conversation_id = await _conversation(workspace_id, member_id)
+    store = GrantStore()
     for target in (agent_id, second_agent):
-        (grant,) = await store.active_grants(workspace_id, target)
-        assert grant.shared is True
-    assert await store.set_shared(workspace_id, "stub", "missing", True) is False
+        await store.record(
+            workspace_id=workspace_id,
+            agent_id=target,
+            provider="stub",
+            account_id="acct-42",
+            host=GRANTED_HOST,
+            grantor_member_id=member_id,
+            conversation_id=conversation_id,
+            shared=False,
+        )
+    assert await store.revoke(workspace_id, agent_id, "stub", "acct-42") is True
+    assert await store.active_grants(workspace_id, agent_id) == ()
+    (kept,) = await store.active_grants(workspace_id, second_agent)
+    assert kept.account_id == "acct-42"
+    assert await store.revoke(workspace_id, agent_id, "stub", "acct-42") is False
 
 
 async def test_connect_account_carries_the_shared_intent(db: None) -> None:
@@ -848,6 +873,11 @@ async def _conversation(workspace_id: UUID, member_id: UUID) -> UUID:
             sa.insert(tables.conversation).values(
                 id=conversation_id,
                 workspace_id=workspace_id,
+                agent_id=sa.select(tables.agent.c.id)
+                .where(tables.agent.c.workspace_id == workspace_id)
+                .order_by(tables.agent.c.created_at, tables.agent.c.id)
+                .limit(1)
+                .scalar_subquery(),
                 surface="cli",
                 queue_key=uuid4().hex,
                 member_id=member_id,

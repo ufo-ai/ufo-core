@@ -19,7 +19,7 @@ from ufo.credentials import (
     CredentialStore,
     HostChoice,
     credential_host,
-    slot_secret,
+    slot_is_set,
 )
 from ufo.db import workspace_tx
 from ufo.ext.loader import (
@@ -404,7 +404,14 @@ async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, UUID | None]:
                     tables.agent.c.model,
                     tables.conversation.c.member_id,
                 )
-                .select_from(tables.turn.join(tables.agent).join(tables.conversation))
+                .select_from(
+                    tables.turn.join(
+                        tables.agent, tables.turn.c.agent_id == tables.agent.c.id
+                    ).join(
+                        tables.conversation,
+                        tables.turn.c.conversation_id == tables.conversation.c.id,
+                    )
+                )
                 .where(tables.turn.c.id == turn_id)
             )
         ).one()
@@ -516,7 +523,7 @@ async def _git_credential_config(
         target = slot.injection
         if target is None or target.git_basic_user is None:
             continue
-        if await slot_secret(slot.name, slot.source, workspace_id, credentials) is None:
+        if not await slot_is_set(slot.name, slot.source, workspace_id, credentials):
             continue
         host = await credential_host(credentials, workspace_id, target.host)
         if host is None:
@@ -551,7 +558,7 @@ async def _keyed_provider_env(
         host_env = target.host.env if isinstance(target.host, HostChoice) else None
         if target.env is None and host_env is None:
             continue
-        if await slot_secret(slot.name, slot.source, workspace_id, credentials) is None:
+        if not await slot_is_set(slot.name, slot.source, workspace_id, credentials):
             continue
         host = await credential_host(credentials, workspace_id, target.host)
         if host is None:
@@ -568,12 +575,13 @@ async def _grant_cli_env(
     grants: GrantStore | None, clis: Mapping[str, CliCredential], turn: Turn
 ) -> dict[str, str]:
     """Each connector-declared CLI env var whose provider this turn may use — the acting member's
-    own grant or one shared with the workspace — set to that grant's sentinel, so the CLI inside
-    the sandbox authenticates and the proxy forwards by the same sentinel (engine and proxy derive
-    it independently from the grant, no shared registration). The acting member is the speaker, else
-    the member the turn acts on behalf of, mirroring `connector_accounts`. A static env var names no
-    account, so two usable accounts cannot be disambiguated per request: rather than silently pick
-    one — `connector_account` fails loud on the same ambiguity — the export is skipped and logged,
+    own grant preferred, one shared with the agent's audience as the fallback — set to that
+    grant's sentinel, so the CLI inside the sandbox authenticates and the proxy forwards by the
+    same sentinel (engine and proxy derive it independently from the grant, no shared
+    registration). The acting member is the speaker, else the member the turn acts on behalf of,
+    mirroring `connector_account`. A static env var names no account, so two accounts in the
+    winning tier cannot be disambiguated per request: rather than silently pick one —
+    `connector_account` fails loud on the same ambiguity — the export is skipped and logged,
     so the CLI fails visibly to authenticate instead of acting as an unintended account."""
     if grants is None or not clis:
         return {}
@@ -585,11 +593,15 @@ async def _grant_cli_env(
     granted = await grants.active_grants(turn.workspace_id, turn.agent_id)
     env: dict[str, str] = {}
     for provider, cli in clis.items():
-        accounts = sorted(
+        private = sorted(
             grant.account_id
             for grant in granted
-            if grant.provider == provider and (grant.shared or grant.grantor_member_id == acting)
+            if grant.provider == provider and not grant.shared and grant.grantor_member_id == acting
         )
+        shared = sorted(
+            grant.account_id for grant in granted if grant.provider == provider and grant.shared
+        )
+        accounts = private or shared
         if len(accounts) > 1:
             log(
                 "sandbox.cli_grant_ambiguous",

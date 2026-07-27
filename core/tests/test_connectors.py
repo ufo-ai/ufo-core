@@ -12,6 +12,7 @@ injects nothing on the wire."""
 import asyncio
 import base64
 from collections.abc import Iterator
+from dataclasses import replace
 from datetime import UTC, datetime
 from urllib.parse import parse_qs, urlparse
 from uuid import UUID, uuid4
@@ -260,6 +261,57 @@ async def test_connector_accounts_lists_only_the_turn_agents_provider_accounts(d
     assert await ctx.connector_accounts(sample.CONNECTOR_PROVIDER) == ("acct-1", "acct-2")
 
 
+async def test_connector_account_prefers_the_acting_members_private_account(db: None) -> None:
+    """A provider bound both privately and agent-shared resolves by tier: the acting member's own
+    private account first, the agent-shared one as the fallback — M's turns act as M's account, a
+    member without a private grant acts as the shared one and can never name M's, and a scheduled
+    fire acting on behalf of M keeps M's private account."""
+    workspace_id = await _workspace()
+    member_m, agent_id = await _member_agent(workspace_id)
+    conversation_id = await _conversation(workspace_id, member_m)
+    member_n = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=member_n,
+                workspace_id=workspace_id,
+                email="n@x.test",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    store = GrantStore()
+    for account, shared in (("acct-m", False), ("acct-shared", True)):
+        await store.record(
+            workspace_id=workspace_id,
+            agent_id=agent_id,
+            provider=sample.CONNECTOR_PROVIDER,
+            account_id=account,
+            host=sample.CONNECTOR_HOST,
+            grantor_member_id=member_m,
+            conversation_id=conversation_id,
+            shared=shared,
+        )
+    ctx_m = _turn_context(workspace_id, agent_id, conversation_id, member_m, grants=store)
+    assert await ctx_m.connector_account(sample.CONNECTOR_PROVIDER) == "acct-m"
+    assert await ctx_m.connector_accounts(sample.CONNECTOR_PROVIDER) == ("acct-m", "acct-shared")
+    assert (
+        await ctx_m.connector_account(sample.CONNECTOR_PROVIDER, account_id="acct-shared")
+        == "acct-shared"
+    )
+    ctx_n = _turn_context(workspace_id, agent_id, conversation_id, member_n, grants=store)
+    assert await ctx_n.connector_account(sample.CONNECTOR_PROVIDER) == "acct-shared"
+    assert await ctx_n.connector_accounts(sample.CONNECTOR_PROVIDER) == ("acct-shared",)
+    with pytest.raises(ValueError, match="acct-m"):
+        await ctx_n.connector_account(sample.CONNECTOR_PROVIDER, account_id="acct-m")
+    scheduled = replace(
+        ctx_m,
+        speaker_member_id=None,
+        on_behalf_of_member_id=member_m,
+    )
+    assert await scheduled.connector_account(sample.CONNECTOR_PROVIDER) == "acct-m"
+
+
 def _turn_context(
     workspace_id: UUID,
     agent_id: UUID,
@@ -352,6 +404,11 @@ async def _conversation(workspace_id: UUID, member_id: UUID) -> UUID:
             sa.insert(tables.conversation).values(
                 id=conversation_id,
                 workspace_id=workspace_id,
+                agent_id=sa.select(tables.agent.c.id)
+                .where(tables.agent.c.workspace_id == workspace_id)
+                .order_by(tables.agent.c.created_at, tables.agent.c.id)
+                .limit(1)
+                .scalar_subquery(),
                 surface="cli",
                 queue_key=uuid4().hex,
                 member_id=member_id,

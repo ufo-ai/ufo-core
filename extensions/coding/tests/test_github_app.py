@@ -13,6 +13,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from ufo_ext_coding.github_app import GitHubAppTokens
 
 from ufo.credentials import (
+    CredentialMintFailed,
     CredentialRequests,
     CredentialSlotUnset,
     CredentialStore,
@@ -66,7 +67,7 @@ async def test_a_hand_typed_installation_id_is_refused_rather_than_minted_agains
     VALUES.clear()
     VALUES.update({(workspace_id, SLOT): INSTALLATION})
     store = _Store(fernet=Fernet(Fernet.generate_key()))
-    with pytest.raises(Exception, match="not one this deploy sealed"):
+    with pytest.raises(Exception, match="tampered or expired"):
         await _tokens().secret(workspace_id, store)
 
 
@@ -76,7 +77,7 @@ async def test_another_workspaces_binding_is_refused() -> None:
     fernet = Fernet(Fernet.generate_key())
     mine, theirs = uuid4(), uuid4()
     VALUES.clear()
-    VALUES.update({(mine, SLOT): seal_installation(fernet, theirs, INSTALLATION)})
+    VALUES.update({(mine, SLOT): seal_installation(fernet, theirs, SLOT, INSTALLATION)})
     with pytest.raises(Exception, match="another workspace"):
         await _tokens().secret(mine, _Store(fernet=fernet))
 
@@ -87,7 +88,9 @@ async def test_a_bound_workspace_mints_and_reuses_the_token_until_it_nears_expir
     fernet = Fernet(Fernet.generate_key())
     workspace_id = uuid4()
     VALUES.clear()
-    VALUES.update({(workspace_id, SLOT): seal_installation(fernet, workspace_id, INSTALLATION)})
+    VALUES.update(
+        {(workspace_id, SLOT): seal_installation(fernet, workspace_id, SLOT, INSTALLATION)}
+    )
     calls: list[httpx.Request] = []
     expires = (datetime.now(UTC) + timedelta(hours=1)).isoformat().replace("+00:00", "Z")
 
@@ -115,15 +118,66 @@ async def test_a_refused_exchange_raises_rather_than_falling_back() -> None:
     fernet = Fernet(Fernet.generate_key())
     workspace_id = uuid4()
     VALUES.clear()
-    VALUES.update({(workspace_id, SLOT): seal_installation(fernet, workspace_id, INSTALLATION)})
+    VALUES.update(
+        {(workspace_id, SLOT): seal_installation(fernet, workspace_id, SLOT, INSTALLATION)}
+    )
 
     async def refused(request: httpx.Request) -> httpx.Response:
         return httpx.Response(404, text="Not Found")
 
-    with pytest.raises(RuntimeError, match="minted no token"):
+    with pytest.raises(CredentialMintFailed, match="minted no token"):
         await _tokens(transport=httpx.MockTransport(refused)).secret(
             workspace_id, _Store(fernet=fernet)
         )
+
+
+async def test_an_unreachable_provider_arrives_as_the_declared_mint_failure() -> None:
+    """A network fault is the same external uncertainty as a refusal, so it must reach the
+    derivation as the one type it catches. Raw `httpx` escaping here would abort the whole rule
+    derivation and fail a turn that never touches git, instead of withholding this host."""
+    fernet = Fernet(Fernet.generate_key())
+    workspace_id = uuid4()
+    VALUES.clear()
+    VALUES.update(
+        {(workspace_id, SLOT): seal_installation(fernet, workspace_id, SLOT, INSTALLATION)}
+    )
+
+    def unreachable(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused", request=request)
+
+    with pytest.raises(CredentialMintFailed, match="unreachable"):
+        await _tokens(transport=httpx.MockTransport(unreachable)).secret(
+            workspace_id, _Store(fernet=fernet)
+        )
+
+
+async def test_a_201_with_an_unreadable_body_arrives_as_the_declared_mint_failure() -> None:
+    """GitHub answering 201 is not the same as GitHub answering a token. A body missing the token, a
+    timestamp that will not parse, a timestamp that is not a string, or a body that is not an object
+    at all is still the provider being unreliable — so each must reach the derivation as the type it
+    catches, not as a raw KeyError, ValueError or TypeError that would abort every host's rules for
+    a turn that never touches git."""
+    fernet = Fernet(Fernet.generate_key())
+    workspace_id = uuid4()
+    VALUES.clear()
+    VALUES.update(
+        {(workspace_id, SLOT): seal_installation(fernet, workspace_id, SLOT, INSTALLATION)}
+    )
+
+    for body in (
+        {"expires_at": "2026-07-26T12:00:00Z"},
+        {"token": "ghs_x", "expires_at": "soon"},
+        {"token": "ghs_x", "expires_at": 1800},
+        ["not", "an", "object"],
+    ):
+
+        async def answered(request: httpx.Request, body: object = body) -> httpx.Response:
+            return httpx.Response(201, json=body)
+
+        with pytest.raises(CredentialMintFailed, match="unreadable token"):
+            await _tokens(transport=httpx.MockTransport(answered)).secret(
+                workspace_id, _Store(fernet=fernet)
+            )
 
 
 async def test_rebinding_to_another_installation_mints_against_the_new_one() -> None:
@@ -135,7 +189,9 @@ async def test_rebinding_to_another_installation_mints_against_the_new_one() -> 
     workspace_id = uuid4()
     other = "149082999"
     VALUES.clear()
-    VALUES.update({(workspace_id, SLOT): seal_installation(fernet, workspace_id, INSTALLATION)})
+    VALUES.update(
+        {(workspace_id, SLOT): seal_installation(fernet, workspace_id, SLOT, INSTALLATION)}
+    )
     expires = (datetime.now(UTC) + timedelta(hours=1)).isoformat().replace("+00:00", "Z")
     minted: list[str] = []
 
@@ -148,7 +204,7 @@ async def test_rebinding_to_another_installation_mints_against_the_new_one() -> 
     store = _Store(fernet=fernet)
 
     assert await tokens.secret(workspace_id, store) == f"ghs_{INSTALLATION}"
-    VALUES[(workspace_id, SLOT)] = seal_installation(fernet, workspace_id, other)
+    VALUES[(workspace_id, SLOT)] = seal_installation(fernet, workspace_id, SLOT, other)
     assert await tokens.secret(workspace_id, store) == f"ghs_{other}"
     assert minted == [INSTALLATION, other]
 
@@ -182,3 +238,43 @@ async def test_a_binding_written_by_the_route_is_what_the_minter_opens(db: None)
     assert INSTALLATION not in stored
     tokens = _tokens(transport=httpx.MockTransport(github))
     assert await tokens.secret(workspace_id, store) == "ghs_joined"
+
+
+async def test_bound_reports_an_unbound_workspace_without_reaching_github() -> None:
+    """The sandbox-open contributors ask only whether a slot is filled, so an unbound workspace
+    must answer False off the store alone — a transport that would fail proves nothing was sent."""
+    VALUES.clear()
+
+    tokens = _tokens(transport=httpx.MockTransport(lambda _request: pytest.fail("minted")))
+
+    assert await tokens.bound(uuid4(), _Store(fernet=Fernet(Fernet.generate_key()))) is False
+
+
+async def test_bound_reports_a_binding_this_deploy_can_open() -> None:
+    """A seal this deploy wrote is a binding, and answering it still mints nothing: the whole point
+    of the check is that a turn which never touches git does not reach GitHub."""
+    VALUES.clear()
+    fernet = Fernet(Fernet.generate_key())
+    workspace_id = uuid4()
+    VALUES[(workspace_id, SLOT)] = seal_installation(fernet, workspace_id, SLOT, INSTALLATION)
+
+    tokens = _tokens(transport=httpx.MockTransport(lambda _request: pytest.fail("minted")))
+
+    assert await tokens.bound(workspace_id, _Store(fernet=fernet)) is True
+
+
+async def test_bound_refuses_a_seal_this_deploy_cannot_open() -> None:
+    """A stored value that is not this deploy's own seal for this workspace and slot is not a
+    binding: it opens no egress rather than reporting a credential the wire would then fail on."""
+    VALUES.clear()
+    fernet = Fernet(Fernet.generate_key())
+    workspace_id = uuid4()
+    VALUES[(workspace_id, SLOT)] = seal_installation(
+        Fernet(Fernet.generate_key()), workspace_id, SLOT, INSTALLATION
+    )
+
+    assert await _tokens().bound(workspace_id, _Store(fernet=fernet)) is False
+
+    VALUES[(workspace_id, SLOT)] = INSTALLATION
+
+    assert await _tokens().bound(workspace_id, _Store(fernet=fernet)) is False

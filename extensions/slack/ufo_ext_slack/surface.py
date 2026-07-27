@@ -1119,10 +1119,8 @@ async def ingest(ctx: SurfaceContext, request: Request) -> Response:
     if inbound.files:
         downloaded = await _download_files(ctx, conversation_id, bot_token, inbound.files)
         body = f"{body}{_files_note(downloaded)}"
-    agent_id = await ctx.default_agent()
     turn_id = await ctx.admit(
         conversation_id,
-        agent_id,
         body,
         idempotency_key=inbound.message_id,
         context=_turn_context(sender),
@@ -1664,12 +1662,10 @@ async def interactive(ctx: SurfaceContext, request: Request) -> Response:
                 return JSONResponse({"ok": True, "ignored": True})
             if click.is_dm and member_id is not None:
                 conversation_id = await ctx.conversation_for(click.queue_key, member_id)
-            agent_id = await ctx.default_agent()
             body = f"[Answered by <@{click.slack_user_id}> via button] {click.label}"
             answer_key = f"{click.queue_key}:{click.message_ts}:answer:{click.question_index}"
             turn_id = await ctx.admit(
                 conversation_id,
-                agent_id,
                 body,
                 idempotency_key=answer_key,
                 speaker_member_id=member_id,

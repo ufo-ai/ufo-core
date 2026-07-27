@@ -179,6 +179,7 @@ async def _grantable(workspace_id: UUID) -> tuple[UUID, UUID, UUID]:
             sa.insert(tables.conversation).values(
                 id=conversation_id,
                 workspace_id=workspace_id,
+                agent_id=agent_id,
                 surface="cli",
                 queue_key=uuid4().hex,
                 member_id=member_id,
@@ -522,7 +523,7 @@ async def test_sample_memory_search_provider_is_scoped_to_the_conversation_membe
     db: None,
 ) -> None:
     workspace_id = await _workspace()
-    member_id, conversation_id = uuid4(), uuid4()
+    member_id, conversation_id, agent_id = uuid4(), uuid4(), uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.member).values(
@@ -534,9 +535,21 @@ async def test_sample_memory_search_provider_is_scoped_to_the_conversation_membe
             )
         )
         await connection.execute(
+            sa.insert(tables.agent).values(
+                id=agent_id,
+                workspace_id=workspace_id,
+                name="assistant",
+                prompt="be brief",
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
             sa.insert(tables.conversation).values(
                 id=conversation_id,
                 workspace_id=workspace_id,
+                agent_id=agent_id,
                 surface="cli",
                 queue_key="memory",
                 member_id=member_id,
@@ -1005,6 +1018,7 @@ async def _seed_trajectory(
             sa.insert(tables.conversation).values(
                 id=conversation_id,
                 workspace_id=workspace_id,
+                agent_id=agent_id,
                 surface="cli",
                 queue_key=str(conversation_id),
                 member_id=None,

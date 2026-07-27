@@ -200,6 +200,7 @@ async def _seed_turn(conversation_id: UUID) -> Turn:
             sa.insert(tables.conversation).values(
                 id=conversation_id,
                 workspace_id=workspace_id,
+                agent_id=agent_id,
                 surface="cli",
                 queue_key=uuid4().hex,
                 member_id=member_id,

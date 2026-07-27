@@ -1,11 +1,12 @@
-"""The `connector` object kind: granted provider accounts projected as workspace objects.
+"""The `connector` object kind: the turn agent's granted provider accounts projected as objects.
 
 A grant is created only through the `connect_account` chat flow — a third party and a secret are
 involved, so create refuses naming that path. A grant is private to its grantor by default; apply
-admits exactly one mutation, flipping `shared`, gated to the grantor or an owner — the only way a
-connected account's disclosure changes after connect time. Delete revokes, gated the same way. The
-broker holds the account's token and exposes no revoke surface, so revocation is the grant-row
-delete: the account stops resolving for tools, syncs, and proxy rules at once.
+admits exactly one mutation, flipping `shared` — disclosure to this agent's audience — gated to
+the grantor or an owner. Delete revokes this agent's binding, gated the same way. The broker
+holds the account's token and exposes no revoke surface, so revocation is the grant-row delete:
+the account stops resolving for the agent's tools, syncs, and proxy rules at once, and the same
+account connected to another agent keeps that agent's own binding.
 
 Names derive from the grant: `<provider>-<account-slug>`, each part canonicalized into the object
 name grammar, with a short digest suffix when two accounts collapse to one slug."""
@@ -49,11 +50,11 @@ def _slug(raw: str) -> str:
 
 @dataclass(frozen=True)
 class ConnectorObjects(MemberOwnedObjects[ConnectorSpec]):
-    """The kind's handlers over the workspace's grant rows: list and get read the audit view,
-    apply flips sharing, delete revokes — both through the grant store on the turn's context. The
-    per-member visibility and grantor-or-owner gate is the base's; this kind supplies the grant
-    rows, their specs, and the flip/revoke domain acts. Grants for the same provider account across
-    agents collapse to one object; revoking or resharing it acts on them all."""
+    """The kind's handlers over the turn agent's grant rows: list and get read the audit view,
+    apply flips sharing, delete revokes — both through the grant store on the turn's context,
+    acting on this agent's binding alone. The per-member visibility and grantor-or-owner gate is
+    the base's; this kind supplies the grant rows, their specs, and the flip/revoke domain
+    acts."""
 
     kind_name: ClassVar[str] = CONNECTOR_KIND
     mutate_gate: ClassVar[str] = SHARE_GATE
@@ -113,21 +114,20 @@ class ConnectorObjects(MemberOwnedObjects[ConnectorSpec]):
         if ctx.grants is None:
             raise RuntimeError("grants unavailable: no credential key configured")
         await ctx.grants.set_shared(
-            ctx.turn.workspace_id, grant.provider, grant.account_id, spec.shared
+            ctx.turn.workspace_id, ctx.turn.agent_id, grant.provider, grant.account_id, spec.shared
         )
 
     async def _delete_owned(self, ctx: ToolContext, name: str, owner: ObjectOwner) -> None:
         grant = (await self._named(ctx))[name]
         if ctx.grants is None:
             raise RuntimeError("grants unavailable: no credential key configured")
-        await ctx.grants.revoke(ctx.turn.workspace_id, grant.provider, grant.account_id)
+        await ctx.grants.revoke(
+            ctx.turn.workspace_id, ctx.turn.agent_id, grant.provider, grant.account_id
+        )
 
     async def _named(self, ctx: ToolContext) -> dict[str, GrantSummary]:
-        accounts: dict[tuple[str, str], GrantSummary] = {}
-        for grant in await grant_summaries(ctx.turn.workspace_id):
-            accounts.setdefault((grant.provider, grant.account_id), grant)
         grouped: dict[str, list[GrantSummary]] = {}
-        for grant in accounts.values():
+        for grant in await grant_summaries(ctx.turn.workspace_id, ctx.turn.agent_id):
             grouped.setdefault(f"{_slug(grant.provider)}-{_slug(grant.account_id)}", []).append(
                 grant
             )

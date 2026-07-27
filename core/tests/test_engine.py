@@ -22,7 +22,12 @@ from pydantic import BaseModel
 from ufo.accounting import record_turn_usage
 from ufo.blob import FilesystemBlobStore
 from ufo.connectors import ConnectorRegistry
-from ufo.credentials import CredentialRequests, CredentialStore, open_credential_request
+from ufo.credentials import (
+    CREDENTIAL_REQUEST_PURPOSE,
+    CredentialRequests,
+    CredentialStore,
+    open_credential_request,
+)
 from ufo.db import workspace_tx
 from ufo.ext.context import context_for
 from ufo.ext.loader import BoundHook, HookChain
@@ -594,6 +599,7 @@ async def _seed_turn(
             sa.insert(tables.conversation).values(
                 id=conversation_id,
                 workspace_id=workspace_id,
+                agent_id=agent_id,
                 surface="cli",
                 queue_key=uuid4().hex,
                 member_id=member_id,
@@ -1195,7 +1201,9 @@ async def test_request_credentials_as_the_final_act_rides_the_terminal_frame(
     assert frame.credential_request is not None
     assert frame.credential_request.reason == REQUEST_INPUT["reason"]
     assert [p.slot for p in frame.credential_request.prompts] == ["sample_api"]
-    state = open_credential_request(fernet, frame.credential_request.sealed)
+    state = open_credential_request(
+        fernet, frame.credential_request.sealed, purpose=CREDENTIAL_REQUEST_PURPOSE
+    )
     assert state.workspace_id == turn.workspace_id
     assert state.member_id == owner
     assert state.slots == ("sample_api",)

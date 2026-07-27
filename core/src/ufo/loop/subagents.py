@@ -339,6 +339,7 @@ class Subagents:
                 .values(
                     id=conversation_id,
                     workspace_id=self.parent.workspace_id,
+                    agent_id=self.parent.agent_id,
                     surface=SUBAGENT_SURFACE,
                     queue_key=str(turn_id),
                     member_id=member_id,

@@ -383,7 +383,6 @@ class Turns:
             admission=self.admission, workspace_id=seed.workspace_id
         ).admit(
             seed.conversation_id,
-            seed.agent_id,
             body,
             idempotency_key=idempotency_key,
             speaker_member_id=seed.member_id,
@@ -471,6 +470,7 @@ async def _bootstrap(model: str = "claude-opus-4-8") -> Seed:
             sa.insert(tables.conversation).values(
                 id=conversation_id,
                 workspace_id=workspace_id,
+                agent_id=agent_id,
                 surface="cli",
                 queue_key=uuid4().hex,
                 member_id=member_id,
@@ -791,6 +791,7 @@ async def test_backstop_terminal_carries_class_and_message(db: None) -> None:
             sa.insert(tables.conversation).values(
                 id=conversation_id,
                 workspace_id=workspace_id,
+                agent_id=agent_id,
                 surface="cli",
                 queue_key="session",
                 created_at=sa.func.now(),

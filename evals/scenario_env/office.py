@@ -169,6 +169,7 @@ async def seed_office(workspace_id: UUID, agent_id: UUID) -> None:
             sa.insert(tables.conversation).values(
                 id=conversation_id,
                 workspace_id=workspace_id,
+                agent_id=agent_id,
                 surface=EVAL_SURFACE,
                 queue_key=f"{EVAL_SURFACE}-seed:{conversation_id}",
                 created_at=sa.func.now(),

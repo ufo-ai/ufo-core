@@ -69,6 +69,7 @@ async def _seed_case_conversation(
             sa.insert(tables.conversation).values(
                 id=conversation_id,
                 workspace_id=workspace_id,
+                agent_id=agent_id,
                 surface="eval",
                 queue_key=f"eval:{CASE_NAME}:{conversation_id}",
                 created_at=sa.func.now(),

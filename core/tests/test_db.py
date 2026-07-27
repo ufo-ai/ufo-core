@@ -154,7 +154,7 @@ def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None
         heads = scripts.get_heads()
     assert scripts.get_revision("memory_0008").dependencies == "0049"
     assert {
-        "0050",
+        "0051",
         "index_default_0002",
         "memory_0009",
         "sample_ext_note_0001",
@@ -341,6 +341,84 @@ def test_memory_provenance_migration_backfills_page_derived_rows(tmp_path: Path)
     assert dangling.created_from_page_id is None and dangling.source_ref is not None
 
 
+def test_agent_binding_migration_backfills_the_earliest_agent(tmp_path: Path) -> None:
+    database_path = tmp_path / "agent-bindings.db"
+    url = f"sqlite+aiosqlite:///{database_path}"
+    config = Config()
+    config.set_main_option("script_location", str(MIGRATIONS_DIR))
+    config.set_main_option(
+        "version_locations",
+        os.pathsep.join((str(MIGRATIONS_DIR / "versions"), *migration_locations())),
+    )
+    config.set_main_option("path_separator", "os")
+    config.set_main_option("sqlalchemy.url", url)
+    command.upgrade(config, "0050")
+
+    engine = sa.create_engine(f"sqlite:///{database_path}")
+    workspace_id, later_agent, earliest_agent, conversation_id = (uuid4() for _ in range(4))
+    with engine.connect() as connection:
+        connection.execute(
+            sa.text(
+                "insert into workspace (id, created_at, updated_at) values (:id, :moment, :moment)"
+            ),
+            {"id": workspace_id.hex, "moment": datetime(2026, 7, 1, tzinfo=UTC)},
+        )
+        for agent_id, name, created in (
+            (later_agent, "exec", datetime(2026, 7, 5, tzinfo=UTC)),
+            (earliest_agent, "assistant", datetime(2026, 7, 2, tzinfo=UTC)),
+        ):
+            connection.execute(
+                sa.text(
+                    "insert into agent "
+                    "(id, workspace_id, name, prompt, model, internet_access_allowed, "
+                    "created_at, updated_at) "
+                    "values (:id, :workspace_id, :name, 'p', 'eval', true, :created, :created)"
+                ),
+                {
+                    "id": agent_id.hex,
+                    "workspace_id": workspace_id.hex,
+                    "name": name,
+                    "created": created,
+                },
+            )
+        connection.execute(
+            sa.text(
+                "insert into surface_installation "
+                "(workspace_id, surface, installation_id, created_at, updated_at) "
+                "values (:workspace_id, 'slack', 'team:T1', :moment, :moment)"
+            ),
+            {"workspace_id": workspace_id.hex, "moment": datetime(2026, 7, 3, tzinfo=UTC)},
+        )
+        connection.execute(
+            sa.text(
+                "insert into conversation "
+                "(id, workspace_id, surface, queue_key, created_at, updated_at) "
+                "values (:id, :workspace_id, 'cli', 'session', :moment, :moment)"
+            ),
+            {
+                "id": conversation_id.hex,
+                "workspace_id": workspace_id.hex,
+                "moment": datetime(2026, 7, 3, tzinfo=UTC),
+            },
+        )
+        connection.commit()
+
+    command.upgrade(config, "0051")
+    with engine.connect() as connection:
+        installation_agent = connection.execute(
+            sa.text("select agent_id from surface_installation where workspace_id = :id"),
+            {"id": workspace_id.hex},
+        ).scalar_one()
+        conversation_agent = connection.execute(
+            sa.text("select agent_id from conversation where id = :id"),
+            {"id": conversation_id.hex},
+        ).scalar_one()
+    engine.dispose()
+
+    assert installation_agent == earliest_agent.hex
+    assert conversation_agent == earliest_agent.hex
+
+
 def test_migrate_command_brings_the_schema_to_head(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -426,6 +504,7 @@ async def test_turn_protocol_state_is_constrained(db: None) -> None:
             sa.insert(tables.conversation).values(
                 id=conversation_id,
                 workspace_id=workspace_id,
+                agent_id=agent_id,
                 surface="cli",
                 queue_key="session",
                 member_id=member_id,

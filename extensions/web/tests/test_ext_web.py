@@ -311,6 +311,7 @@ async def test_web_stream_privately_opens_the_speakers_connect_handoff(
             sa.insert(tables.conversation).values(
                 id=conversation_id,
                 workspace_id=workspace_id,
+                agent_id=agent_id,
                 surface="web",
                 queue_key=uuid4().hex,
                 member_id=member_id,
@@ -412,6 +413,7 @@ async def test_web_spend_view_matches_ledger_sums(web: tuple[AsyncClient, UUID])
             sa.insert(tables.conversation).values(
                 id=conversation_id,
                 workspace_id=workspace_id,
+                agent_id=agent_id,
                 surface="web",
                 queue_key=uuid4().hex,
                 member_id=member_id,

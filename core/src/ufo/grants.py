@@ -244,15 +244,20 @@ class GrantStore:
             for row in rows
         )
 
-    async def revoke(self, workspace_id: UUID, provider: str, account_id: str) -> bool:
-        """Remove every grant binding this provider account in the workspace — the delete half of
-        the connector object kind. The broker holds the account's token and exposes no revoke
-        surface, so withdrawal is the row delete: the account stops resolving for tools, syncs,
-        and proxy-rule derivation the moment the row is gone."""
+    async def revoke(
+        self, workspace_id: UUID, agent_id: UUID, provider: str, account_id: str
+    ) -> bool:
+        """Remove this agent's grant binding the provider account — the delete half of the
+        connector object kind. Connecting an account to an agent is one consent act, so its
+        withdrawal is that binding's row delete: the account stops resolving for the agent's
+        tools, syncs, and proxy-rule derivation the moment the row is gone, and the same account
+        connected to another agent keeps that agent's own binding. The broker holds the account's
+        token and exposes no revoke surface."""
         async with workspace_tx() as connection:
             deleted = await connection.execute(
                 sa.delete(tables.grant).where(
                     tables.grant.c.workspace_id == workspace_id,
+                    tables.grant.c.agent_id == agent_id,
                     tables.grant.c.provider == provider,
                     tables.grant.c.account_id == account_id,
                 )
@@ -260,18 +265,19 @@ class GrantStore:
         return deleted.rowcount > 0
 
     async def set_shared(
-        self, workspace_id: UUID, provider: str, account_id: str, shared: bool
+        self, workspace_id: UUID, agent_id: UUID, provider: str, account_id: str, shared: bool
     ) -> bool:
-        """Flip the disclosure of every grant binding this provider account in the workspace —
-        the share/unshare half of the connector object kind. Disclosure is a property of the
-        connected account, not of one agent binding, so all its rows flip together, exactly as
-        `revoke` deletes them together."""
+        """Flip the disclosure of this agent's grant binding the provider account — the
+        share/unshare half of the connector object kind. `shared` means shared with this agent's
+        audience, so disclosure is a property of the binding: the same account connected to
+        another agent carries that binding's own disclosure, untouched from here."""
         async with workspace_tx() as connection:
             updated = await connection.execute(
                 sa.update(tables.grant)
                 .values(shared=shared, updated_at=sa.func.now())
                 .where(
                     tables.grant.c.workspace_id == workspace_id,
+                    tables.grant.c.agent_id == agent_id,
                     tables.grant.c.provider == provider,
                     tables.grant.c.account_id == account_id,
                 )
@@ -497,9 +503,15 @@ def connect_bridge_workspace(request: Request) -> UUID | None:
         return None
 
 
-async def grant_summaries(workspace_id: UUID) -> tuple[GrantSummary, ...]:
-    """The workspace's grants as audit rows, provider-ordered, joined to the granted agent's name —
-    the read behind `ufoctl grants`. Reads no secret, so it needs no encryption key."""
+async def grant_summaries(
+    workspace_id: UUID, agent_id: UUID | None = None
+) -> tuple[GrantSummary, ...]:
+    """Grants as audit rows, provider-ordered, joined to the granted agent's name. Workspace-wide
+    for the operator surface (`ufoctl grants`); narrowed to one agent for a member surface, which
+    never sees another agent's bindings. Reads no secret, so it needs no encryption key."""
+    scope = [tables.grant.c.workspace_id == workspace_id]
+    if agent_id is not None:
+        scope.append(tables.grant.c.agent_id == agent_id)
     async with workspace_tx() as connection:
         rows = (
             await connection.execute(
@@ -517,7 +529,7 @@ async def grant_summaries(workspace_id: UUID) -> tuple[GrantSummary, ...]:
                 .select_from(
                     tables.grant.join(tables.agent, tables.grant.c.agent_id == tables.agent.c.id)
                 )
-                .where(tables.grant.c.workspace_id == workspace_id)
+                .where(*scope)
                 .order_by(tables.grant.c.provider)
             )
         ).all()

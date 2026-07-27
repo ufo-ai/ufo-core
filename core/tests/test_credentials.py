@@ -11,7 +11,10 @@ from cryptography.fernet import Fernet
 
 from ufo.connectors import CliCredential
 from ufo.credentials import (
+    CREDENTIAL_REQUEST_PURPOSE,
     CREDENTIAL_REQUEST_TTL_SECONDS,
+    INSTALLATION_BINDING_PURPOSE,
+    CredentialMintFailed,
     CredentialRequestInvalid,
     CredentialRequests,
     CredentialRequestState,
@@ -23,6 +26,7 @@ from ufo.credentials import (
     open_installation,
     seal_credential_request,
     seal_installation,
+    slot_is_set,
     slot_secret,
 )
 from ufo.db import workspace_tx
@@ -171,17 +175,19 @@ def test_credential_request_seal_round_trips_and_expires() -> None:
     fernet = Fernet(Fernet.generate_key())
     state = CredentialRequestState(workspace_id=uuid4(), member_id=uuid4(), slots=("a", "b"))
     sealed = seal_credential_request(fernet, state)
-    assert open_credential_request(fernet, sealed) == state
+    assert open_credential_request(fernet, sealed, purpose=CREDENTIAL_REQUEST_PURPOSE) == state
     with pytest.raises(CredentialRequestInvalid):
-        open_credential_request(fernet, "garbage")
+        open_credential_request(fernet, "garbage", purpose=CREDENTIAL_REQUEST_PURPOSE)
     stale = fernet.encrypt_at_time(
         state.model_dump_json().encode(),
         int(time.time()) - CREDENTIAL_REQUEST_TTL_SECONDS - 1,
     ).decode()
     with pytest.raises(CredentialRequestInvalid):
-        open_credential_request(fernet, stale)
+        open_credential_request(fernet, stale, purpose=CREDENTIAL_REQUEST_PURPOSE)
     with pytest.raises(CredentialRequestInvalid):
-        open_credential_request(Fernet(Fernet.generate_key()), sealed)
+        open_credential_request(
+            Fernet(Fernet.generate_key()), sealed, purpose=CREDENTIAL_REQUEST_PURPOSE
+        )
 
 
 def test_credential_requests_seal_only_declared_slots() -> None:
@@ -689,10 +695,15 @@ class _MintedTokens:
     def __init__(self, installed: UUID | None) -> None:
         self.installed = installed
         self.calls = 0
+        self.presence_checks = 0
 
     async def secret(self, workspace_id: UUID, store: CredentialStore) -> str | None:
         self.calls += 1
         return "minted-installation-token" if workspace_id == self.installed else None
+
+    async def bound(self, workspace_id: UUID, store: CredentialStore) -> bool:
+        self.presence_checks += 1
+        return workspace_id == self.installed
 
 
 async def test_a_minted_source_answers_before_the_stored_fallback(db: None) -> None:
@@ -723,21 +734,64 @@ async def test_a_slot_with_neither_a_mint_nor_a_stored_value_resolves_to_nothing
     )
 
 
+SLOT_NAME = "github_app_installation"
+
+
 def test_an_installation_binding_opens_only_for_the_workspace_that_sealed_it() -> None:
     """The binding is what makes a self-asserted installation id worthless. An id is a small integer
     anyone can type, and the deploy's App key mints against any installation of it — so the slot
     holds a seal only the install callback can produce, and only for the workspace it names."""
     fernet = Fernet(Fernet.generate_key())
     mine, theirs = uuid4(), uuid4()
-    sealed = seal_installation(fernet, mine, "149082716")
+    sealed = seal_installation(fernet, mine, SLOT_NAME, "149082716")
 
-    assert open_installation(fernet, mine, sealed) == "149082716"
+    assert open_installation(fernet, mine, SLOT_NAME, sealed) == "149082716"
     with pytest.raises(CredentialRequestInvalid, match="another workspace"):
-        open_installation(fernet, theirs, sealed)
-    with pytest.raises(CredentialRequestInvalid, match="this deploy sealed"):
-        open_installation(fernet, mine, "149082716")
-    with pytest.raises(CredentialRequestInvalid, match="this deploy sealed"):
-        open_installation(Fernet(Fernet.generate_key()), mine, sealed)
+        open_installation(fernet, theirs, SLOT_NAME, sealed)
+    with pytest.raises(CredentialRequestInvalid, match="tampered or expired"):
+        open_installation(fernet, mine, SLOT_NAME, "149082716")
+    with pytest.raises(CredentialRequestInvalid, match="tampered or expired"):
+        open_installation(Fernet(Fernet.generate_key()), mine, SLOT_NAME, sealed)
+    with pytest.raises(CredentialRequestInvalid, match="names another slot"):
+        open_installation(fernet, mine, "another_slot", sealed)
+
+
+def test_a_request_seal_cannot_stand_in_for_an_installation_binding() -> None:
+    """One deploy key seals both acts, so ciphertext from either opens under the other. The member
+    is handed their own connect link's `state` in chat: pasted into the installation slot it must be
+    refused for what it is, not decoded as a binding and not raised as a bare KeyError, which would
+    fail every turn that opens a sandbox for the workspace until an operator cleared the slot."""
+    fernet = Fernet(Fernet.generate_key())
+    workspace_id, member_id = uuid4(), uuid4()
+    handed_to_the_member = CredentialRequests(
+        fernet=fernet, declared=frozenset({SLOT_NAME})
+    ).authorize(workspace_id, member_id, SLOT_NAME, "install")
+
+    with pytest.raises(CredentialRequestInvalid, match="sealed for 'credential-request'"):
+        open_installation(fernet, workspace_id, SLOT_NAME, handed_to_the_member)
+
+
+def test_an_installation_binding_cannot_stand_in_for_a_member_authorization() -> None:
+    """The same confusion in the other direction, isolated to the purpose. This seal matches
+    everything `open_authorization` goes on to check — workspace, member, slot, a present payload —
+    so only the purpose it was minted under refuses it. A binding sealed by `seal_installation`
+    would also fail on its absent member, which would prove the member check instead of this one."""
+    fernet = Fernet(Fernet.generate_key())
+    workspace_id, member_id = uuid4(), uuid4()
+    requests = CredentialRequests(fernet=fernet, declared=frozenset({SLOT_NAME}))
+    binding = seal_credential_request(
+        fernet,
+        CredentialRequestState(
+            workspace_id=workspace_id,
+            member_id=member_id,
+            slots=(SLOT_NAME,),
+            payload="149082716",
+            purpose=INSTALLATION_BINDING_PURPOSE,
+        ),
+    )
+
+    with pytest.raises(CredentialRequestInvalid, match="sealed for 'installation-binding'"):
+        requests.open_authorization(binding, workspace_id, member_id, SLOT_NAME)
 
 
 def test_a_bare_installation_id_in_the_slot_mints_nothing(db: None) -> None:
@@ -746,4 +800,124 @@ def test_a_bare_installation_id_in_the_slot_mints_nothing(db: None) -> None:
     token is minted against it."""
     fernet = Fernet(Fernet.generate_key())
     with pytest.raises(CredentialRequestInvalid):
-        open_installation(fernet, uuid4(), "149082716")
+        open_installation(fernet, uuid4(), SLOT_NAME, "149082716")
+
+
+def _git_slot(source: object | None) -> tuple[CredentialSlot, ...]:
+    return injecting_slots(
+        (
+            Manifest(
+                name="git",
+                version="1",
+                credentials=(
+                    CredentialSlot(
+                        name="github_git_token",
+                        description="git token",
+                        source=source,
+                        injection=InjectionTarget(
+                            host="github.com",
+                            header="Authorization",
+                            sentinel="SENTINEL_GIT",
+                            dimension="requests",
+                            git_basic_user="x-access-token",
+                        ),
+                    ),
+                ),
+            ),
+        )
+    )
+
+
+async def test_a_minted_secret_reaches_the_proxy_rule_the_wire_uses(db: None) -> None:
+    """Both ends: the value a source mints must be the one the proxy actually injects, not just what
+    `slot_secret` returns. The member's stored token is present too, so a rule carrying it would
+    prove the mint never reached the wire."""
+    workspace_id = await _workspace()
+    store = _store()
+    await store.put(workspace_id, "github_git_token", "member-pat")
+    rules = await derive_credential_rules(
+        _git_slot(_MintedTokens(workspace_id)), workspace_id, store
+    )
+
+    (injection,) = [rule for rule in rules if isinstance(rule, InjectionRule)]
+    assert (
+        injection.real == f"Basic {b64encode(b'x-access-token:minted-installation-token').decode()}"
+    )
+
+
+async def test_a_workspace_that_did_not_install_the_app_is_set_by_its_own_token(db: None) -> None:
+    """The deploy wires the App as the source for every workspace, so a workspace that never
+    installed it still reaches a source that reports no binding. That is the member-token case the
+    slot exists to keep working: unbound, the stored token is what makes the slot set, and the
+    sandbox configures git off it exactly as it would off a minted one."""
+
+    class _Unbound:
+        def __init__(self) -> None:
+            self.mints = 0
+
+        async def secret(self, workspace_id: UUID, store: CredentialStore) -> str | None:
+            self.mints += 1
+            return None
+
+        async def bound(self, workspace_id: UUID, store: CredentialStore) -> bool:
+            return False
+
+    workspace_id = await _workspace()
+    store = _store()
+    source = _Unbound()
+
+    assert await slot_is_set("github_git_token", source, workspace_id, store) is False
+
+    await store.put(workspace_id, "github_git_token", "member-pat")
+
+    assert await slot_is_set("github_git_token", source, workspace_id, store) is True
+    assert await slot_secret("github_git_token", source, workspace_id, store) == "member-pat"
+    assert source.mints == 1
+
+
+async def test_a_mint_failure_withholds_only_that_host(db: None) -> None:
+    """A source reaches a provider, so it can fail while the rest of the turn is fine. The host's
+    rules are withheld rather than the derivation aborting — which would fail a turn that never
+    touches the credential — and it never falls back to the stored token, which would authenticate
+    as an identity the workspace did not bind."""
+
+    class _Failing:
+        async def secret(self, workspace_id: UUID, store: CredentialStore) -> str | None:
+            raise CredentialMintFailed("github is down")
+
+        async def bound(self, workspace_id: UUID, store: CredentialStore) -> bool:
+            return True
+
+    workspace_id = await _workspace()
+    store = _store()
+    await store.put(workspace_id, "github_git_token", "member-pat")
+    await store.put(workspace_id, "datadog_api_key", "dd-api-real")
+    await store.put(workspace_id, "datadog_application_key", "dd-app-real")
+    await store.put(workspace_id, "datadog_api_host", DATADOG_HOST)
+    slots = (*_git_slot(_Failing()), *injecting_slots((_keyed_manifest(),)))
+
+    rules = await derive_credential_rules(slots, workspace_id, store)
+
+    hosts = {rule.host for rule in rules if isinstance(rule, InjectionRule)}
+    assert hosts == {DATADOG_HOST}
+    assert ScopeRule(allowed_hosts=frozenset({DATADOG_HOST})) in rules
+    assert not [
+        rule for rule in rules if isinstance(rule, ScopeRule) and "github.com" in rule.allowed_hosts
+    ]
+
+
+async def test_a_fault_that_is_ours_is_not_swallowed_as_a_mint_failure(db: None) -> None:
+    """Only the provider exchange is external uncertainty. A tampered seal or a DB fault is our own,
+    so it propagates instead of quietly withholding a host — masking corruption as unavailability
+    would leave the member connected and every clone silently unauthenticated."""
+
+    class _Corrupt:
+        async def secret(self, workspace_id: UUID, store: CredentialStore) -> str | None:
+            raise CredentialRequestInvalid("stored seal is not this deploy's own")
+
+        async def bound(self, workspace_id: UUID, store: CredentialStore) -> bool:
+            return True
+
+    workspace_id = await _workspace()
+    with pytest.raises(CredentialRequestInvalid):
+        await derive_credential_rules(_git_slot(_Corrupt()), workspace_id, _store())

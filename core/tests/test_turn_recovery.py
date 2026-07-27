@@ -134,6 +134,7 @@ async def _seed_turn(model: str = "claude-opus-4-8") -> tuple[UUID, UUID]:
             sa.insert(tables.conversation).values(
                 id=conversation_id,
                 workspace_id=workspace_id,
+                agent_id=agent_id,
                 surface="cli",
                 queue_key=str(turn_id),
                 member_id=member_id,

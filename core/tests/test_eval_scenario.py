@@ -121,6 +121,11 @@ class DbConversations:
                 sa.insert(tables.conversation).values(
                     id=conversation_id,
                     workspace_id=self.workspace_id,
+                    agent_id=sa.select(tables.agent.c.id)
+                    .where(tables.agent.c.workspace_id == self.workspace_id)
+                    .order_by(tables.agent.c.created_at, tables.agent.c.id)
+                    .limit(1)
+                    .scalar_subquery(),
                     surface="eval",
                     queue_key=str(conversation_id),
                     created_at=sa.func.now(),

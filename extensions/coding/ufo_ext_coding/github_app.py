@@ -29,8 +29,13 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 from ufo.sdk.context import CredentialSlotUnset
-from ufo.sdk.credentials import open_installation
-from ufo.sdk.manifest import CredentialStore
+from ufo.sdk.credentials import (
+    CredentialMintFailed,
+    CredentialRequestInvalid,
+    CredentialStore,
+    open_installation,
+)
+from ufo.sdk.o11y import warn
 
 GITHUB_API = "https://api.github.com"
 JWT_LIFETIME_SECONDS = 540
@@ -59,12 +64,27 @@ class GitHubAppTokens:
     transport: httpx.AsyncBaseTransport | None = None
     minted: dict[tuple[UUID, str], tuple[str, float]] = field(default_factory=dict)
 
+    async def bound(self, workspace_id: UUID, store: CredentialStore) -> bool:
+        """Whether this workspace bound an installation — the stored seal's presence, no mint. A
+        seal this deploy cannot open is not a binding: it opens no egress and says so, rather than
+        reporting a credential the wire would then fail to produce."""
+        try:
+            sealed = await store.get(workspace_id, self.installation_slot)
+        except CredentialSlotUnset:
+            return False
+        try:
+            open_installation(store.fernet, workspace_id, self.installation_slot, sealed)
+        except CredentialRequestInvalid:
+            warn("github_app.installation_binding_unreadable", slot=self.installation_slot)
+            return False
+        return True
+
     async def secret(self, workspace_id: UUID, store: CredentialStore) -> str | None:
         try:
             bound = await store.get(workspace_id, self.installation_slot)
         except CredentialSlotUnset:
             return None
-        installation = open_installation(store.fernet, workspace_id, bound)
+        installation = open_installation(store.fernet, workspace_id, self.installation_slot, bound)
         cached = self.minted.get((workspace_id, installation))
         now = time.time()
         if cached is not None and cached[1] - TOKEN_REFRESH_MARGIN_SECONDS > now:
@@ -82,20 +102,30 @@ class GitHubAppTokens:
         async with httpx.AsyncClient(
             timeout=MINT_TIMEOUT_SECONDS, transport=self.transport
         ) as client:
-            response = await client.post(
-                f"{GITHUB_API}/app/installations/{installation}/access_tokens",
-                headers={
-                    "Authorization": f"Bearer {self._jwt()}",
-                    "Accept": "application/vnd.github+json",
-                },
-            )
+            try:
+                response = await client.post(
+                    f"{GITHUB_API}/app/installations/{installation}/access_tokens",
+                    headers={
+                        "Authorization": f"Bearer {self._jwt()}",
+                        "Accept": "application/vnd.github+json",
+                    },
+                )
+            except httpx.HTTPError as error:
+                raise CredentialMintFailed(
+                    f"github app installation {installation} unreachable: {error}"
+                ) from error
         if response.status_code != 201:
-            raise RuntimeError(
+            raise CredentialMintFailed(
                 f"github app installation {installation} minted no token: "
                 f"{response.status_code} {response.text[:200]}"
             )
-        payload = response.json()
-        return payload["token"], datetime.fromisoformat(payload["expires_at"]).timestamp()
+        try:
+            payload = response.json()
+            return payload["token"], datetime.fromisoformat(payload["expires_at"]).timestamp()
+        except (KeyError, TypeError, ValueError) as error:
+            raise CredentialMintFailed(
+                f"github app installation {installation} answered an unreadable token: {error}"
+            ) from error
 
     def _jwt(self) -> str:
         now = int(time.time())

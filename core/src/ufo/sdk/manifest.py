@@ -7,9 +7,6 @@ from ufo.credentials import (
     CredentialSource as CredentialSource,
 )
 from ufo.credentials import (
-    CredentialStore as CredentialStore,
-)
-from ufo.credentials import (
     HostChoice as HostChoice,
 )
 from ufo.ext.manifest import (

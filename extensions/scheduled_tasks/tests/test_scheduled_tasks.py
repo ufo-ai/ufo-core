@@ -158,6 +158,7 @@ async def _seed(surface: str = "cli") -> tuple[UUID, UUID, UUID]:
             sa.insert(tables.conversation).values(
                 id=conversation_id,
                 workspace_id=workspace_id,
+                agent_id=agent_id,
                 surface=surface,
                 queue_key="session",
                 member_id=member_id,
@@ -418,7 +419,6 @@ async def test_new_message_resumes_pause_and_cancels_timer(db: None) -> None:
         )
         turn_id = await member_admission.admit(
             conversation_id,
-            agent_id,
             "The approval arrived.",
             "approval-1",
             speaker_member_id=None,
@@ -473,7 +473,6 @@ async def test_pause_does_not_arm_after_a_newer_member_was_admitted(db: None) ->
     with ws(workspace_id):
         member_turn_id = await member_admission.admit(
             conversation_id,
-            agent_id,
             "new message",
             "newer-member",
             speaker_member_id=None,
@@ -561,7 +560,6 @@ async def test_redelivered_terminal_message_does_not_cancel_a_later_pause(db: No
     with ws(workspace_id):
         turn_id = await member_admission.admit(
             conversation_id,
-            agent_id,
             "The approval arrived.",
             "approval-redelivery",
             speaker_member_id=None,
@@ -605,7 +603,6 @@ async def test_redelivered_terminal_message_does_not_cancel_a_later_pause(db: No
         )
         redelivered = await member_admission.admit(
             conversation_id,
-            agent_id,
             "The approval arrived.",
             "approval-redelivery",
             speaker_member_id=None,
@@ -642,7 +639,6 @@ async def test_failed_member_enqueue_preserves_pause_for_the_same_turn_retry(db:
         )
         accepted = await member_admission.admit(
             conversation_id,
-            agent_id,
             "The approval arrived.",
             "approval-retry",
             speaker_member_id=None,
@@ -661,7 +657,6 @@ async def test_failed_member_enqueue_preserves_pause_for_the_same_turn_retry(db:
         [failed] = await _turns(conversation_id)
         retried = await member_admission.admit(
             conversation_id,
-            agent_id,
             "The approval arrived.",
             "approval-retry",
             speaker_member_id=None,
@@ -706,7 +701,6 @@ async def test_redundant_enqueue_survives_an_ambiguous_failure_until_claim(db: N
         first = asyncio.create_task(
             member_admission.admit(
                 conversation_id,
-                agent_id,
                 "The approval arrived.",
                 "approval-ambiguous",
                 speaker_member_id=None,
@@ -715,7 +709,6 @@ async def test_redundant_enqueue_survives_an_ambiguous_failure_until_claim(db: N
         await dbos.entered.wait()
         redundant = await member_admission.admit(
             conversation_id,
-            agent_id,
             "The approval arrived.",
             "approval-ambiguous",
             speaker_member_id=None,
@@ -846,7 +839,6 @@ async def test_member_admission_wins_against_an_already_claimed_pause(db: None) 
         member_turn = asyncio.create_task(
             member_admission.admit(
                 conversation_id,
-                agent_id,
                 "The approval arrived.",
                 "approval-race",
                 speaker_member_id=None,
@@ -965,7 +957,6 @@ async def test_member_message_takes_over_a_timer_waiting_to_enqueue(db: None) ->
         await dbos.entered.wait()
         turn_id = await member_admission.admit(
             conversation_id,
-            agent_id,
             "The approval arrived.",
             "approval-after-timer",
             speaker_member_id=None,
@@ -1018,7 +1009,6 @@ async def test_member_takes_over_the_timer_while_internal_work_queues(db: None) 
         )
         member_turn = await member_admission.admit(
             conversation_id,
-            agent_id,
             "member reply",
             "member-after-internal",
             speaker_member_id=None,
@@ -1077,7 +1067,6 @@ async def test_later_member_joins_the_first_queued_turn(db: None) -> None:
         first = asyncio.create_task(
             member_admission.admit(
                 conversation_id,
-                agent_id,
                 "first",
                 "member-first",
                 speaker_member_id=None,
@@ -1086,7 +1075,6 @@ async def test_later_member_joins_the_first_queued_turn(db: None) -> None:
         await dbos.entered.wait()
         second_turn = await member_admission.admit(
             conversation_id,
-            agent_id,
             "second",
             "member-second",
             speaker_member_id=None,
@@ -1136,7 +1124,6 @@ async def test_pause_recovers_the_member_turn_after_process_death(db: None) -> N
         member = asyncio.create_task(
             member_admission.admit(
                 conversation_id,
-                agent_id,
                 "approved",
                 "member-crash",
                 speaker_member_id=None,
@@ -1233,6 +1220,7 @@ async def test_concurrent_first_create_converges_by_workspace_name(db: None) -> 
             sa.insert(tables.conversation).values(
                 id=second_conversation,
                 workspace_id=workspace_id,
+                agent_id=agent_id,
                 surface="cli",
                 queue_key="second-session",
                 member_id=member_id,
@@ -1610,6 +1598,7 @@ async def test_update_from_another_conversation_keeps_reporting_home(db: None) -
             sa.insert(tables.conversation).values(
                 id=second_conversation,
                 workspace_id=workspace_id,
+                agent_id=agent_id,
                 surface="cli",
                 queue_key="second-session",
                 member_id=member_id,

@@ -242,6 +242,7 @@ async def _parked_turn(
             sa.insert(tables.conversation).values(
                 id=conversation_id,
                 workspace_id=workspace_id,
+                agent_id=agent_id,
                 surface="cli",
                 queue_key="session",
                 member_id=(
@@ -453,28 +454,33 @@ async def test_admits_gates_on_included_even_without_a_hard_limit(db: None) -> N
         assert await Seats(workspace_id).gated(connection)
 
 
-async def test_owner_conversation_is_the_owners_latest_with_the_earliest_agent(db: None) -> None:
+async def test_owner_conversation_answers_with_the_conversations_bound_agent(db: None) -> None:
     workspace_id = await _workspace(limit=25)
     owner = await _member(workspace_id, OWNER_EMAIL, offset_seconds=0)
     async with workspace_tx() as connection:
         assert await owner_conversation(connection, workspace_id) is None
-    agent_id, conversation_id = uuid4(), uuid4()
+    earliest_agent, bound_agent, conversation_id = uuid4(), uuid4(), uuid4()
     async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.agent).values(
-                id=agent_id,
-                workspace_id=workspace_id,
-                name="assistant",
-                prompt="p",
-                model="claude-opus-4-8",
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
+        for agent_id, name, created_at in (
+            (earliest_agent, "assistant", datetime(2026, 7, 1, tzinfo=UTC)),
+            (bound_agent, "exec", datetime(2026, 7, 2, tzinfo=UTC)),
+        ):
+            await connection.execute(
+                sa.insert(tables.agent).values(
+                    id=agent_id,
+                    workspace_id=workspace_id,
+                    name=name,
+                    prompt="p",
+                    model="claude-opus-4-8",
+                    created_at=created_at,
+                    updated_at=created_at,
+                )
             )
-        )
         await connection.execute(
             sa.insert(tables.conversation).values(
                 id=conversation_id,
                 workspace_id=workspace_id,
+                agent_id=bound_agent,
                 surface="slack",
                 queue_key="dm",
                 member_id=owner,
@@ -484,4 +490,4 @@ async def test_owner_conversation_is_the_owners_latest_with_the_earliest_agent(d
         )
     async with workspace_tx() as connection:
         venue = await owner_conversation(connection, workspace_id)
-    assert venue == (conversation_id, agent_id)
+    assert venue == (conversation_id, bound_agent)

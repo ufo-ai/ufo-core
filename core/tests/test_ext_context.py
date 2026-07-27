@@ -23,11 +23,22 @@ from ufo.workspace import WorkspaceUnbound, init_workspace_credentials, ws
 
 
 async def _workspace() -> UUID:
-    workspace_id = uuid4()
+    workspace_id, agent_id = uuid4(), uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.workspace).values(
                 id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=agent_id,
+                workspace_id=workspace_id,
+                name="assistant",
+                prompt="be brief",
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
             )
         )
     return workspace_id

@@ -1,6 +1,9 @@
 """Public re-export: the credential value objects and seals an extension may touch."""
 
 from ufo.credentials import (
+    CredentialMintFailed as CredentialMintFailed,
+)
+from ufo.credentials import (
     CredentialRequestInvalid as CredentialRequestInvalid,
 )
 from ufo.credentials import (

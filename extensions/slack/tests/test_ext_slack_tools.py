@@ -33,7 +33,12 @@ from ufo_ext_slack.surface import (
 from ufo_ext_slack.tools import SLACK_SECRET_SLOTS
 
 from ufo.blob import FilesystemBlobStore
-from ufo.credentials import CredentialRequests, CredentialStore, open_credential_request
+from ufo.credentials import (
+    CREDENTIAL_REQUEST_PURPOSE,
+    CredentialRequests,
+    CredentialStore,
+    open_credential_request,
+)
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext
 from ufo.ext.loader import skill_registry, turn_tools
@@ -98,11 +103,22 @@ async def _unavailable_spawn(
 async def _seed() -> tuple[UUID, UUID, UUID]:
     """A workspace whose owner (the earliest member) is OWNER_EMAIL plus one later joiner, so the
     connect tool's owner gate has both sides to check."""
-    workspace_id, owner_id, joiner_id = uuid4(), uuid4(), uuid4()
+    workspace_id, owner_id, joiner_id, agent_id = uuid4(), uuid4(), uuid4(), uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.workspace).values(
                 id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=agent_id,
+                workspace_id=workspace_id,
+                name="assistant",
+                prompt="be brief",
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
             )
         )
         for member_id, email, created in (
@@ -245,7 +261,9 @@ async def test_owner_mints_an_add_to_slack_link_carrying_sealed_state(
     assert query["client_id"] == [CLIENT_ID]
     assert set(query["scope"][0].split(",")) == set(slack.SLACK_BOT_SCOPES)
     assert query["redirect_uri"] == [f"{PUBLIC_BASE_URL}/surface/slack/oauth"]
-    claims = open_credential_request(store.fernet, query["state"][0])
+    claims = open_credential_request(
+        store.fernet, query["state"][0], purpose=CREDENTIAL_REQUEST_PURPOSE
+    )
     assert claims.workspace_id == workspace_id
     assert claims.member_id == owner_id
     assert claims.slots == (SLACK_BOT_TOKEN_SLOT,)

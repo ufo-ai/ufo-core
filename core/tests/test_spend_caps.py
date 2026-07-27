@@ -92,6 +92,7 @@ async def _seed(connection: AsyncConnection) -> tuple[UUID, UUID, UUID, UUID]:
         sa.insert(tables.conversation).values(
             id=conversation_id,
             workspace_id=workspace_id,
+            agent_id=agent_id,
             surface="cli",
             queue_key=uuid4().hex,
             member_id=member_id,
@@ -401,6 +402,7 @@ async def test_workspace_scope_sums_across_members(db: None) -> None:
             sa.insert(tables.conversation).values(
                 id=other_conversation,
                 workspace_id=workspace_id,
+                agent_id=agent_id,
                 surface="cli",
                 queue_key=uuid4().hex,
                 member_id=other_member,

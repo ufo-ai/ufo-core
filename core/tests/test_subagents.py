@@ -301,6 +301,7 @@ async def _running_child(workspace_id: UUID, agent_id: UUID, parent_id: UUID) ->
             sa.insert(tables.conversation).values(
                 id=conversation_id,
                 workspace_id=workspace_id,
+                agent_id=agent_id,
                 surface="subagent",
                 queue_key=str(child_id),
                 member_id=None,
@@ -452,6 +453,7 @@ async def _finished_child(workspace_id: UUID, agent_id: UUID, parent_id: UUID, t
             sa.insert(tables.conversation).values(
                 id=conversation_id,
                 workspace_id=workspace_id,
+                agent_id=agent_id,
                 surface="subagent",
                 queue_key=str(turn_id),
                 member_id=None,
@@ -487,6 +489,7 @@ async def _parent(workspace_id: UUID, agent_id: UUID) -> Turn:
             sa.insert(tables.conversation).values(
                 id=conversation_id,
                 workspace_id=workspace_id,
+                agent_id=agent_id,
                 surface="web",
                 queue_key=str(uuid4()),
                 member_id=None,

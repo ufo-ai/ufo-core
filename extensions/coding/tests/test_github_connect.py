@@ -7,6 +7,7 @@ workspace returning with somebody else's installation id. GitHub stands in as a 
 assertions are on what we send and what we do with the answer, never on the fake."""
 
 import json
+import time
 from uuid import UUID, uuid4
 
 import httpx
@@ -16,9 +17,15 @@ from cryptography.fernet import Fernet
 from starlette.datastructures import QueryParams
 
 from ufo.credentials import (
+    CREDENTIAL_REQUEST_PURPOSE,
+    CREDENTIAL_REQUEST_TTL_SECONDS,
+    INSTALLATION_BINDING_PURPOSE,
+    CredentialRequestInvalid,
     CredentialRequests,
     CredentialRequestState,
     install_credential_requests,
+    open_credential_request,
+    open_installation,
     seal_credential_request,
 )
 
@@ -111,6 +118,70 @@ def test_identify_resolves_a_workspace_only_from_this_deploys_seal_for_this_slot
         )
         is None
     )
+
+
+def test_an_installation_binding_does_not_replay_as_an_authorization_seal() -> None:
+    """The purpose check in isolation. This seal differs from a valid one in nothing but purpose —
+    same deploy key, same workspace, same slot, same payload — so it is refused only because it was
+    sealed to bind an installation rather than to authorize one. A binding is a value already at
+    rest in the slot, so without this the return leg could be driven from what is stored."""
+    fernet = Fernet(Fernet.generate_key())
+    install_credential_requests(
+        CredentialRequests(fernet=fernet, declared=frozenset({connect.GIT_INSTALLATION_SLOT}))
+    )
+    workspace_id = uuid4()
+    replayed = seal_credential_request(
+        fernet,
+        CredentialRequestState(
+            workspace_id=workspace_id,
+            member_id=uuid4(),
+            slots=(connect.GIT_INSTALLATION_SLOT,),
+            payload=connect.INSTALL_PAYLOAD,
+            purpose=INSTALLATION_BINDING_PURPOSE,
+        ),
+    )
+
+    assert connect.install_workspace(_Request(state=replayed)) is None
+
+
+def test_a_binding_outlives_the_request_ttl_it_was_never_bound_by() -> None:
+    """A binding is opened with no TTL because an installation outlives the prompt that bound it.
+    Sealed at a backdated timestamp well past the request window, it must still open — a regression
+    that applied the request TTL here would break git for every already-connected workspace fifteen
+    minutes after it connected, and only a backdated seal catches that."""
+    fernet = Fernet(Fernet.generate_key())
+    workspace_id = uuid4()
+    slot = connect.GIT_INSTALLATION_SLOT
+    aged = fernet.encrypt_at_time(
+        CredentialRequestState(
+            workspace_id=workspace_id,
+            member_id=uuid4(),
+            slots=(slot,),
+            payload="149082716",
+            purpose=INSTALLATION_BINDING_PURPOSE,
+        )
+        .model_dump_json()
+        .encode(),
+        int(time.time()) - CREDENTIAL_REQUEST_TTL_SECONDS * 4,
+    ).decode()
+
+    assert open_installation(fernet, workspace_id, slot, aged) == "149082716"
+
+
+def test_a_schema_invalid_payload_is_refused_rather_than_escaping_as_a_validation_error() -> None:
+    """Every open is total: ciphertext this deploy can decrypt but whose plaintext is not a state
+    raises the credential fault, not a raw pydantic error. It is the branch a corrupted or
+    foreign-shaped stored value reaches, and it must look like every other refusal to its caller."""
+    fernet = Fernet(Fernet.generate_key())
+    install_credential_requests(
+        CredentialRequests(fernet=fernet, declared=frozenset({connect.GIT_INSTALLATION_SLOT}))
+    )
+    wrong_shape = fernet.encrypt(json.dumps({"not": "a state"}).encode()).decode()
+
+    with pytest.raises(CredentialRequestInvalid):
+        open_credential_request(fernet, wrong_shape, purpose=CREDENTIAL_REQUEST_PURPOSE)
+
+    assert connect.install_workspace(_Request(state=wrong_shape)) is None
 
 
 def test_a_seal_from_another_deploy_key_resolves_no_workspace() -> None:

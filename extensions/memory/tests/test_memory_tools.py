@@ -527,11 +527,24 @@ async def test_load_sessions_returns_named_transcripts_and_reports_the_rest(
                     updated_at=sa.func.now(),
                 )
             )
+        agent_id = uuid4()
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=agent_id,
+                workspace_id=workspace_id,
+                name="assistant",
+                prompt="p",
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
         for cid, owner in ((conversation_id, member), (other_conversation_id, other)):
             await connection.execute(
                 sa.insert(tables.conversation).values(
                     id=cid,
                     workspace_id=workspace_id,
+                    agent_id=agent_id,
                     surface="slack",
                     queue_key=cid.hex,
                     member_id=owner,

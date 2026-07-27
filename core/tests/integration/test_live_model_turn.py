@@ -142,6 +142,7 @@ async def _bootstrap() -> Seed:
             sa.insert(tables.conversation).values(
                 id=conversation_id,
                 workspace_id=workspace_id,
+                agent_id=agent_id,
                 surface="cli",
                 queue_key=uuid4().hex,
                 member_id=member_id,
@@ -155,7 +156,7 @@ async def _bootstrap() -> Seed:
 async def _admit(seed: Seed, body: str) -> UUID:
     admission = Admission(dbos=loop_queue._runtime.dbos, durable_surfaces=frozenset())
     return await MemberAdmission(admission=admission, workspace_id=seed.workspace_id).admit(
-        seed.conversation_id, seed.agent_id, body, speaker_member_id=seed.member_id
+        seed.conversation_id, body, speaker_member_id=seed.member_id
     )
 
 

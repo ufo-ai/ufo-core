@@ -767,10 +767,8 @@ async def _surface_ingest(ctx: SurfaceContext, request: Request) -> Response:
         await ctx.write_workspace_file(
             conversation_id, SURFACE_INBOX_REL, _one_chunk(args.inbound_text.encode())
         )
-    agent_id = await ctx.default_agent()
     turn_id = await ctx.admit(
         conversation_id,
-        agent_id,
         args.message,
         idempotency_key=args.external_id,
         speaker_member_id=member_id,
@@ -802,8 +800,7 @@ async def _surface_live_admit(ctx: SurfaceContext, request: Request) -> Response
     if member_id is None:
         member_id = await ctx.adopt_identity(SURFACE_PEER, args.external_id)
     conversation_id = await ctx.conversation_for(args.external_id, member_id)
-    agent_id = await ctx.default_agent()
-    turn_id = await ctx.admit(conversation_id, agent_id, args.message, speaker_member_id=member_id)
+    turn_id = await ctx.admit(conversation_id, args.message, speaker_member_id=member_id)
     owner = await ctx.turn_owner(turn_id)
     report = await ctx.spend_rollup(SURFACE_SPEND_WINDOW_SECONDS)
     return JSONResponse(

@@ -553,7 +553,12 @@ class SpendEvaluator:
             case "member":
                 query = (
                     sa.select(summed)
-                    .select_from(tables.ledger.join(tables.turn).join(tables.conversation))
+                    .select_from(
+                        tables.ledger.join(tables.turn).join(
+                            tables.conversation,
+                            tables.turn.c.conversation_id == tables.conversation.c.id,
+                        )
+                    )
                     .where(tables.conversation.c.member_id == cap.subject_id, window)
                 )
             case "agent":
@@ -661,7 +666,12 @@ class SpendRollup:
                     sa.func.sum(tables.ledger.c.priced_micro_usd).label("priced"),
                 )
                 .select_from(
-                    tables.ledger.join(tables.turn).join(tables.conversation).join(tables.member)
+                    tables.ledger.join(tables.turn)
+                    .join(
+                        tables.conversation,
+                        tables.turn.c.conversation_id == tables.conversation.c.id,
+                    )
+                    .join(tables.member, tables.conversation.c.member_id == tables.member.c.id)
                 )
                 .where(window)
                 .group_by(tables.conversation.c.member_id, tables.member.c.email)

@@ -246,47 +246,52 @@ class ToolContext:
         """The broker's connected-account id a connector tool passes to the broker's server-side
         execute API (the broker holds the account's token and injects it itself, so no sentinel and
         no egress proxy). Resolved strictly from the turn's own workspace and agent, so a tool
-        executes only against the turn-agent's accounts, never another agent's. `account_id` targets
-        a specific account when the agent holds several; omitted, exactly one provider grant must
-        exist. Fails loud when no grant subsystem is configured or the selection is absent or
-        ambiguous."""
-        accounts = await self.connector_accounts(provider)
+        executes only against the turn-agent's accounts, never another agent's. `account_id`
+        targets any account this turn may use; omitted, the acting member's own private grants are
+        preferred and agent-shared ones are the fallback — exactly one account must exist in the
+        winning tier. Fails loud when no grant subsystem is configured or the selection is absent
+        or ambiguous."""
+        private, shared = await self._connector_account_tiers(provider)
         if account_id is not None:
-            if account_id in accounts:
+            if account_id in private or account_id in shared:
                 return account_id
             raise ValueError(
                 f"no active {provider!r} account {account_id!r} is available to this turn"
             )
-        if not accounts:
+        preferred = private or shared
+        if not preferred:
             raise ValueError(
                 f"no {provider!r} account is available to this turn — connect one with "
                 "connect_account"
             )
-        if len(accounts) > 1:
+        if len(preferred) > 1:
             raise ValueError(
                 f"multiple active {provider!r} accounts; pass account_id as one of "
-                f"{list(accounts)!r}"
+                f"{list(preferred)!r}"
             )
-        return accounts[0]
+        return preferred[0]
 
     async def connector_accounts(self, provider: str) -> tuple[str, ...]:
         """The connected-account ids this turn may use for one provider: the acting member's own
-        grants plus any grant its grantor shared with the workspace — the runtime check that makes
+        grants plus any grant shared with the agent's audience — the runtime check that makes
         a connection private by default. The acting member is the speaker, or the member the turn
         acts on behalf of (`on_behalf_of_member_id`) for a speakerless scheduled fire or subagent,
         so a member's own scheduled job and delegated subagents keep their private connections; a
         turn with no member at all resolves only shared grants."""
+        private, shared = await self._connector_account_tiers(provider)
+        return tuple(sorted({*private, *shared}))
+
+    async def _connector_account_tiers(self, provider: str) -> tuple[list[str], list[str]]:
         if self.grants is None:
             raise ConnectUnavailable("grants unavailable: no credential key configured")
         acting = self.acting_member_id
         granted = await self.grants.active_grants(self.turn.workspace_id, self.turn.agent_id)
-        return tuple(
-            sorted(
-                {
-                    grant.account_id
-                    for grant in granted
-                    if grant.provider == provider
-                    and (grant.shared or grant.grantor_member_id == acting)
-                }
-            )
+        private = sorted(
+            grant.account_id
+            for grant in granted
+            if grant.provider == provider and not grant.shared and grant.grantor_member_id == acting
         )
+        shared = sorted(
+            grant.account_id for grant in granted if grant.provider == provider and grant.shared
+        )
+        return private, shared

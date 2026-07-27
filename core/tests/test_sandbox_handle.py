@@ -8,7 +8,7 @@ conversation row, with a stand-in carrier recording the spec core built for it."
 
 import logging
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -35,7 +35,7 @@ GIT_PROXY_AUTH_ENV = _git_config_env(GIT_PROXY_AUTH_CONFIG)
 
 
 async def _conversation(handle: str | None = None) -> tuple[UUID, UUID]:
-    workspace_id, conversation_id = uuid4(), uuid4()
+    workspace_id, conversation_id, agent_id = uuid4(), uuid4(), uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.workspace).values(
@@ -43,9 +43,21 @@ async def _conversation(handle: str | None = None) -> tuple[UUID, UUID]:
             )
         )
         await connection.execute(
+            sa.insert(tables.agent).values(
+                id=agent_id,
+                workspace_id=workspace_id,
+                name=agent_id.hex[:8],
+                prompt="be brief",
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
             sa.insert(tables.conversation).values(
                 id=conversation_id,
                 workspace_id=workspace_id,
+                agent_id=agent_id,
                 surface="cli",
                 queue_key=uuid4().hex,
                 member_id=None,
@@ -355,13 +367,86 @@ async def test_open_sandbox_exports_nothing_for_a_foreign_private_grant(
     assert carrier.specs[0].env == GIT_PROXY_AUTH_ENV
 
 
+async def test_open_sandbox_exports_the_private_sentinel_over_the_shared_one(
+    db: None, tmp_path: Path
+) -> None:
+    """A provider bound both privately and agent-shared is not ambiguous: the acting member's own
+    account wins the tier, so their sentinel is exported and the shared account stays the fallback
+    for members without one — mirroring `connector_account`'s preference."""
+    workspace_id, conversation_id = await _conversation()
+    agent_id, member_id = await _seed_grant(workspace_id, conversation_id, shared=False)
+    await GrantStore().record(
+        workspace_id=workspace_id,
+        agent_id=agent_id,
+        provider="hub",
+        account_id="acct-shared",
+        host="api.hub.test",
+        grantor_member_id=member_id,
+        conversation_id=conversation_id,
+        shared=True,
+    )
+    carrier = _ResumeRecordingCarrier(container_id="sbx-1")
+    blob = FilesystemBlobStore(root=tmp_path)
+    turn = _turn(workspace_id, conversation_id).model_copy(
+        update={"agent_id": agent_id, "speaker_member_id": member_id}
+    )
+
+    await _open_sandbox(
+        carrier, "e2b", blob, None, PROXY, turn, GrantStore(), {"hub": HUB_CLI}, None, ()
+    )
+
+    assert carrier.specs[0].env == {**GIT_PROXY_AUTH_ENV, "HUB_TOKEN": grant_sentinel("acct-1")}
+
+
+async def test_open_sandbox_exports_nothing_when_the_shared_tier_is_ambiguous(
+    db: None, tmp_path: Path
+) -> None:
+    """An acting member with no private grant falls back to the shared tier — and two shared
+    accounts for one provider are just as indistinguishable to a static env var, so the export is
+    skipped there too, not only when the member's own tier is ambiguous."""
+    workspace_id, conversation_id = await _conversation()
+    agent_id, member_id = await _seed_grant(workspace_id, conversation_id, shared=True)
+    await GrantStore().record(
+        workspace_id=workspace_id,
+        agent_id=agent_id,
+        provider="hub",
+        account_id="acct-shared-2",
+        host="api.hub.test",
+        grantor_member_id=member_id,
+        conversation_id=conversation_id,
+        shared=True,
+    )
+    other_member = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=other_member,
+                workspace_id=workspace_id,
+                email="other@x.test",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    carrier = _ResumeRecordingCarrier(container_id="sbx-1")
+    blob = FilesystemBlobStore(root=tmp_path)
+    turn = _turn(workspace_id, conversation_id).model_copy(
+        update={"agent_id": agent_id, "speaker_member_id": other_member}
+    )
+
+    await _open_sandbox(
+        carrier, "e2b", blob, None, PROXY, turn, GrantStore(), {"hub": HUB_CLI}, None, ()
+    )
+
+    assert carrier.specs[0].env == GIT_PROXY_AUTH_ENV
+
+
 async def test_open_sandbox_exports_nothing_when_the_account_is_ambiguous(
     db: None, tmp_path: Path
 ) -> None:
-    """A static env var names no account, so two usable accounts for one provider cannot be
+    """A static env var names no account, so two usable accounts in one tier cannot be
     disambiguated per request. Rather than silently pick one — diverging from `connector_account`,
-    which fails loud on ambiguity — the export is skipped, so the CLI fails visibly to authenticate
-    instead of acting as whichever account sorts first."""
+    which fails loud on the same ambiguity — the export is skipped, so the CLI fails visibly to
+    authenticate instead of acting as whichever account sorts first."""
     workspace_id, conversation_id = await _conversation()
     agent_id, member_id = await _seed_grant(workspace_id, conversation_id, shared=False)
     await GrantStore().record(
@@ -676,3 +761,75 @@ async def test_open_sandbox_configures_no_git_host_the_declaration_does_not_offe
     ]
     assert [entry["slot"] for entry in warned] == ["github_git_token"]
     assert not any("evil" in str(entry) for entry in warned)
+
+
+class _BoundSource:
+    """A minting source that records which question it was asked: presence or value."""
+
+    def __init__(self) -> None:
+        self.mints = 0
+
+    async def secret(self, workspace_id: UUID, store: CredentialStore) -> str | None:
+        self.mints += 1
+        return "minted-installation-token"
+
+    async def bound(self, workspace_id: UUID, store: CredentialStore) -> bool:
+        return True
+
+
+async def test_open_sandbox_exports_a_keyed_sentinel_from_a_source_without_minting(
+    db: None, tmp_path: Path
+) -> None:
+    """The keyed-provider export asks the same presence question as the git config, and for the same
+    reason: both run on every sandbox open. A provider whose key is minted rather than stored must
+    reach the sandbox as its sentinel without the export touching the provider to find out."""
+    workspace_id, conversation_id = await _conversation()
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    await store.put(workspace_id, "datadog_api_host", "api.datadoghq.com")
+    source = _BoundSource()
+    slots = (replace(DATADOG_SLOTS[0], source=source), DATADOG_SLOTS[2])
+    carrier = _ResumeRecordingCarrier(container_id="sbx-1")
+
+    await _open_sandbox(
+        carrier,
+        "e2b",
+        FilesystemBlobStore(root=tmp_path),
+        None,
+        PROXY,
+        _turn(workspace_id, conversation_id),
+        None,
+        {},
+        store,
+        slots,
+    )
+
+    assert carrier.specs[0].env["DD_API_KEY"] == "SENTINEL_DD_API"
+    assert source.mints == 0
+
+
+async def test_open_sandbox_configures_git_from_a_source_without_minting(
+    db: None, tmp_path: Path
+) -> None:
+    """Every turn in every workspace opens a sandbox, so the question asked here is whether the slot
+    is filled — never what it holds. A source mints against a provider, so asking it for the value
+    would put a network call on sandbox startup for turns that never touch git."""
+    workspace_id, conversation_id = await _conversation()
+    source = _BoundSource()
+    slots = (replace(GIT_SLOTS[0], source=source),)
+    carrier = _ResumeRecordingCarrier(container_id="sbx-1")
+
+    await _open_sandbox(
+        carrier,
+        "e2b",
+        FilesystemBlobStore(root=tmp_path),
+        None,
+        PROXY,
+        _turn(workspace_id, conversation_id),
+        None,
+        {},
+        CredentialStore(fernet=Fernet(Fernet.generate_key())),
+        slots,
+    )
+
+    assert carrier.specs[0].env["GIT_CONFIG_VALUE_1"] == "Authorization: SENTINEL_GIT"
+    assert source.mints == 0
