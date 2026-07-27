@@ -158,7 +158,7 @@ def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None
         "index_default_0002",
         "memory_0009",
         "sample_ext_note_0001",
-        "skill_create_0001",
+        "skill_create_0002",
         "eval_env_0001",
     } <= set(heads)
     assert len(heads) == 6
@@ -454,6 +454,120 @@ def test_agent_binding_migration_backfills_the_earliest_agent(tmp_path: Path) ->
 
     assert installation_agent == earliest_agent.hex
     assert conversation_agent == earliest_agent.hex
+
+
+def test_user_skill_migration_backfills_within_each_workspace_and_enforces_agent(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "agent-skills.db"
+    url = f"sqlite+aiosqlite:///{database_path}"
+    config = Config()
+    config.set_main_option("script_location", str(MIGRATIONS_DIR))
+    config.set_main_option(
+        "version_locations",
+        os.pathsep.join((str(MIGRATIONS_DIR / "versions"), *migration_locations())),
+    )
+    config.set_main_option("path_separator", "os")
+    config.set_main_option("sqlalchemy.url", url)
+    command.upgrade(config, "0051")
+    command.upgrade(config, "skill_create_0001")
+
+    engine = sa.create_engine(f"sqlite:///{database_path}")
+    first_workspace, second_workspace = uuid4(), uuid4()
+    first_earliest, first_later, second_earliest, second_later = (uuid4() for _ in range(4))
+    moment = datetime(2026, 7, 1, tzinfo=UTC)
+    with engine.connect() as connection:
+        for workspace_id in (first_workspace, second_workspace):
+            connection.execute(
+                sa.text(
+                    "insert into workspace (id, created_at, updated_at) "
+                    "values (:id, :moment, :moment)"
+                ),
+                {"id": workspace_id.hex, "moment": moment},
+            )
+        for agent_id, workspace_id, name, created in (
+            (first_later, first_workspace, "first-later", datetime(2026, 7, 5, tzinfo=UTC)),
+            (
+                first_earliest,
+                first_workspace,
+                "first-earliest",
+                datetime(2026, 7, 2, tzinfo=UTC),
+            ),
+            (
+                second_later,
+                second_workspace,
+                "second-later",
+                datetime(2026, 7, 3, tzinfo=UTC),
+            ),
+            (
+                second_earliest,
+                second_workspace,
+                "second-earliest",
+                datetime(2026, 7, 1, tzinfo=UTC),
+            ),
+        ):
+            connection.execute(
+                sa.text(
+                    "insert into agent "
+                    "(id, workspace_id, name, prompt, model, internet_access_allowed, "
+                    "created_at, updated_at) "
+                    "values (:id, :workspace_id, :name, 'p', 'eval', true, :created, :created)"
+                ),
+                {
+                    "id": agent_id.hex,
+                    "workspace_id": workspace_id.hex,
+                    "name": name,
+                    "created": created,
+                },
+            )
+        for workspace_id in (first_workspace, second_workspace):
+            connection.execute(
+                sa.text(
+                    "insert into user_skill "
+                    "(workspace_id, name, digest, content, created_at, updated_at) "
+                    "values (:workspace_id, 'greet', 'sha256:old', "
+                    "'{\"files\": {}}', :moment, :moment)"
+                ),
+                {"workspace_id": workspace_id.hex, "moment": moment},
+            )
+        connection.commit()
+
+    command.upgrade(config, "skill_create_0002")
+    with engine.connect() as connection:
+        connection.exec_driver_sql("pragma foreign_keys = on")
+        assert connection.exec_driver_sql("pragma foreign_keys").scalar_one() == 1
+        rows = connection.execute(
+            sa.text("select workspace_id, agent_id from user_skill order by workspace_id")
+        ).all()
+        foreign_keys = sa.inspect(connection).get_foreign_keys("user_skill")
+        with pytest.raises(sa.exc.IntegrityError):
+            connection.execute(
+                sa.text(
+                    "insert into user_skill "
+                    "(workspace_id, agent_id, name, digest, content, created_at, updated_at) "
+                    "values (:workspace_id, :agent_id, 'orphan', 'sha256:orphan', "
+                    "'{\"files\": {}}', :moment, :moment)"
+                ),
+                {
+                    "workspace_id": first_workspace.hex,
+                    "agent_id": uuid4().hex,
+                    "moment": moment,
+                },
+            )
+            connection.commit()
+    engine.dispose()
+
+    assert {(row.workspace_id, row.agent_id) for row in rows} == {
+        (first_workspace.hex, first_earliest.hex),
+        (second_workspace.hex, second_earliest.hex),
+    }
+    assert any(
+        foreign_key["name"] == "user_skill_agent_id_fkey"
+        and foreign_key["referred_table"] == "agent"
+        and foreign_key["constrained_columns"] == ["agent_id"]
+        and foreign_key["referred_columns"] == ["id"]
+        for foreign_key in foreign_keys
+    )
 
 
 def test_migrate_command_brings_the_schema_to_head(

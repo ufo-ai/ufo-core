@@ -1,8 +1,8 @@
-"""Public re-export: the capability-scoped context (and its value types) a handler receives.
+"""Public re-export: scoped context and identity available to extension handlers."""
 
-Extensions type their job/handler signatures against these; the concrete shapes live in
-`ufo.ext.context`, reached only through this surface."""
-
+from ufo.agent_scope import (
+    agent_current as agent_current,
+)
 from ufo.credentials import (
     CredentialSlotUnset as CredentialSlotUnset,
 )

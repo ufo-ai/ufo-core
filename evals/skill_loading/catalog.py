@@ -589,7 +589,7 @@ CASES: tuple[SkillLoadCase, ...] = (
     SkillLoadCase(
         "createskill-capture-workflow",
         "Capture the weekly-report process described in notes/weekly-report-process.md as a "
-        "reusable skill so future turns produce the report the same way.",
+        "reusable custom skill for this agent so its future turns produce the report the same way.",
         expected="create-skill",
         forbidden=("research-report",),
         workspace_files=(REPORT_PROCESS,),
@@ -597,7 +597,7 @@ CASES: tuple[SkillLoadCase, ...] = (
     SkillLoadCase(
         "createskill-fix-draft-frontmatter",
         "My draft skill at drafts/meeting-notes/SKILL.md keeps failing to save — fix whatever "
-        "is wrong with its frontmatter and save it for this workspace.",
+        "is wrong with its frontmatter and save it for this agent.",
         expected="create-skill",
         forbidden=("coding",),
         workspace_files=(DRAFT_SKILL,),
@@ -885,7 +885,7 @@ CASES: tuple[SkillLoadCase, ...] = (
         "Turn the research findings in research/findings.md into a concise Markdown report with "
         "an executive summary, findings, and cited sources.",
         expected="research-report",
-        forbidden=("research-assistant",),
+        forbidden=("research-assistant", "create-skill"),
         workspace_files=(RESEARCH_FINDINGS,),
     ),
     SkillLoadCase(

@@ -1,11 +1,10 @@
-"""Object-verb cases: the agent drives workspace objects (RFC 0017) through the five generic
-tools, graded deterministically from the durable `scheduled_task` rows and the structured tool
-trajectory — no rubric judge.
+"""Object-verb cases: the agent drives durable objects through the five generic tools.
 
 `CASES` are single-turn capability probes on a shared workspace, each grader scoped to its own
-subject so no case depends on another's leftovers. `SCENARIOS` are seeded multi-turn
-conversations: each trial resets every scheduled-task row it owns, lays down fixtures through the
-real `ScheduleStore`, and grades the finished conversation against the rows that survived."""
+subject so no case depends on another's leftovers. Scheduled-task cases grade database rows and
+structured tool trajectories. The user-skill case grades skill loading, persistence, and
+agent-scoped confirmation. `SCENARIOS` are seeded multi-turn conversations whose trials reset and
+seed their scheduled tasks through the real `ScheduleStore`."""
 
 from __future__ import annotations
 
@@ -27,7 +26,7 @@ from evals.harness.capability import (
     Grader,
 )
 from evals.harness.scenario import ScenarioCase, ScenarioOutcome, ScenarioUser
-from evals.harness.scorers import combine, required_tools_scorer
+from evals.harness.scorers import combine, required_tools_scorer, skill_scorer
 from ufo.db import workspace_tx
 from ufo.scheduling import ScheduledTask, ScheduleStore
 from ufo.schema import tables
@@ -374,6 +373,21 @@ CASES = (
             _no_jargon(),
         ),
         digest_tag="object-tools:operational-task-stays-open",
+    ),
+    CapabilityCase(
+        "O10-create-agent-skill",
+        "Create and save a reusable custom skill named concise-brief for this agent. It should "
+        "load when I ask for a concise project brief and produce Summary, Risks, and Next steps. "
+        "Do it now, then tell me whether another agent in this workspace will receive it.",
+        combine(
+            skill_scorer("create-skill", "coding"),
+            required_tools_scorer(("object_apply",), orderings=(("load_skill", "object_apply"),)),
+        ),
+        rubric=(
+            "The reply confirms the skill was saved for the current agent and clearly says another "
+            "agent in the same workspace will not receive or load it.",
+        ),
+        digest_tag="object-tools:create-agent-skill",
     ),
 )
 

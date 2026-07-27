@@ -74,6 +74,7 @@ terminal frame. A client's wait always ends — the terminal state commits on th
   the model registry at serve so the models a member can pin stay documented from the same records
   the runtime routes and bills on (RFC 0018); an extension's skills ride its manifest (the `memory`
   skill ships with the memory extension); a pack may add pack-level skills of its own (see Packs).
+  Member-authored skills persist for the bound agent and join only that agent's registry.
   Every-turn content belongs in the system prompt, situational/long content in skills; skills carry
   workflows, never restated tool docs (the tool's description is authoritative). `load_skill` mounts
   each skill's files and injects its `SKILL.md` without the frontmatter, under a header that says

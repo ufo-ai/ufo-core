@@ -519,10 +519,9 @@ class SkillSpec:
 
 
 RuntimeSkillProvider = Callable[[ExtensionContext], Awaitable[tuple[RuntimeSkill, ...]]]
-"""A per-turn source of a workspace's runtime skills. Core calls it with the extension's
-workspace-scoped ExtensionContext each turn and merges the result into that turn's SkillRegistry,
-so an extension can feed member-authored skills into the loadable set beside core's and the packs'
-own — never a boot-time registration, since the skills are per-workspace state."""
+"""A per-turn source of the bound agent's runtime skills. Core calls it under the turn's workspace
+and agent scope with the extension's ExtensionContext, then merges the result into that turn's
+SkillRegistry. It is not a boot-time registration because member-authored skills are agent state."""
 
 
 @dataclass(frozen=True)

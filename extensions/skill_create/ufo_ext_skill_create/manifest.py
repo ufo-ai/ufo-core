@@ -1,13 +1,4 @@
-"""The skill-authoring extension: the `skill` object kind, the create-skill teaching skill, and
-the `runtime_skills` provider.
-
-A member-authored skill is a workspace object (RFC 0017): the agent authors files in the
-conversation workspace, then applies one manifest whose spec maps each skill-relative path to
-inline text or a `FileFrom` reference resolved out of the workspace at apply. The persisted spec
-is always fully inline text — text-only, bounded, validated by the same parser core and pack
-skills go through, never able to shadow one. The `runtime_skills` provider is the per-turn seam
-core calls to merge this workspace's saved skills back into the turn's `SkillRegistry`, so a
-saved skill is resolvable by `load_skill` and indexed in the prompt on later turns."""
+"""Agent-owned member-authored skills as objects and loadable runtime skills."""
 
 import base64
 import hashlib
@@ -114,16 +105,13 @@ def _text(path: str, content: bytes) -> str:
 
 @dataclass(frozen=True)
 class SkillObjects:
-    """The kind's handlers over `UserSkillStore`: apply resolves `FileFrom` references out of the
-    conversation workspace (text-only, bounded), then persists through the same validation
-    `UserSkillStore.save` has always run — shadow refusal, per-workspace cap, SKILL.md parse.
-    Any member may mutate; a skill can never shadow a built-in."""
+    """Skill object handlers scoped by the ambient turn agent."""
 
     async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage:
         ext = _require_ext(ctx)
         rows = tuple(
             ObjectRow(name=skill.name, summary=skill.description[:SUMMARY_MAX])
-            for skill in await UserSkillStore(ext).load_all(ext.store.workspace_id)
+            for skill in await UserSkillStore(ext).load_all()
         )
         return object_page(rows, query)
 
@@ -132,7 +120,7 @@ class SkillObjects:
         if files is None:
             return None
         ext = _require_ext(ctx)
-        timestamps = await UserSkillStore(ext).timestamps(ext.store.workspace_id, name)
+        timestamps = await UserSkillStore(ext).timestamps(name)
         if timestamps is None:
             return None
         created_at, updated_at = timestamps
@@ -167,17 +155,15 @@ class SkillObjects:
         total = sum(len(content) for content in resolved.values())
         if total > MAX_SKILL_TOTAL_BYTES:
             raise ValueError(f"skill exceeds {MAX_SKILL_TOTAL_BYTES} bytes")
-        await UserSkillStore(ext).save(
-            ext.store.workspace_id, name, resolved, frozenset(ctx.skills.by_name)
-        )
+        await UserSkillStore(ext).save(name, resolved, frozenset(ctx.skills.by_name))
 
     async def delete(self, ctx: ToolContext, name: str) -> None:
         ext = _require_ext(ctx)
-        await UserSkillStore(ext).delete(ext.store.workspace_id, name)
+        await UserSkillStore(ext).delete(name)
 
     async def _files(self, ctx: ToolContext, name: str) -> dict[str, bytes] | None:
         ext = _require_ext(ctx)
-        return await UserSkillStore(ext).files(ext.store.workspace_id, name)
+        return await UserSkillStore(ext).files(name)
 
     async def _resolve(self, ctx: ToolContext, name: str, spec: UserSkillSpec) -> dict[str, bytes]:
         stored = await self._files(ctx, name) or {}
@@ -242,12 +228,12 @@ SKILL_OBJECT = ObjectKind(
         "be loaded on later turns. `files` must contain a SKILL.md with YAML frontmatter — a "
         "name matching the object name and a description; a workspace file rides as "
         "{from: <path>} and is inlined on save, and any bundled files are saved with it. The "
-        "skill is validated before saving and a bad SKILL.md is reported as an error. Get "
+        "skill is validated before saving and a bad SKILL.md is reported as an error. Skills "
+        "belong to this agent; another agent may use the same name for its own skill. Get "
         "returns each file as {sha256, size}, never inline content — read a saved skill's "
         "content with load_skill, which mounts the files; on re-apply, keep an unchanged file "
         "by passing its {sha256: <digest>} back. Load the create-skill skill first for the "
-        "authoring workflow. A saved skill is scoped to this workspace and cannot replace a "
-        "built-in skill."
+        "authoring workflow. A saved skill cannot replace a built-in skill."
     ),
     spec_model=UserSkillSpec,
     store=SkillObjects(),
@@ -255,9 +241,8 @@ SKILL_OBJECT = ObjectKind(
 
 
 async def _runtime_skills(ctx: ExtensionContext) -> tuple[RuntimeSkill, ...]:
-    """This workspace's saved user-skills, parsed for the turn's registry merge — the per-turn seam
-    core folds into the loadable set beside core's and the active packs' own."""
-    return await UserSkillStore(ctx).load_all(ctx.store.workspace_id)
+    """The bound agent's saved skills for its turn registry."""
+    return await UserSkillStore(ctx).load_all()
 
 
 def manifest() -> Manifest:

@@ -1,142 +1,56 @@
 ---
 name: create-skill
-description: "Create or modify a custom skill for this workspace. Load when the user wants to create a new skill, edit an existing skill's instructions or frontmatter, or capture a repeatable workflow as a reusable skill."
+description: "Load when a member asks to create, edit, repair, or save a reusable custom skill for the current agent."
 ---
 # Create Skill
 
-This skill walks you through authoring an Agent Skill in the workspace and saving it so it persists
-across turns. A saved skill is scoped to this workspace: later turns can load it with `load_skill`
-and see it in `<available_skills>`, but it never reaches another workspace and can never replace a
-built-in skill.
+A saved skill belongs to the current agent. Later turns of this agent see it in
+`<available_skills>` and can load it; another agent in the same workspace does not. Each agent may
+own a different skill under the same name. A saved skill never replaces a built-in skill.
 
-## When to Use This Skill
+## Author
 
-Use this skill when the user asks you to:
+1. Identify the behavior worth making repeatable and the member phrases that should load it. Check
+   `<available_skills>` for overlap. Ask only when a missing choice would change the workflow.
+2. Choose a lowercase slug. Write `/workspace/<name>/SKILL.md`; its first characters must be `---`.
+3. Use exactly this frontmatter shape:
 
-- Create a new skill or capture a repeatable workflow as one
-- Edit an existing custom skill's instructions or frontmatter
-- Package a set of instructions and helper files into something reusable
+   ```markdown
+   ---
+   name: concise-brief
+   description: "Load when a member asks for a concise project brief with risks and next steps."
+   ---
+   ```
 
-## Agent Skill Format
-
-A skill is a directory containing a `SKILL.md` file. It may bundle additional files alongside it:
-
-```
-my-skill/
-├── SKILL.md            (required)
-├── scripts/            (optional) scripts the skill runs in the sandbox
-├── references/         (optional) documentation read into context as needed
-└── assets/             (optional) templates or other files the skill uses
-```
-
-For a simple skill, only `SKILL.md` is needed. Add bundled files when the workflow involves
-repeated scripting, large reference material, or reusable templates — things you would otherwise
-recreate every time. Keep `SKILL.md` focused (aim under ~500 lines); move depth into `references/`
-files and point to them from `SKILL.md`.
-
-### SKILL.md Structure
-
-`SKILL.md` is a YAML frontmatter block (delimited by `---`) followed by a markdown body.
-
-```markdown
----
-name: my-skill
-description: "A clear description of what this skill does and when to use it."
----
-
-# Skill Title
-
-## When to Use This Skill
-
-Describe the scenarios where this skill applies.
-
-## Instructions
-
-Step-by-step guidance for the agent to follow.
-
-## Examples
-
-Example inputs and expected outputs.
-```
-
-### Frontmatter Requirements
-
-**Required fields:**
-
-- `name`: must match the skill's directory name exactly. Use lowercase letters, numbers, and
-  hyphens (for example `pdf-processing`, `code-review`). It must not be the name of a built-in
-  skill — saving under a built-in name is refused.
-- `description`: what the skill does and when to use it. Be specific and include the trigger phrases
-  that should surface it, since this is what the agent reads to decide whether to load the skill.
-  Descriptions often contain `:` or other characters YAML treats specially — **always wrap the
-  description in double quotes** to be safe.
-
-**Optional fields:**
-
-- `metadata.depends`: a list of other skill names to load together with this one, when this skill
-  builds on them. Each one costs its whole workflow in context, so depend on a skill you always
-  need — and cite a file you need only sometimes by its mounted path instead.
-
-## Instructions for Creating a New Skill
-
-1. **Understand the requirement.** Ask the user what the skill should accomplish and when it should
-   apply. If a detail would change the workflow, ask before writing.
-
-2. **Check existing skills.** Read the complete `<available_skills>` index in the system prompt so
-   you do not reuse a name that already exists and can see whether a skill already covers the need.
-
-3. **Choose a name and write a clear description** following the requirements above.
-
-4. **Create the skill directory and file** in the workspace with the `write` tool:
-   - Directory: `/workspace/<skill-name>/`
-   - File: `/workspace/<skill-name>/SKILL.md`
-
-   **CRITICAL:** the very first characters of `SKILL.md` must be `---`. No title, description, or
-   blank line before the opening frontmatter delimiter.
-
-5. **Add any bundled files** (scripts, references, assets) under the skill directory. A bundled
-   script runs in the sandbox and must not depend on anything outside it.
-
-6. **Save the skill.** Once every file is in place, apply a `skill` object whose `files` map
-   references what you authored — the object `name` must equal the frontmatter `name`:
+   The name must equal the directory and object name. Make the description a routing trigger of at
+   most 50 words, beginning `Load when`; name member intent, not the workflow.
+4. Keep the body to procedure, judgment, and traps the agent would otherwise miss. Put repeated
+   deterministic logic in `scripts/`, heavy conditional material in `references/`, and reusable
+   output material in `assets/`; say exactly when to read each file.
+5. Apply the finished directory as one `skill` object:
 
    ```yaml
    kind: skill
-   name: my-skill
+   name: concise-brief
    spec:
      files:
-       SKILL.md: {from: my-skill/SKILL.md}
-       references/guide.md: {from: my-skill/references/guide.md}
+       SKILL.md: {from: concise-brief/SKILL.md}
+       references/criteria.md: {from: concise-brief/references/criteria.md}
    ```
 
-   Each `{from: <path>}` is read from the workspace at apply and stored inline, so the saved
-   skill outlives the sandbox. Short content may be inlined directly as the value instead. It
-   validates the skill and persists it for this workspace; if validation fails, read the error,
-   fix `SKILL.md`, and apply again.
+   `{from: <path>}` stores the file content, so the skill outlives the sandbox. Inline short text
+   directly. Fix validation errors and re-apply.
+6. Confirm that the skill was saved for this agent and that other agents do not receive it.
 
-7. **Confirm to the user** that the skill was saved. It is available to `load_skill` and appears in
-   `<available_skills>` on subsequent turns.
+## Revise
 
-## Modifying or Removing an Existing Skill
+Use `object_get` to recover the file digests and `load_skill` to mount the current content. Re-apply
+the same name with `{from: <path>}` for changed files and `{sha256: <digest>}` for unchanged files.
+Applying replaces this agent's copy only. Remove it with `object_delete` using `kind: skill`.
 
-To change a saved skill: `object_get` lists its files as `{sha256, size}` references — read the
-current content with `load_skill`, which mounts the files. Author the updates in the workspace and
-re-apply under the same name, passing `{from: <path>}` for changed files and each unchanged file's
-`{sha256: <digest>}` back as-is — applying replaces the stored skill in place. To remove one, use
-`object_delete` with `kind: skill`; it drops from the loadable set on the next turn.
+## Traps
 
-## Common Errors
-
-**"SKILL.md must open with a YAML frontmatter block"** — the file does not start with `---` on line
-one. The very first character must be the opening delimiter; no title or blank line before it.
-
-**"invalid YAML in frontmatter"** — the `description` (or another value) contains a character YAML
-treats specially, most often `:`. Wrap the value in double quotes. Quoting is always safe.
-
-**"skill name ... must match its directory"** — the `name` in the frontmatter differs from the
-object name you applied. Make them identical.
-
-**"is not text"** — a referenced file is not UTF-8. A skill bundles only text files.
-
-**"is already a core or pack skill and cannot be overridden"** — the name belongs to a built-in
-skill. Choose a different name; a custom skill can never shadow a built-in one.
+- No blank line or title may precede the opening `---`.
+- Quote YAML descriptions; `:` and similar characters otherwise change their meaning.
+- Bundle only UTF-8 text.
+- Do not reuse a built-in skill name.
