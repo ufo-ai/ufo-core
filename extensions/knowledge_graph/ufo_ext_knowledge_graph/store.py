@@ -18,9 +18,10 @@ vocabulary directly. Tier B — a metered model pass — reads typed relations o
 prose through `ctx.model`, the deploy's default model whose tokens are priced onto the workspace
 ledger, and adds edges from the page anchor to each extracted entity, carrying the model's
 confidence rather than the deterministic 1.0. Tier B augments the backbone: Tier A runs first, and
-Tier B is skipped when no model is wired, so the backbone always stands. An extracted edge type
-outside the bounded vocabulary is rejected (`UnknownEdgeType`), never persisted as a silent
-no-op; the model call and its metering happen before the write transaction, never holding the
+Tier B is skipped when no model is wired, so the backbone always stands. A relation whose edge
+type falls outside the bounded vocabulary is dropped with a warning rather than persisted as a
+silent no-op — the one relation, not the page, since Tier B augments the backbone and never gates
+it; the model call and its metering happen before the write transaction, never holding the
 transaction open across the provider round-trip."""
 
 import json
@@ -152,9 +153,7 @@ graph_edge = sa.Table(
 
 
 class UnknownEdgeType(ValueError):
-    """An edge whose type is outside the bounded vocabulary. Extraction output is validated against
-    the closed `EdgeType` set and an unknown type is rejected here rather than persisted as a silent
-    no-op — surfaced to the model as a recoverable tool error when it reaches the query filter."""
+    """Raised when persistence or query filtering receives an edge type outside the vocabulary."""
 
 
 def to_edge_type(raw: str) -> EdgeType:
@@ -389,8 +388,9 @@ class GraphExtractor:
         tool call, tool JSON the provider truncated or malformed, or input that fails validation
         degrades to zero relations with a warning — Tier B augments the deterministic Tier A
         backbone, it does not gate it. Every extracted edge type is validated against the closed
-        vocabulary (`to_edge_type` raises on an unknown type rather than persisting a silent
-        no-op), and an empty-target relation is dropped."""
+        vocabulary; a relation whose type falls outside it is dropped with a warning rather than
+        persisted as a silent no-op, so one out-of-vocabulary relation never gates the rest, and an
+        empty-target relation is dropped."""
         request = ModelRequest(
             model=model.model,
             system=TIER_B_SYSTEM,
@@ -417,7 +417,14 @@ class GraphExtractor:
             return ()
         relations: list[ExtractedRelation] = []
         for relation in extraction.relations:
-            to_edge_type(relation.edge_type)
+            try:
+                to_edge_type(relation.edge_type)
+            except UnknownEdgeType:
+                logger.warning(
+                    "knowledge_graph.tier_b.unknown_edge_type",
+                    extra={"edge_type": relation.edge_type},
+                )
+                continue
             if relation.target.strip():
                 relations.append(relation)
         return tuple(relations)

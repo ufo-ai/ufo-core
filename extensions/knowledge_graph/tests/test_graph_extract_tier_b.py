@@ -2,9 +2,8 @@
 
 A real `ModelAccess` wraps a stub client streaming a canned `record_relations` tool call: the
 extractor lands the typed edges it names and the completion's tokens are priced onto the workspace
-ledger (turn_id NULL). An out-of-vocabulary edge type from the model is rejected, not silently
-dropped; a reply with no tool call or with schema-invalid input degrades to the Tier-A backbone
-with a warning."""
+ledger (turn_id NULL). An out-of-vocabulary edge type from the model is dropped with a warning,
+same as a reply with no tool call or with schema-invalid input degrading to the Tier-A backbone."""
 
 import hashlib
 import logging
@@ -18,7 +17,6 @@ import sqlalchemy as sa
 from ufo_ext_knowledge_graph.store import (
     GraphExtractor,
     GraphStore,
-    UnknownEdgeType,
     graph_edge,
     graph_subjects,
     render_subgraph,
@@ -194,13 +192,26 @@ async def test_tier_b_lands_typed_edges_and_meters_the_call(db: None, tmp_path) 
     assert "Acme" in rendered
 
 
-async def test_tier_b_rejects_an_out_of_vocab_edge_type(db: None, tmp_path) -> None:
+async def test_tier_b_drops_an_out_of_vocab_edge_type_and_keeps_the_rest(
+    db: None, tmp_path, caplog
+) -> None:
     workspace_id = await _workspace()
     blob = FilesystemBlobStore(root=tmp_path)
-    await _seed_page(blob, workspace_id, "# Jane Doe\nJane acquired Foo.")
-    payload = '{"relations": [{"edge_type": "acquired", "target": "Foo", "confidence": 0.9}]}'
-    with pytest.raises(UnknownEdgeType):
-        await _run(blob, workspace_id, _model(payload, Usage(input_tokens=10)))
+    await _seed_page(blob, workspace_id, "# Jane Doe\nJane works at Acme and acquired Foo.")
+    payload = (
+        '{"relations": ['
+        '{"edge_type": "works_at", "target": "Acme", "confidence": 0.8},'
+        '{"edge_type": "acquired", "target": "Foo", "confidence": 0.9}]}'
+    )
+    with caplog.at_level(logging.WARNING, logger="ufo_ext_knowledge_graph"):
+        await _run(blob, workspace_id, _model(payload, Usage(input_tokens=100, output_tokens=50)))
+
+    assert await _edge_types(workspace_id) == {"works_at"}
+    assert any(
+        record.message == "knowledge_graph.tier_b.unknown_edge_type"
+        and record.edge_type == "acquired"
+        for record in caplog.records
+    )
 
 
 async def _edge_types(workspace_id: UUID) -> set[str]:
