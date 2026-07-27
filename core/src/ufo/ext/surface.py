@@ -1059,6 +1059,18 @@ WorkspaceResolver = Callable[[Request, SurfaceAuth], Awaitable[UUID | Response |
 SurfaceContextFactory = Callable[[UUID, str], SurfaceContext]
 
 
+@dataclass(frozen=True)
+class SurfaceIdentityContext:
+    """The live workspace dependencies a surface uses to resolve the external user it speaks as."""
+
+    workspace_id: UUID
+    blob: BlobStore
+    credential: Callable[[str], Awaitable[str]]
+
+
+SurfaceIdentityResolver = Callable[[SurfaceIdentityContext], Awaitable[str | None]]
+
+
 class SurfaceDeliveryError(RuntimeError):
     """A durable surface failure carrying the provider's Retry-After, so the poller schedules the
     next attempt when the provider asked instead of on the fixed backoff."""
@@ -1092,7 +1104,9 @@ class SurfaceSpec:
     surface may make individual files best effort so one rejection does not block its siblings.
     The poller drives these for every turn its ingest admitted with writeback. A **live**
     surface omits them (`post=attach=None`): it admits without writeback and delivers by tailing the
-    hub in its own route, so the poller never sees its turns."""
+    hub in its own route, so the poller never sees its turns. `self_user_id` resolves the surface's
+    current external speaker for a same-named source before each fetch, preventing its own output
+    from becoming source pages without coupling the two extensions."""
 
     name: str
     routes: tuple[SurfaceRoute, ...]
@@ -1104,6 +1118,7 @@ class SurfaceSpec:
     must resolve its workspace before touching any data — a surface cannot mount without it."""
     post: PostHandler | None = None
     attach: AttachHandler | None = None
+    self_user_id: SurfaceIdentityResolver | None = None
 
 
 def _writeback_due(now: datetime) -> sa.ColumnElement[bool]:

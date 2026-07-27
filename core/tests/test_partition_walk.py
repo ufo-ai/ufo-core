@@ -281,7 +281,13 @@ class _WalkConnector(Connector):
         return [self._stream]
 
     async def fetch_page(
-        self, stream: StreamSpec, *, cursor: str | None, credential: Credential, base_url: str
+        self,
+        stream: StreamSpec,
+        *,
+        cursor: str | None,
+        credential: Credential,
+        base_url: str,
+        self_user_id: str | None,
     ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
         async def partitions() -> AsyncIterator[str]:
             yield "p"
@@ -390,7 +396,13 @@ class _NonePartitionsConnector(Connector):
         return [self._stream]
 
     async def fetch_page(
-        self, stream: StreamSpec, *, cursor: str | None, credential: Credential, base_url: str
+        self,
+        stream: StreamSpec,
+        *,
+        cursor: str | None,
+        credential: Credential,
+        base_url: str,
+        self_user_id: str | None,
     ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
         async def partitions() -> AsyncIterator[str]:
             for key in self.data:

@@ -108,7 +108,11 @@ async def _pages(
     return [
         page
         async for page in connector.fetch_page(
-            stream, cursor=cursor, credential=Credential(bearer="tok"), base_url=""
+            stream,
+            cursor=cursor,
+            credential=Credential(bearer="tok"),
+            base_url="",
+            self_user_id=None,
         )
     ]
 

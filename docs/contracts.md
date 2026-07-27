@@ -143,8 +143,9 @@ as jobs, batch-at-interval, never inline with a write.
 ## sources.py
 
 ```python
+class SourceAuth:               workspace_id: UUID; self_user_id: str | None
 class SourceBackend(Protocol):
-    async def fetch(self, config: SourceConfig, cursor: str | None) -> SyncResult: ...
+    async def fetch(self, config: SourceConfig, cursor: str | None, auth: SourceAuth) -> SyncResult: ...
 class SyncResult(BaseModel):  pages: tuple[Page, ...]; next_cursor: str | None
 ```
 Core ships `folder`; S3/GitHub/connector-API backends are extensions. Config `[[sources]]` blocks

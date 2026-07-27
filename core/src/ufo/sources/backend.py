@@ -136,7 +136,11 @@ class ConnectorBackend:
         over = False
         cap_checkpoint: str | None = None
         stream_pages = self.connector.fetch_page(
-            stream, cursor=origin, credential=credential, base_url=base_url
+            stream,
+            cursor=origin,
+            credential=credential,
+            base_url=base_url,
+            self_user_id=auth.self_user_id,
         )
         try:
             async for page in stream_pages:

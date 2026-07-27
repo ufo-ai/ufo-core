@@ -19,8 +19,8 @@ it makes."""
 import asyncio
 import hashlib
 import json
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import ClassVar, Protocol, TypeVar
@@ -131,10 +131,16 @@ class SourceAuth:
     core minting or holding a token: the workspace the sync runs for, and the selected `auth_proxy`
     the deploy resolves connector credentials through. A connector backend asks `auth_proxy` for the
     `Credential` authenticating its provider (a broker's proxying transport, or a member-added key
-    read host-side); the folder backend ignores both. A value object, never persisted."""
+    read host-side). `self_user_id` is the live external speaker resolved by a same-named surface,
+    so a source can reject only records the product itself authored. The folder backend ignores
+    both. A value object, never persisted."""
 
     workspace_id: UUID
     auth_proxy: AuthProxy | None = None
+    self_user_id: str | None = None
+
+
+SourceIdentityResolver = Callable[[UUID], Awaitable[str | None]]
 
 
 ConfigT = TypeVar("ConfigT", bound=BaseModel)
@@ -290,6 +296,7 @@ class SyncDriver:
     blob: BlobStore
     postgres: bool
     auth_proxy: AuthProxy | None = None
+    identity_resolvers: Mapping[str, SourceIdentityResolver] = field(default_factory=dict)
 
     async def candidate_workspaces(self) -> tuple[UUID, ...]:
         """Workspaces holding a source due for sync — one distinct `workspace_id` per such
@@ -389,7 +396,13 @@ class SyncDriver:
         if backend is None:
             raise RuntimeError(f"no source backend for {source.backend!r}")
         config = backend.config_model.model_validate(source.config)
-        auth = SourceAuth(workspace_id=source.workspace_id, auth_proxy=self.auth_proxy)
+        resolver = self.identity_resolvers.get(source.backend)
+        self_user_id = None if resolver is None else await resolver(source.workspace_id)
+        auth = SourceAuth(
+            workspace_id=source.workspace_id,
+            auth_proxy=self.auth_proxy,
+            self_user_id=self_user_id,
+        )
         return await backend.fetch(config, source.cursor, auth)
 
     async def _commit(self, source: ClaimedSource, result: SyncResult) -> None:

@@ -24,6 +24,7 @@ from ufo_ext_slack.surface import (
     interactive,
     oauth_callback,
     post,
+    resolve_self_user_id,
     resolve_workspace,
 )
 from ufo_ext_slack.tools import TOOLS
@@ -60,6 +61,7 @@ def manifest() -> Manifest:
                 post=post,
                 attach=attach,
                 identify=resolve_workspace,
+                self_user_id=resolve_self_user_id,
             ),
         ),
         tools=TOOLS,

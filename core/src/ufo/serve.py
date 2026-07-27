@@ -53,6 +53,7 @@ from ufo.ext.manifest import (
 from ufo.ext.surface import (
     SurfaceAuth,
     SurfaceContext,
+    SurfaceIdentityContext,
     SurfaceSpec,
     WritebackPoller,
     writeback_workspaces,
@@ -95,6 +96,7 @@ from ufo.sources.sync import (
     CorePageFeed,
     FolderSource,
     SourceBackend,
+    SourceIdentityResolver,
     SyncDriver,
 )
 from ufo.surfaces.admission import Admission, AdmissionInvoker, MemberAdmission
@@ -225,6 +227,7 @@ def run() -> None:
         blob=blob,
         postgres=config.database.url.startswith("postgresql"),
         auth_proxy=connectors,
+        identity_resolvers=_source_identity_resolvers(manifests, credentials, blob),
     )
     page_feed = CorePageFeed(blob=blob)
     _launch_jobs(runtime, sync_driver, page_feed)
@@ -391,6 +394,49 @@ def _source_backends(manifests: tuple[Manifest, ...]) -> dict[str, SourceBackend
                 raise RuntimeError(f"two extensions register source backend {provider.backend!r}")
             backends[provider.backend] = provider.build(credentials)
     return backends
+
+
+def _source_identity_resolvers(
+    manifests: tuple[Manifest, ...],
+    credentials: CredentialStore | None,
+    blob: BlobStore,
+) -> dict[str, SourceIdentityResolver]:
+    resolvers: dict[str, SourceIdentityResolver] = {}
+    for manifest in manifests:
+        declared = frozenset(slot.name for slot in manifest.credentials)
+        for surface in manifest.surfaces:
+            if surface.self_user_id is None:
+                continue
+            if surface.name in resolvers:
+                raise RuntimeError(f"two surfaces resolve source identity for {surface.name!r}")
+
+            async def resolve(
+                workspace_id: UUID,
+                handler=surface.self_user_id,
+                slots=declared,
+                store=credentials,
+            ) -> str | None:
+                async def credential(credential_slot: str) -> str:
+                    if credential_slot not in slots:
+                        raise ValueError(
+                            f"surface identity reads undeclared credential slot {credential_slot!r}"
+                        )
+                    if store is None:
+                        raise RuntimeError(
+                            "surface identity reads a credential but no store is configured"
+                        )
+                    return await store.get(workspace_id, credential_slot)
+
+                return await handler(
+                    SurfaceIdentityContext(
+                        workspace_id=workspace_id,
+                        blob=blob,
+                        credential=credential,
+                    )
+                )
+
+            resolvers[surface.name] = resolve
+    return resolvers
 
 
 def _select_hub(config: Config, manifests: tuple[Manifest, ...]) -> Hub:

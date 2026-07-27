@@ -56,6 +56,7 @@ class _FeedConnector(Connector):
         cursor: str | None,
         credential: Credential,
         base_url: str,
+        self_user_id: str | None,
     ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
         self.received_cursors.append(cursor)
         try:

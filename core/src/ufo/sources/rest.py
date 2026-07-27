@@ -224,12 +224,13 @@ class RestConnector(Connector):
         cursor: str | None,
         credential: Credential,
         base_url: str,
+        self_user_id: str | None,
     ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
         url = (base_url or self.base_url) or ""
         if not url:
             raise RuntimeError(f"{type(self).__name__}: no base_url available")
         async with self._make_client(url, credential) as client:
-            source = self.paginate(client, stream, cursor=cursor)
+            source = self.paginate_source(client, stream, cursor=cursor, self_user_id=self_user_id)
             try:
                 async for page in source:
                     if not page:
@@ -247,6 +248,16 @@ class RestConnector(Connector):
             finally:
                 if isinstance(source, AsyncGenerator):
                     await source.aclose()
+
+    def paginate_source(
+        self,
+        client: httpx.AsyncClient,
+        stream: StreamSpec,
+        *,
+        cursor: str | None,
+        self_user_id: str | None,
+    ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
+        return self.paginate(client, stream, cursor=cursor)
 
     async def paginate(
         self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None

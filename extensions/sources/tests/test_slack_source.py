@@ -12,16 +12,18 @@ the run records a skip, not a failure."""
 
 import json
 from collections.abc import Callable
+from pathlib import Path
 from uuid import UUID, uuid4
 
 import httpx
 import pytest
 from ufo_ext_sources.slack import SlackConnector
 
+from ufo.blob import FilesystemBlobStore
 from ufo.connectors import Credential
 from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig
 from ufo.sources import backend as backend_module
-from ufo.sources.sync import SourceAuth, StreamSkipped, SyncResult
+from ufo.sources.sync import ClaimedSource, SourceAuth, StreamSkipped, SyncDriver, SyncResult
 
 ACCOUNT = "acct-1"
 
@@ -39,8 +41,13 @@ async def _fetch(
     handler: Callable[[httpx.Request], httpx.Response],
     *,
     cursor: str | None = None,
+    self_user_id: str | None = None,
 ) -> SyncResult:
-    auth = SourceAuth(workspace_id=uuid4(), auth_proxy=_MockProxy(handler))
+    auth = SourceAuth(
+        workspace_id=uuid4(),
+        auth_proxy=_MockProxy(handler),
+        self_user_id=self_user_id,
+    )
     return await ConnectorBackend(connector=SlackConnector()).fetch(
         ConnectorSourceConfig(account=ACCOUNT, stream=stream), cursor, auth
     )
@@ -138,6 +145,52 @@ def _message_handler(
     return handle
 
 
+def _bot_message_handler(request: httpx.Request) -> httpx.Response:
+    if request.url.path == "/api/users.list":
+        return _ok(
+            {
+                "members": [
+                    {
+                        "id": "U_UFO",
+                        "name": "ufo",
+                        "is_bot": True,
+                        "profile": {"email": "ufo@app.test"},
+                    },
+                    {
+                        "id": "U_THIRD",
+                        "name": "third",
+                        "is_bot": True,
+                        "profile": {"email": "third@app.test"},
+                    },
+                ]
+            }
+        )
+    if request.url.path == "/api/conversations.list":
+        return _ok({"channels": [{"id": "C1", "name": "general", "is_channel": True}]})
+    if request.url.path == "/api/conversations.history":
+        return _ok(
+            {
+                "messages": [
+                    {
+                        "ts": "1700000002.000000",
+                        "user": "U_UFO",
+                        "bot_id": "B_UFO",
+                        "text": "ufo answer",
+                        "reply_count": 1,
+                    },
+                    {
+                        "ts": "1700000003.000000",
+                        "user": "U_THIRD",
+                        "bot_id": "B_THIRD",
+                        "text": "third-party bot answer",
+                        "reply_count": 1,
+                    },
+                ]
+            }
+        )
+    return httpx.Response(404, json={"ok": False, "error": "unknown_method"})
+
+
 async def test_messages_are_incremental_with_a_per_channel_watermark_and_tombstone() -> None:
     result = await _fetch("messages", _message_handler([]))
     assert result.snapshot is False
@@ -193,6 +246,58 @@ async def test_conversation_threads_derive_a_thread_root() -> None:
 
     result = await _fetch("conversation_threads", handle)
     assert _refs(result) == {"conversation_threads/C1:1700000002.000100"}
+
+
+@pytest.mark.parametrize(
+    ("stream", "expected_ref"),
+    (
+        ("messages", "messages/C1:1700000003.000000"),
+        ("conversation_threads", "conversation_threads/C1:1700000003.000000"),
+        (
+            "message_participants",
+            "message_participants/C1:1700000003.000000:from:third@app.test",
+        ),
+    ),
+)
+async def test_message_streams_exclude_only_ufo_user(stream: str, expected_ref: str) -> None:
+    result = await _fetch(
+        stream,
+        _bot_message_handler,
+        self_user_id="U_UFO",
+    )
+
+    assert _refs(result) == {expected_ref}
+
+
+async def test_sync_driver_resolves_the_current_surface_user_each_fetch(tmp_path: Path) -> None:
+    current_user_id = "U_UFO"
+
+    async def resolve(_workspace_id: UUID) -> str:
+        return current_user_id
+
+    driver = SyncDriver(
+        backends={"slack": ConnectorBackend(connector=SlackConnector())},
+        blob=FilesystemBlobStore(root=tmp_path),
+        postgres=False,
+        auth_proxy=_MockProxy(_bot_message_handler),
+        identity_resolvers={"slack": resolve},
+    )
+    source = ClaimedSource(
+        source_id=uuid4(),
+        workspace_id=uuid4(),
+        backend="slack",
+        config=ConnectorSourceConfig(account=ACCOUNT, stream="messages").model_dump(),
+        subject="shared",
+        cursor=None,
+        consecutive_errors=0,
+    )
+
+    first = await driver._fetch(source)
+    current_user_id = "U_THIRD"
+    second = await driver._fetch(source)
+
+    assert _refs(first) == {"messages/C1:1700000003.000000"}
+    assert _refs(second) == {"messages/C1:1700000002.000000"}
 
 
 async def test_messages_backfill_windows_and_resumes_downward_with_latest(

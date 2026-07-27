@@ -16,8 +16,9 @@ advancing never skips a quiet one. A grant that can't enumerate at all (`users.l
 `conversations.list` refused for a
 missing scope, `ok=false` or a 403) can read no stream, so the walk raises `StreamSkipped` and the
 run records a skip, not a failure; a per-channel refusal deeper in the history walk skips that
-channel and the others still sync. The write path is intentionally absent — the source seam only
-reads."""
+channel and the others still sync. Message streams reject the Slack surface's exact live bot-user
+id before deriving message, thread, or participant records; another app's `bot_id` remains source
+material. The write path is intentionally absent — the source seam only reads."""
 
 from collections.abc import AsyncGenerator, AsyncIterator
 from datetime import UTC, datetime
@@ -97,8 +98,28 @@ class SlackConnector(RestConnector):
     base_url = "https://slack.com"
     streams_list = ALL_STREAMS
 
+    def paginate_source(
+        self,
+        client: httpx.AsyncClient,
+        stream: StreamSpec,
+        *,
+        cursor: str | None,
+        self_user_id: str | None,
+    ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
+        return self.paginate(
+            client,
+            stream,
+            cursor=cursor,
+            self_user_id=self_user_id,
+        )
+
     async def paginate(
-        self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
+        self,
+        client: httpx.AsyncClient,
+        stream: StreamSpec,
+        *,
+        cursor: str | None,
+        self_user_id: str | None = None,
     ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
         if stream.name == "users":
             async for page in self.iter_users(client):
@@ -122,7 +143,14 @@ class SlackConnector(RestConnector):
                     yield channel_id
 
             def channel_pages(channel_id: str, bound: PartitionBound) -> AsyncIterator[WalkPage]:
-                return self._channel_pages(client, stream, channels[channel_id], bound, users)
+                return self._channel_pages(
+                    client,
+                    stream,
+                    channels[channel_id],
+                    bound,
+                    users,
+                    self_user_id,
+                )
 
             walk = PartitionWalk(
                 ordering=stream.ordering, partitions=partitions, pages=channel_pages
@@ -212,6 +240,7 @@ class SlackConnector(RestConnector):
         conversation: dict[str, Any],
         bound: PartitionBound,
         users: dict[str, dict[str, Any]],
+        self_user_id: str | None,
     ) -> AsyncIterator[WalkPage]:
         """One channel's `conversations.history` slice for `PartitionWalk`: newest-first, bounding
         a steady-state pass above the channel watermark with `oldest` (exclusive — the watermark
@@ -242,7 +271,13 @@ class SlackConnector(RestConnector):
                 if isinstance(raw, dict) and isinstance(raw.get("ts"), str)
             ]
             if raw_messages:
-                yield self._message_page(stream, conversation, raw_messages, users)
+                yield self._message_page(
+                    stream,
+                    conversation,
+                    raw_messages,
+                    users,
+                    self_user_id,
+                )
             cursor = _next_cursor(data)
             if not cursor:
                 return
@@ -253,6 +288,7 @@ class SlackConnector(RestConnector):
         conversation: dict[str, Any],
         raw_messages: list[dict[str, Any]],
         users: dict[str, dict[str, Any]],
+        self_user_id: str | None,
     ) -> WalkPage:
         """One history page fanned into this stream's records, carrying the raw-message `ts` span so
         the walk advances the channel's newest-first window over it."""
@@ -267,7 +303,12 @@ class SlackConnector(RestConnector):
                 if isinstance(deleted_ts, str) and deleted_ts:
                     deleted_message_ids.append(f"{channel_id}:{deleted_ts}")
                 continue
-            row = _flatten_message(raw, conversation=conversation, users=users)
+            row = _flatten_message(
+                raw,
+                conversation=conversation,
+                users=users,
+                self_user_id=self_user_id,
+            )
             if row is None:
                 continue
             thread = _conversation_thread_from_message(row, raw=raw, conversation=conversation)
@@ -390,13 +431,19 @@ def _flatten_user(raw: dict[str, Any]) -> dict[str, Any]:
 
 
 def _flatten_message(
-    raw: dict[str, Any], *, conversation: dict[str, Any], users: dict[str, dict[str, Any]]
+    raw: dict[str, Any],
+    *,
+    conversation: dict[str, Any],
+    users: dict[str, dict[str, Any]],
+    self_user_id: str | None,
 ) -> dict[str, Any] | None:
     ts = raw.get("ts")
     channel_id = conversation.get("id")
     if not isinstance(ts, str) or not isinstance(channel_id, str):
         return None
     user_id = raw.get("user")
+    if isinstance(user_id, str) and user_id == self_user_id:
+        return None
     user = users.get(user_id) if isinstance(user_id, str) else None
     text = raw.get("text") if isinstance(raw.get("text"), str) else None
     thread_ts = raw.get("thread_ts")

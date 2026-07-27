@@ -361,8 +361,9 @@ class Connector(ABC):
         cursor: str | None,
         credential: Credential,
         base_url: str,
+        self_user_id: str | None,
     ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
-        """Async-yield the stream's records grouped into pages, incrementally from `cursor`."""
+        """Async-yield records from `cursor`, excluding exact `self_user_id` where applicable."""
 
     def render(self, record: dict[str, Any], stream: StreamSpec) -> tuple[str, str]:
         """One record as `(title, body)` for recall. The default titles from the first present

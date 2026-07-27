@@ -95,6 +95,7 @@ from ufo.sdk.surfaces import (
     SurfaceAuth,
     SurfaceContext,
     SurfaceDeliveryError,
+    SurfaceIdentityContext,
     SurfaceInstallationConflict,
     SurfaceWorkspaceUnknown,
     TurnContext,
@@ -237,6 +238,15 @@ async def read_identity(
     if identity.bot_token_fingerprint != bot_token_fingerprint(bot_token):
         return None
     return identity
+
+
+async def resolve_self_user_id(ctx: SurfaceIdentityContext) -> str | None:
+    try:
+        bot_token = await ctx.credential(SLACK_BOT_TOKEN_SLOT)
+    except CredentialSlotUnset:
+        return None
+    identity = await read_identity(ctx.blob, ctx.workspace_id, bot_token)
+    return None if identity is None else identity.bot_user_id
 
 
 async def _identity(ctx: SurfaceContext) -> SlackIdentity | None:
