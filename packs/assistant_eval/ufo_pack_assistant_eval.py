@@ -1,4 +1,5 @@
-"""The assistant pack plus the deterministic eval environment (fake email/calendar connectors).
+"""The assistant pack plus the deterministic eval environment (fake email, calendar, and code-search
+connectors).
 
 Registry entries surface to `list_external_tools` regardless of grants, so the fake providers must
 never ride a product pack — an eval deploy selects this pack (`[pack] name = "assistant_eval"`).

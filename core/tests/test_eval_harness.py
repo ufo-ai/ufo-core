@@ -905,6 +905,57 @@ async def test_capability_case_runs_through_invoke_and_scores_the_trajectory(
     assert len(cast(list[object], trajectory["messages"])) == len(_research_transcript())
 
 
+async def test_a_capability_seed_establishes_state_before_the_conversation_opens(
+    db: None, tmp_path
+) -> None:
+    """A case whose fixture is durable state — a seeded provider response, a grant the turn needs —
+    lays it down through `seed`, which receives the bound workspace and the target's agent and runs
+    before the conversation exists, so the turn's very first tool call already sees it. The payload
+    digest carries the seed's source, so editing a fixture moves the suite digest."""
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    worker = StubWorker(blob, workspace_id, _research_transcript())
+    ctx = _context(blob, worker)
+    order: list[str] = []
+
+    @dataclass
+    class RecordingConversations(DbConversations):
+        async def open(
+            self,
+            case_name: str,
+            member_key: str | None = None,
+            workspace_files: tuple[WorkspaceFile, ...] = (),
+            prior_messages: tuple[str, ...] = (),
+        ) -> UUID:
+            order.append("open")
+            return await super().open(case_name, member_key, workspace_files, prior_messages)
+
+    async def seed(seeded_workspace: UUID, seeded_agent: UUID) -> None:
+        order.append(f"seed:{seeded_workspace}:{seeded_agent}")
+
+    target = InProcessTarget(
+        ctx=ctx,
+        agent_id=agent_id,
+        conversations=RecordingConversations(workspace_id),
+        outcome=CorpusOutcome(ctx),
+        blob=blob,
+    )
+    case = CapabilityCase(
+        "seeded-case",
+        "find the record then remember it",
+        required_tools_scorer(("search_web",)),
+        seed=seed,
+    )
+
+    with ws(workspace_id):
+        result = await run_capability_case(case, target)
+
+    assert result.passed, result.reason
+    assert order == [f"seed:{workspace_id}:{agent_id}", "open"]
+    assert case.payload()["seed"] != CapabilityCase("x", "y", case.grader).payload().get("seed")
+
+
 async def _persist_compaction(
     blob: FilesystemBlobStore,
     conversation_id: UUID,

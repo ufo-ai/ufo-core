@@ -6,6 +6,7 @@ from evals import (
     basics,
     browser_nav,
     coding_subagent,
+    connector_refs,
     document_visual,
     memory_hygiene,
     object_tools,
@@ -64,6 +65,7 @@ TASKS: tuple[EvalTask, ...] = (
         simulator_model=SCENARIO_SIMULATOR_MODEL,
     ),
     skill_loading_task(SKILL_LOADING_CASES),
+    capability_task("connector_refs", connector_refs.CASES),
     capability_task(
         "document_visual",
         document_visual.CASES,

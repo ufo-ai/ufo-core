@@ -8,11 +8,14 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from hashlib import sha256
-from inspect import getmodule, getsource
-from uuid import UUID
 
-from evals.harness.capability import CapabilityOutput, CapabilityVerdict, grading_statement
+from evals.harness.capability import (
+    CapabilityOutput,
+    CapabilityVerdict,
+    EvalSeed,
+    grading_statement,
+    source_digest,
+)
 from evals.harness.harness import EvalCaseResult, Json, JsonObject
 from evals.harness.judge import JUDGE_REVISION, CriterionVerdict, JudgeLeg, rubric_pass
 from evals.harness.target import CapabilityTarget, TargetResult
@@ -89,14 +92,6 @@ class ScenarioOutcome:
 
 
 type ScenarioGrader = Callable[[ScenarioOutcome], Awaitable[CapabilityVerdict]]
-type ScenarioSeed = Callable[[UUID, UUID], Awaitable[None]]
-
-
-def _seed_digest(seed: ScenarioSeed) -> str:
-    module = getmodule(seed)
-    if module is None:
-        raise RuntimeError(f"seed {seed!r} has no source module to digest")
-    return sha256(f"{getsource(seed)}\n{getsource(module)}".encode()).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -117,7 +112,7 @@ class ScenarioCase:
     max_turns: int = 8
     member_key: str | None = None
     digest_tag: str = ""
-    seed: ScenarioSeed | None = None
+    seed: EvalSeed | None = None
     trials: int = 1
     tier: int = 1
     rubric: tuple[str, ...] = ()
@@ -134,7 +129,7 @@ class ScenarioCase:
             "user": self.user.payload(),
             "maxTurns": self.max_turns,
             "grader": self.digest_tag or self.name,
-            "seed": None if self.seed is None else _seed_digest(self.seed),
+            "seed": None if self.seed is None else source_digest(self.seed),
             "trials": self.trials,
             "tier": self.tier,
             "simulatorRevision": SIMULATOR_REVISION,

@@ -1,9 +1,15 @@
-"""The deterministic eval environment: a mailbox and a calendar the agent reaches only through the
-real connector dispatch (`list_external_tools` → `describe_external_tools` → `call_external_tool`),
-backed by the extension's own workspace-scoped tables. Evals seed those tables, run a conversation,
-and assert the end state on the same rows the broker mutated — a controllable domain over the
-production seam, never a mock of it. The providers ride the `assistant_eval` pack only; a product
-pack never lists them."""
+"""The deterministic eval environment: a mailbox, a calendar, and a code index the agent reaches
+only through the real connector dispatch (`list_external_tools` → `describe_external_tools` →
+`call_external_tool`), backed by the extension's own workspace-scoped storage. Evals seed that
+storage, run a conversation, and assert the end state on the same rows the broker mutated — a
+controllable domain over the production seam, never a mock of it. The providers ride the
+`assistant_eval` pack only; a product pack never lists them.
+
+The mailbox and calendar own tables because a case mutates them. The code index owns none: a search
+response is read-only, and what a case under test turns on is the response's exact bytes — which
+side of the inline budget it lands on, and where the offload preview cuts — so the eval authors the
+whole response and seeds it under its query. It cannot ride the call's arguments instead: no agent
+types 30 KB of JSON to make a tool call."""
 
 from __future__ import annotations
 
@@ -36,6 +42,10 @@ EMAIL_HOST = "email.evalenv.test"
 CALENDAR_PROVIDER = "eval_calendar"
 CALENDAR_LABEL = "Calendar (eval)"
 CALENDAR_HOST = "calendar.evalenv.test"
+CODE_PROVIDER = "eval_code_search"
+CODE_LABEL = "Code Search (eval)"
+CODE_HOST = "code.evalenv.test"
+CODE_FIXTURE_PREFIX = "code_search:"
 ACCOUNT_ID = "eval-env-account"
 OWN_ADDRESS = "assistant@evalco.test"
 MAX_LIST_LIMIT = 50
@@ -106,6 +116,10 @@ class CancelEventArgs(BaseModel):
     event_id: str = Field(description="Id of the event to cancel.")
 
 
+class SearchCodeArgs(BaseModel):
+    query: str = Field(min_length=1, description="Code search query, e.g. 'reserve repo:acme/x'.")
+
+
 _CATALOG: dict[str, tuple[BrokerTool, ...]] = {
     EMAIL_PROVIDER: (
         BrokerTool(
@@ -139,6 +153,16 @@ _CATALOG: dict[str, tuple[BrokerTool, ...]] = {
             slug="cancel_event",
             description="Cancel an event; it stays listed with status 'cancelled'.",
             input_schema=CancelEventArgs.model_json_schema(),
+        ),
+    ),
+    CODE_PROVIDER: (
+        BrokerTool(
+            slug="search_code",
+            description=(
+                "Search source files across the org's repositories. Each hit carries the full "
+                "repository record it belongs to."
+            ),
+            input_schema=SearchCodeArgs.model_json_schema(),
         ),
     ),
 }
@@ -216,7 +240,19 @@ class EvalEnvBroker:
                     return await self._cancel_event(
                         workspace_id, CancelEventArgs.model_validate(arguments)
                     )
+        if provider == CODE_PROVIDER and slug == "search_code":
+            return await self._search_code(SearchCodeArgs.model_validate(arguments))
         raise UnknownBrokerTool(slug)
+
+    async def _search_code(self, args: SearchCodeArgs) -> dict[str, object]:
+        """The response the eval seeded under this query, verbatim. An unseeded query fails loud
+        rather than answering an empty page: a case whose fixture never landed would otherwise grade
+        the agent against a payload nothing under test ever shaped."""
+        seeded = await ScopedStore(extension=NAME).get(f"{CODE_FIXTURE_PREFIX}{args.query}")
+        if not isinstance(seeded, dict):
+            raise ValueError(f"no code-search fixture is seeded for query {args.query!r}")
+        response: dict[str, object] = dict(seeded)
+        return response
 
     async def _send_email(self, workspace_id: UUID, args: SendEmailArgs) -> dict[str, object]:
         email_id = uuid4()
@@ -403,6 +439,11 @@ def manifest() -> Manifest:
             ConnectorProvider(
                 oauth=_EvalEnvOAuth(CALENDAR_PROVIDER, CALENDAR_HOST),
                 label=CALENDAR_LABEL,
+                broker=broker,
+            ),
+            ConnectorProvider(
+                oauth=_EvalEnvOAuth(CODE_PROVIDER, CODE_HOST),
+                label=CODE_LABEL,
                 broker=broker,
             ),
         ),

@@ -167,13 +167,16 @@ class CapabilityOutput:
 
 type Grader = Callable[[CapabilityOutput], Awaitable[CapabilityVerdict]]
 type CapabilityFollowup = Callable[[CapabilityOutput], Awaitable[str | None]]
+type EvalSeed = Callable[[UUID, UUID], Awaitable[None]]
 
 
-def _followup_digest(followup: CapabilityFollowup) -> str:
-    module = getmodule(followup)
+def source_digest(hook: CapabilityFollowup | EvalSeed) -> str:
+    """A case hook's identity: its own source plus its defining module's, so editing the hook — or a
+    helper the module's hooks share — moves the suite digest by itself."""
+    module = getmodule(hook)
     if module is None:
-        raise RuntimeError(f"followup {followup!r} has no source module")
-    return sha256(f"{getsource(followup)}\n{getsource(module)}".encode()).hexdigest()
+        raise RuntimeError(f"case hook {hook!r} has no source module to digest")
+    return sha256(f"{getsource(hook)}\n{getsource(module)}".encode()).hexdigest()
 
 
 @runtime_checkable
@@ -229,7 +232,9 @@ class CapabilityCase:
     inbound from the first turn's output and durable state; returning None grades the first turn.
     `rubric` judges the answer text; `visual_rubric` judges the rendered page images the turn shared
     — both reach the model judge only after the deterministic grader passes, and both require a
-    judge model on the task."""
+    judge model on the task. `seed`, when set, receives (workspace_id, agent_id) before the case's
+    conversation opens and establishes the state the case runs against, resetting whatever it
+    owns."""
 
     name: str
     message: str
@@ -244,6 +249,7 @@ class CapabilityCase:
     prior_messages: tuple[str, ...] = ()
     references: tuple[CapabilityReference, ...] = ()
     followup: CapabilityFollowup | None = None
+    seed: EvalSeed | None = None
 
     def __post_init__(self) -> None:
         paths = tuple(reference.path for reference in self.references)
@@ -287,7 +293,9 @@ class CapabilityCase:
                 for reference in self.references
             ]
         if self.followup is not None:
-            payload["followup"] = _followup_digest(self.followup)
+            payload["followup"] = source_digest(self.followup)
+        if self.seed is not None:
+            payload["seed"] = source_digest(self.seed)
         return payload
 
 

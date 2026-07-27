@@ -44,6 +44,7 @@ from ufo.transcript import (
     read_compaction_records,
     transcript_key,
 )
+from ufo.workspace import ws_current
 
 if TYPE_CHECKING:
     from evals.compaction.target import CompactionTarget
@@ -177,6 +178,8 @@ class InProcessTarget:
         return await self.mcp_atlas.run(prompt, enabled_tools, tool_servers)
 
     async def run(self, case: CapabilityCase) -> TargetResult:
+        if case.seed is not None:
+            await case.seed(ws_current().workspace_id, self.agent_id)
         conversation_id = await self.conversations.open(
             case.name, case.member_key, case.workspace_files, case.prior_messages
         )
