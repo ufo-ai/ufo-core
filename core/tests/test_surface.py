@@ -858,7 +858,11 @@ async def test_the_delivered_commit_never_contends_with_its_own_claim_renewal(
     """The renewal and the delivered commit write the same writeback row. If the commit runs while
     this row's refresher still holds the row lock, it waits on its own lease — the delivered write
     is serialized behind a refresh under a loaded runner. Assert the lease is closed first: no
-    refresh for a turn is ever in flight when that turn is marked delivered."""
+    refresh for a turn is ever in flight when that turn is marked delivered.
+
+    Every wait here is bounded by the drain, never by a wall clock: a loaded runner stretches the
+    drain arbitrarily while the delivery it must prove stays correct, and the drain ending is the
+    only way the posts and their refreshers never arrive."""
     in_flight: dict[UUID, int] = {}
     contended = 0
     mark_delivered = WritebackPoller._mark_delivered
@@ -890,14 +894,15 @@ async def test_the_delivered_commit_never_contends_with_its_own_claim_renewal(
     contexts = {workspace_id: _context(workspace_id, StubDbos(), blob)}
     surface = BlockingSurface(blocked_workspace=workspace_id)
     running = asyncio.create_task(_fleet_poller(contexts, surface, worker_id="worker-1").drain())
+    renewing = asyncio.gather(surface.blocked.wait(), all_renewing.wait())
     try:
-        await asyncio.wait_for(
-            asyncio.gather(surface.blocked.wait(), all_renewing.wait()), timeout=1
-        )
+        await asyncio.wait((renewing, running), return_when=asyncio.FIRST_COMPLETED)
+        assert renewing.done(), "the drain ended before every turn posted and renewed"
         assert all(in_flight.get(turn_id) == 1 for turn_id in turn_ids)
     finally:
+        renewing.cancel()
         surface.release.set()
-        await asyncio.wait_for(running, timeout=5)
+        await running
     assert [(await _writeback(turn_id)).status for turn_id in turn_ids] == [
         WRITEBACK_DELIVERED
     ] * len(turn_ids)
