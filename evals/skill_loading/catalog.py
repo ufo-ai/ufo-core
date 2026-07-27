@@ -730,6 +730,17 @@ CASES: tuple[SkillLoadCase, ...] = (
         expected="delegation",
     ),
     SkillLoadCase(
+        "memory-recall-decision",
+        "What did we decide last time about tenant isolation? Check what you remember before "
+        "answering.",
+        expected="memory",
+    ),
+    SkillLoadCase(
+        "memory-record-preference",
+        "Remember that I prefer launch updates as three bullets with the blocker first.",
+        expected="memory",
+    ),
+    SkillLoadCase(
         "design-investor-pdf",
         "Design a polished investor update PDF using our logo colors — deep navy #0B3D91 with "
         "amber #F2A900 accents; choose complementary typography and a restrained chart palette.",
@@ -871,7 +882,7 @@ CASES: tuple[SkillLoadCase, ...] = (
         "Do an industry deep dive on grid-scale energy storage and build a bottom-up market-size "
         "estimate from primary sources.",
         expected="research-assistant",
-        forbidden=("research-report",),
+        forbidden=("research-report", "memory"),
     ),
     SkillLoadCase(
         "research-robotics-rankings",

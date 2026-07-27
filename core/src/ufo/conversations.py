@@ -13,6 +13,7 @@ import sqlalchemy as sa
 from pydantic import BaseModel, ConfigDict, Field
 
 from ufo.agent_scope import agent_current
+from ufo.audience import audience_member, conversation_audience
 from ufo.blob import BlobNotFound
 from ufo.db import workspace_tx
 from ufo.ext.context import JsonValue
@@ -81,7 +82,7 @@ class ConversationObjects:
 
     async def status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None:
         row = await self._find(ctx, name)
-        if row is None or row.member_id != ctx.audience_member_id:
+        if row is None or conversation_audience(row.member_id) != ctx.audience:
             return None
         exchange = await self._exchange(ctx, row.id)
         body = "\n".join(exchange).encode()
@@ -139,7 +140,7 @@ class ConversationObjects:
         return tuple(rows)
 
     def _visible(self, ctx: ToolContext) -> sa.Select:
-        member = ctx.audience_member_id
+        member = audience_member(ctx.audience)
         visibility = (
             tables.conversation.c.member_id.is_(None)
             if member is None

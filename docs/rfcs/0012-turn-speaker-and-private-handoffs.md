@@ -37,8 +37,9 @@ without its member. Only a surface-admitted member inbound has a speaker; timer,
 subagent turns do not inherit member authority.
 
 `ToolContext` and `HookContext` name both meanings: `speaker_member_id` gates `connect_account`,
-credential requests, and owner checks; `audience_member_id` feeds recall, memory writes, hooks, and
-transcript access. `request_credentials` and extension provider authorization through
+credential requests, and owner checks; the exact conversation `audience` atom feeds recall, memory
+writes, hooks, and transcript access without being re-derived from the speaker.
+`request_credentials` and extension provider authorization through
 `begin_credential_authorization` require the speaker's private member audience; shared and venue
 turns fail closed. Member spend remains an accounting policy and is not changed here.
 

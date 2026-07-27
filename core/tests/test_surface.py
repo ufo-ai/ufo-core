@@ -17,6 +17,7 @@ import sqlalchemy as sa
 from cryptography.fernet import Fernet
 
 import ufo.ext.surface as surface_module
+from ufo.audience import SHARED_AUDIENCE, conversation_audience
 from ufo.blob import FilesystemBlobStore
 from ufo.credentials import (
     CredentialRequestInvalid,
@@ -440,6 +441,14 @@ async def test_conversation_for_claims_a_memberless_conversation(db: None, tmp_p
     assert await _owner() is None
     assert await context.conversation_for("D9", member_id) == conversation_id
     assert await _owner() == member_id
+    turn_id = await context.admit(
+        conversation_id,
+        "private",
+        idempotency_key="D9:1",
+        speaker_member_id=member_id,
+    )
+    _, _, audience = await _load_turn(turn_id)
+    assert audience == conversation_audience(member_id)
     other_id = uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
@@ -470,9 +479,10 @@ async def test_admitted_context_round_trips_to_the_loaded_turn(db: None, tmp_pat
         context=ambient,
         speaker_member_id=member_id,
     )
-    turn, _, _ = await _load_turn(turn_id)
+    turn, _, audience = await _load_turn(turn_id)
     assert turn.context == ambient
     assert turn.speaker_member_id == member_id
+    assert audience == SHARED_AUDIENCE
     assert turn.created_at.tzinfo is not None
 
 

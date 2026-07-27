@@ -20,6 +20,7 @@ from PIL import Image
 from pydantic import BaseModel
 
 from ufo.accounting import record_turn_usage
+from ufo.audience import Audience, conversation_audience
 from ufo.blob import FilesystemBlobStore
 from ufo.connectors import ConnectorRegistry
 from ufo.credentials import (
@@ -157,13 +158,16 @@ class MemoryAwareModel:
 
 @dataclass
 class StaticMemorySearch:
+    audiences: list[Audience] = field(default_factory=list)
+
     async def search(
         self,
         queries: tuple[str, ...],
-        member_id: UUID | None,
+        audience: Audience,
         start: datetime | None = None,
         end: datetime | None = None,
     ) -> tuple[MemoryMatch, ...]:
+        self.audiences.append(audience)
         return (
             MemoryMatch(
                 kind="fact",
@@ -270,6 +274,23 @@ class ToolCallingModel:
             return
         yield ToolCallStart(id="c1", name="bash")
         yield ToolCallDelta(id="c1", partial_json='{"command": "echo hi"}')
+        yield Usage(input_tokens=2, output_tokens=2)
+
+
+@dataclass(frozen=True)
+class AudienceToolCallingModel:
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        answered = any(
+            isinstance(message.content, tuple)
+            and any(isinstance(block, ToolResultBlock) for block in message.content)
+            for message in request.messages
+        )
+        if answered:
+            yield TextDelta(text="done")
+            yield Usage(input_tokens=1, output_tokens=1)
+            return
+        yield ToolCallStart(id="c1", name="audience_probe")
+        yield ToolCallDelta(id="c1", partial_json="{}")
         yield Usage(input_tokens=2, output_tokens=2)
 
 
@@ -686,10 +707,10 @@ def _engine(
         connectors=ConnectorRegistry(entries={}),
         tools=ToolRegistry(BUILTIN_TOOLS),
         tool_ext={},
-        hooks=HookChain(),
+        hooks=HookChain(audience=conversation_audience(member_id)),
         blob=blob,
         spawn=_unavailable_spawn,
-        audience_member_id=member_id,
+        audience=conversation_audience(member_id),
         artifact_token_secret="",
         grants=None,
         requestable_credentials=requestable_credentials,
@@ -701,6 +722,54 @@ def _engine(
 def _arrival_body(arrival: Arrival) -> str:
     assert arrival.rendered is not None
     return arrival.rendered.split("</context>\n", 1)[-1]
+
+
+async def test_engine_carries_one_audience_through_extension_tool_context(
+    db: None, tmp_path: Path
+) -> None:
+    turn = await _seed_turn("queued", None)
+    async with workspace_tx() as connection:
+        member = (
+            await connection.execute(
+                sa.select(tables.conversation.c.member_id).where(
+                    tables.conversation.c.id == turn.conversation_id
+                )
+            )
+        ).scalar_one()
+    assert member is not None
+    audience = conversation_audience(member)
+    seen: list[tuple[Audience, Audience, UUID | None]] = []
+
+    async def capture(ctx: ToolContext, args: BaseModel) -> ToolResult:
+        assert ctx.ext is not None
+        seen.append((ctx.audience, ctx.ext.audience, ctx.speaker_member_id))
+        return ToolResult(content=(TextContent(text="ok"),))
+
+    tool = ToolDef(
+        name="audience_probe",
+        description="capture the exact turn audience",
+        input_model=_NoArgs,
+        handler=capture,
+    )
+    ext = context_for("probe", frozenset(), audience=audience)
+    engine = replace(
+        _engine(turn, AudienceToolCallingModel(), tmp_path, member_id=member),
+        tools=ToolRegistry((tool,)),
+        tool_ext={tool.name: ext},
+    )
+    frame = await engine.run()
+    assert frame.status == "done"
+    assert seen == [(audience, audience, member)]
+
+    with pytest.raises(ValueError, match="tool and turn audiences differ"):
+        replace(
+            engine,
+            tool_ext={
+                tool.name: context_for("probe", frozenset(), audience=conversation_audience(None))
+            },
+        )
+    with pytest.raises(ValueError, match="hook and turn audiences differ"):
+        replace(engine, hooks=HookChain(audience=conversation_audience(None)))
 
 
 async def _queue_arrival(turn: Turn, body: str, speaker_member_id: UUID | None = None) -> None:
@@ -815,16 +884,18 @@ async def test_absorbed_arrivals_from_any_speaker_fold_into_the_one_turn(
 
 async def test_scheduled_turn_searches_memory_after_claim(db: None, tmp_path: Path) -> None:
     turn = await _seed_turn("queued", None, admission_source=SCHEDULED_ADMISSION)
+    provider = StaticMemorySearch()
     with ws(turn.workspace_id):
         frame = await _engine(
             turn,
             MemoryAwareModel(),
             tmp_path,
-            memory=MemorySearch(StaticMemorySearch()),
+            memory=MemorySearch(provider),
         ).run()
     assert frame is not None
     assert frame.status == "done"
     assert frame.text == "remembered"
+    assert provider.audiences == [conversation_audience(None)]
 
 
 async def test_turn_with_a_traceparent_runs_inside_the_admitting_trace(
@@ -1592,7 +1663,7 @@ async def test_request_credentials_gates_on_owner_key_and_declared_slots(
             agent=Agent(prompt="p", model="claude-opus-4-8"),
             spawn=_unavailable_spawn,
             speaker_member_id=member,
-            audience_member_id=member,
+            audience=conversation_audience(member),
             artifact_token_secret="",
             requestable_credentials=requestable,
         )
@@ -1601,7 +1672,7 @@ async def test_request_credentials_gates_on_owner_key_and_declared_slots(
         await request_credentials_handler(context(None, requests), args)
     with pytest.raises(ValueError, match="private audience"):
         await request_credentials_handler(
-            replace(context(owner, requests), audience_member_id=None), args
+            replace(context(owner, requests), audience=conversation_audience(None)), args
         )
     with pytest.raises(ValueError, match="no credential key"):
         await request_credentials_handler(context(owner, None), args)
@@ -1631,7 +1702,7 @@ async def test_extension_tool_authorizes_its_declared_credential_as_the_owner(
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=_unavailable_spawn,
         speaker_member_id=owner,
-        audience_member_id=owner,
+        audience=conversation_audience(owner),
         artifact_token_secret="",
         requestable_credentials=requests,
         ext=context_for("sample", frozenset({"sample_api"})),
@@ -1640,15 +1711,15 @@ async def test_extension_tool_authorizes_its_declared_credential_as_the_owner(
     try:
         with ws(turn.workspace_id):
             with pytest.raises(ValueError, match="private audience"):
-                await replace(context, audience_member_id=None).begin_credential_authorization(
-                    "sample_api", "provider-state"
-                )
+                await replace(
+                    context, audience=conversation_audience(None)
+                ).begin_credential_authorization("sample_api", "provider-state")
             non_owner = uuid4()
             with pytest.raises(ValueError, match="workspace owner"):
                 await replace(
                     context,
                     speaker_member_id=non_owner,
-                    audience_member_id=non_owner,
+                    audience=conversation_audience(non_owner),
                 ).begin_credential_authorization("sample_api", "provider-state")
             with pytest.raises(ValueError, match="does not declare"):
                 await context.begin_credential_authorization("other", "provider-state")
@@ -2421,7 +2492,8 @@ async def test_done_turn_persists_the_system_string_and_injected_context(
                     ext=context_for("probe", frozenset()),
                 ),
             )
-        }
+        },
+        audience=conversation_audience(None),
     )
     turn = await _seed_turn("queued", None)
     model = CapturingModel()
@@ -2493,7 +2565,7 @@ async def test_dispatch_bounds_an_oversize_error_result_and_leaves_within_cap_un
         agent=engine.agent,
         spawn=engine.spawn,
         speaker_member_id=engine.turn.speaker_member_id,
-        audience_member_id=engine.audience_member_id,
+        audience=engine.audience,
         artifact_token_secret=engine.artifact_token_secret,
         grants=engine.grants,
     )
@@ -2526,7 +2598,7 @@ async def test_dispatch_offloads_an_oversize_nonerror_result_and_keeps_a_preview
         agent=engine.agent,
         spawn=engine.spawn,
         speaker_member_id=engine.turn.speaker_member_id,
-        audience_member_id=engine.audience_member_id,
+        audience=engine.audience,
         artifact_token_secret=engine.artifact_token_secret,
         grants=engine.grants,
     )
@@ -2563,7 +2635,7 @@ async def test_dispatch_bounds_the_result_when_the_offload_write_fails(
         agent=engine.agent,
         spawn=engine.spawn,
         speaker_member_id=engine.turn.speaker_member_id,
-        audience_member_id=engine.audience_member_id,
+        audience=engine.audience,
         artifact_token_secret=engine.artifact_token_secret,
         grants=engine.grants,
     )
@@ -2602,7 +2674,7 @@ async def test_dispatch_bounds_the_result_when_the_offload_directory_cannot_be_r
         agent=engine.agent,
         spawn=engine.spawn,
         speaker_member_id=engine.turn.speaker_member_id,
-        audience_member_id=engine.audience_member_id,
+        audience=engine.audience,
         artifact_token_secret=engine.artifact_token_secret,
         grants=engine.grants,
     )
@@ -2635,7 +2707,7 @@ async def test_dispatch_offload_preview_is_walled_for_an_untrusted_tool(
         agent=engine.agent,
         spawn=engine.spawn,
         speaker_member_id=engine.turn.speaker_member_id,
-        audience_member_id=engine.audience_member_id,
+        audience=engine.audience,
         artifact_token_secret=engine.artifact_token_secret,
         grants=engine.grants,
     )
@@ -2672,7 +2744,7 @@ async def test_dispatch_offloads_on_the_handler_text_not_the_walled_result(
         agent=engine.agent,
         spawn=engine.spawn,
         speaker_member_id=engine.turn.speaker_member_id,
-        audience_member_id=engine.audience_member_id,
+        audience=engine.audience,
         artifact_token_secret=engine.artifact_token_secret,
         grants=engine.grants,
     )
@@ -2707,7 +2779,7 @@ async def test_dispatch_walls_a_result_marked_untrusted_by_its_handler(
         agent=engine.agent,
         spawn=engine.spawn,
         speaker_member_id=engine.turn.speaker_member_id,
-        audience_member_id=engine.audience_member_id,
+        audience=engine.audience,
         artifact_token_secret=engine.artifact_token_secret,
         grants=engine.grants,
     )
@@ -2739,7 +2811,7 @@ async def test_dispatch_walls_an_untrusted_content_error(db: None, tmp_path: Pat
         agent=engine.agent,
         spawn=engine.spawn,
         speaker_member_id=engine.turn.speaker_member_id,
-        audience_member_id=engine.audience_member_id,
+        audience=engine.audience,
         artifact_token_secret=engine.artifact_token_secret,
         grants=engine.grants,
     )
@@ -2777,7 +2849,7 @@ async def test_dispatch_folds_tool_image_content_into_the_tool_result_block(
         agent=engine.agent,
         spawn=engine.spawn,
         speaker_member_id=engine.turn.speaker_member_id,
-        audience_member_id=engine.audience_member_id,
+        audience=engine.audience,
         artifact_token_secret=engine.artifact_token_secret,
         grants=engine.grants,
     )
@@ -2820,7 +2892,7 @@ async def test_dispatch_step_offloads_image_bytes_to_a_blob_reference(
         agent=engine.agent,
         spawn=engine.spawn,
         speaker_member_id=engine.turn.speaker_member_id,
-        audience_member_id=engine.audience_member_id,
+        audience=engine.audience,
         artifact_token_secret=engine.artifact_token_secret,
         grants=engine.grants,
     )
@@ -2873,7 +2945,7 @@ async def test_dispatch_step_bounds_oversized_tool_images(db: None, tmp_path: Pa
         agent=engine.agent,
         spawn=engine.spawn,
         speaker_member_id=engine.turn.speaker_member_id,
-        audience_member_id=engine.audience_member_id,
+        audience=engine.audience,
         artifact_token_secret=engine.artifact_token_secret,
         grants=engine.grants,
     )
@@ -2910,7 +2982,7 @@ async def test_dispatch_step_survives_a_decompression_bomb(
         agent=engine.agent,
         spawn=engine.spawn,
         speaker_member_id=engine.turn.speaker_member_id,
-        audience_member_id=engine.audience_member_id,
+        audience=engine.audience,
         artifact_token_secret=engine.artifact_token_secret,
         grants=engine.grants,
     )
@@ -2954,7 +3026,7 @@ async def test_dispatch_keeps_an_error_result_str_typed_and_drops_image_content(
         agent=engine.agent,
         spawn=engine.spawn,
         speaker_member_id=engine.turn.speaker_member_id,
-        audience_member_id=engine.audience_member_id,
+        audience=engine.audience,
         artifact_token_secret=engine.artifact_token_secret,
         grants=engine.grants,
     )

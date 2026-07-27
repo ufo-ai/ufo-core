@@ -25,6 +25,7 @@ from ufo.objects import OwnerRequired, UnknownObject, VerbNotSupported
 from ufo.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
+from ufo.sdk.audience import conversation_audience
 from ufo.tools.context import SpawnResult, ToolContext
 from ufo.tools.registry import ToolDef
 from ufo.workspace import ws
@@ -146,14 +147,14 @@ def _tool_context(
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=_unavailable_spawn,
         speaker_member_id=speaker_member_id,
-        audience_member_id=None,
+        audience=conversation_audience(None),
         artifact_token_secret="",
         grants=GrantStore(),
     )
 
 
 def _object_tool(name: str) -> ToolDef:
-    tools, _ = turn_tools((manifest(),), None)
+    tools, _ = turn_tools((manifest(),), None, audience=conversation_audience(None))
     return next(tool for tool in tools if tool.name == name)
 
 

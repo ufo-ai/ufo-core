@@ -39,6 +39,7 @@ from ufo.grants import GrantStore
 from ufo.indexing import TextChunker
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
+from ufo.sdk.audience import conversation_audience
 from ufo.serve import _select_auth_proxy, _source_backends
 from ufo.sources.sync import CorePageFeed, SyncDriver
 from ufo.tools.context import ToolContext
@@ -139,7 +140,7 @@ def _context(state: State, grants: GrantStore, connectors: ConnectorRegistry) ->
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=None,
         speaker_member_id=state.member_id,
-        audience_member_id=state.member_id,
+        audience=conversation_audience(state.member_id),
         artifact_token_secret="",
         grants=grants,
         connectors=connectors,

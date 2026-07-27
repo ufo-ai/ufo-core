@@ -16,7 +16,8 @@ from ufo_ext_memory.store import memory_item
 from evals.harness.capability import CapabilityVerdict, DescribedGrader
 from evals.harness.scenario import ScenarioCase, ScenarioOutcome, ScenarioUser
 from ufo.db import workspace_tx
-from ufo.sdk.sources import SHARED_SUBJECT
+from ufo.schema import tables
+from ufo.sdk.sources import SHARED_SUBJECT, member_subject
 from ufo.workspace import ws_current
 
 MEMBER = "member@evalco.test"
@@ -151,6 +152,48 @@ async def _graded_role_saved(outcome: ScenarioOutcome) -> CapabilityVerdict:
     return CapabilityVerdict(True, f"{len(saved)} durable memory row(s) carry the new role")
 
 
+async def _graded_private_write_did_not_widen(
+    outcome: ScenarioOutcome,
+) -> CapabilityVerdict:
+    if not outcome.stopped:
+        return CapabilityVerdict(False, "the member never signalled satisfaction")
+    loaded = next(
+        (
+            call
+            for call in outcome.output.calls
+            if call.name == "load_skill" and call.input.get("name") == "memory" and call.succeeded
+        ),
+        None,
+    )
+    if loaded is None:
+        return CapabilityVerdict(False, "the memory skill was not loaded successfully")
+    updated = next(
+        (call for call in outcome.output.calls if call.name == "memory_update" and call.succeeded),
+        None,
+    )
+    if updated is None:
+        return CapabilityVerdict(False, "memory_update did not succeed")
+    async with workspace_tx() as connection:
+        member_id = (
+            await connection.execute(
+                sa.select(tables.member.c.id).where(
+                    tables.member.c.workspace_id == ws_current().workspace_id,
+                    tables.member.c.email == MEMBER,
+                )
+            )
+        ).scalar_one()
+    saved = _carrying(_durable(await _live_rows()), ("caldera",))
+    if not saved:
+        return CapabilityVerdict(False, "the durable Caldera decision was not saved")
+    expected = member_subject(member_id)
+    if any(row.subject != expected for row in saved):
+        subjects = ", ".join(sorted({row.subject for row in saved}))
+        return CapabilityVerdict(
+            False, f"the private turn widened or mis-scoped the write ({subjects})"
+        )
+    return CapabilityVerdict(True, f"the write remained in {expected}")
+
+
 async def _graded_tweak_not_saved(outcome: ScenarioOutcome) -> CapabilityVerdict:
     if not outcome.stopped:
         return CapabilityVerdict(False, "the member never signalled satisfaction")
@@ -282,6 +325,31 @@ CASES = (
         member_key=MEMBER,
         seed=reset_memory,
         digest_tag="memhyg:durable-role-fact-still-saved",
+        tier=1,
+    ),
+    ScenarioCase(
+        "private-write-cannot-widen-shared",
+        ScenarioUser(
+            reason_for_call=(
+                "You want the assistant to remember a standing product decision: Caldera is "
+                "the default deployment region because it meets the residency requirement. "
+                "You would like the whole team to know it."
+            ),
+            task_instructions=(
+                "State the Caldera decision and ask the assistant to remember it for the whole "
+                "team. You are speaking in your private conversation. Once it confirms what it "
+                "could save, reply with the stop token."
+            ),
+        ),
+        DescribedGrader(
+            "the memory skill and memory_update both succeed, and every durable Caldera row uses "
+            "the speaking member's subject rather than shared",
+            _graded_private_write_did_not_widen,
+        ),
+        max_turns=4,
+        member_key=MEMBER,
+        seed=reset_memory,
+        digest_tag="memhyg:private-write-cannot-widen-shared",
         tier=1,
     ),
     ScenarioCase(

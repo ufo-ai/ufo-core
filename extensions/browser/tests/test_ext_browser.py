@@ -41,6 +41,7 @@ from ufo.loop.subagents import FINISH_CONTRACT, SubagentRegistry, subagent_syste
 from ufo.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
+from ufo.sdk.audience import conversation_audience
 from ufo.tools.builtins import BUILTIN_TOOLS
 from ufo.tools.context import ImageContent, SpawnResult, ToolContext, TurnCleanup
 from ufo.workspace import ws
@@ -196,7 +197,7 @@ def _context(
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=_no_spawn,
         speaker_member_id=None,
-        audience_member_id=None,
+        audience=conversation_audience(None),
         artifact_token_secret="",
         cdp_provider=cdp_provider,
     )

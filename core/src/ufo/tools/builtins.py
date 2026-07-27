@@ -45,6 +45,7 @@ from ufo.artifact_token import (
     mint_artifact_token,
 )
 from ufo.artifacts import artifact_object_names
+from ufo.audience import conversation_audience
 from ufo.db import workspace_tx
 from ufo.grants import installed_connect_flow
 from ufo.sandbox.session import WORKSPACE_DIR, workspace_path
@@ -586,7 +587,7 @@ async def request_credentials_handler(
     or a deploy without a credential key raises, surfacing as a recoverable tool error."""
     if ctx.speaker_member_id is None:
         raise ValueError("collecting credentials requires a speaking member")
-    if ctx.audience_member_id != ctx.speaker_member_id:
+    if ctx.audience != conversation_audience(ctx.speaker_member_id):
         raise ValueError("collecting credentials requires the speaker's private audience")
     if ctx.requestable_credentials is None:
         raise ValueError("no credential key is configured — this deploy cannot store secrets")

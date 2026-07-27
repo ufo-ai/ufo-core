@@ -19,6 +19,7 @@ from pydantic import ValidationError
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
+from ufo.audience import Audience, audience_member
 from ufo.cancellation import cancel_one_turn
 from ufo.db import workspace_tx
 from ufo.ext.manifest import SubagentProfile
@@ -133,6 +134,7 @@ class Subagents:
     client: DBOSClient
     registry: SubagentRegistry
     parent: Turn
+    audience: Audience
 
     async def spawn(
         self,
@@ -327,13 +329,6 @@ class Subagents:
         duplicate."""
         async with workspace_tx() as connection:
             insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
-            member_id = (
-                await connection.execute(
-                    sa.select(tables.conversation.c.member_id).where(
-                        tables.conversation.c.id == self.parent.conversation_id
-                    )
-                )
-            ).scalar_one()
             await connection.execute(
                 insert(tables.conversation)
                 .values(
@@ -342,7 +337,7 @@ class Subagents:
                     agent_id=self.parent.agent_id,
                     surface=SUBAGENT_SURFACE,
                     queue_key=str(turn_id),
-                    member_id=member_id,
+                    member_id=audience_member(self.audience),
                     created_at=sa.func.now(),
                     updated_at=sa.func.now(),
                 )

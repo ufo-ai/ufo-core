@@ -17,6 +17,7 @@ from ufo_ext_research.delegation import MAX_WIDE_RESEARCH_ENTITIES, WIDE_RESEARC
 from ufo.blob import FilesystemBlobStore
 from ufo.sandbox.session import ExecResult
 from ufo.schema.records import Agent, Turn
+from ufo.sdk.audience import conversation_audience
 from ufo.tools.context import SpawnResult, ToolContext
 
 
@@ -78,7 +79,7 @@ def _context(
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=spawn,
         speaker_member_id=None,
-        audience_member_id=None,
+        audience=conversation_audience(None),
         artifact_token_secret="",
         idempotency_key=idempotency_key,
     )

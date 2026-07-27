@@ -13,6 +13,7 @@ from uuid import UUID, uuid4
 import pytest
 import sqlalchemy as sa
 import ufo_ext_memory.manifest as memory
+from pydantic import ValidationError
 from ufo_ext_embed_openai import EMBED_DIM
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.events import MEMORY_RECALL_EVENT
@@ -24,6 +25,7 @@ from ufo.ext.context import ExtensionContext, context_for
 from ufo.indexing import TextChunker
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
+from ufo.sdk.audience import SHARED_AUDIENCE, Audience, conversation_audience
 from ufo.sdk.manifest import HookContext, InjectContext, UserPromptSubmit
 from ufo.subjects import member_subject
 from ufo.tools.context import SpawnResult, ToolContext, ToolResult
@@ -72,8 +74,8 @@ async def _workspace() -> UUID:
     return workspace_id
 
 
-def _ext(index: object, embed: object) -> ExtensionContext:
-    return context_for("memory", frozenset(), index=index, embed=embed)
+def _ext(index: object, embed: object, audience: Audience = SHARED_AUDIENCE) -> ExtensionContext:
+    return context_for("memory", frozenset(), index=index, embed=embed, audience=audience)
 
 
 def _indexer(embed: object) -> MemoryIndexer:
@@ -92,7 +94,11 @@ def _tool_ctx(
     *,
     workspace_id: UUID | None = None,
     blob: FilesystemBlobStore | None = None,
+    audience: Audience | None = None,
 ) -> ToolContext:
+    exact_audience = conversation_audience(member_id) if audience is None else audience
+    if ext is not None and ext.audience != exact_audience:
+        raise ValueError("tool and extension audiences differ")
     return ToolContext(
         sandbox=None,
         blob=blob if blob is not None else FilesystemBlobStore(root=tmp_path),
@@ -109,7 +115,7 @@ def _tool_ctx(
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=_unavailable_spawn,
         speaker_member_id=member_id,
-        audience_member_id=member_id,
+        audience=exact_audience,
         artifact_token_secret="",
         ext=ext,
     )
@@ -126,7 +132,7 @@ async def test_memory_update_then_search_recalls_in_a_new_conversation(
     workspace_id = await _workspace()
     member = uuid4()
     embed = StubEmbed(vec((6, 1.0)))
-    ext = _ext(DefaultIndex(transaction=workspace_tx), embed)
+    ext = _ext(DefaultIndex(transaction=workspace_tx), embed, conversation_audience(member))
 
     with ws(workspace_id):
         stored = await _run(
@@ -146,7 +152,7 @@ async def test_memory_search_provider_rejects_an_empty_query_set() -> None:
     embed = StubEmbed(vec((0, 1.0)))
     provider = spec.build(_ext(DefaultIndex(transaction=workspace_tx), embed))
     with pytest.raises(ValueError, match="requires 1-3 queries"):
-        await provider.search((), None)
+        await provider.search((), SHARED_AUDIENCE)
 
 
 async def test_user_prompt_submit_hook_injects_and_observes_a_recalled_fact(
@@ -159,7 +165,7 @@ async def test_user_prompt_submit_hook_injects_and_observes_a_recalled_fact(
     workspace_id = await _workspace()
     member = uuid4()
     embed = StubEmbed(vec((7, 1.0)))
-    ext = _ext(DefaultIndex(transaction=workspace_tx), embed)
+    ext = _ext(DefaultIndex(transaction=workspace_tx), embed, conversation_audience(member))
     with ws(workspace_id):
         await MEMORY_TOOLS["memory_update"].handler(
             ToolContext(
@@ -178,7 +184,7 @@ async def test_user_prompt_submit_hook_injects_and_observes_a_recalled_fact(
                 agent=Agent(prompt="p", model="claude-opus-4-8"),
                 spawn=_unavailable_spawn,
                 speaker_member_id=member,
-                audience_member_id=member,
+                audience=conversation_audience(member),
                 artifact_token_secret="",
                 ext=ext,
             ),
@@ -210,7 +216,7 @@ async def test_user_prompt_submit_hook_injects_and_observes_a_recalled_fact(
             ),
             agent=Agent(prompt="p", model="claude-opus-4-8"),
             speaker_member_id=member,
-            audience_member_id=member,
+            audience=conversation_audience(member),
             payload=UserPromptSubmit(text="what is the vault code"),
         )
         with caplog.at_level(logging.INFO, logger="ufo"):
@@ -229,7 +235,7 @@ async def test_user_prompt_submit_hook_injects_and_observes_a_recalled_fact(
                 turn=None,
                 agent=Agent(prompt="p", model="claude-opus-4-8"),
                 speaker_member_id=member,
-                audience_member_id=member,
+                audience=conversation_audience(member),
                 payload=UserPromptSubmit(text="what is the vault code"),
             )
         )
@@ -276,7 +282,7 @@ async def test_recall_hook_observes_search_failure_without_denial(
                 turn=turn,
                 agent=Agent(prompt="p", model="claude-opus-4-8"),
                 speaker_member_id=None,
-                audience_member_id=None,
+                audience=conversation_audience(None),
                 payload=UserPromptSubmit(text="what is the vault code"),
             )
         )
@@ -295,7 +301,7 @@ async def test_recall_hook_excludes_episodic_topic_pointers(
     workspace_id = await _workspace()
     member = uuid4()
     embed = StubEmbed(vec((9, 1.0)))
-    ext = _ext(DefaultIndex(transaction=workspace_tx), embed)
+    ext = _ext(DefaultIndex(transaction=workspace_tx), embed, conversation_audience(member))
     with ws(workspace_id):
         await _run(
             "memory_update", _tool_ctx(ext, member, tmp_path), body="the api key rotates monthly"
@@ -335,7 +341,7 @@ async def test_recall_hook_excludes_episodic_topic_pointers(
                     ),
                     agent=Agent(prompt="p", model="claude-opus-4-8"),
                     speaker_member_id=member,
-                    audience_member_id=member,
+                    audience=conversation_audience(member),
                     payload=UserPromptSubmit(text="api key pricing"),
                 )
             )
@@ -366,40 +372,51 @@ async def test_recall_hook_ignores_a_non_prompt_payload(db: None) -> None:
                 ),
                 agent=Agent(prompt="p", model="claude-opus-4-8"),
                 speaker_member_id=None,
-                audience_member_id=None,
+                audience=conversation_audience(None),
                 payload=None,
             )
         )
         assert outcome is None
 
 
-async def test_memory_update_scopes_to_member_by_default_and_shared_on_flag(
+async def test_memory_update_writes_only_the_conversation_audience(
     db: None, tmp_path: Path
 ) -> None:
     workspace_id = await _workspace()
     member = uuid4()
     embed = StubEmbed(vec((0, 1.0)))
-    ext = _ext(DefaultIndex(transaction=workspace_tx), embed)
-    ctx = _tool_ctx(ext, member, tmp_path)
+    index = DefaultIndex(transaction=workspace_tx)
+    private_ext = _ext(index, embed, conversation_audience(member))
+    shared_ext = _ext(index, embed)
+    private_ctx = _tool_ctx(private_ext, member, tmp_path)
+    shared_ctx = _tool_ctx(shared_ext, member, tmp_path, audience=SHARED_AUDIENCE)
     with ws(workspace_id):
-        await _run("memory_update", ctx, body="a private note")
-        await _run("memory_update", ctx, body="a team note", shared=True)
+        await _run("memory_update", private_ctx, body="a private note")
+        await _run("memory_update", shared_ctx, body="a team note")
         async with workspace_tx() as connection:
             subjects = sorted(
                 row.subject
                 for row in (await connection.execute(sa.select(memory_item.c.subject))).all()
             )
+        await _indexer(embed).run()
+        private_read = await _run("memory_search", private_ctx, queries=["note"])
+        shared_read = await _run("memory_search", shared_ctx, queries=["note"])
     assert subjects == sorted([member_subject(member), "shared"])
+    assert "a private note" in private_read.content[0].text
+    assert "a team note" in private_read.content[0].text
+    assert "a private note" not in shared_read.content[0].text
+    assert "a team note" in shared_read.content[0].text
+    with pytest.raises(ValidationError):
+        memory.MemoryUpdateInput.model_validate({"body": "widened", "shared": True})
 
 
 async def test_memory_search_reports_no_match_on_empty_memory(db: None, tmp_path: Path) -> None:
     workspace_id = await _workspace()
     embed = StubEmbed(vec((0, 1.0)))
-    ext = _ext(DefaultIndex(transaction=workspace_tx), embed)
+    member = uuid4()
+    ext = _ext(DefaultIndex(transaction=workspace_tx), embed, conversation_audience(member))
     with ws(workspace_id):
-        result = await _run(
-            "memory_search", _tool_ctx(ext, uuid4(), tmp_path), queries=["anything"]
-        )
+        result = await _run("memory_search", _tool_ctx(ext, member, tmp_path), queries=["anything"])
         assert result.content[0].text == "No matching memory."
 
 
@@ -417,7 +434,7 @@ async def test_memory_search_merges_and_dedups_across_queries(db: None, tmp_path
     member = uuid4()
     working = StubEmbed(vec((0, 1.0)))
     index = DefaultIndex(transaction=workspace_tx)
-    ext = _ext(index, BrokenEmbed())
+    ext = _ext(index, BrokenEmbed(), conversation_audience(member))
     ctx = _tool_ctx(ext, member, tmp_path)
     with ws(workspace_id):
         for body in ("apple orchard notes", "banana bread recipe", "apple and banana smoothie"):
@@ -438,7 +455,7 @@ async def test_memory_search_bounds_the_merged_result_across_queries(
     member = uuid4()
     working = StubEmbed(vec((0, 1.0)))
     index = DefaultIndex(transaction=workspace_tx)
-    ext = _ext(index, BrokenEmbed())
+    ext = _ext(index, BrokenEmbed(), conversation_audience(member))
     ctx = _tool_ctx(ext, member, tmp_path)
     with ws(workspace_id):
         for index_n in range(6):
@@ -487,7 +504,7 @@ async def test_memory_search_interleaves_per_query_results(
             return ()
 
     monkeypatch.setattr(memory, "store_for", lambda ext: _Store())
-    ctx = _tool_ctx(_ext(object(), object()), uuid4(), tmp_path)
+    ctx = _tool_ctx(_ext(object(), object()), None, tmp_path)
     with ws(uuid4()):
         found = await _run("memory_search", ctx, queries=["alpha", "beta"])
     bodies = [

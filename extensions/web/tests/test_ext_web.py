@@ -41,6 +41,7 @@ from ufo.sandbox.session import (
 )
 from ufo.schema import tables
 from ufo.schema.records import ConnectRequest, TerminalFrame, Usage
+from ufo.sdk.audience import conversation_audience
 from ufo.serve import _mount_shared_surfaces
 from ufo.subjects import SHARED_SUBJECT, member_subject
 from ufo.surfaces import hub_tail
@@ -402,8 +403,10 @@ async def test_two_web_members_get_isolated_subjects_and_cannot_cross(
             .all()
         )
     assert set(owners) == {member_a, member_b}
-    assert recall_subjects(member_a) & recall_subjects(member_b) == frozenset({SHARED_SUBJECT})
-    assert member_subject(member_a) not in recall_subjects(member_b)
+    assert recall_subjects(conversation_audience(member_a)) & recall_subjects(
+        conversation_audience(member_b)
+    ) == frozenset({SHARED_SUBJECT})
+    assert member_subject(member_a) not in recall_subjects(conversation_audience(member_b))
     crossed = await client.get(
         f"/surface/web/turns/{turn_a}/stream", headers={"cookie": f"{SESSION_COOKIE}={token_b}"}
     )

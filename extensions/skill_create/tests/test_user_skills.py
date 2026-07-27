@@ -46,6 +46,7 @@ from ufo.sandbox.session import (
 )
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
+from ufo.sdk.audience import conversation_audience
 from ufo.skills.runtime import CORE_SKILL_NAMES, CORE_SKILL_REGISTRY, RuntimeSkill
 from ufo.tools.context import SpawnResult, ToolContext
 from ufo.tools.registry import ToolDef
@@ -292,7 +293,7 @@ async def test_turn_runtime_skills_without_a_credential_key_fails_loud() -> None
 
 
 def _object_tool(name: str) -> ToolDef:
-    tools, _ = turn_tools((manifest(),), None)
+    tools, _ = turn_tools((manifest(),), None, audience=conversation_audience(None))
     return next(tool for tool in tools if tool.name == name)
 
 
@@ -328,7 +329,7 @@ def _tool_ctx(
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=_unavailable_spawn,
         speaker_member_id=None,
-        audience_member_id=None,
+        audience=conversation_audience(None),
         artifact_token_secret="secret",
     )
 

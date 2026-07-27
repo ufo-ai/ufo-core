@@ -30,6 +30,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncConnection
 from sqlalchemy.sql.elements import ColumnElement
 
+from ufo.sdk.audience import Audience
 from ufo.sdk.context import ExtensionContext
 from ufo.sdk.index import (
     OWNER_KIND_MEMORY_ITEM,
@@ -41,7 +42,7 @@ from ufo.sdk.index import (
     TextChunker,
     chunk_embed_upsert,
 )
-from ufo.sdk.sources import SHARED_SUBJECT, PageChange, member_subject
+from ufo.sdk.sources import SHARED_SUBJECT, PageChange
 
 RRF_K = 60
 RRF_WEIGHT = 0.7
@@ -106,12 +107,9 @@ mem_page = sa.Table(
 )
 
 
-def recall_subjects(member_id: UUID | None) -> frozenset[str]:
-    """The subjects a turn recalls under: the member's own space plus the shared space, or shared
-    alone when the conversation has no linked member."""
-    if member_id is None:
-        return frozenset({SHARED_SUBJECT})
-    return frozenset({member_subject(member_id), SHARED_SUBJECT})
+def recall_subjects(audience: Audience) -> frozenset[str]:
+    """The current audience plus shared memory, deduplicated for shared conversations."""
+    return frozenset({SHARED_SUBJECT, str(audience)})
 
 
 class MemoryInventoryItem(BaseModel):

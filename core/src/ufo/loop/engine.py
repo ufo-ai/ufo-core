@@ -35,6 +35,7 @@ from ufo.accounting import (
     read_turn_cost,
     record_turn_usage,
 )
+from ufo.audience import Audience, audience_member
 from ufo.blob import BlobStore
 from ufo.browser import CdpProvider
 from ufo.connectors import ConnectorRegistry
@@ -635,7 +636,7 @@ class TurnEngine:
     hooks: HookChain
     blob: BlobStore
     spawn: Spawn
-    audience_member_id: UUID | None
+    audience: Audience
     artifact_token_secret: str
     grants: GrantStore | None
     requestable_credentials: CredentialRequests | None = None
@@ -651,6 +652,10 @@ class TurnEngine:
     output_model: type[BaseModel] | None = None
 
     def __post_init__(self) -> None:
+        if any(context.audience != self.audience for context in self.tool_ext.values()):
+            raise ValueError("tool and turn audiences differ")
+        if self.hooks.audience != self.audience:
+            raise ValueError("hook and turn audiences differ")
         if self.output_model is None:
             return
         try:
@@ -699,7 +704,7 @@ class TurnEngine:
                 spawn=self.spawn,
                 subagents=self.subagents,
                 speaker_member_id=self.turn.speaker_member_id,
-                audience_member_id=self.audience_member_id,
+                audience=self.audience,
                 on_behalf_of_member_id=self.turn.on_behalf_of_member_id,
                 artifact_token_secret=self.artifact_token_secret,
                 grants=self.grants,
@@ -723,7 +728,6 @@ class TurnEngine:
                     UserPromptSubmit(text=self.turn.inbound),
                     self.turn,
                     self.agent,
-                    self.audience_member_id,
                     self.turn.speaker_member_id,
                 )
                 pending_guard = self.turn.subagent_profile is None
@@ -768,7 +772,6 @@ class TurnEngine:
                         Stop(answer=answer),
                         self.turn,
                         self.agent,
-                        self.audience_member_id,
                         self.turn.speaker_member_id,
                     )
                     frame = await self._commit(
@@ -816,7 +819,7 @@ class TurnEngine:
             raise RuntimeError("scheduled turn requires memory search; none is wired")
         try:
             async with asyncio.timeout(SCHEDULED_MEMORY_SEARCH_TIMEOUT_SECONDS):
-                matches = await self.memory.search(self.turn.conversation_id, (self.turn.inbound,))
+                matches = await self.memory.search(self.audience, (self.turn.inbound,))
         except Exception as error:
             log(
                 "memory.scheduled_search_degraded",
@@ -1048,7 +1051,6 @@ class TurnEngine:
             UserPromptSubmit(text=body),
             self.turn,
             self.agent,
-            self.audience_member_id,
             speaker_member_id,
         )
         if submitted.denied is not None:
@@ -1248,14 +1250,13 @@ class TurnEngine:
                 )
             if not admitted:
                 raise TurnParked(SEAT_REVOKED_MESSAGE)
-        if applicable_caps_absent(
-            self.turn.workspace_id, self.audience_member_id, self.turn.agent_id
-        ):
+        member_id = audience_member(self.audience)
+        if applicable_caps_absent(self.turn.workspace_id, member_id, self.turn.agent_id):
             return
         pending = self.pricing.micro_usd(self.agent.model, _total_usage(usage_events))
         async with workspace_tx() as connection:
             decision = await SpendEvaluator(
-                self.turn.workspace_id, self.audience_member_id, self.turn.agent_id
+                self.turn.workspace_id, member_id, self.turn.agent_id
             ).decide(connection, pending)
         if decision.outcome != ALLOW:
             raise TurnParked(decision.message)
@@ -1504,7 +1505,6 @@ class TurnEngine:
             PreToolUse(tool_name=call.name, tool_input=args),
             self.turn,
             self.agent,
-            self.audience_member_id,
             self.turn.speaker_member_id,
         )
         if pre.denied is not None:
@@ -1556,7 +1556,6 @@ class TurnEngine:
                 PostToolUseFailure(tool_name=call.name, tool_input=args, output=content),
                 self.turn,
                 self.agent,
-                self.audience_member_id,
                 self.turn.speaker_member_id,
             )
         else:
@@ -1565,7 +1564,6 @@ class TurnEngine:
                 PostToolUse(tool_name=call.name, tool_input=args, output=content),
                 self.turn,
                 self.agent,
-                self.audience_member_id,
                 self.turn.speaker_member_id,
             )
             if post.output is not None:

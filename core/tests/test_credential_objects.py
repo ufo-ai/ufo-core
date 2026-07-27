@@ -14,6 +14,7 @@ import ufo_ext_sample as sample
 import yaml
 from cryptography.fernet import Fernet
 
+from ufo.audience import conversation_audience
 from ufo.blob import FilesystemBlobStore
 from ufo.credential_kind import CREDENTIAL_KIND
 from ufo.credentials import CredentialStore, HostChoice
@@ -101,7 +102,7 @@ def _tool_context(workspace_id: UUID, speaker_member_id: UUID | None = None) -> 
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=_unavailable_spawn,
         speaker_member_id=speaker_member_id,
-        audience_member_id=None,
+        audience=conversation_audience(None),
         artifact_token_secret="",
     )
 
@@ -109,7 +110,11 @@ def _tool_context(workspace_id: UUID, speaker_member_id: UUID | None = None) -> 
 def _object_tool(name: str) -> ToolDef:
     manifest = next((m for m in load_manifests() if m.name == sample.NAME), None)
     assert manifest is not None, "sample extension not discovered via entry points — run `uv sync`"
-    tools, _ = turn_tools((manifest,), CredentialStore(fernet=Fernet(Fernet.generate_key())))
+    tools, _ = turn_tools(
+        (manifest,),
+        CredentialStore(fernet=Fernet(Fernet.generate_key())),
+        audience=conversation_audience(None),
+    )
     return next(tool for tool in tools if tool.name == name)
 
 
@@ -285,7 +290,7 @@ async def test_a_host_choice_slot_renders_its_options_through_tool_dispatch(db: 
             CredentialSlot(name="probe_api_host", description="Probe site."),
         ),
     )
-    tools, _ = turn_tools((probe,), store)
+    tools, _ = turn_tools((probe,), store, audience=conversation_audience(None))
     get_tool = next(tool for tool in tools if tool.name == "object_get")
     with ws(workspace_id):
         owner = await _member(workspace_id, OWNER_CREATED_AT)

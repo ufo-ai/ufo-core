@@ -19,6 +19,7 @@ from evals.driver import WorkspaceDriver
 from evals.harness.capability import CapabilityCase
 from evals.harness.scorers import exact_scorer
 from evals.harness.target import InProcessTarget
+from ufo.audience import conversation_audience
 from ufo.blob import FilesystemBlobStore
 from ufo.config import Config
 from ufo.connectors import ConnectorRegistry
@@ -1317,7 +1318,12 @@ async def test_subagent_plain_text_followup_runs_without_a_spawn_payload(
         created_at=parent_row.created_at,
         terminal=TerminalFrame.model_validate(parent_row.terminal),
     )
-    subagents = Subagents(client=runtime.dbos, registry=runtime.subagents, parent=parent)
+    subagents = Subagents(
+        client=runtime.dbos,
+        registry=runtime.subagents,
+        parent=parent,
+        audience=conversation_audience(None),
+    )
     queued = await subagents.message(child_id, FOLLOWUP_INBOUND)
     (followup,) = await subagents.wait((queued.turn_id,))
     assert followup.status == "done"

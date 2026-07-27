@@ -31,6 +31,7 @@ from ufo_ext_memory.store import (
 from ufo.db import workspace_tx
 from ufo.indexing import OWNER_KIND_MEMORY_ITEM, OWNER_KIND_PAGE, Chunk, Hit, TextChunker
 from ufo.schema import tables
+from ufo.sdk.audience import conversation_audience
 from ufo.sources.sync import PageChange
 from ufo.subjects import SHARED_SUBJECT, member_subject
 from ufo.workspace import ws
@@ -270,8 +271,8 @@ async def test_untail_leg_respects_subject_scoping(db: None) -> None:
     alice, bob = uuid4(), uuid4()
     store = _store(StubEmbed(vec((0, 1.0))), workspace_id)
     await store.commit(MemoryWrite(subject=member_subject(alice), body="alices locker code is 77"))
-    assert await store.recall("locker code", recall_subjects(bob), 10) == ()
-    mine = await store.recall("locker code", recall_subjects(alice), 10)
+    assert await store.recall("locker code", recall_subjects(conversation_audience(bob)), 10) == ()
+    mine = await store.recall("locker code", recall_subjects(conversation_audience(alice)), 10)
     assert len(mine) == 1 and "77" in mine[0].body
 
 
@@ -283,12 +284,12 @@ async def test_recall_returns_items_scoped_to_subject(db: None) -> None:
     await _seed_item(workspace_id, SHARED_SUBJECT, "the office wifi password is maple", probe)
 
     mine = await _store(StubEmbed(probe), workspace_id).recall(
-        "seat and wifi", recall_subjects(member), 10
+        "seat and wifi", recall_subjects(conversation_audience(member)), 10
     )
     assert {item.subject for item in mine} == {member_subject(member), SHARED_SUBJECT}
 
     theirs = await _store(StubEmbed(probe), workspace_id).recall(
-        "seat and wifi", recall_subjects(uuid4()), 10
+        "seat and wifi", recall_subjects(conversation_audience(uuid4())), 10
     )
     assert [item.subject for item in theirs] == [SHARED_SUBJECT]
 

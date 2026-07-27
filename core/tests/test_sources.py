@@ -13,6 +13,7 @@ from ufo_ext_embed_openai import EMBED_DIM
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.store import MemoryStore, PageIndexer, mem_page, recall_subjects
 
+from ufo.audience import conversation_audience
 from ufo.blob import FilesystemBlobStore
 from ufo.config import SourceConfig, SourceEntry
 from ufo.db import workspace_tx
@@ -245,7 +246,7 @@ def _context(memory: MemoryStore, member_id: UUID | None, blob_root: Path) -> To
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=_unavailable_spawn,
         speaker_member_id=member_id,
-        audience_member_id=member_id,
+        audience=conversation_audience(member_id),
         artifact_token_secret="",
         ext=ext,
     )
@@ -760,7 +761,9 @@ async def test_shared_page_scoping_excludes_a_member_only_search(
     )
     assert member_only == ()
 
-    with_shared = await service.search_sources("expense reports due", recall_subjects(uuid4()), 8)
+    with_shared = await service.search_sources(
+        "expense reports due", recall_subjects(conversation_audience(uuid4())), 8
+    )
     assert len(with_shared) == 1
 
 
@@ -824,9 +827,16 @@ async def test_member_scoped_page_is_invisible_to_another_member(
             )
         )
 
-    mine = await service.search_sources("onboarding checklist", recall_subjects(alice), 8)
+    mine = await service.search_sources(
+        "onboarding checklist", recall_subjects(conversation_audience(alice)), 8
+    )
     assert len(mine) == 1 and mine[0].page_id == page_id
-    assert await service.search_sources("onboarding checklist", recall_subjects(bob), 8) == ()
+    assert (
+        await service.search_sources(
+            "onboarding checklist", recall_subjects(conversation_audience(bob)), 8
+        )
+        == ()
+    )
 
 
 async def test_a_failing_source_is_isolated_and_released(

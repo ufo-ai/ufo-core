@@ -19,6 +19,7 @@ import pytest
 from cryptography.fernet import Fernet
 from fastapi import FastAPI
 
+from ufo.audience import conversation_audience
 from ufo.blob import FilesystemBlobStore
 from ufo.config import (
     DEFAULT_CDP_PROVIDER,
@@ -128,7 +129,7 @@ def _check_tools(manifest: Manifest, store: CredentialStore) -> None:
     )
     if not declared:
         return
-    tools, ext_by_tool = turn_tools((manifest,), store)
+    tools, ext_by_tool = turn_tools((manifest,), store, audience=conversation_audience(None))
     registry = ToolRegistry(tools)
     for tool in declared:
         assert registry.get(tool.name).name == tool.name
@@ -251,7 +252,7 @@ def _check_routes(manifest: Manifest, store: CredentialStore) -> None:
 def _check_hooks(manifest: Manifest, store: CredentialStore) -> None:
     if not manifest.hooks:
         return
-    chain = turn_hooks((manifest,), store)
+    chain = turn_hooks((manifest,), store, audience=conversation_audience(None))
     for spec in manifest.hooks:
         if spec.event == "page_change":
             assert "page_change" not in chain.hooks

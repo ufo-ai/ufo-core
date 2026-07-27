@@ -59,6 +59,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
 from ufo.sdk.accounting import UsageExport, metered_workspaces
+from ufo.sdk.audience import conversation_audience
 from ufo.sdk.context import ExtensionContext
 from ufo.sdk.jobs import JobSpec
 from ufo.sdk.manifest import CredentialSlot, Manifest, PromptSection
@@ -550,7 +551,7 @@ async def _owner_billing(ctx: ToolContext) -> ExtensionContext:
     cannot even cause a Stripe write."""
     if ctx.speaker_member_id is None:
         raise ValueError("billing requires a speaking member")
-    if ctx.audience_member_id != ctx.speaker_member_id:
+    if ctx.audience != conversation_audience(ctx.speaker_member_id):
         raise ValueError("billing requires the speaker's private conversation")
     if not await ctx.speaker_is_owner():
         raise ValueError("only the workspace owner can manage billing")

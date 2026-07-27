@@ -33,6 +33,7 @@ from ufo.models.catalog import CORE_PRICING
 from ufo.models.interface import ModelClient, ModelRequest, TextDelta
 from ufo.schema import tables
 from ufo.schema.records import WRITEBACK_PENDING, Agent, Turn, Usage
+from ufo.sdk.audience import conversation_audience
 from ufo.sources.sync import PageChange
 from ufo.surfaces.admission import Admission, AdmissionInvoker
 from ufo.tools.context import SpawnResult, ToolContext
@@ -145,7 +146,7 @@ def _tool_ctx(workspace_id: UUID, conversation_id: UUID, agent_id: UUID) -> Tool
         agent=Agent(prompt="p", model=BILLED_MODEL),
         spawn=_unavailable_spawn,
         speaker_member_id=None,
-        audience_member_id=None,
+        audience=conversation_audience(None),
         artifact_token_secret="",
         ext=context_for(NAME, frozenset()),
     )

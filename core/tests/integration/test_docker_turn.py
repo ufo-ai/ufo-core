@@ -17,6 +17,7 @@ import pytest
 import sqlalchemy as sa
 from ufo_ext_docker import DockerCarrier
 
+from ufo.audience import conversation_audience
 from ufo.blob import FilesystemBlobStore
 from ufo.connectors import ConnectorRegistry
 from ufo.db import workspace_tx
@@ -193,7 +194,7 @@ async def test_turn_execs_bash_in_a_live_container(
         hooks=HookChain(),
         blob=blob,
         spawn=_unavailable_spawn,
-        audience_member_id=None,
+        audience=conversation_audience(None),
         artifact_token_secret="",
         grants=None,
     )

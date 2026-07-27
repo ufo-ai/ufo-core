@@ -40,6 +40,7 @@ from ufo.models.registry import ModelRegistry, model_registry
 from ufo.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
 from ufo.schema import tables
 from ufo.schema.records import Agent, TerminalFrame, Turn, Usage
+from ufo.sdk.audience import SHARED_AUDIENCE, Audience, conversation_audience
 from ufo.seats import OwnerSeatRevocation, SeatLimitReached
 from ufo.surfaces.admission import Admission
 from ufo.tools.context import SpawnResult, ToolContext
@@ -528,9 +529,13 @@ async def _seat_seed(limit: int | None = 2) -> tuple[UUID, UUID, UUID]:
     return workspace_id, owner_id, joiner_id
 
 
-def _seat_tools() -> tuple[dict[str, ToolDef], dict[str, ExtensionContext]]:
+def _seat_tools(
+    audience: Audience = SHARED_AUDIENCE,
+) -> tuple[dict[str, ToolDef], dict[str, ExtensionContext]]:
     declared, ext_by_tool = turn_tools(
-        (metronome.manifest(),), CredentialStore(fernet=Fernet(Fernet.generate_key()))
+        (metronome.manifest(),),
+        CredentialStore(fernet=Fernet(Fernet.generate_key())),
+        audience=audience,
     )
     return {tool.name: tool for tool in declared}, ext_by_tool
 
@@ -540,7 +545,7 @@ def _tool_context(
     ext: ExtensionContext,
     tmp_path: Path,
     member_id: UUID | None,
-    audience_member_id: UUID | None,
+    audience: Audience,
 ) -> ToolContext:
     return ToolContext(
         sandbox=SandboxSession(
@@ -561,7 +566,7 @@ def _tool_context(
         agent=Agent(prompt="p", model=MODEL),
         spawn=_unavailable_spawn,
         speaker_member_id=member_id,
-        audience_member_id=audience_member_id,
+        audience=audience,
         artifact_token_secret="",
         ext=ext,
     )
@@ -570,9 +575,10 @@ def _tool_context(
 async def _run_tool(
     workspace_id: UUID, tmp_path: Path, member_id: UUID | None, name: str, **args: object
 ) -> dict[str, object]:
-    registry, ext_by_tool = _seat_tools()
+    audience = conversation_audience(member_id)
+    registry, ext_by_tool = _seat_tools(audience)
     tool = registry[name]
-    ctx = _tool_context(workspace_id, ext_by_tool[name], tmp_path, member_id, member_id)
+    ctx = _tool_context(workspace_id, ext_by_tool[name], tmp_path, member_id, audience)
     with ws(workspace_id):
         result = await tool.handler(ctx, tool.input_model.model_validate(args))
     return json.loads(result.content[0].text)
@@ -1262,9 +1268,11 @@ async def _billing_seed() -> tuple[UUID, UUID, UUID, UUID]:
     return workspace_id, owner_id, mate_id, conversation_id
 
 
-def _billing_tool() -> tuple[ToolDef, ExtensionContext]:
+def _billing_tool(audience: Audience) -> tuple[ToolDef, ExtensionContext]:
     declared, ext_by_tool = turn_tools(
-        (metronome.manifest(),), CredentialStore(fernet=Fernet(Fernet.generate_key()))
+        (metronome.manifest(),),
+        CredentialStore(fernet=Fernet(Fernet.generate_key())),
+        audience=audience,
     )
     tool = next(t for t in declared if t.name == metronome.MANAGE_BILLING_TOOL)
     return tool, ext_by_tool[metronome.MANAGE_BILLING_TOOL]
@@ -1274,10 +1282,11 @@ async def _manage_billing(
     workspace_id: UUID,
     tmp_path: Path,
     speaker: UUID | None,
-    audience: UUID | None,
+    disclosure_member_id: UUID | None,
     action: str,
 ) -> dict[str, object]:
-    tool, ext = _billing_tool()
+    audience = conversation_audience(disclosure_member_id)
+    tool, ext = _billing_tool(audience)
     ctx = _tool_context(workspace_id, ext, tmp_path, speaker, audience)
     with ws(workspace_id):
         result = await tool.handler(ctx, tool.input_model.model_validate({"action": action}))

@@ -27,6 +27,7 @@ from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.store import MemoryStore, PageIndexer
 
 from ufo.agent_scope import agent
+from ufo.audience import conversation_audience
 from ufo.bearer import mint_token
 from ufo.blob import FilesystemBlobStore
 from ufo.config import (
@@ -232,7 +233,7 @@ def _tool_context(workspace_id: UUID, ext: ExtensionContext, tmp_path: Path) -> 
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=_unavailable_spawn,
         speaker_member_id=None,
-        audience_member_id=None,
+        audience=conversation_audience(None),
         artifact_token_secret="",
         ext=ext,
     )
@@ -520,55 +521,20 @@ async def test_sample_search_provider_answers_a_query_and_fetches() -> None:
     assert page.text == sample.SAMPLE_FETCH_TEXT
 
 
-async def test_sample_memory_search_provider_is_scoped_to_the_conversation_member(
-    db: None,
-) -> None:
+async def test_sample_memory_search_provider_receives_the_exact_audience(db: None) -> None:
     workspace_id = await _workspace()
-    member_id, conversation_id, agent_id = uuid4(), uuid4(), uuid4()
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.member).values(
-                id=member_id,
-                workspace_id=workspace_id,
-                email="memory@example.com",
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-        await connection.execute(
-            sa.insert(tables.agent).values(
-                id=agent_id,
-                workspace_id=workspace_id,
-                name="assistant",
-                prompt="be brief",
-                model="claude-opus-4-8",
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-        await connection.execute(
-            sa.insert(tables.conversation).values(
-                id=conversation_id,
-                workspace_id=workspace_id,
-                agent_id=agent_id,
-                surface="cli",
-                queue_key="memory",
-                member_id=member_id,
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
+    audience = conversation_audience(uuid4())
     access = memory_search(
         (_sample_manifest(),), _credential_store(), name=sample.MEMORY_SEARCH_PROVIDER
     )
     assert access is not None
     with ws(workspace_id):
-        matches = await access.search(conversation_id, ("customer history",))
+        matches = await access.search(audience, ("customer history",))
         recorded = await ScopedStore(extension=sample.NAME).get(sample.MEMORY_SEARCH_KEY)
     assert matches[0].text == sample.SAMPLE_MEMORY_TEXT
     assert recorded == {
         "queries": ["customer history"],
-        "member_id": str(member_id),
+        "audience": str(audience),
         "start": None,
         "end": None,
     }
@@ -711,7 +677,9 @@ async def test_subagent_tool_grant_and_default_widen_a_child_beyond_its_named_to
     Resolved here exactly as the turn loop does (own names plus grants, plus any subagent-default
     tool) over the real tool pool."""
     manifest = _sample_manifest()
-    all_tools, _ = turn_tools((manifest,), _credential_store())
+    all_tools, _ = turn_tools(
+        (manifest,), _credential_store(), audience=conversation_audience(None)
+    )
     profile = SubagentRegistry(turn_subagents((manifest,))).get(sample.SUBAGENT_NAME)
     grants = turn_subagent_grants((manifest,))
     assert grants[sample.SUBAGENT_NAME] == frozenset({sample.NOTE_TOOL_NAME})
@@ -753,7 +721,9 @@ async def test_sample_model_provider_is_selected_priced_and_streams(tmp_path: Pa
 async def test_tool_dispatches_with_its_scoped_context(db: None, tmp_path: Path) -> None:
     workspace_id = await _workspace()
     manifest = _sample_manifest()
-    tools, ext_by_tool = turn_tools((manifest,), _credential_store())
+    tools, ext_by_tool = turn_tools(
+        (manifest,), _credential_store(), audience=conversation_audience(None)
+    )
     tool = next(tool for tool in tools if tool.name == sample.TOOL_NAME)
     context = ToolContext(
         sandbox=SandboxSession(
@@ -774,7 +744,7 @@ async def test_tool_dispatches_with_its_scoped_context(db: None, tmp_path: Path)
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=_unavailable_spawn,
         speaker_member_id=None,
-        audience_member_id=None,
+        audience=conversation_audience(None),
         artifact_token_secret="",
         ext=ext_by_tool[tool.name],
     )
@@ -793,7 +763,9 @@ async def test_extension_owns_a_table_through_its_own_migration(db: None, tmp_pa
     extension owns a real table and reaches only its own workspace's rows."""
     manifest = _sample_manifest()
     first, second = await _workspace(), await _workspace()
-    tools, ext_by_tool = turn_tools((manifest,), _credential_store())
+    tools, ext_by_tool = turn_tools(
+        (manifest,), _credential_store(), audience=conversation_audience(None)
+    )
     note = next(tool for tool in tools if tool.name == sample.NOTE_TOOL_NAME)
 
     with ws(first):
@@ -804,7 +776,9 @@ async def test_extension_owns_a_table_through_its_own_migration(db: None, tmp_pa
         assert write.is_error is False
         assert write.content[0].text == "first note"
 
-    _, other_ext = turn_tools((manifest,), _credential_store())
+    _, other_ext = turn_tools(
+        (manifest,), _credential_store(), audience=conversation_audience(None)
+    )
     with ws(second):
         await note.handler(
             _tool_context(second, other_ext[note.name], tmp_path),
@@ -844,7 +818,9 @@ async def test_connector_execute_tool_resolves_the_bound_account_without_the_san
             shared=False,
         )
     manifest = _sample_manifest()
-    tools, ext_by_tool = turn_tools((manifest,), _credential_store())
+    tools, ext_by_tool = turn_tools(
+        (manifest,), _credential_store(), audience=conversation_audience(member_id)
+    )
     tool = next(tool for tool in tools if tool.name == sample.CONNECTOR_EXECUTE_TOOL_NAME)
     context = ToolContext(
         sandbox=SandboxSession(
@@ -865,7 +841,7 @@ async def test_connector_execute_tool_resolves_the_bound_account_without_the_san
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=_unavailable_spawn,
         speaker_member_id=member_id,
-        audience_member_id=member_id,
+        audience=conversation_audience(member_id),
         artifact_token_secret="",
         grants=grants,
         ext=ext_by_tool[tool.name],
@@ -899,7 +875,9 @@ async def test_context_confines_the_credential_handle(db: None) -> None:
     is built for a job/route (`context_for`) or a tool (`turn_tools`)."""
     manifest = _sample_manifest()
     declared = frozenset(slot.name for slot in manifest.credentials)
-    _, ext_by_tool = turn_tools((manifest,), _credential_store())
+    _, ext_by_tool = turn_tools(
+        (manifest,), _credential_store(), audience=conversation_audience(None)
+    )
     for context in (
         context_for(manifest.name, declared),
         ext_by_tool[sample.TOOL_NAME],

@@ -28,6 +28,7 @@ from pydantic import BaseModel, ConfigDict
 
 from ufo.agents import AGENT_OBJECT
 from ufo.artifacts import ARTIFACT_OBJECT
+from ufo.audience import SHARED_AUDIENCE, Audience
 from ufo.connectors import CliCredential
 from ufo.conversations import CONVERSATION_OBJECT
 from ufo.credential_kind import (
@@ -387,6 +388,8 @@ def turn_tools(
     credential_store: CredentialStore | None,
     index: IndexBackend | None = None,
     embed: EmbedClient | None = None,
+    *,
+    audience: Audience,
 ) -> tuple[tuple[ToolDef, ...], dict[str, ExtensionContext]]:
     """The full tool set a turn dispatches against — core builtins plus every extension's declared
     tools and connector tools — and, per extension tool, the workspace-scoped ExtensionContext its
@@ -420,6 +423,7 @@ def turn_tools(
             index,
             embed,
             surfaces=frozenset(surface.name for surface in manifest.surfaces),
+            audience=audience,
         )
         for tool in declared_tools:
             tools.append(tool)
@@ -685,6 +689,12 @@ class HookChain:
     page-change runner in the jobs role, never the turn chain."""
 
     hooks: dict[HookEvent, tuple[BoundHook, ...]] = field(default_factory=dict)
+    audience: Audience = SHARED_AUDIENCE
+
+    def __post_init__(self) -> None:
+        bound = tuple(hook for hooks in self.hooks.values() for hook in hooks)
+        if any(hook.ext.audience != self.audience for hook in bound):
+            raise ValueError("hook and chain audiences differ")
 
     async def fire(
         self,
@@ -692,7 +702,6 @@ class HookChain:
         payload: HookPayload,
         turn: Turn | None,
         agent: Agent | None,
-        audience_member_id: UUID | None,
         speaker_member_id: UUID | None,
     ) -> HookResolution:
         """Run every hook bound to `event` in order and fold their outcomes. Any Deny denies and
@@ -708,6 +717,7 @@ class HookChain:
         output = payload.output if isinstance(payload, PostToolUse) else None
         injected: list[str] = []
         for hook in bound:
+            assert self.audience is not None
             current: HookPayload
             match payload:
                 case PreToolUse() | PostToolUse() | PostToolUseFailure() if hook.spec.tools and (
@@ -727,7 +737,7 @@ class HookChain:
                 payload=current,
                 turn=turn,
                 agent=agent,
-                audience_member_id=audience_member_id,
+                audience=self.audience,
                 speaker_member_id=speaker_member_id,
             )
             try:
@@ -769,6 +779,8 @@ def turn_hooks(
     credential_store: CredentialStore | None,
     index: IndexBackend | None = None,
     embed: EmbedClient | None = None,
+    *,
+    audience: Audience,
 ) -> HookChain:
     """The turn's reactive hook chain — every declared turn-lifecycle hook bound to its extension's
     workspace-scoped ExtensionContext (the same handle its tools and jobs receive), grouped by
@@ -785,9 +797,12 @@ def turn_hooks(
                 f"extension {manifest.name!r} declares hooks but no credential key is set"
             )
         declared = frozenset(slot.name for slot in manifest.credentials)
-        context = context_for(manifest.name, declared, index, embed)
+        context = context_for(manifest.name, declared, index, embed, audience=audience)
         for spec in manifest.hooks:
             if spec.event == "page_change":
                 continue
             grouped[spec.event].append(BoundHook(spec=spec, ext=context))
-    return HookChain(hooks={event: tuple(bound) for event, bound in grouped.items()})
+    return HookChain(
+        hooks={event: tuple(bound) for event, bound in grouped.items()},
+        audience=audience,
+    )

@@ -21,6 +21,7 @@ from pydantic import BaseModel
 from ufo_ext_docker import DockerCarrier, _docker
 
 from ufo.artifact_token import verify_artifact_token
+from ufo.audience import conversation_audience
 from ufo.blob import FilesystemBlobStore, S3BlobStore
 from ufo.connectors import ConnectorRegistry
 from ufo.db import workspace_tx
@@ -158,7 +159,7 @@ def file_ctx(
         agent=Agent(prompt="be terse", model="claude-opus-4-8"),
         spawn=_unavailable_spawn,
         speaker_member_id=None,
-        audience_member_id=None,
+        audience=conversation_audience(None),
         artifact_token_secret=ARTIFACT_SECRET,
     )
     yield ctx, workspace
@@ -686,7 +687,7 @@ def _dispatch_engine(ctx: ToolContext, tools: ToolRegistry) -> TurnEngine:
         hooks=HookChain(),
         blob=ctx.blob,
         spawn=ctx.spawn,
-        audience_member_id=ctx.audience_member_id,
+        audience=ctx.audience,
         artifact_token_secret=ctx.artifact_token_secret,
         grants=None,
     )

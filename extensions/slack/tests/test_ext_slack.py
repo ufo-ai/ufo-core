@@ -65,6 +65,7 @@ from ufo.schema.records import (
     QuestionOption,
     TerminalFrame,
 )
+from ufo.sdk.audience import conversation_audience
 from ufo.serve import _mount_shared_surfaces
 from ufo.workspace import ws
 
@@ -246,7 +247,7 @@ async def _store(workspace_id: UUID) -> CredentialStore:
 async def _register_slack(
     store: CredentialStore, workspace_id: UUID, team_id: str = TEAM_ID
 ) -> None:
-    _, contexts = turn_tools((slack_manifest(),), store)
+    _, contexts = turn_tools((slack_manifest(),), store, audience=conversation_audience(None))
     with ws(workspace_id):
         await contexts["slack_connect"].installations.bind(
             slack.SURFACE_SLACK, slack.slack_installation_id(team_id)

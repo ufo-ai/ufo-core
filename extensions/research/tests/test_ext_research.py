@@ -26,6 +26,7 @@ from ufo.ext.loader import skill_registry
 from ufo.loop.prompts.render import render_system_prompt
 from ufo.loop.subagents import subagent_system_prompt
 from ufo.schema.records import Agent, Turn
+from ufo.sdk.audience import conversation_audience
 from ufo.search import (
     FetchedPage,
     FetchRequest,
@@ -111,7 +112,7 @@ def _context(provider: SearchProvider | None) -> ToolContext:
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=_no_spawn,
         speaker_member_id=None,
-        audience_member_id=None,
+        audience=conversation_audience(None),
         artifact_token_secret="",
         search_provider=provider,
     )

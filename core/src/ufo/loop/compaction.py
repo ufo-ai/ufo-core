@@ -110,7 +110,6 @@ class Compaction:
     loaded_skills: LoadedSkills = field(default_factory=LoadedSkills)
     turn: Turn | None = None
     agent: Agent | None = None
-    audience_member_id: UUID | None = None
     speaker_member_id: UUID | None = None
 
     async def maybe_compact(
@@ -155,7 +154,6 @@ class Compaction:
             PreCompact(reason=reason, before_tokens=before_tokens),
             self.turn,
             self.agent,
-            self.audience_member_id,
             self.speaker_member_id,
         )
         index = await self._next_index()
@@ -172,7 +170,6 @@ class Compaction:
             ),
             self.turn,
             self.agent,
-            self.audience_member_id,
             self.speaker_member_id,
         )
         return after, usages

@@ -24,6 +24,7 @@ from ufo.db import workspace_tx
 from ufo.indexing import TextChunker
 from ufo.jobs import CORE_EXTENSION, JobRunner, bindings_from
 from ufo.schema import tables
+from ufo.sdk.audience import conversation_audience
 from ufo.subjects import member_subject
 from ufo.workspace import ws
 
@@ -161,8 +162,8 @@ async def test_member_memory_is_invisible_to_another_member(db: None) -> None:
     with ws(workspace_id):
         await indexer.run()
 
-    assert await store.recall("window seat", recall_subjects(bob), 5) == ()
-    mine = await store.recall("window seat", recall_subjects(alice), 5)
+    assert await store.recall("window seat", recall_subjects(conversation_audience(bob)), 5) == ()
+    mine = await store.recall("window seat", recall_subjects(conversation_audience(alice)), 5)
     assert len(mine) == 1 and "alice" in mine[0].body
 
 

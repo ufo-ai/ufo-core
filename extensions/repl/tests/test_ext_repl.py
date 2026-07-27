@@ -21,6 +21,7 @@ from ufo.sandbox.session import (
     SandboxSpec,
 )
 from ufo.schema.records import Agent, Turn
+from ufo.sdk.audience import conversation_audience
 from ufo.tools.context import SpawnResult, ToolContext
 
 
@@ -103,7 +104,7 @@ def _context(sandbox: FakeSandbox | SandboxSession, tmp_path: Path) -> ToolConte
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=_unavailable_spawn,
         speaker_member_id=None,
-        audience_member_id=None,
+        audience=conversation_audience(None),
         artifact_token_secret="",
     )
 

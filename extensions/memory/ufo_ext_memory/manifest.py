@@ -21,8 +21,9 @@ from pathlib import Path
 from uuid import UUID
 
 import sqlalchemy as sa
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
+from ufo.sdk.audience import Audience
 from ufo.sdk.context import ExtensionContext
 from ufo.sdk.index import TextChunker
 from ufo.sdk.jobs import JobSpec, owner_candidates
@@ -41,7 +42,6 @@ from ufo.sdk.memory import DEFAULT_MEMORY_SEARCH_PROVIDER, MemoryMatch
 from ufo.sdk.o11y import log
 from ufo.sdk.objects import ObjectRef
 from ufo.sdk.operator import resolve_operator_workspace
-from ufo.sdk.sources import SHARED_SUBJECT, member_subject
 from ufo.sdk.surfaces import SurfaceSpec
 from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 from ufo_ext_memory.condenser import (
@@ -114,6 +114,8 @@ class MemorySearchInput(BaseModel):
 
 
 class MemoryUpdateInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     body: str = Field(
         description="A durable fact to remember about the user, written from their perspective "
         "(e.g. 'I prefer concise summaries'). Store persistent facts — role, company, team, "
@@ -132,11 +134,6 @@ class MemoryUpdateInput(BaseModel):
         ge=1,
         le=MAX_CONFIDENCE,
         description="Confidence 1-10 in the fact; scales its recall score.",
-    )
-    shared: bool = Field(
-        default=False,
-        description="Store as shared workspace memory rather than the speaking member's private "
-        "memory.",
     )
     source_ref: str | None = Field(
         default=None, description="Optional reference to the source this fact came from."
@@ -170,14 +167,14 @@ class MemorySearchService:
     async def search(
         self,
         queries: tuple[str, ...],
-        member_id: UUID | None,
+        audience: Audience,
         start: datetime | None = None,
         end: datetime | None = None,
     ) -> tuple[MemoryMatch, ...]:
         if not 1 <= len(queries) <= MAX_MEMORY_QUERIES:
             raise ValueError(f"memory search requires 1-{MAX_MEMORY_QUERIES} queries")
         store = store_for(self.ctx)
-        subjects = recall_subjects(member_id)
+        subjects = recall_subjects(audience)
         recall_batch = asyncio.gather(
             *(store.recall(query, subjects, MEMORY_SEARCH_LIMIT, start, end) for query in queries)
         )
@@ -239,9 +236,7 @@ async def memory_search_handler(ctx: ToolContext, args: MemorySearchInput) -> To
         raise RuntimeError("memory_search dispatched without its ExtensionContext")
     start = _date_bound(args.start_date, end=False)
     end = _date_bound(args.end_date, end=True)
-    matches = await MemorySearchService(ctx.ext).search(
-        args.queries, ctx.audience_member_id, start, end
-    )
+    matches = await MemorySearchService(ctx.ext).search(args.queries, ctx.audience, start, end)
     if not matches:
         return ToolResult(content=(TextContent(text="No matching memory."),))
     return ToolResult(
@@ -252,11 +247,7 @@ async def memory_search_handler(ctx: ToolContext, args: MemorySearchInput) -> To
 async def memory_update_handler(ctx: ToolContext, args: MemoryUpdateInput) -> ToolResult:
     if ctx.ext is None:
         raise RuntimeError("memory_update dispatched without its ExtensionContext")
-    subject = (
-        SHARED_SUBJECT
-        if args.shared or ctx.audience_member_id is None
-        else member_subject(ctx.audience_member_id)
-    )
+    subject = str(ctx.audience)
     await store_for(ctx.ext).commit(
         MemoryWrite(
             subject=subject,
@@ -277,7 +268,7 @@ async def recall_hook(ctx: HookContext) -> HookOutcome:
     on any failure or empty result rather than ever failing the turn."""
     if not isinstance(ctx.payload, UserPromptSubmit):
         return None
-    subjects = recall_subjects(ctx.audience_member_id)
+    subjects = recall_subjects(ctx.audience)
     recalled: tuple[Recalled, ...] = ()
     error_class: str | None = None
     try:
@@ -406,8 +397,9 @@ def manifest() -> Manifest:
                 name="memory_update",
                 description=(
                     "Record a durable memory item so later turns and conversations can recall it. "
-                    "Writes to the current member's memory by default, or shared memory when "
-                    "`shared` is true. Use proactively when learning persistent facts — name, "
+                    "Writes only to the current conversation audience: a private conversation "
+                    "writes that member's memory; a shared conversation writes shared memory. "
+                    "Use proactively when learning persistent facts — name, "
                     "role, company, team, colleagues, preferences, projects, tools, key people, "
                     "communication style. Set `memory_kind` (fact/preference/decision/event/task) "
                     "so recency decay matches how fast the fact goes stale, and `confidence` "

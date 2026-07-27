@@ -45,6 +45,7 @@ from ufo.grants import ConnectHandoff, GrantStore, install_connect_flow
 from ufo.sandbox.proxy.rules import connector_transfer_hosts
 from ufo.schema import tables
 from ufo.schema.records import Agent, ConnectRequest, TerminalFrame, Turn
+from ufo.sdk.audience import conversation_audience
 from ufo.serve import _connect_flow, _connector_registry
 from ufo.tools.builtins import ConnectAccountInput, connect_account_handler
 from ufo.tools.context import ToolContext
@@ -474,7 +475,9 @@ async def test_connect_binds_a_grant_and_call_external_tool_executes_via_pipedre
     assert (row.host, row.account_id) == (PROVIDER_HOST, PIPEDREAM_ACCOUNT)
 
     tools, ext_by_tool = turn_tools(
-        (connectors_manifest.manifest(), pipedream_manifest.manifest()), credentials
+        (connectors_manifest.manifest(), pipedream_manifest.manifest()),
+        credentials,
+        audience=conversation_audience(None),
     )
     tool = next(t for t in tools if t.name == "call_external_tool")
     ctx = _ctx(
@@ -874,7 +877,7 @@ def _turn_context(
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=None,
         speaker_member_id=member_id,
-        audience_member_id=member_id,
+        audience=conversation_audience(member_id),
         artifact_token_secret="",
     )
 
@@ -905,7 +908,7 @@ def _ctx(
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=None,
         speaker_member_id=speaker_member_id,
-        audience_member_id=None,
+        audience=conversation_audience(None),
         artifact_token_secret="",
         grants=grants,
         ext=ext,

@@ -32,6 +32,7 @@ from ufo.db import current_workspace, workspace_tx
 from ufo.ext.loader import turn_tools
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
+from ufo.sdk.audience import conversation_audience
 from ufo.tools.context import ToolContext
 from ufo.workspace import init_workspace_credentials
 
@@ -141,7 +142,12 @@ def test_server_config_rejects_a_non_http_url() -> None:
 
 
 def test_turn_tools_registers_both_dynamic_mcp_tools() -> None:
-    tools, ext_by_tool = turn_tools((mcp.manifest(),), uuid4(), _credentials())
+    tools, ext_by_tool = turn_tools(
+        (mcp.manifest(),),
+        uuid4(),
+        _credentials(),
+        audience=conversation_audience(None),
+    )
     names = {tool.name for tool in tools}
     assert {"list_mcp_tools", "call_mcp_tool"} <= names
     assert {"list_mcp_tools", "call_mcp_tool"} <= set(ext_by_tool)
@@ -270,7 +276,7 @@ async def _tool_context() -> ToolContext:
     await store.put(workspace_id, mcp.MCP_SERVERS_SLOT, config.model_dump_json())
     init_workspace_credentials(store)
     current_workspace.set(workspace_id)
-    _, ext_by_tool = turn_tools((mcp.manifest(),), store)
+    _, ext_by_tool = turn_tools((mcp.manifest(),), store, audience=conversation_audience(None))
     return ToolContext(
         sandbox=None,
         blob=None,
@@ -287,7 +293,7 @@ async def _tool_context() -> ToolContext:
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=None,
         speaker_member_id=None,
-        audience_member_id=None,
+        audience=conversation_audience(None),
         artifact_token_secret="",
         ext=ext_by_tool["call_mcp_tool"],
     )

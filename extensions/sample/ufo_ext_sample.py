@@ -20,6 +20,7 @@ from uuid import UUID
 import sqlalchemy as sa
 from pydantic import BaseModel, ConfigDict, Field
 
+from ufo.sdk.audience import Audience
 from ufo.sdk.authproxy import AuthProxySpec, Credential
 from ufo.sdk.bearer import workspace_claim
 from ufo.sdk.browser import CdpEndpoint, CdpLease
@@ -921,7 +922,7 @@ class SampleMemorySearch:
     async def search(
         self,
         queries: tuple[str, ...],
-        member_id: UUID | None,
+        audience: Audience,
         start: datetime | None = None,
         end: datetime | None = None,
     ) -> tuple[MemoryMatch, ...]:
@@ -929,7 +930,7 @@ class SampleMemorySearch:
             MEMORY_SEARCH_KEY,
             {
                 "queries": list(queries),
-                "member_id": None if member_id is None else str(member_id),
+                "audience": str(audience),
                 "start": None if start is None else start.isoformat(),
                 "end": None if end is None else end.isoformat(),
             },

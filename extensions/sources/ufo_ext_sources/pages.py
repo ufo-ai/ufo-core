@@ -30,7 +30,7 @@ from ufo.sdk.objects import (
     VerbNotSupported,
     object_page,
 )
-from ufo.sdk.sources import SHARED_SUBJECT, ConnectorSourceConfig, member_subject
+from ufo.sdk.sources import SHARED_SUBJECT, ConnectorSourceConfig
 from ufo.sdk.tools import ToolContext
 from ufo_ext_sources.registry import CONNECTORS, SOURCE_KIND, binding_name
 
@@ -62,15 +62,6 @@ def _require_ext(ctx: ToolContext) -> ExtensionContext:
     if ctx.ext is None:
         raise RuntimeError("page objects dispatched without their ExtensionContext")
     return ctx.ext
-
-
-def _audience_subjects(ctx: ToolContext) -> frozenset[str]:
-    """The visibility subjects the caller may read: the shared space plus, when the turn has an
-    audience member, that member's private space — mirroring the memory readers so
-    a member never reads another member's private page."""
-    if ctx.audience_member_id is None:
-        return frozenset({SHARED_SUBJECT})
-    return frozenset({SHARED_SUBJECT, member_subject(ctx.audience_member_id)})
 
 
 def _page_timestamp(provider_value: str | None, row_value: datetime) -> str:
@@ -237,7 +228,7 @@ class PageObjects:
                 updated_at=record.updated_at,
                 source_name=source_names.get(record.source_id),
             )
-            for record in await ext.source_pages(_audience_subjects(ctx))
+            for record in await ext.source_pages(frozenset({SHARED_SUBJECT, str(ctx.audience)}))
         )
 
 

@@ -82,7 +82,7 @@ class MemoryObjects:
                         )
                         .where(
                             memory_item.c.workspace_id == ext.store.workspace_id,
-                            memory_item.c.subject.in_(recall_subjects(ctx.audience_member_id)),
+                            memory_item.c.subject.in_(recall_subjects(ctx.audience)),
                             memory_item.c.superseded_by.is_(None),
                         )
                         .order_by(memory_item.c.created_at.desc(), memory_item.c.id)
@@ -121,7 +121,7 @@ class MemoryObjects:
                         sa.select(memory_item).where(
                             memory_item.c.workspace_id == ext.store.workspace_id,
                             memory_item.c.id == item_id,
-                            memory_item.c.subject.in_(recall_subjects(ctx.audience_member_id)),
+                            memory_item.c.subject.in_(recall_subjects(ctx.audience)),
                         )
                     )
                 )

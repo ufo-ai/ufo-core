@@ -91,7 +91,7 @@ class ToolDef:
 class ToolContext(Protocol):    # capability-scoped view a handler gets
     sandbox: SandboxSession; memory: MemoryService; blob: BlobStore
     turn: Turn; agent: AgentRuntime
-    speaker_member_id: UUID | None; audience_member_id: UUID | None
+    speaker_member_id: UUID | None; audience: Audience
     async def ask_user(self, question: Question) -> Answer: ...
     async def spawn(self, profile: str, input: BaseModel, background: bool = False) -> SpawnResult: ...
 class ToolResult(BaseModel):    content: tuple[ContentBlock, ...]; is_error: bool = False

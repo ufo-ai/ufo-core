@@ -35,6 +35,7 @@ from evals.issue_recall.corpus import (
 from evals.issue_recall.materialize import Materializer
 from evals.issue_recall.runner import load_issue_recall
 from evals.issue_recall.state import CorpusAttestor
+from ufo.audience import conversation_audience
 from ufo.blob import FilesystemBlobStore
 from ufo.db import apply_migrations, dispose_db, init_db, workspace_tx
 from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
@@ -176,10 +177,14 @@ async def test_materializes_the_fixture_into_a_recallable_attested_corpus(
             readiness.workspace_id,
         )
         recalled = await store.recall(
-            FILINGS[0].symptom, recall_subjects(None), MAX_RECALLED_MEMORY_IDS
+            FILINGS[0].symptom,
+            recall_subjects(conversation_audience(None)),
+            MAX_RECALLED_MEMORY_IDS,
         )
         sources = await store.search_sources(
-            FILINGS[0].symptom, recall_subjects(None), MAX_RECALLED_MEMORY_IDS
+            FILINGS[0].symptom,
+            recall_subjects(conversation_audience(None)),
+            MAX_RECALLED_MEMORY_IDS,
         )
         async with workspace_tx() as connection:
             subjects = (

@@ -514,12 +514,12 @@ def validate_ext_tools(manifests: tuple[Manifest, ...], credential_store: Creden
 ##### `HookChain.fire`  (lines 691–766)
 
 ```
-async def fire(self, event: HookEvent, payload: HookPayload, turn: Turn | None, agent: Agent | None, audience_member_id: UUID | None, speaker_member_id: UUID | None) -> HookResolution
+async def fire(self, event: HookEvent, payload: HookPayload, turn: Turn | None, agent: Agent | None, audience: Audience, speaker_member_id: UUID | None) -> HookResolution
 ```
 
 **Purpose**: Runs all hooks for one turn event and combines their results. Hooks are extension callbacks that can observe, block, modify, or add context at specific points in a turn.
 
-**Data flow**: It receives an event, event payload, optional turn and agent records, and optional speaker/audience IDs. It selects hooks for the event, filters tool-specific hooks, gives each hook the latest payload in a HookContext, enforces a timeout, checks that the hook returned an allowed outcome, and folds outcomes into one HookResolution. A Deny stops the chain; modifications flow into later hooks; injected text is concatenated.
+**Data flow**: It receives an event, event payload, optional turn and agent records, the exact conversation audience, and optional speaker ID. It selects hooks for the event, filters tool-specific hooks, gives each hook the latest payload in a HookContext, enforces a timeout, checks that the hook returned an allowed outcome, and folds outcomes into one HookResolution. A Deny stops the chain; modifications flow into later hooks; injected text is concatenated.
 
 **Call relations**: turn_hooks builds the HookChain that owns this method. During firing, it creates HookContext and HookResolution objects, uses dataclasses.replace to pass updated payloads forward, uses asyncio.timeout to limit hook runtime, and logs swallowed failures for non-gating events.
 

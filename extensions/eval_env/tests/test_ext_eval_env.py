@@ -40,6 +40,7 @@ from ufo.grants import Grant, GrantStore
 from ufo.loop.engine import MAX_TOOL_RESULT_CHARS, TOOL_RESULT_PREVIEW_CHARS
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
+from ufo.sdk.audience import conversation_audience
 from ufo.sdk.context import ScopedStore
 from ufo.tools.context import ToolContext
 from ufo.workspace import ws
@@ -88,7 +89,7 @@ def _ctx(workspace_id: UUID, grants: tuple[tuple[str, str], ...] = ALL_GRANTS) -
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=None,
         speaker_member_id=None,
-        audience_member_id=None,
+        audience=conversation_audience(None),
         artifact_token_secret="",
         grants=_Grants(grants),
         connectors=ConnectorRegistry(

@@ -27,6 +27,7 @@ from ufo.accounting import (
     mint_usage_exports,
     read_pending_usage_exports,
 )
+from ufo.audience import SHARED_AUDIENCE, Audience
 from ufo.blob import BlobNotFound, BlobStore
 from ufo.candidates import WorkspaceCandidates, owner_candidates
 from ufo.credentials import (
@@ -488,6 +489,7 @@ class PageRecord:
 class ExtensionContext:
     store: ScopedStore
     credentials: CredentialAccess
+    audience: Audience = SHARED_AUDIENCE
     installations: SurfaceInstallationAccess = field(
         default_factory=lambda: SurfaceInstallationAccess(frozenset())
     )
@@ -669,9 +671,9 @@ class ExtensionContext:
     async def source_pages(self, subjects: frozenset[str] | None = None) -> tuple[PageRecord, ...]:
         """This workspace's live (non-tombstoned) synced pages, optionally narrowed to a set of
         visibility subjects — the sanctioned read over the core `page` table, scoped by workspace
-        exactly as `sources()` is. A subject-scoped caller passes `{member_subject(audience),
-        shared}` so a member never reads another member's private page; the off-turn producer that
-        wants every page passes None. The body stays by reference in each record."""
+        exactly as `sources()` is. A subject-scoped caller passes `{audience, shared}` so a member
+        never reads another member's private page; the off-turn producer that wants every page
+        passes None. The body stays by reference in each record."""
         query = (
             sa.select(
                 tables.page.c.id,
@@ -819,6 +821,8 @@ def context_for(
     model_resolver: ModelResolver | None = None,
     schedule_invoker: ScheduleInvoker | None = None,
     surfaces: frozenset[str] = frozenset(),
+    *,
+    audience: Audience = SHARED_AUDIENCE,
 ) -> ExtensionContext:
     """The scoped handle a handler receives — no workspace passed: every accessor reads the ambient
     workspace the turn or job bound (`ws_current()`), so the one context object serves whichever
@@ -828,6 +832,7 @@ def context_for(
     return ExtensionContext(
         store=ScopedStore(extension=extension),
         credentials=CredentialAccess(declared=declared),
+        audience=audience,
         installations=SurfaceInstallationAccess(declared=surfaces),
         index=index,
         embed=embed,

@@ -50,6 +50,7 @@ from ufo.sandbox.session import (
     SandboxSpec,
 )
 from ufo.schema.records import Agent, Turn
+from ufo.sdk.audience import conversation_audience
 from ufo.tools.context import ToolContext
 
 OTHER_PROVIDER = "other_widgets"
@@ -108,7 +109,7 @@ def _ctx(
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=None,
         speaker_member_id=None,
-        audience_member_id=None,
+        audience=conversation_audience(None),
         artifact_token_secret="",
         grants=_Grants(accounts),
         connectors=registry,
@@ -122,7 +123,7 @@ def _payload(result) -> dict:
 
 def test_manifest_declares_the_dynamic_tools_and_prompt_section() -> None:
     manifest = connectors.manifest()
-    tools, _ = turn_tools((manifest,), None)
+    tools, _ = turn_tools((manifest,), None, audience=conversation_audience(None))
     names = {tool.name for tool in tools}
     assert {
         "list_external_tools",

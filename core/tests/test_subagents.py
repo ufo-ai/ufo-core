@@ -8,6 +8,7 @@ from dbos import DBOSClient
 from opentelemetry import trace
 from pydantic import BaseModel, ValidationError
 
+from ufo.audience import conversation_audience
 from ufo.config import Config
 from ufo.db import workspace_tx
 from ufo.ext.manifest import SUBAGENT_ROUND_LIMIT, SubagentProfile
@@ -359,7 +360,12 @@ async def test_message_admits_the_running_childs_next_turn_and_enqueues_it(
     )
     child_id, child_conversation = await _running_child(workspace_id, agent_id, parent.id)
     client = _RecordingClient()
-    subagents = Subagents(client=client, registry=SubagentRegistry(()), parent=parent)
+    subagents = Subagents(
+        client=client,
+        registry=SubagentRegistry(()),
+        parent=parent,
+        audience=conversation_audience(member_id),
+    )
     with trace.use_span(_spawning_span()):
         status = await subagents.message(child_id, "also summarize the risks")
     assert status.status == "queued"
@@ -402,7 +408,12 @@ async def test_message_refuses_a_turn_this_parent_did_not_spawn(
         created_at=datetime(2026, 7, 9, tzinfo=UTC),
     )
     stranger, _ = await _running_child(workspace_id, agent_id, uuid4())
-    subagents = Subagents(client=_RecordingClient(), registry=SubagentRegistry(()), parent=parent)
+    subagents = Subagents(
+        client=_RecordingClient(),
+        registry=SubagentRegistry(()),
+        parent=parent,
+        audience=conversation_audience(None),
+    )
     with pytest.raises(ValueError, match="not a subagent this turn spawned"):
         await subagents.message(stranger, "hello")
 
@@ -423,7 +434,12 @@ async def test_messages_dispatch_in_child_conversation_order(
     )
     child_id, _ = await _running_child(workspace_id, agent_id, parent.id)
     client = _RecordingClient()
-    subagents = Subagents(client=client, registry=SubagentRegistry(()), parent=parent)
+    subagents = Subagents(
+        client=client,
+        registry=SubagentRegistry(()),
+        parent=parent,
+        audience=conversation_audience(None),
+    )
     first = await subagents.message(child_id, "first follow-up")
     second = await subagents.message(child_id, "second follow-up")
     async with workspace_tx() as connection:
@@ -509,6 +525,51 @@ async def _parent(workspace_id: UUID, agent_id: UUID) -> Turn:
     )
 
 
+async def test_spawn_inherits_a_private_audience_from_a_speakerless_parent(
+    db: None, dbos_launched: Config
+) -> None:
+    workspace_id, agent_id = await _workspace_agent()
+    member_id = uuid4()
+    parent = (await _parent(workspace_id, agent_id)).model_copy(
+        update={"on_behalf_of_member_id": member_id}
+    )
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=member_id,
+                workspace_id=workspace_id,
+                email="member@example.com",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.update(tables.conversation)
+            .values(member_id=member_id)
+            .where(tables.conversation.c.id == parent.conversation_id)
+        )
+    spawned = await Subagents(
+        client=_RecordingClient(),
+        registry=SubagentRegistry((_profile("research"),)),
+        parent=parent,
+        audience=conversation_audience(member_id),
+    ).spawn("research", {"task": "acme"}, background=True)
+
+    child, _, child_audience = await _load_turn(spawned.turn_id)
+    assert child.speaker_member_id is None
+    assert child.on_behalf_of_member_id == member_id
+    assert child_audience == conversation_audience(member_id)
+    async with workspace_tx() as connection:
+        child_member_id = (
+            await connection.execute(
+                sa.select(tables.conversation.c.member_id).where(
+                    tables.conversation.c.id == child.conversation_id
+                )
+            )
+        ).scalar_one()
+    assert child_member_id == member_id
+
+
 async def test_spawn_with_a_dedup_key_reconnects_to_a_finished_child_without_respawning(
     db: None, dbos_launched: Config
 ) -> None:
@@ -536,9 +597,21 @@ async def test_spawn_with_a_dedup_key_reconnects_to_a_finished_child_without_res
         client=_RecordingClient(),
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
+        audience=conversation_audience(speaker),
     )
 
     first = await subagents.spawn("research", {"task": "acme"}, background=True, dedup_key="acme")
+    loaded, _, child_audience = await _load_turn(first.turn_id)
+    assert child_audience == conversation_audience(speaker)
+    async with workspace_tx() as connection:
+        child_member = (
+            await connection.execute(
+                sa.select(tables.conversation.c.member_id).where(
+                    tables.conversation.c.id == loaded.conversation_id
+                )
+            )
+        ).scalar_one()
+    assert child_member == speaker
     async with workspace_tx() as connection:
         await connection.execute(
             sa.update(tables.turn)
@@ -584,6 +657,7 @@ async def test_spawn_distinct_dedup_keys_admit_distinct_children(
         client=_RecordingClient(),
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
+        audience=conversation_audience(None),
     )
     a = await subagents.spawn("research", {"task": "a"}, background=True, dedup_key="a")
     b = await subagents.spawn("research", {"task": "b"}, background=True, dedup_key="b")
@@ -608,6 +682,7 @@ async def test_spawn_enqueue_failure_leaves_the_child_in_the_outbox(
         client=_FailingClient(),
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
+        audience=conversation_audience(None),
     ).spawn("research", {"task": "acme"}, background=True)
     async with workspace_tx() as connection:
         row = (
@@ -631,6 +706,7 @@ async def test_spawn_without_a_dedup_key_mints_a_fresh_child_each_call(
         client=_RecordingClient(),
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
+        audience=conversation_audience(None),
     )
     first = await subagents.spawn("research", {"task": "x"}, background=True)
     second = await subagents.spawn("research", {"task": "x"}, background=True)
@@ -663,6 +739,7 @@ async def test_spawn_stamps_the_spawning_spans_traceparent_on_the_child_turn(
         client=_RecordingClient(),
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
+        audience=conversation_audience(None),
     )
     with trace.use_span(_spawning_span()):
         assert current_traceparent() == SPAWNING_TRACEPARENT
@@ -713,7 +790,12 @@ async def test_wait_reports_every_already_finished_childs_status(
     first = await _finished_child(workspace_id, agent_id, parent.id, "first done")
     second = await _finished_child(workspace_id, agent_id, parent.id, "second done")
     client = DBOSClient(system_database_url=dbos_launched.database.system_url)
-    subagents = Subagents(client=client, registry=SubagentRegistry(()), parent=parent)
+    subagents = Subagents(
+        client=client,
+        registry=SubagentRegistry(()),
+        parent=parent,
+        audience=conversation_audience(None),
+    )
     statuses = await subagents.wait((first, second))
     assert [status.turn_id for status in statuses] == [first, second]
     assert [status.text for status in statuses] == ["first done", "second done"]
@@ -737,7 +819,12 @@ async def test_spawn_and_wait_carry_the_profiles_untrusted_output_declaration(
         untrusted_output=True,
     )
     registry = SubagentRegistry((walled, _profile("plain")))
-    subagents = Subagents(client=_RecordingClient(), registry=registry, parent=parent)
+    subagents = Subagents(
+        client=_RecordingClient(),
+        registry=registry,
+        parent=parent,
+        audience=conversation_audience(None),
+    )
 
     spawned = await subagents.spawn("webby", {"task": "acme"}, background=True, dedup_key="acme")
     async with workspace_tx() as connection:
@@ -791,7 +878,12 @@ async def test_untrusted_profile_validation_failure_raises_a_walled_error(
         untrusted_output=True,
     )
     registry = SubagentRegistry((walled, _profile("plain")))
-    subagents = Subagents(client=_RecordingClient(), registry=registry, parent=parent)
+    subagents = Subagents(
+        client=_RecordingClient(),
+        registry=registry,
+        parent=parent,
+        audience=conversation_audience(None),
+    )
     for profile, expected in (("webby", UntrustedContentError), ("plain", ValidationError)):
         spawned = await subagents.spawn(
             profile, {"task": "acme"}, background=True, dedup_key=f"bad-{profile}"
@@ -818,7 +910,10 @@ async def test_spawn_raises_loud_on_a_prose_terminal(db: None, dbos_launched: Co
     workspace_id, agent_id = await _workspace_agent()
     parent = await _parent(workspace_id, agent_id)
     subagents = Subagents(
-        client=_RecordingClient(), registry=SubagentRegistry((_profile("plain"),)), parent=parent
+        client=_RecordingClient(),
+        registry=SubagentRegistry((_profile("plain"),)),
+        parent=parent,
+        audience=conversation_audience(None),
     )
     text = "I could not complete this task in full, so here is what I found instead."
     spawned = await subagents.spawn("plain", {"task": "acme"}, background=True, dedup_key="prose")
@@ -842,7 +937,10 @@ async def test_spawn_surfaces_a_failed_childs_diagnostic(db: None, dbos_launched
     workspace_id, agent_id = await _workspace_agent()
     parent = await _parent(workspace_id, agent_id)
     subagents = Subagents(
-        client=_RecordingClient(), registry=SubagentRegistry((_profile("research"),)), parent=parent
+        client=_RecordingClient(),
+        registry=SubagentRegistry((_profile("research"),)),
+        parent=parent,
+        audience=conversation_audience(None),
     )
     spawned = await subagents.spawn("research", {"task": "acme"}, background=True, dedup_key="boom")
     async with workspace_tx() as connection:
@@ -883,7 +981,12 @@ async def test_wait_refuses_a_turn_this_parent_did_not_spawn(
     child = await _finished_child(workspace_id, agent_id, parent.id, "child result")
     stranger = await _finished_child(workspace_id, agent_id, uuid4(), "private result")
     client = DBOSClient(system_database_url=dbos_launched.database.system_url)
-    subagents = Subagents(client=client, registry=SubagentRegistry(()), parent=parent)
+    subagents = Subagents(
+        client=client,
+        registry=SubagentRegistry(()),
+        parent=parent,
+        audience=conversation_audience(None),
+    )
     with pytest.raises(ValueError, match="not a subagent this turn spawned"):
         await subagents.wait((child, stranger))
 
@@ -905,7 +1008,12 @@ async def test_cancel_cancels_the_childs_workflow_and_commits_its_terminal(db: N
     parent = await _parent(workspace_id, agent_id)
     child, _ = await _running_child(workspace_id, agent_id, parent.id)
     client = _RecordingClient()
-    subagents = Subagents(client=client, registry=SubagentRegistry(()), parent=parent)
+    subagents = Subagents(
+        client=client,
+        registry=SubagentRegistry(()),
+        parent=parent,
+        audience=conversation_audience(None),
+    )
     status = await subagents.cancel(child)
     assert (status.turn_id, status.status) == (child, "cancelled")
     assert client.cancelled == [str(child)]
@@ -916,7 +1024,12 @@ async def test_cancel_refuses_a_turn_this_parent_did_not_spawn(db: None) -> None
     workspace_id, agent_id = await _workspace_agent()
     parent = await _parent(workspace_id, agent_id)
     stranger, _ = await _running_child(workspace_id, agent_id, uuid4())
-    subagents = Subagents(client=_RecordingClient(), registry=SubagentRegistry(()), parent=parent)
+    subagents = Subagents(
+        client=_RecordingClient(),
+        registry=SubagentRegistry(()),
+        parent=parent,
+        audience=conversation_audience(None),
+    )
     with pytest.raises(ValueError, match="not a subagent this turn spawned"):
         await subagents.cancel(stranger)
     assert await _turn_status(stranger) == "running"

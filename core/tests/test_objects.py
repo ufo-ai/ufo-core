@@ -29,6 +29,7 @@ from ufo.agent_scope import agent
 from ufo.agents import AGENT_KIND
 from ufo.artifact_token import verify_artifact_token
 from ufo.artifacts import ARTIFACT_KIND, artifact_object_names
+from ufo.audience import SHARED_AUDIENCE, Audience, conversation_audience
 from ufo.blob import FilesystemBlobStore
 from ufo.conversations import CONVERSATION_KIND
 from ufo.credentials import CredentialStore
@@ -154,7 +155,7 @@ def _tool_context(
         agent=Agent(prompt="p", model=agent_model),
         spawn=_unavailable_spawn,
         speaker_member_id=speaker_member_id,
-        audience_member_id=None,
+        audience=conversation_audience(None),
         artifact_token_secret="",
     )
 
@@ -163,7 +164,9 @@ def _object_tools() -> dict[str, ToolDef]:
     manifest = next((m for m in load_manifests() if m.name == sample.NAME), None)
     assert manifest is not None, "sample extension not discovered via entry points — run `uv sync`"
     tools, ext_by_tool = turn_tools(
-        (manifest,), CredentialStore(fernet=Fernet(Fernet.generate_key()))
+        (manifest,),
+        CredentialStore(fernet=Fernet(Fernet.generate_key())),
+        audience=conversation_audience(None),
     )
     by_name = {tool.name: tool for tool in tools}
     assert not (by_name.keys() & ext_by_tool.keys()) & {
@@ -862,7 +865,7 @@ async def _turn_row(
 
 
 async def _workspace_context(
-    turn: Turn, tmp_path: Path, audience_member_id: UUID | None = None
+    turn: Turn, tmp_path: Path, audience: Audience = SHARED_AUDIENCE
 ) -> tuple[ToolContext, Path]:
     """A context whose sandbox is the real local carrier over a temp workspace and whose blob
     store is a real temp filesystem store — object materialization runs its true path."""
@@ -883,8 +886,8 @@ async def _workspace_context(
         turn=turn,
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=_unavailable_spawn,
-        speaker_member_id=audience_member_id,
-        audience_member_id=audience_member_id,
+        speaker_member_id=turn.speaker_member_id,
+        audience=audience,
         artifact_token_secret=ARTIFACT_TEST_SECRET,
     )
     return ctx, workspace_dir
@@ -1257,14 +1260,16 @@ async def test_conversation_transcript_keeps_member_and_agent_gates(
         other = await _member(workspace_id, JOINER_CREATED_AT)
         private = await _turn_row(workspace_id, member_id=member)
         reader = await _turn_row(workspace_id, agent_id=private.agent_id, member_id=other)
-        ctx, workspace_dir = await _workspace_context(reader, tmp_path, audience_member_id=other)
+        ctx, workspace_dir = await _workspace_context(
+            reader, tmp_path, audience=conversation_audience(other)
+        )
         correct_reader = await _turn_row(workspace_id, agent_id=private.agent_id, member_id=member)
-        correct_ctx = replace(ctx, turn=correct_reader, audience_member_id=member)
+        correct_ctx = replace(ctx, turn=correct_reader, audience=conversation_audience(member))
         other_agent_reader = await _turn_row(workspace_id, member_id=member)
         other_agent_ctx = replace(
             ctx,
             turn=other_agent_reader,
-            audience_member_id=member,
+            audience=conversation_audience(member),
         )
         await Transcript(blob=ctx.blob, conversation_id=private.conversation_id).write(
             LAUNCH_EXCHANGE
@@ -1309,7 +1314,9 @@ async def test_private_turn_sees_shared_conversation_metadata_but_not_its_transc
         member = await _member(workspace_id, OWNER_CREATED_AT)
         shared = await _turn_row(workspace_id)
         reader = await _turn_row(workspace_id, agent_id=shared.agent_id, member_id=member)
-        ctx, workspace_dir = await _workspace_context(reader, tmp_path, audience_member_id=member)
+        ctx, workspace_dir = await _workspace_context(
+            reader, tmp_path, audience=conversation_audience(member)
+        )
         await Transcript(blob=ctx.blob, conversation_id=shared.conversation_id).write(
             LAUNCH_EXCHANGE
         )

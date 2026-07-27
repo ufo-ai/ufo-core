@@ -14,6 +14,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from ufo.agent_scope import AgentUnbound, agent
+from ufo.audience import conversation_audience
 from ufo.connectors import CliCredential, ForwardedResponse
 from ufo.db import workspace_tx
 from ufo.grants import (
@@ -605,7 +606,7 @@ def _turn_context(
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=None,
         speaker_member_id=member_id,
-        audience_member_id=member_id,
+        audience=conversation_audience(member_id),
         artifact_token_secret="",
     )
 

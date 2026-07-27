@@ -12,6 +12,7 @@ import sqlalchemy as sa
 from cryptography.fernet import Fernet
 from pydantic import BaseModel
 
+from ufo.audience import conversation_audience
 from ufo.blob import FilesystemBlobStore
 from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
@@ -257,7 +258,10 @@ async def test_subagent_conversation_inherits_the_parents_agent(db: None) -> Non
         output_model=_SpawnFinding,
     )
     subagents = Subagents(
-        client=_SilentClient(), registry=SubagentRegistry((profile,)), parent=parent
+        client=_SilentClient(),
+        registry=SubagentRegistry((profile,)),
+        parent=parent,
+        audience=conversation_audience(None),
     )
     with ws(workspace_id):
         spawned = await subagents.spawn("research", {"task": "acme"}, background=True)

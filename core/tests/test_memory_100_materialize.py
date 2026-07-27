@@ -19,6 +19,7 @@ from evals.memory_100.models import (
 )
 from evals.memory_100.snapshot import content_digest, load_snapshot, write_snapshot
 from evals.memory_100.state import CorpusAttestor
+from ufo.audience import conversation_audience
 from ufo.blob import FilesystemBlobStore
 from ufo.db import apply_migrations, dispose_db, init_db, workspace_tx
 from ufo.ext.context import ScopedStore
@@ -287,9 +288,15 @@ async def test_materializes_snapshot_through_real_memory_and_page_pipelines(
 
     with ws(readiness.workspace_id):
         store = MemoryStore(index, embed, workspace_tx, readiness.workspace_id)
-        alice_memory = await store.recall("alpha lantern", recall_subjects(alice), 8)
-        bob_memory = await store.recall("alpha lantern", recall_subjects(bob), 8)
-        shared = await store.search_sources("incident commander", recall_subjects(alice), 8)
+        alice_memory = await store.recall(
+            "alpha lantern", recall_subjects(conversation_audience(alice)), 8
+        )
+        bob_memory = await store.recall(
+            "alpha lantern", recall_subjects(conversation_audience(bob)), 8
+        )
+        shared = await store.search_sources(
+            "incident commander", recall_subjects(conversation_audience(alice)), 8
+        )
         async with workspace_tx() as connection:
             memory_count = (
                 await connection.execute(sa.select(sa.func.count()).select_from(memory_item))

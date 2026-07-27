@@ -26,6 +26,7 @@ from ufo.ext.loader import skill_registry
 from ufo.loop.subagents import subagent_system_prompt
 from ufo.sandbox.session import ExecResult
 from ufo.schema.records import Agent, Turn
+from ufo.sdk.audience import conversation_audience
 from ufo.skills.runtime import mount_skill
 from ufo.tools.context import SpawnResult, ToolContext
 
@@ -78,7 +79,7 @@ def _context(sandbox: FakeSandbox, tmp_path: Path) -> ToolContext:
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=_unavailable_spawn,
         speaker_member_id=None,
-        audience_member_id=None,
+        audience=conversation_audience(None),
         artifact_token_secret="",
     )
 

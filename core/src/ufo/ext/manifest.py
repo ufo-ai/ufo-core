@@ -18,6 +18,7 @@ from pydantic import BaseModel
 from starlette.requests import Request
 from starlette.responses import Response
 
+from ufo.audience import SHARED_AUDIENCE, Audience
 from ufo.browser import CdpProvider
 from ufo.candidates import WorkspaceCandidates
 from ufo.connectors import AuthProxy, CliCredential, ConnectorBroker, ConnectorResolver
@@ -429,8 +430,8 @@ HookOutcome = Deny | ModifyInput | ModifyOutput | InjectContext | None
 class HookContext:
     """What a hook handler receives: the same workspace-scoped `ExtensionContext` a job or route
     gets (its store, declared credential slots, memory) and the per-event payload. A turn-lifecycle
-    event carries the frozen turn and agent it fires under, its speaking member, and the
-    conversation's audience member, and its
+    event carries the frozen turn and agent it fires under and its speaking member; the exact
+    conversation audience is on `ext`. Its
     context deliberately wires no model or invoker — inside the loop a hook observes and filters,
     never firing work that would re-enter the turn it runs within. A data-plane event (page_change)
     fires outside any turn — its turn/member fields are None — and the page-change runner
@@ -442,7 +443,7 @@ class HookContext:
     payload: HookPayload
     turn: Turn | None = None
     agent: Agent | None = None
-    audience_member_id: UUID | None = None
+    audience: Audience = SHARED_AUDIENCE
     speaker_member_id: UUID | None = None
 
 

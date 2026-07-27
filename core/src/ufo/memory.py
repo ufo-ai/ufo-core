@@ -3,14 +3,9 @@
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
-from uuid import UUID
 
-import sqlalchemy as sa
-
-from ufo.db import workspace_tx
+from ufo.audience import Audience
 from ufo.objects import ObjectRef
-from ufo.schema import tables
-from ufo.workspace import ws_current
 
 DEFAULT_MEMORY_SEARCH_PROVIDER = "default"
 
@@ -34,7 +29,7 @@ class MemorySearchProvider(Protocol):
     async def search(
         self,
         queries: tuple[str, ...],
-        member_id: UUID | None,
+        audience: Audience,
         start: datetime | None = None,
         end: datetime | None = None,
     ) -> tuple[MemoryMatch, ...]: ...
@@ -42,25 +37,16 @@ class MemorySearchProvider(Protocol):
 
 @dataclass(frozen=True)
 class MemorySearch:
-    """Resolve a conversation's member before dispatching scoped provider search."""
+    """Dispatch one exact conversation audience to the selected provider."""
 
     provider: MemorySearchProvider
 
     async def search(
         self,
-        conversation_id: UUID,
+        audience: Audience,
         queries: tuple[str, ...],
         start: datetime | None = None,
         end: datetime | None = None,
     ) -> tuple[MemoryMatch, ...]:
-        """Search the conversation member's private and shared memory."""
-        async with workspace_tx() as connection:
-            member_id = (
-                await connection.execute(
-                    sa.select(tables.conversation.c.member_id).where(
-                        tables.conversation.c.workspace_id == ws_current().workspace_id,
-                        tables.conversation.c.id == conversation_id,
-                    )
-                )
-            ).scalar_one()
-        return await self.provider.search(queries, member_id, start, end)
+        """Search exactly what the conversation audience may read."""
+        return await self.provider.search(queries, audience, start, end)

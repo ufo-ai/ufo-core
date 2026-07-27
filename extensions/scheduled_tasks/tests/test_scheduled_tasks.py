@@ -40,10 +40,12 @@ from ufo.ext.context import ExtensionContext, context_for
 from ufo.ext.loader import skill_registry, turn_tools
 from ufo.jobs import JobRunner, bindings_from
 from ufo.loop.engine import _claim_turn
+from ufo.loop.queue import _load_turn
 from ufo.objects import OwnerRequired, UnknownObject
 from ufo.scheduling import ONE_TIME_SCHEDULE, ScheduleStore, due_task_workspaces
 from ufo.schema import tables
 from ufo.schema.records import WRITEBACK_PENDING, Agent, TerminalFrame, Turn
+from ufo.sdk.audience import conversation_audience
 from ufo.surfaces.admission import Admission, AdmissionInvoker, MemberAdmission
 from ufo.tools.context import SpawnResult, ToolContext
 from ufo.tools.registry import ToolDef
@@ -53,7 +55,7 @@ DAILY_9AM = "0 9 * * *"
 
 
 def _object_tool(name: str) -> ToolDef:
-    tools, _ = turn_tools((manifest(),), None)
+    tools, _ = turn_tools((manifest(),), None, audience=conversation_audience(None))
     return next(tool for tool in tools if tool.name == name)
 
 
@@ -222,7 +224,7 @@ def _tool_ctx(workspace_id: UUID, conversation_id: UUID, agent_id: UUID) -> Tool
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=_unavailable_spawn,
         speaker_member_id=None,
-        audience_member_id=None,
+        audience=conversation_audience(None),
         artifact_token_secret="",
         ext=context_for(NAME, frozenset()),
     )
@@ -2179,10 +2181,21 @@ async def test_scheduled_fire_runs_on_behalf_of_the_creator(db: None) -> None:
         )
         await ScheduledTaskRunner(ctx=_runner_ctx(invoker)).run()
         turns = await _turns(conversation_id)
+        _, _, audience = await _load_turn(turns[0]["id"])
+        async with workspace_tx() as connection:
+            conversation_member = (
+                await connection.execute(
+                    sa.select(tables.conversation.c.member_id).where(
+                        tables.conversation.c.id == conversation_id
+                    )
+                )
+            ).scalar_one()
     assert len(turns) == 1
     assert turns[0]["admission_source"] == "scheduled"
     assert turns[0]["speaker_member_id"] is None
     assert turns[0]["on_behalf_of_member_id"] == creator
+    assert audience == conversation_audience(conversation_member)
+    assert audience != conversation_audience(creator)
 
 
 async def test_a_stranger_cannot_hijack_or_read_another_members_task(db: None) -> None:

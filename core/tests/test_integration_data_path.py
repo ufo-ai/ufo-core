@@ -23,6 +23,7 @@ from ufo_ext_memory.store import (
 )
 
 from ufo.accounting import SpendEvaluator, record_sandbox_tokens
+from ufo.audience import conversation_audience
 from ufo.blob import FilesystemBlobStore
 from ufo.config import SourceConfig, SourceEntry
 from ufo.db import workspace_tx
@@ -233,9 +234,16 @@ async def test_member_fact_recall_is_isolated_from_other_members(db: None) -> No
     )
     with ws(workspace_id):
         await indexer.run()
-        mine = await service.recall("vault combination", recall_subjects(alice), 5)
+        mine = await service.recall(
+            "vault combination", recall_subjects(conversation_audience(alice)), 5
+        )
         assert len(mine) == 1 and "alice" in mine[0].body
-        assert await service.recall("vault combination", recall_subjects(bob), 5) == ()
+        assert (
+            await service.recall(
+                "vault combination", recall_subjects(conversation_audience(bob)), 5
+            )
+            == ()
+        )
 
 
 async def test_metered_sandbox_tokens_breach_a_member_cap_and_park(db: None) -> None:

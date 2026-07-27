@@ -30,6 +30,7 @@ from ufo.ext.context import context_for
 from ufo.ext.loader import turn_tools
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
+from ufo.sdk.audience import conversation_audience
 from ufo.sdk.connectors import ConnectorRegistry
 from ufo.sdk.objects import OwnerRequired, VerbNotSupported
 from ufo.sdk.sources import ConnectorSourceConfig, Page, SourceAuth, SyncResult
@@ -119,7 +120,11 @@ async def _workspace() -> _Workspace:
 
 _TOOLS: dict[str, ToolDef] = {
     tool.name: tool
-    for tool in turn_tools((manifest(),), CredentialStore(fernet=Fernet(Fernet.generate_key())))[0]
+    for tool in turn_tools(
+        (manifest(),),
+        CredentialStore(fernet=Fernet(Fernet.generate_key())),
+        audience=conversation_audience(None),
+    )[0]
 }
 
 
@@ -143,7 +148,7 @@ def _context(
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=None,
         speaker_member_id=speaker_id or state.owner_id,
-        audience_member_id=speaker_id or state.owner_id,
+        audience=conversation_audience(speaker_id or state.owner_id),
         artifact_token_secret="",
         grants=None,
         connectors=ConnectorRegistry(entries={}, fallback=None),

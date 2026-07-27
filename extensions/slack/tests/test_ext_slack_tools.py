@@ -45,6 +45,7 @@ from ufo.ext.loader import skill_registry, turn_tools
 from ufo.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
+from ufo.sdk.audience import conversation_audience
 from ufo.sdk.surfaces import (
     CredentialPrompt,
     CredentialRequest,
@@ -140,7 +141,9 @@ async def _seed() -> tuple[UUID, UUID, UUID]:
 def _registry(
     store: CredentialStore,
 ) -> tuple[dict[str, object], dict[str, ExtensionContext]]:
-    declared_tools, ext_by_tool = turn_tools((slack_manifest(),), store)
+    declared_tools, ext_by_tool = turn_tools(
+        (slack_manifest(),), store, audience=conversation_audience(None)
+    )
     return {tool.name: tool for tool in declared_tools}, ext_by_tool
 
 
@@ -171,7 +174,7 @@ def _context(
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=_unavailable_spawn,
         speaker_member_id=member_id,
-        audience_member_id=member_id,
+        audience=conversation_audience(member_id),
         artifact_token_secret="",
         ext=ext,
         public_base_url=public_base_url,

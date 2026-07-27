@@ -5,6 +5,7 @@ from uuid import uuid4
 
 import pytest
 
+from ufo.audience import conversation_audience
 from ufo.blob import FilesystemBlobStore
 from ufo.sandbox.session import (
     DEFAULT_EXEC_TIMEOUT_SECONDS,
@@ -110,7 +111,7 @@ def _bash_ctx(carrier: _RecordingCarrier, tmp_path: Path) -> ToolContext:
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=_no_spawn,
         speaker_member_id=None,
-        audience_member_id=None,
+        audience=conversation_audience(None),
         artifact_token_secret="",
     )
 

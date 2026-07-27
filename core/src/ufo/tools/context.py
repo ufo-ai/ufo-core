@@ -2,8 +2,8 @@
 
 A handler reaches the outside world only through the fields here: the sandbox for filesystem and
 shell, the blob store for artifacts, the turn/agent it runs under, `spawn` to delegate a typed
-subtask to a child turn, the speaking member who gates authorization, the conversation audience
-member that scopes disclosure, and `artifact_token_secret` with which
+subtask to a child turn, the speaking member who gates authorization, the exact conversation
+audience that scopes disclosure, and `artifact_token_secret` with which
 `share_file` mints the signed download URLs the web surface verifies. `read_paths` is the working
 set that lets `edit` refuse to touch a file the turn has not read first. `connector_account` hands
 a connector tool the broker's connected-account id it passes to the broker's server-side execute
@@ -31,6 +31,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
+from ufo.audience import Audience, conversation_audience
 from ufo.blob import BlobStore
 from ufo.browser import CdpProvider, FindCompleter
 from ufo.connectors import ConnectorRegistry
@@ -172,7 +173,7 @@ class ToolContext:
     agent: Agent
     spawn: Spawn
     speaker_member_id: UUID | None
-    audience_member_id: UUID | None
+    audience: Audience
     artifact_token_secret: str
     on_behalf_of_member_id: UUID | None = None
     grants: GrantStore | None = None
@@ -235,7 +236,7 @@ class ToolContext:
     async def _credential_authorization(self, slot: str) -> tuple[CredentialRequests, UUID]:
         if self.speaker_member_id is None:
             raise ValueError("credential authorization requires a speaking member")
-        if self.audience_member_id != self.speaker_member_id:
+        if self.audience != conversation_audience(self.speaker_member_id):
             raise ValueError("credential authorization requires the speaker's private audience")
         if self.ext is None or slot not in self.ext.credentials.declared:
             raise ValueError(f"this extension does not declare credential slot {slot!r}")

@@ -23,6 +23,7 @@ import ufo_ext_sample as sample
 from cryptography.fernet import Fernet
 
 from ufo.agent_scope import agent
+from ufo.audience import conversation_audience
 from ufo.config import Config
 from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
@@ -347,7 +348,7 @@ def _turn_context(
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=None,
         speaker_member_id=member_id,
-        audience_member_id=member_id,
+        audience=conversation_audience(member_id),
         artifact_token_secret="",
         grants=grants,
     )

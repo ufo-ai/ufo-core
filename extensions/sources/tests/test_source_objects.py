@@ -39,6 +39,7 @@ from ufo.grants import GrantStore
 from ufo.objects import UnknownObject
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
+from ufo.sdk.audience import conversation_audience
 from ufo.sdk.authproxy import DIRECT_ACCOUNT
 from ufo.sdk.connectors import ConnectorEntry, ConnectorRegistry
 from ufo.sdk.manifest import HookContext, PageChangeBatch
@@ -143,7 +144,11 @@ async def _workspace() -> _Workspace:
 
 _TOOLS: dict[str, ToolDef] = {
     tool.name: tool
-    for tool in turn_tools((manifest(),), CredentialStore(fernet=Fernet(Fernet.generate_key())))[0]
+    for tool in turn_tools(
+        (manifest(),),
+        CredentialStore(fernet=Fernet(Fernet.generate_key())),
+        audience=conversation_audience(None),
+    )[0]
 }
 
 
@@ -175,7 +180,7 @@ def _context(
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=None,
         speaker_member_id=speaker,
-        audience_member_id=speaker,
+        audience=conversation_audience(speaker),
         artifact_token_secret="",
         grants=grants,
         connectors=ConnectorRegistry(

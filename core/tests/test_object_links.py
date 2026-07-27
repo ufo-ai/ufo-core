@@ -29,6 +29,7 @@ from ufo_ext_sources.registry import SOURCE_KIND, binding_name
 from ufo_ext_sources.tools import SOURCE_OBJECT
 
 from ufo.agent_scope import agent
+from ufo.audience import conversation_audience
 from ufo.blob import FilesystemBlobStore
 from ufo.conversations import CONVERSATION_KIND, CONVERSATION_OBJECT
 from ufo.db import workspace_tx
@@ -235,7 +236,7 @@ def _tool_ctx(
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=_unavailable_spawn,
         speaker_member_id=member_id,
-        audience_member_id=member_id,
+        audience=conversation_audience(member_id),
         artifact_token_secret="",
         ext=ext,
     )

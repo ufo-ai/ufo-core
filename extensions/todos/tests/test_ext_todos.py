@@ -13,6 +13,7 @@ from ufo.db import workspace_tx
 from ufo.ext.context import ScopedStore, context_for
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
+from ufo.sdk.audience import conversation_audience
 from ufo.tools.context import SpawnResult, ToolContext
 from ufo.workspace import ws
 
@@ -66,7 +67,7 @@ def _context(workspace_id: UUID, conversation_id: UUID, tmp_path: Path) -> ToolC
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=_unavailable_spawn,
         speaker_member_id=None,
-        audience_member_id=None,
+        audience=conversation_audience(None),
         artifact_token_secret="",
         ext=ext,
     )
@@ -171,7 +172,7 @@ async def test_requires_the_extension_context(tmp_path: Path) -> None:
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=_unavailable_spawn,
         speaker_member_id=None,
-        audience_member_id=None,
+        audience=conversation_audience(None),
         artifact_token_secret="",
         ext=None,
     )

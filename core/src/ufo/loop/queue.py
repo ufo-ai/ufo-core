@@ -11,6 +11,7 @@ import sqlalchemy as sa
 from dbos import DBOS, DBOSClient, EnqueueOptions, Queue
 
 from ufo.agent_scope import agent
+from ufo.audience import Audience, conversation_audience
 from ufo.blob import BlobStore, FilesystemBlobStore, S3BlobStore
 from ufo.browser import CdpProvider
 from ufo.config import Config
@@ -234,12 +235,27 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
                 handoff.conversation_id,
                 handoff.workflow_id,
             )
-        turn, agent, audience_member_id = await _load_turn(UUID(turn_id))
-        subagents = Subagents(client=runtime.dbos, registry=runtime.subagents, parent=turn)
-        all_tools, tool_ext = turn_tools(
-            runtime.manifests, runtime.credentials, runtime.index, runtime.embed
+        turn, agent, audience = await _load_turn(UUID(turn_id))
+        subagents = Subagents(
+            client=runtime.dbos,
+            registry=runtime.subagents,
+            parent=turn,
+            audience=audience,
         )
-        hooks = turn_hooks(runtime.manifests, runtime.credentials, runtime.index, runtime.embed)
+        all_tools, tool_ext = turn_tools(
+            runtime.manifests,
+            runtime.credentials,
+            runtime.index,
+            runtime.embed,
+            audience=audience,
+        )
+        hooks = turn_hooks(
+            runtime.manifests,
+            runtime.credentials,
+            runtime.index,
+            runtime.embed,
+            audience=audience,
+        )
         skills = runtime.skills.merged_with(
             await turn_runtime_skills(
                 runtime.manifests, runtime.credentials, runtime.index, runtime.embed
@@ -311,7 +327,6 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
                 hooks=hooks,
                 turn=turn,
                 agent=resolved,
-                audience_member_id=audience_member_id,
                 speaker_member_id=turn.speaker_member_id,
             ),
             hub=runtime.hub,
@@ -337,7 +352,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             blob=runtime.blob,
             spawn=subagents.spawn,
             subagents=subagents,
-            audience_member_id=audience_member_id,
+            audience=audience,
             artifact_token_secret=runtime.artifact_token_secret,
             grants=(GrantStore() if runtime.credentials is not None else None),
             pricing=runtime.registry.pricing,
@@ -399,9 +414,8 @@ async def turn_workflow(workspace_id: str, turn_id: str) -> str:
     return await _execute_turn(workspace_id, turn_id)
 
 
-async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, UUID | None]:
-    """The turn, its agent, and the conversation's member (the memory subject the turn recalls
-    and commits under) — member lives on the conversation, not the turn."""
+async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, Audience]:
+    """Load a turn and derive its exact audience from the bound conversation."""
     async with workspace_tx() as connection:
         row = (
             await connection.execute(
@@ -457,7 +471,7 @@ async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, UUID | None]:
         subagent_profile=row.subagent_profile,
         traceparent=row.traceparent,
     )
-    return turn, Agent(prompt=row.prompt, model=row.model), row.member_id
+    return turn, Agent(prompt=row.prompt, model=row.model), conversation_audience(row.member_id)
 
 
 async def _open_sandbox(

@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 import pytest
 from pydantic import BaseModel, ValidationError
 
+from ufo.audience import conversation_audience
 from ufo.blob import FilesystemBlobStore
 from ufo.ext.manifest import SubagentProfile
 from ufo.loop.subagents import SubagentRegistry, Subagents
@@ -104,7 +105,7 @@ def make_context(
         agent=Agent(prompt="be terse", model="claude-opus-4-8"),
         spawn=spawn,
         speaker_member_id=None,
-        audience_member_id=None,
+        audience=conversation_audience(None),
         artifact_token_secret=artifact_secret,
         subagents=subagents,
     )
@@ -438,6 +439,7 @@ async def test_spawn_subagent_unknown_profile_is_an_error_naming_the_valid_profi
         client=_IdleSpawnClient(),
         registry=SubagentRegistry((_spawn_profile("research"), _spawn_profile("coding"))),
         parent=parent,
+        audience=conversation_audience(None),
     )
     ctx = make_context(FakeSandbox(), tmp_path, spawn=subagents.spawn)
     result = await run("spawn_subagent", ctx, profile="assistant", payload={"task": "x"})

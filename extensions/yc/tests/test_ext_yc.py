@@ -55,6 +55,7 @@ from ufo.ext.context import ExtensionContext, context_for
 from ufo.sandbox.session import SandboxSession
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
+from ufo.sdk.audience import conversation_audience
 from ufo.sources.sync import CorePageFeed, SourceAuth, StreamSkipped, SyncDriver
 from ufo.tools.context import Spawn, ToolContext
 from ufo.workspace import init_workspace_credentials, ws
@@ -209,7 +210,7 @@ async def test_device_auth_starts_in_chat_and_fulfills_the_encrypted_slot(
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=cast(Spawn, None),
         speaker_member_id=owner_id,
-        audience_member_id=owner_id,
+        audience=conversation_audience(owner_id),
         artifact_token_secret="",
         idempotency_key="turn/tool/call",
         ext=ext,
@@ -259,7 +260,7 @@ async def test_device_auth_starts_in_chat_and_fulfills_the_encrypted_slot(
         async with async_client(transport=httpx.MockTransport(auth)) as http:
             with ws(workspace_id):
                 with pytest.raises(ValueError, match="private audience"):
-                    await YcAuth(replace(context, audience_member_id=None), http).run(
+                    await YcAuth(replace(context, audience=conversation_audience(None)), http).run(
                         "start", "session"
                     )
                 non_owner = uuid4()
@@ -268,7 +269,7 @@ async def test_device_auth_starts_in_chat_and_fulfills_the_encrypted_slot(
                         replace(
                             context,
                             speaker_member_id=non_owner,
-                            audience_member_id=non_owner,
+                            audience=conversation_audience(non_owner),
                         ),
                         http,
                     ).run("start", "session")

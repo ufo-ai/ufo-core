@@ -18,12 +18,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
 
+import pytest
 import sqlalchemy as sa
 import ufo_ext_sample as sample
 from cryptography.fernet import Fernet
 from pydantic import BaseModel
 
 import ufo.ext.loader as loader
+from ufo.audience import SHARED_AUDIENCE, Audience, conversation_audience
 from ufo.blob import FilesystemBlobStore
 from ufo.connectors import ConnectorRegistry
 from ufo.credentials import CredentialStore
@@ -78,13 +80,13 @@ class Args(BaseModel):
     value: str
 
 
-def _ext() -> ExtensionContext:
-    return context_for("probe", frozenset())
+def _ext(audience: Audience = SHARED_AUDIENCE) -> ExtensionContext:
+    return context_for("probe", frozenset(), audience=audience)
 
 
 def _chain(event: str, ext: ExtensionContext, *specs: HookSpec) -> HookChain:
     bound = tuple(BoundHook(spec=spec, ext=ext) for spec in specs)
-    return HookChain(hooks={event: bound})
+    return HookChain(hooks={event: bound}, audience=ext.audience)
 
 
 async def _fire(chain: HookChain, event: str, payload: object) -> loader.HookResolution:
@@ -99,7 +101,11 @@ async def _fire(chain: HookChain, event: str, payload: object) -> loader.HookRes
         created_at=datetime(2026, 7, 9, tzinfo=UTC),
     )
     return await chain.fire(
-        event, payload, turn, Agent(prompt="p", model="claude-opus-4-8"), None, None
+        event,
+        payload,
+        turn,
+        Agent(prompt="p", model="claude-opus-4-8"),
+        None,
     )
 
 
@@ -108,13 +114,14 @@ def _pre(tool_name: str = "t") -> PreToolUse:
 
 
 async def test_hook_context_keeps_speaker_and_audience_separate() -> None:
-    seen: list[tuple[UUID | None, UUID | None]] = []
+    seen: list[tuple[UUID | None, Audience]] = []
 
     async def capture(ctx: HookContext) -> HookOutcome:
-        seen.append((ctx.speaker_member_id, ctx.audience_member_id))
+        seen.append((ctx.speaker_member_id, ctx.audience))
         return None
 
-    speaker, audience = uuid4(), uuid4()
+    speaker, member = uuid4(), uuid4()
+    audience = conversation_audience(member)
     turn = Turn(
         id=uuid4(),
         workspace_id=uuid4(),
@@ -126,15 +133,26 @@ async def test_hook_context_keeps_speaker_and_audience_separate() -> None:
         speaker_member_id=speaker,
         created_at=datetime(2026, 7, 9, tzinfo=UTC),
     )
-    await _chain("stop", _ext(), HookSpec(event="stop", handler=capture)).fire(
+    await _chain("stop", _ext(audience), HookSpec(event="stop", handler=capture)).fire(
         "stop",
         Stop(answer="done"),
         turn,
         Agent(prompt="p", model="claude-opus-4-8"),
-        audience,
         speaker,
     )
     assert seen == [(speaker, audience)]
+    with pytest.raises(ValueError, match="hook and chain audiences differ"):
+        HookChain(
+            hooks={
+                "stop": (
+                    BoundHook(
+                        spec=HookSpec(event="stop", handler=capture),
+                        ext=_ext(),
+                    ),
+                )
+            },
+            audience=audience,
+        )
 
 
 # --- composition model, asserted directly against fire's resolution -----------------------------
@@ -495,7 +513,6 @@ def _engine(
             hooks=hooks,
             turn=turn,
             agent=agent,
-            audience_member_id=None,
             speaker_member_id=None,
         ),
         hub=InProcessHub(),
@@ -508,7 +525,7 @@ def _engine(
         hooks=hooks,
         blob=blob,
         spawn=_unavailable_spawn,
-        audience_member_id=None,
+        audience=conversation_audience(None),
         artifact_token_secret="",
         grants=None,
     )
@@ -526,8 +543,8 @@ async def test_sample_pre_deny_short_circuits_and_post_captures_the_other(
     turn = await _seed_turn(uuid4())
     manifest = _sample_manifest()
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
-    tools, tool_ext = turn_tools((manifest,), store)
-    hooks = turn_hooks((manifest,), store)
+    tools, tool_ext = turn_tools((manifest,), store, audience=conversation_audience(None))
+    hooks = turn_hooks((manifest,), store, audience=conversation_audience(None))
     engine = _engine(turn, EchoAndBashModel(), tmp_path, hooks, tools=tools, tool_ext=tool_ext)
     with ws(turn.workspace_id):
         frame = await engine.run()
@@ -550,8 +567,8 @@ async def test_stop_fires_with_the_final_answer(db: None, tmp_path: Path) -> Non
     turn = await _seed_turn(uuid4())
     manifest = _sample_manifest()
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
-    tools, tool_ext = turn_tools((manifest,), store)
-    hooks = turn_hooks((manifest,), store)
+    tools, tool_ext = turn_tools((manifest,), store, audience=conversation_audience(None))
+    hooks = turn_hooks((manifest,), store, audience=conversation_audience(None))
     with ws(turn.workspace_id):
         frame = await _engine(
             turn, CapturingModel(), tmp_path, hooks, tools=tools, tool_ext=tool_ext
@@ -567,8 +584,8 @@ async def test_tool_failure_reaches_post_tool_use_failure_not_post_tool_use(
     turn = await _seed_turn(uuid4())
     manifest = _sample_manifest()
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
-    tools, tool_ext = turn_tools((manifest,), store)
-    hooks = turn_hooks((manifest,), store)
+    tools, tool_ext = turn_tools((manifest,), store, audience=conversation_audience(None))
+    hooks = turn_hooks((manifest,), store, audience=conversation_audience(None))
     carrier = RecordingCarrier(result=ExecResult(stdout="", stderr="boom", exit_code=1))
     with ws(turn.workspace_id):
         frame = await _engine(
@@ -590,8 +607,8 @@ async def test_compaction_fires_pre_and_post_compact(db: None, tmp_path: Path) -
     turn = await _seed_turn(uuid4())
     manifest = _sample_manifest()
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
-    tools, tool_ext = turn_tools((manifest,), store)
-    hooks = turn_hooks((manifest,), store)
+    tools, tool_ext = turn_tools((manifest,), store, audience=conversation_audience(None))
+    hooks = turn_hooks((manifest,), store, audience=conversation_audience(None))
     with ws(turn.workspace_id):
         frame = await _engine(
             turn,

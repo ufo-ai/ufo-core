@@ -14,6 +14,7 @@ from typing import Literal, Protocol
 import httpx
 from pydantic import BaseModel, Field, HttpUrl, model_validator
 
+from ufo.sdk.audience import conversation_audience
 from ufo.sdk.context import CredentialAccess, CredentialSlotUnset
 from ufo.sdk.tools import TextContent, ToolContext, ToolResult
 
@@ -101,7 +102,7 @@ class YcAuth:
     async def run(self, action: Literal["start", "complete"], session: str) -> YcAuthResult:
         if self.ctx.ext is None:
             raise RuntimeError("yc_auth dispatched without the YC extension context")
-        if self.ctx.audience_member_id != self.ctx.speaker_member_id:
+        if self.ctx.audience != conversation_audience(self.ctx.speaker_member_id):
             raise ValueError("YC authorization requires the speaker's private audience")
         if self.ctx.requestable_credentials is None:
             raise ValueError("no credential key is configured — this deploy cannot store secrets")
