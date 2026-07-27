@@ -390,7 +390,7 @@ async def test_github_repositories_fan_out_over_granted_orgs() -> None:
     handles re-reads."""
     result = await _fetch(GitHubConnector(), "repositories", _github_handler([]))
     assert result.snapshot is False
-    assert {page.source_ref for page in result.pages} == {"repositories/7"}
+    assert {page.source_ref for page in result.pages} == {"repositories/acme/7"}
     assert "acme/widgets" in result.pages[0].body
 
 
@@ -399,7 +399,10 @@ async def test_github_issues_fan_out_link_pagination_and_pr_filter() -> None:
     requests, and checkpoint the repo's watermark into the per-repo cursor map — snapshot=False,
     no deletes (GitHub has no delete)."""
     result = await _fetch(GitHubConnector(), "issues", _github_handler([]))
-    assert {p.source_ref for p in result.pages} == {"issues/1", "issues/3"}
+    assert {p.source_ref for p in result.pages} == {
+        "issues/acme/widgets/1",
+        "issues/acme/widgets/3",
+    }
     assert any("Bug" in p.body for p in result.pages)
     assert result.snapshot is False
     assert result.next_cursor == json.dumps(

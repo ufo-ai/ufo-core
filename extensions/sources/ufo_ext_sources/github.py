@@ -10,13 +10,21 @@ base built from the resolved `Credential`.
 Most streams hit a per-repo path, but the repo catalog is derived from the organizations the grant
 exposes: the connector walks `/user/orgs`, then `/orgs/{org}/repos`, and fans repo-scoped streams
 out over that org-owned repo set, so a fresh issue lands on the next sync with no manual repo
-config. Each repo is a partition of the SDK's `PartitionWalk`, which owns the cursor map and resume
-state; this connector only enumerates repos and produces one repo's bounded pages per stream
-`Ordering`. `issues`/`comments` are `ascending` — a `sort=updated&direction=asc&since` walk whose
-running watermark is a sound resume point. `commits`/`events`/`issue_events` are `newest_first`
-append-only feeds: a first backfill walks the repo newest-first as a descending `{high, until}`
-window (`commits` bounds it server-side with `?until`, `events`/`issue_events` client-side since
-their API takes no time filter), so a capped run resumes downward without the position drift that
+config. A fanned-out record is stamped with the partition it came from — `repo_full_name` for a
+repo-scoped path, `org_login` for an org-scoped one — and `flatten` scopes its primary key to that
+value, so every page ref and title carries the repo or org. Without it a key that is only unique
+inside one repo (a branch or tag `name`, a commit `sha`, a starrer's user id) would land every
+repo's `main` on one page, the rows rewriting each other every sync. The scoped key is what a page
+is addressed by, so the record's own `sha`/`name`/`id` reads composite in the body — the provider's
+own `number`, `login`, `commit.sha` and `url` carry the unscoped values. Each repo is a partition of
+the SDK's `PartitionWalk`, which owns the
+cursor map and resume state; this connector only enumerates repos and produces one repo's bounded
+pages per stream `Ordering`. `issues`/`comments` are `ascending` — a
+`sort=updated&direction=asc&since` walk whose running watermark is a sound resume point.
+`commits`/`events`/`issue_events` are `newest_first` append-only feeds: a first backfill walks the
+repo newest-first as a descending `{high, until}` window (`commits` bounds it server-side with
+`?until`, `events`/`issue_events` client-side since their API takes no time filter), so a capped
+run resumes downward without the position drift that
 would lose records prepended between slices; steady-state stops early once a page sits strictly
 below the repo watermark (a tying page re-yields, so a tied-but-new record lands and the repeats
 dedup downstream). Every other repo-scoped stream is `none` — checkpointed at the repo boundary
@@ -43,9 +51,12 @@ from ufo.sdk.sources import (
     StreamSpec,
     WalkPage,
     get_path,
+    with_context,
 )
 
 PAGE_SIZE = 100
+REPO_PARTITION_FIELD = "repo_full_name"
+ORG_PARTITION_FIELD = "org_login"
 _REPO_LIST_PARAMS = {"per_page": PAGE_SIZE, "type": "all", "sort": "pushed", "direction": "desc"}
 _USERS_ENRICH_CONCURRENCY = 8
 _GITHUB_ACCEPT = "application/vnd.github+json, application/vnd.github.star+json"
@@ -180,22 +191,46 @@ class GitHubConnector(RestConnector):
         return client
 
     def flatten(self, record: dict[str, Any], stream: StreamSpec) -> dict[str, Any]:
-        if stream.name == "stargazers":
-            user = record.get("user")
-            return {**user, **record} if isinstance(user, dict) else record
-        if stream.name != "pull_requests":
-            return record
-        head = record.get("head")
-        base = record.get("base")
-        return {
-            **record,
-            "head": {key: value for key, value in head.items() if key != "repo"}
-            if isinstance(head, dict)
-            else head,
-            "base": {key: value for key, value in base.items() if key != "repo"}
-            if isinstance(base, dict)
-            else base,
-        }
+        """Shape the record, then scope its primary key to the partition the record was fanned out
+        from (`acme/ufo/main`). This runs before the adapter reads `stream.primary_key`, so both the
+        page ref and its title carry the repo or org — a key unique only inside one partition (a
+        branch or tag `name`, a commit `sha`, a starrer's user id) can no longer collide across
+        repos onto one page. A record the fan-out failed to stamp raises. A record carrying no
+        primary key at all is returned unscoped and keyed by the adapter's content hash instead:
+        that hash covers the whole record, and the stamped partition field is part of it, so two
+        partitions serving the identical keyless record still separate — by the stamp's presence in
+        the hashed body, not by anything this scoping does."""
+        match stream.name:
+            case "stargazers":
+                user = record.get("user")
+                shaped = {**user, **record} if isinstance(user, dict) else record
+            case "pull_requests":
+                head = record.get("head")
+                base = record.get("base")
+                shaped = {
+                    **record,
+                    "head": {key: value for key, value in head.items() if key != "repo"}
+                    if isinstance(head, dict)
+                    else head,
+                    "base": {key: value for key, value in base.items() if key != "repo"}
+                    if isinstance(base, dict)
+                    else base,
+                }
+            case _:
+                shaped = record
+        partition_field = _partition_field(_PATHS[stream.name])
+        if partition_field is None:
+            return shaped
+        partition = shaped.get(partition_field)
+        if not isinstance(partition, str) or not partition:
+            raise RuntimeError(
+                f"github: stream {stream.name!r} fans out over {partition_field!r} but a record "
+                "carries no such value"
+            )
+        key = shaped.get(stream.primary_key)
+        if key is None:
+            return shaped
+        return {**shaped, stream.primary_key: f"{partition}/{key}"}
 
     async def paginate(
         self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
@@ -209,8 +244,8 @@ class GitHubConnector(RestConnector):
             params["state"] = "all"
 
         if stream.name == "repositories":
-            async for _org, page in self._iter_granted_org_repo_pages(client):
-                yield page
+            async for org, page in self._iter_granted_org_repo_pages(client):
+                yield with_context(page, **{ORG_PARTITION_FIELD: org})
             return
 
         if "{owner}" in path and "{repo}" in path:
@@ -245,7 +280,7 @@ class GitHubConnector(RestConnector):
                     ):
                         if stream.name == "users" and semaphore is not None:
                             page = await self._enrich_users(client, page, semaphore=semaphore)
-                        yield page
+                        yield with_context(page, **{ORG_PARTITION_FIELD: org})
                 except httpx.HTTPStatusError as error:
                     if error.response.status_code in {404, 410}:
                         continue
@@ -267,8 +302,9 @@ class GitHubConnector(RestConnector):
         GitHub's own terms: an ascending `?since` walk sends `sort=updated&direction=asc&since`;
         `commits` bounds a newest-first backfill server-side with `?until`; `events`/`issue_events`
         expose no time filter, so a backfill is bounded client-side by dropping records at or above
-        `before`. Each page reports its cursor-value span so the walk tracks the watermark/window;
-        a repo the grant can't read (404/409/410) drops out without failing the run."""
+        `before`. Each page reports its cursor-value span so the walk tracks the watermark/window
+        and leaves stamped with its repo, which qualifies every record's page ref; a repo the grant
+        can't read (404/409/410) drops out without failing the run."""
         owner, _, repo = repo_key.partition("/")
         scoped = path.format(owner=owner, repo=repo)
         params: dict[str, Any] = {"per_page": PAGE_SIZE}
@@ -299,7 +335,11 @@ class GitHubConnector(RestConnector):
                 if not page:
                     continue
                 high, low = _cursor_bounds(page, stream.cursor_field)
-                yield WalkPage(records=page, high=high, low=low)
+                yield WalkPage(
+                    records=with_context(page, **{REPO_PARTITION_FIELD: repo_key}),
+                    high=high,
+                    low=low,
+                )
         except httpx.HTTPStatusError as error:
             if error.response.status_code in _REPO_SKIP_STATUS:
                 raise PartitionSkipped(f"github: {repo_key} refused") from error
@@ -390,6 +430,17 @@ class GitHubConnector(RestConnector):
             client, path, params=params, page_size=PAGE_SIZE, parse_records=_parse_records
         ):
             yield page
+
+
+def _partition_field(path: str) -> str | None:
+    """The record field a path's fan-out stamps its partition into, read off the placeholders the
+    path declares: a repo-scoped path is walked once per repo, an org-scoped one once per granted
+    org, and `/user/orgs` over nothing at all."""
+    if "{repo}" in path:
+        return REPO_PARTITION_FIELD
+    if "{org}" in path:
+        return ORG_PARTITION_FIELD
+    return None
 
 
 def _parse_records(response: httpx.Response) -> list[dict[str, Any]]:

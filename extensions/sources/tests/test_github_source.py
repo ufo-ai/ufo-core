@@ -77,7 +77,7 @@ async def test_repositories_fan_out_over_granted_orgs_and_advance_a_watermark() 
     result = await _fetch("repositories", handle)
     assert result.snapshot is False
     assert result.deletes == ()
-    assert _refs(result) == {"repositories/100"}
+    assert _refs(result) == {"repositories/acme/100"}
     assert result.next_cursor == "2026-02-02T00:00:00Z"
     assert result.pages[0].updated_at == "2026-02-02T00:00:00.000000+00:00"
 
@@ -113,8 +113,37 @@ async def test_stargazers_request_star_timestamps_and_project_user_identity() ->
         return httpx.Response(404, json={"path": request.url.path})
 
     result = await _fetch("stargazers", handle)
-    assert _refs(result) == {"stargazers/42"}
+    assert _refs(result) == {"stargazers/acme/repo1/42"}
     assert result.pages[0].created_at == "2026-02-03T00:00:00.000000+00:00"
+
+
+async def test_one_starrer_of_two_repos_lands_as_two_pages() -> None:
+    """A starrer is one GitHub user id whatever they star, and `flatten` merges that user into the
+    record, so both repos' rows key on `42` and used to settle on one page whose `starred_at` each
+    sync overwrote with the other repo's. The repo qualifier splits them — the records differ only
+    in their star time, never in the key — and each page keeps its own timestamp."""
+    repo2 = {**REPO, "id": 101, "name": "repo2", "full_name": "acme/repo2"}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/user/orgs":
+            return httpx.Response(200, json=[ORG])
+        if request.url.path == "/orgs/acme/repos":
+            return httpx.Response(200, json=[REPO, repo2])
+        starred_at = (
+            "2026-02-03T00:00:00Z" if "repo1" in request.url.path else "2026-04-09T00:00:00Z"
+        )
+        if request.url.path in {"/repos/acme/repo1/stargazers", "/repos/acme/repo2/stargazers"}:
+            return httpx.Response(
+                200, json=[{"starred_at": starred_at, "user": {"id": 42, "login": "ada"}}]
+            )
+        return httpx.Response(404, json={"path": request.url.path})
+
+    result = await _fetch("stargazers", handle)
+    assert _refs(result) == {"stargazers/acme/repo1/42", "stargazers/acme/repo2/42"}
+    assert {page.source_ref: page.created_at for page in result.pages} == {
+        "stargazers/acme/repo1/42": "2026-02-03T00:00:00.000000+00:00",
+        "stargazers/acme/repo2/42": "2026-04-09T00:00:00.000000+00:00",
+    }
 
 
 def _issues_handler(seen: list[str]) -> Callable[[httpx.Request], httpx.Response]:
@@ -146,7 +175,7 @@ def _issues_handler(seen: list[str]) -> Callable[[httpx.Request], httpx.Response
 async def test_issues_filter_pull_requests_and_checkpoint_the_repo_watermark() -> None:
     result = await _fetch("issues", _issues_handler([]))
     assert result.snapshot is False
-    assert _refs(result) == {"issues/500"}
+    assert _refs(result) == {"issues/acme/repo1/500"}
     assert result.next_cursor == json.dumps({"acme/repo1": "2026-02-04T00:00:00Z"}, sort_keys=True)
 
 
@@ -181,7 +210,7 @@ async def test_issues_send_since_per_repo() -> None:
     cursor = json.dumps({"acme/repo1": "2026-02-01T00:00:00Z"}, sort_keys=True)
     result = await _fetch("issues", handle, cursor=cursor)
     assert since_by_repo == {"repo1": "2026-02-01T00:00:00Z", "repo2": None}
-    assert _refs(result) == {"issues/600"}
+    assert _refs(result) == {"issues/acme/repo2/600"}
     assert result.next_cursor == json.dumps(
         {"acme/repo1": "2026-02-01T00:00:00Z", "acme/repo2": "2026-02-05T00:00:00Z"},
         sort_keys=True,
@@ -288,14 +317,14 @@ async def test_commits_backfill_windows_and_resumes_downward_with_until(
         return httpx.Response(404, json={"path": request.url.path})
 
     first = await _fetch("commits", handle)
-    assert _refs(first) == {"commits/c1", "commits/c2"}
+    assert _refs(first) == {"commits/acme/repo1/c1", "commits/acme/repo1/c2"}
     assert json.loads(first.next_cursor) == {
         "acme/repo1": {"high": "2026-03-03T00:00:00Z", "until": "2026-03-02T00:00:00Z"}
     }
 
     second = await _fetch("commits", handle, cursor=first.next_cursor)
     assert seen_until[-1] == "2026-03-02T00:00:00Z"
-    assert _refs(second) == {"commits/c2", "commits/c3"}
+    assert _refs(second) == {"commits/acme/repo1/c2", "commits/acme/repo1/c3"}
     assert json.loads(second.next_cursor) == {"acme/repo1": "2026-03-03T00:00:00Z"}
 
 
@@ -364,7 +393,7 @@ async def test_events_backfill_filters_client_side_without_a_time_param(
     )
     result = await _fetch(stream_name, handle, cursor=cursor)
     assert all("until" not in params and "since" not in params for params in params_seen)
-    assert _refs(result) == {f"{stream_name}/901"}
+    assert _refs(result) == {f"{stream_name}/acme/repo1/901"}
 
 
 async def test_org_enumeration_refusal_raises_stream_skipped() -> None:
@@ -380,7 +409,10 @@ async def test_org_enumeration_refusal_raises_stream_skipped() -> None:
 async def test_branches_walk_the_default_none_path_per_repo() -> None:
     """The default `Ordering.none` streams — the majority of the catalog — ride the partition walk
     through the real connector: every repo's collection lands, and a completed pass leaves no
-    markers behind, so the next run re-walks in full."""
+    markers behind, so the next run re-walks in full. A branch name is unique only inside its repo,
+    so each page ref carries the repo it was walked from and every repo's `main` lands as its own
+    page instead of rewriting one shared page every sync. The scoped key is the record's own `name`,
+    so the title a member recalls names its repo too rather than a bare `main` per repo."""
     repo2 = {**REPO, "id": 101, "name": "repo2", "full_name": "acme/repo2"}
 
     def handle(request: httpx.Request) -> httpx.Response:
@@ -391,14 +423,121 @@ async def test_branches_walk_the_default_none_path_per_repo() -> None:
         if request.url.path == "/repos/acme/repo1/branches":
             return httpx.Response(200, json=[{"name": "main"}])
         if request.url.path == "/repos/acme/repo2/branches":
-            return httpx.Response(200, json=[{"name": "dev"}])
+            return httpx.Response(200, json=[{"name": "main"}, {"name": "dev"}])
         return httpx.Response(404, json={"path": request.url.path})
 
+    expected = {"branches/acme/repo1/main", "branches/acme/repo2/main", "branches/acme/repo2/dev"}
     result = await _fetch("branches", handle)
-    assert _refs(result) == {"branches/main", "branches/dev"}
+    assert _refs(result) == expected
     assert result.snapshot is False
+    bodies = {page.source_ref: json.loads(page.body.split("\n\n", 1)[1]) for page in result.pages}
+    assert bodies["branches/acme/repo1/main"]["repo_full_name"] == "acme/repo1"
+    assert bodies["branches/acme/repo2/main"]["repo_full_name"] == "acme/repo2"
+    assert bodies["branches/acme/repo1/main"]["name"] == "acme/repo1/main"
+    assert {page.title for page in result.pages} == {
+        "acme/repo1/main",
+        "acme/repo2/main",
+        "acme/repo2/dev",
+    }
     rerun = await _fetch("branches", handle, cursor=result.next_cursor)
-    assert _refs(rerun) == {"branches/main", "branches/dev"}
+    assert _refs(rerun) == expected
+
+
+async def test_org_scoped_streams_are_qualified_by_the_org_they_were_walked_from() -> None:
+    """A member of two granted orgs is one GitHub user id but two org-membership records, so the
+    org-scoped fan-out qualifies each page ref with its org rather than collapsing both onto one
+    page."""
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/user/orgs":
+            return httpx.Response(200, json=[ORG, {"login": "beta", "id": 2}])
+        if request.url.path in {"/orgs/acme/members", "/orgs/beta/members"}:
+            return httpx.Response(200, json=[{"id": 42, "login": "ada"}])
+        if request.url.path == "/users/ada":
+            return httpx.Response(200, json={"id": 42, "login": "ada", "name": "Ada"})
+        return httpx.Response(404, json={"path": request.url.path})
+
+    result = await _fetch("users", handle)
+    assert _refs(result) == {"users/acme/42", "users/beta/42"}
+
+
+@pytest.mark.parametrize(
+    ("stream_name", "record", "key"),
+    [
+        ("tags", {"name": "v1.0.0"}, "v1.0.0"),
+        ("assignees", {"id": 42, "login": "ada"}, "42"),
+        ("collaborators", {"id": 42, "login": "ada"}, "42"),
+        ("commits", _commit("abc123", "2026-03-03T00:00:00Z"), "abc123"),
+    ],
+)
+async def test_an_identical_record_in_two_repos_lands_as_two_pages(
+    stream_name: str, record: dict[str, object], key: str
+) -> None:
+    """The repo-scoped collision class, one identical record per repo: a tag name is unique only
+    inside its repo, one person is one GitHub user id across every repo they are assignable on, and
+    a sha reachable from two repos is one sha. Serving byte-identical records from two repos proves
+    the repo qualifier, not the record, is what separates the pages — a distinct-key fixture would
+    only prove the ref format changed."""
+    repo2 = {**REPO, "id": 101, "name": "repo2", "full_name": "acme/repo2"}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/user/orgs":
+            return httpx.Response(200, json=[ORG])
+        if request.url.path == "/orgs/acme/repos":
+            return httpx.Response(200, json=[REPO, repo2])
+        if request.url.path in {
+            f"/repos/acme/repo1/{stream_name}",
+            f"/repos/acme/repo2/{stream_name}",
+        }:
+            return httpx.Response(200, json=[record])
+        return httpx.Response(404, json={"path": request.url.path})
+
+    result = await _fetch(stream_name, handle)
+    assert _refs(result) == {
+        f"{stream_name}/acme/repo1/{key}",
+        f"{stream_name}/acme/repo2/{key}",
+    }
+
+
+async def test_a_record_with_no_primary_key_still_separates_per_repo() -> None:
+    """`flatten` writes no prefix when the record carries no `primary_key` — `contributor_activity`
+    is a runnable stream whose `/stats/contributors` records have no `id`, so the branch fires on
+    every sync of it. Separation then rests entirely on the stamped `repo_full_name` being part of
+    the record the adapter content-hashes: two repos serving the identical keyless record still land
+    two pages, neither carrying a repo prefix."""
+    repo2 = {**REPO, "id": 101, "name": "repo2", "full_name": "acme/repo2"}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/user/orgs":
+            return httpx.Response(200, json=[ORG])
+        if request.url.path == "/orgs/acme/repos":
+            return httpx.Response(200, json=[REPO, repo2])
+        if request.url.path in {"/repos/acme/repo1/assignees", "/repos/acme/repo2/assignees"}:
+            return httpx.Response(200, json=[{"login": "ada"}])
+        return httpx.Response(404, json={"path": request.url.path})
+
+    refs = _refs(await _fetch("assignees", handle))
+    assert len(refs) == 2
+    assert all(ref.startswith("assignees/") and "acme/repo" not in ref for ref in refs)
+
+
+def test_flatten_raises_when_a_fanned_out_record_carries_no_partition() -> None:
+    """The fan-out sites stamp the partition; `flatten` scoping it is the only reader, so a record
+    that reached it unstamped is a wiring bug and fails loud rather than landing a colliding ref."""
+    connector = GitHubConnector()
+    branches = next(stream for stream in connector.streams() if stream.name == "branches")
+    with pytest.raises(RuntimeError, match="fans out over"):
+        connector.flatten({"name": "main"}, branches)
+
+
+def test_no_runnable_stream_keys_on_its_own_cursor_field() -> None:
+    """Scoping the primary key is safe only while no stream's key IS its cursor: the watermark the
+    sync advances compares raw provider values, and a scoped key would corrupt the comparison."""
+    assert [
+        stream.name
+        for stream in GitHubConnector().streams()
+        if stream.primary_key == stream.cursor_field
+    ] == []
 
 
 async def test_repo_refusal_mid_walk_skips_only_that_repo() -> None:
@@ -427,7 +566,7 @@ async def test_repo_refusal_mid_walk_skips_only_that_repo() -> None:
         sort_keys=True,
     )
     result = await _fetch("commits", handle, cursor=cursor)
-    assert _refs(result) == {"commits/c9"}
+    assert _refs(result) == {"commits/acme/repo2/c9"}
     assert json.loads(result.next_cursor) == {
         "acme/repo1": {"high": "2026-03-04T00:00:00Z", "until": "2026-03-01T00:00:00Z"},
         "acme/repo2": "2026-03-05T00:00:00Z",

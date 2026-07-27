@@ -108,8 +108,10 @@ class RecallTarget:
 
 def test_fixture_pages_are_what_a_github_sync_would_land() -> None:
     """The body is checked against the fixture record itself, never against a second `render` call:
-    the header is the connector's own shape, the payload is the record's JSON, and the pull
-    request's `head`/`base` have lost the foreign `repo` object that `flatten` strips."""
+    the header is the connector's own shape, the payload is the record's JSON with its id scoped to
+    the repo the fan-out stamped (that scoped id keys the page, so no two repos collide on one id),
+    and the pull request's `head`/`base` have lost the foreign `repo` object that `flatten`
+    strips."""
     pages = rendered_pages()
     issue = next(page for page in PAGES if page.key == "issue-412")
     landed = next(page for page in pages if page.key == "issue-412")
@@ -119,10 +121,10 @@ def test_fixture_pages_are_what_a_github_sync_would_land() -> None:
         next(page for page in pages if page.key == "pull-431").body.partition("\n\n")[2]
     )
 
-    assert landed.source_ref == "issues/2400412"
+    assert landed.source_ref == f"issues/{REPO}/2400412"
     assert landed.title == issue.title
     assert header == f"# github issues: {issue.title}"
-    assert json.loads(payload) == issue.record()
+    assert json.loads(payload) == issue.record() | {"id": f"{REPO}/2400412"}
     assert pull.record()["head"]["repo"] == {"full_name": REPO}
     assert pull_body["head"] == {"ref": "fix/431"}
     assert pull_body["base"] == {"ref": "main"}
