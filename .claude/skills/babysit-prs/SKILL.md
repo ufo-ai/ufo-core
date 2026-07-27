@@ -7,6 +7,8 @@ description: Shepherd open metalcraftai/ufo pull requests to merge-ready — wat
 
 With no argument, sweep the PRs you authored (`gh pr list --author @me --state open`); otherwise touch only the named PRs. Read root `README.md`, `CLAUDE.md`, and `spec.md` first — `spec.md` is the design source of truth you judge a "design gap" against; also read a nested `CLAUDE.md`/`AGENTS.md` that governs a changed path before editing it. Fix each PR on its own branch, one worktree per PR; never combine fixes across PRs. Keep a per-PR note of what you tried and why it failed, and never rerun an unchanged mechanism.
 
+Between current-head passes, tell the user only material findings, blockers, decisions, or completed wait results, in the fewest words possible; omit tool narration, routine checks, the act of waiting, and unchanged status. Prefer `Two valid issues. Fixing.`
+
 ## What you may and may not do
 
 You may diagnose, patch, test, commit, push, reply to reviewers, and resolve threads. You may **not** merge a PR or enable auto-merge without explicit human approval. Your job ends at merge-ready, not at merged.
