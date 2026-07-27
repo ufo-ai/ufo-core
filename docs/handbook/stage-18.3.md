@@ -1,279 +1,81 @@
-# Platform surface and runtime extension manifests  `stage-18.3`
+# Public SDK extension capability facades  `stage-18.3`
 
-This stage is part of startup and shared platform support. It is made of “manifest” files, which are like registration cards. Each one tells the core system that an extension exists, what it is called, and what doors it wants to open.
+This stage is shared support for extension writers. It is not where jobs run, schedules tick, or tools execute. Instead, it provides stable “front doors” into the SDK, so outside extension code can import approved names without depending on the project’s private folder layout. This is like giving users one clear service desk instead of sending them through staff-only corridors.
 
-The connectors manifest advertises connector tools, their shared object type, and prompt text so the host can offer them to users or agents. The debugger manifest registers debugger web and API access. The ufo manifest exposes the shell-client surface, letting a command-line client talk to the system. The web manifest adds normal web routes so browser-facing pages can be mounted. The page-alerts manifest lists chat tools and a background event listener for page alert activity. The scheduled-tasks manifest registers recurring task objects, a wait tool, a clock-based runner, and scheduling skills. The self-improvement manifest adds a daily job that evaluates and improves prompts using model access. The Redis hub manifest registers an optional Redis-backed hub, so live shared state can move through Redis instead of staying inside one server.
+Each file is a small facade, meaning it mostly re-publishes selected types, constants, errors, or helper classes from deeper internal modules. jobs.py exposes the public job-related tools. scheduling.py exposes scheduling names from the internal scheduling system. objects.py gathers the object API names that extensions are allowed to use. skills.py provides the import point for skill-related SDK pieces, while the real behavior lives elsewhere. surfaces.py collects the main building blocks for “surfaces,” the places where extensions interact with users or workspaces. tools.py exposes public tool-related types. Together, these files keep extension code clean, stable, and insulated from internal refactors.
 
 ## Files in this stage
 
-### Connector tooling
-These manifests advertise user-facing connector capabilities and their prompt/tool surfaces to the host system.
+### Work and object facades
+Stable SDK entry points for extension code that declares or consumes job and object-related public types.
 
-### `extensions/connectors/ufo_ext_connectors/manifest.py`
+### `core/src/ufo/sdk/jobs.py`
 
-`config` · `startup / extension load`
+`other` · `cross-cutting`
 
-This file is the extension’s calling card. When the main application loads extensions, it needs a simple answer to questions like: What is this extension called? What tools does it provide? What extra instructions should be shown to the assistant? This file packages those answers into a Manifest, which is a structured description the host can read.
+This is a small “front desk” module for background jobs in the SDK. Instead of asking extension authors to import directly from deeper core files, it re-exports the job pieces they are meant to use: `JobSpec`, `WorkspaceCandidates`, and `owner_candidates`.
 
-The connector tools declared here are deliberately generic. They are not tied to one outside service or one broker. Instead, they work across all connectors that other broker extensions register. In everyday terms, this file puts one shared “tool counter” in the workspace, while the individual broker extensions stock that counter with their own services.
+The main idea is to keep the public contract clean. If core internals move around later, extensions can keep importing from `ufo.sdk.jobs` without breaking. That is like giving visitors one official reception desk instead of making them learn the building’s back hallways.
 
-The file also reads a Markdown prompt section from disk. That prompt text becomes an instruction block named external_tools, helping the assistant understand how to talk about and use these connector tools. The manifest then combines four pieces: the extension name, its version, the tool list, the connector object type, and the prompt section. The host application can use that single bundle during startup to make the connectors extension available.
+The exported job tools help an extension describe background work. A `JobSpec` describes a job. `owner_candidates` is used when a job needs to say which workspaces currently have work waiting. It builds a database query each time the scheduler checks for work, so time-based rules can use the current time. `WorkspaceCandidates` represents the resulting workspace choices.
 
-#### Function details
+The comments also mention RLS, or row-level security, which is a database rule system that normally limits which rows can be seen. Core performs one controlled read that bypasses those rules so it can safely discover which workspaces need job dispatching.
 
-##### `manifest`  (lines 21–28)
 
-```
-def manifest() -> Manifest
-```
+### `core/src/ufo/sdk/objects.py`
 
-**Purpose**: Builds and returns the formal description of the connectors extension. The host uses this description to learn which connector tools, objects, and prompt text the extension contributes.
+`other` · `cross-cutting; used whenever extension or SDK code imports object-related public API names`
 
-**Data flow**: It reads the constants already prepared in this file: the extension name and version, the shared connector tool list, the connector object definition, and the prompt text loaded from the Markdown file. It wraps the prompt text in a PromptSection, then places everything into a Manifest object. The result is a single package of extension metadata that the rest of the system can consume.
+This file exists to make the project’s public interface clearer and safer. Extensions need to talk about “objects” in the UFO system: things with kinds, owners, references, list pages, detail views, and stores. The real definitions live deeper in modules such as `ufo.objects` and `ufo.conversations`, but extension authors should not have to know or depend on those internal locations.
 
-**Call relations**: When the extension is being discovered or loaded, the host calls this function to ask, “What do you provide?” The function creates a PromptSection for the assistant-facing instructions, then creates a Manifest that hands the host the complete connector extension surface in one return value.
+Think of this file like a front desk. The actual offices are elsewhere, but visitors are told to come here because this is the stable, official entrance. If the internals move later, this file can keep presenting the same names to extensions.
 
-*Call graph*: 2 external calls (__init__, __init__).
+There is no active logic here. It does not create objects, read files, call services, or transform data. It simply imports selected names and re-exports them under the SDK path. The repeated `as same_name` style makes the export explicit: these names are intentionally part of the public surface. Without this file, extension code would likely import from internal modules directly, making it more fragile when the core project changes.
 
 
-### Platform surfaces
-These manifests register externally visible debugger, shell-client, and web routes that the core can mount at startup.
+### Scheduling and skill facades
+Public import paths for scheduling utilities and skill-related SDK names backed by internal implementations.
 
-### `extensions/debugger/ufo_ext_debugger/manifest.py`
+### `core/src/ufo/sdk/scheduling.py`
 
-`config` · `startup / extension discovery`
+`other` · `import time / cross-cutting SDK access`
 
-This is the debugger extension’s identity card and signpost. When the larger UFO system looks for extensions, it needs a simple answer to questions like: “What is this extension called?”, “Which version is it?”, and “What routes should become available if I load it?” Without this file, the debugger code could exist on disk but the host system would not know how to mount it or how users should reach it.
+This file is like a labeled front desk for scheduling features. The real scheduling code lives elsewhere, in `ufo.scheduling`, but outside users should not have to know that internal layout. Instead, they can import from `ufo.sdk.scheduling`, which is part of the public SDK surface.
 
-The file defines a fixed name, `debugger`, and a version, `0.1.0`. Its main job is the `manifest` function, which builds a `Manifest` object. A manifest is a small declaration that describes an extension to the host application.
+The file re-exports a small set of scheduling-related pieces: a one-time schedule constant, a scheduled-task value object, the schedule store that extensions use through their extension context, task inspection information, and a helper for finding workspaces with tasks that are due. “Re-export” means it imports something from one module and makes it available under another module name, without changing it.
 
-Inside that manifest, the file registers one surface. A surface is a public-facing area of the extension, like a doorway into a specific feature. Here, the surface uses the debugger route table and is identified by `SURFACE_DEBUG`. It also attaches `resolve_operator_workspace` as the identity resolver. In plain terms, that resolver is the check that decides which operator workspace the caller belongs to before the debugger surface is used. This matters because debugger access is sensitive; the extension should only be mounted where the system can confirm the right operator context.
+This matters because it gives the project room to reorganize its internal code later without breaking extension authors. If extensions were told to import directly from `ufo.scheduling`, any internal move or rename could break them. By keeping this thin public layer, the SDK can act as a stable doorway while the rooms behind it can change.
 
-#### Function details
 
-##### `manifest`  (lines 14–21)
+### `core/src/ufo/sdk/skills.py`
 
-```
-def manifest() -> Manifest
-```
+`io_transport` · `cross-cutting`
 
-**Purpose**: Builds and returns the debugger extension’s manifest, which is the object the host system reads to learn how to load this extension. It declares the extension name, version, and the single debugger surface with its routes and workspace identity check.
+This is a small “front desk” module for the SDK. The real skill code lives in `ufo.skills.runtime`, but outside users should not have to know that internal path. Instead, they can import `RuntimeSkill` and `parse_skill_content` from `ufo.sdk.skills`, which is a cleaner and more stable public address.
 
-**Data flow**: It starts with constants from this file, plus imported route and surface definitions from the debugger surface module. It creates a `SurfaceSpec`, which describes the debugger-facing entry point and says to use `resolve_operator_workspace` to identify the caller’s operator workspace. It then wraps that surface inside a `Manifest` and returns it to whoever is loading the extension.
+A skill here means a runtime capability contributed by an extension. `RuntimeSkill` is the value object that represents that capability, and `parse_skill_content` reads in-memory skill text and turns it into that structured form. This file re-exports both names without changing them.
 
-**Call relations**: When the extension system asks this module what it provides, this function is the answer. It hands the host a `Manifest` object, built using `Manifest.__init__`, and includes a `SurfaceSpec` built using `SurfaceSpec.__init__` so the host knows which debugger routes to mount and how to authenticate the workspace context.
+The comment explains an important project rule: package `__init__.py` files are kept empty, so public SDK names are exposed through small named modules like this one. Without this file, extension authors would either need to import from deeper internal modules, making their code more fragile, or the SDK would have no clear public skill import path.
 
-*Call graph*: 2 external calls (__init__, __init__).
+An everyday analogy: this file is like a signpost in a building lobby. It does not do the work of the office upstairs, but it tells visitors the official door to use.
 
 
-### `extensions/ufo/ufo_ext_ufo/manifest.py`
+### Surface and tool facades
+SDK doorways for user-facing surfaces and extension-declared tool types without exposing private module paths.
 
-`config` · `startup / extension discovery`
+### `core/src/ufo/sdk/surfaces.py`
 
-A manifest is like a small label and wiring diagram for an extension. Without this file, the core system would not know that the `ufo` extension exists, what it is called, or which route should be mounted so users can reach it.
+`other` · `cross-cutting import-time SDK access`
 
-This manifest declares a single surface, meaning one exposed way for outside users or tools to interact with the extension. Here, that surface is the terminal-facing `ufo` connection used by the shell client. The route list comes from the surface module, and the workspace-identifying function is also supplied there. In plain terms, when someone connects, the system uses `resolve_workspace` to work out which workspace the connection belongs to.
+This file does not create new behavior. Instead, it acts like a labeled shelf in a toolbox: it collects tools from several deeper parts of the project and makes them available from one public place, `ufo.sdk.surfaces`. That matters because extension authors should not need to know the project’s internal folder layout just to write a surface. They can import the official names from this module and avoid depending on private implementation details.
 
-An important detail is what this manifest does not include. It does not define credential slots or extension-specific configuration settings. The comment explains that access is checked using a bearer token, which is a secret token presented by the client, verified against the `UFO_TOKEN_SECRET` environment variable. So installation is enough to mount it, similar to a web route being made available once the service starts.
+A “surface” here means an integration point where UFO can deliver conversation turns, ask questions, request credentials, or write results back to some durable place. The file re-exports types such as `SurfaceSpec`, which describes what a surface offers; `SurfaceRoute`, which describes where messages go; `SurfaceContext`, which gives privileged context to handlers; and `Writeback`, which represents the two-step process of saving results. It also exposes related records such as turns, terminal frames, credential prompts, questions, transcript summaries, and errors.
 
-#### Function details
+The repeated `as SameName` imports are intentional. They make the public API explicit: these are the names this module promises to provide. If this file disappeared, users could still hunt through internal modules, but the clean SDK boundary for surface extensions would be gone.
 
-##### `manifest`  (lines 15–20)
 
-```
-def manifest() -> Manifest
-```
+### `core/src/ufo/sdk/tools.py`
 
-**Purpose**: Builds and returns the extension manifest that the core system can read. This is the single place where the `ufo` extension announces its name, version, exposed surface, routes, and workspace-identification function.
+`util` · `import time / extension development`
 
-**Data flow**: It starts with the file-level constants `NAME` and `VERSION`, plus imported surface details such as `SURFACE_UFO`, `ROUTES`, and `resolve_workspace`. It wraps the surface information into a `SurfaceSpec`, then wraps that into a `Manifest`. The result is a completed manifest object that describes how this extension should be mounted.
-
-**Call relations**: When the extension system asks this module what it provides, `manifest` creates the answer. It calls `SurfaceSpec.__init__` to describe the one exposed `ufo` surface, then calls `Manifest.__init__` to package that surface together with the extension name and version for the core system to use.
-
-*Call graph*: 2 external calls (__init__, __init__).
-
-
-### `extensions/web/ufo_ext_web/manifest.py`
-
-`config` · `startup / extension discovery`
-
-This file is the web extension’s manifest, meaning it describes the extension in a form the main UFO system can understand. A manifest is like a sign-up sheet: it says “my name is web, this is my version, and these are the doors I add to the building.” Without this file, the core system would not know how to discover or attach the web extension’s routes.
-
-The important idea here is a “surface.” In this project, a surface is an outside-facing way for people or systems to interact with UFO, such as a web interface. This manifest declares one surface, named by `SURFACE_WEB`. It connects that surface to `ROUTES`, which are the web paths/endpoints the extension exposes. It also provides `resolve_workspace` as the identifying function, which helps the system work out which workspace a web request belongs to.
-
-The file deliberately does not declare credentials or extra configuration. The comment explains why: the web session uses the member’s own session cookie, not a shared bot secret, and installing the extension is enough to mount it. It also does not set up a writeback delivery path; instead, the web extension listens to the central hub through its own streaming route.
-
-#### Function details
-
-##### `manifest`  (lines 14–19)
-
-```
-def manifest() -> Manifest
-```
-
-**Purpose**: Builds and returns the web extension’s manifest, which is the object the core system reads to learn how to mount this extension. Someone would use it when the extension is being discovered or loaded.
-
-**Data flow**: It starts with fixed information in this file, such as the extension name and version, and imported web surface details such as the route list and workspace resolver. It wraps those details into a `SurfaceSpec`, which describes the web-facing surface, then places that inside a `Manifest`. The result is a complete manifest object that the core can use.
-
-**Call relations**: During extension loading, the core calls `manifest` to ask this extension what it provides. Inside that call, it creates a `SurfaceSpec` for the web surface and then creates the larger `Manifest` object that carries that surface back to the core.
-
-*Call graph*: 2 external calls (__init__, __init__).
-
-
-### Event and task services
-These manifests expose reactive page-alert tools and recurring job machinery for scheduled and self-improvement work.
-
-### `extensions/page_alerts/ufo_ext_page_alerts/manifest.py`
-
-`config` · `startup`
-
-This file does not perform the page-watching work itself. Instead, it declares what the extension can do, much like a restaurant menu tells you what can be ordered without cooking the meal. The platform needs this declaration so it can expose the right tools in chat and connect the right event to the right code.
-
-The extension is named `page_alerts` and has version `0.1.0`. Its `manifest` function builds a `Manifest`, which is the package of information the UFO platform reads when loading the extension. Inside that package are three chat tools: one to start watching synced workspace pages for a topic, one to list existing watches, and one to cancel a watch. Each tool has a plain description, an input model that defines what information the user must provide, and a handler function that actually does the work.
-
-The file also declares one hook: when a `page_change` event happens, the platform should call `on_page_change`. A hook is a background connection point: instead of waiting for a user to ask, the extension can react when the system notices a changed page. Without this file, the platform would not know these tools or the page-change reaction exist.
-
-#### Function details
-
-##### `manifest`  (lines 21–50)
-
-```
-def manifest() -> Manifest
-```
-
-**Purpose**: Builds and returns the extension declaration that the platform reads when loading page alerts. It says the extension's name and version, lists the chat tools users can call, and connects page-change events to the alerting code.
-
-**Data flow**: It starts with fixed local information: the extension name, version, tool descriptions, input models, and handler functions imported from the alerts module. It wraps each chat action in a `ToolDef`, wraps the page-change reaction in a `HookSpec`, and places them all into a `Manifest`. The result is a single manifest object that the platform can use to register the extension.
-
-**Call relations**: When the extension is loaded, the platform asks for this manifest so it can wire the extension into the wider system. This function creates `ToolDef` objects for the user-facing chat tools, creates a `HookSpec` for the background `page_change` event, and hands all of that to `Manifest` so the platform has one complete registration record.
-
-*Call graph*: 3 external calls (__init__, __init__, __init__).
-
-
-### `extensions/scheduled_tasks/ufo_ext_scheduled_tasks/manifest.py`
-
-`config` · `startup/config load, then on scheduled job ticks`
-
-This is the extension’s front desk. When the larger UFO system starts or scans extensions, it asks this file for a manifest, which is a clear declaration of what the extension provides. The file names the extension, gives it a version, and registers the pieces that make scheduled tasks work.
-
-The main idea is simple: users or agents can create scheduled tasks, and a background runner periodically checks which workspaces have tasks due. A “workspace” is an isolated area of data and activity. The runner is not triggered by each individual task row directly; instead, it wakes up on a fixed clock schedule and looks for due work. This is like a building caretaker walking the halls every hour rather than every office ringing a bell separately.
-
-The manifest also registers a durable pause tool, which lets an agent pause and resume later in a way the system can remember, and a scheduled-task object type, which lets the generic object commands create, update, list, and delete scheduled tasks. Finally, it points the system at a skill folder named “task-scheduling” and declares that this extension depends on “memory_search” being available.
-
-#### Function details
-
-##### `_run`  (lines 28–29)
-
-```
-async def _run(ctx: ExtensionContext) -> None
-```
-
-**Purpose**: This is the small job entry function that actually starts the scheduled-task runner when the clock-based job fires. It exists so the manifest can give the job system one simple function to call.
-
-**Data flow**: It receives an ExtensionContext, which is the extension’s access pass to workspace-specific services and stored data. It uses that context to create a ScheduledTaskRunner, then asks the runner to do its work. Nothing is returned; the useful effect is that due scheduled tasks may be found and invoked.
-
-**Call relations**: The manifest gives this function to the JobSpec as the job handler. When the job system decides it is time to run the scheduled-task runner, it calls _run, and _run hands control to ScheduledTaskRunner so the real task-checking work can happen.
-
-*Call graph*: 1 external calls (__init__).
-
-
-##### `manifest`  (lines 32–48)
-
-```
-def manifest() -> Manifest
-```
-
-**Purpose**: This function builds and returns the extension declaration that the host system reads. It explains which tools, object types, background jobs, skills, and dependencies belong to the scheduled-tasks extension.
-
-**Data flow**: It starts from fixed constants such as the extension name, version, runner job name, clock schedule, and skill folder. It creates a JobSpec for the recurring runner, uses due_task_workspaces to choose which workspaces are candidates for that job, creates SkillSpec entries for the skill folders, and packages everything into a Manifest. The result is a complete description the host can load.
-
-**Call relations**: The extension loader calls manifest when it is discovering what this extension offers. Inside, manifest builds the JobSpec that points back to _run, asks due_task_workspaces for the workspace-selection rule, creates SkillSpec records for the declared skills, and finally returns a Manifest that the rest of the system uses to register the extension.
-
-*Call graph*: 4 external calls (__init__, __init__, __init__, due_task_workspaces).
-
-
-### `extensions/self_improvement/ufo_ext_self_improvement/manifest.py`
-
-`config` · `startup registration, then scheduled job execution`
-
-This file is the extension’s front desk. When the larger UFO system loads extensions, it asks each one for a manifest, which is a small declaration of its name, version, and scheduled work. Here, the self-improvement extension declares a cron job. A cron job is work that runs on a clock schedule, like a reminder that rings at a set time, rather than work triggered by a user request or a database change.
-
-The scheduled job is called `eval_cron` and is set to run at midnight according to the schedule string. When the clock fires, the system calls `_tick`. That function first checks that a model is available, because this extension depends on a language model to propose prompt changes, replay behavior, and judge results. If no model has been connected, it stops with a clear error instead of silently doing nothing.
-
-If model access exists, `_tick` wraps it in `ModelAccessLeg`, then builds the three main parts of the improvement run: a proposer that suggests prompt candidates, an evaluator that replays and grades them, and an `ImproveCron` object that coordinates the whole pass. The manifest also limits the job to trajectory workspaces, meaning it runs in the kinds of work areas where recorded behavior can be evaluated.
-
-#### Function details
-
-##### `_tick`  (lines 21–29)
-
-```
-async def _tick(ctx: ExtensionContext) -> None
-```
-
-**Purpose**: This is the actual scheduled action for the self-improvement job. It prepares model-powered proposing, replaying, and judging, then starts one improvement run.
-
-**Data flow**: It receives an `ExtensionContext`, which is the job’s bundle of runtime tools and settings. It reads `ctx.model`; if no model is present, it raises an error because the improvement process cannot work without one. If a model is present, it wraps that model access, gives the wrapper to the prompt proposer and evaluator, builds the cron runner, and waits for the run to finish. It does not return a value; its effect is the completed improvement pass or a clear failure.
-
-**Call relations**: The scheduler calls `_tick` when the manifest’s cron job fires. Inside that moment, `_tick` creates the model access wrapper, uses it to create `PromptProposer` and `CandidateEvaluation`, then hands both to `ImproveCron`, which takes over the real improvement workflow.
-
-*Call graph*: 4 external calls (__init__, __init__, __init__, __init__).
-
-
-##### `manifest`  (lines 32–44)
-
-```
-def manifest() -> Manifest
-```
-
-**Purpose**: This function describes the extension to the host system. It says the extension’s name and version, and registers the scheduled evaluation job that should call `_tick`.
-
-**Data flow**: It takes no input. It gathers the fixed constants in this file, asks for the eligible trajectory workspaces, builds a `JobSpec` for the daily evaluation cron, and places that job inside a `Manifest`. The returned manifest is what the host system reads to know how to load and schedule this extension.
-
-**Call relations**: The extension loader calls `manifest` during startup or discovery. `manifest` creates the job description and points that job at `_tick`, so later, when the scheduler reaches the configured time and workspace candidates, `_tick` becomes the function that actually runs.
-
-*Call graph*: 3 external calls (__init__, __init__, trajectory_workspaces).
-
-
-### Hub backend selection
-This manifest registers Redis as a selectable live-frame hub backend for deployments that need shared runtime state.
-
-### `extensions/redis_hub/ufo_ext_redis_hub/manifest.py`
-
-`config` · `startup/config load`
-
-This is the extension’s sign-up sheet. The core application has a “hub” seam: a replaceable part that distributes live frames. By default, that may happen inside one running server. This file registers an alternative hub that uses Redis Streams, a Redis feature for passing ordered messages between processes. That matters when there is more than one server instance, because each instance needs to see the same live-frame traffic.
-
-The file gives the extension a name, a version, and the backend label `redis`. When the application reads extension manifests during startup, this manifest says: “If the config asks for the Redis hub backend, call this builder function.”
-
-The builder is deliberately strict. If someone selects the Redis backend but forgets to provide `hub.url`, it raises an error immediately. This is like refusing to start a delivery route without the depot address, instead of waiting until the first package is already in hand. If the URL is present, the builder creates a `RedisStreamHub`, which is the actual object that talks to Redis and distributes frames.
-
-#### Function details
-
-##### `_build_hub`  (lines 17–22)
-
-```
-def _build_hub(url: str | None) -> Hub
-```
-
-**Purpose**: Creates the Redis-backed hub object from a Redis connection URL. It also protects the system from a half-configured setup by failing immediately if the URL is missing.
-
-**Data flow**: It receives a URL value, which may be a string or may be absent. If the URL is absent, it stops with a clear runtime error explaining that `hub.url` is required. If the URL is present, it passes that URL into `RedisStreamHub` and returns the newly created hub object.
-
-**Call relations**: This function is handed to the manifest as the build step for the `redis` hub backend. When the core system later chooses that backend, it calls this builder, and the builder hands off to `RedisStreamHub.__init__` to create the real Redis-based hub.
-
-*Call graph*: 1 external calls (__init__).
-
-
-##### `manifest`  (lines 25–30)
-
-```
-def manifest() -> Manifest
-```
-
-**Purpose**: Builds and returns the extension manifest that advertises this Redis hub backend to the main application. The manifest is how the extension says what it provides and how the core should construct it.
-
-**Data flow**: It reads the module’s fixed name, version, and backend label. It wraps the backend label and `_build_hub` function into a `HubSpec`, then wraps that specification into a `Manifest`, which it returns to the extension-loading system.
-
-**Call relations**: This is the function the application’s extension loader calls during startup to discover what the extension offers. It creates a `HubSpec` to describe the Redis backend, then creates a `Manifest` that carries that spec back to the core system.
-
-*Call graph*: 2 external calls (__init__, __init__).
+This module is like a front desk for the tool system. Instead of asking extension authors to know where every tool-related class lives inside the core code, it re-exports the small set of names they are meant to use: tool definitions, tool context, text and image content, tool results, and a connection-unavailable error. That matters because internal files can move or be reorganized over time, while this public import path can stay the same. Without this file, extensions would likely import directly from deeper internal modules such as `ufo.tools.context` or `ufo.tools.registry`, making them more fragile when the core project changes. There is no runtime logic here beyond normal Python imports. Its job is to define a clean boundary: extensions should write handlers against `ufo.sdk.tools`, not against core internals. The comment also explains why this lives in a named module rather than in `__init__.py`: the project disallows code in package initializer files, so public SDK surfaces are exposed through explicit files like this one.

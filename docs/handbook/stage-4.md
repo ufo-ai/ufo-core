@@ -1,654 +1,1078 @@
-# Serve process startup, app lifespan, and fleet coordination  `stage-4`
+# User-facing surfaces receive and normalize inbound requests  `stage-4`
 
-This stage is the server’s “come alive and stay healthy” step. It happens at startup, then keeps running behind the scenes until shutdown. The main entry point, core/src/ufo/serve.py, assembles the service process. It starts the web server, attaches extension routes and user-facing surfaces, connects the background job engine, sets up workspace boundaries, credentials, sandbox networking, storage, and live update channels. In simple terms, it plugs all the main parts together so requests, jobs, files, and real-time updates can move through the system safely.
+This stage is the system’s set of front desks after startup. It is where messages first arrive from Slack, the browser chat, the terminal client, operator tools, or debugger routes. Each front desk checks that the request is allowed, figures out who the outside user is, connects that user to the right workspace and conversation, and reshapes the message into the common form the core conversation engine understands.
 
-core/src/ufo/runtime_instance.py makes each running server process known to the wider fleet, meaning the group of server processes working together. It writes heartbeat-style records so other parts of the system can tell the process is alive. It also runs cleanup loops that find work left behind by crashed or stopped processes, and it spreads cancellations from parent tasks to child tasks. During shutdown, these pieces help stop background server work cleanly instead of leaving loose ends.
+The Slack, web, terminal, and operator routes are the visible doors. Slack verifies Slack requests and handles messages, installs, button clicks, replies, and files. The terminal route accepts command-line messages and streams simple updates back. The web route lets signed-in users send chat messages, receive live answers, and view recent spending.
+
+The small surfaces package file only makes this folder importable. The important shared piece is the surface bridge in core/src/ufo/ext/surface.py. It gives these trusted doors controlled access to core abilities: finding people, opening conversations, admitting messages, streaming responses, and sending final results back out.
+
+## Sub-stages
+
+- [Slack, web, terminal, and operator routes](stage-4.1.md) `stage-4.1` — 3 files
 
 ## Files in this stage
 
-### Serve Runtime Lifecycle
-Starts the shared service process, initializes integrations and local runtime state, then registers the process with fleet-wide heartbeat and cleanup coordination.
+### Surface Bridge Package
+Defines the importable surfaces package and the core bridge that trusted external surfaces use to admit and deliver conversation events.
 
-### `core/src/ufo/serve.py`
+### `core/src/ufo/surfaces/__init__.py`
 
-`entrypoint` · `startup, request handling, background work, shutdown`
+`other` · `import time`
 
-Think of this file as the control room for one running UFO fleet process. A single process serves many workspaces, so the central problem is keeping each request, job, credential lookup, and database read tied to the correct workspace. Without this file, the system would have pieces like storage, extensions, jobs, sandboxes, and web routes, but nothing would assemble them safely into one service.
+This is an empty package marker file. In Python projects, a file named `__init__.py` tells Python that the surrounding folder should be treated as an importable package. Here, it makes the `ufo.surfaces` namespace available, so modules inside the `surfaces` folder can be imported using normal Python import paths. Think of it like a label on a drawer: the label does not contain the tools, but it lets the rest of the workshop find the drawer reliably. Because the file is empty, it does not run setup code, expose shortcut imports, or change how the surface-related modules behave. If it were missing in environments that expect traditional Python packages, imports from this folder could fail or become less predictable.
 
-At startup, `run` loads configuration, opens databases, loads extension manifests, checks credentials, creates the shared runtime, starts DBOS workers, registers background jobs, mounts API routes, and finally starts Uvicorn, the web server. It also starts a heartbeat so other processes know this one is alive.
 
-A major safety theme is “fail loudly at boot.” If an extension asks for a browser provider, search provider, connector auth backend, or credential key that is missing, this file stops startup instead of letting the first user request fail later.
+### `core/src/ufo/ext/surface.py`
 
-Another important theme is workspace boundaries. Shared surface routes identify the caller’s workspace from the request, bind that workspace for the whole response, and clear it afterward. This is like checking a visitor’s badge at the door and making sure the badge is removed before the next visitor enters.
+`orchestration` · `request handling and background writeback delivery`
 
-The file also decides whether sandbox internet traffic uses a local in-process proxy or an external proxy, so sandboxed agents can get controlled, metered, credential-aware network access.
+A surface is the place where a human talks to UFO, such as Slack or a web page. This file defines the safe doorway that those surfaces use to reach into the core system. Without it, each surface would have to know too much about the database, blob storage, credentials, conversation ownership, and reply delivery rules, which would make identity and tenant isolation easy to get wrong.
+
+The main piece is SurfaceContext. Think of it as a trusted service desk pass: it lets a surface prove who a person is, link that outside identity to a workspace member, create or find the right conversation, admit a message into the durable turn queue, read files and transcripts for debug views, and fetch workspace credentials when the surface declared it is allowed to do so.
+
+The file supports two reply styles. Live surfaces keep a connection open and stream frames as the turn runs. Durable surfaces, like Slack, cannot rely on a live stream, so this file also includes WritebackPoller. The poller repeatedly looks for finished turns that need delivery, claims them so only one worker sends them, posts the reply, attaches files, records success, and retries failures with backoff.
+
+The important theme is controlled privilege: surfaces are trusted, but every operation is still tied to a workspace and guarded by explicit lookup, ownership checks, and declared capabilities.
 
 #### Function details
 
-##### `_assert_no_reserved_routes`  (lines 110–126)
+##### `MemberAdmitter.admit`  (lines 102–110)
 
 ```
-def _assert_no_reserved_routes(app: FastAPI) -> None
+async def admit(self, conversation_id: UUID, message: str, idempotency_key: str | None=None, context: TurnContext | None=None, *, speaker_member_id: UUID | None) -> UUID
 ```
 
-**Purpose**: Checks that this service has not mounted web routes under URL prefixes reserved for the separate onboarding gateway. This prevents a silent routing conflict where the front door sends those paths somewhere else.
+**Purpose**: This protocol method describes the one core action a surface needs to submit a member’s message into a conversation. A concrete implementation turns the incoming text into a queued turn that the engine will run.
 
-**Data flow**: It receives the FastAPI app, reads its registered routes, and looks for paths beginning with reserved prefixes such as `/login`, `/v1/onboard`, or `/ufo`. If it finds any, it raises an error; otherwise startup continues unchanged.
+**Data flow**: It receives a conversation id, message text, optional duplicate-prevention key, optional turn context, and the speaking member id. It returns the id of the turn that was created or reused.
 
-**Call relations**: `run` calls this after all routes have been mounted, just before starting the web server. It acts as the final guardrail that proves the service and gateway will not fight over the same paths.
-
-*Call graph*: called by 1 (run).
+**Call relations**: SurfaceContext.admit delegates to this method whenever Slack, web, sample, or UFO surfaces accept a user message. The protocol keeps surfaces independent from the actual queue implementation.
 
 
-##### `run`  (lines 129–253)
+##### `TurnTailer.tail`  (lines 119–119)
 
 ```
-def run() -> None
+def tail(self, turn_id: UUID, since: str='') -> AsyncIterator[tuple[str, LiveFrame]]
 ```
 
-**Purpose**: Starts the shared UFO service process. It builds every major dependency, installs web routes and background workers, and then runs the HTTP server.
+**Purpose**: This protocol method describes how a live surface reads a turn’s live output frames. It lets the surface stream progress to a waiting user without touching the internal hub directly.
 
-**Data flow**: It begins by reading configuration and environment variables. From those it creates database connections, credential storage, extension objects, blob storage, model and memory backends, connector routing, sandbox support, the runtime object, DBOS workflow execution, FastAPI routes, and scheduled jobs. Its visible output is a running web server; it also starts background threads and records this process as an active fleet seat.
+**Data flow**: It receives a turn id and an optional cursor saying where to resume. It yields cursor-and-frame pairs until the turn finishes or stops streaming.
 
-**Call relations**: This is the top-level entry point for the file. It calls the many helper functions in this file to choose backends, validate extension requirements, mount routes, launch jobs, set up proxy access, and shut down cleanly when Uvicorn exits.
-
-*Call graph*: calls 16 internal fn (from_env, _assert_no_reserved_routes, _connect_flow, _connector_registry, _launch_jobs, _mount_ext_routes, _mount_shared_surfaces, _proxy_endpoint, _select_carrier, _select_cdp_provider (+6 more)); 39 external calls (__init__, __init__, __init__, __init__, __init__, __init__, __init__, run, Fernet, DBOS (+15 more)).
+**Call relations**: SurfaceContext.tail delegates to this method for live surfaces and debugger views. The concrete tailer owns the connection to the process hub.
 
 
-##### `_stop_executor`  (lines 256–270)
+##### `workspace_key`  (lines 135–143)
 
 ```
-def _stop_executor(dbos: DBOS, heartbeat: Heartbeat, graceful_shutdown_seconds: int) -> None
+def workspace_key(conversation_id: UUID, rel: str) -> str
 ```
 
-**Purpose**: Stops DBOS workflow execution safely during shutdown. It only retires this process’s fleet seat if no workflows are still active.
+**Purpose**: This helper turns a user-facing relative file path into the internal blob-storage key for a conversation workspace file. It also blocks unsafe paths that try to escape the workspace folder.
 
-**Data flow**: It receives the DBOS executor object, heartbeat object, and a shutdown time limit. It asks DBOS to drain work, checks whether any workflows are still active, logs and leaves the seat alive if work remains, or retires the heartbeat seat if the executor is empty.
+**Data flow**: It receives a conversation id and a relative path. It cleans and validates the path, then returns a blob key under conversations/<id>/workspace/; if the path is absolute, empty, or contains parent-directory jumps, it raises an error.
 
-**Call relations**: `run` calls this in its `finally` block after the web server stops. It hands off to DBOS for draining and to `Heartbeat.retire` only when it is safe for another process to recover abandoned work.
+**Call relations**: SurfaceContext.write_workspace_file uses it before saving uploaded files, and SurfaceContext.read_workspace_file uses it before reading them. It is the path safety gate for workspace file access.
 
-*Call graph*: calls 1 internal fn (retire); called by 1 (run); 3 external calls (run, destroy, log).
-
-
-##### `_shared_owner_dsn`  (lines 273–287)
-
-```
-def _shared_owner_dsn(config: Config) -> str
-```
-
-**Purpose**: Finds the special database connection string used for cross-workspace owner-level reads. This is needed for jobs that must enumerate workspaces before rebinding each operation to one workspace.
-
-**Data flow**: It reads either the owner database URL environment variable or the configured owner URL. If neither exists, it raises an error. If it gets a plain PostgreSQL URL, it rewrites it to use the async database driver expected by the service.
-
-**Call relations**: `run` uses this before initializing the owner database connection. It supports later background sweeps that need to see across workspaces without accidentally running under an unset workspace.
-
-*Call graph*: called by 1 (run).
+*Call graph*: called by 2 (read_workspace_file, write_workspace_file); 1 external calls (PurePosixPath).
 
 
-##### `_launch_jobs`  (lines 290–333)
+##### `ConversationSummary._aware_utc`  (lines 201–204)
 
 ```
-def _launch_jobs(runtime: Runtime, sync_driver: SyncDriver, page_feed: CorePageFeed) -> None
+def _aware_utc(cls, value: datetime | None) -> datetime | None
 ```
 
-**Purpose**: Registers and starts the service’s background jobs. These include source syncing, turn dispatching, sandbox cleanup, page-change indexing, and extension-provided jobs.
+**Purpose**: This validator makes conversation timestamps consistently timezone-aware. That avoids confusing “local time versus UTC” behavior when summaries are serialized or displayed.
 
-**Data flow**: It receives the runtime, sync driver, and page feed. It builds an admission helper, creates job runners for page changes and core jobs, combines those with extension job bindings, and launches the `JobRunner`, which registers schedules and queued work with DBOS.
+**Data flow**: It receives a datetime or None. None passes through; a datetime that already has a timezone is kept, and one without a timezone is marked as UTC.
 
-**Call relations**: `run` calls this after DBOS has launched and after the runtime is available. Inside it, `invoker_for` creates workspace-specific admission invokers so jobs can admit work under the right workspace.
+**Call relations**: It runs automatically when ConversationSummary objects are built in SurfaceContext.list_conversations. Callers get normalized timestamps without needing to remember this detail.
 
-*Call graph*: called by 1 (run); 8 external calls (__init__, __init__, __init__, __init__, __init__, durable_surfaces, bindings_from, core_jobs).
-
-
-##### `_launch_jobs.invoker_for`  (lines 304–305)
-
-```
-def invoker_for(workspace_id: UUID) -> AdmissionInvoker
-```
-
-**Purpose**: Creates a small object that can admit work for one specific workspace. It is used when a background job needs to enqueue or re-admit turns for that workspace.
-
-**Data flow**: It receives a workspace ID, combines it with the shared `Admission` object, and returns an `AdmissionInvoker` tied to that workspace.
-
-**Call relations**: This helper is passed as a factory into job-related objects created by `_launch_jobs`. Those job objects call it when they need a workspace-scoped way to submit work.
-
-*Call graph*: 1 external calls (__init__).
+*Call graph*: 1 external calls (replace).
 
 
-##### `_select_carrier`  (lines 336–376)
+##### `LedgerEntry._aware_utc`  (lines 218–219)
 
 ```
-def _select_carrier(config: Config, manifests: tuple[Manifest, ...]) -> Carrier
+def _aware_utc(cls, value: datetime) -> datetime
 ```
 
-**Purpose**: Chooses the sandbox backend that will run agent code. A carrier is the component that actually starts and controls sandboxes, such as a local runner or an extension-provided remote runner.
+**Purpose**: This validator makes accounting timestamps consistently timezone-aware. It prevents ledger rows from carrying ambiguous times.
 
-**Data flow**: It starts with the built-in local carrier, adds carrier factories declared by extensions, checks for duplicate names, and looks up the configured backend. For remote backends, it also verifies that a public HTTPS proxy URL is configured. It returns one constructed carrier instance or raises a clear startup error.
+**Data flow**: It receives a datetime. If it has no timezone, the function marks it as UTC; otherwise it leaves it unchanged.
 
-**Call relations**: `run` calls this while building the runtime. The selected carrier is later used by turns and cleanup jobs to create and reap sandboxes.
+**Call relations**: It runs automatically when LedgerEntry objects are created in SurfaceContext.turn_detail. Debug and accounting views then receive predictable timestamp data.
 
-*Call graph*: called by 1 (run); 2 external calls (__init__, urlparse).
-
-
-##### `_source_backends`  (lines 379–393)
-
-```
-def _source_backends(manifests: tuple[Manifest, ...]) -> dict[str, SourceBackend]
-```
-
-**Purpose**: Builds the list of source-sync backends available to the sync driver. A source backend knows how to read pages or files from a particular kind of source.
-
-**Data flow**: It begins with the built-in folder source. For each extension source provider, it creates a credential reader limited to that extension’s declared credential slots, builds the backend, and stores it by backend name. Duplicate backend names cause startup to fail.
-
-**Call relations**: `run` uses this to construct the `SyncDriver`. The sync driver later uses the returned map to decide how to sync each configured source.
-
-*Call graph*: called by 1 (run); 2 external calls (__init__, __init__).
+*Call graph*: 1 external calls (replace).
 
 
-##### `_select_hub`  (lines 396–414)
+##### `_fulfilled_marker_key`  (lines 241–246)
 
 ```
-def _select_hub(config: Config, manifests: tuple[Manifest, ...]) -> Hub
+def _fulfilled_marker_key(workspace_id: UUID, sealed: str, slot: str) -> str
 ```
 
-**Purpose**: Chooses the live-update hub used to send frames or events inside the service. The built-in default is an in-process hub, but extensions can register other hub implementations.
+**Purpose**: This helper builds the blob key for a small marker that says a particular credential prompt slot has already been answered. The marker is per sealed request and per slot, so one answered secret does not hide other unanswered secrets.
 
-**Data flow**: It builds a name-to-builder map from the built-in hub and extension hub specs. It checks for duplicate backend names, finds the configured backend, and calls its builder with the configured hub URL. It returns the constructed hub or raises an error if the chosen name is unknown.
+**Data flow**: It receives a workspace id, a sealed credential request string, and a slot name. It hashes the sealed request and returns a stable blob key for that slot’s fulfillment marker.
 
-**Call relations**: `run` calls this early when assembling shared runtime services. The resulting hub is used by live surfaces and tailing code to stream updates.
+**Call relations**: SurfaceContext.credential_prompt_pending checks this key to decide whether to keep showing a prompt. SurfaceContext.fulfill_credential_request writes to this key after storing the secret.
 
-*Call graph*: called by 1 (run); 1 external calls (__init__).
-
-
-##### `_select_cdp_provider`  (lines 417–445)
-
-```
-def _select_cdp_provider(config: Config, manifests: tuple[Manifest, ...], credentials: CredentialStore | None) -> CdpProvider | None
-```
-
-**Purpose**: Selects the browser automation provider, if one is installed and configured. CDP means Chrome DevTools Protocol, a way to control a browser programmatically.
-
-**Data flow**: It collects browser provider specs from extensions, checks for duplicate backend names, and looks up the configured provider name. If none is registered under that name, it returns `None`. If the provider needs credentials but no credential store exists, it raises an error. Otherwise it builds and returns the provider with credential access limited to that extension’s declared slots.
-
-**Call relations**: `run` calls this when building the runtime. `_require_cdp_provider` also calls it during requirement validation when an extension says browser support must be available.
-
-*Call graph*: called by 2 (_require_cdp_provider, run); 1 external calls (__init__).
+*Call graph*: called by 2 (credential_prompt_pending, fulfill_credential_request); 1 external calls (sha256).
 
 
-##### `_validate_requires`  (lines 448–472)
+##### `_email_domain`  (lines 249–253)
 
 ```
-def _validate_requires(config: Config, manifests: tuple[Manifest, ...], credentials: CredentialStore | None) -> None
+def _email_domain(email: str) -> str
 ```
 
-**Purpose**: Checks that every active extension’s declared required service is actually available. This catches missing browser, search, or memory support during startup instead of during a user action.
+**Purpose**: This helper extracts the domain part of an email address in a cautious way. Badly shaped emails return an empty domain, so they cannot accidentally pass a domain check.
 
-**Data flow**: It reads each manifest’s required seam names, finds the matching checker function, and runs it with the current configuration, manifests, and credentials. Unknown seam names or failed checks are wrapped in errors that name the extension and missing requirement.
+**Data flow**: It receives an email string. It trims and lowercases it, splits at the last @, and returns the domain only if both local name and domain are present.
 
-**Call relations**: `run` calls this after loading manifests and credentials. It delegates the actual checks to functions such as `_require_cdp_provider`, `_require_search_provider`, and `_require_memory_search`.
+**Call relations**: SurfaceContext.join_member uses it to decide whether a verified email belongs to the workspace’s domain. SurfaceContext.is_operator_workspace uses it to recognize the operator’s own workspace.
 
-*Call graph*: called by 1 (run).
-
-
-##### `_require_cdp_provider`  (lines 475–489)
-
-```
-def _require_cdp_provider(config: Config, manifests: tuple[Manifest, ...], credentials: CredentialStore | None) -> None
-```
-
-**Purpose**: Enforces that a browser automation provider is present when an extension requires one. It turns an optional runtime feature into a mandatory startup check.
-
-**Data flow**: It asks `_select_cdp_provider` to resolve the configured provider. If that returns `None`, it raises an error explaining that the required provider is not registered.
-
-**Call relations**: _validate_requires calls this when a manifest lists the `cdp_providers` requirement. It reuses the normal provider-selection logic so validation matches runtime behavior.
-
-*Call graph*: calls 1 internal fn (_select_cdp_provider).
+*Call graph*: called by 2 (is_operator_workspace, join_member).
 
 
-##### `_select_search_provider`  (lines 492–527)
+##### `_earliest_agent`  (lines 256–271)
 
 ```
-def _select_search_provider(config: Config, manifests: tuple[Manifest, ...], credentials: CredentialStore | None) -> SearchProvider | None
+async def _earliest_agent(workspace_id: UUID) -> UUID
 ```
 
-**Purpose**: Chooses the web or research search backend for the process. Search is optional unless an extension declares that it requires it.
+**Purpose**: This function finds the default agent for a workspace: the oldest agent row. It is used when no surface-specific agent binding exists.
 
-**Data flow**: It gathers search provider specs from extensions, checks for duplicate names, and examines the configured search provider. If the setting is absent, it returns `None`. If the configured name is unknown or credentials are missing, it raises an error. Otherwise it builds the provider with credential access for the declaring extension’s slots.
+**Data flow**: It receives a workspace id, reads the agent table inside the workspace boundary, and returns the first agent id by creation time and id. If the workspace has no agent, it raises an error because the workspace setup is broken.
 
-**Call relations**: `run` calls this while building the runtime. `_require_search_provider` calls it during startup validation when research tools need search to be available.
+**Call relations**: _bind_surface_installation uses it when creating a new surface binding, and SurfaceContext._surface_agent falls back to it for conversations without a binding.
 
-*Call graph*: called by 2 (_require_search_provider, run); 2 external calls (__init__, __init__).
-
-
-##### `_require_search_provider`  (lines 530–543)
-
-```
-def _require_search_provider(config: Config, manifests: tuple[Manifest, ...], credentials: CredentialStore | None) -> None
-```
-
-**Purpose**: Enforces that a configured and usable search provider exists. This protects research extensions from failing only when the first search request arrives.
-
-**Data flow**: It checks that the search provider setting is present, then calls `_select_search_provider` to verify the named backend can be built. It returns nothing if the requirement is satisfied, or raises a startup error if not.
-
-**Call relations**: _validate_requires calls this for extensions that list the `search_providers` requirement. It delegates backend resolution to `_select_search_provider`.
-
-*Call graph*: calls 1 internal fn (_select_search_provider).
+*Call graph*: called by 2 (_surface_agent, _bind_surface_installation); 2 external calls (select, workspace_tx).
 
 
-##### `_require_memory_search`  (lines 546–572)
+##### `_bind_surface_installation`  (lines 274–306)
 
 ```
-def _require_memory_search(_config: Config, manifests: tuple[Manifest, ...], credentials: CredentialStore | None) -> None
+async def _bind_surface_installation(workspace_id: UUID, surface: str, installation_id: str) -> None
 ```
 
-**Purpose**: Verifies that exactly one default memory-search provider is available. Memory search is the feature that lets the system look up stored knowledge or indexed past content.
+**Purpose**: This function records that an external surface installation, such as a Slack team, belongs to a workspace. It gives later incoming shared requests a way to resolve which workspace they belong to.
 
-**Data flow**: It scans all manifests for providers with the default memory-search name. If none exist, more than one exists, or the chosen provider declares credentials without a credential store, it raises an error. Otherwise it simply confirms the requirement.
+**Data flow**: It receives a workspace id, surface name, and installation id. It validates the id, chooses the workspace’s default agent for new bindings, inserts or updates the binding, and raises SurfaceInstallationConflict if the same installation is already owned elsewhere.
 
-**Call relations**: _validate_requires uses this when an extension requires memory search. Unlike some other requirements, it performs the check directly instead of calling a separate selector in this file.
+**Call relations**: SurfaceContext.bind_installation calls it during a surface’s own setup flow, and SurfaceInstallationAccess.bind calls it for tools that register installations. It is the single write path for installation bindings.
 
-
-##### `_select_auth_proxy`  (lines 584–621)
-
-```
-def _select_auth_proxy(config: Config, manifests: tuple[Manifest, ...], credentials: CredentialStore | None) -> AuthProxy | None
-```
-
-**Purpose**: Chooses the fallback authentication proxy used by connector feed sync when a connector does not have its own broker. An auth proxy is a host-side service that supplies or exchanges credentials without exposing them directly to sandbox code.
-
-**Data flow**: It collects auth proxy specs from extensions and checks for duplicate backend names. If no backend is explicitly configured, it accepts the only registered backend or fails if several choices exist. It verifies the selected backend exists and that credentials are available, then builds the proxy with access limited to the declaring extension’s credential slots.
-
-**Call relations**: _connector_registry calls this while creating the connector registry. The returned proxy becomes the fallback path for connector credential resolution.
-
-*Call graph*: called by 1 (_connector_registry); 2 external calls (__init__, __init__).
+*Call graph*: calls 1 internal fn (_earliest_agent); called by 2 (bind_installation, bind); 2 external calls (__init__, workspace_tx).
 
 
-##### `_mount_ext_routes`  (lines 624–662)
+##### `SurfaceContext.credential`  (lines 330–333)
 
 ```
-def _mount_ext_routes(app: FastAPI, manifests: tuple[Manifest, ...], credentials: CredentialStore | None, index: IndexBackend, embed: EmbedClient) -> None
+async def credential(self, slot: str) -> str
 ```
 
-**Purpose**: Adds HTTP routes provided by extensions under `/ext/<extension-name>/...`. Each route must first identify the workspace for the incoming request before the extension handler is allowed to run.
+**Purpose**: This method reads a declared workspace credential for a trusted surface. It is used for secrets such as Slack signing tokens that the surface needs in-process.
 
-**Data flow**: It loops through manifests with routes, verifies credentials are available when needed, creates an extension context, and adds each route to the FastAPI app. The route wrapper rejects unidentified requests and runs identified ones inside the correct workspace binding.
+**Data flow**: It receives a credential slot name. If no credential store is configured, it raises an error; otherwise it reads the secret for this context’s workspace and returns it.
 
-**Call relations**: `run` calls this after jobs are launched and before shared surfaces are mounted. It creates the nested `endpoint` function used as the actual FastAPI handler for each extension route.
+**Call relations**: Slack surface code calls it when verifying requests, posting messages, handling interactions, attaching files, and proving identity. The context keeps the read tied to the current workspace.
 
-*Call graph*: called by 1 (run); 2 external calls (add_route, context_for).
-
-
-##### `_mount_ext_routes.endpoint`  (lines 646–656)
-
-```
-async def endpoint(request: Request, handler=spec.handler, identify=spec.identify, extension_context=context) -> Response
-```
-
-**Purpose**: Acts as the safety wrapper around an extension HTTP route. It makes sure the request belongs to a workspace before calling extension code.
-
-**Data flow**: It receives a web request, calls the route’s identify function, and returns a 401 response if identification fails. If identification succeeds, it temporarily binds that workspace and calls the extension’s handler with the prepared extension context and request. The handler’s response is returned to the client.
-
-**Call relations**: This function is registered with FastAPI by `_mount_ext_routes`. It hands off to the extension’s own handler only after the workspace has been resolved.
-
-*Call graph*: 2 external calls (Response, ws).
+*Call graph*: called by 8 (_ctx_signing_secret, _identity, _post_ephemeral, _run_identity_proof, attach, ingest, interactive, post).
 
 
-##### `WorkspaceScopeBoundary.__call__`  (lines 683–691)
+##### `SurfaceContext.credential_prompt_pending`  (lines 335–349)
 
 ```
-async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None
+async def credential_prompt_pending(self, sealed: str, slot: str) -> bool
 ```
 
-**Purpose**: Middleware that clears the current workspace before and after every HTTP request. This prevents one request’s workspace from leaking into another request.
+**Purpose**: This method decides whether a user should still be shown a credential prompt for one slot. It prevents already answered, expired, tampered, or wrong-workspace prompts from reappearing.
 
-**Data flow**: It receives the ASGI request scope plus receive and send callables. For non-HTTP traffic, it simply passes through. For HTTP traffic, it sets the ambient workspace to `None`, runs the downstream app, and then sets it back to `None` in a final cleanup step even if an error occurs.
+**Data flow**: It receives a sealed request and slot name. It opens and verifies the sealed request, checks that it belongs to this workspace and names the slot, then returns true only if the fulfillment marker is not present.
 
-**Call relations**: _mount_shared_surfaces installs this as middleware. Shared surface endpoints set the workspace during a request, and this boundary guarantees that binding is cleaned up after the full response, including streamed responses.
+**Call relations**: Surface renderers use this check before displaying credential prompts. It relies on _fulfilled_marker_key to look up the per-slot marker.
 
-*Call graph*: 1 external calls (set).
-
-
-##### `_mount_shared_surfaces`  (lines 694–775)
-
-```
-def _mount_shared_surfaces(app: FastAPI, manifests: tuple[Manifest, ...], credentials: CredentialStore | None, blob: BlobStore, hub: Hub, dbos_client: DBOSClient, artifact_secret: str, public_base_url
-```
-
-**Purpose**: Mounts shared surface routes, such as product-facing integrations, so one service can safely serve many workspaces. A surface is an external interface that can admit turns, stream updates, and sometimes post durable writebacks.
-
-**Data flow**: It adds the workspace boundary middleware, builds shared admission and hub-tailing helpers, and then loops through surface specs from manifests. For each route, it creates authentication helpers, registers a FastAPI endpoint, and records durable surfaces that need writeback polling. If durable posting is available, it creates a shared `WritebackPoller` and stores it on the app.
-
-**Call relations**: `run` calls this after extension routes are mounted. It creates both the nested `context_for` helper, which builds per-workspace surface contexts, and the nested `endpoint` wrapper, which authenticates each request.
-
-*Call graph*: called by 1 (run); 10 external calls (__init__, __init__, __init__, __init__, add_middleware, add_route, durable_surfaces, writeback_workspaces, log, uuid4).
+*Call graph*: calls 1 internal fn (_fulfilled_marker_key); 1 external calls (open_credential_request).
 
 
-##### `_mount_shared_surfaces.context_for`  (lines 721–731)
+##### `SurfaceContext.open_credential_authorization`  (lines 351–361)
 
 ```
-def context_for(workspace_id: UUID, surface: str) -> SurfaceContext
+def open_credential_authorization(self, sealed: str) -> CredentialRequestState
 ```
 
-**Purpose**: Builds the per-request context object that a surface handler uses. This context carries the workspace ID and the tools needed to admit work, access blobs, stream updates, read credentials, and create artifact links.
+**Purpose**: This method opens a sealed credential handoff and returns the claims inside it. It is used when a browser callback needs to know which workspace, member, and slot the authorization belongs to.
 
-**Data flow**: It receives a workspace ID and surface name. It combines them with shared services such as blob storage, admission, hub tailing, credentials, artifact token secret, and public base URL, then returns a `SurfaceContext` tied to that workspace.
+**Data flow**: It receives a sealed string. If no credential store exists, it raises an error; otherwise it verifies and decrypts the sealed request and returns its state, or lets the credential error propagate.
 
-**Call relations**: The surface endpoint wrapper calls this after identifying the request’s workspace. The writeback poller also uses it so durable background delivery runs under the correct workspace.
+**Call relations**: Slack’s OAuth callback uses it to recover the original credential request. The method delegates the actual seal verification to the credential subsystem.
 
-*Call graph*: 2 external calls (__init__, __init__).
-
-
-##### `_mount_shared_surfaces.endpoint`  (lines 747–761)
-
-```
-async def endpoint(request: Request, handler=route.handler, identify=resolver, surface=spec.name, surface_auth=auth) -> Response
-```
-
-**Purpose**: Wraps a shared surface route with authentication and workspace binding. It makes sure every surface request is tied to exactly one workspace before route code runs.
-
-**Data flow**: It receives a request, calls the surface’s identify function with surface authentication, and handles three outcomes: a ready-made response, no identity, or a workspace ID. No identity becomes a 401 response. A workspace ID is stored as the current workspace, then the real surface route handler is called with a workspace-specific context.
-
-**Call relations**: _mount_shared_surfaces registers this function with FastAPI for each surface route. It hands off to the surface’s handler only after identification and workspace binding.
-
-*Call graph*: 3 external calls (Response, set, context_for).
+*Call graph*: called by 1 (oauth_callback); 1 external calls (open_credential_request).
 
 
-##### `_serve_lifespan`  (lines 779–802)
+##### `SurfaceContext.fulfill_credential_request`  (lines 363–388)
 
 ```
-async def _serve_lifespan(app: FastAPI) -> AsyncIterator[None]
+async def fulfill_credential_request(self, sealed: str, slot: str, value: str, member_id: UUID | None) -> None
 ```
 
-**Purpose**: Runs app-level background tasks for as long as the web app is alive. These tasks recover work from dead executors, reconcile cancellations, and optionally deliver durable surface writebacks.
+**Purpose**: This method stores one requested credential value after proving that the right member is fulfilling the right sealed request. It is the safe write path from a surface prompt into the encrypted credential store.
 
-**Data flow**: When the FastAPI lifespan starts, it creates an async task group and starts executor recovery and cancellation reconciliation. If a writeback poller exists, it starts that too. When the app is shutting down, it cancels those tasks.
+**Data flow**: It receives a sealed request, slot, secret value, and member id. It verifies the seal, workspace, member, and slot, writes the value to the credential store, and writes a blob marker so that prompt is not shown again.
 
-**Call relations**: `run` passes this as the FastAPI lifespan function. It is separate from the heartbeat thread because heartbeat liveness must begin earlier and survive event-loop stalls.
+**Call relations**: Slack OAuth callbacks and UFO’s own surface use it after a user supplies or authorizes a secret. It uses _fulfilled_marker_key so prompt rendering and fulfillment agree.
 
-*Call graph*: 3 external calls (__init__, __init__, TaskGroup).
-
-
-##### `_proxy_endpoint`  (lines 805–835)
-
-```
-def _proxy_endpoint(config: Config, manifests: tuple[Manifest, ...], credentials: CredentialStore | None, pricing: Pricing, run_tokens: RunTokenCodec, workspace_fs: SandboxFsCredentialMinter | None=No
-```
-
-**Purpose**: Chooses how sandboxes will reach the egress proxy, the controlled gateway for outbound internet traffic. It supports either a local in-process proxy or an external shared proxy.
-
-**Data flow**: It reads sandbox proxy configuration. If no public proxy URL is set, it starts a local egress proxy and returns its endpoint. If a public proxy URL is set, it reads the shared proxy certificate from the environment and returns a `ProxyEndpoint` pointing at the external proxy. Missing certificate data causes startup to fail.
-
-**Call relations**: `run` calls this while building the runtime. If local proxying is needed, it delegates to `_local_egress_proxy`.
-
-*Call graph*: calls 1 internal fn (_local_egress_proxy); called by 1 (run); 1 external calls (__init__).
+*Call graph*: calls 1 internal fn (_fulfilled_marker_key); called by 2 (oauth_callback, _fulfill_secret); 4 external calls (__init__, now, dumps, open_credential_request).
 
 
-##### `_local_egress_proxy`  (lines 838–877)
+##### `SurfaceContext.bind_installation`  (lines 390–396)
 
 ```
-def _local_egress_proxy(config: Config, manifests: tuple[Manifest, ...], credentials: CredentialStore | None, pricing: Pricing, run_tokens: RunTokenCodec, workspace_fs: SandboxFsCredentialMinter | Non
+async def bind_installation(self, installation_id: str) -> None
 ```
 
-**Purpose**: Starts an in-process egress proxy for single-node or local deployments. This proxy gives sandboxes a controlled way to access the network with policy checks, credentials, and metering.
+**Purpose**: This method lets a surface bind its external installation identity to the current workspace. For example, a Slack OAuth callback can record which Slack team maps to this workspace.
 
-**Data flow**: It builds a rule resolver from model rules, grants, credentials, extension-declared injection slots, internet rules, transfer hosts, and connector command-line tools. It creates a new event loop in a daemon thread, starts the proxy boot coroutine there, and waits for a `ProxyEndpoint` result within the startup timeout.
+**Data flow**: It receives an installation id and passes the current workspace id and surface name to the shared binding function. The database is updated or a conflict is raised.
 
-**Call relations**: _proxy_endpoint calls this when the deployment does not use an external proxy. Its nested `_boot` function performs the asynchronous certificate generation and proxy startup.
+**Call relations**: Slack’s OAuth callback calls it after installation succeeds. The real database work is centralized in _bind_surface_installation.
 
-*Call graph*: called by 1 (_proxy_endpoint); 10 external calls (__init__, __init__, new_event_loop, run_coroutine_threadsafe, Thread, connector_clis, injecting_slots, model_rule_base, connector_transfer_hosts, derive_manifest_rules).
-
-
-##### `_local_egress_proxy._boot`  (lines 865–875)
-
-```
-async def _boot() -> ProxyEndpoint
-```
-
-**Purpose**: Performs the asynchronous startup steps for the local egress proxy. It creates temporary certificate authority material and starts the proxy server.
-
-**Data flow**: It generates a certificate authority certificate and key, builds an `EgressProxy` with rule resolution, live-turn authorization, run-token checking, pricing, and optional workspace filesystem credential refresh. It starts the proxy on the configured port and returns the resulting endpoint.
-
-**Call relations**: _local_egress_proxy schedules this coroutine on the proxy’s dedicated event loop. It hands the finished endpoint back to `_local_egress_proxy`, which then returns it to `_proxy_endpoint`.
-
-*Call graph*: 2 external calls (__init__, generate_ca).
+*Call graph*: calls 1 internal fn (_bind_surface_installation); called by 1 (oauth_callback).
 
 
-##### `_connector_registry`  (lines 883–906)
+##### `SurfaceContext.public_base_url`  (lines 399–402)
 
 ```
-def _connector_registry(config: Config, manifests: tuple[Manifest, ...], credentials: CredentialStore | None) -> ConnectorRegistry
+def public_base_url(self) -> str | None
 ```
 
-**Purpose**: Builds the registry that knows about all installed connector providers. Connectors are integrations that may use OAuth or brokered authentication to access external services.
+**Purpose**: This property returns the deployment’s public base URL if one is configured. Surfaces use it to build callback or download links that external systems can reach.
 
-**Data flow**: It scans manifests for connector definitions, checks that no two extensions register the same provider name, and creates registry entries with labels and broker information. It also builds the connector namespace resolver and selects the fallback auth proxy. It returns a `ConnectorRegistry`.
+**Data flow**: It reads the value stored in the context and returns it, or returns None when no public URL was configured.
 
-**Call relations**: `run` calls this during runtime construction. It calls `_select_auth_proxy` for fallback credential resolution, and the resulting registry is used by connector tools and source sync.
-
-*Call graph*: calls 1 internal fn (_select_auth_proxy); called by 1 (run); 3 external calls (__init__, __init__, open_connector_namespace).
+**Call relations**: Surface code can read this alongside other context capabilities. SurfaceContext.artifact_link also depends on the same stored value.
 
 
-##### `_connect_flow`  (lines 909–934)
+##### `SurfaceContext.artifact_link`  (lines 404–415)
 
 ```
-def _connect_flow(credentials: CredentialStore | None, config: Config, manifests: tuple[Manifest, ...]) -> ConnectFlow | None
+def artifact_link(self, artifact: SharedArtifact) -> str | None
 ```
 
-**Purpose**: Creates the OAuth connect flow used to start and finish member authorization for connectors. OAuth is the common browser-based permission handoff used by many third-party services.
+**Purpose**: This method creates a temporary public download link for a shared artifact when the surface cannot upload the file directly. If public links are not configured, it returns None so the surface can fall back to naming the file only.
 
-**Data flow**: If no credential store exists, it returns `None` because grants cannot be securely stored. Otherwise it collects OAuth providers from connector manifests, checks for duplicate provider names, computes the callback URL, and returns a `ConnectFlow` with encryption, grant storage, provider data, and namespace resolution.
+**Data flow**: It receives a SharedArtifact. If both a token secret and public base URL exist, it creates an expiring signed token for the blob key and filename and returns a full download URL; otherwise it returns None.
 
-**Call relations**: `run` installs the returned connect flow globally. This flow is then used by tools, surfaces, and the OAuth callback route; it calls `_connect_redirect_uri` to validate and build the external callback address.
+**Call relations**: Slack uses it for oversized artifact messages. The generated token is understood by the web artifact download route elsewhere in the system.
 
-*Call graph*: calls 1 internal fn (_connect_redirect_uri); called by 1 (run); 3 external calls (__init__, __init__, open_connector_namespace).
-
-
-##### `_connect_redirect_uri`  (lines 937–961)
-
-```
-def _connect_redirect_uri(config: Config, providers: Mapping[str, OAuthProvider]) -> str
-```
-
-**Purpose**: Builds and validates the public OAuth callback URL for connector authorization. This URL must be reachable by third-party providers after a user approves access.
-
-**Data flow**: It reads `connect.public_base_url` from configuration and the set of registered OAuth providers. If no providers exist, it returns an empty or best-effort callback URL. If providers exist, it requires a base URL with an HTTP or HTTPS scheme and a real hostname, rejects bind-only addresses like `127.0.0.1`, and returns the base URL plus the callback path.
-
-**Call relations**: _connect_flow calls this while constructing the OAuth flow. Its validation prevents a connector from registering with a callback address that an outside provider cannot reach.
-
-*Call graph*: called by 1 (_connect_flow); 1 external calls (urlparse).
+*Call graph*: called by 1 (_oversize_link_line); 2 external calls (now, mint_artifact_token).
 
 
-### `core/src/ufo/runtime_instance.py`
-
-`orchestration` · `main loop`
-
-Think of each serve process as a worker in a shared workshop. This file makes every worker regularly sign a time sheet, so the others know it is still alive. That sign-in is stored in the `runtime_instance` table as a heartbeat: a timestamp that is refreshed every few seconds.
-
-That heartbeat matters because DBOS, the durable workflow system used here, records which executor started a queued workflow. If a workflow is still marked pending under an executor whose heartbeat has gone stale, the original process probably died. The `ExecutorRecovery` loop finds those stranded workflows and asks DBOS to recover them, so another live process can continue the work instead of leaving it frozen.
-
-The file also has a `CancelReconciler`. Cancelling one turn is a local action, but turns can spawn child turns and grandchildren. This reconciler periodically searches for still-running turns that sit underneath a cancelled ancestor, then cancels them too. This makes cancellation eventually flow down the whole tree, even after crashes or restarts.
-
-All three background jobs are deliberately tolerant of temporary database or DBOS failures. They log the failed tick and keep going, because one bad moment should not kill the long-running safety loops.
-
-#### Function details
-
-##### `record_fleet_seat`  (lines 38–53)
+##### `SurfaceContext._identity_member`  (lines 417–430)
 
 ```
-async def record_fleet_seat(instance_id: UUID) -> None
+async def _identity_member(self, surface: str, external_id: str) -> UUID | None
 ```
 
-**Purpose**: This records that a serve process exists before it starts doing durable DBOS work. It creates the process's row in the shared `runtime_instance` table, which other processes later use as proof that this executor is alive.
+**Purpose**: This private method looks up which workspace member is linked to an external surface identity. It is the common read used by identity-linking helpers.
 
-**Data flow**: It receives an `instance_id`, opens a database transaction, and inserts a new runtime-instance row with no workspace attached and the current time as its heartbeat. After the row is written, it logs that the fleet seat was recorded. The outside world now has a fresh liveness marker for this process.
+**Data flow**: It receives a surface name and external id. It queries the surface_identity table for this workspace and returns the member id, or None if there is no link.
 
-**Call relations**: This is the first part of the liveness story. Later, `Heartbeat.beat` keeps the row fresh, `Heartbeat.retire` removes it on graceful shutdown, and `ExecutorRecovery._live_executors` reads it to decide which executors must not be recovered.
+**Call relations**: SurfaceContext.linked_member uses it for this surface, while SurfaceContext.adopt_identity uses it to read a peer surface’s identity before copying the link.
 
-*Call graph*: 3 external calls (insert, owner_tx, log).
+*Call graph*: called by 2 (adopt_identity, linked_member); 2 external calls (select, workspace_tx).
 
 
-##### `Heartbeat.run`  (lines 66–76)
+##### `SurfaceContext.linked_member`  (lines 432–433)
+
+```
+async def linked_member(self, external_id: str) -> UUID | None
+```
+
+**Purpose**: This method checks whether this surface already knows an outside user as a workspace member. It lets a surface avoid creating duplicate identities on later messages.
+
+**Data flow**: It receives an external id and asks _identity_member for this context’s surface. It returns the linked member id or None.
+
+**Call relations**: Sample, Slack, UFO, and web surfaces call it during authentication or message ingest. It is the first, non-mutating identity lookup.
+
+*Call graph*: calls 1 internal fn (_identity_member); called by 6 (_surface_ingest, _surface_live_admit, _resolve_member, interactive, channel, _authenticate).
+
+
+##### `SurfaceContext._owner_email`  (lines 435–449)
+
+```
+async def _owner_email(self) -> str | None
+```
+
+**Purpose**: This private method reads the workspace owner’s email, defined here as the earliest member. That email’s domain is used as the workspace’s own domain.
+
+**Data flow**: It reads the oldest member row for this workspace and returns its email, or None if no member exists.
+
+**Call relations**: SurfaceContext.join_member uses it to decide whether a new verified email can join the workspace. SurfaceContext.is_operator_workspace uses it to recognize the operator domain.
+
+*Call graph*: called by 2 (is_operator_workspace, join_member); 2 external calls (select, workspace_tx).
+
+
+##### `SurfaceContext.is_operator_workspace`  (lines 451–459)
+
+```
+async def is_operator_workspace(self) -> bool
+```
+
+**Purpose**: This method tells whether the current workspace belongs to UFO’s operator organization. It gates operator-only display details so they do not appear in customer workspaces.
+
+**Data flow**: It reads the owner email, extracts its domain, and compares it to the fixed operator domain. It returns false if there is no owner.
+
+**Call relations**: Slack’s post rendering calls it before adding operator-only footer or debug information. It uses _owner_email and _email_domain.
+
+*Call graph*: calls 2 internal fn (_owner_email, _email_domain); called by 1 (post).
+
+
+##### `SurfaceContext.adopt_identity`  (lines 461–484)
+
+```
+async def adopt_identity(self, peer_surface: str, external_id: str) -> UUID | None
+```
+
+**Purpose**: This method links the current surface’s external id to a member already known by another surface. It lets one human keep the same member identity across, for example, CLI and web.
+
+**Data flow**: It receives a peer surface name and external id. It looks up the peer’s member link, inserts the same member link for this surface if found, tolerates a race where another request inserted it first, and returns the member id or None.
+
+**Call relations**: The sample live admit flow calls it when adopting an identity. It builds on _identity_member and writes to surface_identity.
+
+*Call graph*: calls 1 internal fn (_identity_member); called by 1 (_surface_live_admit); 3 external calls (insert, workspace_tx, log).
+
+
+##### `SurfaceContext.link_member`  (lines 486–515)
+
+```
+async def link_member(self, external_id: str, email: str) -> UUID | None
+```
+
+**Purpose**: This method links this surface’s external id to an existing workspace member with a matching email. It does not create a member if none exists.
+
+**Data flow**: It receives an external id and email. It searches this workspace for a member with that email, inserts the surface identity link if found, tolerates duplicate-link races, and returns the member id or None.
+
+**Call relations**: It is used directly by several surfaces and also by SurfaceContext.join_member. It is the simple “known email to known member” path.
+
+*Call graph*: called by 4 (join_member, _surface_ingest, channel, _authenticate); 4 external calls (insert, select, workspace_tx, log).
+
+
+##### `SurfaceContext.join_member`  (lines 517–534)
+
+```
+async def join_member(self, external_id: str, email: str) -> UUID | None
+```
+
+**Purpose**: This method links an external id to a member, creating a new member first if the verified email belongs to the workspace’s domain. It lets teammates join on first contact through a trusted surface.
+
+**Data flow**: It first tries link_member. If no member exists, it compares the email domain with the owner’s domain; on a match it creates the member, then links and returns it. Foreign or malformed domains return None.
+
+**Call relations**: Slack’s member resolver calls it after Slack has verified the user’s email. It depends on link_member, _owner_email, _email_domain, and create_member.
+
+*Call graph*: calls 3 internal fn (_owner_email, link_member, _email_domain); called by 1 (_resolve_member); 2 external calls (workspace_tx, create_member).
+
+
+##### `SurfaceContext._conversation_lookup`  (lines 536–541)
+
+```
+def _conversation_lookup(self, queue_key: str) -> sa.Select
+```
+
+**Purpose**: This private helper builds the database query for finding a conversation by this surface’s queue key. A queue key is the surface’s own channel, thread, or session identifier.
+
+**Data flow**: It receives a queue key and returns a query selecting the conversation id and member id for this workspace and surface.
+
+**Call relations**: SurfaceContext.find_conversation and SurfaceContext.conversation_for both use this shared query so lookup rules stay identical.
+
+*Call graph*: called by 2 (conversation_for, find_conversation); 1 external calls (select).
+
+
+##### `SurfaceContext.find_conversation`  (lines 543–549)
+
+```
+async def find_conversation(self, queue_key: str) -> UUID | None
+```
+
+**Purpose**: This method finds an existing conversation for a surface queue key without creating one. It is useful when a surface needs to check whether a thread is already participating.
+
+**Data flow**: It receives a queue key, runs the shared conversation lookup, and returns the conversation id or None.
+
+**Call relations**: Slack debug, participation, and interactive flows call it before deciding what a request may do. It uses _conversation_lookup inside a workspace transaction.
+
+*Call graph*: calls 1 internal fn (_conversation_lookup); called by 3 (_debug_link, _participating_conversation, interactive); 1 external calls (workspace_tx).
+
+
+##### `SurfaceContext.conversation_for`  (lines 551–594)
+
+```
+async def conversation_for(self, queue_key: str, member_id: UUID | None) -> UUID
+```
+
+**Purpose**: This method gets or creates the conversation for a surface queue key. It is the main way incoming messages are attached to the right durable conversation.
+
+**Data flow**: It receives a queue key and optional member id. If the conversation exists, it may claim a previously memberless conversation for that member. If it does not exist, it chooses the surface’s agent, inserts a new conversation, handles creation races, and returns the conversation id.
+
+**Call relations**: Sample, Slack, UFO, and web surfaces call it before admitting messages. It uses _conversation_lookup, _surface_agent, database inserts and updates, and race logging.
+
+*Call graph*: calls 2 internal fn (_conversation_lookup, _surface_agent); called by 6 (_surface_ingest, _surface_live_admit, ingest, interactive, channel, chat); 5 external calls (insert, update, workspace_tx, log, uuid4).
+
+
+##### `SurfaceContext._surface_agent`  (lines 596–608)
+
+```
+async def _surface_agent(self) -> UUID
+```
+
+**Purpose**: This private method chooses which agent should run turns for this surface’s conversations. A surface installation can bind to a specific agent; otherwise the workspace’s earliest agent is used.
+
+**Data flow**: It checks for a surface_installation row for this workspace and surface. If one exists, it returns its agent id; if not, it falls back to _earliest_agent.
+
+**Call relations**: SurfaceContext.conversation_for calls it when creating a new conversation. This keeps agent selection out of individual surface implementations.
+
+*Call graph*: calls 1 internal fn (_earliest_agent); called by 1 (conversation_for); 2 external calls (select, workspace_tx).
+
+
+##### `SurfaceContext.admit`  (lines 610–632)
+
+```
+async def admit(self, conversation_id: UUID, body: str, idempotency_key: str | None=None, context: TurnContext | None=None, *, speaker_member_id: UUID | None) -> UUID
+```
+
+**Purpose**: This method submits a user message into the engine as a turn in an existing conversation. It is the write side of a surface: after identity and conversation are resolved, the message enters the durable queue.
+
+**Data flow**: It receives the conversation id, message body, optional idempotency key, optional turn context, and speaking member id. It forwards those values to the injected MemberAdmitter and returns the resulting turn id.
+
+**Call relations**: Sample, Slack, UFO, and web surfaces call it after conversation_for. The actual admission and duplicate handling live behind the injected _admitter.
+
+*Call graph*: called by 6 (_surface_ingest, _surface_live_admit, ingest, interactive, channel, chat).
+
+
+##### `SurfaceContext.connect_url`  (lines 634–640)
+
+```
+async def connect_url(self, turn_id: UUID, member_id: UUID) -> str
+```
+
+**Purpose**: This method starts an installed-service connection handoff for a member from a terminal turn. It returns the URL the surface should send the user to.
+
+**Data flow**: It receives a turn id and member id. It loads the configured connect flow, turns unavailable configuration into a connect-request error, and asks ConnectHandoff to authorize the handoff.
+
+**Call relations**: Slack interactive handling and web event streaming call it when a terminal frame asks the user to connect an external provider.
+
+*Call graph*: called by 2 (interactive, _events); 3 external calls (__init__, __init__, installed_connect_flow).
+
+
+##### `SurfaceContext.admitted_body`  (lines 642–667)
+
+```
+async def admitted_body(self, idempotency_key: str) -> str | None
+```
+
+**Purpose**: This method finds the message body that actually won for an idempotency key. It helps a surface update only the button or answer affordance whose click was accepted.
+
+**Data flow**: It receives an idempotency key. It first looks for a completed turn with that key, then for an inbound queued message with that key, and returns the stored body or None.
+
+**Call relations**: Slack interactive handling calls it after racing user interactions. It reads both turn and inbound_message tables to cover both admission states.
+
+*Call graph*: called by 1 (interactive); 2 external calls (select, workspace_tx).
+
+
+##### `SurfaceContext.turn_owner`  (lines 669–683)
+
+```
+async def turn_owner(self, turn_id: UUID) -> UUID | None
+```
+
+**Purpose**: This method returns the member who owns the conversation containing a turn. Live surfaces use it as an authorization check before letting someone stream that turn.
+
+**Data flow**: It receives a turn id, joins turn to conversation inside this workspace, and returns the conversation member id or None if the turn is not found.
+
+**Call relations**: The sample live surface and web stream route call it before tailing frames. It helps prevent one member from watching another member’s turn.
+
+*Call graph*: called by 2 (_surface_live_admit, stream); 2 external calls (select, workspace_tx).
+
+
+##### `SurfaceContext.latest_turn`  (lines 685–702)
+
+```
+async def latest_turn(self, conversation_id: UUID) -> UUID | None
+```
+
+**Purpose**: This method finds the newest turn in a conversation. It is useful when a surface reconnects or needs to know what turn is currently relevant.
+
+**Data flow**: It receives a conversation id, reads the turn table ordered by descending sequence number, and returns the most recent turn id or None.
+
+**Call relations**: Slack participation logic and the UFO channel use it when resuming or inspecting conversation activity.
+
+*Call graph*: called by 2 (_participating_conversation, channel); 2 external calls (select, workspace_tx).
+
+
+##### `SurfaceContext.tail`  (lines 704–707)
+
+```
+def tail(self, turn_id: UUID, since: str='') -> AsyncIterator[tuple[str, LiveFrame]]
+```
+
+**Purpose**: This method streams live frames for one turn through the injected tailer. It gives live surfaces a single safe way to read ongoing output.
+
+**Data flow**: It receives a turn id and optional resume cursor, then returns the async stream produced by the tailer.
+
+**Call relations**: Debugger, sample, UFO, and web event routes call it after their own access checks. It delegates to TurnTailer.tail.
+
+*Call graph*: called by 4 (_events, _surface_frames, channel, _events).
+
+
+##### `SurfaceContext.spend_rollup`  (lines 709–713)
+
+```
+async def spend_rollup(self, window_seconds: int) -> SpendReport
+```
+
+**Purpose**: This method reads recent workspace spending totals. A surface can use it to show a spend dashboard or usage indicator.
+
+**Data flow**: It receives a time window in seconds, opens a workspace transaction, and returns a SpendReport computed by SpendRollup.
+
+**Call relations**: The sample live admit flow and web spend route call it for user-facing spend views.
+
+*Call graph*: called by 2 (_surface_live_admit, spend); 2 external calls (__init__, workspace_tx).
+
+
+##### `SurfaceContext.write_workspace_file`  (lines 715–721)
+
+```
+async def write_workspace_file(self, conversation_id: UUID, rel: str, chunks: AsyncIterator[bytes]) -> None
+```
+
+**Purpose**: This method saves a streamed file into a conversation’s workspace folder before a turn runs. The sandbox can then see the file as part of its working area.
+
+**Data flow**: It receives a conversation id, relative path, and async byte chunks. It validates and converts the path with workspace_key, then streams the bytes into blob storage without buffering the whole file.
+
+**Call relations**: Sample ingest and Slack file download code call it when users attach files. workspace_key provides the path safety check.
+
+*Call graph*: calls 1 internal fn (workspace_key); called by 2 (_surface_ingest, _download_files).
+
+
+##### `SurfaceContext.list_conversations`  (lines 723–772)
+
+```
+async def list_conversations(self, limit: int=LIST_CONVERSATIONS_LIMIT) -> tuple[ConversationSummary, ...]
+```
+
+**Purpose**: This method returns a bounded list of workspace conversations for read-only views. It includes conversations from all surfaces, not just the current one.
+
+**Data flow**: It receives an optional limit. It builds an activity summary from turns, joins conversations and member email, orders by newest activity, and returns ConversationSummary objects.
+
+**Call relations**: The debugger surface calls it to show conversation lists. ConversationSummary normalizes timestamps as each item is created.
+
+*Call graph*: called by 1 (conversations); 3 external calls (__init__, select, workspace_tx).
+
+
+##### `SurfaceContext.list_turns`  (lines 774–790)
+
+```
+async def list_turns(self, conversation_id: UUID, limit: int=LIST_TURNS_LIMIT) -> tuple[Turn, ...]
+```
+
+**Purpose**: This method returns the most recent turns in a conversation in chronological order. It gives debug views the durable history of a conversation.
+
+**Data flow**: It receives a conversation id and optional limit. It reads the latest rows in reverse order for efficiency, converts each row into a Turn record, and returns them oldest-first.
+
+**Call relations**: The debugger conversation-turns endpoint calls it. It relies on _turn_query for the selected columns and _turn_record for typed conversion.
+
+*Call graph*: calls 2 internal fn (_turn_query, _turn_record); called by 1 (conversation_turns); 1 external calls (workspace_tx).
+
+
+##### `SurfaceContext.turn_detail`  (lines 792–842)
+
+```
+async def turn_detail(self, turn_id: UUID) -> TurnDetail | None
+```
+
+**Purpose**: This method returns a detailed view of one turn, including its accounting rows and child subagent turns. It is meant for inspection and debugging.
+
+**Data flow**: It receives a turn id. It reads the turn, its children, and ledger rows; if no turn exists, it returns None. Otherwise it packages everything into a TurnDetail object.
+
+**Call relations**: Debugger stream and turn pages call it. It uses _turn_query, _turn_record, and LedgerEntry to assemble the view.
+
+*Call graph*: calls 2 internal fn (_turn_query, _turn_record); called by 2 (stream, turn); 4 external calls (__init__, __init__, select, workspace_tx).
+
+
+##### `SurfaceContext.read_transcript`  (lines 844–855)
+
+```
+async def read_transcript(self, conversation_id: UUID) -> Conversation | None
+```
+
+**Purpose**: This method reads the durable transcript for a conversation if the conversation belongs to this workspace. It protects tenant data before touching unscoped blob storage.
+
+**Data flow**: It receives a conversation id. It first checks ownership, then reads the transcript blob, decodes it, and returns the Conversation; missing or foreign data returns None.
+
+**Call relations**: The debugger transcript endpoint calls it. _owned_conversation is the guard before transcript_key and decode are used.
+
+*Call graph*: calls 1 internal fn (_owned_conversation); called by 1 (conversation_transcript); 2 external calls (decode, transcript_key).
+
+
+##### `SurfaceContext.list_compactions`  (lines 857–868)
+
+```
+async def list_compactions(self, conversation_id: UUID) -> tuple[int, ...]
+```
+
+**Purpose**: This method lists saved compaction record numbers for a conversation. Compactions are stored summaries that replace older transcript windows.
+
+**Data flow**: It receives a conversation id. After ownership is confirmed, it lists compaction blobs, extracts numeric indices from matching keys, sorts them, and returns the tuple.
+
+**Call relations**: The debugger compactions endpoint calls it. It uses _owned_conversation to keep blob listing scoped to the workspace.
+
+*Call graph*: calls 1 internal fn (_owned_conversation); called by 1 (conversation_compactions).
+
+
+##### `SurfaceContext.read_compaction`  (lines 870–876)
+
+```
+async def read_compaction(self, conversation_id: UUID, index: int) -> CompactionRecord | None
+```
+
+**Purpose**: This method reads one saved compaction record for a conversation. It returns nothing if the conversation is outside this workspace or the record is missing.
+
+**Data flow**: It receives a conversation id and compaction index. It checks ownership, then asks the transcript module to read that compaction record from blob storage.
+
+**Call relations**: The debugger compaction-record endpoint calls it. The ownership check happens here before handing off to read_compaction_record.
+
+*Call graph*: calls 1 internal fn (_owned_conversation); called by 1 (compaction_record); 1 external calls (read_compaction_record).
+
+
+##### `SurfaceContext.list_workspace_files`  (lines 878–892)
+
+```
+async def list_workspace_files(self, conversation_id: UUID) -> tuple[WorkspaceFile, ...]
+```
+
+**Purpose**: This method lists files stored in a conversation’s workspace folder. It shows relative paths rather than internal blob keys.
+
+**Data flow**: It receives a conversation id. If the conversation is owned by this workspace, it lists blobs under the workspace prefix and returns WorkspaceFile objects with path, size, and modification time.
+
+**Call relations**: The debugger workspace-files endpoint calls it. It uses _owned_conversation first and WorkspaceFile for the returned view.
+
+*Call graph*: calls 1 internal fn (_owned_conversation); called by 1 (workspace_files); 1 external calls (__init__).
+
+
+##### `SurfaceContext.read_workspace_file`  (lines 894–905)
+
+```
+async def read_workspace_file(self, conversation_id: UUID, rel: str) -> AsyncIterator[bytes] | None
+```
+
+**Purpose**: This method opens a stream for one workspace file if it belongs to this workspace and exists. It keeps file reads inside the conversation workspace subtree.
+
+**Data flow**: It receives a conversation id and relative path. It checks conversation ownership, validates the path with workspace_key, verifies the blob exists, and returns a byte stream or None.
+
+**Call relations**: The debugger workspace-file endpoint calls it. workspace_key prevents paths from escaping into other conversation data.
+
+*Call graph*: calls 2 internal fn (_owned_conversation, workspace_key); called by 1 (workspace_file).
+
+
+##### `SurfaceContext.installation`  (lines 907–920)
+
+```
+async def installation(self, peer_surface: str) -> str | None
+```
+
+**Purpose**: This method reads the external installation id for a surface in this workspace. It helps views build links back to the external place where a conversation lives.
+
+**Data flow**: It receives a peer surface name, queries the installation table in this workspace, and returns the installation id or None.
+
+**Call relations**: The debugger workspace metadata endpoint calls it to enrich its read view.
+
+*Call graph*: called by 1 (workspace_meta); 2 external calls (select, workspace_tx).
+
+
+##### `SurfaceContext._owned_conversation`  (lines 922–932)
+
+```
+async def _owned_conversation(self, conversation_id: UUID) -> bool
+```
+
+**Purpose**: This private method checks whether a conversation id belongs to the current workspace. It is the guard used before reading unscoped blob data.
+
+**Data flow**: It receives a conversation id, queries the conversation table for that id and workspace id, and returns true if a row exists.
+
+**Call relations**: Transcript, compaction, and workspace-file read/list methods call it before accessing blob storage.
+
+*Call graph*: called by 5 (list_compactions, list_workspace_files, read_compaction, read_transcript, read_workspace_file); 2 external calls (select, workspace_tx).
+
+
+##### `SurfaceContext._turn_query`  (lines 934–952)
+
+```
+def _turn_query(self) -> sa.Select
+```
+
+**Purpose**: This private helper builds the common query shape for reading turns. It keeps the selected columns consistent across list and detail views.
+
+**Data flow**: It takes no input and returns a SQL select object containing the durable turn fields needed to reconstruct a Turn record.
+
+**Call relations**: SurfaceContext.list_turns and SurfaceContext.turn_detail call it before adding their own filters and ordering.
+
+*Call graph*: called by 2 (list_turns, turn_detail); 1 external calls (select).
+
+
+##### `SurfaceContext._turn_record`  (lines 954–972)
+
+```
+def _turn_record(self, row: sa.Row) -> Turn
+```
+
+**Purpose**: This private helper converts a database row into a typed Turn object. It also parses stored context and terminal data back into their structured forms.
+
+**Data flow**: It receives a row from _turn_query. It copies scalar fields, validates context and terminal JSON when present, and returns a Turn record.
+
+**Call relations**: SurfaceContext.list_turns and SurfaceContext.turn_detail use it so their returned turns have the same shape.
+
+*Call graph*: called by 2 (list_turns, turn_detail); 3 external calls (__init__, model_validate, model_validate).
+
+
+##### `SurfaceInstallationAccess.bind`  (lines 993–998)
+
+```
+async def bind(self, surface: str, installation_id: str) -> None
+```
+
+**Purpose**: This method lets a tool bind an installation only for a surface it declared in its manifest. That prevents a tool from registering arbitrary surface names.
+
+**Data flow**: It receives a surface name and installation id. It checks the surface is declared, reads the current workspace id, and writes the binding through _bind_surface_installation.
+
+**Call relations**: Tool code uses this scoped access object during configuration. The shared binding function performs the actual database update.
+
+*Call graph*: calls 1 internal fn (_bind_surface_installation); 2 external calls (__init__, ws_current).
+
+
+##### `SurfaceAuth.workspace`  (lines 1010–1020)
+
+```
+async def workspace(self, installation_id: str) -> UUID | None
+```
+
+**Purpose**: This method resolves an external installation id to the workspace that owns it before a request is bound to any workspace. It is the first gate for shared surface ingress.
+
+**Data flow**: It receives an installation id, searches owner-visible installation bindings for this surface, and returns the workspace id or None.
+
+**Call relations**: Slack’s workspace resolver calls it when an incoming shared Slack request names a team or installation.
+
+*Call graph*: called by 1 (resolve_workspace); 2 external calls (select, owner_tx).
+
+
+##### `SurfaceAuth.open_credential_authorization`  (lines 1022–1034)
+
+```
+def open_credential_authorization(self, sealed: str) -> CredentialRequestState | None
+```
+
+**Purpose**: This method tries to open a sealed credential authorization before the request has been bound to a workspace. It is useful for OAuth callbacks carrying sealed state.
+
+**Data flow**: It receives a sealed string. If no credential store exists or verification fails, it returns None; otherwise it returns the credential request state.
+
+**Call relations**: Slack’s workspace resolver calls it during install or authorization callbacks. It uses the same credential seal mechanism as SurfaceContext.
+
+*Call graph*: called by 1 (resolve_workspace); 1 external calls (open_credential_request).
+
+
+##### `SurfaceAuth.credential`  (lines 1036–1052)
+
+```
+async def credential(self, workspace_id: UUID, slot: str) -> str
+```
+
+**Purpose**: This method reads a declared credential during pre-binding authentication. It lets a shared resolver verify a request for a specific workspace without granting broad secret access.
+
+**Data flow**: It receives a workspace id and slot. It rejects undeclared slots, checks a credential store exists, confirms the workspace exists inside a workspace context, and returns the secret.
+
+**Call relations**: Slack’s auth signing-secret helper calls it while resolving requests. It raises SurfaceWorkspaceUnknown if the sealed or supplied workspace is not served here.
+
+*Call graph*: called by 1 (_auth_signing_secret); 4 external calls (__init__, select, workspace_tx, ws).
+
+
+##### `SurfaceDeliveryError.__init__`  (lines 1066–1070)
+
+```
+def __init__(self, message: str, *, retry_after_seconds: int | None=None) -> None
+```
+
+**Purpose**: This exception constructor records a durable delivery failure and an optional provider-requested retry delay. It lets the poller respect a service’s Retry-After instruction.
+
+**Data flow**: It receives an error message and optional retry-after seconds. It rejects negative retry delays, stores the retry value, and initializes the runtime error text.
+
+**Call relations**: Slack posting code raises it for provider delivery problems. WritebackPoller._fail_or_retry later reads the retry delay from this exception.
+
+*Call graph*: called by 1 (_chat_post).
+
+
+##### `_writeback_due`  (lines 1109–1125)
+
+```
+def _writeback_due(now: datetime) -> sa.ColumnElement[bool]
+```
+
+**Purpose**: This helper builds the database condition for writebacks that are ready to be processed. It includes finished turns whose delivery is pending or whose previous claim expired.
+
+**Data flow**: It receives the current time and returns a SQL boolean expression. The expression matches terminal turns with pending or claimed writeback rows that are not currently protected by an active claim.
+
+**Call relations**: writeback_workspaces.due uses it to find workspaces with work, and WritebackPoller._claim uses it to claim individual rows.
+
+*Call graph*: called by 2 (_claim, due); 2 external calls (and_, or_).
+
+
+##### `writeback_workspaces`  (lines 1128–1163)
+
+```
+def writeback_workspaces() -> WorkspaceCandidates
+```
+
+**Purpose**: This function creates a rotating reader for workspace ids that have deliverable writebacks. It keeps the background poller from scanning or loading everything at once.
+
+**Data flow**: It initializes a cursor and returns an async candidates function. The returned function reads a bounded page of workspace ids and advances or resets the cursor as needed.
+
+**Call relations**: A WritebackPoller receives this candidates function and calls it from run or drain. The owner_candidates wrapper performs the owner-level read safely.
+
+*Call graph*: 1 external calls (owner_candidates).
+
+
+##### `writeback_workspaces.due`  (lines 1135–1149)
+
+```
+def due() -> sa.Select[tuple[UUID]]
+```
+
+**Purpose**: This inner function builds the SQL query for the next page of workspaces with due writebacks. It is cursor-aware so repeated polling moves through the id space.
+
+**Data flow**: It reads the current time and current cursor. It selects workspace ids from due writebacks joined to terminal turns, groups them, orders them, limits the page, and optionally filters past the cursor.
+
+**Call relations**: writeback_workspaces passes it into owner_candidates, which calls it whenever the poller asks for candidates.
+
+*Call graph*: calls 1 internal fn (_writeback_due); 2 external calls (now, select).
+
+
+##### `writeback_workspaces.candidates`  (lines 1153–1161)
+
+```
+async def candidates() -> tuple[UUID, ...]
+```
+
+**Purpose**: This inner async function returns the next batch of workspace ids that may need writeback delivery. It wraps cursor movement and wraparound behavior.
+
+**Data flow**: It calls the owner-level due reader. If no rows are found after a cursor, it resets to the beginning and tries again; when rows are found, it stores the last id as the new cursor.
+
+**Call relations**: WritebackPoller.run and WritebackPoller.drain call this function through the candidates field to decide which workspaces to drain.
+
+
+##### `_WritebackDeliveryFailed.__init__`  (lines 1171–1174)
+
+```
+def __init__(self, phase: Literal['post', 'attach'], error: Exception) -> None
+```
+
+**Purpose**: This exception wraps a failure in one phase of durable delivery: posting the reply or attaching files. It preserves both the phase and the original error.
+
+**Data flow**: It receives the phase name and exception. It stores both, and uses the original exception’s text or class name as its own message.
+
+**Call relations**: WritebackPoller._deliver_claimed raises it around surface post and attach calls. WritebackPoller._deliver catches it and decides whether to retry or fail.
+
+*Call graph*: called by 1 (_deliver_claimed).
+
+
+##### `WritebackPoller.run`  (lines 1197–1230)
 
 ```
 async def run(self) -> None
 ```
 
-**Purpose**: This is the never-ending loop that keeps one process's heartbeat fresh. It protects a healthy process from being mistaken for a dead one.
+**Purpose**: This is the long-running background loop that delivers finished turns to durable surfaces. It continually finds workspaces with due writebacks and starts bounded drain tasks.
 
-**Data flow**: It repeatedly calls `Heartbeat.beat` to update the database timestamp for this instance. If a database error happens on one tick, it logs the failure instead of stopping. Then it waits for the heartbeat interval and tries again.
+**Data flow**: It keeps a map of in-flight workspace tasks and a concurrency semaphore. Each loop cleans up completed tasks, asks for more candidate workspaces when capacity allows, starts drain tasks, logs failures, sleeps briefly, and cancels outstanding work on shutdown.
 
-**Call relations**: This loop drives `Heartbeat.beat` over and over. Its updates are later read by `ExecutorRecovery._live_executors`, which uses them to avoid recovering work that is still being run by a live process.
+**Call relations**: The application starts this method for continuous durable delivery. It hands each workspace to _drain_workspace.
 
-*Call graph*: calls 1 internal fn (beat); 2 external calls (sleep, log).
-
-
-##### `Heartbeat.beat`  (lines 78–88)
-
-```
-async def beat(self) -> None
-```
-
-**Purpose**: This writes one fresh heartbeat timestamp for the current process. It is the small database update that says, in effect, “I am still here.”
-
-**Data flow**: It reads the instance id from the `Heartbeat` object, opens a database transaction, and updates that row's `heartbeat_at` and `updated_at` fields to the current database time. It returns nothing, but the stored liveness timestamp becomes fresh.
-
-**Call relations**: `Heartbeat.run` calls this on every heartbeat tick. The timestamp it writes is later compared against a cutoff by `ExecutorRecovery._live_executors` to decide whether this executor is alive.
-
-*Call graph*: called by 1 (run); 2 external calls (update, owner_tx).
+*Call graph*: calls 1 internal fn (_drain_workspace); 5 external calls (Semaphore, create_task, gather, sleep, log).
 
 
-##### `Heartbeat.retire`  (lines 90–96)
+##### `WritebackPoller.drain`  (lines 1232–1241)
 
 ```
-async def retire(self) -> None
+async def drain(self) -> None
 ```
 
-**Purpose**: This removes the process's liveness row when the process shuts down cleanly. That lets peers see immediately that the seat is gone, rather than waiting for the heartbeat to become stale.
+**Purpose**: This method performs one bounded drain pass instead of running forever. It is useful for tests, maintenance, or command-style execution.
 
-**Data flow**: It reads the instance id from the `Heartbeat` object, opens a database transaction, and deletes the matching row from `runtime_instance`. It returns nothing, but the shared table no longer claims this process is alive.
+**Data flow**: It reads candidate workspace ids, creates a semaphore, drains all candidates concurrently within the limit, gathers results, and raises an ExceptionGroup if any workspace drain failed.
 
-**Call relations**: The serve shutdown path calls this through `ufo.serve._stop_executor`. It is the graceful counterpart to the recovery sweep: if a process exits normally, it clears its own marker instead of making others infer death from an old timestamp.
+**Call relations**: It uses the same _drain_workspace path as run, but without the infinite polling loop.
 
-*Call graph*: called by 1 (_stop_executor); 2 external calls (delete, owner_tx).
-
-
-##### `ExecutorRecovery.run`  (lines 116–122)
-
-```
-async def run(self) -> None
-```
-
-**Purpose**: This is the never-ending background loop that looks for work abandoned by dead processes. It keeps queued workflows from staying stuck under an executor that will never come back.
-
-**Data flow**: It waits for the recovery interval, calls `ExecutorRecovery.sweep`, and catches database or DBOS errors. On failure it logs the error class and continues looping, so temporary trouble delays recovery but does not permanently disable it.
-
-**Call relations**: This loop is the scheduler for `ExecutorRecovery.sweep`. Every serve process can run it, so any surviving process can notice and recover work left behind by a crashed peer.
-
-*Call graph*: calls 1 internal fn (sweep); 2 external calls (sleep, log).
+*Call graph*: calls 1 internal fn (_drain_workspace); 2 external calls (Semaphore, gather).
 
 
-##### `ExecutorRecovery.sweep`  (lines 124–132)
+##### `WritebackPoller._drain_workspace`  (lines 1243–1261)
 
 ```
-async def sweep(self) -> None
+async def _drain_workspace(self, workspace_id: UUID, semaphore: asyncio.Semaphore) -> None
 ```
 
-**Purpose**: This performs one recovery pass. It compares executors that still have pending workflows with executors that still have fresh heartbeats, and recovers the ones that look dead.
+**Purpose**: This private method processes one workspace’s claimed writebacks under the workspace context. It is the per-workspace unit of background delivery work.
 
-**Data flow**: It asks `_pending_executors` for executor ids attached to pending workflows. It asks `_live_executors` for executor ids with recent heartbeat rows. It subtracts the live set from the pending set, then for each remaining stranded executor it calls DBOS recovery in a worker thread and logs how many workflows were recovered.
+**Data flow**: It receives a workspace id and semaphore. After entering the workspace context, it claims due rows, starts lease-renewal tasks for them, delivers each one, and cancels renewals when finished.
 
-**Call relations**: `ExecutorRecovery.run` calls this on each interval. It delegates the two facts it needs to `_pending_executors` and `_live_executors`, then hands each dead executor id to DBOS so DBOS can re-dispatch its pending workflows safely.
+**Call relations**: WritebackPoller.run and drain call it. It coordinates _claim, _renew_claim, and _deliver.
 
-*Call graph*: calls 2 internal fn (_live_executors, _pending_executors); called by 1 (run); 2 external calls (to_thread, log).
-
-
-##### `ExecutorRecovery._pending_executors`  (lines 134–146)
-
-```
-async def _pending_executors(self) -> set[str]
-```
-
-**Purpose**: This finds executor ids that currently have pending DBOS workflows. These are candidates for recovery, but only if their executor is no longer alive.
-
-**Data flow**: It asks DBOS for pending workflows, up to a fixed scan limit, without loading the full workflow inputs or outputs. If the result reaches the limit, it logs that the scan may have hit the cap. It returns a set of executor id strings found on those pending workflow records.
-
-**Call relations**: `ExecutorRecovery.sweep` calls this first to find where pending work is sitting. The sweep then compares the result with `_live_executors`, because pending work alone is not a problem if its executor is still alive.
-
-*Call graph*: called by 1 (sweep); 2 external calls (to_thread, log).
+*Call graph*: calls 3 internal fn (_claim, _deliver, _renew_claim); called by 2 (drain, run); 4 external calls (create_task, gather, log, ws).
 
 
-##### `ExecutorRecovery._live_executors`  (lines 148–158)
+##### `WritebackPoller._claim`  (lines 1263–1296)
 
 ```
-async def _live_executors(self) -> set[str]
+async def _claim(self, workspace_id: UUID) -> Sequence[sa.Row]
 ```
 
-**Purpose**: This finds executor ids that have recently heartbeated and should be treated as alive. It prevents the recovery loop from starting a second copy of work that a live process is already running.
+**Purpose**: This private method claims a batch of due writebacks for this worker. Claiming is like putting a temporary name tag on work so another poller does not do the same job at the same time.
 
-**Data flow**: It calculates a cutoff time by subtracting the stale window from the current time. Then it reads `runtime_instance` rows whose heartbeat is newer than that cutoff. It returns those row ids as strings, one per live executor.
+**Data flow**: It receives a workspace id, finds due writebacks, updates them to claimed with this worker id and an expiry time, and returns the turn id, any saved reply reference, and last error for each claimed row.
 
-**Call relations**: `ExecutorRecovery.sweep` uses this as the safety check before recovery. Its answer comes from rows created by `record_fleet_seat` and refreshed by `Heartbeat.beat`.
+**Call relations**: _drain_workspace calls it before delivery. It uses _writeback_due so workspace selection and row claiming agree on what is ready.
 
-*Call graph*: called by 1 (sweep); 4 external calls (now, timedelta, select, owner_tx).
-
-
-##### `CancelReconciler.run`  (lines 182–188)
-
-```
-async def run(self) -> None
-```
-
-**Purpose**: This is the never-ending loop that makes cancellation flow down from cancelled parent turns to still-running descendants. It turns cancellation from a one-turn action into an eventually consistent tree-wide cleanup.
-
-**Data flow**: It waits for the reconciliation interval, calls `CancelReconciler.sweep`, and catches database or DBOS errors. If one pass fails, it logs the error and keeps looping so the next tick can try again.
-
-**Call relations**: This loop drives `CancelReconciler.sweep` periodically. Every serve process can run it, so a surviving process can finish cancellation cleanup even if the process that started the cancellation crashes.
-
-*Call graph*: calls 1 internal fn (sweep); 2 external calls (sleep, log).
+*Call graph*: calls 1 internal fn (_writeback_due); called by 1 (_drain_workspace); 5 external calls (now, timedelta, select, update, workspace_tx).
 
 
-##### `CancelReconciler.sweep`  (lines 190–197)
+##### `WritebackPoller._deliver`  (lines 1298–1330)
 
 ```
-async def sweep(self) -> None
+async def _deliver(self, workspace_id: UUID, turn_id: UUID, reply_ref: str | None, renewal: asyncio.Task[None]) -> None
 ```
 
-**Purpose**: This performs one cancellation cleanup pass. It finds live turns that have a cancelled ancestor and cancels each of them through the normal cancellation path.
+**Purpose**: This private method wraps delivery of one claimed writeback with logging and retry/failure handling. It turns delivery exceptions into database state changes.
 
-**Data flow**: It builds and runs `_orphans_query` inside a database transaction to get descendant turns that should no longer be running. For each result, it enters that turn's workspace context, calls `cancel_one_turn` with the DBOS client and turn id, and logs the turn if it was actually cancelled.
+**Data flow**: It receives workspace id, turn id, optional reply reference, and the renewal task. It tries delivery with a lease; if the claim is lost it logs that, if delivery fails it calls _fail_or_retry, and if it succeeds it logs elapsed time.
 
-**Call relations**: `CancelReconciler.run` calls this on each interval. It relies on `_orphans_query` to find the right turns, then hands each turn to `cancel_one_turn`, which performs the actual workflow cancellation and terminal status update.
+**Call relations**: _drain_workspace calls it for each claimed row. It delegates the actual work to _deliver_with_lease.
 
-*Call graph*: calls 1 internal fn (_orphans_query); called by 1 (run); 4 external calls (cancel_one_turn, owner_tx, log, ws).
+*Call graph*: calls 2 internal fn (_deliver_with_lease, _fail_or_retry); called by 1 (_drain_workspace); 2 external calls (now, log).
 
 
-##### `CancelReconciler._orphans_query`  (lines 199–234)
+##### `WritebackPoller._deliver_with_lease`  (lines 1332–1361)
 
 ```
-def _orphans_query(self) -> sa.Select
+async def _deliver_with_lease(self, workspace_id: UUID, turn_id: UUID, reply_ref: str | None, renewal: asyncio.Task[None]) -> None
 ```
 
-**Purpose**: This builds the database query that finds non-finished turns living under a cancelled ancestor. It is how the reconciler catches not just direct children, but grandchildren and deeper descendants too.
+**Purpose**: This private method makes sure external delivery happens only while the worker still owns the claim. It also stops the renewal task before marking the row delivered.
 
-**Data flow**: It starts from every turn whose status is still non-terminal, meaning not finished yet. Using a recursive database query, it walks upward through each turn's `parent_turn_id` chain until it either finds a cancelled ancestor or runs out of parents. It returns a selectable query that yields the live descendant turn id and workspace id for each match.
+**Data flow**: It receives workspace id, turn id, optional reply reference, and renewal task. It runs delivery and renewal together, reacts if renewal stops first, cancels leftover tasks, waits for cleanup, then marks the writeback delivered.
 
-**Call relations**: `CancelReconciler.sweep` calls this to know which turns need cancellation. The query only identifies the targets; the sweep then uses `cancel_one_turn` to do the actual cancellation work in the correct workspace.
+**Call relations**: _deliver calls it. It runs _deliver_claimed for the outside call and _mark_delivered for the final database commit.
 
-*Call graph*: called by 1 (sweep); 1 external calls (select).
+*Call graph*: calls 2 internal fn (_deliver_claimed, _mark_delivered); called by 1 (_deliver); 3 external calls (create_task, gather, wait).
+
+
+##### `WritebackPoller._deliver_claimed`  (lines 1363–1385)
+
+```
+async def _deliver_claimed(self, workspace_id: UUID, turn_id: UUID, reply_ref: str | None) -> None
+```
+
+**Purpose**: This private method performs the actual surface delivery for a claimed writeback. It builds the reply payload, chooses the surface, posts the reply if needed, then attaches files.
+
+**Data flow**: It receives workspace id, turn id, and optional saved reply reference. It builds a Writeback, finds the surface spec, skips surfaces without durable delivery, creates a SurfaceContext, posts if no reply reference is recorded, records the reference, and calls attach.
+
+**Call relations**: _deliver_with_lease calls it while the claim renewal is active. It calls the surface’s post and attach handlers and wraps their failures in _WritebackDeliveryFailed.
+
+*Call graph*: calls 3 internal fn (_build, _record_ref, __init__); called by 1 (_deliver_with_lease); 1 external calls (log).
+
+
+##### `WritebackPoller._renew_claim`  (lines 1387–1405)
+
+```
+async def _renew_claim(self, turn_id: UUID) -> None
+```
+
+**Purpose**: This private method keeps a long delivery claim alive. It prevents another worker from taking over while a slow external provider call is still in progress.
+
+**Data flow**: It receives a turn id. In a loop, it sleeps until refresh time, extends the claim expiry for rows still claimed by this worker, and raises _WritebackClaimLost if the row is no longer owned.
+
+**Call relations**: _drain_workspace starts one renewal task per claimed writeback. _deliver_with_lease watches this task while delivery runs.
+
+*Call graph*: called by 1 (_drain_workspace); 6 external calls (__init__, sleep, now, timedelta, update, workspace_tx).
+
+
+##### `WritebackPoller._build`  (lines 1407–1463)
+
+```
+async def _build(self, turn_id: UUID) -> tuple[Writeback, str]
+```
+
+**Purpose**: This private method builds the Writeback object that a durable surface knows how to render. It collects the terminal answer and any shared artifacts for one turn.
+
+**Data flow**: It receives a turn id, reads the turn terminal frame, conversation queue key and surface name, and artifact rows. It validates the terminal frame, converts artifact rows to SharedArtifact objects, and returns the Writeback plus surface name.
+
+**Call relations**: _deliver_claimed calls it before selecting and invoking the surface’s delivery handlers.
+
+*Call graph*: called by 1 (_deliver_claimed); 5 external calls (__init__, __init__, model_validate, select, workspace_tx).
+
+
+##### `WritebackPoller._record_ref`  (lines 1465–1477)
+
+```
+async def _record_ref(self, turn_id: UUID, reply_ref: str) -> None
+```
+
+**Purpose**: This private method saves the durable reference returned by the surface after posting a reply. That lets recovery attach files later without reposting the main reply.
+
+**Data flow**: It receives a turn id and reply reference. It updates the claimed writeback row only if this worker still owns it; if not exactly one row is updated, it raises _WritebackClaimLost.
+
+**Call relations**: _deliver_claimed calls it after a successful post and before attachments. This is the checkpoint between the post and attach phases.
+
+*Call graph*: called by 1 (_deliver_claimed); 3 external calls (__init__, update, workspace_tx).
+
+
+##### `WritebackPoller._mark_delivered`  (lines 1479–1496)
+
+```
+async def _mark_delivered(self, turn_id: UUID) -> None
+```
+
+**Purpose**: This private method marks a writeback as successfully delivered. It clears the worker claim so the row is closed and no longer retried.
+
+**Data flow**: It receives a turn id. It updates the writeback row from claimed to delivered only if this worker still owns it, clears claim fields, and raises _WritebackClaimLost if the update did not happen.
+
+**Call relations**: _deliver_with_lease calls it after delivery completes and renewal has been stopped. It is the final success commit.
+
+*Call graph*: called by 1 (_deliver_with_lease); 3 external calls (__init__, update, workspace_tx).
+
+
+##### `WritebackPoller._fail_or_retry`  (lines 1498–1547)
+
+```
+async def _fail_or_retry(self, turn_id: UUID, error: _WritebackDeliveryFailed) -> tuple[str, str, datetime | None]
+```
+
+**Purpose**: This private method releases a failed writeback either for a later retry or as permanently failed if it is too old. It also respects provider retry timing when a SurfaceDeliveryError includes it.
+
+**Data flow**: It receives a turn id and wrapped delivery error. It calculates retry timing, truncates the stored error message, updates the claimed row to pending with a future claim expiry or failed if past the age limit, and returns the outcome, stored error, and next attempt time.
+
+**Call relations**: WritebackPoller._deliver calls it after _deliver_with_lease reports a post or attach failure. Its returned outcome drives the failure log.
+
+*Call graph*: called by 1 (_deliver); 5 external calls (now, timedelta, case, update, workspace_tx).
 
 ## 📊 State Registers Touched
 
-- `reg-config` — The effective deployment settings that tell the system how to start, what services to use, and what safety rules are enabled.
-- `reg-extension-set` — The saved and loaded set of extensions, packs, manifests, and contributed capabilities available to the runtime.
-- `reg-workspace-directory` — The shared record of workspaces, members, owners, agents, and workspace boundaries.
-- `reg-surface-installations` — The stored links between outside surfaces, workspaces, channels, conversations, and agents.
-- `reg-live-stream` — The live feed of turn updates, text chunks, tool events, costs, and final frames that clients and debuggers can watch.
-- `reg-runtime-fleet` — The shared heartbeat and ownership records that show which server processes are alive and which work they are responsible for.
-- `reg-cancellation-state` — The shared stop signal state used to cancel active turns, child tasks, tools, and abandoned work safely.
-- `reg-egress-policy` — The network access and proxy state that decides which sandbox traffic is allowed, audited, billed, or given injected secrets.
-- `reg-subagent-tree` — The shared parent-child work structure for delegated agents, including child turns, messages, waits, and cancellations.
-- `reg-observability-context` — The shared tracing, metrics, structured logs, and trace-parent links used to understand work across processes and turns.
-- `reg-db-schema-version` — The applied core, control-plane, and extension migration revisions that determine which persisted schema the runtime may safely use.
-- `reg-db-connection-pool` — The process-global database engine, sessions, transactions, and connection pool shared by requests, workers, jobs, and shutdown cleanup.
-- `reg-redis-backplane-pool` — The optional Redis client/backplane connection state used to share live stream infrastructure across server processes.
-- `reg-update-check-cache` — Cached version/update-check metadata used by CLI or startup paths to avoid repeated remote checks and notify operators about newer releases.
+- `reg-workspace-tenant-record` — The customer workspace record that all users, conversations, data, tools, and billing are kept under.
+- `reg-member-session-auth` — The signed-in person’s identity and session proof used to decide who is making a request.
+- `reg-agent-profile-settings` — The saved assistant settings for a workspace, including which agent is used and what it is allowed to do.
+- `reg-surface-installation-binding` — The stored connection between outside channels like Slack, web chat, or terminal clients and an internal workspace conversation.
+- `reg-inbound-message-dedup` — The durable inbox and duplicate-detection state for messages arriving from external surfaces.
+- `reg-conversation-thread-state` — The saved conversation identity and history that let the system continue the same thread over time.
+- `reg-spend-ledger-billing` — The shared usage ledger, prices, caps, exports, and billing records used to track and limit spending.
+- `reg-live-stream-hub` — The live stream of turn updates that clients can watch and replay after reconnecting.
+- `reg-observability-trace-context` — The trace, metric, and log context that follows requests and turns so operators can understand what happened.
+- `reg-row-level-security-context` — The database safety context that keeps each workspace’s rows separated even when code uses shared tables.
+- `reg-surface-writeback-state` — Pending and completed outbound reply/writeback records used to deliver final turn results back to external surfaces without duplication.
+- `reg-slack-connect-provisioning-state` — The hosted-control-plane state for creating, retrying, and inspecting customer Slack Connect channels during workspace onboarding.
