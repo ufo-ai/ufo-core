@@ -466,12 +466,14 @@ async def test_new_message_resumes_pause_and_cancels_timer(db: None) -> None:
                 reason="approval",
             ),
         )
-        turn_id = await member_admission.admit(
-            conversation_id,
-            "The approval arrived.",
-            "approval-1",
-            speaker_member_id=None,
-        )
+        turn_id = (
+            await member_admission.admit(
+                conversation_id,
+                "The approval arrived.",
+                "approval-1",
+                speaker_member_id=None,
+            )
+        ).turn_id
         async with workspace_tx() as connection:
             resume_turn_id = (
                 await connection.execute(sa.select(tables.scheduled_task.c.resume_turn_id))
@@ -520,12 +522,14 @@ async def test_pause_does_not_arm_after_a_newer_member_was_admitted(db: None) ->
         workspace_id=workspace_id,
     )
     with ws(workspace_id), agent(agent_id):
-        member_turn_id = await member_admission.admit(
-            conversation_id,
-            "new message",
-            "newer-member",
-            speaker_member_id=None,
-        )
+        member_turn_id = (
+            await member_admission.admit(
+                conversation_id,
+                "new message",
+                "newer-member",
+                speaker_member_id=None,
+            )
+        ).turn_id
         result = await pause_and_wait(
             ctx,
             PauseAndWaitInput(
@@ -609,12 +613,14 @@ async def test_redelivered_terminal_message_does_not_cancel_a_later_pause(db: No
     admission = Admission(dbos=dbos, durable_surfaces=frozenset())
     member_admission = MemberAdmission(admission=admission, workspace_id=workspace_id)
     with ws(workspace_id), agent(agent_id):
-        turn_id = await member_admission.admit(
-            conversation_id,
-            "The approval arrived.",
-            "approval-redelivery",
-            speaker_member_id=None,
-        )
+        turn_id = (
+            await member_admission.admit(
+                conversation_id,
+                "The approval arrived.",
+                "approval-redelivery",
+                speaker_member_id=None,
+            )
+        ).turn_id
         async with workspace_tx() as connection:
             await connection.execute(
                 sa.update(tables.turn)
@@ -653,12 +659,14 @@ async def test_redelivered_terminal_message_does_not_cancel_a_later_pause(db: No
                 reason="later approval",
             ),
         )
-        redelivered = await member_admission.admit(
-            conversation_id,
-            "The approval arrived.",
-            "approval-redelivery",
-            speaker_member_id=None,
-        )
+        redelivered = (
+            await member_admission.admit(
+                conversation_id,
+                "The approval arrived.",
+                "approval-redelivery",
+                speaker_member_id=None,
+            )
+        ).turn_id
         async with workspace_tx() as connection:
             pauses = (
                 await connection.execute(
@@ -690,12 +698,14 @@ async def test_failed_member_enqueue_preserves_pause_for_the_same_turn_retry(db:
                 reason="approval",
             ),
         )
-        accepted = await member_admission.admit(
-            conversation_id,
-            "The approval arrived.",
-            "approval-retry",
-            speaker_member_id=None,
-        )
+        accepted = (
+            await member_admission.admit(
+                conversation_id,
+                "The approval arrived.",
+                "approval-retry",
+                speaker_member_id=None,
+            )
+        ).turn_id
         async with workspace_tx() as connection:
             pause = (
                 await connection.execute(
@@ -708,12 +718,14 @@ async def test_failed_member_enqueue_preserves_pause_for_the_same_turn_retry(db:
                 )
             ).one()
         [failed] = await _turns(conversation_id)
-        retried = await member_admission.admit(
-            conversation_id,
-            "The approval arrived.",
-            "approval-retry",
-            speaker_member_id=None,
-        )
+        retried = (
+            await member_admission.admit(
+                conversation_id,
+                "The approval arrived.",
+                "approval-retry",
+                speaker_member_id=None,
+            )
+        ).turn_id
         turns = await _turns(conversation_id)
         async with workspace_tx() as connection:
             resume_turn_id = (
@@ -759,14 +771,16 @@ async def test_redundant_enqueue_survives_an_ambiguous_failure_until_claim(db: N
             )
         )
         await dbos.entered.wait()
-        redundant = await member_admission.admit(
-            conversation_id,
-            "The approval arrived.",
-            "approval-ambiguous",
-            speaker_member_id=None,
-        )
+        redundant = (
+            await member_admission.admit(
+                conversation_id,
+                "The approval arrived.",
+                "approval-ambiguous",
+                speaker_member_id=None,
+            )
+        ).turn_id
         dbos.release.set()
-        accepted = await first
+        accepted = (await first).turn_id
         [turn] = await _turns(conversation_id)
         async with workspace_tx() as connection:
             pause = (
@@ -902,7 +916,7 @@ async def test_member_admission_wins_against_an_already_claimed_pause(db: None) 
             assert await runner._fire(store, claimed, fire_at, fire_at) is None
         finally:
             dbos.release.set()
-        turn_id = await member_turn
+        turn_id = (await member_turn).turn_id
         turns = await _turns(conversation_id)
         async with workspace_tx() as connection:
             resume_turn_id = (
@@ -1005,12 +1019,13 @@ async def test_member_message_takes_over_a_timer_waiting_to_enqueue(db: None) ->
         [claimed] = await store.claim_due(now, 300)
         timer_fire = asyncio.create_task(runner._fire(store, claimed, now, now))
         await dbos.entered.wait()
-        turn_id = await member_admission.admit(
+        taken_over = await member_admission.admit(
             conversation_id,
             "The approval arrived.",
             "approval-after-timer",
             speaker_member_id=member_id,
         )
+        turn_id = taken_over.turn_id
         dbos.release.set()
         assert await timer_fire is None
         turns = await _turns(conversation_id)
@@ -1019,6 +1034,7 @@ async def test_member_message_takes_over_a_timer_waiting_to_enqueue(db: None) ->
                 await connection.execute(sa.select(tables.scheduled_task.c.resume_turn_id))
             ).scalar_one()
         assert resume_turn_id == turn_id
+        assert taken_over.opened_run
         assert await _claim_turn(turn_id, "timer-takeover") is True
         async with workspace_tx() as connection:
             pauses = (
@@ -1058,12 +1074,13 @@ async def test_member_takes_over_the_timer_while_internal_work_queues(db: None) 
         internal_turn = await invoker.invoke(
             conversation_id, agent_id, "internal work", "internal-between"
         )
-        member_turn = await member_admission.admit(
+        taken_over = await member_admission.admit(
             conversation_id,
             "member reply",
             "member-after-internal",
             speaker_member_id=None,
         )
+        member_turn = taken_over.turn_id
         dbos.release.set()
         assert await timer_fire is None
         turns = await _turns(conversation_id)
@@ -1088,6 +1105,7 @@ async def test_member_takes_over_the_timer_while_internal_work_queues(db: None) 
         assert turn["admission_source"] == "member"
         assert internal_turn == turn["id"]
         assert member_turn == turn["id"]
+        assert taken_over.opened_run
         assert queued_bodies == ["internal work"]
         assert resume_turn_id == turn["id"]
         assert dbos.enqueued == [str(turn["id"]), str(turn["id"])]
@@ -1123,14 +1141,16 @@ async def test_later_member_joins_the_first_queued_turn(db: None) -> None:
             )
         )
         await dbos.entered.wait()
-        second_turn = await member_admission.admit(
-            conversation_id,
-            "second",
-            "member-second",
-            speaker_member_id=None,
-        )
+        second_turn = (
+            await member_admission.admit(
+                conversation_id,
+                "second",
+                "member-second",
+                speaker_member_id=None,
+            )
+        ).turn_id
         dbos.release.set()
-        first_turn = await first
+        first_turn = (await first).turn_id
         turns = await _turns(conversation_id)
         async with workspace_tx() as connection:
             resume_turn_id = (

@@ -352,12 +352,14 @@ async def test_admit_queues_a_turn_and_registers_a_writeback(db: None, tmp_path)
     dbos = StubDbos()
     context = _context(workspace_id, dbos, FilesystemBlobStore(root=tmp_path))
     conversation_id = await context.conversation_for("C1:1.0", SHARED_AUDIENCE)
-    turn_id = await context.admit(
+    admitted = await context.admit(
         conversation_id,
         "hello",
         idempotency_key="C1:1.0",
         speaker_member_id=member_id,
     )
+    turn_id = admitted.turn_id
+    assert admitted.opened_run
     assert dbos.enqueued == [str(turn_id)]
     async with workspace_tx() as connection:
         turn = (
@@ -384,7 +386,8 @@ async def test_admit_queues_a_turn_and_registers_a_writeback(db: None, tmp_path)
         idempotency_key="C1:1.0",
         speaker_member_id=member_id,
     )
-    assert again == turn_id
+    assert again.turn_id == turn_id
+    assert not again.opened_run
 
 
 async def test_admit_refuses_a_speaker_from_another_workspace(db: None, tmp_path) -> None:
@@ -448,13 +451,13 @@ async def test_conversation_for_claims_a_memberless_conversation(db: None, tmp_p
     assert await _owner() is None
     assert await context.conversation_for("D9", conversation_audience(member_id)) == conversation_id
     assert await _owner() == member_id
-    turn_id = await context.admit(
+    admitted = await context.admit(
         conversation_id,
         "private",
         idempotency_key="D9:1",
         speaker_member_id=member_id,
     )
-    _, _, audience = await _load_turn(turn_id)
+    _, _, audience = await _load_turn(admitted.turn_id)
     assert audience == conversation_audience(member_id)
     other_id = uuid4()
     async with workspace_tx() as connection:
@@ -507,14 +510,14 @@ async def test_admitted_context_round_trips_to_the_loaded_turn(db: None, tmp_pat
     context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
     conversation_id = await context.conversation_for("C1:1.0", SHARED_AUDIENCE)
     ambient = TurnContext(sender="Bee Jones (bee@example.com)", timezone="America/New_York")
-    turn_id = await context.admit(
+    admitted = await context.admit(
         conversation_id,
         "hello",
         idempotency_key="C1:2.0",
         context=ambient,
         speaker_member_id=member_id,
     )
-    turn, _, audience = await _load_turn(turn_id)
+    turn, _, audience = await _load_turn(admitted.turn_id)
     assert turn.context == ambient
     assert turn.speaker_member_id == member_id
     assert audience == SHARED_AUDIENCE

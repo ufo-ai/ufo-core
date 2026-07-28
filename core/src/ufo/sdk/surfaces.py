@@ -18,6 +18,9 @@ from ufo.ext.surface import (
     OPERATOR_EMAIL_DOMAIN as OPERATOR_EMAIL_DOMAIN,
 )
 from ufo.ext.surface import (
+    Admitted as Admitted,
+)
+from ufo.ext.surface import (
     ConversationSummary as ConversationSummary,
 )
 from ufo.ext.surface import (

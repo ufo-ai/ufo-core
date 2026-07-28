@@ -111,8 +111,8 @@ async def test_each_installation_routes_conversations_to_its_own_agent(db: None)
         company_turn = await company.admit(company_conversation, "hi", speaker_member_id=None)
         private_turn = await private.admit(private_conversation, "hi", speaker_member_id=None)
 
-    assert await _turn_agent(company_turn) == first_agent
-    assert await _turn_agent(private_turn) == second_agent
+    assert await _turn_agent(company_turn.turn_id) == first_agent
+    assert await _turn_agent(private_turn.turn_id) == second_agent
 
 
 async def test_rebinding_an_installation_keeps_its_agent(db: None) -> None:
@@ -123,8 +123,8 @@ async def test_rebinding_an_installation_keeps_its_agent(db: None) -> None:
         await _rebind_agent(workspace_id, "slack", second_agent)
         await context.bind_installation("team:T1-reinstalled")
         conversation_id = await context.conversation_for("C1:1.0", conversation_audience(None))
-        turn_id = await context.admit(conversation_id, "hi", speaker_member_id=None)
-    assert await _turn_agent(turn_id) == second_agent
+        admitted = await context.admit(conversation_id, "hi", speaker_member_id=None)
+    assert await _turn_agent(admitted.turn_id) == second_agent
 
 
 async def test_unbound_surface_lands_on_the_explicit_main_agent(db: None) -> None:
@@ -132,8 +132,8 @@ async def test_unbound_surface_lands_on_the_explicit_main_agent(db: None) -> Non
     with ws(workspace_id):
         context = _context(workspace_id, "cli")
         conversation_id = await context.conversation_for("session", conversation_audience(None))
-        turn_id = await context.admit(conversation_id, "hi", speaker_member_id=None)
-    assert await _turn_agent(turn_id) == main_agent
+        admitted = await context.admit(conversation_id, "hi", speaker_member_id=None)
+    assert await _turn_agent(admitted.turn_id) == main_agent
 
 
 async def test_invoke_refuses_a_conversation_bound_to_another_agent(db: None) -> None:

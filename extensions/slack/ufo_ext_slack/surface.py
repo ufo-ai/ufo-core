@@ -24,9 +24,12 @@ A one-line status is enough while a turn takes seconds; a turn taking minutes le
 unable to tell progress from a stall, so a second per-turn task tails the same frames and posts
 interim progress into the turn's own destination each time the wait doubles — two and a half minutes
 in, then five, ten, twenty, forty — until it settles at one post every thirty. Unlike the status
-these are messages, so exactly one delivery may start one: Slack sends both `app_mention` and
-`message` for a channel mention and every replica runs its own tasks, so the reporter starts on the
-delivery without a twin and never on a retry, leaving one reporter per turn across the fleet. These
+these are messages, so a second reporter doubles the member's updates for the turn's whole life
+rather than costing a redundant overwrite: the reporter starts only on the delivery admission says
+opened the turn's run, which is one delivery per run across the fleet however many of them Slack
+sends — the `message` twin of a channel mention, a retry of a delivery that already admitted, a
+follow-up folded into the running turn, and a losing click on a question all join a run already
+being reported. These
 are side-channel writes: the turn is never told, so a post neither ends it nor stalls it, and its
 terminal reply still lands through the poller exactly as it does for a turn that never ran long
 enough to post one. Each post carries what the tail saw — the latest completed narration, the step
@@ -645,7 +648,6 @@ SLACK_REPLAY_SECONDS = 300
 MAX_SLACK_EVENT_BYTES = 1024 * 1024
 SLACK_RAW_BODY_STATE_KEY = "slack_raw_body"
 MESSAGE_EVENT_TYPES = ("app_mention", "message")
-SLACK_RETRY_HEADER = "x-slack-retry-num"
 MEMBER_MESSAGE_SUBTYPES = (None, "file_share", "thread_broadcast")
 
 AMBIENT_FETCH_LIMIT = 100
@@ -735,13 +737,6 @@ class Inbound:
     body: str
     files: tuple[InboundFile, ...]
     conversation_id: UUID | None
-    has_mention_twin: bool
-    """Whether an `app_mention` delivery of this same message also reaches ingest. Slack sends both
-    event types for a mention in a channel the bot belongs to, and both admit the one turn through
-    the idempotency key — the overlap admission exists to absorb. Anything spawned *per delivery*
-    rather than per turn must therefore pick one of the pair, and the twin is identifiable from the
-    payload alone: only a channel `message` carrying the mention has one, because a bot outside the
-    channel receives no `message` events and a DM has no mention to fire `app_mention`."""
 
 
 def verify_slack_signature(
@@ -1176,16 +1171,16 @@ async def ingest(ctx: SurfaceContext, request: Request) -> Response:
     if inbound.files:
         downloaded = await _download_files(ctx, conversation_id, bot_token, inbound.files)
         body = f"{body}{_files_note(downloaded)}"
-    turn_id = await ctx.admit(
+    admitted = await ctx.admit(
         conversation_id,
         body,
         idempotency_key=inbound.message_id,
         context=_turn_context(sender),
         speaker_member_id=member_id,
     )
-    _track_status(ctx, turn_id, inbound.queue_key, inbound.ts)
-    if not inbound.has_mention_twin and SLACK_RETRY_HEADER not in request.headers:
-        _track_progress(ctx, turn_id, inbound.queue_key)
+    _track_status(ctx, admitted.turn_id, inbound.queue_key, inbound.ts)
+    if admitted.opened_run:
+        _track_progress(ctx, admitted.turn_id, inbound.queue_key)
     return JSONResponse({"ok": True})
 
 
@@ -1270,7 +1265,6 @@ async def _to_inbound(
         body=str(event.get("text") or ""),
         files=_inbound_files(event),
         conversation_id=conversation_id,
-        has_mention_twin=event.get("type") == "message" and not is_dm and addressed,
     )
 
 
@@ -1910,20 +1904,12 @@ _PROGRESS_TASKS: dict[UUID, asyncio.Task[None]] = {}
 
 
 def _track_progress(ctx: SurfaceContext, turn_id: UUID, queue_key: str) -> None:
-    """Spawn one ThreadProgress task per admitted turn. A progress post is a message, not the
-    status's idempotent overwrite state, so a second reporter doubles the member's updates for the
-    turn's whole life rather than costing a redundant write — and the fleet runs more than one
-    replica, so this dict cannot be the only guard. Each entry point calls this for exactly one
-    request per turn — ingest for the delivery with no mention twin, interactivity for the click
-    whose body won the answer key — and neither on a Slack retry, which belongs to the request it
-    retries. So one turn has one reporter across the fleet; the dict holds that line in-process.
-
-    One reporter is guaranteed against every request a replica can tell apart. Two concurrent taps
-    of one button by one member are not tellable apart — same body, same answer key, neither a
-    retry — and a second replica taking the twin doubles that turn's interim updates. The trade is
-    deliberate: the window is open only until the click's `chat.update` replaces the buttons, both
-    reporters read the same frames and neither touches the turn or its reply, so the cost is a
-    repeated update, paid against a durable per-turn claim this surface would otherwise need."""
+    """Spawn one ThreadProgress task per run of a turn. Callers gate on `Admitted.opened_run`, which
+    admission decides under the conversation-row lock, so exactly one delivery reaches here per run
+    however many Slack sends and whichever replicas take them — the guard is the durable admission
+    itself, never this dict, which knows only this process. The dict holds the task's strong
+    reference and keeps one live reporter per turn id, so the second run of a twice-parked turn
+    starts its reporter once its predecessor has ended on the park."""
     if turn_id in _PROGRESS_TASKS:
         return
     progress = ThreadProgress(
@@ -1992,10 +1978,11 @@ async def interactive(ctx: SurfaceContext, request: Request) -> Response:
     message, so a double click or a second member's click joins the turn the first click won — and
     rewrite the buttons into the winning answer with who answered. Only the click whose exact body
     the answer key stored (`admitted_body` — the turn it opened or the queue row it landed as)
-    rewrites, so a losing click never displays an answer the agent won't see. That same winning
-    click starts the turn's progress reporter, and only when this request is not a retry: all clicks
-    on one question row share its answer key, so a second member's click and a retry of the winner
-    both reach the one turn, and a reporter is a stream of messages a second replica would double.
+    rewrites, so a losing click never displays an answer the agent won't see. The progress reporter
+    starts on a different line, the one admission draws: all clicks on a question row share its
+    answer key, so the click that resumed the parked turn opened its run and every other — a second
+    member's, a double tap, a retry of the winner — joins the run it opened, and only the opener
+    starts the stream of messages a second reporter would double.
     The rewrite rides its own task so the ack beats Slack's three-second budget — Block Kit allows
     no message in the direct response, only the ack."""
     try:
@@ -2046,16 +2033,16 @@ async def interactive(ctx: SurfaceContext, request: Request) -> Response:
                 )
             body = f"[Answered by <@{click.slack_user_id}> via button] {click.label}"
             answer_key = f"{click.queue_key}:{click.message_ts}:answer:{click.question_index}"
-            turn_id = await ctx.admit(
+            admitted = await ctx.admit(
                 conversation_id,
                 body,
                 idempotency_key=answer_key,
                 speaker_member_id=member_id,
             )
-            _track_status(ctx, turn_id, click.queue_key, click.message_ts)
+            _track_status(ctx, admitted.turn_id, click.queue_key, click.message_ts)
+            if admitted.opened_run:
+                _track_progress(ctx, admitted.turn_id, click.queue_key)
             if await ctx.admitted_body(answer_key) == body:
-                if SLACK_RETRY_HEADER not in request.headers:
-                    _track_progress(ctx, turn_id, click.queue_key)
                 _rewrite_in_background(bot_token, click)
     return JSONResponse({"ok": True})
 

@@ -236,7 +236,7 @@ async def channel(ctx: SurfaceContext, request: Request) -> Response:
     else:
         if len(body.encode()) > MAX_MESSAGE_BYTES:
             return PlainTextResponse("message too large", status_code=413)
-        turn_id = await ctx.admit(conversation_id, body, speaker_member_id=member_id)
+        turn_id = (await ctx.admit(conversation_id, body, speaker_member_id=member_id)).turn_id
     connect = None if member_id is None else partial(ctx.connect_url, turn_id, member_id)
     return StreamingResponse(
         stream_directives(

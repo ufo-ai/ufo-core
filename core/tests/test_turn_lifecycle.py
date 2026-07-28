@@ -417,7 +417,7 @@ class Turns:
     admission: Admission
 
     async def admit(self, seed: Seed, body: str, idempotency_key: str | None = None) -> str:
-        turn_id = await MemberAdmission(
+        admitted = await MemberAdmission(
             admission=self.admission, workspace_id=seed.workspace_id
         ).admit(
             seed.conversation_id,
@@ -425,7 +425,7 @@ class Turns:
             idempotency_key=idempotency_key,
             speaker_member_id=seed.member_id,
         )
-        return str(turn_id)
+        return str(admitted.turn_id)
 
     async def consume(self, seed: Seed, turn_id: str) -> tuple[str, dict[str, object]]:
         deltas: list[str] = []

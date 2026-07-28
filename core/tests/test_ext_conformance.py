@@ -1209,7 +1209,9 @@ async def test_sample_surface_admits_links_streams_and_delivers(
     """The surface seam end to end through the probe: an inbound event admits a turn, links a
     surface identity, and streams an inbound file into the workspace; then the writeback poller
     delivers the terminal turn and streams a shared file back out — every step read through the
-    durable rows and blobs core wrote, never a mock."""
+    durable rows and blobs core wrote, never a mock. A redelivery of the same event proves the
+    other half of what admission hands back: the same turn, and `opened_run` false, so a surface
+    can start per-run work on the one delivery that opened the run."""
     monkeypatch.setenv("UFO_TOKEN_SECRET", TOKEN_SECRET)
     workspace_id, member_id, email = await _surface_workspace()
     manifest = _sample_manifest()
@@ -1237,13 +1239,18 @@ async def test_sample_surface_admits_links_streams_and_delivers(
         response = await client.post(
             f"/surface/{sample.SURFACE_NAME}", content=body, headers=_bearer(workspace_id)
         )
+        redelivered = await client.post(
+            f"/surface/{sample.SURFACE_NAME}", content=body, headers=_bearer(workspace_id)
+        )
     assert no_bearer.status_code == 401
     assert forged.status_code == 401
     assert response.status_code == 200
     turn_id = UUID(response.json()["turn_id"])
     conversation_id = UUID(response.json()["conversation_id"])
+    assert response.json()["opened_run"] is True
+    assert redelivered.json() == {**response.json(), "opened_run": False}
 
-    assert dbos.enqueued == [str(turn_id)]
+    assert dbos.enqueued == [str(turn_id), str(turn_id)]
     async with workspace_tx() as connection:
         turn = (
             await connection.execute(

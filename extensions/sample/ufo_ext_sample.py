@@ -774,7 +774,9 @@ async def _one_chunk(data: bytes) -> AsyncIterator[bytes]:
 async def _surface_ingest(ctx: SurfaceContext, request: Request) -> Response:
     """Exercise the whole surface seam: resolve (and link) a member identity, get-or-create the
     conversation, optionally stream an inbound file into the workspace, then admit a turn — all
-    read back by the conformance test through the durable rows core writes here."""
+    read back by the conformance test through the durable rows core writes here. The admission's
+    `opened_run` rides the response so the test can drive a redelivery of one external id and see
+    the seam report the second one as joining the run the first opened."""
     args = SurfaceIngestInput.model_validate_json(await request.body())
     member_id = await ctx.linked_member(args.external_id)
     if member_id is None and args.email is not None:
@@ -784,13 +786,19 @@ async def _surface_ingest(ctx: SurfaceContext, request: Request) -> Response:
         await ctx.write_workspace_file(
             conversation_id, SURFACE_INBOX_REL, _one_chunk(args.inbound_text.encode())
         )
-    turn_id = await ctx.admit(
+    admitted = await ctx.admit(
         conversation_id,
         args.message,
         idempotency_key=args.external_id,
         speaker_member_id=member_id,
     )
-    return JSONResponse({"turn_id": str(turn_id), "conversation_id": str(conversation_id)})
+    return JSONResponse(
+        {
+            "turn_id": str(admitted.turn_id),
+            "conversation_id": str(conversation_id),
+            "opened_run": admitted.opened_run,
+        }
+    )
 
 
 async def _surface_post(ctx: SurfaceContext, writeback: Writeback) -> str:
@@ -817,7 +825,7 @@ async def _surface_live_admit(ctx: SurfaceContext, request: Request) -> Response
     if member_id is None:
         member_id = await ctx.adopt_identity(SURFACE_PEER, args.external_id)
     conversation_id = await ctx.conversation_for(args.external_id, conversation_audience(member_id))
-    turn_id = await ctx.admit(conversation_id, args.message, speaker_member_id=member_id)
+    turn_id = (await ctx.admit(conversation_id, args.message, speaker_member_id=member_id)).turn_id
     owner = await ctx.turn_owner(turn_id)
     report = await ctx.spend_rollup(SURFACE_SPEND_WINDOW_SECONDS)
     return JSONResponse(

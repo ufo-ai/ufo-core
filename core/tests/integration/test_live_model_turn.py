@@ -162,9 +162,10 @@ async def _bootstrap() -> Seed:
 
 async def _admit(seed: Seed, body: str) -> UUID:
     admission = Admission(dbos=loop_queue._runtime.dbos, durable_surfaces=frozenset())
-    return await MemberAdmission(admission=admission, workspace_id=seed.workspace_id).admit(
+    admitted = await MemberAdmission(admission=admission, workspace_id=seed.workspace_id).admit(
         seed.conversation_id, body, speaker_member_id=seed.member_id
     )
+    return admitted.turn_id
 
 
 async def _consume(hub: Hub, seed: Seed, turn_id: UUID) -> tuple[str, dict[str, object]]:

@@ -81,8 +81,8 @@ async def chat(ctx: SurfaceContext, request: Request) -> Response:
     if len(inbound) > MAX_INBOUND_CHARS:
         return Response(f"message exceeds {MAX_INBOUND_CHARS} characters", status_code=413)
     conversation_id = await ctx.conversation_for(email, conversation_audience(member_id))
-    turn_id = await ctx.admit(conversation_id, inbound, speaker_member_id=member_id)
-    return JSONResponse({"turn_id": str(turn_id)})
+    admitted = await ctx.admit(conversation_id, inbound, speaker_member_id=member_id)
+    return JSONResponse({"turn_id": str(admitted.turn_id)})
 
 
 async def stream(ctx: SurfaceContext, request: Request) -> Response:

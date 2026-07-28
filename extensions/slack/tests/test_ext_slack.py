@@ -3566,9 +3566,9 @@ async def test_one_message_starts_one_reporter_across_its_deliveries(
     """One turn gets one reporter however many times Slack delivers its message — and the guard may
     not lean on `_PROGRESS_TASKS`, which knows only this process while the fleet runs two replicas.
     Clearing that dict between deliveries reproduces a second replica's view: with no local
-    knowledge, only the payload rule can drop the `message` twin of a channel mention, and only the
-    header rule can leave a retry to the delivery it retries. The dict is handed back afterwards,
-    and still catches a duplicate of one delivery inside a process."""
+    knowledge, the line still holds, because the delivery that founded the turn is the only one
+    admission reports as opening its run. The `message` twin of a channel mention carries the same
+    `channel:ts` key, and so does a redelivery, so both dedupe to that turn and neither reports."""
     workspace_id, _ = await _seed()
     _, client, _ = await _mount(monkeypatch, workspace_id, tmp_path, [])
     mention = "<@UBOT00000> migrate"
@@ -3583,22 +3583,14 @@ async def test_one_message_starts_one_reporter_across_its_deliveries(
         assert len(reporter) == 1
 
         slack._PROGRESS_TASKS.clear()
-        for body, headers in (
-            (twin, _sign(twin, int(time.time()))),
-            (
-                app_mention,
-                {**_sign(app_mention, int(time.time())), slack.SLACK_RETRY_HEADER: "1"},
-            ),
-        ):
-            response = await client.post(EVENTS_PATH, content=body, headers=headers)
+        for body in (twin, app_mention):
+            response = await client.post(
+                EVENTS_PATH, content=body, headers=_sign(body, int(time.time()))
+            )
             assert response.status_code == 200
             assert not slack._PROGRESS_TASKS
 
         slack._PROGRESS_TASKS.update(reporter)
-        again = await client.post(
-            EVENTS_PATH, content=app_mention, headers=_sign(app_mention, int(time.time()))
-        )
-        assert again.status_code == 200
 
     async with workspace_tx() as connection:
         turn_id = (
@@ -3610,14 +3602,14 @@ async def test_one_message_starts_one_reporter_across_its_deliveries(
     assert dict(slack._PROGRESS_TASKS) == reporter
 
 
-async def test_an_unmentioned_thread_reply_has_no_twin_to_drop(
+async def test_an_unmentioned_reply_after_the_answer_opens_its_own_run(
     db: None, tmp_path, monkeypatch
 ) -> None:
-    """The other half of the twin rule, and the larger one: once a thread is the agent's
-    conversation every reply in it is admitted un-mentioned, arrives only as `message`, and so has
-    no `app_mention` twin. Getting the rule's `addressed` term wrong would silence progress for
-    every follow-up in every thread — the bulk of a real conversation — so the false branch is
-    driven here."""
+    """The larger half of the rule: once a thread is the agent's conversation every reply in it is
+    admitted un-mentioned, and a reply arriving after the previous turn answered founds a turn of
+    its own. Silencing those would silence progress for every follow-up in every thread — the bulk
+    of a real conversation — so the reply that opens a run is driven here against the one that
+    joins a live turn."""
     workspace_id, _ = await _seed()
     blob = FilesystemBlobStore(root=tmp_path)
     await _seed_done_turn(workspace_id, "C1:100.5", "first", blob, artifact=False)
@@ -3640,9 +3632,84 @@ async def test_an_unmentioned_thread_reply_has_no_twin_to_drop(
     assert list(slack._PROGRESS_TASKS) == [admitted]
 
 
-async def test_a_dm_has_no_mention_twin_to_drop(db: None, tmp_path, monkeypatch) -> None:
-    """The twin rule keys on a channel mention, so a DM — which fires no `app_mention` and so has no
-    twin — still starts its reporter on the only delivery it gets."""
+async def test_a_reply_to_a_still_running_turn_does_not_double_its_progress(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """Typing a clarifying line while the agent works is ordinary, and every such reply folds into
+    the running turn rather than founding one — so it must not bring a reporter with it, or the
+    member gets every remaining update twice on two independent clocks for the rest of a long turn.
+    `_PROGRESS_TASKS` is cleared before the reply to reproduce the replica that took it without
+    having seen the mention: nothing local is left to catch the duplicate, and admission reporting
+    the fold is the whole guard. Each tool call is then tallied by exactly one post — the tally
+    resets at every checkpoint, so a second reporter counting the same frames on its own clock
+    would report each call a second time."""
+    workspace_id, _ = await _seed()
+    monkeypatch.setattr(slack, "PROGRESS_BASE_SECONDS", 0.05)
+    monkeypatch.setattr(slack, "PROGRESS_CAP_SECONDS", 0.1)
+    recorder: list[httpx.Request] = []
+    hub = InProcessHub()
+    _, client, _ = await _mount(monkeypatch, workspace_id, tmp_path, recorder, hub=hub)
+    mention = _event_body(
+        type="app_mention", user="U1", channel="C1", ts="100.5", text="<@UBOT00000> migrate"
+    )
+    reply = _event_body(
+        type="message", user="U1", channel="C1", ts="101.0", thread_ts="100.5", text="postgres only"
+    )
+    async with client:
+        opened = await client.post(
+            EVENTS_PATH, content=mention, headers=_sign(mention, int(time.time()))
+        )
+        assert opened.status_code == 200
+        reporter = dict(slack._PROGRESS_TASKS)
+        assert len(reporter) == 1
+
+        slack._PROGRESS_TASKS.clear()
+        joined = await client.post(
+            EVENTS_PATH, content=reply, headers=_sign(reply, int(time.time()))
+        )
+        assert joined.status_code == 200
+        assert not slack._PROGRESS_TASKS
+        slack._PROGRESS_TASKS.update(reporter)
+
+    turn_id = next(iter(reporter))
+    async with workspace_tx() as connection:
+        turns = (
+            await connection.execute(
+                sa.select(sa.func.count())
+                .select_from(tables.turn)
+                .where(tables.turn.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+        folded = (
+            await connection.execute(
+                sa.select(tables.inbound_message.c.admitted_turn_id).where(
+                    tables.inbound_message.c.idempotency_key == "C1:101.0"
+                )
+            )
+        ).scalar_one()
+    assert turns == 1
+    assert folded == turn_id
+
+    deadline = time.monotonic() + 10
+    for step in ("bash", "grep"):
+        await hub.publish(turn_id, ToolCall(tool=step, preview="{}", description=f"{step} step"))
+        while not [p for p in _progress_posts(recorder) if f"{step} x1" in str(p["text"])]:
+            assert time.monotonic() < deadline, f"the {step} tally never posted"
+            await asyncio.sleep(0.01)
+    while len(_progress_posts(recorder)) < 4:
+        assert time.monotonic() < deadline, "the reporter stopped before two further checkpoints"
+        await asyncio.sleep(0.01)
+    posted = [str(post["text"]) for post in _progress_posts(recorder)]
+    assert [text for text in posted if "bash x1" in text] == [posted[0]]
+    assert len([text for text in posted if "grep x1" in text]) == 1
+
+    await _finish_turn(turn_id, "migrated")
+    await asyncio.wait_for(reporter[turn_id], timeout=10)
+
+
+async def test_a_dm_opens_its_run_on_its_only_delivery(db: None, tmp_path, monkeypatch) -> None:
+    """A DM fires no `app_mention`, so its one `message` delivery is the one that founds the turn
+    and it starts the reporter — the shape with nothing to dedupe against."""
     workspace_id, member_id = await _seed(member_email="bee@example.com")
     assert member_id is not None
     _, client, _ = await _mount(
@@ -3984,12 +4051,14 @@ async def test_a_revoked_bot_token_abandons_the_progress_task(
     assert turn == "queued"
 
 
-async def test_only_the_winning_click_starts_one_reporter(db: None, tmp_path, monkeypatch) -> None:
+async def test_only_the_click_that_opened_the_run_starts_one_reporter(
+    db: None, tmp_path, monkeypatch
+) -> None:
     """Interactivity is the second entry point, and its duplicates need no retry to appear: every
-    click on one question row shares an answer key, so a second member's click joins the turn the
-    first won. Only the winner starts the reporter, and not when its own request is retried. The
-    process-local dict is cleared between requests to reproduce a second replica's view, so only the
-    winner check and the header check can hold the line."""
+    click on one question row shares an answer key, so a second member's click and a redelivery of
+    the first both dedupe to the turn that click opened. The process-local dict is cleared between
+    requests to reproduce a second replica's view, leaving admission's own line — which of the
+    three opened the run — as the only thing holding it."""
     workspace_id, _ = await _seed()
     await _seed_answer_conversation(workspace_id)
     _, client, _ = await _mount(monkeypatch, workspace_id, tmp_path, [])
@@ -4003,17 +4072,12 @@ async def test_only_the_winning_click_starts_one_reporter(db: None, tmp_path, mo
         assert len(reporter) == 1
 
         slack._PROGRESS_TASKS.clear()
-        second = await client.post(INTERACTIVE_PATH, content=loser, headers=_signed_form(loser))
-        assert second.status_code == 200
-        assert not slack._PROGRESS_TASKS
-
-        retried = await client.post(
-            INTERACTIVE_PATH,
-            content=winner,
-            headers={**_signed_form(winner), slack.SLACK_RETRY_HEADER: "1"},
-        )
-        assert retried.status_code == 200
-        assert not slack._PROGRESS_TASKS
+        for body in (loser, winner):
+            duplicate = await client.post(
+                INTERACTIVE_PATH, content=body, headers=_signed_form(body)
+            )
+            assert duplicate.status_code == 200
+            assert not slack._PROGRESS_TASKS
         slack._PROGRESS_TASKS.update(reporter)
 
     async with workspace_tx() as connection:

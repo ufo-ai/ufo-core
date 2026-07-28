@@ -14,6 +14,8 @@ own, whoever spoke it. The engine drains that queue into the live
 turn at each round boundary as separate <context>-tagged messages, and the terminal commit
 refuses to close over a non-empty queue, so one reply answers everything that arrived. Each
 queue row carries its own idempotency key, so a redelivery joins the turn that consumed it.
+Member admission returns which of the two it did, so a surface's per-turn side channel starts once
+per run rather than once per delivery.
 
 Delivery is derived here too: a turn entering a conversation whose surface is durable registers a
 writeback row atomically with its turn row, so the poller delivers the reply no matter who admitted
@@ -44,6 +46,7 @@ from dbos import DBOSClient, EnqueueOptions
 
 from ufo.accounting import ALLOW, SpendEvaluator
 from ufo.db import workspace_tx
+from ufo.ext.surface import Admitted
 from ufo.o11y import log
 from ufo.scheduling import ONE_TIME_SCHEDULE, ScheduledTask
 from ufo.schema import tables
@@ -92,7 +95,7 @@ class Admission:
         speaker_member_id: UUID | None,
         idempotency_key: str | None = None,
         context: TurnContext | None = None,
-    ) -> UUID:
+    ) -> Admitted:
         return await self._admit(
             workspace_id,
             conversation_id,
@@ -114,7 +117,7 @@ class Admission:
         idempotency_key: str | None = None,
         context: TurnContext | None = None,
     ) -> UUID:
-        return await self._admit(
+        admitted = await self._admit(
             workspace_id,
             conversation_id,
             agent_id,
@@ -125,6 +128,7 @@ class Admission:
             None,
             None,
         )
+        return admitted.turn_id
 
     async def invoke_scheduled(
         self,
@@ -156,7 +160,7 @@ class Admission:
                     "</scheduled_task_instruction>"
                 )
         try:
-            return await self._admit(
+            admitted = await self._admit(
                 workspace_id,
                 task.conversation_id,
                 task.agent_id,
@@ -170,6 +174,7 @@ class Admission:
             )
         except _ScheduledInvocationSuperseded:
             return None
+        return admitted.turn_id
 
     async def _admit(
         self,
@@ -183,8 +188,9 @@ class Admission:
         pending_pause: _PendingPause | None,
         scheduled_task: ScheduledTask | None,
         on_behalf_of_member_id: UUID | None = None,
-    ) -> UUID:
+    ) -> Admitted:
         dispatch_now = False
+        opened_run = False
         folded_parked_turn: UUID | None = None
         redispatch_workflow_id: str | None = None
         admitted_at = None
@@ -299,7 +305,7 @@ class Admission:
                         if queued_message.conversation_id != conversation_id:
                             raise RuntimeError("idempotency key reused for a different turn")
                         if queued_message.consumed_turn_id is not None:
-                            return queued_message.consumed_turn_id
+                            return Admitted(queued_message.consumed_turn_id, opened_run=False)
                         target_live = (
                             await connection.execute(
                                 sa.select(tables.turn.c.status.in_(NON_TERMINAL_STATUSES)).where(
@@ -308,7 +314,7 @@ class Admission:
                             )
                         ).scalar_one()
                         if target_live:
-                            return queued_message.admitted_turn_id
+                            return Admitted(queued_message.admitted_turn_id, opened_run=False)
                         await connection.execute(
                             sa.delete(tables.inbound_message).where(
                                 tables.inbound_message.c.id == queued_message.id
@@ -387,6 +393,7 @@ class Admission:
                             )
                         )
                         if taken_over.rowcount == 1:
+                            opened_run = True
                             await connection.execute(
                                 sa.update(tables.scheduled_task)
                                 .values(
@@ -520,7 +527,7 @@ class Admission:
                             )
                         )
                     if live_turn.status != PARKED:
-                        return live_turn.id
+                        return Admitted(live_turn.id, opened_run=False)
                     await connection.execute(
                         sa.update(tables.turn)
                         .values(
@@ -557,7 +564,7 @@ class Admission:
                                 tables.scheduled_task.c.resume_turn_id == turn_id,
                             )
                         )
-                    return turn_id
+                    return Admitted(turn_id, opened_run=False)
                 status = QUEUED
             if deduped is None and folded_parked_turn is None:
                 seq = (
@@ -569,6 +576,7 @@ class Admission:
                 ).scalar_one()
                 turn_id = turn_id_for(workspace_id, conversation_id, seq)
                 turn_seq = seq
+                opened_run = True
                 admission_source = (
                     MEMBER_ADMISSION
                     if pending_pause is not None
@@ -705,14 +713,14 @@ class Admission:
             await self._enqueue(
                 workspace_id, conversation_id, folded_parked_turn, workflow_id=uuid4().hex
             )
-            return folded_parked_turn
+            return Admitted(folded_parked_turn, opened_run=True)
         if status != QUEUED:
-            return turn_id
+            return Admitted(turn_id, opened_run=False)
         if dispatch_now:
             await self._enqueue(
                 workspace_id, conversation_id, turn_id, workflow_id=redispatch_workflow_id
             )
-        return turn_id
+        return Admitted(turn_id, opened_run=opened_run)
 
     async def _enqueue(
         self,
@@ -804,7 +812,7 @@ class MemberAdmission:
         context: TurnContext | None = None,
         *,
         speaker_member_id: UUID | None,
-    ) -> UUID:
+    ) -> Admitted:
         return await self.admission.admit_member(
             self.workspace_id,
             conversation_id,

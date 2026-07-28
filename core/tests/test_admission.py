@@ -5,6 +5,7 @@ from uuid import UUID, uuid4
 import sqlalchemy as sa
 
 from ufo.db import workspace_tx
+from ufo.ext.surface import Admitted
 from ufo.loop.engine import _claim_turn
 from ufo.scheduling import ONE_TIME_SCHEDULE, ScheduledTask
 from ufo.schema import tables
@@ -164,13 +165,14 @@ async def test_message_while_a_turn_is_queued_joins_its_inbound_queue(db: None) 
         "C:2",
         TurnContext(sender="Pat Doe", timezone="UTC"),
     )
-    assert second == first
+    assert first.opened_run
+    assert second == Admitted(first.turn_id, opened_run=False)
     assert await _turn_count(conversation_id) == 1
     assert await _queued_bodies(conversation_id) == ["second message"]
     async with workspace_tx() as connection:
         inbound = (
             await connection.execute(
-                sa.select(tables.turn.c.inbound).where(tables.turn.c.id == first)
+                sa.select(tables.turn.c.inbound).where(tables.turn.c.id == first.turn_id)
             )
         ).scalar_one()
         queued = (
@@ -189,17 +191,17 @@ async def test_message_while_a_turn_is_queued_joins_its_inbound_queue(db: None) 
     assert queued.speaker_member_id == member_id
     assert queued.idempotency_key == "C:2"
     assert queued.admission_source == "member"
-    assert queued.admitted_turn_id == first
-    assert dbos.enqueued == [str(first)]
+    assert queued.admitted_turn_id == first.turn_id
+    assert dbos.enqueued == [str(first.turn_id)]
 
 
 async def test_message_while_a_turn_runs_joins_its_inbound_queue(db: None) -> None:
     workspace_id, member_id, _, conversation_id = await _seed()
     admission = Admission(dbos=StubDbos(), durable_surfaces=frozenset())
     first = await admission.admit_member(workspace_id, conversation_id, "one", member_id, "C:1")
-    assert await _claim_turn(first, str(first))
+    assert await _claim_turn(first.turn_id, str(first.turn_id))
     second = await admission.admit_member(workspace_id, conversation_id, "two", member_id, "C:2")
-    assert second == first
+    assert second == Admitted(first.turn_id, opened_run=False)
     assert await _turn_count(conversation_id) == 1
     assert await _queued_bodies(conversation_id) == ["two"]
 
@@ -212,8 +214,8 @@ async def test_message_redelivery_joins_the_queued_row(db: None) -> None:
     redelivered = await admission.admit_member(
         workspace_id, conversation_id, "two", member_id, "C:2"
     )
-    assert second == first
-    assert redelivered == first
+    assert second == Admitted(first.turn_id, opened_run=False)
+    assert redelivered == Admitted(first.turn_id, opened_run=False)
     assert await _turn_count(conversation_id) == 1
     assert await _queued_bodies(conversation_id) == ["two"]
 
@@ -224,7 +226,7 @@ async def test_every_admission_source_joins_the_live_turn(db: None) -> None:
     first = await admission.invoke(workspace_id, conversation_id, agent_id, "job prompt", "job:1")
     second = await admission.admit_member(workspace_id, conversation_id, "hello", member_id, "C:2")
     third = await admission.invoke(workspace_id, conversation_id, agent_id, "another job")
-    assert second == first
+    assert second == Admitted(first, opened_run=False)
     assert third == first
     assert await _turn_count(conversation_id) == 1
     assert await _queued_bodies(conversation_id) == ["hello", "another job"]
@@ -252,7 +254,7 @@ async def test_a_reject_cap_stops_arrivals_at_the_boundary(db: None) -> None:
             sa.insert(tables.ledger).values(
                 id=uuid4(),
                 workspace_id=workspace_id,
-                turn_id=first,
+                turn_id=first.turn_id,
                 dimension="tokens",
                 amount=10,
                 priced_micro_usd=100,
@@ -262,12 +264,13 @@ async def test_a_reject_cap_stops_arrivals_at_the_boundary(db: None) -> None:
             )
         )
     second = await admission.admit_member(workspace_id, conversation_id, "two", member_id, "C:2")
-    assert second != first
+    assert second.turn_id != first.turn_id
+    assert not second.opened_run
     assert await _queued_bodies(conversation_id) == []
     async with workspace_tx() as connection:
         status = (
             await connection.execute(
-                sa.select(tables.turn.c.status).where(tables.turn.c.id == second)
+                sa.select(tables.turn.c.status).where(tables.turn.c.id == second.turn_id)
             )
         ).scalar_one()
     assert status == "cancelled"
@@ -277,9 +280,10 @@ async def test_message_after_a_terminal_turn_starts_a_new_turn(db: None) -> None
     workspace_id, member_id, _, conversation_id = await _seed()
     admission = Admission(dbos=StubDbos(), durable_surfaces=frozenset())
     first = await admission.admit_member(workspace_id, conversation_id, "one", member_id, "C:1")
-    await _finish(first)
+    await _finish(first.turn_id)
     second = await admission.admit_member(workspace_id, conversation_id, "two", member_id, "C:2")
-    assert second != first
+    assert second.turn_id != first.turn_id
+    assert second.opened_run
     assert await _turn_count(conversation_id) == 2
     assert await _queued_bodies(conversation_id) == []
 
@@ -326,7 +330,7 @@ async def test_redelivery_refounds_a_row_whose_turn_died_undrained(db: None) -> 
     admission = Admission(dbos=dbos, durable_surfaces=frozenset())
     first = await admission.admit_member(workspace_id, conversation_id, "one", member_id, "C:1")
     second = await admission.admit_member(workspace_id, conversation_id, "two", member_id, "C:2")
-    assert second == first
+    assert second == Admitted(first.turn_id, opened_run=False)
     async with workspace_tx() as connection:
         await connection.execute(
             sa.update(tables.turn)
@@ -335,12 +339,13 @@ async def test_redelivery_refounds_a_row_whose_turn_died_undrained(db: None) -> 
                 terminal=TerminalFrame(status="failed", error_class="Boom").model_dump(mode="json"),
                 updated_at=sa.func.now(),
             )
-            .where(tables.turn.c.id == first)
+            .where(tables.turn.c.id == first.turn_id)
         )
     redelivered = await admission.admit_member(
         workspace_id, conversation_id, "two", member_id, "C:2"
     )
-    assert redelivered != first
+    assert redelivered.turn_id != first.turn_id
+    assert redelivered.opened_run
     async with workspace_tx() as connection:
         refounded = (
             await connection.execute(
@@ -348,7 +353,7 @@ async def test_redelivery_refounds_a_row_whose_turn_died_undrained(db: None) -> 
                     tables.turn.c.inbound,
                     tables.turn.c.status,
                     tables.turn.c.idempotency_key,
-                ).where(tables.turn.c.id == redelivered)
+                ).where(tables.turn.c.id == redelivered.turn_id)
             )
         ).one()
         rows = (
@@ -360,7 +365,7 @@ async def test_redelivery_refounds_a_row_whose_turn_died_undrained(db: None) -> 
         "C:2",
     )
     assert rows == 0
-    assert str(redelivered) in dbos.enqueued
+    assert str(redelivered.turn_id) in dbos.enqueued
 
 
 async def test_fold_onto_a_parked_turn_dispatches_its_resume(db: None) -> None:
@@ -374,21 +379,21 @@ async def test_fold_onto_a_parked_turn_dispatches_its_resume(db: None) -> None:
         await connection.execute(
             sa.update(tables.turn)
             .values(status="parked", updated_at=sa.func.now())
-            .where(tables.turn.c.id == first)
+            .where(tables.turn.c.id == first.turn_id)
         )
     second = await admission.admit_member(workspace_id, conversation_id, "two", member_id, "C:2")
-    assert second == first
+    assert second == Admitted(first.turn_id, opened_run=True)
     assert await _queued_bodies(conversation_id) == ["two"]
     async with workspace_tx() as connection:
         resumed_status = (
             await connection.execute(
-                sa.select(tables.turn.c.status).where(tables.turn.c.id == first)
+                sa.select(tables.turn.c.status).where(tables.turn.c.id == first.turn_id)
             )
         ).scalar_one()
     assert resumed_status == "queued"
-    assert dbos.enqueued == [str(first), str(first)]
-    assert dbos.workflow_ids[0] == str(first)
-    assert dbos.workflow_ids[1] != str(first)
+    assert dbos.enqueued == [str(first.turn_id), str(first.turn_id)]
+    assert dbos.workflow_ids[0] == str(first.turn_id)
+    assert dbos.workflow_ids[1] != str(first.turn_id)
 
 
 async def test_redelivery_of_a_fold_resumed_turn_retries_under_a_fresh_workflow_id(
@@ -410,15 +415,15 @@ async def test_redelivery_of_a_fold_resumed_turn_retries_under_a_fresh_workflow_
                 dispatch_enqueued_at=None,
                 updated_at=sa.func.now(),
             )
-            .where(tables.turn.c.id == first)
+            .where(tables.turn.c.id == first.turn_id)
         )
     redelivered = await admission.admit_member(
         workspace_id, conversation_id, "one", member_id, "C:1"
     )
-    assert redelivered == first
-    assert dbos.enqueued == [str(first), str(first)]
-    assert dbos.workflow_ids[0] == str(first)
-    assert dbos.workflow_ids[1] != str(first)
+    assert redelivered == Admitted(first.turn_id, opened_run=False)
+    assert dbos.enqueued == [str(first.turn_id), str(first.turn_id)]
+    assert dbos.workflow_ids[0] == str(first.turn_id)
+    assert dbos.workflow_ids[1] != str(first.turn_id)
 
 
 async def _set_limit(workspace_id: UUID, limit: int) -> None:
@@ -457,7 +462,7 @@ async def test_unseated_speaker_is_refused_with_the_seat_message(db: None) -> No
     await _set_limit(workspace_id, 1)
     dbos = StubDbos()
     admission = Admission(dbos=dbos, durable_surfaces=frozenset({"cli"}))
-    turn_id = await admission.admit_member(workspace_id, conversation_id, "hi", member_id)
+    turn_id = (await admission.admit_member(workspace_id, conversation_id, "hi", member_id)).turn_id
     assert dbos.enqueued == []
     status, text = await _turn_row(turn_id)
     assert status == "cancelled"
@@ -478,9 +483,11 @@ async def test_seated_speaker_enqueues_under_a_limit(db: None) -> None:
     await _set_limit(workspace_id, 1)
     await _seat(member_id)
     dbos = StubDbos()
-    turn_id = await Admission(dbos=dbos, durable_surfaces=frozenset()).admit_member(
+    admitted = await Admission(dbos=dbos, durable_surfaces=frozenset()).admit_member(
         workspace_id, conversation_id, "hi", member_id
     )
+    turn_id = admitted.turn_id
+    assert admitted.opened_run
     assert dbos.enqueued == [str(turn_id)]
     status, _ = await _turn_row(turn_id)
     assert status == "queued"
@@ -555,11 +562,11 @@ async def test_unseated_speakers_message_does_not_fold_into_a_live_turn(db: None
     first = await admission.admit_member(workspace_id, conversation_id, "first", member_id)
     await _set_limit(workspace_id, 1)
     second = await admission.admit_member(workspace_id, conversation_id, "second", member_id)
-    assert second != first
-    status, text = await _turn_row(second)
+    assert second.turn_id != first.turn_id
+    status, text = await _turn_row(second.turn_id)
     assert status == "cancelled"
     assert text == SEAT_REFUSAL_MESSAGE
-    first_status, _ = await _turn_row(first)
+    first_status, _ = await _turn_row(first.turn_id)
     assert first_status == "queued"
     assert await _queued_bodies(conversation_id) == []
 
@@ -587,7 +594,7 @@ async def test_seated_reply_does_not_resume_a_seat_blocked_parked_turn(db: None)
         await connection.execute(
             sa.update(tables.turn)
             .values(status="parked", updated_at=sa.func.now())
-            .where(tables.turn.c.id == first)
+            .where(tables.turn.c.id == first.turn_id)
         )
         await connection.execute(
             sa.update(tables.member)
@@ -595,10 +602,10 @@ async def test_seated_reply_does_not_resume_a_seat_blocked_parked_turn(db: None)
             .where(tables.member.c.id == member_id)
         )
     second = await admission.admit_member(workspace_id, conversation_id, "second", second_member)
-    assert second != first
-    first_status, _ = await _turn_row(first)
+    assert second.turn_id != first.turn_id
+    first_status, _ = await _turn_row(first.turn_id)
     assert first_status == "parked"
-    second_status, _ = await _turn_row(second)
+    second_status, _ = await _turn_row(second.turn_id)
     assert second_status == "queued"
     assert await _queued_bodies(conversation_id) == []
 
@@ -627,7 +634,7 @@ async def test_seated_reply_does_not_resume_an_aggregate_with_an_unseated_speake
         await connection.execute(
             sa.update(tables.turn)
             .values(status="parked", updated_at=sa.func.now())
-            .where(tables.turn.c.id == first)
+            .where(tables.turn.c.id == first.turn_id)
         )
         await connection.execute(
             sa.insert(tables.inbound_message).values(
@@ -638,16 +645,16 @@ async def test_seated_reply_does_not_resume_an_aggregate_with_an_unseated_speake
                 body="pending",
                 admission_source="member",
                 speaker_member_id=unseated,
-                admitted_turn_id=first,
+                admitted_turn_id=first.turn_id,
                 created_at=sa.func.now(),
             )
         )
 
     second = await admission.admit_member(workspace_id, conversation_id, "resume", member_id)
 
-    assert second != first
-    first_status, _ = await _turn_row(first)
-    second_status, _ = await _turn_row(second)
+    assert second.turn_id != first.turn_id
+    first_status, _ = await _turn_row(first.turn_id)
+    second_status, _ = await _turn_row(second.turn_id)
     assert first_status == "parked"
     assert second_status == "queued"
     assert await _queued_bodies(conversation_id) == ["pending"]
@@ -695,8 +702,8 @@ async def test_unseated_speakers_message_does_not_take_over_a_timer_turn(db: Non
     refused = await Admission(dbos=dbos, durable_surfaces=frozenset()).admit_member(
         workspace_id, conversation_id, "hey", member_id
     )
-    assert refused != timer_turn_id
-    status, text = await _turn_row(refused)
+    assert refused.turn_id != timer_turn_id
+    status, text = await _turn_row(refused.turn_id)
     assert status == "cancelled"
     assert text == SEAT_REFUSAL_MESSAGE
     async with workspace_tx() as connection:
@@ -718,9 +725,11 @@ async def test_speakerless_member_message_is_refused_under_a_seat_limit(db: None
     workspace_id, _member_id, _, conversation_id = await _seed()
     await _set_limit(workspace_id, 1)
     dbos = StubDbos()
-    turn_id = await Admission(dbos=dbos, durable_surfaces=frozenset()).admit_member(
-        workspace_id, conversation_id, "who am i", None
-    )
+    turn_id = (
+        await Admission(dbos=dbos, durable_surfaces=frozenset()).admit_member(
+            workspace_id, conversation_id, "who am i", None
+        )
+    ).turn_id
     assert dbos.enqueued == []
     status, text = await _turn_row(turn_id)
     assert status == "cancelled"
@@ -730,9 +739,11 @@ async def test_speakerless_member_message_is_refused_under_a_seat_limit(db: None
 async def test_speakerless_member_message_passes_an_ungated_workspace(db: None) -> None:
     workspace_id, _member_id, _, conversation_id = await _seed()
     dbos = StubDbos()
-    turn_id = await Admission(dbos=dbos, durable_surfaces=frozenset()).admit_member(
-        workspace_id, conversation_id, "hello", None
-    )
+    turn_id = (
+        await Admission(dbos=dbos, durable_surfaces=frozenset()).admit_member(
+            workspace_id, conversation_id, "hello", None
+        )
+    ).turn_id
     assert dbos.enqueued == [str(turn_id)]
 
 
@@ -744,8 +755,8 @@ async def test_speakerless_member_message_does_not_fold_under_a_seat_limit(db: N
     admission = Admission(dbos=dbos, durable_surfaces=frozenset())
     first = await admission.admit_member(workspace_id, conversation_id, "first", member_id)
     ghost = await admission.admit_member(workspace_id, conversation_id, "psst", None)
-    assert ghost != first
-    status, text = await _turn_row(ghost)
+    assert ghost.turn_id != first.turn_id
+    status, text = await _turn_row(ghost.turn_id)
     assert status == "cancelled"
     assert text == UNRESOLVED_SPEAKER_MESSAGE
     assert await _queued_bodies(conversation_id) == []
@@ -793,8 +804,8 @@ async def test_ghost_message_does_not_take_over_a_timer_turn_under_a_seat_limit(
     refused = await Admission(dbos=dbos, durable_surfaces=frozenset()).admit_member(
         workspace_id, conversation_id, "hey", None
     )
-    assert refused != timer_turn_id
-    status, text = await _turn_row(refused)
+    assert refused.turn_id != timer_turn_id
+    status, text = await _turn_row(refused.turn_id)
     assert status == "cancelled"
     assert text == UNRESOLVED_SPEAKER_MESSAGE
     async with workspace_tx() as connection:

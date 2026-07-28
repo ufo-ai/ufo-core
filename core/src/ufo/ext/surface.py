@@ -97,6 +97,20 @@ WORKSPACE_SEGMENT = "workspace"
 OPERATOR_EMAIL_DOMAIN = "metalcraft.ai"
 
 
+@dataclass(frozen=True)
+class Admitted:
+    """What one member admission did: the turn the message belongs to, and whether this admission is
+    the one that put that turn's current run on the queue. Founding a turn, taking over a queued
+    timer turn, and resuming a parked one each open a run; a message folded into a live turn, or
+    deduped to a turn already admitted, joins a run another admission opened. The call is made under
+    the conversation-row lock, so exactly one admission opens any run however many deliveries and
+    replicas race for it — the line a surface starts a per-turn reporter on, since a reporter posts
+    messages and a second one doubles the member's updates for the turn's whole life."""
+
+    turn_id: UUID
+    opened_run: bool
+
+
 class MemberAdmitter(Protocol):
     """Admit a member message and consume the conversation's pending one-time pause."""
 
@@ -108,7 +122,7 @@ class MemberAdmitter(Protocol):
         context: TurnContext | None = None,
         *,
         speaker_member_id: UUID | None,
-    ) -> UUID: ...
+    ) -> Admitted: ...
 
 
 class TurnTailer(Protocol):
@@ -630,14 +644,15 @@ class SurfaceContext:
         context: TurnContext | None = None,
         *,
         speaker_member_id: UUID | None,
-    ) -> UUID:
-        """Admit an inbound message onto the durable turn queue and return its turn id. The turn
-        executes as the conversation's bound agent — a surface never names one. Delivery is
-        admission's concern, derived from the conversation's surface: a durable-surface turn
-        registers for the poller atomically with its row, a live surface's turn registers nothing
-        and its member tails the hub — the surface supplies only the message, its idempotency
-        key, and the ambient `TurnContext` (sender, timezone) the engine renders before the
-        inbound. A redelivery deduped to the turn already admitted joins it."""
+    ) -> Admitted:
+        """Admit an inbound message onto the durable turn queue and return its turn, with whether
+        this delivery opened that turn's run. The turn executes as the conversation's bound agent —
+        a surface never names one. Delivery is admission's concern, derived from the conversation's
+        surface: a durable-surface turn registers for the poller atomically with its row, a live
+        surface's turn registers nothing and its member tails the hub — the surface supplies only
+        the message, its idempotency key, and the ambient `TurnContext` (sender, timezone) the
+        engine renders before the inbound. A redelivery deduped to the turn already admitted joins
+        it, as does a follow-up folded into a live one."""
         return await self._admitter.admit(
             conversation_id,
             body,
