@@ -1,0 +1,12 @@
+{
+  "name": "ufo-edge",
+  "private": true,
+  "type": "module",
+  "description": "Apex edge worker: tests for the worker and its landing page.",
+  "scripts": {
+    "test": "node --test *.test.mjs"
+  },
+  "devDependencies": {
+    "playwright": "1.62.0"
+  }
+}

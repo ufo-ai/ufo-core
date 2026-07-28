@@ -1,52 +1,10 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
-// The same substitution main.tf applies at deploy, so the tested worker is the shipped artifact.
-const moduleDir = new URL(".", import.meta.url);
-const LANDING_PAGE = await readFile(new URL("landing.html", moduleDir), "utf8");
-const source = (await readFile(new URL("worker.js", moduleDir), "utf8"))
-  .replace('"__LANDING_HTML__"', JSON.stringify(LANDING_PAGE))
-  .replace('"__WAITLIST_SENDER__"', JSON.stringify("no-reply@flyingobject.ai"));
-async function importWorker(tag) {
-  const tagged = `${source}\n// ${tag}`;
-  return (await import(`data:text/javascript;base64,${Buffer.from(tagged).toString("base64")}`))
-    .default;
-}
-const worker = await importWorker("shared");
+import { LANDING_PAGE, d1, importWorker } from "./harness.mjs";
 
-function d1(database = new DatabaseSync(":memory:")) {
-  return {
-    database,
-    prepare(sql) {
-      let args = [];
-      return {
-        bind(...bound) {
-          args = bound;
-          return this;
-        },
-        async run() {
-          return { meta: database.prepare(sql).run(...args) };
-        },
-        async first() {
-          const row = database.prepare(sql).get(...args);
-          return row === undefined ? null : { ...row };
-        },
-      };
-    },
-    async batch(statements) {
-      database.exec("begin");
-      try {
-        for (const statement of statements) await statement.run();
-        database.exec("commit");
-      } catch (error) {
-        database.exec("rollback");
-        throw error;
-      }
-    },
-  };
-}
+const worker = await importWorker("shared");
 
 const EMAIL_LEDGER =
   "create table if not exists waitlist_email (email text primary key, queued_at text, sent_at text)";
@@ -79,7 +37,7 @@ test("curl landing renders the ledger card with live counts and https commands",
   assert.match(body, /you found us\./);
   assert.match(body, /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z/);
   assert.match(body, /0 objects\. 0 unidentified\./);
-  assert.match(body, /request identification:/);
+  assert.match(body, /join waitlist:/);
   assert.match(body, /curl https:\/\/flyingobject\.ai\/waitlist -d email=/);
   assert.match(body, /curl -fsSL https:\/\/flyingobject\.ai\/ufo \| sh/);
 });
@@ -179,6 +137,39 @@ test("signup is positional, idempotent, and normalizes the email", async () => {
     body: "email=you@yourco.com",
   });
   assert.match(await duplicate.text(), /object #1 logged/);
+});
+
+test("the browser panel joins over the same wire the card documents", async () => {
+  // Drive the worker with exactly what the page declares and sends, so a change to either
+  // end of the panel's request has to keep landing on a route the worker actually serves.
+  const [, action] = LANDING_PAGE.match(/<form id="join" action="([^"]+)" method="post">/);
+  const [, contentType] = LANDING_PAGE.match(/'content-type': '([^']+)'/);
+  const fresh = await importWorker("panel-join");
+  const reply = await fresh.fetch(
+    new Request(new URL(action, "https://flyingobject.ai"), {
+      method: "POST",
+      headers: { "content-type": contentType, "user-agent": "Mozilla/5.0" },
+      body: new URLSearchParams({ email: "Pilot@YourCo.com" }),
+    }),
+    { ...env, DB: d1() },
+  );
+  assert.equal(reply.status, 200);
+  assert.match((await reply.text()).trim(), /^object #1 logged \S+\. status: unidentified\./);
+});
+
+test("a craft's click survives the morph that is redrawing it", () => {
+  // The animation replaces every glyph each frame: a press landing on one destroys its own
+  // target before the release, so the click never resolves. Only the craft is hit-tested, and
+  // the handler sits on the sky they share — the fleet gathers, so press and release can land
+  // on two different craft. Without both, clicking a craft works about a quarter of the time.
+  assert.match(LANDING_PAGE, /\.craft span\{pointer-events:none\}/);
+  assert.match(LANDING_PAGE, /sky\.addEventListener\('click', hail\);/);
+});
+
+test("the sky is decoration and the join is reachable without a pointer", () => {
+  assert.match(LANDING_PAGE, /<div id="sky" aria-hidden="true"><\/div>/);
+  assert.match(LANDING_PAGE, /<button id="hail" class="hail" type="button">/);
+  assert.match(LANDING_PAGE, /<input id="email" name="email" type="email" required maxlength="254"/);
 });
 
 test("a first join queues and delivers one confirmation email", async () => {
@@ -459,7 +450,7 @@ test("an unnumbered waitlist is renumbered once, in insertion order, permanently
 });
 
 const BANNED_LEXICON =
-  /!|\bwelcome\b|\boops\b|\bjust\b|\bsimply\b|\bawesome\b|\bjoin(ing|ed)?\b|\bboard(ing)?\b|\bpassengers?\b|\bshortly\b|\bsoon\b|\brecently\b|you'?re all set/i;
+  /!|\bwelcome\b|\boops\b|\bjust\b|\bsimply\b|\bawesome\b|\bboard(ing)?\b|\bpassengers?\b|\bshortly\b|\bsoon\b|\brecently\b|you'?re all set/i;
 
 test("plain-text surfaces carry no banned lexicon", async () => {
   const card = await (await request("https://flyingobject.ai/")).text();

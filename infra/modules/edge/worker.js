@@ -50,7 +50,7 @@ function card(host, total, identified) {
   ${new Date().toISOString().replace(/\.\d+Z$/, "Z")}
   ${total} object${total === 1 ? "" : "s"}. ${unidentified} unidentified.
 
-  request identification:
+  join waitlist:
     curl https://${host}/waitlist -d email=you@yourco.com
 
   have a code?
@@ -61,7 +61,7 @@ function card(host, total, identified) {
 
 function usage(host) {
   return `
-  request identification:
+  join waitlist:
     curl https://${host}/waitlist -d email=you@yourco.com
 
 `;

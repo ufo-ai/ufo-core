@@ -26,6 +26,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+      # The landing page's behaviour is geometric and frame-timed, so its suite drives a browser.
+      - run: npm --prefix infra/modules/edge ci
+      - run: npm --prefix infra/modules/edge exec -- playwright install --with-deps chromium
       - run: node --test infra/modules/edge/*.test.mjs
       # The debugger app must typecheck and build on every push, BEFORE the wheel gate below: the
       # bundle image bakes it, so the gated wheel must be the production shape.
