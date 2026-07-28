@@ -96,7 +96,6 @@ class Onboarding:
             return render(
                 install,
                 directive("say", "u f o · flyingobject.ai"),
-                directive("say", "begin identification"),
                 directive("ask", "enter your work email:"),
             )
         try:
@@ -121,62 +120,54 @@ class Onboarding:
         return await self._resolve(claim, install)
 
     async def _resolve(self, claim: OnboardClaim, install: bytes) -> bytes:
-        identified = b""
         if self.invite_required and not await self.workspaces.exists(claim.email_domain):
-            gate = await self._invite_gate(claim, install)
-            match gate:
-                case bytes():
-                    return gate
-                case InviteAccepted(object_number=number, consumed_at=consumed_at):
-                    stamp = consumed_at.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-                    identified = directive("say", f"object #{number} identified. {stamp}")
+            refusal = await self._invite_gate(claim, install)
+            if refusal is not None:
+                return refusal
         ensured = await self.workspaces.ensure(claim.email_domain, claim.email)
         await self.store.complete(claim.claim_id, ensured.workspace_id)
-        return self._signed_in(claim, ensured, install, identified)
+        return self._signed_in(claim, ensured, install)
 
-    async def _invite_gate(
-        self, claim: OnboardClaim, install: bytes
-    ) -> bytes | InviteAccepted | None:
-        """The verified email domain is the whole answer: a live grant for it opens the workspace
-        with nothing to type, and every refusal ends the session rather than prompting, because the
-        member holds no secret that could change the outcome. The claim keeps its verified email, so
-        re-running the installer once a grant lands resolves the same claim."""
+    async def _invite_gate(self, claim: OnboardClaim, install: bytes) -> bytes | None:
+        """A refusal screen, or `None` when the flow may open the workspace. The verified email
+        domain is the whole answer: a live grant for it opens the workspace with nothing to type,
+        and every refusal ends the session rather than prompting, because the member holds no
+        secret that could change the outcome. The claim keeps its verified email, so re-running the
+        installer once a grant lands resolves the same claim."""
         if claim.invite_id is not None:
             return None
         domain = claim.email_domain
         match await self.invites.redeem(domain, claim.claim_id):
-            case InviteAccepted() as accepted:
-                return accepted
+            case InviteAccepted():
+                return None
             case InviteExpired(expires_at=expires_at):
                 expired = expires_at.astimezone(UTC).strftime("%Y-%m-%d %H:%M")
                 return render(
                     install,
-                    directive("say", f"{domain} identification expired {expired} UTC."),
+                    directive("say", f"the invite for {domain} expired {expired} UTC."),
                     directive("say", "reply to your invite email for a new one."),
                     directive("exit", "0"),
                 )
             case InviteConsumed():
                 return render(
                     install,
-                    directive("say", f"{domain} is already identified."),
-                    directive("say", "contact us if you cannot reach your fleet."),
+                    directive("say", f"the invite for {domain} was already used."),
+                    directive("say", "contact us if you cannot sign in."),
                     directive("exit", "0"),
                 )
             case _:
                 return render(
                     install,
-                    directive("say", f"{domain} is not identified yet."),
+                    directive("say", f"{domain} has no invite."),
                     directive(
                         "say",
-                        "request identification: "
+                        "join the waitlist: "
                         f"curl https://{self.apex_host}/waitlist -d email={claim.email}",
                     ),
                     directive("exit", "0"),
                 )
 
-    def _signed_in(
-        self, claim: OnboardClaim, ensured: EnsuredWorkspace, install: bytes, identified: bytes
-    ) -> bytes:
+    def _signed_in(self, claim: OnboardClaim, ensured: EnsuredWorkspace, install: bytes) -> bytes:
         """The signed-in cap: token and workspace for every member, plus the `debugger` directive
         — the operator session debugger's base URL — only when the claim's channel-verified email
         domain is the operator's. The gate is server-side policy; every renderer (the terminal
@@ -192,7 +183,6 @@ class Onboarding:
         operator = claim.email_domain == OPERATOR_EMAIL_DOMAIN
         return render(
             install,
-            identified,
             directive("token", token),
             directive("workspace", self.workspaces.workspace_url),
             directive("debugger", f"{self.workspaces.workspace_url}{DEBUG_SURFACE_PATH}")

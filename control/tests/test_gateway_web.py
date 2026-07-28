@@ -41,7 +41,7 @@ TOKEN_SECRET = "web-token-secret"
 WORKSPACE_URL = "https://app.testing.flyingobject.ai"
 
 EXIT_IS_TERMINAL = """  else if (directive.verb === 'exit') {
-    if (arg !== '0') line('something went wrong — reload to retry', 'error');
+    if (arg !== '0') line('failed — reload to retry', 'error');
     finished = true;
     promptRow.style.display = 'none';
   }"""
@@ -167,7 +167,7 @@ def test_web_channel_walks_email_then_code_to_the_signed_in_card(
 
         signed_in = _advance(client, session, sender.sent[email])
 
-    assert "object #71 identified." in " ".join(_fields(signed_in, "say"))
+    assert _fields(signed_in, "say") == [f"signed in: {email}"]
     (token,) = _fields(signed_in, "token")
     (workspace,) = _fields(signed_in, "workspace")
     workspace_id = UUID(str(uuid5(NAMESPACE_DNS, "webco.io")))
@@ -196,7 +196,7 @@ def test_web_channel_refusal_ends_the_page_instead_of_stranding_it(
         _advance(client, session, email)
         refused = _advance(client, session, sender.sent[email])
 
-    assert "ungrantedweb.io is not identified yet." in _fields(refused, "say")
+    assert "ungrantedweb.io has no invite." in _fields(refused, "say")
     assert _fields(refused, "exit") == ["0"]
     assert not _fields(refused, "ask")
     assert not _fields(refused, "token")

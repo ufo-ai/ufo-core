@@ -86,8 +86,7 @@ LOGIN_PAGE = r"""<!doctype html>
 <main>
   <section class="card" id="board">
     <h1>Sign in</h1>
-    <div class="hint">Use your work email — your team's workspace is provisioned on the spot if it
-      doesn't exist yet.</div>
+    <div class="hint">Use your work email.</div>
     <div id="log"></div>
     <form id="prompt-row">
       <label id="prompt-label" for="answer"></label>
@@ -100,9 +99,8 @@ LOGIN_PAGE = r"""<!doctype html>
 
   <section class="card" id="home">
     <h1>Signed in</h1>
-    <div class="hint">You are <code id="member-email"></code>. Your workspace lives at
-      <code id="workspace-url"></code>.</div>
-    <div class="hint" style="margin-top:10px">Talk to the agent from your terminal:</div>
+    <div class="hint"><code id="member-email"></code> · <code id="workspace-url"></code></div>
+    <div class="hint" style="margin-top:10px">From your terminal:</div>
     <pre id="curl-line"></pre>
     <form id="debugger-row" method="post">
       <input type="hidden" name="token" id="debugger-token">
@@ -169,7 +167,7 @@ function handle(directive) {
   else if (directive.verb === 'workspace') workspace = arg;
   else if (directive.verb === 'debugger') debuggerUrl = arg;
   else if (directive.verb === 'exit') {
-    if (arg !== '0') line('something went wrong — reload to retry', 'error');
+    if (arg !== '0') line('failed — reload to retry', 'error');
     finished = true;
     promptRow.style.display = 'none';
   }
@@ -187,7 +185,7 @@ async function advance(body) {
     return;
   }
   if (!res.ok) {
-    line('error ' + res.status + ' — please try again', 'error');
+    line('error ' + res.status + ' — try again', 'error');
     if (lastPrompt && !finished) prompt(lastPrompt);
     else go.disabled = false;
     return;

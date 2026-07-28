@@ -541,9 +541,9 @@ def test_invite_cli_grants_a_redeemable_domain(
             os.environ[POSTGRES_OWNER_DSN_ENV] = previous
     assert granted.exit_code == 0, granted.output
     assert "object #42 granted to cli@mintco.io" in granted.output
-    assert "identification granted" in caplog.text
-    assert "  object:   #42 → identified" in caplog.text
-    assert "  contact:  cli@mintco.io" in caplog.text
+    assert "Your ufo invite" in caplog.text
+    assert "Sign in as cli@mintco.io." in caplog.text
+    assert "Anyone at mintco.io can sign in with the same invite." in caplog.text
     assert "code:" not in caplog.text
     assert asyncio.run(_redeems(shared_role_env.owner_dsn, "mintco.io"))
 

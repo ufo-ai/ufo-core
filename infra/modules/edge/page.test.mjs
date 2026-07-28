@@ -155,10 +155,12 @@ test("the join posts to the worker and renders its ack verbatim", async () => {
   await page.click("#hail");
   await page.fill("#email", "Pilot@YourCo.com");
   await page.keyboard.press("Enter");
-  await page.waitForFunction(() => document.getElementById("ack").textContent.includes("object"));
+  await page.waitForFunction(() =>
+    document.getElementById("ack").textContent.includes("waitlist"),
+  );
   assert.match(
     (await page.textContent("#ack")).trim(),
-    /^object #\d+ logged \S+\. status: unidentified\. watch your inbox\.$/,
+    /^#\d+ on the waitlist\. we will email you when access opens\.$/,
   );
   assert.equal(await page.locator("#email").isDisabled(), true);
   assert.equal(queued.length, before + 1);
@@ -172,7 +174,7 @@ test("an address the browser rejects never reaches the worker", async () => {
   let posts = 0;
   page.on("request", (r) => r.url().endsWith("/waitlist") && r.method() === "POST" && posts++);
   await page.fill("#email", "not-an-address");
-  await page.click("#transmit");
+  await page.click("#go");
   await page.waitForTimeout(300);
   assert.equal(posts, 0);
   assert.equal(await page.textContent("#ack"), "");
@@ -187,18 +189,20 @@ test("an address the browser allows but the worker refuses can be corrected", as
   // Native email validation does not require a dot in the domain. The worker's regex does, so
   // this reaches the wire and comes back a 400 — the path the two rules disagree on.
   await page.fill("#email", "pilot@localhost");
-  await page.click("#transmit");
+  await page.click("#go");
   await page.waitForFunction(() =>
-    document.getElementById("ack").textContent.includes("not logged"),
+    document.getElementById("ack").textContent.includes("not accepted"),
   );
   assert.equal(posted, 1);
-  assert.equal(await page.textContent("#ack"), "not logged. check the address.");
+  assert.equal(await page.textContent("#ack"), "that email address was not accepted.");
   assert.equal(await page.locator("#ack").evaluate((el) => el.classList.contains("bad")), true);
   // Nothing was logged, so the field stays open and the second try succeeds.
   assert.equal(await page.locator("#email").isDisabled(), false);
   await page.fill("#email", "pilot@yourco.com");
-  await page.click("#transmit");
-  await page.waitForFunction(() => document.getElementById("ack").textContent.includes("object"));
+  await page.click("#go");
+  await page.waitForFunction(() =>
+    document.getElementById("ack").textContent.includes("waitlist"),
+  );
   assert.equal(await page.locator("#ack").evaluate((el) => el.classList.contains("bad")), false);
   assert.equal(await page.locator("#email").isDisabled(), true);
   await page.close();
@@ -211,11 +215,11 @@ test("a body that dies after its headers hands the button back", async () => {
     window.fetch = async () => ({ ok: true, text: () => Promise.reject(new Error("stream died")) });
   });
   await page.fill("#email", "cut@off.com");
-  await page.click("#transmit");
-  await page.waitForFunction(() => !document.getElementById("transmit").disabled, {
+  await page.click("#go");
+  await page.waitForFunction(() => !document.getElementById("go").disabled, {
     timeout: 3000,
   });
-  assert.equal(await page.textContent("#ack"), "signal lost. try again.");
+  assert.equal(await page.textContent("#ack"), "request failed. try again.");
   assert.equal(await page.locator("#email").isDisabled(), false);
   await page.close();
 });
@@ -256,5 +260,53 @@ test("craft close on a held cursor rather than fleeing it", async () => {
   const gathered = samples.filter((d) => d < 120).length / samples.length;
   // Under the avoidance this replaced, a craft could not sit inside the cursor's radius at all.
   assert.ok(gathered > 0.5, `a craft was near the cursor in only ${(gathered * 100).toFixed(0)}%`);
+  await page.close();
+});
+
+// The product is named ufo; nothing a member reads plays the part. Swept from the rendered page
+// rather than landing.html's source, because the retained ASCII art engine names saucer, mothership,
+// craft and beams in its own code — the copy is what a browser puts on screen.
+const BANNED_METAPHOR =
+  /\bbeam\w*|\btransmit\w*|\bsignals?\b|\bsaucers?\b|\bmothership\b|\bcraft\b|\bfleets?\b|\babduct\w*|\b(un)?identified\b|\bidentification\b|\bobjects?\b/i;
+
+// Submit and return whatever the ack becomes — never waiting on a word, so rewording the copy
+// under test surfaces as a lexicon failure rather than a timeout.
+async function ackAfter(page, address) {
+  const before = await page.textContent("#ack");
+  await page.fill("#email", address);
+  await page.click("#go");
+  await page.waitForFunction(
+    (was) => {
+      const now = document.getElementById("ack").textContent;
+      return now.length > 0 && now !== was && now !== "joining…";
+    },
+    before,
+    { timeout: 5000 },
+  );
+  return page.textContent("#ack");
+}
+
+test("every word the page shows carries no ufo metaphor", async () => {
+  const page = await open();
+  const shown = [await page.innerText("body")];
+  await page.click("#hail");
+  shown.push(await page.innerText("#panel"));
+  shown.push(await page.getAttribute("#email", "placeholder"));
+  shown.push(await page.getAttribute("#panel", "aria-label"));
+  // The worker's 400 copy: native validation passes a dotless domain, its regex does not.
+  shown.push(await ackAfter(page, "pilot@localhost"));
+  // The dead-body path, the one ack no server can produce.
+  await page.evaluate(() => {
+    window.fetch = async () => ({ ok: true, text: () => Promise.reject(new Error("cut")) });
+  });
+  shown.push(await ackAfter(page, "cut@lexicon.com"));
+  await page.reload();
+  await page.waitForFunction(() => document.querySelector(".craft")?.style.opacity === "1");
+  await page.click("#hail");
+  shown.push(await ackAfter(page, "lexicon@yourco.com"));
+  assert.ok(shown.length === 7 && shown.every((copy) => copy && copy.length > 0), shown.join("|"));
+  for (const copy of shown) {
+    assert.doesNotMatch(copy, BANNED_METAPHOR);
+  }
   await page.close();
 });

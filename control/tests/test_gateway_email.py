@@ -76,21 +76,16 @@ def test_verification_email_states_the_exact_expiry() -> None:
 
 def test_invite_email_names_the_granted_address_and_carries_no_secret() -> None:
     subject, body = invite_email(
-        object_number=7,
         email="founder@acme.com",
         expires_at=datetime(2026, 7, 26, 18, 45, tzinfo=UTC),
         apex_host="flyingobject.ai",
     )
-    assert subject == "identification granted"
+    assert subject == "Your ufo invite"
     assert body == (
-        "  object:   #7 → identified\n"
-        "  contact:  founder@acme.com\n"
-        "  expires:  2026-07-26 18:45 UTC\n"
-        "\n"
         "  curl -fsSL https://flyingobject.ai/ufo | sh\n"
         "\n"
-        "  Sign in as founder@acme.com. Identification covers one\n"
-        "  company — your teammates need no invitation.\n"
+        "  Sign in as founder@acme.com. Expires 2026-07-26 18:45 UTC.\n"
+        "  Anyone at acme.com can sign in with the same invite.\n"
     )
 
 
@@ -153,13 +148,13 @@ async def test_send_posts_the_rendered_subject_and_body(
         role_arn="arn:aws:iam::111122223333:role/ufo-testing-gateway-ses",
         token_file=token_file,
     )
-    subject, body = invite_email(2, "founder@acme.com", EXPIRES_AT, "testing.flyingobject.ai")
+    subject, body = invite_email("founder@acme.com", EXPIRES_AT, "testing.flyingobject.ai")
     await sender.send("founder@acme.com", subject, body)
     assert len(posted) == 1
     payload = json.loads(posted[0])
     assert payload["FromEmailAddress"] == "no-reply@flyingobject.ai"
     assert payload["Destination"]["ToAddresses"] == ["founder@acme.com"]
-    assert payload["Content"]["Simple"]["Subject"]["Data"] == "identification granted"
+    assert payload["Content"]["Simple"]["Subject"]["Data"] == "Your ufo invite"
     assert payload["Content"]["Simple"]["Body"]["Text"]["Data"] == body
 
 

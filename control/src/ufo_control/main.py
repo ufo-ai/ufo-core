@@ -105,7 +105,7 @@ async def _mint_invite(object_number: int, email: str) -> MintedInvite:
         minted = await InviteCodes(pool=pool).mint(object_number, email)
     finally:
         await pool.close()
-    subject, body = invite_email(minted.object_number, minted.email, minted.expires_at, apex_host)
+    subject, body = invite_email(minted.email, minted.expires_at, apex_host)
     try:
         await sender.send(minted.email, subject, body)
     except Exception as error:

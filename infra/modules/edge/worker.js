@@ -36,24 +36,18 @@ const EMAIL_SCHEMA =
 let counted = { count: null, at: 0 };
 let fleet = { count: null, at: 0 };
 
-function card(host, total, identified) {
-  const unidentified = Math.max(0, total - identified);
+function card(host, total, workspaces) {
   return `
-       .  *   .      .
+      ╭─◠◠◠─╮
+  ╾══╡ ◉ ◉ ◉ ╞══╼   ${host}
+     ╰┄┄┄┄┄┄┄╯
 
-   .      ╭─◠◠◠─╮
-      ╾══╡ ◉ ◉ ◉ ╞══╼      you found us.
-         ╰┄┄┄┄┄┄┄╯         ${host}
-           ˙ ✦ ˙
-       .   *  .    .
+  ${workspaces} workspace${workspaces === 1 ? "" : "s"}. ${total} on the waitlist.
 
-  ${new Date().toISOString().replace(/\.\d+Z$/, "Z")}
-  ${total} object${total === 1 ? "" : "s"}. ${unidentified} unidentified.
-
-  join waitlist:
+  join the waitlist:
     curl https://${host}/waitlist -d email=you@yourco.com
 
-  have a code?
+  already invited?
     curl -fsSL https://${host}/ufo | sh
 
 `;
@@ -61,15 +55,15 @@ function card(host, total, identified) {
 
 function usage(host) {
   return `
-  join waitlist:
+  join the waitlist:
     curl https://${host}/waitlist -d email=you@yourco.com
 
 `;
 }
 
-function ack(position, loggedAt) {
+function ack(position) {
   return `
-  object #${position} logged ${loggedAt}. status: unidentified. watch your inbox.
+  #${position} on the waitlist. we will email you when access opens.
 
 `;
 }
@@ -125,11 +119,11 @@ async function landing(request, env, url) {
       headers: { "content-type": "text/html; charset=utf-8" },
     });
   }
-  const [total, identified] = await Promise.all([
+  const [total, workspaces] = await Promise.all([
     waitlistCount(env.DB),
     fleetCount(env.ORIGIN_BASE),
   ]);
-  return text(card(url.hostname, total, identified));
+  return text(card(url.hostname, total, workspaces));
 }
 
 async function join(request, env, url) {
@@ -145,9 +139,7 @@ async function join(request, env, url) {
   )
     .bind(email)
     .run();
-  const row = await env.DB.prepare("select n, created_at from waitlist where email = ?1")
-    .bind(email)
-    .first();
+  const row = await env.DB.prepare("select n from waitlist where email = ?1").bind(email).first();
   await env.DB.prepare(EMAIL_SCHEMA).run();
   await env.DB.prepare("insert into waitlist_email (email) values (?1) on conflict do nothing")
     .bind(email)
@@ -164,7 +156,7 @@ async function join(request, env, url) {
       .run();
   }
   counted = { count: null, at: 0 };
-  return text(ack(row.n, `${row.created_at.replace(" ", "T")}Z`));
+  return text(ack(row.n));
 }
 
 export default {
@@ -209,20 +201,14 @@ export default {
           message.ack();
           return;
         }
-        const entry = await env.DB.prepare("select n, created_at from waitlist where email = ?1")
+        const entry = await env.DB.prepare("select n from waitlist where email = ?1")
           .bind(email)
           .first();
         await env.EMAIL.send({
           to: email,
           from: WAITLIST_SENDER,
-          subject: `object #${entry.n} logged`,
-          text:
-            `  object:   #${entry.n}\n` +
-            `  contact:  ${email}\n` +
-            `  logged:   ${entry.created_at.slice(0, 16)} UTC\n` +
-            "  status:   unidentified\n\n" +
-            "We'll signal you when identification opens.\n" +
-            "Your number is permanent.\n",
+          subject: `#${entry.n} on the ufo waitlist`,
+          text: `${email} is #${entry.n} on the waitlist. We will email you when access opens.\n`,
         });
         await env.DB.prepare("update waitlist_email set sent_at = datetime('now') where email = ?1")
           .bind(email)

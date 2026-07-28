@@ -791,7 +791,7 @@ turn() {
   wait "$CURL" || true
   spin_stop
   if [ "$GOT" = 0 ]; then
-    die "lost contact with the mothership ($UFO_URL)"
+    die "no response from $UFO_URL"
   fi
   STATUS=''
   if [ "$FX" = 1 ]; then
@@ -855,7 +855,7 @@ main() {
           dyn_erase
           if [ "$TTY" = 1 ]; then
             say ''
-            say "${DIM}the saucer waits - type ${RESET}${BOLD}ufo${RESET}${DIM} to continue.${RESET}"
+            say "${DIM}type ${RESET}${BOLD}ufo${RESET}${DIM} to continue.${RESET}"
           fi
           exit 0
         fi
@@ -866,7 +866,7 @@ main() {
           dyn_erase
           if [ "$TTY" = 1 ]; then
             say ''
-            say "${DIM}the saucer waits - type ${RESET}${BOLD}ufo${RESET}${DIM} to continue.${RESET}"
+            say "${DIM}type ${RESET}${BOLD}ufo${RESET}${DIM} to continue.${RESET}"
           fi
           exit 0
         fi

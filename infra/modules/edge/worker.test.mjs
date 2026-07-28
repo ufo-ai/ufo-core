@@ -29,15 +29,14 @@ function request(url, { ua = "curl/8.6.0", method = "GET", body } = {}) {
   return worker.fetch(new Request(url, { method, body, headers: { "user-agent": ua } }), env);
 }
 
-test("curl landing renders the ledger card with live counts and https commands", async () => {
+test("curl landing renders the card with live counts and https commands", async () => {
   const reply = await request("https://flyingobject.ai/");
   const body = await reply.text();
   assert.equal(reply.headers.get("content-type"), "text/plain; charset=utf-8");
   assert.match(body, /◉ ◉ ◉/);
-  assert.match(body, /you found us\./);
-  assert.match(body, /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z/);
-  assert.match(body, /0 objects\. 0 unidentified\./);
-  assert.match(body, /join waitlist:/);
+  assert.match(body, /flyingobject\.ai/);
+  assert.match(body, /0 workspaces\. 0 on the waitlist\./);
+  assert.match(body, /join the waitlist:/);
   assert.match(body, /curl https:\/\/flyingobject\.ai\/waitlist -d email=/);
   assert.match(body, /curl -fsSL https:\/\/flyingobject\.ai\/ufo \| sh/);
 });
@@ -46,7 +45,7 @@ test("curl landing over plain http gets the card directly", async () => {
   const reply = await request("http://flyingobject.ai/");
   assert.equal(reply.status, 200);
   assert.equal(reply.headers.get("content-type"), "text/plain; charset=utf-8");
-  assert.match(await reply.text(), /objects\. \d+ unidentified\./);
+  assert.match(await reply.text(), /\d+ workspaces?\. \d+ on the waitlist\./);
 });
 
 test("browser landing over plain http is bounced to https with its query intact", async () => {
@@ -123,20 +122,17 @@ test("signup is positional, idempotent, and normalizes the email", async () => {
     body: "email=You@YourCo.com",
   });
   assert.equal(first.status, 200);
-  assert.match(
-    await first.text(),
-    /object #1 logged \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\. status: unidentified\. watch your inbox\./,
-  );
+  assert.match(await first.text(), /#1 on the waitlist\. we will email you when access opens\./);
   const second = await request("https://flyingobject.ai/waitlist", {
     method: "POST",
     body: "email=second@co.com&junk=1",
   });
-  assert.match(await second.text(), /object #2 logged/);
+  assert.match(await second.text(), /#2 on the waitlist\./);
   const duplicate = await request("https://flyingobject.ai/waitlist", {
     method: "POST",
     body: "email=you@yourco.com",
   });
-  assert.match(await duplicate.text(), /object #1 logged/);
+  assert.match(await duplicate.text(), /#1 on the waitlist\./);
 });
 
 test("the browser panel joins over the same wire the card documents", async () => {
@@ -154,7 +150,7 @@ test("the browser panel joins over the same wire the card documents", async () =
     { ...env, DB: d1() },
   );
   assert.equal(reply.status, 200);
-  assert.match((await reply.text()).trim(), /^object #1 logged \S+\. status: unidentified\./);
+  assert.match((await reply.text()).trim(), /^#1 on the waitlist\./);
 });
 
 test("a craft's click survives the morph that is redrawing it", () => {
@@ -199,9 +195,6 @@ test("a first join queues and delivers one confirmation email", async () => {
     });
   await fresh.fetch(signup(), isolated);
   await fresh.fetch(signup(), isolated);
-  const loggedAt = isolated.DB.database
-    .prepare("select created_at from waitlist where email = 'pilot@example.com'")
-    .get().created_at;
   assert.deepEqual(queued, [
     { message: { email: "pilot@example.com" }, options: { contentType: "json" } },
   ]);
@@ -225,14 +218,9 @@ test("a first join queues and delivers one confirmation email", async () => {
     {
       to: "pilot@example.com",
       from: "no-reply@flyingobject.ai",
-      subject: "object #1 logged",
+      subject: "#1 on the ufo waitlist",
       text:
-        "  object:   #1\n" +
-        "  contact:  pilot@example.com\n" +
-        `  logged:   ${loggedAt.slice(0, 16)} UTC\n` +
-        "  status:   unidentified\n\n" +
-        "We'll signal you when identification opens.\n" +
-        "Your number is permanent.\n",
+        "pilot@example.com is #1 on the waitlist. We will email you when access opens.\n",
     },
   ]);
   assert.equal(acknowledged, true);
@@ -358,7 +346,7 @@ test("an exhausted confirmation is surfaced and consumed", async (context) => {
 
 test("a signup busts the counter cache so the card reflects it", async () => {
   const body = await (await request("https://flyingobject.ai/")).text();
-  assert.match(body, /2 objects\. 2 unidentified\./);
+  assert.match(body, /0 workspaces\. 2 on the waitlist\./);
 });
 
 test("a malformed email is a 400 and takes no queue slot", async () => {
@@ -372,7 +360,7 @@ test("a malformed email is a 400 and takes no queue slot", async () => {
     method: "POST",
     body: "email=third@co.com",
   });
-  assert.match(await next.text(), /object #3 logged/);
+  assert.match(await next.text(), /#3 on the waitlist\./);
 });
 
 test("GET /waitlist answers with usage for the requested host", async () => {
@@ -433,7 +421,7 @@ test("an unnumbered waitlist is renumbered once, in insertion order, permanently
     );
 
   const third = await signup("third@co.com");
-  assert.match(await third.text(), /object #3 logged/);
+  assert.match(await third.text(), /#3 on the waitlist\./);
   const numbers = database
     .prepare("select email, n from waitlist order by n")
     .all()
@@ -446,13 +434,17 @@ test("an unnumbered waitlist is renumbered once, in insertion order, permanently
 
   database.prepare("delete from waitlist where email = 'third@co.com'").run();
   const fourth = await signup("fourth@co.com");
-  assert.match(await fourth.text(), /object #4 logged/);
+  assert.match(await fourth.text(), /#4 on the waitlist\./);
 });
 
 const BANNED_LEXICON =
   /!|\bwelcome\b|\boops\b|\bjust\b|\bsimply\b|\bawesome\b|\bboard(ing)?\b|\bpassengers?\b|\bshortly\b|\bsoon\b|\brecently\b|you'?re all set/i;
 
-test("plain-text surfaces carry no banned lexicon", async () => {
+// The product is named ufo; the copy never plays the part.
+const BANNED_METAPHOR =
+  /\bbeam\w*|\btransmit\w*|\bsignals?\b|\bsaucers?\b|\bmothership\b|\bcraft\b|\bfleets?\b|\babduct\w*|\b(un)?identified\b|\bidentification\b|\bobjects?\b/i;
+
+test("member-facing surfaces carry no banned lexicon and no ufo metaphor", async () => {
   const card = await (await request("https://flyingobject.ai/")).text();
   const usage = await (await request("https://flyingobject.ai/waitlist")).text();
   const ack = await (
@@ -461,7 +453,37 @@ test("plain-text surfaces carry no banned lexicon", async () => {
       body: "email=lexicon@co.com",
     })
   ).text();
-  for (const surface of [card, usage, ack]) {
+  const sent = [];
+  const isolated = {
+    DB: d1(),
+    ORIGIN_BASE: "https://testing.flyingobject.ai",
+    WAITLIST_DEAD_LETTER_QUEUE: "ufo-edge-waitlist-email-dead-letters",
+    WAITLIST_EMAILS: { async send() {} },
+    EMAIL: {
+      async send(message) {
+        sent.push(message);
+      },
+    },
+  };
+  const fresh = await importWorker("waitlist-lexicon");
+  await fresh.fetch(
+    new Request("https://flyingobject.ai/waitlist", {
+      method: "POST",
+      body: "email=lexicon@co.com",
+      headers: { "user-agent": "curl/8.6.0" },
+    }),
+    isolated,
+  );
+  await fresh.queue(
+    {
+      queue: "ufo-edge-waitlist-email",
+      messages: [{ body: { email: "lexicon@co.com" }, ack() {} }],
+    },
+    isolated,
+  );
+  assert.equal(sent.length, 1);
+  for (const surface of [card, usage, ack, sent[0].subject, sent[0].text]) {
     assert.doesNotMatch(surface, BANNED_LEXICON);
+    assert.doesNotMatch(surface, BANNED_METAPHOR);
   }
 });

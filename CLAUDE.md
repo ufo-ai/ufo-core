@@ -40,6 +40,14 @@ gate forbids `core` internals in `extensions/`.
 Generated text and code are as succinct as possible — specs, docs, commits, code. Keep every
 hard-to-vary decision; cut the words around it. Prefer a table to prose. One example, not three.
 
+## User-facing copy
+
+**Spartan and factual.** Every word a member reads — terminal screens, emails, web pages, agent
+replies — states what happened, what is true, or what to do next. No UFO metaphors (`beam`,
+`transmit`, `signal`, `saucer`, `mothership`, `identification`, `unidentified`): the product is
+named ufo and that is the whole joke. No greeting, reassurance, exclamation, or restatement of what
+the member just did. A line the member cannot act on and did not ask for does not ship.
+
 ## Skills
 
 Creating or editing a Skill requires reading and applying

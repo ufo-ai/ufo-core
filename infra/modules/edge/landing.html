@@ -85,15 +85,15 @@
   .panel input::placeholder{color:var(--gray)}
   .panel input:focus{outline:none; border-bottom-color:var(--gold)}
   .panel input:disabled{color:var(--gray); border-bottom-style:dashed}
-  .panel .transmit{
+  .panel .go{
     margin-top:18px; padding:7px 16px;
     background:none; border:1px solid var(--gray);
     font:inherit; letter-spacing:.08em; color:var(--hull);
     cursor:pointer;
     transition:border-color .2s, color .2s;
   }
-  .panel .transmit:enabled:hover,.panel .transmit:focus-visible{border-color:var(--gold); color:var(--gold)}
-  .panel .transmit:disabled{opacity:.45; cursor:default}
+  .panel .go:enabled:hover,.panel .go:focus-visible{border-color:var(--gold); color:var(--gold)}
+  .panel .go:disabled{opacity:.45; cursor:default}
   .panel .ack{
     margin:16px 0 0; min-height:1.6em;
     white-space:pre-wrap; color:var(--green); text-shadow:0 0 10px #9dffb055;
@@ -113,7 +113,7 @@
                placeholder="you@yourco.com" autocomplete="email" spellcheck="false"
                aria-label="your email" />
       </p>
-      <button id="transmit" class="transmit" type="submit">transmit</button>
+      <button id="go" class="go" type="submit">join</button>
       <p id="ack" class="ack" role="status"></p>
     </form>
   </dialog>
@@ -608,7 +608,7 @@ const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
 const panel = document.getElementById('panel');
 const join = document.getElementById('join');
 const email = document.getElementById('email');
-const transmit = document.getElementById('transmit');
+const go = document.getElementById('go');
 const ack = document.getElementById('ack');
 
 function hail(){ if(!panel.open) panel.showModal(); }
@@ -633,8 +633,8 @@ function report(message, bad){
 
 join.addEventListener('submit', async e => {
   e.preventDefault();
-  transmit.disabled = true;
-  report('transmitting…');
+  go.disabled = true;
+  report('joining…');
   // One try encloses the whole turn — reading the body can fail after the headers land, and
   // every path out of here either ends on an ack or hands the button back.
   try {
@@ -644,15 +644,15 @@ join.addEventListener('submit', async e => {
       body: new URLSearchParams({email: email.value}),
     });
     if(!reply.ok){
-      report('not logged. check the address.', true);
-      transmit.disabled = false;
+      report('that email address was not accepted.', true);
+      go.disabled = false;
       return;
     }
     report((await reply.text()).trim());
-    email.disabled = true;    // the number is permanent; there is nothing left to send
+    email.disabled = true;    // the entry is recorded; there is nothing left to send
   } catch {
-    report('signal lost. try again.', true);
-    transmit.disabled = false;
+    report('request failed. try again.', true);
+    go.disabled = false;
   }
 });
 

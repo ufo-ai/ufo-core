@@ -80,16 +80,12 @@ DEFAULT_PUBLIC_BASE_URL = "https://flyingobject.ai"
 CODE_SUBJECT = "Your flyingobject.ai verification code"
 CODE_BODY = "Your code: {code}. Expires {expires} UTC ({minutes} minutes)."
 
-INVITE_SUBJECT = "identification granted"
+INVITE_SUBJECT = "Your ufo invite"
 INVITE_BODY = """\
-  object:   #{object_number} → identified
-  contact:  {email}
-  expires:  {expires} UTC
-
   curl -fsSL https://{apex_host}/ufo | sh
 
-  Sign in as {email}. Identification covers one
-  company — your teammates need no invitation.
+  Sign in as {email}. Expires {expires} UTC.
+  Anyone at {email_domain} can sign in with the same invite.
 """
 
 SES_SERVICE = "ses"
@@ -160,15 +156,14 @@ def verification_email(code: str, expires_at: datetime, ttl: timedelta) -> tuple
     )
 
 
-def invite_email(
-    object_number: int, email: str, expires_at: datetime, apex_host: str
-) -> tuple[str, str]:
+def invite_email(email: str, expires_at: datetime, apex_host: str) -> tuple[str, str]:
     """Subject and body for an invitation, delivered by ``ufo-control invite``. It names the granted
     address rather than a secret: the flow identifies the domain from the email the member verifies,
     so there is nothing to carry back into the terminal."""
+    _, domain = normalize_email(email)
     return INVITE_SUBJECT, INVITE_BODY.format(
-        object_number=object_number,
         email=email,
+        email_domain=domain,
         expires=expires_at.astimezone(UTC).strftime("%Y-%m-%d %H:%M"),
         apex_host=apex_host,
     )

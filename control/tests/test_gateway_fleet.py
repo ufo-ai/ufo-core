@@ -5,7 +5,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass, field, replace
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 
@@ -21,6 +21,8 @@ from ufo_control.gateway_email import (
     AWS_ROLE_ARN_ENV,
     AWS_WEB_IDENTITY_TOKEN_FILE_ENV,
     SES_SENDER_ENV,
+    invite_email,
+    verification_email,
 )
 from ufo_control.gateway_invite import INVITE_TTL, InviteCodes
 from ufo_control.gateway_shared import SERVE_DSN_ENV
@@ -31,6 +33,7 @@ from ufo_control.gateway_slack_connect import (
     TEAM_ID_ENV,
     SlackConnectInviter,
 )
+from ufo_control.gateway_web import LOGIN_PAGE, parse_directives
 
 TOKEN_SECRET = "test-token-secret"
 WORKSPACE_URL = "https://app.testing.flyingobject.ai"
@@ -38,6 +41,8 @@ OPERATOR_TEAM_ID = "T0PERATOR"
 UNREACHABLE_SLACK = "http://127.0.0.1:1"
 DELIVERY_POLL_SECONDS = 0.05
 DELIVERY_TIMEOUT_SECONDS = 20.0
+LEXICON_EXPIRES_AT = datetime(2026, 7, 28, 18, 45, tzinfo=UTC)
+LEXICON_CODE_TTL = timedelta(minutes=15)
 
 
 CODE_IN_BODY = re.compile(r"\d{6}")
@@ -149,7 +154,6 @@ def test_a_granted_domain_is_identified_without_a_third_prompt(
         signed_in = client.post("/v1/onboard/ufo", headers=headers, content=sender.sent[email])
 
     assert "enter your invite" not in signed_in.text
-    assert re.search(r"object #9 identified\. \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", signed_in.text)
     assert f"signed in: {email}" in signed_in.text
     assert asyncio.run(_claim_invite_id(gateway_postgres, email)) is not None
 
@@ -165,9 +169,9 @@ def test_the_gate_ends_the_session_on_every_refusal(
     asyncio.run(_grant(gateway_postgres, 8, "founder@expiredco.io", timedelta(days=-1)))
     with TestClient(gateway_app()) as client:
         ungranted = _walk(client, "no-grant", "founder@ungrantedco.io", sender)
-        assert "ungrantedco.io is not identified yet." in ungranted
+        assert "ungrantedco.io has no invite." in ungranted
         assert (
-            "request identification: curl https://flyingobject.ai/waitlist"
+            "join the waitlist: curl https://flyingobject.ai/waitlist"
             " -d email=founder@ungrantedco.io" in ungranted
         )
         assert "exit\t0" in ungranted
@@ -175,7 +179,7 @@ def test_the_gate_ends_the_session_on_every_refusal(
 
         expired = _walk(client, "expired-grant", "founder@expiredco.io", sender)
         assert re.search(
-            r"expiredco\.io identification expired \d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC\.", expired
+            r"the invite for expiredco\.io expired \d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC\.", expired
         )
         assert "reply to your invite email for a new one." in expired
         assert "exit\t0" in expired
@@ -183,8 +187,8 @@ def test_the_gate_ends_the_session_on_every_refusal(
         asyncio.run(_grant(gateway_postgres, 10, "founder@burnedco.io"))
         asyncio.run(_burn_grant(gateway_postgres, "burnedco.io"))
         burned = _walk(client, "burned-grant", "founder@burnedco.io", sender)
-        assert "burnedco.io is already identified." in burned
-        assert "contact us if you cannot reach your fleet." in burned
+        assert "the invite for burnedco.io was already used." in burned
+        assert "contact us if you cannot sign in." in burned
         assert "exit\t0" in burned
 
 
@@ -381,3 +385,73 @@ def test_http_onboarding_refuses_an_ambiguous_domain(
     assert uuid.uuid5(uuid.NAMESPACE_DNS, domain) not in asyncio.run(
         _workspace_ids(gateway_postgres)
     )
+
+
+# The product is named ufo; nothing a member reads plays the part. One sweep over every screen the
+# control plane renders, so a new branch or a reworded line cannot reintroduce the lexicon.
+BANNED_METAPHOR = re.compile(
+    r"\bbeam\w*|\btransmit\w*|\bsignals?\b|\bsaucers?\b|\bmothership\b|\babduct\w*"
+    r"|\b(un)?identified\b|\bidentification\b",
+    re.IGNORECASE,
+)
+COPY_VERBS = frozenset({"say", "ask", "choose"})
+
+
+def _member_copy(payload: str) -> list[str]:
+    """Only the verbs a member reads — a token and a workspace URL are wire, not copy."""
+    copy: list[str] = []
+    for parsed in parse_directives(payload.encode()):
+        if parsed["verb"] in COPY_VERBS:
+            fields = parsed["fields"]
+            assert isinstance(fields, list)
+            copy.extend(str(field) for field in fields)
+    return copy
+
+
+def test_every_word_a_member_reads_carries_no_ufo_metaphor(
+    gateway_postgres: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Every rendered onboarding screen — the opening, both prompts, a rejected address, a wrong
+    code, the signed-in cap, and all three invite refusals — plus the two emails, the sign-in page,
+    and the served terminal client."""
+    _configure(monkeypatch, tmp_path, gateway_postgres)
+    sender = RecordingSender()
+    monkeypatch.setattr(gateway, "email_sender_from_env", lambda: sender)
+    asyncio.run(_grant(gateway_postgres, 21, "founder@lexiconco.io"))
+    asyncio.run(_grant(gateway_postgres, 22, "founder@lexiconexpired.io", timedelta(days=-1)))
+    asyncio.run(_grant(gateway_postgres, 23, "founder@lexiconburned.io"))
+    asyncio.run(_burn_grant(gateway_postgres, "lexiconburned.io"))
+    email = "founder@lexiconco.io"
+    headers = {"x-ufo-session": "lexicon", "x-ufo-installed": "1"}
+    screens: list[str] = []
+    with TestClient(gateway_app()) as client:
+        screens += _member_copy(client.post("/v1/onboard/ufo", headers=headers, content="").text)
+        screens += _member_copy(
+            client.post("/v1/onboard/ufo", headers=headers, content="me@gmail.com").text
+        )
+        screens += _member_copy(client.post("/v1/onboard/ufo", headers=headers, content=email).text)
+        screens += _member_copy(
+            client.post("/v1/onboard/ufo", headers=headers, content="000000").text
+        )
+        screens += _member_copy(
+            client.post("/v1/onboard/ufo", headers=headers, content=sender.sent[email]).text
+        )
+        for session, refused in (
+            ("lexicon-none", "founder@lexiconnone.io"),
+            ("lexicon-expired", "founder@lexiconexpired.io"),
+            ("lexicon-burned", "founder@lexiconburned.io"),
+        ):
+            screens += _member_copy(_walk(client, session, refused, sender))
+    code_subject, code_body = verification_email("042042", LEXICON_EXPIRES_AT, LEXICON_CODE_TTL)
+    invite_subject, invite_body = invite_email(email, LEXICON_EXPIRES_AT, "flyingobject.ai")
+    screens += [
+        code_subject,
+        code_body,
+        invite_subject,
+        invite_body,
+        LOGIN_PAGE,
+        gateway.STAMPED_SCRIPT,
+    ]
+    assert len(screens) > 15
+    for copy in screens:
+        assert BANNED_METAPHOR.search(copy) is None, copy

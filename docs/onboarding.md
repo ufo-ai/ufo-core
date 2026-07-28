@@ -51,7 +51,7 @@ browser ------>| web (ufo_session) · debug (ufo_debug)      |
 One worker fronts both apexes (`flyingobject.ai`, `testing.flyingobject.ai`), claiming only four
 paths — every other request passes through to what the host serves:
 
-- `GET /` — curl/wget/httpie get the text landing card (saucer, waitlist counter, install
+- `GET /` — curl/wget/httpie get the text landing card (craft, the two counters, install
   one-liner); any other agent lands on the one site at the prod apex — proxied on the site's own
   host, a redirect (query intact) from any other.
 - `POST /waitlist -d email=…` — the one join, reached from either renderer: a curl user types the
@@ -60,8 +60,8 @@ paths — every other request passes through to what the host serves:
   verbatim. Records the email in a per-apex D1 database, idempotent, with a
   positional ack; D1 tracks the confirmation's queued and sent states, so a duplicate repairs a
   failed publish without resending delivered mail. Delivery retries five times before its terminal
-  failure is logged and re-armed by the dead-letter consumer. The card's "N identified flying
-  objects" counter reads D1 (≤1h stale per isolate, busted on join).
+  failure is logged and re-armed by the dead-letter consumer. The card's waitlist counter reads D1
+  (≤1h stale per isolate, busted on join); its workspace counter reads the gateway's `/fleet`.
 - `GET /ufo` — proxies the gateway's stamped `/ufo` from the module's `origin_base`; both apexes
   point at the one live fleet.
 - `GET /login` — 302 to `app.<host>/login`. Sign-in lives on the app host (the sole authenticated

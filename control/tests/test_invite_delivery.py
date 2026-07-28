@@ -37,7 +37,7 @@ async def test_invite_emails_the_invitation_to_the_granted_address(
     with caplog.at_level(logging.INFO):
         minted = await main._mint_invite(2, "Founder@Acme.com")
     assert minted.email == "founder@acme.com"
-    assert "identification granted" in caplog.text
+    assert "Your ufo invite" in caplog.text
     assert "founder@acme.com" in caplog.text
     assert f"curl -fsSL {APEX}/ufo | sh" in caplog.text
     row = await store.pool.fetchrow(
