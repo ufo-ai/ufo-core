@@ -44,6 +44,7 @@ from ufo.sandbox.proxy.rules import (
     InternetRule,
     MeterRule,
     ScopeRule,
+    derive_credential_rules,
     derive_manifest_rules,
 )
 from ufo.sandbox.proxy.server import (
@@ -2249,3 +2250,45 @@ async def test_real_git_presents_the_credential_sentinel_to_the_credentialed_hos
 
     assert await urlmatch("https://github.com/owner/private.git") == "Authorization: SENTINEL_GIT"
     assert await urlmatch("https://gitlab.test/owner/other.git") == ""
+
+
+async def test_an_unusable_binding_exports_nothing_and_admits_nothing(db: None) -> None:
+    """Both roles read one answer. A workspace whose source holds a binding this deploy cannot use
+    has the member's own token stored too — the value that made the two roles disagree.
+
+    The export must not configure git off that stored token, because the same slot's wire rules are
+    withheld: git would then send a sentinel to a host the proxy admits nothing for, and the member
+    would watch a clone fail against a credential the sandbox said it had. `slot_is_set` and
+    `derive_credential_rules` are asserted in one test on purpose — they are two roles answering one
+    question, and a fixture that proved only one would let them drift apart again."""
+    async with workspace_tx() as connection:
+        seeded = await _seed_turn(connection)
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    await store.put(seeded.workspace_id, "github_git_token", "ghp-member-own")
+
+    class _Unusable:
+        async def secret(self, workspace_id: UUID, store: CredentialStore) -> str | None:
+            raise ValueError("installation binding does not open")
+
+        async def bound(self, workspace_id: UUID, store: CredentialStore) -> bool:
+            raise ValueError("installation binding does not open")
+
+    slots = (
+        CredentialSlot(
+            name="github_git_token",
+            description="git token",
+            source=_Unusable(),
+            injection=InjectionTarget(
+                host="github.com",
+                header="Authorization",
+                sentinel="SENTINEL_GIT",
+                git_basic_user="x-access-token",
+            ),
+        ),
+    )
+
+    assert await _git_credential_config(store, slots, seeded.workspace_id) == ()
+
+    rules = await derive_credential_rules(slots, seeded.workspace_id, store)
+
+    assert rules == ()

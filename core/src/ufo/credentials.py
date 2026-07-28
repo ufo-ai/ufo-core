@@ -344,7 +344,11 @@ class CredentialSource(Protocol):
     async def bound(self, workspace_id: UUID, store: "CredentialStore") -> bool:
         """Whether this workspace has something to mint from, answered without minting. Every
         sandbox open asks whether a slot is filled; only the wire asks for its value, so the
-        question that runs on every turn must not reach the provider."""
+        question that runs on every turn must not reach the provider.
+
+        Raises for a binding this workspace holds but this deploy cannot use, exactly as `secret`
+        does: the two answer for different roles — the export and the wire — and a `False` here
+        against a raise there is what exports a credential for a host the wire then refuses."""
         ...
 
 
@@ -371,7 +375,13 @@ async def slot_is_set(
 ) -> bool:
     """Whether this slot would yield a secret, without producing one. `slot_secret`'s question costs
     a provider round trip where the slot mints; this one is the DB read every sandbox open needs to
-    decide whether to configure a client at all, so it stays off the wire."""
+    decide whether to configure a client at all, so it stays off the wire.
+
+    A source that raises propagates rather than falling through to the stored value, which is what
+    keeps this answer identical to `slot_secret`'s: a workspace holding a binding this deploy cannot
+    use yields nothing to either role, instead of exporting the member's own token into a sandbox
+    whose wire will refuse the host. Callers isolate the raise per slot, as the rule derivation
+    does."""
     if source is not None and await source.bound(workspace_id, store):
         return True
     try:

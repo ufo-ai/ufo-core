@@ -585,9 +585,18 @@ async def _git_credential_config(
         target = slot.injection
         if target is None or target.git_basic_user is None:
             continue
-        if not await slot_is_set(slot.name, slot.source, workspace_id, credentials):
+        try:
+            if not await slot_is_set(slot.name, slot.source, workspace_id, credentials):
+                continue
+            host = await credential_host(credentials, workspace_id, target.host)
+        except Exception as error:
+            warn(
+                "sandbox.credential_slot_failed",
+                slot=slot.name,
+                error_class=type(error).__name__,
+                error=str(error),
+            )
             continue
-        host = await credential_host(credentials, workspace_id, target.host)
         if host is None:
             warn("sandbox.git_host_unavailable", slot=slot.name)
             continue
@@ -620,9 +629,18 @@ async def _keyed_provider_env(
         host_env = target.host.env if isinstance(target.host, HostChoice) else None
         if target.env is None and host_env is None:
             continue
-        if not await slot_is_set(slot.name, slot.source, workspace_id, credentials):
+        try:
+            if not await slot_is_set(slot.name, slot.source, workspace_id, credentials):
+                continue
+            host = await credential_host(credentials, workspace_id, target.host)
+        except Exception as error:
+            warn(
+                "sandbox.credential_slot_failed",
+                slot=slot.name,
+                error_class=type(error).__name__,
+                error=str(error),
+            )
             continue
-        host = await credential_host(credentials, workspace_id, target.host)
         if host is None:
             warn("sandbox.keyed_host_unavailable", slot=slot.name)
             continue

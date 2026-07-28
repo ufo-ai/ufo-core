@@ -32,11 +32,9 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from ufo.sdk.context import CredentialSlotUnset
 from ufo.sdk.credentials import (
     CredentialMintFailed,
-    CredentialRequestInvalid,
     CredentialStore,
     open_installation,
 )
-from ufo.sdk.o11y import warn
 
 GITHUB_API = "https://api.github.com"
 JWT_LIFETIME_SECONDS = 540
@@ -69,18 +67,17 @@ class GitHubAppTokens:
     )
 
     async def bound(self, workspace_id: UUID, store: CredentialStore) -> bool:
-        """Whether this workspace bound an installation — the stored seal's presence, no mint. A
-        seal this deploy cannot open is not a binding: it opens no egress and says so, rather than
-        reporting a credential the wire would then fail to produce."""
+        """Whether this workspace bound an installation — the stored seal's presence, no mint.
+
+        A seal this deploy cannot open raises here exactly as it does in `secret`, and that identity
+        is the point: this answers for the sandbox export while `secret` answers for the wire, so a
+        `False` here would export the member's own token for a host the wire refuses to admit. One
+        unopenable value, one answer — this slot yields nothing to either role."""
         try:
             sealed = await store.get(workspace_id, self.installation_slot)
         except CredentialSlotUnset:
             return False
-        try:
-            open_installation(store.fernet, workspace_id, self.installation_slot, sealed)
-        except CredentialRequestInvalid:
-            warn("github_app.installation_binding_unreadable", slot=self.installation_slot)
-            return False
+        open_installation(store.fernet, workspace_id, self.installation_slot, sealed)
         return True
 
     async def secret(self, workspace_id: UUID, store: CredentialStore) -> str | None:

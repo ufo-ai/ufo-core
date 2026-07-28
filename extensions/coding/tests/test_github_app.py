@@ -396,18 +396,33 @@ async def test_bound_reports_a_binding_this_deploy_can_open() -> None:
     assert await tokens.bound(workspace_id, _Store(fernet=fernet)) is True
 
 
-async def test_bound_refuses_a_seal_this_deploy_cannot_open() -> None:
+async def test_bound_refuses_a_seal_this_deploy_cannot_open_exactly_as_secret_does() -> None:
     """A stored value that is not this deploy's own seal for this workspace and slot is not a
-    binding: it opens no egress rather than reporting a credential the wire would then fail on."""
+    binding — and it refuses the same way in both roles.
+
+    `bound` answers for the sandbox export and `secret` for the wire. Answering `False` here while
+    `secret` raises is what exports the member's own token into a sandbox whose proxy then refuses
+    the host: git configured to authenticate against a host that admits nothing. An unset slot is
+    still plainly `False`, because that is a workspace with no installation rather than one holding
+    a value nobody can use."""
     VALUES.clear()
     fernet = Fernet(Fernet.generate_key())
     workspace_id = uuid4()
-    VALUES[(workspace_id, SLOT)] = seal_installation(
-        Fernet(Fernet.generate_key()), workspace_id, SLOT, INSTALLATION
-    )
+    store = _Store(fernet=fernet)
 
-    assert await _tokens().bound(workspace_id, _Store(fernet=fernet)) is False
+    assert await _tokens().bound(workspace_id, store) is False
 
-    VALUES[(workspace_id, SLOT)] = INSTALLATION
+    for unopenable in (
+        seal_installation(Fernet(Fernet.generate_key()), workspace_id, SLOT, INSTALLATION),
+        seal_installation(fernet, uuid4(), SLOT, INSTALLATION),
+        INSTALLATION,
+    ):
+        VALUES[(workspace_id, SLOT)] = unopenable
+        with pytest.raises(CredentialRequestInvalid):
+            await _tokens().bound(workspace_id, store)
+        with pytest.raises(CredentialRequestInvalid):
+            await _tokens().secret(workspace_id, store)
 
-    assert await _tokens().bound(workspace_id, _Store(fernet=fernet)) is False
+    VALUES[(workspace_id, SLOT)] = seal_installation(fernet, workspace_id, SLOT, INSTALLATION)
+
+    assert await _tokens().bound(workspace_id, store) is True

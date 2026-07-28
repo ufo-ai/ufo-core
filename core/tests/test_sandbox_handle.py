@@ -750,6 +750,62 @@ async def test_open_sandbox_withholds_and_warns_on_a_selection_the_row_does_not_
     assert not any("169.254" in str(entry) for entry in warned)
 
 
+async def test_open_sandbox_survives_a_keyed_slot_whose_source_raises(
+    db: None, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The export half of the isolation the wire already has. A source that cannot answer withholds
+    its own slot and nothing more: the sandbox still opens, so a turn that never touches that
+    provider runs, and the slot's env is simply absent rather than present and unusable.
+
+    Isolating here matters as much as at the proxy, because this call is on the path of every
+    sandbox open — an escaping fault would fail every turn in the workspace, which is the failure
+    this whole change exists to remove rather than relocate."""
+    workspace_id, conversation_id = await _conversation()
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    await store.put(workspace_id, "datadog_api_key", "dd-api-real")
+    await store.put(workspace_id, "datadog_application_key", "dd-app-real")
+
+    class _Unusable:
+        async def secret(self, workspace_id: UUID, store: CredentialStore) -> str | None:
+            raise ValueError("stored binding does not open")
+
+        async def bound(self, workspace_id: UUID, store: CredentialStore) -> bool:
+            raise ValueError("stored binding does not open")
+
+    slots = (
+        replace(DATADOG_SLOTS[0], source=_Unusable()),
+        DATADOG_SLOTS[1],
+        DATADOG_SLOTS[2],
+    )
+    carrier = _ResumeRecordingCarrier(container_id="sbx-1")
+
+    with caplog.at_level(logging.WARNING, logger="ufo"):
+        await _open_sandbox(
+            carrier,
+            "e2b",
+            FilesystemBlobStore(root=tmp_path),
+            None,
+            PROXY,
+            RUN_TOKENS,
+            _turn(workspace_id, conversation_id),
+            None,
+            {},
+            store,
+            slots,
+        )
+
+    env = carrier.specs[0].env
+    assert "DD_API_KEY" not in env
+    assert env["DD_APP_KEY"] == "SENTINEL_DD_APP"
+    withheld = [
+        record.ufo
+        for record in caplog.records
+        if record.getMessage() == "sandbox.credential_slot_failed"
+    ]
+    assert [entry["slot"] for entry in withheld] == ["datadog_api_key"]
+    assert withheld[0]["error_class"] == "ValueError"
+
+
 async def test_open_sandbox_configures_git_to_authenticate_to_the_proxy(
     db: None, tmp_path: Path
 ) -> None:
