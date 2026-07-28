@@ -238,28 +238,82 @@ test("the join is reachable without a pointer, and Escape leaves", async () => {
   await page.close();
 });
 
-test("craft close on a held cursor rather than fleeing it", async () => {
-  const page = await open(10);
-  const nearest = () =>
-    page.evaluate(() =>
-      Math.min(
-        ...[...document.querySelectorAll(".craft")]
-          .filter((el) => Number(el.style.opacity) > 0.3)
-          .map((el) => {
-            const b = el.getBoundingClientRect();
-            return Math.hypot(b.x + b.width / 2 - 600, b.y + b.height / 2 - 400);
-          }),
-      ),
-    );
-  const samples = [];
-  for (let tick = 0; tick < 60; tick++) {
-    await page.mouse.move(600, 400);
-    await page.waitForTimeout(100);
-    samples.push(await nearest());
+// The craft is the mark and stays: the copy rule bans metaphor words, never the art. Glyph counts
+// measured across 2400 samples of 20 craft mid-morph — min 11, median 24, never 0 — so a craft
+// emptied while keeping its class and opacity fails here rather than passing unnoticed.
+const CRAFT_MIN_GLYPHS = 8;
+
+test("every craft renders as drawn glyphs", async () => {
+  const page = await open(4);
+  const drawn = await page.$$eval(".craft", (els) =>
+    els.map((el) => (el.textContent.match(/\S/g) ?? []).length),
+  );
+  assert.equal(drawn.length, 4);
+  for (const glyphs of drawn) {
+    assert.ok(glyphs >= CRAFT_MIN_GLYPHS, `a craft rendered only ${glyphs} glyphs`);
   }
-  const gathered = samples.filter((d) => d < 120).length / samples.length;
+  await page.close();
+});
+
+// Curiosity is measured in frames the page actually rendered, never in elapsed time: the pull
+// advances once per frame, so charging it for frames a loaded machine never delivered measures the
+// runner instead of the animation. 900 frames of drift is ~45 simulated seconds at the dt cap,
+// against a gather that takes 1-365 frames.
+const CURSOR = { x: 600, y: 400 };
+const NEAR_RADIUS_PX = 120;
+const GATHER_FRAMES = 900;
+const STAY_FRAMES = 90;
+const STAY_SHARE = 0.8;
+// A frame budget cannot bound a loop that is never handed a frame: if rAF stalls outright, nothing
+// inside the page runs to notice. This is the liveness backstop, never the measurement — it fails
+// with a message instead of hanging on the job's 15-minute ceiling. The test itself measures ~2s.
+const STALL_BACKSTOP = { timeout: 120_000 };
+
+test("craft close on a held cursor rather than fleeing it", STALL_BACKSTOP, async () => {
+  const page = await open(10);
+  await page.mouse.move(CURSOR.x, CURSOR.y);
+  const gathered = await page.evaluate(
+    async ({ x, y, radius, gatherFrames, stayFrames }) => {
+      const nearest = () =>
+        Math.min(
+          ...[...document.querySelectorAll(".craft")]
+            .filter((el) => Number(el.style.opacity) > 0.3)
+            .map((el) => {
+              const b = el.getBoundingClientRect();
+              return Math.hypot(b.x + b.width / 2 - x, b.y + b.height / 2 - y);
+            }),
+        );
+      const frame = () => new Promise(requestAnimationFrame);
+      let arrived = null;
+      for (let count = 1; count <= gatherFrames && arrived === null; count++) {
+        await frame();
+        if (nearest() < radius) arrived = count;
+      }
+      if (arrived === null) return { arrived, stayed: 0 };
+      let near = 0;
+      for (let count = 0; count < stayFrames; count++) {
+        await frame();
+        if (nearest() < radius) near++;
+      }
+      return { arrived, stayed: near / stayFrames };
+    },
+    {
+      ...CURSOR,
+      radius: NEAR_RADIUS_PX,
+      gatherFrames: GATHER_FRAMES,
+      stayFrames: STAY_FRAMES,
+    },
+  );
   // Under the avoidance this replaced, a craft could not sit inside the cursor's radius at all.
-  assert.ok(gathered > 0.5, `a craft was near the cursor in only ${(gathered * 100).toFixed(0)}%`);
+  assert.ok(
+    gathered.arrived !== null,
+    `no craft reached ${NEAR_RADIUS_PX}px of the cursor in ${GATHER_FRAMES} frames`,
+  );
+  // Arriving once could be a flyby; curiosity holds it there.
+  assert.ok(
+    gathered.stayed > STAY_SHARE,
+    `a craft was near the cursor in only ${(gathered.stayed * 100).toFixed(0)}% of frames`,
+  );
   await page.close();
 });
 
