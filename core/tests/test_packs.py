@@ -104,9 +104,8 @@ def test_chief_of_staff_pack_is_discovered_with_its_bundle() -> None:
 
 def test_activating_the_chief_of_staff_pack_makes_exactly_its_bundle_active() -> None:
     """The chief-of-staff pack narrows to its feed-and-review bundle (brokered connectors plus
-    sources, memory, the Slack front door, scheduling, watches, todos, workspace
-    skills, self-improvement) in declared order, followed by the pack's own manifest carrying its
-    four workflow skills."""
+    sources, memory, the Slack front door, scheduling, todos, workspace skills, self-improvement)
+    in declared order, followed by the pack's own manifest carrying its four workflow skills."""
     manifests = load_manifests(chief_of_staff.NAME)
     assert [manifest.name for manifest in manifests] == [
         *chief_of_staff.EXTENSIONS,

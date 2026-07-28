@@ -2,7 +2,7 @@
 
 This stage is part of startup and extension discovery. Each manifest is like a label on a plug-in box: it tells the host system what the extension can do, what permissions it needs, and what background work or web routes should be wired in.
 
-The Composio and Pipedream manifests register external app connectors and the OAuth sign-in routes used to connect a user’s accounts. The connectors manifest defines shared connector tools, the connector object type, and prompt text that teaches the assistant how to talk about outside tools. The sources manifest adds connector-based content sources, the stored objects they create, the credentials they require, and a hook that reacts when synced page content changes. Page alerts build on that by registering chat tools for watching pages and a background hook that responds to page updates. Scheduled tasks declare a tool, object type, scheduling skill, and recurring job so work can run later. Self-improvement registers a scheduled evaluation job. The YC manifest adds authenticated YC and Bookface reading through tools, sources, onboarding, credentials, and skills.
+The Composio and Pipedream manifests register external app connectors and the OAuth sign-in routes used to connect a user’s accounts. The connectors manifest defines shared connector tools, the connector object type, and prompt text that teaches the assistant how to talk about outside tools. The sources manifest adds connector-based content sources, the stored objects they create, the credentials they require, and a hook that reacts when synced page content changes. Scheduled tasks declare a tool, object type, scheduling skill, and recurring job so work can run later. Self-improvement registers a scheduled evaluation job. The YC manifest adds authenticated YC and Bookface reading through tools, sources, onboarding, credentials, and skills.
 
 ## Files in this stage
 
@@ -64,35 +64,6 @@ def manifest() -> Manifest
 
 *Call graph*: 2 external calls (__init__, __init__).
 
-
-### Page alert hooks
-This manifest registers page-watch tools and the background hook that reacts to synced-page changes.
-
-### `extensions/page_alerts/ufo_ext_page_alerts/manifest.py`
-
-`config` · `startup / extension discovery`
-
-This file is the extension’s “front desk sign.” It does not contain the alerting logic itself. Instead, it declares what the rest of the system can call. Without it, the platform would not know that this extension has tools like “watch pages,” “list watches,” or “cancel a watch,” and it would not know to run the page-change checker when a synced page is updated.
-
-The manifest gives the extension a name and version, then builds a Manifest object. Inside that manifest are three ToolDef entries. A tool is something the chat agent can offer during a conversation. Each tool has a name, a plain-language description, an input model that says what information the tool expects, and a handler function that does the real work.
-
-The file also declares one HookSpec for the page_change event. A hook is like asking the platform, “Please call this function whenever this kind of thing happens.” Here, when a page changes, the platform should call on_page_change, which can decide whether the change matches any saved watch and should alert the original conversation.
-
-#### Function details
-
-##### `manifest`  (lines 21–50)
-
-```
-def manifest() -> Manifest
-```
-
-**Purpose**: Builds and returns the extension manifest, which is the platform-readable description of this extension’s tools and event hook. Someone would use it when loading the extension so the platform knows what the extension can do.
-
-**Data flow**: It starts with the fixed extension name and version from this file. It creates three tool definitions, each connecting a chat-visible tool name to its expected input shape and its real handler function. It also creates a hook definition for page_change events. The result is one Manifest object that the platform can read to register all of these pieces.
-
-**Call relations**: During extension loading, this function is the piece that gathers the extension’s public promises in one place. It calls ToolDef.__init__ to describe each chat tool, HookSpec.__init__ to describe the page-change event listener, and Manifest.__init__ to package everything together for the platform.
-
-*Call graph*: 3 external calls (__init__, __init__, __init__).
 
 
 ### Pipedream authorization

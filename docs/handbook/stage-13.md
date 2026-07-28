@@ -9,7 +9,7 @@ The recall and enrichment parts then make the saved knowledge useful. Indexing s
 ## Sub-stages
 
 - [Provider-specific source connectors](stage-13.1.md) `stage-13.1` — 52 files
-- [Recall, indexing, alerts, memory consolidation, and graph extraction](stage-13.2.md) `stage-13.2` — 17 files
+- [Recall, indexing, memory consolidation, and graph extraction](stage-13.2.md) `stage-13.2` — 15 files
 
 ## Files in this stage
 

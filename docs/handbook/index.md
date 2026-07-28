@@ -128,11 +128,11 @@ This stage is behind-the-scenes setup. It is made of “manifest” files, which
 
 The browser manifest adds a browser helper agent and the instructions for sending web-browsing tasks to it. The coding manifest adds a coding helper, programming skills, GitHub access, routes, and needed credentials. The documents manifest lists skills for working with Word, PowerPoint, PDFs, spreadsheets, themes, and reviews. The research manifest adds research tools, research-focused helper agents, prompts, and skills. The sites manifest declares website-building tools, prompts, skills, and its site-building helper profile. The brief-pipeline manifest ties several helper agent stages together and adds a skill that teaches a parent agent to run them in sequence. Together, these files let the system discover and assemble specialist capabilities without hard-coding them into the core.
 
-### [Connector, source, automation, and scheduled-job extension manifests](stage-3.6.md) `stage-3.6` — 8 files
+### [Connector, source, automation, and scheduled-job extension manifests](stage-3.6.md) `stage-3.6` — 7 files
 
 This stage is part of startup and extension discovery. Each manifest is like a label on a plug-in box: it tells the host system what the extension can do, what permissions it needs, and what background work or web routes should be wired in.
 
-The Composio and Pipedream manifests register external app connectors and the OAuth sign-in routes used to connect a user’s accounts. The connectors manifest defines shared connector tools, the connector object type, and prompt text that teaches the assistant how to talk about outside tools. The sources manifest adds connector-based content sources, the stored objects they create, the credentials they require, and a hook that reacts when synced page content changes. Page alerts build on that by registering chat tools for watching pages and a background hook that responds to page updates. Scheduled tasks declare a tool, object type, scheduling skill, and recurring job so work can run later. Self-improvement registers a scheduled evaluation job. The YC manifest adds authenticated YC and Bookface reading through tools, sources, onboarding, credentials, and skills.
+The Composio and Pipedream manifests register external app connectors and the OAuth sign-in routes used to connect a user’s accounts. The connectors manifest defines shared connector tools, the connector object type, and prompt text that teaches the assistant how to talk about outside tools. The sources manifest adds connector-based content sources, the stored objects they create, the credentials they require, and a hook that reacts when synced page content changes. Scheduled tasks declare a tool, object type, scheduling skill, and recurring job so work can run later. Self-improvement registers a scheduled evaluation job. The YC manifest adds authenticated YC and Bookface reading through tools, sources, onboarding, credentials, and skills.
 
 ## [User-facing surfaces receive and normalize inbound requests](stage-4.md) `stage-4` — 5 files
 
@@ -358,13 +358,13 @@ This stage is behind-the-scenes support for bringing outside team knowledge into
 
 The Airtable connector reads bases, tables, and records, but only in read-only mode, so it never changes the original Airtable data. The Calendly connector reads scheduling information such as users, event types, groups, scheduled meetings, and invitees. The Confluence connector pulls Atlassian spaces, pages, blog posts, comments, groups, and audit records, turning them into readable text. The Notion connector does the same for pages, databases, blocks, comments, and users. The Slack connector reads workspace people, channels, messages, threads, and participants. The Y Combinator connector imports selected YC guidance and limited directory-style searches, such as companies, founders, jobs, and posts, as shared searchable memory.
 
-### [Recall, indexing, alerts, memory consolidation, and graph extraction](stage-13.2.md) `stage-13.2` — 17 files
+### [Recall, indexing, memory consolidation, and graph extraction](stage-13.2.md) `stage-13.2` — 15 files
 
 This stage is shared behind-the-scenes support for remembering, searching, and reacting to changed pages. When text changes, the indexing rules split it into chunks, create embeddings, which are number lists that capture meaning, and store them for later search. The OpenAI embedding extension makes those vectors. The default index keeps them locally, while the Turbopuffer extension can send them to an external search service.
 
 On top of that search base, the memory extension turns useful page content into longer-lasting facts. Its manifest plugs in recall hooks, tools, and background jobs. Its store saves and searches memories, subjects label who each memory belongs to, and the core memory doorway gives all providers the same search shape. The condenser turns raw pages into memories and later merges older memories into summaries. Memory objects let callers read saved memories safely.
 
-The knowledge-graph extension adds another view: it extracts entities and links from pages, then lets queries follow those connections. Finally, page alerts watch for chosen topics and notify the conversation when matching changed pages appear.
+The knowledge-graph extension adds another view: it extracts entities and links from pages, then lets queries follow those connections.
 
 ## [Scheduled, recurring, billing, evaluation, and self-improvement jobs](stage-14.md) `stage-14` — 16 files
 

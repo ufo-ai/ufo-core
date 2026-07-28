@@ -1,6 +1,6 @@
 ---
 name: sync
-description: The recurring review-and-route run — turn what accumulated (transcripts, channels, the state repo) into a proposed fan-out of observations, agenda items, todos, and watches, written only after approval. Load when a scheduled sync fires or the member asks to sync.
+description: Load when a scheduled chief-of-staff sync fires or the member asks to review what accumulated across their inbox, channels, and state repo.
 metadata:
   depends:
     - triage
@@ -8,8 +8,8 @@ metadata:
 # Sync — review what accumulated, route it, write on approval
 
 Runs on its schedule in the inbox conversation (the member's private channel with just them and
-the bot). The pipeline has already done the heavy lift off-turn — sources synced, pages distilled
-into memory, watches classified. This run's job is judgment and routing.
+the bot). The pipeline has already done the heavy lift off-turn — sources synced and pages
+distilled into memory. This run's job is judgment and routing.
 
 ## 1 — Establish the window
 
@@ -22,7 +22,6 @@ review what recall surfaces as recent and say the run is seeding.
 - Per person who matters now: `memory_search` their name and where the org chart places them
   (triage rule 2). Note fresh facts, commitments, concerns.
 - The inbox: what the member dropped in this channel since the last run is in the conversation.
-- Standing loops: `list_page_watches`.
 
 ## 3 — Form insights
 
@@ -36,7 +35,6 @@ weight per `triage`, and destinations from this closed set — nothing else is a
 | Decision record | `memory_update` — `decision — <what>, because <why>`, memory_kind `decision` |
 | Kudos | `memory_update` — `kudos — <person>: <what>`, memory_kind `event` |
 | Todo | `update_todo_list` / `update_todo_status` on this conversation's board |
-| Follow-through | `watch_pages` — a topic the page proving it closed will match — plus a todo naming the loop |
 
 Memory stays private to the member (`shared` false) — this is one person's operating manual.
 

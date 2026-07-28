@@ -519,7 +519,6 @@ bundle installs OSS, on-prem, or hosted.
 |---|---|
 | OpenRouter (any model router) | models |
 | Slack surface (ingest + writeback + attachments) | surfaces, credentials, skills |
-| Page alerts (chat-bound watches over synced pages, off-turn classify + alert turn) | tools, hooks (page_change) |
 | Brief pipeline (typed outline → draft → critic stages the agent chains) | subagents, skills |
 | Composio / Pipedream connector brokers | connectors, routes (OAuth) |
 | Docker, E2B | carriers |
@@ -540,7 +539,7 @@ Packs (activation bundles, not code — see Packs): **assistant** bundles memory
 (its BUA engine over the default `sandbox_cdp` transport), brokered connectors, and web research
 (the research tools over the Exa search backend) (the flagship); **chief-of-staff** bundles
 brokered connector grants plus feed sync (Google Meet transcripts and Gemini smart notes, Slack, a
-folder-synced state repo) with memory, the Slack surface, scheduling, page watches, todos, workspace
+folder-synced state repo) with memory, the Slack surface, scheduling, todos, workspace
 skills, and self-improvement behind four pack skills (`sync`, `prep`, `triage`, setup); **yc**
 bundles authenticated YC research, indexed YC guidance, memory, documents, scheduled tasks, todos,
 and founder workflows. **support bot** bundles knowledge sources, keys onboarding, and websites.

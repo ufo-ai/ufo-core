@@ -11,7 +11,7 @@ The rest of the stage decides what abilities the service will have. Pack discove
 - [Core extension discovery and pinning](stage-3.3.md) `stage-3.3` — 2 files
 - [Web, shell, communication, and live-surface extension manifests](stage-3.4.md) `stage-3.4` — 5 files
 - [Agent, skill, document, research, and creation extension manifests](stage-3.5.md) `stage-3.5` — 6 files
-- [Connector, source, automation, and scheduled-job extension manifests](stage-3.6.md) `stage-3.6` — 8 files
+- [Connector, source, automation, and scheduled-job extension manifests](stage-3.6.md) `stage-3.6` — 7 files
 
 ## Files in this stage
 

@@ -14,8 +14,7 @@ Given a name:
 2. **Pull the open threads.** Focused `memory_search` passes: `1:1 <name> — raise` (the agenda),
    `observation — <name>` (fresh context), `kudos — <name>` (wins not yet named), and the bare
    name (anything recent the conventions missed).
-3. **Check the loops.** `list_page_watches` for watches naming them; this conversation's todo
-   board for their items.
+3. **Check the loops.** Read this conversation's todo board for their items.
 4. **Brief.** One message: the agenda ordered by `triage`, then commitments in flight (theirs and
    the member's), then wins, then watch-outs. Short enough to read at the meeting-room door.
 5. **Close the loop after.** When the member says the 1:1 happened, offer to mark raised items:

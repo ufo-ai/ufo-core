@@ -1,10 +1,10 @@
-# Recall, indexing, alerts, memory consolidation, and graph extraction  `stage-13.2`
+# Recall, indexing, memory consolidation, and graph extraction  `stage-13.2`
 
 This stage is shared behind-the-scenes support for remembering, searching, and reacting to changed pages. When text changes, the indexing rules split it into chunks, create embeddings, which are number lists that capture meaning, and store them for later search. The OpenAI embedding extension makes those vectors. The default index keeps them locally, while the Turbopuffer extension can send them to an external search service.
 
 On top of that search base, the memory extension turns useful page content into longer-lasting facts. Its manifest plugs in recall hooks, tools, and background jobs. Its store saves and searches memories, subjects label who each memory belongs to, and the core memory doorway gives all providers the same search shape. The condenser turns raw pages into memories and later merges older memories into summaries. Memory objects let callers read saved memories safely.
 
-The knowledge-graph extension adds another view: it extracts entities and links from pages, then lets queries follow those connections. Finally, page alerts watch for chosen topics and notify the conversation when matching changed pages appear.
+The knowledge-graph extension adds another view: it extracts entities and links from pages, then lets queries follow those connections.
 
 ## Files in this stage
 
@@ -2178,115 +2178,3 @@ async def _nodes(self, ids: set[UUID]) -> tuple[EntityNode, ...]
 **Call relations**: `GraphStore._expand` calls this after the edge walk is complete. The returned nodes are paired with the traversed edges to form the final `Subgraph`.
 
 *Call graph*: called by 1 (_expand); 2 external calls (__init__, select).
-
-
-### Page alerts
-The page-alerts extension package and alert logic let conversations watch synced pages for matching changes and fire notifications.
-
-### `extensions/page_alerts/ufo_ext_page_alerts/__init__.py`
-
-`other` · `startup/import time`
-
-This is the smallest possible starting point for the page alerts extension. In Python, an `__init__.py` file tells the language that a folder should be treated as an importable package. That matters because other parts of the project can then refer to this extension by its package name and load code from inside it. Think of it like a sign on a folder that says, “this folder belongs together and can be opened as one module.” This file does not define any functions, classes, or behavior by itself. Its main value is organizational: it gives the extension a clear package boundary and a brief description. Without it, depending on the Python version and packaging setup, the extension might be harder or impossible to import in the expected way.
-
-
-### `extensions/page_alerts/ufo_ext_page_alerts/alerts.py`
-
-`domain_logic` · `tool calls and page-change hook handling`
-
-This file solves a simple problem: a person may not want to keep checking every synced page by hand, but they do want to know when something relevant changes. It acts like a saved search with a messenger attached. A user creates a “watch” from a conversation by naming a topic. The watch is stored with the topic, the conversation where it was requested, and the agent that should later speak there.
-
-When synced pages change, the page-change hook reads all saved watches. For each changed page and each watch, it asks the configured language model a tightly limited yes-or-no question: does this page concern the watch topic? Only a small excerpt of the page is sent, so the check is bounded and predictable. If the answer contains “MATCH,” the extension invokes a new turn in the original conversation, asking the agent to explain the change and why it matters.
-
-The file also includes tools for listing current watches and canceling one by name. Watch names are normalized into simple lowercase “slugs,” so names can safely become storage keys. The alert invocation uses an idempotency key based on the watch and page digest, which helps prevent duplicate alerts if the same change batch is replayed.
-
-#### Function details
-
-##### `_slug`  (lines 38–42)
-
-```
-def _slug(raw: str) -> str
-```
-
-**Purpose**: Turns a user-provided watch name into a safe, simple storage name. It makes the name lowercase, replaces runs of non-letter-or-number characters with dashes, and rejects names that contain no usable letters or digits.
-
-**Data flow**: It receives raw text from a user or topic. It cleans that text into a lowercase dash-separated name. It returns the cleaned name, or raises an error if the result would be empty.
-
-**Call relations**: When a watch is created, watch_pages uses this to decide the saved watch key. When a watch is canceled, cancel_page_watch uses the same cleanup so the user can refer to the watch by a human-friendly name and still reach the stored entry.
-
-*Call graph*: called by 2 (cancel_page_watch, watch_pages); 1 external calls (sub).
-
-
-##### `watch_pages`  (lines 45–66)
-
-```
-async def watch_pages(ctx: ToolContext, args: WatchPagesInput) -> ToolResult
-```
-
-**Purpose**: Creates a new page watch from inside a conversation. A user gives a topic, optionally a name, and this function records that future matching page changes should alert the current conversation.
-
-**Data flow**: It receives the tool context, which includes the current conversation, current agent, and extension storage, plus the requested topic and optional name. It checks that extension context is available, creates a safe watch name, stores the topic and conversation details under that name, then returns a short confirmation message to the user.
-
-**Call relations**: This is called when the user asks the tool to start watching pages. It relies on _slug to make a safe watch key, writes the watch into the extension store, and returns its answer as tool text content.
-
-*Call graph*: calls 1 internal fn (_slug); 2 external calls (__init__, __init__).
-
-
-##### `list_page_watches`  (lines 69–79)
-
-```
-async def list_page_watches(ctx: ToolContext, args: ListPageWatchesInput) -> ToolResult
-```
-
-**Purpose**: Shows the user the page watches that are currently saved. It helps people remember what topics are being monitored and under which names.
-
-**Data flow**: It receives the tool context and reads all stored entries whose keys start with the watch prefix. If none exist, it returns “No page watches.” Otherwise it extracts each watch’s topic and returns a plain text list of watch names and topics.
-
-**Call relations**: This is called when a user asks to see existing watches. It uses _watch_fields to safely read each stored watch record before formatting the response.
-
-*Call graph*: calls 1 internal fn (_watch_fields); 2 external calls (__init__, __init__).
-
-
-##### `cancel_page_watch`  (lines 82–89)
-
-```
-async def cancel_page_watch(ctx: ToolContext, args: CancelPageWatchInput) -> ToolResult
-```
-
-**Purpose**: Deletes an existing page watch by name. This stops future page changes from producing alerts for that watch.
-
-**Data flow**: It receives the tool context and the requested watch name. It converts the name into the same safe form used when the watch was created, checks whether that stored watch exists, deletes it if found, and returns a confirmation message. If no matching watch exists, it raises a clear error.
-
-**Call relations**: This is called when a user asks to stop watching a topic. It uses _slug to find the correct storage key, then removes that key from the extension store.
-
-*Call graph*: calls 1 internal fn (_slug); 2 external calls (__init__, __init__).
-
-
-##### `on_page_change`  (lines 92–146)
-
-```
-async def on_page_change(ctx: HookContext) -> HookOutcome
-```
-
-**Purpose**: Runs when synced pages change and decides whether any saved watch should produce an alert. It compares each changed page with each watch topic and, on a match, starts an alerting turn in the original conversation.
-
-**Data flow**: It receives a hook context containing a page-change batch, extension storage, a model, and the ability to invoke an agent turn. It ignores deleted pages, clips each changed page body to a limited excerpt, asks the model whether the excerpt matches each watch topic, and for positive matches invokes the saved conversation and agent with an alert prompt. It returns no visible hook result, but it may cause alert messages to be generated elsewhere.
-
-**Call relations**: The system calls this after the source page-sync pipeline reports changes. It reads watches created by watch_pages, uses _watch_fields to unpack their saved data, asks the configured model for a MATCH or NO verdict, and then hands matching cases to the extension invocation path so the alert is delivered through the same conversation surface where the watch was created.
-
-*Call graph*: calls 1 internal fn (_watch_fields); 3 external calls (__init__, __init__, UUID).
-
-
-##### `_watch_fields`  (lines 149–154)
-
-```
-def _watch_fields(key: str, value: object) -> tuple[str, str, str]
-```
-
-**Purpose**: Checks and unpacks a stored watch record. It makes sure the saved value has the expected topic, conversation ID, and agent ID fields before other code trusts it.
-
-**Data flow**: It receives a storage key and the stored value found under that key. If the value has the expected shape, it returns the topic, conversation ID, and agent ID as text. If the stored data is malformed, it raises an error naming the broken watch.
-
-**Call relations**: list_page_watches uses this before showing saved watches to a user. on_page_change uses it before deciding where to send an alert. In both cases it acts as a small safety gate between raw stored data and the rest of the alert flow.
-
-*Call graph*: called by 2 (list_page_watches, on_page_change).

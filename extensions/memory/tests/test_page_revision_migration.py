@@ -136,7 +136,6 @@ def test_page_revision_migration_invalidates_derivations_and_requests_full_repla
             ("memory", "page_change_cursor:derive_facts", f"{now.isoformat()}|{page_id}"),
             ("memory", "unrelated", "value"),
             ("sample", "page_change_cursor:index_pages", f"{now.isoformat()}|{page_id}"),
-            ("page_alerts", "page_change_cursor:dispatch", f"{now.isoformat()}|{page_id}"),
             ("sources", "page_change_cursor:notify", f"{now.isoformat()}|{page_id}"),
             ("sample", "pageXchangeYcursor:opaque", "untouched"),
         ):
@@ -196,7 +195,6 @@ def test_page_revision_migration_invalidates_derivations_and_requests_full_repla
     assert cursors == {
         "memory:unrelated": "value",
         "sample:page_change_cursor:index_pages": translated,
-        "page_alerts:page_change_cursor:dispatch": translated,
         "sources:page_change_cursor:notify": translated,
         "sample:pageXchangeYcursor:opaque": "untouched",
     }
