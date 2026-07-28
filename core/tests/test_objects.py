@@ -1423,6 +1423,273 @@ async def test_conversation_transcript_keeps_member_and_agent_gates(
     assert (workspace_dir / path).is_file()
 
 
+async def test_main_targets_child_conversations_and_artifacts_with_the_requesters_audience(
+    db: None, tmp_path: Path
+) -> None:
+    workspace_id = await _workspace()
+    tools = _object_tools()
+    room = room_audience("slack", "CRESEARCH")
+    with ws(workspace_id):
+        alice = await _member(workspace_id, ADMIN_CREATED_AT)
+        bob = await _member(workspace_id, JOINER_CREATED_AT)
+        main_agent = await _agent_row(workspace_id, name="assistant", is_main=True)
+        child_agent = await _agent_row(workspace_id, name="research")
+        alice_private = await _turn_row(
+            workspace_id,
+            agent_id=child_agent,
+            member_id=alice,
+        )
+        bob_private = await _turn_row(
+            workspace_id,
+            agent_id=child_agent,
+            member_id=bob,
+        )
+        room_turn = await _turn_row(
+            workspace_id,
+            agent_id=child_agent,
+            audience=room,
+        )
+        reader = await _turn_row(
+            workspace_id,
+            agent_id=main_agent,
+            audience=room,
+        )
+        ctx, workspace_dir = await _workspace_context(
+            reader,
+            tmp_path,
+            audience=room,
+        )
+        alice_ctx = replace(ctx, speaker_member_id=alice)
+        bob_ctx = replace(ctx, speaker_member_id=bob)
+        await Transcript(blob=ctx.blob, conversation_id=alice_private.conversation_id).write(
+            LAUNCH_EXCHANGE
+        )
+        await Transcript(blob=ctx.blob, conversation_id=room_turn.conversation_id).write(
+            LAUNCH_EXCHANGE
+        )
+
+        async def add_artifact(turn: Turn, filename: str, body: bytes) -> str:
+            blob_key = f"artifacts/{turn.id}/{filename}"
+            await ctx.blob.put(blob_key, body)
+            await _shared_artifact_row(turn, blob_key, filename, len(body))
+            return f"{turn.conversation_id.hex[:8]}-{filename.replace('.', '-')}"
+
+        alice_artifact = await add_artifact(
+            alice_private,
+            "alice.txt",
+            b"private research",
+        )
+        bob_artifact = await add_artifact(
+            bob_private,
+            "bob.txt",
+            b"bob research",
+        )
+        room_artifact = await add_artifact(
+            room_turn,
+            "room.txt",
+            b"room research",
+        )
+
+        with agent(main_agent):
+            conversations_listing = json.loads(
+                await _text(
+                    tools,
+                    "object_list",
+                    alice_ctx,
+                    kind=CONVERSATION_KIND,
+                    agent="research",
+                )
+            )
+            conversation = yaml.safe_load(
+                await _text(
+                    tools,
+                    "object_get",
+                    alice_ctx,
+                    kind=CONVERSATION_KIND,
+                    name=str(alice_private.conversation_id),
+                    agent="research",
+                )
+            )
+            artifacts = json.loads(
+                await _text(
+                    tools,
+                    "object_list",
+                    alice_ctx,
+                    kind=ARTIFACT_KIND,
+                    agent="research",
+                )
+            )
+            artifact = yaml.safe_load(
+                await _text(
+                    tools,
+                    "object_get",
+                    alice_ctx,
+                    kind=ARTIFACT_KIND,
+                    name=alice_artifact,
+                    agent="research",
+                )
+            )
+            bob_conversations = json.loads(
+                await _text(
+                    tools,
+                    "object_list",
+                    bob_ctx,
+                    kind=CONVERSATION_KIND,
+                    agent="research",
+                )
+            )
+            bob_artifacts = json.loads(
+                await _text(
+                    tools,
+                    "object_list",
+                    bob_ctx,
+                    kind=ARTIFACT_KIND,
+                    agent="research",
+                )
+            )
+            with pytest.raises(UnknownObject):
+                await _text(
+                    tools,
+                    "object_get",
+                    bob_ctx,
+                    kind=ARTIFACT_KIND,
+                    name=alice_artifact,
+                    agent="research",
+                )
+            with pytest.raises(ValueError, match="cannot be applied across agents"):
+                await _text(
+                    tools,
+                    "object_apply",
+                    alice_ctx,
+                    manifest=yaml.safe_dump(
+                        {
+                            "kind": ARTIFACT_KIND,
+                            "name": alice_artifact,
+                            "spec": {},
+                        }
+                    ),
+                    agent="research",
+                )
+            deleted_artifact = json.loads(
+                await _text(
+                    tools,
+                    "object_delete",
+                    alice_ctx,
+                    kind=ARTIFACT_KIND,
+                    name=alice_artifact,
+                    agent="research",
+                )
+            )
+            with pytest.raises(UnknownObject):
+                await _text(
+                    tools,
+                    "object_get",
+                    alice_ctx,
+                    kind=ARTIFACT_KIND,
+                    name=alice_artifact,
+                    agent="research",
+                )
+
+    assert conversation["agent"] == "research"
+    assert conversation["status"]["workspace_path"] == (
+        f"transcripts/{alice_private.conversation_id}.txt"
+    )
+    assert {row["name"] for row in conversations_listing["objects"]} == {
+        str(alice_private.conversation_id),
+        str(room_turn.conversation_id),
+    }
+    assert artifacts["agent"] == "research"
+    assert {row["name"] for row in artifacts["objects"]} == {
+        alice_artifact,
+        room_artifact,
+    }
+    assert artifact["agent"] == "research"
+    assert artifact["links"] == [
+        {
+            "relation": "created_in",
+            "target": {
+                "kind": "conversation",
+                "name": str(alice_private.conversation_id),
+                "agent": "research",
+            },
+        }
+    ]
+    artifact_path = workspace_dir / "artifacts" / alice_artifact / "alice.txt"
+    assert artifact_path.read_bytes() == b"private research"
+    assert deleted_artifact == {
+        "kind": ARTIFACT_KIND,
+        "name": alice_artifact,
+        "deleted": True,
+        "spec": {
+            "filename": "alice.txt",
+            "subject": "",
+            "media_type": "application/octet-stream",
+        },
+        "agent": "research",
+    }
+    assert {row["name"] for row in bob_conversations["objects"]} == {
+        str(bob_private.conversation_id),
+        str(room_turn.conversation_id),
+    }
+    assert {row["name"] for row in bob_artifacts["objects"]} == {
+        bob_artifact,
+        room_artifact,
+    }
+
+
+@pytest.mark.parametrize("kind", [CONVERSATION_KIND, ARTIFACT_KIND])
+async def test_conversation_and_artifact_targets_require_main_live_member_authority(
+    db: None, tmp_path: Path, kind: str
+) -> None:
+    workspace_id = await _workspace()
+    tools = _object_tools()
+    with ws(workspace_id):
+        member = await _member(workspace_id, ADMIN_CREATED_AT)
+        main_agent = await _agent_row(workspace_id, name="assistant", is_main=True)
+        child_agent = await _agent_row(workspace_id, name="research")
+        main_turn = await _turn_row(workspace_id, agent_id=main_agent)
+        child_turn = await _turn_row(workspace_id, agent_id=child_agent)
+        main_ctx, _ = await _workspace_context(main_turn, tmp_path)
+        main_ctx = replace(main_ctx, speaker_member_id=member)
+        child_ctx = replace(main_ctx, turn=child_turn)
+        with agent(child_agent), pytest.raises(ValueError, match="only the workspace main agent"):
+            await _text(
+                tools,
+                "object_list",
+                child_ctx,
+                kind=kind,
+                agent="assistant",
+            )
+        with agent(main_agent):
+            with pytest.raises(ValueError, match="typed subagent"):
+                await _text(
+                    tools,
+                    "object_list",
+                    replace(
+                        main_ctx,
+                        turn=main_ctx.turn.model_copy(update={"subagent_profile": "research"}),
+                    ),
+                    kind=kind,
+                    agent="research",
+                )
+            with pytest.raises(ValueError, match="exact live member-requested"):
+                await _text(
+                    tools,
+                    "object_list",
+                    replace(main_ctx, speaker_member_id=None),
+                    kind=kind,
+                    agent="research",
+                )
+            with pytest.raises(ValueError, match="no agent named"):
+                await _text(
+                    tools,
+                    "object_list",
+                    main_ctx,
+                    kind=kind,
+                    agent="missing",
+                )
+
+
 async def test_message_requester_reads_their_private_conversation_from_a_shared_turn(
     db: None, tmp_path: Path
 ) -> None:

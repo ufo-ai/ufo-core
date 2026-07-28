@@ -23,6 +23,7 @@ from datetime import datetime
 from typing import ClassVar, Literal, Protocol, get_args
 from uuid import UUID
 
+import sqlalchemy as sa
 import yaml
 from pydantic import (
     BaseModel,
@@ -36,7 +37,10 @@ from pydantic import (
 )
 from pydantic.errors import PydanticInvalidForJsonSchema
 
+from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, JsonValue
+from ufo.object_scope import ObjectAgent, object_agent
+from ufo.schema import tables
 from ufo.tools.context import TextContent, ToolContext, ToolResult
 from ufo.tools.registry import ToolDef
 
@@ -47,6 +51,12 @@ OBJECT_MANIFEST_MAX_BYTES = 65_536
 MATERIALIZE_MAX_BYTES = 33_554_432
 OBJECT_LIST_PAGE = 50
 ENVELOPE_KEYS = frozenset({"kind", "name", "spec"})
+AGENT_TARGETABLE_KINDS = frozenset({"artifact", "conversation", "scheduled_task"})
+AGENT_APPLY_TARGETABLE_KINDS = frozenset({"scheduled_task"})
+AGENT_TARGET_DESCRIPTION = (
+    "Stable agent name for an agent-scoped kind. Omit for this agent. Only the workspace main "
+    "agent may target another agent, on an exact member-requested call."
+)
 
 type Relation = Literal["created_from", "synced_by", "created_in", "reports_to", "superseded_by"]
 
@@ -54,14 +64,15 @@ type _SortRank = Literal[0, 1, 2, 3]
 
 
 class ObjectRef(BaseModel):
-    """One object's canonical identity — a registered kind plus that kind's own object name,
-    displayed `kind/name`. The one navigation currency: search hits, links, and change alerts all
-    hand the agent a ref it can `object_get`."""
+    """One object's canonical identity: a registered kind, that kind's own object name, and the
+    stable agent name when an agent-scoped ref crosses the main-agent control boundary. The
+    agent stays a separate field, never an alternate encoding of the object name."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     kind: str
     name: str
+    agent: str | None = None
 
     @field_validator("kind")
     @classmethod
@@ -99,12 +110,14 @@ class ObjectLink(BaseModel):
 @dataclass(frozen=True)
 class ObjectDetail[SpecT: BaseModel]:
     """One object as its store reads it: the applied spec, the owning row's timestamps (None for a
-    kind whose instances are declarations, not rows), and its typed outgoing links."""
+    kind whose instances are declarations, not rows), its typed outgoing links, and whether the
+    caller may receive the spec."""
 
     spec: SpecT
     created_at: datetime | None
     updated_at: datetime | None
     links: tuple[ObjectLink, ...] = ()
+    spec_visible: bool = True
 
 
 class UnknownKind(ValueError):
@@ -316,7 +329,6 @@ class ObjectOwner:
 class GeneratedObjectOwner(ObjectOwner):
     """An owner whose row may be replaced under the same object name."""
 
-    member_id: UUID
     generation: UUID
 
 
@@ -549,6 +561,7 @@ def _annotation_types(annotation: object) -> tuple[object, ...]:
 
 class ObjectListInput(BaseModel):
     kind: str = ""
+    agent: str = Field(default="", description=AGENT_TARGET_DESCRIPTION)
     query: str = ""
     filters: dict[str, JsonValue] = Field(default_factory=dict)
     order_by: str = "name"
@@ -562,6 +575,7 @@ class ObjectListInput(BaseModel):
 class ObjectGetInput(BaseModel):
     kind: str
     name: str
+    agent: str = Field(default="", description=AGENT_TARGET_DESCRIPTION)
     user_description: str = Field(
         description="Which item you are opening, in plain language for the activity timeline."
     )
@@ -577,6 +591,14 @@ class ObjectExplainInput(BaseModel):
 
 class ObjectApplyInput(BaseModel):
     manifest: str
+    agent: str = Field(
+        default="",
+        description=(
+            "Stable agent name when updating an existing scheduled task. Omit for this agent. "
+            "Only the workspace main agent may target another agent, on an exact "
+            "member-requested call."
+        ),
+    )
     user_description: str = Field(
         description="What you are setting up or changing, in plain language for the activity "
         "timeline."
@@ -586,6 +608,7 @@ class ObjectApplyInput(BaseModel):
 class ObjectDeleteInput(BaseModel):
     kind: str
     name: str
+    agent: str = Field(default="", description=AGENT_TARGET_DESCRIPTION)
     user_description: str = Field(
         description="What you are removing, in plain language for the activity timeline."
     )
@@ -609,7 +632,9 @@ class ObjectVerbs:
                     "`query` searches names, summaries, and string fields; `filters` exactly "
                     "matches first-class fields, and `order_by` with `order` sorts by a field. A "
                     "returned `next_cursor` passed back as `cursor` fetches the next page. Use "
-                    "object_get for one instance's full spec."
+                    "object_get for one instance's full spec. For conversation, artifact, or "
+                    "scheduled_task, the main agent may pass a stable `agent` name to inspect "
+                    "that agent's namespace for the exact requesting member."
                 ),
                 input_model=ObjectListInput,
                 handler=self._list,
@@ -622,7 +647,9 @@ class ObjectVerbs:
                     "live status (next fire time, last sync, fill state), its typed links to "
                     "related objects (each an object_get-able kind/name), and the row's "
                     "created_at/updated_at — recency is the first arbitration signal when "
-                    "retrieved facts conflict."
+                    "retrieved facts conflict. For conversation, artifact, or scheduled_task, "
+                    "the main agent may pass a stable `agent` name to read that agent's namespace "
+                    "for the exact requesting member."
                 ),
                 input_model=ObjectGetInput,
                 handler=self._get,
@@ -645,7 +672,10 @@ class ObjectVerbs:
                     "three top-level keys: `kind`, `name`, and `spec`. An existing name is an "
                     "update, a new one a create; the spec is validated against the kind's "
                     "schema (see object_explain) before anything runs. Kinds that don't accept "
-                    "a mutation refuse with the path that does."
+                    "a mutation refuse with the path that does. For `scheduled_task`, the main "
+                    "agent may pass a stable `agent` name only to update an existing task in that "
+                    "agent's namespace for the exact requesting member. Creating a task remains "
+                    "bound to the executing agent's conversation; artifact mutation is refused."
                 ),
                 input_model=ObjectApplyInput,
                 handler=self._apply,
@@ -656,7 +686,9 @@ class ObjectVerbs:
                 description=(
                     "Delete a workspace object by kind and name. The result echoes the deleted "
                     "spec, so on a kind that accepts create an accidental delete can be "
-                    "re-applied from it."
+                    "re-applied from it. For artifact or scheduled_task, the main agent may pass "
+                    "a stable `agent` name to delete from that agent's namespace for the exact "
+                    "requesting member."
                 ),
                 input_model=ObjectDeleteInput,
                 handler=self._delete,
@@ -666,28 +698,34 @@ class ObjectVerbs:
 
     async def _list(self, ctx: ToolContext, args: ObjectListInput) -> ToolResult:
         if not args.kind:
+            if args.agent:
+                raise ValueError("an agent target requires an agent-scoped object kind")
             kinds = [
                 {"kind": name, "description": entry.kind.description}
                 for name, entry in sorted(self.registry.items())
             ]
             return _json_result({"kinds": kinds})
         bound = self._resolve(args.kind)
-        page = await bound.kind.store.list(
-            self._bound_ctx(ctx, bound),
-            ObjectListQuery(
-                query=args.query,
-                filters=args.filters,
-                order_by=args.order_by,
-                order=args.order,
-                cursor=args.cursor,
-                supported_fields=bound.kind.list_fields,
-            ),
-        )
+        target = await self._target(ctx, args.kind, args.agent)
+        with object_agent(target):
+            page = await bound.kind.store.list(
+                self._bound_ctx(ctx, bound),
+                ObjectListQuery(
+                    query=args.query,
+                    filters=args.filters,
+                    order_by=args.order_by,
+                    order=args.order,
+                    cursor=args.cursor,
+                    supported_fields=bound.kind.list_fields,
+                ),
+            )
         listing: dict[str, JsonValue] = {
             "objects": [
                 {"name": row.name, "summary": row.summary, **row.fields} for row in page.rows
             ]
         }
+        if target is not None:
+            listing["agent"] = target.name
         if page.next_cursor is not None:
             listing["next_cursor"] = page.next_cursor
         return _json_result(listing)
@@ -695,18 +733,34 @@ class ObjectVerbs:
     async def _get(self, ctx: ToolContext, args: ObjectGetInput) -> ToolResult:
         bound = self._resolve(args.kind)
         bound_ctx = self._bound_ctx(ctx, bound)
-        detail = await bound.kind.store.get(bound_ctx, args.name)
-        if detail is None:
-            raise UnknownObject(f"no {args.kind} object named {args.name!r}")
+        target = await self._target(ctx, args.kind, args.agent)
+        with object_agent(target):
+            detail = await bound.kind.store.get(bound_ctx, args.name)
+            if detail is None:
+                raise UnknownObject(f"no {args.kind} object named {args.name!r}")
+            status = await bound.kind.store.status(bound_ctx, args.name)
         rendered: dict[str, object] = {
             "kind": args.kind,
             "name": args.name,
-            "spec": detail.spec.model_dump(mode="json"),
-            "status": await bound.kind.store.status(bound_ctx, args.name),
-            "links": [link.model_dump(mode="json") for link in detail.links],
+            "spec": detail.spec.model_dump(mode="json") if detail.spec_visible else None,
+            "status": status,
+            "links": [
+                link.model_copy(
+                    update={
+                        "target": link.target.model_copy(update={"agent": target.name}),
+                    }
+                ).model_dump(mode="json", exclude_none=True)
+                if target is not None
+                and link.target.kind in AGENT_TARGETABLE_KINDS
+                and link.target.agent is None
+                else link.model_dump(mode="json", exclude_none=True)
+                for link in detail.links
+            ],
             "created_at": None if detail.created_at is None else detail.created_at.isoformat(),
             "updated_at": None if detail.updated_at is None else detail.updated_at.isoformat(),
         }
+        if target is not None:
+            rendered["agent"] = target.name
         return ToolResult(content=(TextContent(text=yaml.safe_dump(rendered, sort_keys=False)),))
 
     async def _explain(self, ctx: ToolContext, args: ObjectExplainInput) -> ToolResult:
@@ -726,6 +780,9 @@ class ObjectVerbs:
     async def _apply(self, ctx: ToolContext, args: ObjectApplyInput) -> ToolResult:
         kind_name, name, spec_mapping = _parse_envelope(args.manifest)
         bound = self._resolve(kind_name)
+        target = await self._target(ctx, kind_name, args.agent)
+        if target is not None and kind_name not in AGENT_APPLY_TARGETABLE_KINDS:
+            raise ValueError(f"{kind_name!r} objects cannot be applied across agents")
         _validate_name(name)
         try:
             spec = bound.kind.spec_model.model_validate(spec_mapping)
@@ -738,29 +795,42 @@ class ObjectVerbs:
                 )
             ) from error
         bound_ctx = self._bound_ctx(ctx, bound)
-        existing = await bound.kind.store.get(bound_ctx, name)
-        await bound.kind.store.apply(
-            bound_ctx, name, spec, None if existing is None else existing.spec
-        )
-        return _json_result(
-            {"kind": kind_name, "name": name, "result": "updated" if existing else "created"}
-        )
+        with object_agent(target):
+            existing = await bound.kind.store.get(bound_ctx, name)
+            if target is not None and existing is None:
+                raise VerbNotSupported(
+                    "cross-agent apply can only update an existing scheduled task"
+                )
+            await bound.kind.store.apply(
+                bound_ctx, name, spec, None if existing is None else existing.spec
+            )
+        result = {
+            "kind": kind_name,
+            "name": name,
+            "result": "updated" if existing else "created",
+        }
+        if target is not None:
+            result["agent"] = target.name
+        return _json_result(result)
 
     async def _delete(self, ctx: ToolContext, args: ObjectDeleteInput) -> ToolResult:
         bound = self._resolve(args.kind)
         bound_ctx = self._bound_ctx(ctx, bound)
-        old = await bound.kind.store.get(bound_ctx, args.name)
-        if old is None:
-            raise UnknownObject(f"no {args.kind} object named {args.name!r}")
-        await bound.kind.store.delete(bound_ctx, args.name)
-        return _json_result(
-            {
-                "kind": args.kind,
-                "name": args.name,
-                "deleted": True,
-                "spec": old.spec.model_dump(mode="json"),
-            }
-        )
+        target = await self._target(ctx, args.kind, args.agent)
+        with object_agent(target):
+            old = await bound.kind.store.get(bound_ctx, args.name)
+            if old is None:
+                raise UnknownObject(f"no {args.kind} object named {args.name!r}")
+            await bound.kind.store.delete(bound_ctx, args.name)
+        result = {
+            "kind": args.kind,
+            "name": args.name,
+            "deleted": True,
+            "spec": old.spec.model_dump(mode="json") if old.spec_visible else None,
+        }
+        if target is not None:
+            result["agent"] = target.name
+        return _json_result(result)
 
     def _resolve(self, kind: str) -> BoundKind:
         found = self.registry.get(kind)
@@ -771,6 +841,48 @@ class ObjectVerbs:
 
     def _bound_ctx(self, ctx: ToolContext, bound: BoundKind) -> ToolContext:
         return replace(ctx, ext=bound.context)
+
+    async def _target(self, ctx: ToolContext, kind: str, name: str) -> ObjectAgent | None:
+        if not name:
+            return None
+        if kind not in AGENT_TARGETABLE_KINDS:
+            raise ValueError(
+                f"object kind {kind!r} is workspace-scoped and rejects an agent target"
+            )
+        async with workspace_tx() as connection:
+            current = (
+                await connection.execute(
+                    sa.select(
+                        tables.agent.c.id,
+                        tables.agent.c.name,
+                        tables.agent.c.is_main,
+                    ).where(
+                        tables.agent.c.workspace_id == ctx.turn.workspace_id,
+                        tables.agent.c.id == ctx.turn.agent_id,
+                    )
+                )
+            ).one()
+            if name == current.name:
+                return None
+            if not current.is_main:
+                raise ValueError("only the workspace main agent may target another agent")
+            if ctx.turn.subagent_profile is not None:
+                raise ValueError("a typed subagent may not target another agent")
+            if ctx.speaker_member_id is None:
+                raise ValueError(
+                    "targeting another agent requires an exact live member-requested call"
+                )
+            target = (
+                await connection.execute(
+                    sa.select(tables.agent.c.id, tables.agent.c.name).where(
+                        tables.agent.c.workspace_id == ctx.turn.workspace_id,
+                        tables.agent.c.name == name,
+                    )
+                )
+            ).one_or_none()
+        if target is None:
+            raise ValueError(f"no agent named {name!r} in this workspace")
+        return ObjectAgent(id=target.id, name=target.name)
 
 
 def _parse_envelope(manifest: str) -> tuple[str, str, Mapping[str, object]]:

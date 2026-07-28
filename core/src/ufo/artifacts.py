@@ -24,7 +24,6 @@ from uuid import UUID
 import sqlalchemy as sa
 from pydantic import BaseModel, ConfigDict, Field
 
-from ufo.agent_scope import agent_current
 from ufo.artifact_token import (
     ARTIFACT_DOWNLOAD_PATH,
     ARTIFACT_TOKEN_TTL_SECONDS,
@@ -34,6 +33,7 @@ from ufo.blob import BlobNotFound
 from ufo.conversations import CONVERSATION_KIND
 from ufo.db import workspace_tx
 from ufo.ext.context import JsonValue
+from ufo.object_scope import object_agent_id
 from ufo.objects import (
     MATERIALIZE_MAX_BYTES,
     ObjectDetail,
@@ -105,11 +105,11 @@ class ArtifactSpec(BaseModel):
 
 @dataclass(frozen=True)
 class ArtifactObjects:
-    """Read/delete handlers over the agent's `shared_artifact` rows, grouped by the sharing
-    conversation and filename — each group's newest share is the object's current version.
-    Another agent's artifacts are not found. `status` is where get's workspace copy happens: the
-    seam calls `status` only on `object_get`, so `apply` and `delete` fetching the current spec
-    never write into the workspace as a side effect."""
+    """Read/delete handlers over the selected agent's audience-visible `shared_artifact` rows,
+    grouped by the sharing conversation and filename — each group's newest share is the object's
+    current version. `status` is where get's workspace copy happens: the seam calls `status` only
+    on `object_get`, so `apply` and `delete` fetching the current spec never write into the
+    workspace as a side effect."""
 
     async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage:
         rows = tuple(
@@ -121,12 +121,12 @@ class ArtifactObjects:
                     "subject": shares[0].subject or "",
                 },
             )
-            for name, shares in await self._groups()
+            for name, shares in await self._groups(ctx)
         )
         return object_page(rows, query)
 
     async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[ArtifactSpec] | None:
-        shares = await self._find(name)
+        shares = await self._find(ctx, name)
         if shares is None:
             return None
         latest = shares[0]
@@ -147,7 +147,7 @@ class ArtifactObjects:
         )
 
     async def status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None:
-        shares = await self._find(name)
+        shares = await self._find(ctx, name)
         if shares is None:
             return None
         latest = shares[0]
@@ -173,7 +173,7 @@ class ArtifactObjects:
         raise VerbNotSupported(ARTIFACTS_ARE_SHARED)
 
     async def delete(self, ctx: ToolContext, name: str) -> None:
-        shares = await self._find(name)
+        shares = await self._find(ctx, name)
         if shares is None:
             raise ValueError(f"no artifact named {name!r}")
         async with workspace_tx() as connection:
@@ -199,11 +199,11 @@ class ArtifactObjects:
         await ctx.sandbox.write_file(path, data)
         return path
 
-    async def _find(self, name: str) -> tuple[sa.Row, ...] | None:
-        matched = [shares for candidate, shares in await self._groups() if candidate == name]
+    async def _find(self, ctx: ToolContext, name: str) -> tuple[sa.Row, ...] | None:
+        matched = [shares for candidate, shares in await self._groups(ctx) if candidate == name]
         return matched[0] if matched else None
 
-    async def _groups(self) -> Sequence[tuple[str, tuple[sa.Row, ...]]]:
+    async def _groups(self, ctx: ToolContext) -> Sequence[tuple[str, tuple[sa.Row, ...]]]:
         async with workspace_tx() as connection:
             rows = (
                 await connection.execute(
@@ -220,11 +220,15 @@ class ArtifactObjects:
                     .select_from(
                         tables.shared_artifact.join(
                             tables.turn, tables.shared_artifact.c.turn_id == tables.turn.c.id
+                        ).join(
+                            tables.conversation,
+                            tables.turn.c.conversation_id == tables.conversation.c.id,
                         )
                     )
                     .where(
                         tables.shared_artifact.c.workspace_id == ws_current().workspace_id,
-                        tables.turn.c.agent_id == agent_current().agent_id,
+                        tables.turn.c.agent_id == object_agent_id(),
+                        tables.conversation.c.audience.in_(ctx.read_subjects),
                     )
                 )
             ).all()
@@ -264,8 +268,8 @@ ARTIFACT_OBJECT = ObjectKind(
         "named <conversation-prefix>-<filename-slug> (3f2a9c1b-report-txt; the share result "
         "carries the name), so one session's artifacts share a prefix and the same filename "
         "from different sessions stays distinct. Re-sharing a filename in the same conversation "
-        "adds a version — get, status, and the workspace copy reflect the latest share. Another "
-        "agent's artifacts are not found. "
+        "adds a version — get, status, and the workspace copy reflect the latest share. Reads stay "
+        "inside the selected agent and acting audience. "
         "object_get copies the latest bytes back into the conversation workspace at "
         "artifacts/<name>/<filename> — the way to reuse a file an earlier turn produced — its "
         "status carries a fresh member download link (valid one hour), the share time, the "

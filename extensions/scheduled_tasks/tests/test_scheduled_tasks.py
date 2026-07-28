@@ -11,18 +11,19 @@ import asyncio
 import json
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta, timezone
+from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
 import yaml
-from sqlalchemy.exc import NoResultFound
 from ufo_ext_scheduled_tasks.cron import next_fire
 from ufo_ext_scheduled_tasks.manifest import NAME, RUNNER_JOB, manifest
 from ufo_ext_scheduled_tasks.runner import FINAL_FIRE_INSTRUCTION, ScheduledTaskRunner
 from ufo_ext_scheduled_tasks.tools import (
     SCHEDULED_TASK_KIND,
     PauseAndWaitInput,
+    ScheduledTaskObjects,
     ScheduledTaskSpec,
     pause_and_wait,
 )
@@ -35,6 +36,7 @@ from evals.object_tools import (
     _graded_operational_task_stays_open,
 )
 from ufo.agent_scope import AgentUnbound, agent
+from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, context_for
 from ufo.ext.loader import skill_registry, turn_tools
@@ -42,7 +44,7 @@ from ufo.jobs import JobRunner, bindings_from
 from ufo.loop.engine import _claim_turn
 from ufo.loop.queue import _load_turn
 from ufo.objects import AdminRequired, UnknownObject
-from ufo.scheduling import ONE_TIME_SCHEDULE, ScheduleStore, due_task_workspaces
+from ufo.scheduling import ONE_TIME_SCHEDULE, ScheduledTask, ScheduleStore, due_task_workspaces
 from ufo.schema import tables
 from ufo.schema.records import WRITEBACK_PENDING, Agent, TerminalFrame, Turn
 from ufo.sdk.audience import conversation_audience
@@ -1301,7 +1303,7 @@ async def test_concurrent_first_create_converges_by_agent_name(db: None) -> None
     store = ScheduleStore()
     due_at = datetime.now(UTC) + timedelta(minutes=10)
     with ws(workspace_id), agent(agent_id):
-        first, second = await asyncio.gather(
+        outcomes = await asyncio.gather(
             store.create(
                 conversation_id,
                 "scheduled-shared-name",
@@ -1318,9 +1320,14 @@ async def test_concurrent_first_create_converges_by_agent_name(db: None) -> None
                 "second",
                 due_at,
             ),
+            return_exceptions=True,
         )
         tasks = await store.list()
-    assert first.id == second.id
+    created = [outcome for outcome in outcomes if isinstance(outcome, ScheduledTask)]
+    refused = [outcome for outcome in outcomes if isinstance(outcome, ValueError)]
+    assert len(created) == 1
+    assert len(refused) == 1
+    assert "already exists" in str(refused[0])
     assert len(tasks) == 1
 
 
@@ -1360,7 +1367,7 @@ async def test_runner_fires_due_task_into_a_turn(db: None) -> None:
         assert advanced.last_run_at is not None
         assert await store.claim_due(datetime.now(UTC), 300) == ()
 
-        inspection = await store.inspect("scheduled-daily")
+        inspection = await store.inspect(advanced)
         assert inspection is not None
         assert inspection.last_turn_id == turns[0]["id"]
         assert inspection.last_response is None
@@ -1870,7 +1877,7 @@ async def test_bounded_daily_eval_rejects_open_ended_and_accepts_ten_fires(db: N
     expires_at = next_fire(DAILY_9AM, final_fire)
     store = ScheduleStore()
     with ws(workspace_id), agent(agent_id):
-        await store.create(
+        task = await store.create(
             conversation_id,
             "mccarren-park-events",
             DAILY_9AM,
@@ -1879,9 +1886,8 @@ async def test_bounded_daily_eval_rejects_open_ended_and_accepts_ten_fires(db: N
             first_fire,
         )
         assert not (await _graded_bounded_daily(CapabilityOutput("", ()))).passed
-        await store.create(
-            conversation_id,
-            "mccarren-park-events",
+        task = await store.update(
+            task,
             DAILY_9AM,
             "Report McCarren Park events. On the final scheduled fire, also offer Continue same "
             "cadence, Change cadence, or Stop.",
@@ -1890,9 +1896,8 @@ async def test_bounded_daily_eval_rejects_open_ended_and_accepts_ten_fires(db: N
             expires_at=expires_at,
         )
         assert not (await _graded_bounded_daily(CapabilityOutput("", ()))).passed
-        await store.create(
-            conversation_id,
-            "mccarren-park-events",
+        await store.update(
+            task,
             DAILY_9AM,
             "Report McCarren Park events.",
             "McCarren Park events",
@@ -1907,7 +1912,7 @@ async def test_operational_eval_requires_an_open_ended_task(db: None) -> None:
     first_fire = datetime(2026, 8, 1, 9, tzinfo=UTC)
     store = ScheduleStore()
     with ws(workspace_id), agent(agent_id):
-        await store.create(
+        task = await store.create(
             conversation_id,
             "credential-refresh",
             "0 * * * *",
@@ -1917,9 +1922,8 @@ async def test_operational_eval_requires_an_open_ended_task(db: None) -> None:
             expires_at=first_fire + timedelta(days=1),
         )
         assert not (await _graded_operational_task_stays_open(CapabilityOutput("", ()))).passed
-        await store.create(
-            conversation_id,
-            "credential-refresh",
+        await store.update(
+            task,
             "0 * * * *",
             "Refresh integration credentials so synchronization keeps access.",
             "Credential refresh",
@@ -2343,7 +2347,7 @@ async def test_task_namespace_and_conversation_are_ambient_agent_scoped(db: None
                 "first",
                 due_at,
             )
-            with pytest.raises(NoResultFound):
+            with pytest.raises(ValueError, match="bound to its executing agent"):
                 await store.create(
                     second_conversation,
                     "crossed",
@@ -2352,7 +2356,7 @@ async def test_task_namespace_and_conversation_are_ambient_agent_scoped(db: None
                     "crossed",
                     due_at,
                 )
-            with pytest.raises(NoResultFound):
+            with pytest.raises(ValueError, match="bound to its executing agent"):
                 await store.pause(
                     second_conversation,
                     "crossed",
@@ -2361,7 +2365,7 @@ async def test_task_namespace_and_conversation_are_ambient_agent_scoped(db: None
                     0,
                 )
         with agent(second_agent):
-            assert await store.inspect("digest") is None
+            assert await store.inspect(first) is None
             second_due_at = due_at + timedelta(minutes=1)
             second = await store.create(
                 second_conversation,
@@ -2372,19 +2376,19 @@ async def test_task_namespace_and_conversation_are_ambient_agent_scoped(db: None
                 second_due_at,
             )
             second_rows = await store.list()
-            second_inspection = await store.inspect("digest")
+            second_inspection = await store.inspect(second)
             assert second_inspection is not None
             assert second_inspection.next_run_at.replace(tzinfo=UTC) == second_due_at
         with agent(first_agent):
             first_rows = await store.list()
-            first_inspection = await store.inspect("digest")
+            first_inspection = await store.inspect(first)
             assert first_inspection is not None
             assert first_inspection.next_run_at.replace(tzinfo=UTC) == due_at
-            assert await store.cancel("digest") is True
-            assert await store.inspect("digest") is None
+            await store.cancel(first)
+            assert await store.inspect(first) is None
         with agent(second_agent):
             surviving_rows = await store.list()
-            surviving_inspection = await store.inspect("digest")
+            surviving_inspection = await store.inspect(second)
             assert surviving_inspection is not None
             assert surviving_inspection.next_run_at.replace(tzinfo=UTC) == second_due_at
 
@@ -2439,13 +2443,9 @@ async def test_workspace_clock_fires_exact_records_across_agents(db: None) -> No
     assert set(dbos.enqueued) == {str(first_turns[0]["id"]), str(second_turns[0]["id"])}
 
 
-async def test_reapply_preserves_the_original_creator(db: None) -> None:
-    """An update never reassigns who a task runs as: created_by is fixed at creation, so a
-    workspace admin (or anyone) editing a member's task can change its definition but not make it
-    run with a different member's connections."""
+async def test_update_preserves_the_original_creator(db: None) -> None:
     workspace_id, agent_id, conversation_id = await _seed()
     creator = await _member(workspace_id)
-    editor = await _member(workspace_id)
     store = ScheduleStore()
     when = datetime.now(UTC)
     with ws(workspace_id), agent(agent_id):
@@ -2458,20 +2458,285 @@ async def test_reapply_preserves_the_original_creator(db: None) -> None:
             when,
             created_by_member_id=creator,
         )
-        second = await store.create(
-            conversation_id,
-            "digest",
+        second = await store.update(
+            first,
             "0 17 * * 1",
             "v2",
             "v2",
             when,
-            created_by_member_id=editor,
         )
         tasks = await store.list()
     assert first.id == second.id
     assert second.created_by_member_id == creator
     assert tasks[0].created_by_member_id == creator
     assert tasks[0].schedule == "0 17 * * 1"
+
+
+async def test_update_cannot_overwrite_a_task_recreated_after_authorization(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace_id, agent_id, conversation_id = await _seed()
+    alice = await _member(workspace_id)
+    bob = await _member(workspace_id)
+    alice_ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=alice)
+    apply = _object_tool("object_apply")
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    real_update = ScheduleStore.update
+
+    async def blocked_update(
+        store: ScheduleStore,
+        expected: ScheduledTask,
+        schedule: str,
+        prompt: str,
+        description: str,
+        next_run_at: datetime,
+        expires_at: datetime | None = None,
+    ) -> ScheduledTask:
+        entered.set()
+        await release.wait()
+        return await real_update(
+            store,
+            expected,
+            schedule,
+            prompt,
+            description,
+            next_run_at,
+            expires_at,
+        )
+
+    monkeypatch.setattr(ScheduleStore, "update", blocked_update)
+    with ws(workspace_id), agent(agent_id):
+        await _dispatch(
+            apply,
+            alice_ctx,
+            manifest=_task_manifest("digest", DAILY_9AM, "Alice's digest"),
+        )
+        editing = asyncio.create_task(
+            _dispatch(
+                apply,
+                alice_ctx,
+                manifest=_task_manifest("digest", "0 17 * * 1", "Alice's edit"),
+            )
+        )
+        await entered.wait()
+        [original] = await ScheduleStore().list()
+        await ScheduleStore().cancel(original)
+        replacement = await ScheduleStore().create(
+            conversation_id,
+            "digest",
+            DAILY_9AM,
+            "Bob's digest",
+            "Bob's digest",
+            datetime.now(UTC),
+            created_by_member_id=bob,
+        )
+        release.set()
+        with pytest.raises(ValueError, match="changed while editing"):
+            await editing
+        [remaining] = await ScheduleStore().list()
+
+    assert remaining.id == replacement.id
+    assert remaining.created_by_member_id == bob
+    assert remaining.prompt == "Bob's digest"
+
+
+@pytest.mark.parametrize("method", ["get", "status"])
+async def test_task_read_refuses_a_same_named_replacement(
+    db: None,
+    monkeypatch: pytest.MonkeyPatch,
+    method: str,
+) -> None:
+    workspace_id, agent_id, conversation_id = await _seed()
+    alice = await _member(workspace_id)
+    ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=alice)
+    scheduler = ScheduleStore()
+    objects = ScheduledTaskObjects()
+    real_owner = ScheduledTaskObjects._owner
+
+    with ws(workspace_id), agent(agent_id):
+        original = await scheduler.create(
+            conversation_id,
+            "digest",
+            DAILY_9AM,
+            "Alice's digest",
+            "Alice's digest",
+            datetime.now(UTC),
+            created_by_member_id=alice,
+        )
+
+        async def replace_after_authorization(
+            store: ScheduledTaskObjects,
+            tool_ctx: ToolContext,
+            name: str,
+        ):
+            owner = await real_owner(store, tool_ctx, name)
+            await scheduler.cancel(original)
+            await scheduler.create(
+                conversation_id,
+                name,
+                DAILY_9AM,
+                "admin-only secret",
+                "admin-only secret",
+                datetime.now(UTC),
+                created_by_member_id=None,
+            )
+            return owner
+
+        monkeypatch.setattr(ScheduledTaskObjects, "_owner", replace_after_authorization)
+        result = await getattr(objects, method)(ctx, "digest")
+        [remaining] = await scheduler.list()
+
+    assert result is None
+    assert remaining.prompt == "admin-only secret"
+
+
+async def test_task_status_refuses_replacement_during_inspection(
+    db: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id, agent_id, conversation_id = await _seed()
+    alice = await _member(workspace_id)
+    ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=alice)
+    scheduler = ScheduleStore()
+    real_inspect = ScheduleStore.inspect
+
+    with ws(workspace_id), agent(agent_id):
+        original = await scheduler.create(
+            conversation_id,
+            "digest",
+            DAILY_9AM,
+            "Alice's digest",
+            "Alice's digest",
+            datetime.now(UTC),
+            created_by_member_id=alice,
+        )
+
+        async def replace_before_inspection(
+            store: ScheduleStore,
+            expected: ScheduledTask,
+        ):
+            await store.cancel(original)
+            await store.create(
+                conversation_id,
+                expected.name,
+                DAILY_9AM,
+                "admin-only secret",
+                "admin-only secret",
+                datetime.now(UTC),
+                created_by_member_id=None,
+            )
+            return await real_inspect(store, expected)
+
+        monkeypatch.setattr(ScheduleStore, "inspect", replace_before_inspection)
+        result = await ScheduledTaskObjects().status(ctx, "digest")
+        [remaining] = await scheduler.list()
+
+    assert result is None
+    assert remaining.prompt == "admin-only secret"
+
+
+async def test_task_create_refuses_a_row_created_after_absence_check(
+    db: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id, agent_id, conversation_id = await _seed()
+    alice = await _member(workspace_id)
+    ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=alice)
+    scheduler = ScheduleStore()
+    real_owner = ScheduledTaskObjects._owner
+
+    async def create_after_absence(
+        store: ScheduledTaskObjects,
+        tool_ctx: ToolContext,
+        name: str,
+    ):
+        assert await real_owner(store, tool_ctx, name) is None
+        await scheduler.create(
+            conversation_id,
+            name,
+            DAILY_9AM,
+            "replacement",
+            "replacement",
+            datetime.now(UTC),
+            created_by_member_id=alice,
+        )
+        return None
+
+    monkeypatch.setattr(ScheduledTaskObjects, "_owner", create_after_absence)
+    with ws(workspace_id), agent(agent_id):
+        with pytest.raises(ValueError, match="changed while editing"):
+            await ScheduledTaskObjects().apply(
+                ctx,
+                "digest",
+                ScheduledTaskSpec(schedule=DAILY_9AM, prompt="new task"),
+                None,
+            )
+        [remaining] = await scheduler.list()
+
+    assert remaining.prompt == "replacement"
+
+
+@pytest.mark.parametrize("requester_is_admin", [False, True])
+async def test_cancel_cannot_delete_a_task_recreated_after_authorization(
+    db: None,
+    monkeypatch: pytest.MonkeyPatch,
+    requester_is_admin: bool,
+) -> None:
+    workspace_id, agent_id, conversation_id = await _seed()
+    alice = await _member(workspace_id)
+    bob = await _member(workspace_id)
+    requester = await _member(workspace_id, is_admin=True) if requester_is_admin else alice
+    requester_ctx = replace(
+        _tool_ctx(workspace_id, conversation_id, agent_id),
+        speaker_member_id=requester,
+    )
+    apply = _object_tool("object_apply")
+    delete = _object_tool("object_delete")
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    real_cancel = ScheduleStore.cancel
+
+    async def blocked_cancel(store: ScheduleStore, expected: ScheduledTask) -> None:
+        entered.set()
+        await release.wait()
+        await real_cancel(store, expected)
+
+    monkeypatch.setattr(ScheduleStore, "cancel", blocked_cancel)
+    with ws(workspace_id), agent(agent_id):
+        await _dispatch(
+            apply,
+            replace(requester_ctx, speaker_member_id=alice),
+            manifest=_task_manifest("digest", DAILY_9AM, "Alice's digest"),
+        )
+        [original] = await ScheduleStore().list()
+        deleting = asyncio.create_task(
+            _dispatch(
+                delete,
+                requester_ctx,
+                kind=SCHEDULED_TASK_KIND,
+                name="digest",
+            )
+        )
+        await entered.wait()
+        await real_cancel(ScheduleStore(), original)
+        replacement = await ScheduleStore().create(
+            conversation_id,
+            "digest",
+            DAILY_9AM,
+            "Bob's digest",
+            "Bob's digest",
+            datetime.now(UTC),
+            created_by_member_id=bob,
+        )
+        release.set()
+        with pytest.raises(ValueError, match="changed while cancelling"):
+            await deleting
+        [remaining] = await ScheduleStore().list()
+
+    assert remaining.id == replacement.id
+    assert remaining.created_by_member_id == bob
+    assert remaining.prompt == "Bob's digest"
 
 
 async def test_admin_edits_a_task_no_member_created(db: None) -> None:
@@ -2500,9 +2765,7 @@ async def test_admin_edits_a_task_no_member_created(db: None) -> None:
 
 
 async def test_admin_may_delete_but_not_edit_another_members_task(db: None) -> None:
-    """The workspace admin administers a member's task — it stays visible and deletable to the
-    admin — but the admin cannot edit its prompt: an edit would run the admin's prompt as the
-    creator, against the creator's private memory and connections, and read the result back."""
+    """An admin can manage cadence and cancellation without reading or changing task content."""
     workspace_id, agent_id, conversation_id = await _seed()
     admin = await _member(workspace_id, created_at=datetime(2020, 1, 1, tzinfo=UTC), is_admin=True)
     creator = await _member(workspace_id, created_at=datetime(2027, 1, 1, tzinfo=UTC))
@@ -2511,10 +2774,60 @@ async def test_admin_may_delete_but_not_edit_another_members_task(db: None) -> N
     )
     admin_ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=admin)
     apply = _object_tool("object_apply")
+    get = _object_tool("object_get")
+    listing = _object_tool("object_list")
     delete = _object_tool("object_delete")
+    private_prompt = "creator's private medical prompt"
+    private_description = "creator's private medical description"
+    private_response = "creator's private medical result"
     with ws(workspace_id), agent(agent_id):
         await _dispatch(
-            apply, creator_ctx, manifest=_task_manifest("digest", DAILY_9AM, "creator's prompt")
+            apply,
+            creator_ctx,
+            manifest=_task_manifest(
+                "digest",
+                DAILY_9AM,
+                private_prompt,
+                private_description,
+            ),
+        )
+        [task] = await ScheduleStore().list()
+        completed_turn_id = uuid4()
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.insert(tables.turn).values(
+                    id=completed_turn_id,
+                    workspace_id=workspace_id,
+                    conversation_id=conversation_id,
+                    agent_id=agent_id,
+                    seq=1,
+                    status="done",
+                    inbound=private_prompt,
+                    admission_source="internal",
+                    terminal=TerminalFrame(
+                        status="done",
+                        text=private_response,
+                    ).model_dump(mode="json"),
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+            await connection.execute(
+                sa.update(tables.scheduled_task)
+                .where(tables.scheduled_task.c.id == task.id)
+                .values(
+                    last_run_at=sa.func.now(),
+                    last_turn_id=completed_turn_id,
+                )
+            )
+        admin_listing = json.loads(await _dispatch(listing, admin_ctx, kind=SCHEDULED_TASK_KIND))
+        admin_get = yaml.safe_load(
+            await _dispatch(
+                get,
+                admin_ctx,
+                kind=SCHEDULED_TASK_KIND,
+                name="digest",
+            )
         )
         with pytest.raises(AdminRequired, match="creator"):
             await apply.handler(
@@ -2528,9 +2841,456 @@ async def test_admin_may_delete_but_not_edit_another_members_task(db: None) -> N
                     }
                 ),
             )
+        with pytest.raises(AdminRequired, match="creator"):
+            await _dispatch(
+                apply,
+                admin_ctx,
+                manifest=_task_manifest(
+                    "digest",
+                    "0 17 * * 1",
+                    private_prompt,
+                    private_description,
+                ),
+            )
+        cadence = "0 17 * * 1"
+        expiry = datetime.now(UTC) + timedelta(days=30)
+        await _dispatch(
+            apply,
+            admin_ctx,
+            manifest=yaml.safe_dump(
+                {
+                    "kind": SCHEDULED_TASK_KIND,
+                    "name": "digest",
+                    "spec": {"schedule": cadence, "expires_at": expiry},
+                }
+            ),
+        )
         after_edit = await ScheduleStore().list()
-        await _dispatch(delete, admin_ctx, kind=SCHEDULED_TASK_KIND, name="digest")
+        admin_delete = json.loads(
+            await _dispatch(delete, admin_ctx, kind=SCHEDULED_TASK_KIND, name="digest")
+        )
         after_delete = await ScheduleStore().list()
-    assert after_edit[0].prompt == "creator's prompt"
+    admin_rendered = json.dumps((admin_listing, admin_get, admin_delete))
+    assert private_prompt not in admin_rendered
+    assert private_description not in admin_rendered
+    assert private_response not in admin_rendered
+    assert admin_listing["objects"] == [
+        {"name": "digest", "summary": f"{DAILY_9AM} — private member task"}
+    ]
+    assert admin_get["spec"] is None
+    assert admin_get["status"]["last_run"] == {
+        "turn_id": str(completed_turn_id),
+        "turn_status": "done",
+    }
+    assert admin_delete["spec"] is None
+    assert after_edit[0].prompt == private_prompt
+    assert after_edit[0].description == private_description
+    assert after_edit[0].schedule == cadence
+    assert after_edit[0].expires_at == expiry
     assert after_edit[0].created_by_member_id == creator
     assert after_delete == ()
+
+
+async def test_main_controls_a_members_child_agent_task_without_moving_it(
+    db: None, tmp_path: Path
+) -> None:
+    workspace_id, main_agent, main_conversation = await _seed()
+    child_agent, child_conversation = await _second_agent(workspace_id)
+    alice = await _member(workspace_id)
+    bob = await _member(workspace_id)
+    admin = await _member(workspace_id, is_admin=True)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.agent).where(tables.agent.c.id == main_agent).values(is_main=True)
+        )
+        child_name = (
+            await connection.execute(
+                sa.select(tables.agent.c.name).where(tables.agent.c.id == child_agent)
+            )
+        ).scalar_one()
+
+    child_ctx = replace(
+        _tool_ctx(workspace_id, child_conversation, child_agent),
+        speaker_member_id=alice,
+    )
+    main_ctx = replace(
+        _tool_ctx(workspace_id, main_conversation, main_agent),
+        speaker_member_id=alice,
+        blob=FilesystemBlobStore(root=tmp_path),
+    )
+    bob_ctx = replace(main_ctx, speaker_member_id=bob)
+    admin_ctx = replace(main_ctx, speaker_member_id=admin)
+    apply = _object_tool("object_apply")
+    get = _object_tool("object_get")
+    listing = _object_tool("object_list")
+    delete = _object_tool("object_delete")
+    private_prompt = "Alice's daily digest"
+    private_description = "Alice's private research cadence"
+    private_response = "Alice's private research result"
+
+    with ws(workspace_id):
+        with agent(child_agent):
+            await _dispatch(
+                apply,
+                child_ctx,
+                manifest=_task_manifest(
+                    "digest",
+                    DAILY_9AM,
+                    private_prompt,
+                    private_description,
+                ),
+            )
+            [task] = await ScheduleStore().list()
+            completed_turn_id = uuid4()
+            async with workspace_tx() as connection:
+                await connection.execute(
+                    sa.insert(tables.turn).values(
+                        id=completed_turn_id,
+                        workspace_id=workspace_id,
+                        conversation_id=child_conversation,
+                        agent_id=child_agent,
+                        seq=1,
+                        status="done",
+                        inbound=private_prompt,
+                        admission_source="scheduled",
+                        on_behalf_of_member_id=alice,
+                        terminal=TerminalFrame(
+                            status="done",
+                            text=private_response,
+                        ).model_dump(mode="json"),
+                        created_at=sa.func.now(),
+                        updated_at=sa.func.now(),
+                    )
+                )
+                await connection.execute(
+                    sa.update(tables.scheduled_task)
+                    .where(tables.scheduled_task.c.id == task.id)
+                    .values(last_run_at=sa.func.now(), last_turn_id=completed_turn_id)
+                )
+        with agent(main_agent):
+            listed = json.loads(
+                await _dispatch(
+                    listing,
+                    main_ctx,
+                    kind=SCHEDULED_TASK_KIND,
+                    agent=child_name,
+                )
+            )
+            fetched = yaml.safe_load(
+                await _dispatch(
+                    get,
+                    main_ctx,
+                    kind=SCHEDULED_TASK_KIND,
+                    name="digest",
+                    agent=child_name,
+                )
+            )
+            linked_conversation = yaml.safe_load(
+                await _dispatch(get, main_ctx, **fetched["links"][0]["target"])
+            )
+            bob_listing = json.loads(
+                await _dispatch(
+                    listing,
+                    bob_ctx,
+                    kind=SCHEDULED_TASK_KIND,
+                    agent=child_name,
+                )
+            )
+            with pytest.raises(UnknownObject):
+                await _dispatch(
+                    get,
+                    bob_ctx,
+                    kind=SCHEDULED_TASK_KIND,
+                    name="digest",
+                    agent=child_name,
+                )
+            with pytest.raises(UnknownObject):
+                await _dispatch(
+                    delete,
+                    bob_ctx,
+                    kind=SCHEDULED_TASK_KIND,
+                    name="digest",
+                    agent=child_name,
+                )
+            admin_listing = json.loads(
+                await _dispatch(
+                    listing,
+                    admin_ctx,
+                    kind=SCHEDULED_TASK_KIND,
+                    agent=child_name,
+                )
+            )
+            admin_get = yaml.safe_load(
+                await _dispatch(
+                    get,
+                    admin_ctx,
+                    kind=SCHEDULED_TASK_KIND,
+                    name="digest",
+                    agent=child_name,
+                )
+            )
+            updated = json.loads(
+                await _dispatch(
+                    apply,
+                    main_ctx,
+                    manifest=_task_manifest("digest", "0 17 * * 1", "Alice's weekly digest"),
+                    agent=child_name,
+                )
+            )
+            with pytest.raises(AdminRequired, match="creator"):
+                await _dispatch(
+                    apply,
+                    admin_ctx,
+                    manifest=_task_manifest("digest", "0 8 * * *", "admin rewrite"),
+                    agent=child_name,
+                )
+            admin_updated = json.loads(
+                await _dispatch(
+                    apply,
+                    admin_ctx,
+                    manifest=yaml.safe_dump(
+                        {
+                            "kind": SCHEDULED_TASK_KIND,
+                            "name": "digest",
+                            "spec": {"schedule": "0 8 * * *"},
+                        }
+                    ),
+                    agent=child_name,
+                )
+            )
+            admin_after = json.loads(
+                await _dispatch(
+                    listing,
+                    admin_ctx,
+                    kind=SCHEDULED_TASK_KIND,
+                    agent=child_name,
+                )
+            )
+            await _dispatch(
+                delete,
+                admin_ctx,
+                kind=SCHEDULED_TASK_KIND,
+                name="digest",
+                agent=child_name,
+            )
+        with agent(child_agent):
+            remaining = await ScheduleStore().list()
+
+    assert listed["agent"] == child_name
+    assert [row["name"] for row in listed["objects"]] == ["digest"]
+    assert fetched["agent"] == child_name
+    assert fetched["links"] == [
+        {
+            "relation": "reports_to",
+            "target": {
+                "kind": "conversation",
+                "name": str(child_conversation),
+                "agent": child_name,
+            },
+        }
+    ]
+    assert linked_conversation["agent"] == child_name
+    assert linked_conversation["name"] == str(child_conversation)
+    assert updated == {
+        "kind": SCHEDULED_TASK_KIND,
+        "name": "digest",
+        "result": "updated",
+        "agent": child_name,
+    }
+    assert bob_listing["objects"] == []
+    assert [row["name"] for row in admin_listing["objects"]] == ["digest"]
+    admin_rendered = json.dumps((admin_listing, admin_get))
+    assert private_prompt not in admin_rendered
+    assert private_description not in admin_rendered
+    assert private_response not in admin_rendered
+    assert admin_get["spec"] is None
+    assert admin_get["status"]["last_run"] == {
+        "turn_id": str(completed_turn_id),
+        "turn_status": "done",
+    }
+    assert admin_updated["result"] == "updated"
+    assert admin_after["objects"] == [
+        {"name": "digest", "summary": "0 8 * * * — private member task"}
+    ]
+    assert remaining == ()
+
+
+async def test_cross_agent_object_target_requires_main_live_member_authority(db: None) -> None:
+    workspace_id, main_agent, main_conversation = await _seed()
+    child_agent, child_conversation = await _second_agent(workspace_id)
+    alice = await _member(workspace_id)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.agent).where(tables.agent.c.id == main_agent).values(is_main=True)
+        )
+        child_name = (
+            await connection.execute(
+                sa.select(tables.agent.c.name).where(tables.agent.c.id == child_agent)
+            )
+        ).scalar_one()
+        main_name = (
+            await connection.execute(
+                sa.select(tables.agent.c.name).where(tables.agent.c.id == main_agent)
+            )
+        ).scalar_one()
+    listing = _object_tool("object_list")
+    main_ctx = replace(
+        _tool_ctx(workspace_id, main_conversation, main_agent),
+        speaker_member_id=alice,
+    )
+    child_ctx = replace(
+        _tool_ctx(workspace_id, child_conversation, child_agent),
+        speaker_member_id=alice,
+    )
+
+    with ws(workspace_id):
+        with agent(child_agent), pytest.raises(ValueError, match="only the workspace main agent"):
+            await _dispatch(
+                listing,
+                child_ctx,
+                kind=SCHEDULED_TASK_KIND,
+                agent=main_name,
+            )
+        with agent(main_agent):
+            self_listing = json.loads(
+                await _dispatch(
+                    listing,
+                    main_ctx,
+                    kind=SCHEDULED_TASK_KIND,
+                    agent=main_name,
+                )
+            )
+            with pytest.raises(ValueError, match="exact live member-requested"):
+                await _dispatch(
+                    listing,
+                    replace(main_ctx, speaker_member_id=None),
+                    kind=SCHEDULED_TASK_KIND,
+                    agent=child_name,
+                )
+            with pytest.raises(ValueError, match="typed subagent"):
+                await _dispatch(
+                    listing,
+                    replace(
+                        main_ctx,
+                        turn=main_ctx.turn.model_copy(
+                            update={"subagent_profile": "research"},
+                        ),
+                    ),
+                    kind=SCHEDULED_TASK_KIND,
+                    agent=child_name,
+                )
+            with pytest.raises(ValueError, match="no agent named"):
+                await _dispatch(
+                    listing,
+                    main_ctx,
+                    kind=SCHEDULED_TASK_KIND,
+                    agent="unknown-agent",
+                )
+            with pytest.raises(ValueError, match="workspace-scoped"):
+                await _dispatch(listing, main_ctx, kind="agent", agent=child_name)
+    assert "agent" not in self_listing
+
+
+async def test_main_cross_agent_task_create_is_not_supported(
+    db: None,
+) -> None:
+    workspace_id, main_agent, main_conversation = await _seed()
+    child_agent, _ = await _second_agent(workspace_id)
+    alice = await _member(workspace_id)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.agent).where(tables.agent.c.id == main_agent).values(is_main=True)
+        )
+        child_name = (
+            await connection.execute(
+                sa.select(tables.agent.c.name).where(tables.agent.c.id == child_agent)
+            )
+        ).scalar_one()
+    ctx = replace(
+        _tool_ctx(workspace_id, main_conversation, main_agent),
+        speaker_member_id=alice,
+    )
+
+    with ws(workspace_id):
+        with (
+            agent(main_agent),
+            pytest.raises(
+                ValueError,
+                match="cross-agent apply can only update an existing scheduled task",
+            ),
+        ):
+            await _dispatch(
+                _object_tool("object_apply"),
+                ctx,
+                manifest=_task_manifest("digest", DAILY_9AM, "run as the child"),
+                agent=child_name,
+            )
+        with agent(child_agent):
+            assert await ScheduleStore().list() == ()
+
+
+async def test_parallel_main_targets_keep_their_agent_namespaces_isolated(db: None) -> None:
+    workspace_id, main_agent, main_conversation = await _seed()
+    first_agent, first_conversation = await _second_agent(workspace_id)
+    second_agent, second_conversation = await _second_agent(workspace_id)
+    alice = await _member(workspace_id)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.agent).where(tables.agent.c.id == main_agent).values(is_main=True)
+        )
+        names = {
+            row.id: row.name
+            for row in (
+                await connection.execute(
+                    sa.select(tables.agent.c.id, tables.agent.c.name).where(
+                        tables.agent.c.id.in_((first_agent, second_agent))
+                    )
+                )
+            ).all()
+        }
+    apply = _object_tool("object_apply")
+    listing = _object_tool("object_list")
+    with ws(workspace_id):
+        with agent(first_agent):
+            await _dispatch(
+                apply,
+                replace(
+                    _tool_ctx(workspace_id, first_conversation, first_agent),
+                    speaker_member_id=alice,
+                ),
+                manifest=_task_manifest("digest", DAILY_9AM, "first child"),
+            )
+        with agent(second_agent):
+            await _dispatch(
+                apply,
+                replace(
+                    _tool_ctx(workspace_id, second_conversation, second_agent),
+                    speaker_member_id=alice,
+                ),
+                manifest=_task_manifest("digest", DAILY_9AM, "second child"),
+            )
+        with agent(main_agent):
+            main_ctx = replace(
+                _tool_ctx(workspace_id, main_conversation, main_agent),
+                speaker_member_id=alice,
+            )
+            first, second = await asyncio.gather(
+                _dispatch(
+                    listing,
+                    main_ctx,
+                    kind=SCHEDULED_TASK_KIND,
+                    agent=names[first_agent],
+                ),
+                _dispatch(
+                    listing,
+                    main_ctx,
+                    kind=SCHEDULED_TASK_KIND,
+                    agent=names[second_agent],
+                ),
+            )
+
+    first_payload, second_payload = json.loads(first), json.loads(second)
+    assert first_payload["agent"] == names[first_agent]
+    assert "first child" in first_payload["objects"][0]["summary"]
+    assert second_payload["agent"] == names[second_agent]
+    assert "second child" in second_payload["objects"][0]["summary"]

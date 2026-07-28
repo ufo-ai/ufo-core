@@ -1,11 +1,11 @@
 """Durable scheduled tasks: the schedule row and the scoped store that owns it.
 
 A scheduled task is a durable row — the conversation and agent a fire re-enters, its schedule,
-prompt, and due marker. Agent-bound calls create, cancel, and read recurring tasks. Workspace jobs
-lease due records and advance their exact versions. A one-time pause also records its originating
-conversation sequence and accepted resume turn, so member ingress and timer recovery converge on
-one durable turn. Claims are bounded and atomic, so overlapping polls partition due work. Cron
-parsing stays in the scheduled-tasks extension."""
+prompt, and due marker. Object-scoped calls create, update, cancel, and read recurring tasks.
+Workspace jobs lease due records and advance their exact versions. A one-time pause also records
+its originating conversation sequence and accepted resume turn, so member ingress and timer
+recovery converge on one durable turn. Claims are bounded and atomic, so overlapping polls
+partition due work. Cron parsing stays in the scheduled-tasks extension."""
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -16,9 +16,9 @@ import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-from ufo.agent_scope import agent_current
 from ufo.candidates import WorkspaceCandidates
 from ufo.db import owner_tx, workspace_tx
+from ufo.object_scope import object_agent_id
 from ufo.schema import tables
 from ufo.schema.records import MEMBER_ADMISSION
 from ufo.workspace import ws_current
@@ -164,10 +164,11 @@ def due_task_workspaces() -> WorkspaceCandidates:
 
 @dataclass(frozen=True)
 class ScheduleStore:
-    """Scheduled-task rows behind ambient workspace and agent boundaries.
+    """Scheduled-task rows behind ambient workspace and object-agent boundaries.
 
-    Member-facing reads and mutations derive their agent from the turn boundary. Due-job methods
-    operate workspace-wide on claimed records because each record carries the agent it re-enters."""
+    Member-facing reads and mutations use the selected object namespace, which defaults to the turn
+    agent. Due-job methods operate workspace-wide on claimed records because each record carries
+    the agent it re-enters."""
 
     _invoker: ScheduleInvoker | None = None
 
@@ -193,25 +194,129 @@ class ScheduleStore:
         created_by_member_id: UUID | None = None,
         expires_at: datetime | None = None,
     ) -> ScheduledTask:
-        """Upsert an agent's schedule row by name without moving its reporting conversation."""
+        """Create one recurring task with immutable executor, reporter, and creator."""
         if schedule == ONE_TIME_SCHEDULE:
             raise ValueError("one-time workflow pauses must use ScheduleStore.pause")
         if name.startswith(PAUSE_NAME_PREFIX):
             raise ValueError(f"scheduled task names cannot start with {PAUSE_NAME_PREFIX!r}")
-        task = await self._upsert(
-            conversation_id,
-            name,
-            schedule,
-            prompt,
-            description,
-            next_run_at,
-            None,
-            created_by_member_id,
-            expires_at,
+        agent_id = object_agent_id()
+        async with workspace_tx() as connection:
+            conversation = (
+                await connection.execute(
+                    sa.select(tables.conversation.c.id)
+                    .where(
+                        tables.conversation.c.workspace_id == self.workspace_id,
+                        tables.conversation.c.id == conversation_id,
+                        tables.conversation.c.agent_id == agent_id,
+                    )
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if conversation is None:
+                raise ValueError(
+                    "a scheduled task must report to a conversation bound to its executing agent"
+                )
+            insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
+            row = (
+                (
+                    await connection.execute(
+                        insert(tables.scheduled_task)
+                        .values(
+                            id=uuid4(),
+                            workspace_id=self.workspace_id,
+                            conversation_id=conversation_id,
+                            agent_id=agent_id,
+                            name=name,
+                            created_by_member_id=created_by_member_id,
+                            schedule=schedule,
+                            prompt=prompt,
+                            description=description,
+                            next_run_at=next_run_at,
+                            last_run_at=None,
+                            last_turn_id=None,
+                            expires_at=expires_at,
+                            origin_seq=None,
+                            resume_turn_id=None,
+                            claimed_by=None,
+                            claim_expires_at=None,
+                            created_at=sa.func.now(),
+                            updated_at=sa.func.now(),
+                        )
+                        .on_conflict_do_nothing(
+                            index_elements=(
+                                tables.scheduled_task.c.workspace_id,
+                                tables.scheduled_task.c.agent_id,
+                                tables.scheduled_task.c.name,
+                            )
+                        )
+                        .returning(*_COLUMNS)
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+        if row is None:
+            raise ValueError(f"scheduled task {name!r} already exists")
+        return _task(row)
+
+    async def update(
+        self,
+        expected: ScheduledTask,
+        schedule: str,
+        prompt: str,
+        description: str,
+        next_run_at: datetime,
+        expires_at: datetime | None = None,
+    ) -> ScheduledTask:
+        """Update one exact recurring task without changing its immutable identity."""
+        if schedule == ONE_TIME_SCHEDULE:
+            raise ValueError("one-time workflow pauses cannot be updated as recurring tasks")
+        if expected.name.startswith(PAUSE_NAME_PREFIX):
+            raise ValueError("one-time workflow pauses cannot be updated as recurring tasks")
+        agent_id = object_agent_id()
+        if expected.agent_id != agent_id:
+            raise ValueError("scheduled task executor changed while editing")
+        creator_matches = (
+            tables.scheduled_task.c.created_by_member_id.is_(None)
+            if expected.created_by_member_id is None
+            else tables.scheduled_task.c.created_by_member_id == expected.created_by_member_id
         )
-        if task is None:
-            raise RuntimeError("recurring task upsert produced no task")
-        return task
+        async with workspace_tx() as connection:
+            row = (
+                (
+                    await connection.execute(
+                        sa.update(tables.scheduled_task)
+                        .where(
+                            tables.scheduled_task.c.workspace_id == self.workspace_id,
+                            tables.scheduled_task.c.id == expected.id,
+                            tables.scheduled_task.c.agent_id == expected.agent_id,
+                            tables.scheduled_task.c.conversation_id == expected.conversation_id,
+                            tables.scheduled_task.c.name == expected.name,
+                            creator_matches,
+                        )
+                        .values(
+                            schedule=schedule,
+                            prompt=prompt,
+                            description=description,
+                            next_run_at=next_run_at,
+                            last_run_at=None,
+                            last_turn_id=None,
+                            expires_at=expires_at,
+                            origin_seq=None,
+                            resume_turn_id=None,
+                            claimed_by=None,
+                            claim_expires_at=None,
+                            updated_at=sa.func.now(),
+                        )
+                        .returning(*_COLUMNS)
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+        if row is None:
+            raise ValueError(f"scheduled task {expected.name!r} changed while editing")
+        return _task(row)
 
     async def pause(
         self,
@@ -223,33 +328,28 @@ class ScheduleStore:
         created_by_member_id: UUID | None = None,
     ) -> ScheduledTask | None:
         """Arm the conversation's one-time pause from the turn sequence that requested it."""
-        return await self._upsert(
+        return await self._upsert_pause(
             conversation_id,
-            f"{PAUSE_NAME_PREFIX}{conversation_id}",
-            ONE_TIME_SCHEDULE,
             prompt,
             description,
             next_run_at,
             origin_seq,
             created_by_member_id,
-            None,
         )
 
-    async def _upsert(
+    async def _upsert_pause(
         self,
         conversation_id: UUID,
-        name: str,
-        schedule: str,
         prompt: str,
         description: str,
         next_run_at: datetime,
-        origin_seq: int | None,
+        origin_seq: int,
         created_by_member_id: UUID | None,
-        expires_at: datetime | None,
     ) -> ScheduledTask | None:
-        agent_id = agent_current().agent_id
+        agent_id = object_agent_id()
+        name = f"{PAUSE_NAME_PREFIX}{conversation_id}"
         async with workspace_tx() as connection:
-            (
+            conversation = (
                 await connection.execute(
                     sa.select(tables.conversation.c.id)
                     .where(
@@ -259,58 +359,61 @@ class ScheduleStore:
                     )
                     .with_for_update()
                 )
-            ).scalar_one()
+            ).scalar_one_or_none()
+            if conversation is None:
+                raise ValueError(
+                    "a scheduled task must report to a conversation bound to its executing agent"
+                )
             resume_turn_id: UUID | None = None
             effective_next_run_at = next_run_at
-            if origin_seq is not None:
-                reply_pending = (
-                    await connection.execute(
-                        sa.select(
-                            sa.exists(
-                                sa.select(tables.inbound_message.c.id).where(
-                                    tables.inbound_message.c.workspace_id == self.workspace_id,
-                                    tables.inbound_message.c.conversation_id == conversation_id,
-                                    tables.inbound_message.c.admission_source == MEMBER_ADMISSION,
-                                    tables.inbound_message.c.consumed_turn_id.is_(None),
-                                )
+            reply_pending = (
+                await connection.execute(
+                    sa.select(
+                        sa.exists(
+                            sa.select(tables.inbound_message.c.id).where(
+                                tables.inbound_message.c.workspace_id == self.workspace_id,
+                                tables.inbound_message.c.conversation_id == conversation_id,
+                                tables.inbound_message.c.admission_source == MEMBER_ADMISSION,
+                                tables.inbound_message.c.consumed_turn_id.is_(None),
                             )
                         )
                     )
-                ).scalar_one()
-                if reply_pending:
-                    return None
-                newer_member = (
-                    await connection.execute(
-                        sa.select(
-                            tables.turn.c.id,
-                            tables.turn.c.status,
-                        )
-                        .where(
-                            tables.turn.c.workspace_id == self.workspace_id,
-                            tables.turn.c.conversation_id == conversation_id,
-                            tables.turn.c.agent_id == agent_id,
-                            tables.turn.c.admission_source == MEMBER_ADMISSION,
-                            tables.turn.c.seq > origin_seq,
-                        )
-                        .order_by(tables.turn.c.seq.desc())
-                        .limit(1)
-                        .with_for_update()
+                )
+            ).scalar_one()
+            if reply_pending:
+                return None
+            newer_member = (
+                await connection.execute(
+                    sa.select(
+                        tables.turn.c.id,
+                        tables.turn.c.status,
                     )
-                ).one_or_none()
-                if newer_member is not None:
-                    if newer_member.status != "queued":
-                        return None
-                    resume_turn_id = newer_member.id
-                    effective_next_run_at = datetime.now(UTC)
+                    .where(
+                        tables.turn.c.workspace_id == self.workspace_id,
+                        tables.turn.c.conversation_id == conversation_id,
+                        tables.turn.c.agent_id == agent_id,
+                        tables.turn.c.admission_source == MEMBER_ADMISSION,
+                        tables.turn.c.seq > origin_seq,
+                    )
+                    .order_by(tables.turn.c.seq.desc())
+                    .limit(1)
+                    .with_for_update()
+                )
+            ).one_or_none()
+            if newer_member is not None:
+                if newer_member.status != "queued":
+                    return None
+                resume_turn_id = newer_member.id
+                effective_next_run_at = datetime.now(UTC)
             task_id = uuid4()
             values = {
-                "schedule": schedule,
+                "schedule": ONE_TIME_SCHEDULE,
                 "prompt": prompt,
                 "description": description,
                 "next_run_at": effective_next_run_at,
                 "last_run_at": None,
                 "last_turn_id": None,
-                "expires_at": expires_at,
+                "expires_at": None,
                 "origin_seq": origin_seq,
                 "resume_turn_id": resume_turn_id,
                 "claimed_by": None,
@@ -328,13 +431,13 @@ class ScheduleStore:
                         agent_id=agent_id,
                         name=name,
                         created_by_member_id=created_by_member_id,
-                        schedule=schedule,
+                        schedule=ONE_TIME_SCHEDULE,
                         prompt=prompt,
                         description=description,
                         next_run_at=effective_next_run_at,
                         last_run_at=None,
                         last_turn_id=None,
-                        expires_at=expires_at,
+                        expires_at=None,
                         origin_seq=origin_seq,
                         resume_turn_id=resume_turn_id,
                         claimed_by=None,
@@ -365,12 +468,12 @@ class ScheduleStore:
             agent_id=agent_id,
             name=name,
             created_by_member_id=row.created_by_member_id,
-            schedule=schedule,
+            schedule=ONE_TIME_SCHEDULE,
             prompt=prompt,
             description=description,
             next_run_at=effective_next_run_at,
             last_run_at=None,
-            expires_at=expires_at,
+            expires_at=None,
             origin_seq=origin_seq,
             resume_turn_id=resume_turn_id,
             claim_id=None,
@@ -378,20 +481,33 @@ class ScheduleStore:
             updated_at=row.updated_at,
         )
 
-    async def cancel(self, name: str) -> bool:
-        agent_id = agent_current().agent_id
+    async def cancel(self, expected: ScheduledTask) -> None:
+        if expected.schedule == ONE_TIME_SCHEDULE:
+            raise ValueError("one-time workflow pauses cannot be cancelled as recurring tasks")
+        agent_id = object_agent_id()
+        if expected.agent_id != agent_id:
+            raise ValueError("scheduled task executor changed while cancelling")
+        creator_matches = (
+            tables.scheduled_task.c.created_by_member_id.is_(None)
+            if expected.created_by_member_id is None
+            else tables.scheduled_task.c.created_by_member_id == expected.created_by_member_id
+        )
         async with workspace_tx() as connection:
             deleted = await connection.execute(
                 sa.delete(tables.scheduled_task).where(
                     tables.scheduled_task.c.workspace_id == self.workspace_id,
-                    tables.scheduled_task.c.agent_id == agent_id,
-                    tables.scheduled_task.c.name == name,
+                    tables.scheduled_task.c.id == expected.id,
+                    tables.scheduled_task.c.agent_id == expected.agent_id,
+                    tables.scheduled_task.c.conversation_id == expected.conversation_id,
+                    tables.scheduled_task.c.name == expected.name,
+                    creator_matches,
                 )
             )
-        return deleted.rowcount > 0
+        if deleted.rowcount == 0:
+            raise ValueError(f"scheduled task {expected.name!r} changed while cancelling")
 
     async def list(self) -> tuple[ScheduledTask, ...]:
-        agent_id = agent_current().agent_id
+        agent_id = object_agent_id()
         async with workspace_tx() as connection:
             rows = (
                 (
@@ -517,11 +633,11 @@ class ScheduleStore:
             )
         return updated.rowcount > 0
 
-    async def inspect(self, name: str) -> TaskInspection | None:
+    async def inspect(self, expected: ScheduledTask) -> TaskInspection | None:
         """One task's live picture beyond its definition: its timing marks and the latest fire's
         turn with its terminal outcome — the read the `scheduled_task` object kind renders as
         status."""
-        agent_id = agent_current().agent_id
+        agent_id = object_agent_id()
         query = (
             sa.select(
                 tables.scheduled_task.c.next_run_at,
@@ -538,8 +654,9 @@ class ScheduleStore:
             )
             .where(
                 tables.scheduled_task.c.workspace_id == self.workspace_id,
+                tables.scheduled_task.c.id == expected.id,
                 tables.scheduled_task.c.agent_id == agent_id,
-                tables.scheduled_task.c.name == name,
+                tables.scheduled_task.c.name == expected.name,
                 tables.scheduled_task.c.schedule != ONE_TIME_SCHEDULE,
             )
         )

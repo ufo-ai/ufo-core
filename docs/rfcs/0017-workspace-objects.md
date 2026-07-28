@@ -42,7 +42,7 @@ Every durable-config surface today is a bespoke, gap-ridden island:
 
 | Concern | Today | Gap |
 |---|---|---|
-| Scheduled tasks | `schedule_task` / `cancel_scheduled_task` / `list_scheduled_tasks` (`extensions/scheduled_tasks/ufo_ext_scheduled_tasks/tools.py:170-198`) over core's `ScheduleStore` (`core/src/ufo/scheduling.py:116`) | Three tools for one row family; no inspect-one verb |
+| Scheduled tasks | `scheduled_task` objects over core's `ScheduleStore` | One row family through the object verbs |
 | User skills | `save_custom_skill` reads an authored directory into the extension's `user_skill` table (`extensions/skill_create/ufo_ext_skill_create/manifest.py:120-135`) | **No list, no get, no delete** — a saved skill is invisible and immortal in chat |
 | Sources | `sync_source` registers via progressive disclosure (`extensions/sources/ufo_ext_sources/tools.py:279`) | Create-only — **no list, no remove**; a wrong source syncs forever |
 | Connector grants | `connect_account` → OAuth → `grant` row (`core/src/ufo/grants.py:251`, `tables.py:228-245`) | **No tool lists or revokes a grant at all** |
@@ -151,22 +151,26 @@ itself is core). Registry, envelope parsing, and the five `ToolDef`s live in one
 ```python
 class ObjectListInput(BaseModel):
     kind: str = ""    # "" lists the kinds; a kind name lists its instances
+    agent: str = ""   # stable target for audited agent-scoped kinds; "" means current
     query: str = ""   # kind-interpreted filter; the landing kinds substring-match name and summary
     cursor: str = ""  # opaque, from the previous page's next_cursor
 
 class ObjectGetInput(BaseModel):
     kind: str
     name: str
+    agent: str = ""
 
 class ObjectExplainInput(BaseModel):
     kind: str
 
 class ObjectApplyInput(BaseModel):
     manifest: str     # one YAML document: kind, name, spec — nothing else
+    agent: str = ""   # existing scheduled-task executor; "" means current
 
 class ObjectDeleteInput(BaseModel):
     kind: str
     name: str
+    agent: str = ""
 ```
 
 | Tool | Returns |
@@ -198,6 +202,13 @@ Semantics, fixed here so implementation doesn't relitigate them:
   mutation handlers, exactly as `sync_source` does today
   (`extensions/sources/ufo_ext_sources/tools.py:132`); a finer rule needs no new mechanism (the
   connector kind admits the grantor, §3).
+- **Agent targets are a core dispatch boundary.** Reads target `conversation`, `artifact`, and
+  `scheduled_task`; delete targets `artifact` and `scheduled_task`; apply targets only an existing
+  `scheduled_task`. Creation requires the executor's own conversation. Omission uses the executing
+  agent. A cross-agent target requires the configured main agent, a non-subagent turn, and an exact
+  live requesting member message. The task-local target changes only the audited store namespace:
+  member authority, audience, and sandbox stay on the call. Results and refs carry the stable agent
+  name in their own `agent` field; object names are unchanged. Workspace kinds reject the field.
 
 Every failure is terminal for the call and names its cause:
 
@@ -224,11 +235,14 @@ Every failure is terminal for the call and names its cause:
 | `agent` | core | `model` | update | prompt + its digest, read-only | nothing deleted — `prompt` stays proposal-owned, so the two write paths are disjoint by construction |
 | `artifact` | core | `filename`, `media_type`, `subject` — the share record, never authored | delete | shared-at, sharing turn + conversation, size, version count, fresh download link, workspace copy path | nothing existed — fills the list/re-fetch/delete gap over `share_file` |
 
-**`scheduled_task`.** Handlers are thin adapters over `ScheduleStore.create/cancel/list`
-(`core/src/ufo/scheduling.py:133,313,323`); apply validates through the extension's existing
+**`scheduled_task`.** Handlers are thin adapters over `ScheduleStore.create/update/cancel/list`;
+apply validates through the extension's existing
 `validate_cron` (`extensions/scheduled_tasks/ufo_ext_scheduled_tasks/cron.py:14`) and computes
-the first `next_run_at`. The report conversation is the applying turn's conversation — today's
-upsert behavior, kept: it is operational binding, so it lives in the row, not the spec. Pause
+the first `next_run_at`. Creation requires a conversation bound to the executing agent. An update
+keeps the stored executor, report conversation, creator, and name, so the main agent may inspect,
+edit, or cancel a creator's child-agent task from another conversation without reassigning it.
+An admin sees its schedule and run state, may change cadence or expiry, and may cancel it, but
+cannot read or change its prompt, description, or responses. Pause
 rows (`@pause:` / `@once`) are workflow internals and never surface as objects; `pause_and_wait`
 is untouched. Claims, leases, and the job runner do not change.
 

@@ -11,11 +11,11 @@ from uuid import UUID
 import sqlalchemy as sa
 from pydantic import BaseModel, ConfigDict, Field
 
-from ufo.agent_scope import agent_current
 from ufo.blob import BlobNotFound
 from ufo.db import workspace_tx
 from ufo.ext.context import JsonValue
 from ufo.models.interface import TextBlock
+from ufo.object_scope import object_agent_id
 from ufo.objects import (
     MATERIALIZE_MAX_BYTES,
     ObjectDetail,
@@ -46,9 +46,9 @@ class ConversationSpec(BaseModel):
 
 @dataclass(frozen=True)
 class ConversationObjects:
-    """Read-only handlers over the agent's conversations visible to the caller's audience. Another
-    agent's conversations are not found. Status materializes only an exact-audience transcript.
-    Resolves artifact and scheduled-task links; every mutation refuses."""
+    """Read-only handlers over the selected agent's conversations visible to the caller. Status
+    materializes a visible transcript. Resolves artifact and scheduled-task links; every mutation
+    refuses."""
 
     async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage:
         rows = tuple(
@@ -142,7 +142,7 @@ class ConversationObjects:
             tables.conversation.c.updated_at,
         ).where(
             tables.conversation.c.workspace_id == ws_current().workspace_id,
-            tables.conversation.c.agent_id == agent_current().agent_id,
+            tables.conversation.c.agent_id == object_agent_id(),
             tables.conversation.c.audience.in_(ctx.read_subjects),
         )
 
@@ -156,9 +156,8 @@ CONVERSATION_OBJECT = ObjectKind(
     guidance=(
         "Conversations resolve artifact `created_in` and scheduled-task `reports_to` links: get "
         "one by its id to see which surface and audience it runs on and when it started. Reads "
-        "show this agent's conversations visible to the acting audience; another agent's are not "
-        "found. When a conversation has the same acting audience, "
-        "`status.workspace_path` is its text exchange written into your workspace. Conversations "
+        "show the selected agent's conversations visible to the conversation and exact requester. "
+        "`status.workspace_path` writes a visible text exchange into your workspace. Conversations "
         "cannot be created, changed, or deleted through objects."
     ),
     spec_model=ConversationSpec,

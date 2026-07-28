@@ -61,7 +61,7 @@ Tables (all keyed by `workspace_id`, `created_at`, `updated_at`):
 | `ledger` | Metered usage: every model and tool call, priced. |
 | `spend_cap` | Caps by scope (`workspace` \| `member` \| `agent`), dimension, window; `reject` or `park` on breach. |
 | `job` | Recurring/one-time background work (source sync, page-change fan-out, extension jobs). |
-| `scheduled_task` | Agent-namespaced, member-private recurring invocation with names unique per agent and optional UTC expiry, enforced before invocation. Each recurring turn carries the exact claimed UTC occurrence; when its following occurrence reaches expiry, runtime adds a continuation check-in to the completed work. One-time workflow pauses keep their raw resume prompt. |
+| `scheduled_task` | Agent-namespaced, member-private recurring invocation with names unique per agent and optional UTC expiry, enforced before invocation. Creation binds the executor and its reporting conversation; updates never move either. The main agent may target an existing child-agent task from any conversation: its creator may inspect, edit, or cancel it; an admin may list management metadata, change cadence or expiry, or cancel, but cannot read or change its prompt or responses; another member cannot see it. Each recurring turn carries the exact claimed UTC occurrence; when its following occurrence reaches expiry, runtime adds a continuation check-in to the completed work. One-time workflow pauses keep their raw resume prompt. |
 
 ## Agent loop
 
@@ -149,6 +149,14 @@ terminal frame. A client's wait always ends — the terminal state commits on th
   only when a flow needs it. A link never grants visibility.
   A conversation get writes its text exchange to `status.workspace_path`; bulk transcript content
   never enters the tool result.
+  Object reads accept an optional stable agent name for `conversation`, `artifact`, and
+  `scheduled_task`; delete accepts one for `artifact` and `scheduled_task`; apply accepts one only
+  to update an existing `scheduled_task`. Task creation requires the executor's own conversation.
+  Omission means the executing agent. Crossing that boundary requires the configured main agent, a
+  non-subagent turn, and an exact live requesting message. The target is task-local to the object
+  dispatch, keeps the requester's member authority, audience, and sandbox, and appears as a
+  separate `agent` field in results and refs — object names never gain a second encoded form.
+  Workspace-scoped kinds reject a target.
   Everything else arrives via extensions.
   Two tools where one would do is a defect. `share_file` ports the shipped design: byte custody in
   the blob store, a TTL-bound token URL served by core's artifact route — no token, no bytes.
