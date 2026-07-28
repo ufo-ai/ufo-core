@@ -32,7 +32,7 @@ from uuid import UUID
 import sqlalchemy as sa
 from pydantic import BaseModel, Field
 
-from ufo.audience import Audience, audience_subjects, conversation_audience
+from ufo.audience import Audience, audience_subjects, conversation_audience, is_foreign
 from ufo.blob import BlobStore
 from ufo.browser import CdpProvider, FindCompleter
 from ufo.connectors import ConnectorRegistry
@@ -47,6 +47,7 @@ from ufo.schema.records import Agent, Turn
 from ufo.search import SearchProvider
 from ufo.seats import member_is_admin
 from ufo.skills.runtime import CORE_SKILL_REGISTRY, LoadedSkills, SkillRegistry
+from ufo.subjects import member_subject
 from ufo.workspace import ws_current
 
 
@@ -213,18 +214,26 @@ class ToolContext:
 
     @property
     def effective_audience(self) -> Audience:
-        """The exact audience a write belongs to."""
+        """The exact audience a write belongs to: the requester's own when one is bound, except in
+        an externally-shared conversation. A Slack Connect channel is sealed both ways, so what is
+        said there stays keyed to that channel — stamping it with the requester would carry another
+        organization's content into every internal conversation that member speaks in."""
         acting = self.acting_member_id
-        return conversation_audience(acting) if acting is not None else self.audience
+        if acting is None or is_foreign(self.audience):
+            return self.audience
+        return conversation_audience(acting)
 
     @property
     def read_subjects(self) -> frozenset[str]:
-        """What the conversation and exact requester may jointly read."""
+        """What the conversation and exact requester may jointly read: the conversation's own
+        subjects plus the requester's private one. The requester contributes only their own subject,
+        never the workspace-shared atom their private audience also reads — a Slack Connect
+        audience is sealed against internal content, and speaking there does not unseal it."""
         subjects = audience_subjects(self.audience)
         acting = self.acting_member_id
         if acting is None:
             return subjects
-        return subjects | audience_subjects(conversation_audience(acting))
+        return subjects | {member_subject(acting)}
 
     async def speaker_is_admin(self) -> bool:
         """Whether this call's requesting member is a workspace admin. Workspace-wide acts gate on

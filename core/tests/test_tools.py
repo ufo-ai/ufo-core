@@ -7,13 +7,20 @@ from uuid import UUID, uuid4
 import pytest
 from pydantic import BaseModel, ValidationError
 
-from ufo.audience import conversation_audience
+from ufo.audience import (
+    SHARED_AUDIENCE,
+    Audience,
+    conversation_audience,
+    foreign_room_audience,
+    room_audience,
+)
 from ufo.blob import FilesystemBlobStore
 from ufo.ext.manifest import SubagentProfile
 from ufo.loop.subagents import SubagentRegistry, Subagents
 from ufo.sandbox.session import ExecResult
 from ufo.schema.records import Agent, Turn
 from ufo.skills.runtime import CORE_SKILL_REGISTRY, RuntimeSkill, SkillRegistry
+from ufo.subjects import member_subject
 from ufo.tools.builtins import BUILTIN_TOOLS
 from ufo.tools.context import Spawn, SpawnResult, SubagentStatus, ToolContext, ToolResult
 from ufo.tools.registry import REQUESTED_BY, ToolDef, ToolRegistry
@@ -483,3 +490,80 @@ async def test_spawn_subagent_unknown_profile_is_an_error_naming_the_valid_profi
     text = result.content[0].text
     assert "assistant" in text
     assert "research" in text
+
+
+SEAL_MEMBER = UUID("11111111-1111-1111-1111-111111111111")
+SEAL_ROOM = room_audience("slack", "CROOM")
+SEAL_FOREIGN = foreign_room_audience("slack", "CCONNECT")
+
+
+@pytest.mark.parametrize(
+    ("audience", "speaker", "subjects", "write_to"),
+    [
+        (SHARED_AUDIENCE, None, {"shared"}, SHARED_AUDIENCE),
+        (
+            SHARED_AUDIENCE,
+            SEAL_MEMBER,
+            {"shared", member_subject(SEAL_MEMBER)},
+            f"member:{SEAL_MEMBER}",
+        ),
+        (
+            conversation_audience(SEAL_MEMBER),
+            None,
+            {"shared", member_subject(SEAL_MEMBER)},
+            f"member:{SEAL_MEMBER}",
+        ),
+        (SEAL_ROOM, None, {"shared", str(SEAL_ROOM)}, str(SEAL_ROOM)),
+        (
+            SEAL_ROOM,
+            SEAL_MEMBER,
+            {"shared", str(SEAL_ROOM), member_subject(SEAL_MEMBER)},
+            f"member:{SEAL_MEMBER}",
+        ),
+        (SEAL_FOREIGN, None, {str(SEAL_FOREIGN)}, str(SEAL_FOREIGN)),
+        (
+            SEAL_FOREIGN,
+            SEAL_MEMBER,
+            {str(SEAL_FOREIGN), member_subject(SEAL_MEMBER)},
+            str(SEAL_FOREIGN),
+        ),
+    ],
+    ids=[
+        "shared",
+        "shared+speaker",
+        "member",
+        "room",
+        "room+speaker",
+        "foreign",
+        "foreign+speaker",
+    ],
+)
+def test_the_audience_seal_holds_for_every_audience_and_speaker(
+    audience: Audience, speaker: UUID | None, subjects: set[str], write_to: str
+) -> None:
+    """The whole disclosure contract of the two properties every read and write scopes on, pinned
+    here rather than inferred from any one consumer. The row that matters is `foreign+speaker`: an
+    externally-shared audience never gains the workspace-shared atom and never rekeys its writes
+    out, however the conversation is being driven."""
+    ctx = ToolContext(
+        sandbox=None,
+        blob=None,
+        turn=Turn(
+            id=uuid4(),
+            workspace_id=uuid4(),
+            conversation_id=uuid4(),
+            agent_id=uuid4(),
+            seq=0,
+            status="running",
+            inbound="hello",
+            created_at=datetime(2026, 7, 9, tzinfo=UTC),
+        ),
+        agent=Agent(prompt="be terse", model="claude-opus-4-8"),
+        spawn=_unavailable_spawn,
+        speaker_member_id=speaker,
+        audience=audience,
+        artifact_token_secret=ARTIFACT_SECRET,
+    )
+
+    assert ctx.read_subjects == frozenset(subjects)
+    assert str(ctx.effective_audience) == write_to

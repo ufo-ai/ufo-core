@@ -431,11 +431,15 @@ async def test_foreign_room_cannot_read_shared_source_pages(db: None, tmp_path: 
             speaker_member_id=None,
         )
 
+        speaking = _context(state, blob, audience=foreign_room_audience("slack", "CCONNECT"))
+
         room_listing = json.loads(await _text(_TOOLS["object_list"], room, kind=PAGE_KIND))
         foreign_listing = json.loads(await _text(_TOOLS["object_list"], foreign, kind=PAGE_KIND))
+        speaking_listing = json.loads(await _text(_TOOLS["object_list"], speaking, kind=PAGE_KIND))
 
     assert len(room_listing["objects"]) == 1
     assert foreign_listing["objects"] == []
+    assert speaking_listing["objects"] == []
 
 
 async def test_explicit_room_request_reads_shared_and_requester_private_pages(

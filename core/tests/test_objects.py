@@ -973,7 +973,10 @@ async def _turn_row(
 
 
 async def _workspace_context(
-    turn: Turn, tmp_path: Path, audience: Audience = SHARED_AUDIENCE
+    turn: Turn,
+    tmp_path: Path,
+    audience: Audience = SHARED_AUDIENCE,
+    speaker_member_id: UUID | None = None,
 ) -> tuple[ToolContext, Path]:
     """A context whose sandbox is the real local carrier over a temp workspace and whose blob
     store is a real temp filesystem store — object materialization runs its true path."""
@@ -994,7 +997,7 @@ async def _workspace_context(
         turn=turn,
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=_unavailable_spawn,
-        speaker_member_id=turn.speaker_member_id,
+        speaker_member_id=speaker_member_id or turn.speaker_member_id,
         audience=audience,
         artifact_token_secret=ARTIFACT_TEST_SECRET,
     )
@@ -1909,6 +1912,9 @@ async def test_foreign_conversation_cannot_see_shared_metadata(db: None, tmp_pat
         shared = await _turn_row(workspace_id)
         sealed = await _turn_row(workspace_id, agent_id=shared.agent_id, audience=foreign)
         ctx, _ = await _workspace_context(sealed, tmp_path, audience=foreign)
+        speaking, _ = await _workspace_context(
+            sealed, tmp_path, audience=foreign, speaker_member_id=uuid4()
+        )
 
         listing = yaml.safe_load(
             await _agent_text(
@@ -1919,8 +1925,44 @@ async def test_foreign_conversation_cannot_see_shared_metadata(db: None, tmp_pat
                 kind=CONVERSATION_KIND,
             )
         )
+        speaking_listing = yaml.safe_load(
+            await _agent_text(
+                shared.agent_id,
+                tools,
+                "object_list",
+                speaking,
+                kind=CONVERSATION_KIND,
+            )
+        )
 
     assert [row["name"] for row in listing["objects"]] == [str(sealed.conversation_id)]
+    assert [row["name"] for row in speaking_listing["objects"]] == [str(sealed.conversation_id)]
+
+
+async def test_foreign_conversation_cannot_list_shared_artifacts(db: None, tmp_path: Path) -> None:
+    """A member speaking in an externally-shared channel lists that channel's artifacts and their
+    own, never the workspace's — the seal does not lift because someone is speaking."""
+    workspace_id = await _workspace()
+    tools = _object_tools()
+    foreign = foreign_room_audience("slack", "CCONNECT")
+    with ws(workspace_id):
+        shared_turn = await _turn_row(workspace_id)
+        sealed_turn = await _turn_row(workspace_id, agent_id=shared_turn.agent_id, audience=foreign)
+        ctx, _ = await _workspace_context(shared_turn, tmp_path)
+        blob_key = f"artifacts/{shared_turn.id}/internal.txt"
+        await ctx.blob.put(blob_key, b"internal numbers")
+        await _shared_artifact_row(shared_turn, blob_key, "internal.txt", 16)
+
+        speaking, _ = await _workspace_context(
+            sealed_turn, tmp_path, audience=foreign, speaker_member_id=uuid4()
+        )
+        listing = json.loads(
+            await _agent_text(
+                shared_turn.agent_id, tools, "object_list", speaking, kind=ARTIFACT_KIND
+            )
+        )
+
+    assert listing["objects"] == []
 
 
 async def test_conversation_transcript_uses_the_canonical_id_path(db: None, tmp_path: Path) -> None:

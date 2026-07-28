@@ -73,8 +73,10 @@ terminal frame. A client's wait always ends — the terminal state commits on th
   call's optional `requested_by` must name a visible, non-denied message already absorbed by this
   turn; core strips it before input validation and binds the call's member capabilities. Omission
   means common work, except a scheduled turn or subagent retains its durable `on_behalf` member.
-  Reads combine the conversation's subjects with that member's subjects; writes use the member's
-  private subject.
+  Reads combine the conversation's subjects with that member's own subject — never the shared atom
+  their private audience also reads, so a sealed conversation stays sealed however it is driven.
+  Writes use the member's private subject, except in a foreign conversation, whose writes stay keyed
+  to it.
 - **Skill loading** — skills are folders of files (SKILL.md + assets), mounted into the sandbox on
   `load_skill`. **A skill ships with the thing it teaches**: core ships exactly two folder skills —
   `sandbox`, `delegation` — teaching core's own builtins, and generates a `model-catalog` skill from
@@ -120,7 +122,8 @@ terminal frame. A client's wait always ends — the terminal state commits on th
   each turn through a `user_prompt_submit` hook. Member and room audiences read their own subject
   plus shared; shared reads shared; foreign reads only its sealed subject. Automatic recall uses
   the conversation audience. Explicit memory tools and opened result objects combine the
-  conversation's readable subjects with the bound requester's member and shared subjects. It also
+  conversation's readable subjects with the bound requester's own member subject, so a foreign
+  conversation reads only its sealed subject and the requester's, never shared. It also
   provides the typed `memory_search` seam: core routes that exact subject set to the extension's
   one search workflow. Scheduled tasks require this seam and search
   after admission and before the run's first model round. Recall carries the

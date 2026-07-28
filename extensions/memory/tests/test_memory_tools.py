@@ -17,12 +17,14 @@ from pydantic import ValidationError
 from ufo_ext_embed_openai import EMBED_DIM
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.events import MEMORY_RECALL_EVENT
+from ufo_ext_memory.objects import MEMORY_OBJECT, MemoryObjects
 from ufo_ext_memory.store import MemoryIndexer, memory_item
 
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, context_for
 from ufo.indexing import TextChunker
+from ufo.objects import ObjectListQuery
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import (
@@ -500,6 +502,63 @@ async def test_room_memory_reads_shared_while_foreign_memory_is_sealed(
     assert "shared launch note" not in foreign_read.content[0].text
 
 
+async def test_a_speaking_member_does_not_unseal_a_foreign_conversation(
+    db: None, tmp_path: Path
+) -> None:
+    """A member speaking in a Slack Connect channel reads their own memory and the channel's, never
+    the workspace's — the seal is a property of the channel, not of whether anyone is speaking."""
+    workspace_id = await _workspace()
+    alice = uuid4()
+    embed = StubEmbed(vec((0, 1.0)))
+    index = DefaultIndex(transaction=workspace_tx)
+    foreign = foreign_room_audience("slack", "CCONNECT")
+    shared_ctx = _tool_ctx(_ext(index, embed), None, tmp_path)
+    alice_dm = conversation_audience(alice)
+    alice_ctx = _tool_ctx(_ext(index, embed, alice_dm), alice, tmp_path, audience=alice_dm)
+    foreign_ext = _ext(index, embed, foreign)
+    alice_in_foreign = _tool_ctx(foreign_ext, alice, tmp_path, audience=foreign)
+
+    with ws(workspace_id):
+        await _run("memory_update", shared_ctx, body="internal shared launch note")
+        await _run("memory_update", alice_ctx, body="alice private launch note")
+        await _indexer(embed).run()
+        read = await _run("memory_search", alice_in_foreign, queries=["launch note"])
+
+    assert "internal shared launch note" not in read.content[0].text
+    assert "alice private launch note" in read.content[0].text
+
+
+async def test_a_members_write_in_a_foreign_conversation_stays_sealed_to_it(
+    db: None, tmp_path: Path
+) -> None:
+    """What a member says in a Slack Connect channel belongs to that channel. Stamping it with the
+    requester instead would carry another organization's content into every internal conversation
+    that member speaks in."""
+    workspace_id = await _workspace()
+    alice = uuid4()
+    embed = StubEmbed(vec((0, 1.0)))
+    index = DefaultIndex(transaction=workspace_tx)
+    foreign = foreign_room_audience("slack", "CCONNECT")
+    alice_in_foreign = _tool_ctx(_ext(index, embed, foreign), alice, tmp_path, audience=foreign)
+    alice_dm = conversation_audience(alice)
+    alice_elsewhere = _tool_ctx(_ext(index, embed, alice_dm), alice, tmp_path, audience=alice_dm)
+
+    with ws(workspace_id):
+        await _run("memory_update", alice_in_foreign, body="acme renewal terms")
+        await _indexer(embed).run()
+        async with workspace_tx() as connection:
+            rows = await connection.execute(
+                sa.select(memory_item.c.subject).where(memory_item.c.body == "acme renewal terms")
+            )
+            stored = list(rows.scalars().all())
+        internal_read = await _run("memory_search", alice_elsewhere, queries=["acme renewal"])
+        foreign_read = await _run("memory_search", alice_in_foreign, queries=["acme renewal"])
+
+    assert stored == [str(foreign)]
+    assert "acme renewal terms" not in internal_read.content[0].text
+    assert "acme renewal terms" in foreign_read.content[0].text
+
+
 async def test_explicit_room_request_reads_the_room_and_requesters_private_memory(
     db: None, tmp_path: Path
 ) -> None:
@@ -628,3 +687,46 @@ async def test_memory_search_interleaves_per_query_results(
         for line in found.content[0].text.splitlines()
     ]
     assert bodies == ["a-one", "b-one", "a-two"]
+
+
+async def test_the_memory_object_kind_is_sealed_against_a_speaking_member(
+    db: None, tmp_path: Path
+) -> None:
+    """`object_list kind=memory` and `object_get kind=memory` read `ctx.read_subjects` too, so the
+    Slack Connect seal has to hold on the object surface exactly as it does on search."""
+    workspace_id = await _workspace()
+    alice = uuid4()
+    embed = StubEmbed(vec((0, 1.0)))
+    index = DefaultIndex(transaction=workspace_tx)
+    foreign = foreign_room_audience("slack", "CCONNECT")
+    shared_ctx = _tool_ctx(_ext(index, embed), None, tmp_path, workspace_id=workspace_id)
+    alice_dm = conversation_audience(alice)
+    alice_ctx = _tool_ctx(
+        _ext(index, embed, alice_dm), alice, tmp_path, workspace_id=workspace_id, audience=alice_dm
+    )
+    speaking = _tool_ctx(
+        _ext(index, embed, foreign), alice, tmp_path, workspace_id=workspace_id, audience=foreign
+    )
+
+    with ws(workspace_id):
+        await _run("memory_update", shared_ctx, body="internal shared roadmap")
+        await _run("memory_update", alice_ctx, body="alice private roadmap")
+        async with workspace_tx() as connection:
+            rows = await connection.execute(
+                sa.select(memory_item.c.id, memory_item.c.body, memory_item.c.subject)
+            )
+            stored = {row.body: (row.id, row.subject) for row in rows.all()}
+
+        listed = await MemoryObjects().list(
+            speaking, ObjectListQuery(supported_fields=MEMORY_OBJECT.list_fields)
+        )
+        fetched_shared = await MemoryObjects().get(
+            speaking, str(stored["internal shared roadmap"][0])
+        )
+        fetched_own = await MemoryObjects().get(speaking, str(stored["alice private roadmap"][0]))
+
+    listed_ids = {row.name for row in listed.rows}
+    assert str(stored["internal shared roadmap"][0]) not in listed_ids
+    assert str(stored["alice private roadmap"][0]) in listed_ids
+    assert fetched_shared is None
+    assert fetched_own is not None
