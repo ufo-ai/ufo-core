@@ -518,7 +518,7 @@ SEAL_FOREIGN = foreign_room_audience("slack", "CCONNECT")
             SEAL_ROOM,
             SEAL_MEMBER,
             {"shared", str(SEAL_ROOM), member_subject(SEAL_MEMBER)},
-            f"member:{SEAL_MEMBER}",
+            str(SEAL_ROOM),
         ),
         (SEAL_FOREIGN, None, {str(SEAL_FOREIGN)}, str(SEAL_FOREIGN)),
         (
@@ -542,9 +542,11 @@ def test_the_audience_seal_holds_for_every_audience_and_speaker(
     audience: Audience, speaker: UUID | None, subjects: set[str], write_to: str
 ) -> None:
     """The whole disclosure contract of the two properties every read and write scopes on, pinned
-    here rather than inferred from any one consumer. The row that matters is `foreign+speaker`: an
-    externally-shared audience never gains the workspace-shared atom and never rekeys its writes
-    out, however the conversation is being driven."""
+    here rather than inferred from any one consumer. A write takes the requester's own subject only
+    in a shared conversation; in a room or a foreign channel it stays keyed to that space, so a
+    private room's fact never rekeys into the next room and a foreign channel's never into the
+    workspace, however the conversation is being driven. Reads still union the requester's own
+    subject everywhere except that shared atom a foreign audience is sealed against."""
     ctx = ToolContext(
         sandbox=None,
         blob=None,

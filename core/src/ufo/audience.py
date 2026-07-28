@@ -62,16 +62,12 @@ def audience_member(audience: Audience) -> UUID | None:
     return UUID(parsed.removeprefix(MEMBER_SUBJECT_PREFIX))
 
 
-def is_foreign(audience: Audience) -> bool:
-    """Whether this audience is an externally-shared room — a space another organization sits in.
-    The one predicate every seal asks: such an audience reads and writes only itself, so it never
-    receives the workspace-shared atom and nothing said in it is ever rekeyed out of it."""
-    return parse_audience(audience).startswith(FOREIGN_AUDIENCE_PREFIX)
-
-
 def audience_subjects(audience: Audience) -> frozenset[str]:
+    """The subjects a conversation of this audience may read. An externally-shared room reads only
+    itself — never the workspace-shared atom — so nothing internal is ever recalled into a channel
+    another organization sits in."""
     parsed = parse_audience(audience)
-    if is_foreign(parsed):
+    if parsed.startswith(FOREIGN_AUDIENCE_PREFIX):
         return frozenset({parsed})
     return frozenset({SHARED_SUBJECT, parsed})
 

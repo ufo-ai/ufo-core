@@ -75,8 +75,9 @@ terminal frame. A client's wait always ends — the terminal state commits on th
   means common work, except a scheduled turn or subagent retains its durable `on_behalf` member.
   Reads combine the conversation's subjects with that member's own subject — never the shared atom
   their private audience also reads, so a sealed conversation stays sealed however it is driven.
-  Writes use the member's private subject, except in a foreign conversation, whose writes stay keyed
-  to it.
+  A write takes the member's private subject only in a workspace-shared conversation; a private room
+  or a foreign channel is its own memory space, so a write there stays keyed to that space — a
+  member wanting a private note makes it in their own conversation.
 - **Skill loading** — skills are folders of files (SKILL.md + assets), mounted into the sandbox on
   `load_skill`. **A skill ships with the thing it teaches**: core ships exactly two folder skills —
   `sandbox`, `delegation` — teaching core's own builtins, and generates a `model-catalog` skill from

@@ -32,7 +32,7 @@ from uuid import UUID
 import sqlalchemy as sa
 from pydantic import BaseModel, Field
 
-from ufo.audience import Audience, audience_subjects, conversation_audience, is_foreign
+from ufo.audience import SHARED_AUDIENCE, Audience, audience_subjects, conversation_audience
 from ufo.blob import BlobStore
 from ufo.browser import CdpProvider, FindCompleter
 from ufo.connectors import ConnectorRegistry
@@ -214,12 +214,14 @@ class ToolContext:
 
     @property
     def effective_audience(self) -> Audience:
-        """The exact audience a write belongs to: the requester's own when one is bound, except in
-        an externally-shared conversation. A Slack Connect channel is sealed both ways, so what is
-        said there stays keyed to that channel — stamping it with the requester would carry another
-        organization's content into every internal conversation that member speaks in."""
+        """The exact audience a write belongs to: the conversation's own, taking the requester's
+        private subject only in a workspace-shared conversation. A private room and a Slack Connect
+        channel are memory spaces in their own right — what is said there belongs to that space, so
+        stamping it with the requester would carry it into every other conversation that member
+        speaks in, leaking a private room's fact to the next room and another org's to the
+        workspace. A member who wants a private note makes it in their own conversation."""
         acting = self.acting_member_id
-        if acting is None or is_foreign(self.audience):
+        if acting is None or self.audience != SHARED_AUDIENCE:
             return self.audience
         return conversation_audience(acting)
 

@@ -559,30 +559,57 @@ async def test_a_members_write_in_a_foreign_conversation_stays_sealed_to_it(
     assert "acme renewal terms" in foreign_read.content[0].text
 
 
-async def test_explicit_room_request_reads_the_room_and_requesters_private_memory(
+async def test_a_room_write_is_the_rooms_and_a_members_own_note_stays_theirs(
     db: None, tmp_path: Path
 ) -> None:
+    """What a member says in a private room belongs to the room — the team recalls it, and it never
+    follows the member into another room. A note the member wants to themselves they make in their
+    own conversation; that stays theirs, surfaced to them anywhere but never to another room
+    member."""
     workspace_id = await _workspace()
     alice, bob = uuid4(), uuid4()
     embed = StubEmbed(vec((0, 1.0)))
     index = DefaultIndex(transaction=workspace_tx)
     room = room_audience("slack", "CPRIVATE")
-    room_ext = _ext(index, embed, room)
-    common = _tool_ctx(room_ext, None, tmp_path, audience=room)
-    alice_ctx = _tool_ctx(room_ext, alice, tmp_path, audience=room)
-    bob_ctx = _tool_ctx(room_ext, bob, tmp_path, audience=room)
+    alice_dm = conversation_audience(alice)
+    alice_in_room = _tool_ctx(_ext(index, embed, room), alice, tmp_path, audience=room)
+    alice_own = _tool_ctx(_ext(index, embed, alice_dm), alice, tmp_path, audience=alice_dm)
+    bob_in_room = _tool_ctx(_ext(index, embed, room), bob, tmp_path, audience=room)
 
     with ws(workspace_id):
-        await _run("memory_update", common, body="room launch note")
-        await _run("memory_update", alice_ctx, body="alice private launch note")
+        await _run("memory_update", alice_in_room, body="the room launch note")
+        await _run("memory_update", alice_own, body="alice's own launch note")
         await _indexer(embed).run()
-        alice_read = await _run("memory_search", alice_ctx, queries=["launch note"])
-        bob_read = await _run("memory_search", bob_ctx, queries=["launch note"])
+        alice_read = await _run("memory_search", alice_in_room, queries=["launch note"])
+        bob_read = await _run("memory_search", bob_in_room, queries=["launch note"])
 
-    assert "room launch note" in alice_read.content[0].text
-    assert "alice private launch note" in alice_read.content[0].text
-    assert "room launch note" in bob_read.content[0].text
-    assert "alice private launch note" not in bob_read.content[0].text
+    assert "the room launch note" in alice_read.content[0].text
+    assert "alice's own launch note" in alice_read.content[0].text
+    assert "the room launch note" in bob_read.content[0].text
+    assert "alice's own launch note" not in bob_read.content[0].text
+
+
+async def test_a_members_room_write_does_not_follow_them_into_another_room(
+    db: None, tmp_path: Path
+) -> None:
+    """The leak room-scoping closes: a fact a member states in one private room must not surface
+    when that same member speaks in a different room. Stamping the write to the member instead of
+    the room would carry #deal-acme's price into #deal-globex the moment she asks there."""
+    workspace_id = await _workspace()
+    alice = uuid4()
+    embed = StubEmbed(vec((0, 1.0)))
+    index = DefaultIndex(transaction=workspace_tx)
+    acme = room_audience("slack", "CACME")
+    globex = room_audience("slack", "CGLOBEX")
+    alice_in_acme = _tool_ctx(_ext(index, embed, acme), alice, tmp_path, audience=acme)
+    alice_in_globex = _tool_ctx(_ext(index, embed, globex), alice, tmp_path, audience=globex)
+
+    with ws(workspace_id):
+        await _run("memory_update", alice_in_acme, body="the acme floor price is 40k")
+        await _indexer(embed).run()
+        globex_read = await _run("memory_search", alice_in_globex, queries=["acme floor price"])
+
+    assert "the acme floor price is 40k" not in globex_read.content[0].text
 
 
 async def test_memory_search_reports_no_match_on_empty_memory(db: None, tmp_path: Path) -> None:
