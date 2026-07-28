@@ -199,6 +199,12 @@ def run() -> None:
             declared=frozenset(
                 slot.name for manifest in manifests for slot in manifest.credentials
             ),
+            fillable=frozenset(
+                slot.name
+                for manifest in manifests
+                for slot in manifest.credentials
+                if slot.member_filled
+            ),
         )
     )
     dbos = DBOS(

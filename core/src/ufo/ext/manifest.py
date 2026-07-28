@@ -73,12 +73,19 @@ class CredentialSlot:
     wire so the sandbox never holds it; without one it is readable only in-process. A `source` mints
     the secret for this workspace instead of the member storing one, falling back to a stored value
     when it has nothing to mint from — a published GitHub App's installation token, with the
-    member's own token as the slot's stored fallback."""
+    member's own token as the slot's stored fallback.
+
+    `member_filled=False` is a slot only this deploy's own code writes: a provider callback binding
+    an installation, where the value is a seal the member could not compose and a typed one is
+    meaningless. `request_credentials` and `ufoctl credential set` refuse it, so the only value it
+    can hold is one that opens. Without that, the sole guard on a typed value is the reader that
+    later refuses it — which withholds the slot's host on every turn until someone rebinds."""
 
     name: str
     description: str
     injection: InjectionTarget | None = None
     source: CredentialSource | None = None
+    member_filled: bool = True
 
 
 @dataclass(frozen=True)

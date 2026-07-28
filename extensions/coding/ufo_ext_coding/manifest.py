@@ -83,8 +83,9 @@ GIT_BASIC_USER = "x-access-token"
 GIT_INSTALLATION = CredentialSlot(
     name=GIT_INSTALLATION_SLOT,
     description="Which ufo GitHub App installation this workspace uses. Filled by installing the "
-    "App, never typed: the value is a seal this deploy writes once GitHub confirms the install "
-    "belongs to the member who authorized it.",
+    "App: the value is a seal this deploy writes once GitHub confirms the install belongs to the "
+    "member who authorized it.",
+    member_filled=False,
 )
 
 

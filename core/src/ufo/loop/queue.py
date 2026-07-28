@@ -363,6 +363,12 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
                     declared=frozenset(
                         slot.name for manifest in runtime.manifests for slot in manifest.credentials
                     ),
+                    fillable=frozenset(
+                        slot.name
+                        for manifest in runtime.manifests
+                        for slot in manifest.credentials
+                        if slot.member_filled
+                    ),
                 )
             ),
             public_base_url=runtime.config.connect.public_base_url,

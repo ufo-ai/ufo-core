@@ -94,7 +94,11 @@ def test_identify_resolves_a_workspace_only_from_this_deploys_seal_for_this_slot
     authorization stand in for another."""
     fernet = Fernet(Fernet.generate_key())
     install_credential_requests(
-        CredentialRequests(fernet=fernet, declared=frozenset({connect.GIT_INSTALLATION_SLOT}))
+        CredentialRequests(
+            fernet=fernet,
+            declared=frozenset({connect.GIT_INSTALLATION_SLOT}),
+            fillable=frozenset(),
+        )
     )
     workspace_id = uuid4()
     slot, payload = connect.GIT_INSTALLATION_SLOT, connect.INSTALL_PAYLOAD
@@ -127,7 +131,11 @@ def test_an_installation_binding_does_not_replay_as_an_authorization_seal() -> N
     rest in the slot, so without this the return leg could be driven from what is stored."""
     fernet = Fernet(Fernet.generate_key())
     install_credential_requests(
-        CredentialRequests(fernet=fernet, declared=frozenset({connect.GIT_INSTALLATION_SLOT}))
+        CredentialRequests(
+            fernet=fernet,
+            declared=frozenset({connect.GIT_INSTALLATION_SLOT}),
+            fillable=frozenset(),
+        )
     )
     workspace_id = uuid4()
     replayed = seal_credential_request(
@@ -174,7 +182,11 @@ def test_a_schema_invalid_payload_is_refused_rather_than_escaping_as_a_validatio
     foreign-shaped stored value reaches, and it must look like every other refusal to its caller."""
     fernet = Fernet(Fernet.generate_key())
     install_credential_requests(
-        CredentialRequests(fernet=fernet, declared=frozenset({connect.GIT_INSTALLATION_SLOT}))
+        CredentialRequests(
+            fernet=fernet,
+            declared=frozenset({connect.GIT_INSTALLATION_SLOT}),
+            fillable=frozenset(),
+        )
     )
     wrong_shape = fernet.encrypt(json.dumps({"not": "a state"}).encode()).decode()
 
@@ -191,6 +203,7 @@ def test_a_seal_from_another_deploy_key_resolves_no_workspace() -> None:
         CredentialRequests(
             fernet=Fernet(Fernet.generate_key()),
             declared=frozenset({connect.GIT_INSTALLATION_SLOT}),
+            fillable=frozenset(),
         )
     )
     foreign = _sealed(

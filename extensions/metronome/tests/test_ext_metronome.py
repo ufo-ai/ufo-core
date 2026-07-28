@@ -838,11 +838,13 @@ async def test_the_declared_slot_opens_the_chat_seal_and_byok_resolution(db: Non
     workspace_id, _, _ = await _seed()
     fernet = Fernet(Fernet.generate_key())
     declared = frozenset(slot.name for slot in metronome.manifest().credentials)
-    requests = CredentialRequests(fernet=fernet, declared=declared)
+    requests = CredentialRequests(fernet=fernet, declared=declared, fillable=declared)
     member_id = uuid4()
     sealed = requests.seal(workspace_id, member_id, (metronome.ANTHROPIC_KEY_SLOT,))
     assert sealed
-    without_metronome = CredentialRequests(fernet=fernet, declared=frozenset())
+    without_metronome = CredentialRequests(
+        fernet=fernet, declared=frozenset(), fillable=frozenset()
+    )
     with pytest.raises(ValueError, match="anthropic_api_key"):
         without_metronome.seal(workspace_id, member_id, (metronome.ANTHROPIC_KEY_SLOT,))
     store = CredentialStore(fernet=fernet)

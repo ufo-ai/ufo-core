@@ -218,6 +218,7 @@ async def test_device_auth_starts_in_chat_and_fulfills_the_encrypted_slot(
         requestable_credentials=CredentialRequests(
             fernet=store.fernet,
             declared=frozenset({YC_CREDENTIALS_SLOT}),
+            fillable=frozenset({YC_CREDENTIALS_SLOT}),
         ),
     )
     authorization_calls = 0

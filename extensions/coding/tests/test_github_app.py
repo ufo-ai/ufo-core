@@ -4,6 +4,7 @@ what comes back, never on the fake."""
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from json import dumps
 from uuid import UUID, uuid4
 
 import httpx
@@ -15,6 +16,7 @@ from ufo_ext_coding.github_app import GitHubAppTokens
 
 from ufo.credentials import (
     CredentialMintFailed,
+    CredentialRequestInvalid,
     CredentialRequests,
     CredentialSlotUnset,
     CredentialStore,
@@ -23,6 +25,8 @@ from ufo.credentials import (
 )
 from ufo.db import workspace_tx
 from ufo.ext.context import CredentialAccess
+from ufo.ext.manifest import CredentialSlot, InjectionTarget
+from ufo.sandbox.proxy.rules import InjectionRule, ScopeRule, derive_credential_rules
 from ufo.schema import tables
 from ufo.workspace import init_workspace_credentials, ws
 
@@ -68,7 +72,7 @@ async def test_a_hand_typed_installation_id_is_refused_rather_than_minted_agains
     VALUES.clear()
     VALUES.update({(workspace_id, SLOT): INSTALLATION})
     store = _Store(fernet=Fernet(Fernet.generate_key()))
-    with pytest.raises(Exception, match="tampered or expired"):
+    with pytest.raises(CredentialRequestInvalid, match="tampered or expired"):
         await _tokens().secret(workspace_id, store)
 
 
@@ -79,8 +83,56 @@ async def test_another_workspaces_binding_is_refused() -> None:
     mine, theirs = uuid4(), uuid4()
     VALUES.clear()
     VALUES.update({(mine, SLOT): seal_installation(fernet, theirs, SLOT, INSTALLATION)})
-    with pytest.raises(Exception, match="another workspace"):
+    with pytest.raises(CredentialRequestInvalid, match="another workspace"):
         await _tokens().secret(mine, _Store(fernet=fernet))
+
+
+async def test_an_unopenable_binding_withholds_the_git_host_and_no_other() -> None:
+    """The incident, end to end through the real source and the real derivation. The stored value is
+    the production one: a blob the credential Fernet decrypts but that is not a sealed state — a
+    shape no `seal_installation` produces. github.com alone is withheld, while every other slot's
+    injection and scope survive the same call, which is what keeps the workspace's internet and
+    grant rules from unwinding with it."""
+    fernet = Fernet(Fernet.generate_key())
+    workspace_id = uuid4()
+    other_host = "api.datadoghq.com"
+    VALUES.clear()
+    VALUES.update(
+        {
+            (workspace_id, SLOT): fernet.encrypt(
+                dumps({"workspace_id": str(workspace_id), "installation_id": INSTALLATION}).encode()
+            ).decode(),
+            (workspace_id, "datadog_api_key"): "dd-api-real",
+        }
+    )
+    slots = (
+        CredentialSlot(
+            name="github_git_token",
+            description="git",
+            source=_tokens(),
+            injection=InjectionTarget(
+                host="github.com",
+                header="Authorization",
+                sentinel="UFO_SENTINEL_GIT_GITHUB",
+                git_basic_user="x-access-token",
+            ),
+        ),
+        CredentialSlot(
+            name="datadog_api_key",
+            description="datadog",
+            injection=InjectionTarget(
+                host=other_host, header="DD-API-KEY", sentinel="UFO_SENTINEL_DATADOG"
+            ),
+        ),
+    )
+
+    rules = await derive_credential_rules(slots, workspace_id, _Store(fernet=fernet))
+
+    assert [rule.host for rule in rules if isinstance(rule, InjectionRule)] == [other_host]
+    assert ScopeRule(allowed_hosts=frozenset({other_host})) in rules
+    assert not [
+        rule for rule in rules if isinstance(rule, ScopeRule) and "github.com" in rule.allowed_hosts
+    ]
 
 
 async def test_a_bound_workspace_mints_and_reuses_the_token_until_it_nears_expiry() -> None:
@@ -295,7 +347,9 @@ async def test_a_binding_written_by_the_route_is_what_the_minter_opens(db: None)
     sides disagreed about what a bound slot contains."""
     fernet = Fernet(Fernet.generate_key())
     store = CredentialStore(fernet=fernet)
-    install_credential_requests(CredentialRequests(fernet=fernet, declared=frozenset({SLOT})))
+    install_credential_requests(
+        CredentialRequests(fernet=fernet, declared=frozenset({SLOT}), fillable=frozenset({SLOT}))
+    )
     init_workspace_credentials(store)
     async with workspace_tx() as connection:
         workspace_id = uuid4()

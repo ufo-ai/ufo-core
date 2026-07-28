@@ -27,10 +27,10 @@ class CredentialSlotUnset(KeyError):
 
 
 class CredentialMintFailed(RuntimeError):
-    """A `CredentialSource` could not mint from its provider. The one fault a rule derivation
-    tolerates: it is the external uncertainty a provider exchange carries, so it withholds that
-    host's rules rather than failing a turn that never touches the credential. Every other fault —
-    a tampered seal, a DB error — is ours and propagates."""
+    """A `CredentialSource` could not mint from its provider: the external uncertainty a provider
+    exchange carries, so the next turn may well succeed. Withheld per slot like every other fault a
+    slot's resolution can raise — `derive_credential_rules` isolates the slot rather than the fault
+    class, so a source is never obliged to translate what went wrong into a tolerated type."""
 
 
 class CredentialRequestInvalid(ValueError):
@@ -95,15 +95,28 @@ def open_credential_request(
 class CredentialRequests:
     """The member-sealed credential arm: the Fernet that guards the slots and the deploy's declared
     slot set, so a private prompt or provider authorization can name only an installed extension's
-    slot. Absent when no credential key is configured."""
+    slot. Absent when no credential key is configured.
+
+    `fillable` is the subset a member may type a value into. It gates `seal` alone — the seal a
+    private prompt is fulfilled against — while `authorize` keeps the whole declared set, because a
+    provider callback binding an installation writes a slot the member must never type. Gating at
+    the seal is what makes the refusal total: with no seal minted, no surface holds anything to
+    fulfill against, so an unopenable value never reaches the slot at all."""
 
     fernet: Fernet
     declared: frozenset[str]
+    fillable: frozenset[str]
 
     def seal(self, workspace_id: UUID, member_id: UUID, slots: tuple[str, ...]) -> str:
         undeclared = [slot for slot in slots if slot not in self.declared]
         if undeclared:
             raise ValueError(f"no installed extension declares credential slot(s) {undeclared}")
+        unfillable = [slot for slot in slots if slot not in self.fillable]
+        if unfillable:
+            raise ValueError(
+                f"credential slot(s) {unfillable} are written by this deploy, never entered — "
+                "the value is a seal a typed one cannot stand in for"
+            )
         return seal_credential_request(
             self.fernet,
             CredentialRequestState(workspace_id=workspace_id, member_id=member_id, slots=slots),

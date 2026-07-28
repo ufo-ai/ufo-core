@@ -190,8 +190,32 @@ def test_credential_request_seal_round_trips_and_expires() -> None:
         )
 
 
+def test_a_deploy_written_slot_is_never_sealed_for_a_member_to_type() -> None:
+    """A slot whose value is a seal only the install callback can compose refuses the private prompt
+    outright. Gating the seal is what makes it total: a member is never handed a request to fulfill,
+    so no typed value reaches the slot to be refused later by the wire — which would withhold that
+    host on every turn until someone rebound it. `authorize` still passes, because that is the
+    callback's own path to the same slot."""
+    fernet = Fernet(Fernet.generate_key())
+    requests = CredentialRequests(
+        fernet=fernet,
+        declared=frozenset({"github_app_installation", "github_git_token"}),
+        fillable=frozenset({"github_git_token"}),
+    )
+    workspace_id, member_id = uuid4(), uuid4()
+
+    assert requests.seal(workspace_id, member_id, ("github_git_token",))
+    with pytest.raises(ValueError, match="written by this deploy, never entered"):
+        requests.seal(workspace_id, member_id, ("github_app_installation",))
+    with pytest.raises(ValueError, match="written by this deploy, never entered"):
+        requests.seal(workspace_id, member_id, ("github_git_token", "github_app_installation"))
+    assert requests.authorize(workspace_id, member_id, "github_app_installation", "install")
+
+
 def test_credential_requests_seal_only_declared_slots() -> None:
-    requests = CredentialRequests(fernet=Fernet(Fernet.generate_key()), declared=frozenset({"a"}))
+    requests = CredentialRequests(
+        fernet=Fernet(Fernet.generate_key()), declared=frozenset({"a"}), fillable=frozenset({"a"})
+    )
     assert requests.seal(uuid4(), uuid4(), ("a",))
     with pytest.raises(ValueError, match="declares credential slot"):
         requests.seal(uuid4(), uuid4(), ("a", "nope"))
@@ -200,7 +224,9 @@ def test_credential_requests_seal_only_declared_slots() -> None:
 async def test_credential_requests_open_an_owner_bound_authorization(db: None) -> None:
     workspace_id = await _workspace()
     member_id = uuid4()
-    requests = CredentialRequests(fernet=Fernet(Fernet.generate_key()), declared=frozenset({"yc"}))
+    requests = CredentialRequests(
+        fernet=Fernet(Fernet.generate_key()), declared=frozenset({"yc"}), fillable=frozenset({"yc"})
+    )
     with pytest.raises(ValueError, match="empty"):
         requests.authorize(workspace_id, member_id, "yc", "")
     sealed = requests.authorize(workspace_id, member_id, "yc", '{"device":"secret"}')
@@ -764,7 +790,7 @@ def test_a_request_seal_cannot_stand_in_for_an_installation_binding() -> None:
     fernet = Fernet(Fernet.generate_key())
     workspace_id, member_id = uuid4(), uuid4()
     handed_to_the_member = CredentialRequests(
-        fernet=fernet, declared=frozenset({SLOT_NAME})
+        fernet=fernet, declared=frozenset({SLOT_NAME}), fillable=frozenset()
     ).authorize(workspace_id, member_id, SLOT_NAME, "install")
 
     with pytest.raises(CredentialRequestInvalid, match="sealed for 'credential-request'"):
@@ -778,7 +804,9 @@ def test_an_installation_binding_cannot_stand_in_for_a_member_authorization() ->
     would also fail on its absent member, which would prove the member check instead of this one."""
     fernet = Fernet(Fernet.generate_key())
     workspace_id, member_id = uuid4(), uuid4()
-    requests = CredentialRequests(fernet=fernet, declared=frozenset({SLOT_NAME}))
+    requests = CredentialRequests(
+        fernet=fernet, declared=frozenset({SLOT_NAME}), fillable=frozenset({SLOT_NAME})
+    )
     binding = seal_credential_request(
         fernet,
         CredentialRequestState(
@@ -906,18 +934,60 @@ async def test_a_mint_failure_withholds_only_that_host(db: None) -> None:
     ]
 
 
-async def test_a_fault_that_is_ours_is_not_swallowed_as_a_mint_failure(db: None) -> None:
-    """Only the provider exchange is external uncertainty. A tampered seal or a DB fault is our own,
-    so it propagates instead of quietly withholding a host — masking corruption as unavailability
-    would leave the member connected and every clone silently unauthenticated."""
+async def test_any_slot_fault_withholds_its_own_host_and_leaves_the_rest_deriving(
+    db: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The property that makes this derivation safe to compose: it is total. A slot's resolution is
+    isolated per slot, not per fault class, so a fault nobody anticipated withholds that one host
+    while every other slot still derives.
 
-    class _Corrupt:
+    The alternative is what a stale installation binding did once: escape the derivation, unwind the
+    public-internet and grant rules composed around the call, and leave the workspace refusing every
+    host but the model provider on every turn — silently, since the proxy fails closed to its base.
+    Aborting was never the loud option; it was the total one.
+
+    The fault class rides the event as data rather than branching the code, because withholding is
+    the same act however the slot failed. An operator filters `error_class` to tell a provider that
+    will come back from a stored value that needs a rebind."""
+
+    class _Exploding:
+        def __init__(self, error: Exception) -> None:
+            self.error = error
+
         async def secret(self, workspace_id: UUID, store: CredentialStore) -> str | None:
-            raise CredentialRequestInvalid("stored seal is not this deploy's own")
+            raise self.error
 
         async def bound(self, workspace_id: UUID, store: CredentialStore) -> bool:
             return True
 
-    workspace_id = await _workspace()
-    with pytest.raises(CredentialRequestInvalid):
-        await derive_credential_rules(_git_slot(_Corrupt()), workspace_id, _store())
+    for error in (
+        CredentialRequestInvalid("stored seal is not this deploy's own"),
+        CredentialMintFailed("github is unreachable"),
+        RuntimeError("a fault this deploy never anticipated"),
+    ):
+        workspace_id = await _workspace()
+        store = _store()
+        await store.put(workspace_id, "github_git_token", "member-pat")
+        await store.put(workspace_id, "datadog_api_key", "dd-api-real")
+        await store.put(workspace_id, "datadog_application_key", "dd-app-real")
+        await store.put(workspace_id, "datadog_api_host", DATADOG_HOST)
+        slots = (*_git_slot(_Exploding(error)), *injecting_slots((_keyed_manifest(),)))
+
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="ufo"):
+            rules = await derive_credential_rules(slots, workspace_id, store)
+
+        assert {rule.host for rule in rules if isinstance(rule, InjectionRule)} == {DATADOG_HOST}
+        assert ScopeRule(allowed_hosts=frozenset({DATADOG_HOST})) in rules
+        assert not [
+            rule
+            for rule in rules
+            if isinstance(rule, ScopeRule) and "github.com" in rule.allowed_hosts
+        ]
+        withheld = [
+            record.ufo
+            for record in caplog.records
+            if record.getMessage() == "egress.credential_slot_failed"
+        ]
+        assert [entry["slot"] for entry in withheld] == ["github_git_token"]
+        assert withheld[0]["error_class"] == type(error).__name__

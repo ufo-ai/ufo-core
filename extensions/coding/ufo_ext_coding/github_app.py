@@ -12,9 +12,9 @@ member's own token, for a repository outside any org that installed the App.
 The slot holds a seal over `(workspace, installation)` that only the install callback can produce,
 never a bare id. An id is a small integer anyone could type into the slot, and this deploy's App key
 can mint against any installation of it — so trusting a typed one would let a workspace mint tokens
-for another organization's repositories. A value that does not open raises rather than falling back
-to the member's own token, because authenticating as a different identity than the one the
-organization granted is worse than failing the clone."""
+for another organization's repositories. A value that does not open mints nothing and withholds the
+git host, never falling back to the member's own token: authenticating as a different identity than
+the one the organization granted is worse than failing the clone."""
 
 import asyncio
 import os
@@ -84,11 +84,19 @@ class GitHubAppTokens:
         return True
 
     async def secret(self, workspace_id: UUID, store: CredentialStore) -> str | None:
+        """This workspace's installation token, or None where it bound no installation and the
+        member's own stored token answers instead.
+
+        A stored value that does not open raises, which withholds this one host: the rule derivation
+        isolates a slot's fault, so the refusal costs this workspace its git egress and nothing
+        else. It is never softened into a `None` that would fall through to the member's own stored
+        token, because authenticating as a different identity than the one the organization granted
+        is worse than failing the clone."""
         try:
-            bound = await store.get(workspace_id, self.installation_slot)
+            sealed = await store.get(workspace_id, self.installation_slot)
         except CredentialSlotUnset:
             return None
-        installation = open_installation(store.fernet, workspace_id, self.installation_slot, bound)
+        installation = open_installation(store.fernet, workspace_id, self.installation_slot, sealed)
         key = (workspace_id, installation)
         now = time.time()
         cached = self.minted.get(key)

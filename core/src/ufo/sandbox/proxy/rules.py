@@ -12,7 +12,6 @@ from uuid import UUID
 
 from ufo.connectors import CliCredential, RequestForwarder
 from ufo.credentials import (
-    CredentialMintFailed,
     CredentialStore,
     credential_host,
     slot_secret,
@@ -135,10 +134,16 @@ async def derive_credential_rules(
     A `git_basic_user` slot composes its header value here rather than storing it composed: the
     secret is one rotatable value, and git's smart-HTTP wants it as the password half of Basic.
 
-    A slot that mints reaches a provider, so it can fail while nothing else about the turn has: a
-    mint failure withholds that one host's rules and is logged, rather than aborting the derivation
-    and failing a turn that never touches the credential. It never falls through to the stored
-    value — that would authenticate as a different identity than the one the workspace bound."""
+    **One slot resolves or one slot is withheld — never the turn.** Whatever a slot's secret needs
+    to resolve (a provider exchange, a stored seal this deploy opens, a host selection) is that
+    slot's own uncertainty, so a slot that raises contributes nothing and the derivation continues.
+    This function is total by construction, and that is what makes the rest of the turn's rules
+    safe: the public-internet rule and the grant rules are composed around this call, so a fault
+    escaping here takes the workspace's whole egress with it — every host refused but the model
+    provider, on every turn, over one slot's unreadable value. `error_class` carries which fault it
+    was, because an unreachable provider clears itself while a value only a rebind repairs does not.
+    A withheld slot never falls through to its stored value — that would authenticate as a different
+    identity than the one the workspace bound."""
     grouped: dict[str, list[InjectionRule]] = {}
     dimensions: dict[str, str] = {}
     for slot in slots:
@@ -147,12 +152,17 @@ async def derive_credential_rules(
             continue
         try:
             real = await slot_secret(slot.name, slot.source, workspace_id, store)
-        except CredentialMintFailed as error:
-            warn("egress.credential_mint_failed", slot=slot.name, error=str(error))
+            if real is None:
+                continue
+            host = await credential_host(store, workspace_id, target.host)
+        except Exception as error:
+            warn(
+                "egress.credential_slot_failed",
+                slot=slot.name,
+                error_class=type(error).__name__,
+                error=str(error),
+            )
             continue
-        if real is None:
-            continue
-        host = await credential_host(store, workspace_id, target.host)
         if host is None:
             warn("egress.credential_host_unavailable", slot=slot.name)
             continue

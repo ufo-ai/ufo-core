@@ -682,6 +682,11 @@ def credential_set(slot: str) -> None:
     if owner is None:
         available = ", ".join(sorted(declared)) or "none"
         raise click.ClickException(f"unknown credential slot {slot!r} (declared: {available})")
+    if slot not in _fillable_slots(config):
+        raise click.ClickException(
+            f"credential slot {slot!r} is written by this deploy, never entered — its value is a "
+            "seal, and a typed one only refuses when the wire reads it"
+        )
     key = os.environ.get(config.credentials.key_env)
     if not key:
         raise click.ClickException(f"{config.credentials.key_env} must be set to store credentials")
@@ -714,6 +719,18 @@ def _declared_slots(config: Config) -> dict[str, str]:
     except RuntimeError as error:
         raise click.ClickException(str(error)) from error
     return {slot.name: manifest.name for manifest in manifests for slot in manifest.credentials}
+
+
+def _fillable_slots(config: Config) -> frozenset[str]:
+    """The slots an operator may type a value into — the same subset a member's private prompt is
+    limited to, read from the one declaration rather than a second list to keep in step."""
+    try:
+        manifests = load_manifests(config.pack.name)
+    except RuntimeError as error:
+        raise click.ClickException(str(error)) from error
+    return frozenset(
+        slot.name for manifest in manifests for slot in manifest.credentials if slot.member_filled
+    )
 
 
 async def _write_credential(config: Config, key: str, slot: str, value: str) -> None:

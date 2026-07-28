@@ -87,6 +87,8 @@ def test_coding_manifest_declares_the_git_credential_the_proxy_swaps() -> None:
     installation, slot = coding.manifest().credentials
     assert installation.name == "github_app_installation"
     assert installation.injection is None
+    assert installation.member_filled is False
+    assert slot.member_filled is True
     assert slot.name == "github_git_token"
     assert slot.injection is not None
     assert (slot.injection.host, slot.injection.header) == ("github.com", "Authorization")

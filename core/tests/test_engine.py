@@ -1927,7 +1927,9 @@ async def test_request_credentials_as_the_final_act_rides_the_terminal_frame(
     turn = await _seed_turn("queued", None)
     owner = await _seeded_member(turn.workspace_id)
     fernet = Fernet(Fernet.generate_key())
-    requests = CredentialRequests(fernet=fernet, declared=frozenset({"sample_api"}))
+    requests = CredentialRequests(
+        fernet=fernet, declared=frozenset({"sample_api"}), fillable=frozenset({"sample_api"})
+    )
     engine = _engine(
         turn,
         CollectThenEndModel(turn.id),
@@ -1974,7 +1976,9 @@ async def test_request_credentials_gates_on_admin_key_and_declared_slots(
             )
         )
     requests = CredentialRequests(
-        fernet=Fernet(Fernet.generate_key()), declared=frozenset({"sample_api"})
+        fernet=Fernet(Fernet.generate_key()),
+        declared=frozenset({"sample_api"}),
+        fillable=frozenset({"sample_api"}),
     )
     args = RequestCredentialsInput.model_validate(REQUEST_INPUT)
     blob = FilesystemBlobStore(root=tmp_path)
@@ -2018,7 +2022,9 @@ async def test_extension_tool_authorizes_its_declared_credential_as_an_admin(
     turn = await _seed_turn("queued", None)
     owner = await _seeded_member(turn.workspace_id)
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
-    requests = CredentialRequests(fernet=store.fernet, declared=frozenset({"sample_api"}))
+    requests = CredentialRequests(
+        fernet=store.fernet, declared=frozenset({"sample_api"}), fillable=frozenset({"sample_api"})
+    )
     context = ToolContext(
         sandbox=SandboxSession(
             carrier=RecordingCarrier(),

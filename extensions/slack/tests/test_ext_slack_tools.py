@@ -187,6 +187,9 @@ def _context(
             else CredentialRequests(
                 fernet=store.fernet,
                 declared=frozenset(slot.name for slot in slack_manifest().credentials),
+                fillable=frozenset(
+                    slot.name for slot in slack_manifest().credentials if slot.member_filled
+                ),
             )
         ),
     )
