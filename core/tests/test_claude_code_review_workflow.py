@@ -20,7 +20,7 @@ def test_claude_code_review_uses_its_own_skill_with_permissive_bash() -> None:
 
     assert allowed_tools is not None
     assert {"Skill", "Bash"} <= set(allowed_tools.group(1).split(","))
-    assert "--model sonnet" in workflow
+    assert "--model claude-opus-5" in workflow
     assert "Use the review-pull-request skill" in workflow
     assert "plugin_marketplaces" not in workflow
     assert "plugins:" not in workflow
