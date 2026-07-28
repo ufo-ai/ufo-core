@@ -1,8 +1,9 @@
 """The web renderer of the onboarding machine: the JSON directive wire, the sign-in page's
-self-containment, and the full email → code → invite walk over the real `onboard_claim` table and
-`SharedWorkspaces` through `POST /v1/onboard/web` — one machine, a second renderer. The `debugger`
-directive is asserted at both poles: emitted with the exact URL for an operator-domain email,
-absent for everyone else."""
+self-containment, and the full email → code walk over the real `onboard_claim` table and
+`SharedWorkspaces` through `POST /v1/onboard/web` — one machine, a second renderer. Both terminal
+shapes are asserted, since the page can only end on one of them: the signed-in card, and a gate
+refusal that ends on `exit`. The `debugger` directive is asserted at both poles: emitted with the
+exact URL for an operator-domain email, absent for everyone else."""
 
 import asyncio
 import uuid
@@ -38,6 +39,17 @@ from ufo_control.gateway_web import LOGIN_PAGE, parse_directives
 
 TOKEN_SECRET = "web-token-secret"
 WORKSPACE_URL = "https://app.testing.flyingobject.ai"
+
+EXIT_IS_TERMINAL = """  else if (directive.verb === 'exit') {
+    if (arg !== '0') line('something went wrong — reload to retry', 'error');
+    finished = true;
+    promptRow.style.display = 'none';
+  }"""
+"""The whole `exit` arm, exactly. The freeze it closes came from making the terminal effect
+conditional on the argument, and every way of reintroducing that — nesting these two statements in
+the `arg !== '0'` branch, dropping either one, guarding the arm — changes these bytes. A structural
+assertion (does the arm mention `finished`?) passes on the nested form and would not have caught the
+bug it exists for."""
 
 
 @dataclass
@@ -96,15 +108,15 @@ def test_login_page_hands_the_token_off_by_post_after_the_whole_batch() -> None:
     assert LOGIN_PAGE.count("complete()") == 2
 
 
-def _mint_invite(dsn: str, object_number: int) -> str:
-    async def _mint() -> str:
+def _grant(dsn: str, object_number: int, email: str) -> None:
+    async def _mint() -> None:
         pool = await asyncpg.create_pool(dsn, min_size=1, max_size=1)
         try:
-            return (await InviteCodes(pool=pool).mint(object_number)).code
+            await InviteCodes(pool=pool).mint(object_number, email)
         finally:
             await pool.close()
 
-    return asyncio.run(_mint())
+    asyncio.run(_mint())
 
 
 def _advance(client: TestClient, session: str, body: str) -> list[dict[str, object]]:
@@ -125,19 +137,19 @@ def _fields(directives: list[dict[str, object]], verb: str) -> list[str]:
     return collected
 
 
-def test_web_channel_walks_email_code_invite_to_the_signed_in_card(
+def test_web_channel_walks_email_then_code_to_the_signed_in_card(
     gateway_postgres: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The web renderer end to end, and the one directive it must never receive: this member
-    administers the workspace they just created, but the page ends on its signed-in card rather
-    than a prompt, so it is never handed a `choose` menu it has no way to drive. The terminal
-    admin's billing choice is asserted in test_rls."""
+    """The web renderer end to end, in the two prompts a granted domain now costs, and the one
+    directive it must never receive: this member administers the workspace they just created, but
+    the page ends on its signed-in card rather than a prompt, so it is never handed a `choose` menu
+    it has no way to drive. The terminal admin's billing choice is asserted in test_rls."""
     _configure(monkeypatch, tmp_path, gateway_postgres)
     sender = RecordingSender()
     monkeypatch.setattr(gateway, "email_sender_from_env", lambda: sender)
-    invite = _mint_invite(gateway_postgres, 71)
-    session = str(uuid.uuid4())
     email = "boss@webco.io"
+    _grant(gateway_postgres, 71, email)
+    session = str(uuid.uuid4())
     with TestClient(gateway_app()) as client:
         opening = _advance(client, session, "")
         assert "enter your work email:" in _fields(opening, "ask")
@@ -146,11 +158,9 @@ def test_web_channel_walks_email_code_invite_to_the_signed_in_card(
         coded = _advance(client, session, email)
         assert "enter the code:" in _fields(coded, "ask")
 
-        gated = _advance(client, session, sender.sent[email])
-        assert any("invite" in text for text in _fields(gated, "say"))
+        signed_in = _advance(client, session, sender.sent[email])
 
-        signed_in = _advance(client, session, invite)
-
+    assert "object #71 identified." in " ".join(_fields(signed_in, "say"))
     (token,) = _fields(signed_in, "token")
     (workspace,) = _fields(signed_in, "workspace")
     workspace_id = UUID(str(uuid5(NAMESPACE_DNS, "webco.io")))
@@ -162,7 +172,31 @@ def test_web_channel_walks_email_code_invite_to_the_signed_in_card(
     assert _fields(signed_in, "ask") == [PROMPT]
 
 
-def test_disabled_invite_gate_opens_a_new_workspace_without_a_code(
+def test_web_channel_refusal_ends_the_page_instead_of_stranding_it(
+    gateway_postgres: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A refusal carries no prompt, so `exit` is the only thing that can end the web session. The
+    renderer must treat it as terminal for both arguments: the submit handler has already hidden the
+    prompt row and disabled the button, so an `exit` the page ignores leaves the reason on screen
+    above a dead form that looks exactly like a hang."""
+    _configure(monkeypatch, tmp_path, gateway_postgres)
+    sender = RecordingSender()
+    monkeypatch.setattr(gateway, "email_sender_from_env", lambda: sender)
+    session = str(uuid.uuid4())
+    email = "founder@ungrantedweb.io"
+    with TestClient(gateway_app()) as client:
+        _advance(client, session, "")
+        _advance(client, session, email)
+        refused = _advance(client, session, sender.sent[email])
+
+    assert "ungrantedweb.io is not identified yet." in _fields(refused, "say")
+    assert _fields(refused, "exit") == ["0"]
+    assert not _fields(refused, "ask")
+    assert not _fields(refused, "token")
+    assert EXIT_IS_TERMINAL in LOGIN_PAGE
+
+
+def test_disabled_invite_gate_opens_a_new_workspace_without_a_grant(
     gateway_postgres: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     _configure(monkeypatch, tmp_path, gateway_postgres)
@@ -205,15 +239,13 @@ def test_debugger_directive_lands_only_for_the_operator_domain(
     _configure(monkeypatch, tmp_path, gateway_postgres)
     sender = RecordingSender()
     monkeypatch.setattr(gateway, "email_sender_from_env", lambda: sender)
-    invite = _mint_invite(gateway_postgres, 72)
-    session = str(uuid.uuid4())
     email = f"alex@{OPERATOR_EMAIL_DOMAIN}"
+    _grant(gateway_postgres, 72, email)
+    session = str(uuid.uuid4())
     with TestClient(gateway_app()) as client:
         _advance(client, session, "")
         _advance(client, session, email)
-        gated = _advance(client, session, sender.sent[email])
-        assert any("invite" in text for text in _fields(gated, "say"))
-        signed_in = _advance(client, session, invite)
+        signed_in = _advance(client, session, sender.sent[email])
     assert _fields(signed_in, "debugger") == [f"{WORKSPACE_URL}/surface/debug"]
 
 
@@ -223,14 +255,13 @@ def test_debugger_directive_never_lands_outside_the_operator_domain(
     _configure(monkeypatch, tmp_path, gateway_postgres)
     sender = RecordingSender()
     monkeypatch.setattr(gateway, "email_sender_from_env", lambda: sender)
-    invite = _mint_invite(gateway_postgres, 73)
-    session = str(uuid.uuid4())
     email = "pilot@customerco.io"
+    _grant(gateway_postgres, 73, email)
+    session = str(uuid.uuid4())
     with TestClient(gateway_app()) as client:
         _advance(client, session, "")
         _advance(client, session, email)
-        _advance(client, session, sender.sent[email])
-        signed_in = _advance(client, session, invite)
+        signed_in = _advance(client, session, sender.sent[email])
     assert _fields(signed_in, "token")
     assert not _fields(signed_in, "debugger")
 

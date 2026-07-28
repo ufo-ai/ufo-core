@@ -89,7 +89,7 @@ class Onboarding:
             return await self._collect_email(channel, session, body, install)
         if claim.verified_at is None:
             return await self._verify_code(claim, body, install)
-        return await self._resolve(claim, body, install)
+        return await self._resolve(claim, install)
 
     async def _collect_email(self, channel: str, session: str, body: str, install: bytes) -> bytes:
         if not body:
@@ -118,70 +118,64 @@ class Onboarding:
             return render(
                 install, directive("say", str(error)), directive("ask", "enter the code:")
             )
-        return await self._resolve(claim, None, install)
+        return await self._resolve(claim, install)
 
-    async def _resolve(self, claim: OnboardClaim, answer: str | None, install: bytes) -> bytes:
-        accepted = b""
+    async def _resolve(self, claim: OnboardClaim, install: bytes) -> bytes:
+        identified = b""
         if self.invite_required and not await self.workspaces.exists(claim.email_domain):
-            gate = await self._invite_gate(claim, answer, install)
+            gate = await self._invite_gate(claim, install)
             match gate:
                 case bytes():
                     return gate
                 case InviteAccepted(object_number=number, consumed_at=consumed_at):
                     stamp = consumed_at.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-                    code = (answer or "").strip().lower()
-                    accepted = directive(
-                        "say", f"code {code} accepted. object #{number} identified. {stamp}"
-                    )
+                    identified = directive("say", f"object #{number} identified. {stamp}")
         ensured = await self.workspaces.ensure(claim.email_domain, claim.email)
         await self.store.complete(claim.claim_id, ensured.workspace_id)
-        return self._signed_in(claim, ensured, install, accepted)
+        return self._signed_in(claim, ensured, install, identified)
 
     async def _invite_gate(
-        self, claim: OnboardClaim, answer: str | None, install: bytes
+        self, claim: OnboardClaim, install: bytes
     ) -> bytes | InviteAccepted | None:
+        """The verified email domain is the whole answer: a live grant for it opens the workspace
+        with nothing to type, and every refusal ends the session rather than prompting, because the
+        member holds no secret that could change the outcome. The claim keeps its verified email, so
+        re-running the installer once a grant lands resolves the same claim."""
         if claim.invite_id is not None:
             return None
-        if not answer:
-            return render(
-                install,
-                directive("say", "a new workspace needs an invite code."),
-                directive("ask", "enter your invite:"),
-            )
-        code = answer.strip().lower()
-        match await self.invites.redeem(code, claim.claim_id):
+        domain = claim.email_domain
+        match await self.invites.redeem(domain, claim.claim_id):
             case InviteAccepted() as accepted:
                 return accepted
             case InviteExpired(expires_at=expires_at):
                 expired = expires_at.astimezone(UTC).strftime("%Y-%m-%d %H:%M")
                 return render(
                     install,
-                    directive("say", f"code {code} expired {expired} UTC."),
+                    directive("say", f"{domain} identification expired {expired} UTC."),
                     directive("say", "reply to your invite email for a new one."),
-                    directive("ask", "enter your invite:"),
+                    directive("exit", "0"),
                 )
             case InviteConsumed():
                 return render(
                     install,
-                    directive(
-                        "say", f"code {code} already used. contact us if that wasn't your team."
-                    ),
-                    directive("ask", "enter your invite:"),
+                    directive("say", f"{domain} is already identified."),
+                    directive("say", "contact us if you cannot reach your fleet."),
+                    directive("exit", "0"),
                 )
             case _:
                 return render(
                     install,
-                    directive("say", "code not recognized."),
+                    directive("say", f"{domain} is not identified yet."),
                     directive(
                         "say",
                         "request identification: "
-                        f"curl https://{self.apex_host}/waitlist -d email=you@yourco.com",
+                        f"curl https://{self.apex_host}/waitlist -d email={claim.email}",
                     ),
-                    directive("ask", "enter your invite:"),
+                    directive("exit", "0"),
                 )
 
     def _signed_in(
-        self, claim: OnboardClaim, ensured: EnsuredWorkspace, install: bytes, accepted: bytes
+        self, claim: OnboardClaim, ensured: EnsuredWorkspace, install: bytes, identified: bytes
     ) -> bytes:
         """The signed-in cap: token and workspace for every member, plus the `debugger` directive
         — the operator session debugger's base URL — only when the claim's channel-verified email
@@ -198,7 +192,7 @@ class Onboarding:
         operator = claim.email_domain == OPERATOR_EMAIL_DOMAIN
         return render(
             install,
-            accepted,
+            identified,
             directive("token", token),
             directive("workspace", self.workspaces.workspace_url),
             directive("debugger", f"{self.workspaces.workspace_url}{DEBUG_SURFACE_PATH}")

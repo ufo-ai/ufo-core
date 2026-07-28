@@ -21,7 +21,12 @@ from ufo_control.gateway_email import (
     AWS_WEB_IDENTITY_TOKEN_FILE_ENV,
     SES_SENDER_ENV,
 )
-from ufo_control.gateway_invite import InviteAccepted, InviteCodes
+from ufo_control.gateway_invite import (
+    LIVE_DOMAIN_INDEX,
+    LIVE_OBJECT_INDEX,
+    InviteAccepted,
+    InviteCodes,
+)
 from ufo_control.gateway_shared import SERVE_DSN_ENV
 from ufo_control.gateway_slack_connect import DUE_INDEX
 from ufo_control.gateway_store import ACTIVE_INDEX, SCHEMA
@@ -57,9 +62,8 @@ INDEX_KIND = "i"
 
 WRITERS = 8
 SHAPED_DATABASE = "ufo_control_schema"
-LIVE_INVITE_INDEX = "invite_code_live_object"
 EXPECTED_TABLES = frozenset({"onboard_claim", "invite_code", "slack_connect_delivery"})
-EXPECTED_INDEXES = frozenset({ACTIVE_INDEX, LIVE_INVITE_INDEX, DUE_INDEX})
+EXPECTED_INDEXES = frozenset({ACTIVE_INDEX, LIVE_OBJECT_INDEX, LIVE_DOMAIN_INDEX, DUE_INDEX})
 WORKSPACE_URL = "https://app.testing.flyingobject.ai"
 
 
@@ -107,9 +111,9 @@ async def test_concurrent_shaping_agrees_on_one_schema(empty_database: str) -> N
     assert EXPECTED_INDEXES <= {name for kind, name, _ in shaped if kind == INDEX_KIND}
 
 
-async def test_the_verb_rebuilds_an_unnumbered_invite_ledger(empty_database: str) -> None:
-    """A ledger that cannot name objects predates `object_number`; the reshape that voids it lives
-    with the shaping verb, so the code it rebuilds for is mintable and redeemable afterwards."""
+async def test_the_verb_rebuilds_an_unbound_invite_ledger(empty_database: str) -> None:
+    """A ledger whose rows name no domain can honor no grant; the reshape that voids it lives with
+    the shaping verb, so the grant it rebuilds for is mintable and redeemable afterwards."""
     connection = await asyncpg.connect(empty_database)
     try:
         await connection.execute(f"create schema {SCHEMA}")
@@ -117,7 +121,7 @@ async def test_the_verb_rebuilds_an_unnumbered_invite_ledger(empty_database: str
             f"create table {SCHEMA}.invite_code ("
             "  id uuid primary key,"
             "  code_hash text not null unique,"
-            "  used_at timestamptz,"
+            "  object_number integer not null,"
             "  created_at timestamptz not null default now())"
         )
     finally:
@@ -128,8 +132,8 @@ async def test_the_verb_rebuilds_an_unnumbered_invite_ledger(empty_database: str
     pool = await asyncpg.create_pool(empty_database, min_size=1, max_size=2)
     try:
         invites = InviteCodes(pool=pool)
-        minted = await invites.mint(3)
-        assert isinstance(await invites.redeem(minted.code, uuid4()), InviteAccepted)
+        await invites.mint(3, "founder@rebuilt.io")
+        assert isinstance(await invites.redeem("rebuilt.io", uuid4()), InviteAccepted)
     finally:
         await pool.close()
 
@@ -166,7 +170,7 @@ def test_operator_verbs_refuse_an_unshaped_schema(migrate: CliRunner) -> None:
     """Every verb that reads a ledger states the same precondition the same way, so an operator who
     reaches for one before the deploy has shaped the schema is told which verb to run instead of
     reading a raw `UndefinedTableError`."""
-    for argv in (["invite", "1"], ["slack-connect-retry", str(uuid4())]):
+    for argv in (["invite", "1", "cli@mintco.io"], ["slack-connect-retry", str(uuid4())]):
         result = migrate.invoke(main, argv)
         assert result.exit_code != 0, result.output
         assert "run `ufo-control migrate`" in str(result.exception)

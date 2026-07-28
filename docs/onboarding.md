@@ -30,7 +30,7 @@ browser ------>|  GET /login -> sign-in page (app host)     |
                |  Onboarding.advance ---------------------->+--> SharedWorkspaces
                |       +--> onboard_claim rows              |
                |       +--> email code workflow             |
-               |       +--> invite_code burn (create only)  |
+               |       +--> domain grant burn (create only) |
                |       +--> bearer token                    |
                |  slack connect delivery (background poll)  |
                +--------------------------------------------+
@@ -84,10 +84,11 @@ Onboarding.advance(channel, session, body, install)
   |
   +-- code submitted -------------------> verify claim
   |
-  +-- existing workspace for domain -----> join it (never asks for an invite)
+  +-- existing workspace for domain -----> join it
   |
-  +-- no workspace for domain -----------> ask for a one-time invite code
-  |                                         redeem burns it, then create workspace
+  +-- domain holds a live grant ---------> burn it, then create workspace
+  |
+  +-- domain holds no live grant --------> say why, name the waitlist, exit
   |
   +-- workspace ready -------------------> mint bearer token
                                             emit token + workspace directives
@@ -133,20 +134,26 @@ The client is a pure renderer of tab-separated directive lines (`gateway_directi
 `token` and `workspace` land in `~/.ufo/credentials` (chmod 600) and `~/.ufo/workspace` — the
 token is machine-consumed and never printed.
 
-Creating a workspace is invite-gated; joining an existing one never is.
-`ufo-control invite <object-number>` mints a code for a waitlist object and prints the invite
-email once, code included; only the hash lands in the `ufo_control.invite_code` ledger (14-day
-expiry, one live code per object), and redeeming consumes the code and stamps the claim's
-`invite_id` in one transaction, so one code opens exactly one workspace and a resolution retry
-never re-asks for it. `SharedWorkspaces.exists` decides create versus join. An unknown, expired,
-or consumed code re-asks with its exact ledger state; an unknown one points at the waitlist.
+Creating a workspace is invite-gated; joining an existing one never is. A grant names one email
+domain, so the verified email *is* the redemption: `ufo-control invite <object-number> <email>`
+grants a waitlist object's domain and prints the invitation once, and the flow burns the domain's
+live grant and stamps the claim's `invite_id` in one transaction — no third prompt, and nothing for
+the member to carry from the invitation back into the terminal. The invitation therefore holds no
+secret, and a colleague at the granted domain is identified by the same grant, which is who usually
+runs the installer. `SharedWorkspaces.exists` decides create versus join.
+
+The `ufo_control.invite_code` ledger keeps one live grant per object and one per domain (14-day
+expiry, both database-enforced), so one grant opens exactly one workspace and a resolution retry
+proceeds without consulting it again. Each refusal — no grant, expired, already burned — says why,
+names the waitlist, and exits, because the member holds nothing that could change the answer. The
+claim keeps its verified email, so re-running the installer after a grant lands resolves it.
 
 ## Signup Slack Connect invitation
 
-A claim that both burned an invite code and created a workspace — `invite_id` and
+A claim that both burned a grant and created a workspace — `invite_id` and
 `resulting_workspace_id` both set — earns one public channel in UFO's *own* Slack workspace and one
 Slack-generated Slack Connect invitation to the email that signed up. A member joining an existing
-workspace never burns a code, so the same test excludes them, and only the earliest completed claim
+workspace never burns a grant, so the same test excludes them, and only the earliest completed claim
 of a workspace materializes: one channel per customer, never a second invitation.
 
 The completed claim is the durable event source. `gateway_slack_connect.py` polls it on both gateway
@@ -365,7 +372,7 @@ control/src/ufo_control/
   gateway_directives.py   the directive wire the client renders
   gateway_web.py          the /login page + JSON rendering of the same wire
   gateway_claim.py        email -> 6-digit code -> constant-time verify
-  gateway_invite.py       one-time invite codes gating workspace creation
+  gateway_invite.py       one-time domain grants gating workspace creation
   gateway_slack_connect.py
                           the signup Slack Connect delivery: table, client, leased workflow
   gateway_token.py        bearer minting

@@ -168,8 +168,11 @@ function handle(directive) {
   else if (directive.verb === 'token') token = arg;
   else if (directive.verb === 'workspace') workspace = arg;
   else if (directive.verb === 'debugger') debuggerUrl = arg;
-  else if (directive.verb === 'exit' && arg !== '0')
-    line('something went wrong — reload to retry', 'error');
+  else if (directive.verb === 'exit') {
+    if (arg !== '0') line('something went wrong — reload to retry', 'error');
+    finished = true;
+    promptRow.style.display = 'none';
+  }
 }
 
 async function advance(body) {

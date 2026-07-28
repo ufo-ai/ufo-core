@@ -82,13 +82,13 @@ CODE_BODY = "Your code: {code}. Expires {expires} UTC ({minutes} minutes)."
 INVITE_SUBJECT = "identification granted"
 INVITE_BODY = """\
   object:   #{object_number} → identified
-  code:     {code}
+  contact:  {email}
   expires:  {expires} UTC
 
   curl -fsSL https://{apex_host}/ufo | sh
 
-  Your code identifies one company. You'll receive
-  3 more when your fleet is live.
+  Sign in as {email}. Identification covers one
+  company — your teammates need no invitation.
 """
 
 SES_SERVICE = "ses"
@@ -160,13 +160,14 @@ def verification_email(code: str, expires_at: datetime, ttl: timedelta) -> tuple
 
 
 def invite_email(
-    object_number: int, code: str, expires_at: datetime, apex_host: str
+    object_number: int, email: str, expires_at: datetime, apex_host: str
 ) -> tuple[str, str]:
-    """Subject and body for an invite-code delivery; ``ufo-control invite`` prints it once for
-    the operator to send by hand."""
+    """Subject and body for an invitation; ``ufo-control invite`` prints it once for the operator to
+    send by hand. It names the granted address rather than a secret: the flow identifies the domain
+    from the email the member verifies, so there is nothing to carry back into the terminal."""
     return INVITE_SUBJECT, INVITE_BODY.format(
         object_number=object_number,
-        code=code,
+        email=email,
         expires=expires_at.astimezone(UTC).strftime("%Y-%m-%d %H:%M"),
         apex_host=apex_host,
     )

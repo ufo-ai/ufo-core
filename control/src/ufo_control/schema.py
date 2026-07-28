@@ -30,28 +30,28 @@ DDL = (
     *gateway_slack_connect.DDL,
 )
 
-UNNUMBERED_INVITE_CODE = (
+UNBOUND_INVITE_CODE = (
     "select exists (select from information_schema.tables"
     "  where table_schema = $1 and table_name = $2)"
     " and not exists (select from information_schema.columns"
-    "  where table_schema = $1 and table_name = $2 and column_name = 'object_number')"
+    "  where table_schema = $1 and table_name = $2 and column_name = 'email_domain')"
 )
 
 
 async def shape_control_schema(dsn: str) -> None:
     """Bring the whole schema to head in one transaction, one writer at a time. An invite ledger
-    that cannot name objects is rebuilt and its codes are void: every ledger reply names an object,
-    so an unnameable code could never be honored."""
+    that cannot name the domain each grant opens is rebuilt and its rows are void: a grant is
+    redeemed by the domain it names, so an unbound row could never be honored."""
     connection = await asyncpg.connect(dsn)
     try:
         async with connection.transaction():
             await connection.execute(SHAPE_LOCK)
-            unnumbered = await connection.fetchval(
-                UNNUMBERED_INVITE_CODE,
+            unbound = await connection.fetchval(
+                UNBOUND_INVITE_CODE,
                 gateway_store.SCHEMA,
                 gateway_invite.TABLE.split(".", maxsplit=1)[1],
             )
-            if unnumbered:
+            if unbound:
                 await connection.execute(f"drop table if exists {gateway_invite.TABLE}")
             for statement in DDL:
                 await connection.execute(statement)

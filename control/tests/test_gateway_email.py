@@ -70,23 +70,23 @@ def test_verification_email_states_the_exact_expiry() -> None:
     assert body == "Your code: 042042. Expires 18:45 UTC (15 minutes)."
 
 
-def test_invite_email_renders_the_ledger() -> None:
+def test_invite_email_names_the_granted_address_and_carries_no_secret() -> None:
     subject, body = invite_email(
         object_number=7,
-        code="abcd-efgh-jkmn",
+        email="founder@acme.com",
         expires_at=datetime(2026, 7, 26, 18, 45, tzinfo=UTC),
         apex_host="flyingobject.ai",
     )
     assert subject == "identification granted"
     assert body == (
         "  object:   #7 → identified\n"
-        "  code:     abcd-efgh-jkmn\n"
+        "  contact:  founder@acme.com\n"
         "  expires:  2026-07-26 18:45 UTC\n"
         "\n"
         "  curl -fsSL https://flyingobject.ai/ufo | sh\n"
         "\n"
-        "  Your code identifies one company. You'll receive\n"
-        "  3 more when your fleet is live.\n"
+        "  Sign in as founder@acme.com. Identification covers one\n"
+        "  company — your teammates need no invitation.\n"
     )
 
 

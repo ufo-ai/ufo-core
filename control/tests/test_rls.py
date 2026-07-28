@@ -477,11 +477,10 @@ async def test_shared_onboard_creates_then_joins_a_workspace(
         invite_required=True,
     )
     try:
+        await invites.mint(1, "boss@sharedtwo.io")
         await flow.advance("ufo", "sess", "", b"")
         await flow.advance("ufo", "sess", "boss@sharedtwo.io", b"")
-        gated = await flow.advance("ufo", "sess", sender.last_code("boss@sharedtwo.io"), b"")
-        assert "invite code" in gated.decode()
-        signed_in = await flow.advance("ufo", "sess", (await invites.mint(1)).code, b"")
+        signed_in = await flow.advance("ufo", "sess", sender.last_code("boss@sharedtwo.io"), b"")
         await flow.advance("ufo", "sess2", "", b"")
         await flow.advance("ufo", "sess2", "mate@sharedtwo.io", b"")
         joined = await flow.advance("ufo", "sess2", sender.last_code("mate@sharedtwo.io"), b"")
@@ -508,32 +507,34 @@ async def test_shared_onboard_creates_then_joins_a_workspace(
 
 
 def test_invite_cli_rejects_a_nonpositive_object_number() -> None:
-    result = CliRunner().invoke(main, ["invite", "0"])
+    result = CliRunner().invoke(main, ["invite", "0", "cli@mintco.io"])
     assert result.exit_code != 0
     assert "not in the range" in result.output
 
 
-def test_invite_cli_mints_a_redeemable_code(shared_role_env: SharedRoleEnv) -> None:
+def test_invite_cli_grants_a_redeemable_domain(shared_role_env: SharedRoleEnv) -> None:
     previous = os.environ.get(POSTGRES_OWNER_DSN_ENV)
     os.environ[POSTGRES_OWNER_DSN_ENV] = shared_role_env.owner_dsn
     try:
-        result = CliRunner().invoke(main, ["invite", "42"])
+        granted = CliRunner().invoke(main, ["invite", "42", "cli@mintco.io"])
+        refused = CliRunner().invoke(main, ["invite", "43", "someone@gmail.com"])
     finally:
         if previous is None:
             os.environ.pop(POSTGRES_OWNER_DSN_ENV, None)
         else:
             os.environ[POSTGRES_OWNER_DSN_ENV] = previous
-    assert result.exit_code == 0, result.output
-    assert "Subject: identification granted" in result.output
-    assert "  object:   #42 → identified" in result.output
-    code_line = next(
-        line for line in result.output.splitlines() if line.strip().startswith("code:")
-    )
-    code = code_line.split()[-1]
-    assert asyncio.run(_redeems(shared_role_env.owner_dsn, code))
+    assert granted.exit_code == 0, granted.output
+    assert "Subject: identification granted" in granted.output
+    assert "  object:   #42 → identified" in granted.output
+    assert "  contact:  cli@mintco.io" in granted.output
+    assert "code:" not in granted.output
+    assert asyncio.run(_redeems(shared_role_env.owner_dsn, "mintco.io"))
+
+    assert refused.exit_code != 0, refused.output
+    assert "gmail.com is not a work email domain" in refused.output
 
 
-async def _redeems(dsn: str, code: str) -> bool:
+async def _redeems(dsn: str, domain: str) -> bool:
     pool = await asyncpg.create_pool(dsn, min_size=1, max_size=1)
     try:
         claim_id = uuid4()
@@ -542,13 +543,13 @@ async def _redeems(dsn: str, code: str) -> bool:
             "(id, email, email_domain, code_hash, surface, surface_ref, expires_at) "
             "values ($1, $2, $3, $4, $5, $6, now() + interval '15 minutes')",
             claim_id,
-            "cli@mintco.io",
-            "mintco.io",
+            f"cli@{domain}",
+            domain,
             "x",
             "ufo",
             "cli-mint-proof",
         )
-        outcome = await InviteCodes(pool=pool).redeem(code, claim_id)
+        outcome = await InviteCodes(pool=pool).redeem(domain, claim_id)
         return isinstance(outcome, InviteAccepted)
     finally:
         await pool.close()

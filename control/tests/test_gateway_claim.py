@@ -131,8 +131,8 @@ async def test_invite_redeems_once_and_stamps_the_claim(store: OnboardStore) -> 
     claim = await store.live_claim("ufo", "sess-1")
     assert claim is not None
     invites = InviteCodes(pool=store.pool)
-    minted = await invites.mint(7)
-    accepted = await invites.redeem(minted.code, claim.claim_id)
+    await invites.mint(7, "founder@acme.com")
+    accepted = await invites.redeem(claim.email_domain, claim.claim_id)
     assert isinstance(accepted, InviteAccepted)
     assert accepted.object_number == 7
     assert accepted.consumed_at.tzinfo is not None
@@ -140,61 +140,95 @@ async def test_invite_redeems_once_and_stamps_the_claim(store: OnboardStore) -> 
     assert stamped is not None and stamped.invite_id == accepted.invite_id
 
 
+async def test_a_grant_is_redeemed_by_any_address_at_the_granted_domain(
+    store: OnboardStore,
+) -> None:
+    """The invitation goes to whoever asked; the colleague who runs the installer is identified by
+    the same grant, so a company is never asked to pass a secret between two inboxes."""
+    invites = InviteCodes(pool=store.pool)
+    await invites.mint(7, "founder@acme.com")
+    accepted = await invites.redeem("acme.com", uuid4())
+    assert isinstance(accepted, InviteAccepted)
+
+
+async def test_a_grant_refuses_every_other_domain(store: OnboardStore) -> None:
+    invites = InviteCodes(pool=store.pool)
+    await invites.mint(7, "founder@acme.com")
+    assert isinstance(await invites.redeem("elsewhere.com", uuid4()), InviteUnknown)
+
+
 async def test_consumed_invite_is_refused_on_second_redeem(store: OnboardStore) -> None:
     invites = InviteCodes(pool=store.pool)
-    minted = await invites.mint(7)
-    assert isinstance(await invites.redeem(minted.code, uuid4()), InviteAccepted)
-    assert isinstance(await invites.redeem(minted.code, uuid4()), InviteConsumed)
+    await invites.mint(7, "founder@acme.com")
+    assert isinstance(await invites.redeem("acme.com", uuid4()), InviteAccepted)
+    assert isinstance(await invites.redeem("acme.com", uuid4()), InviteConsumed)
 
 
-async def test_mint_refuses_a_second_live_code_for_an_object(store: OnboardStore) -> None:
+async def test_mint_refuses_a_second_live_grant_for_an_object(store: OnboardStore) -> None:
     invites = InviteCodes(pool=store.pool)
-    await invites.mint(7)
-    with pytest.raises(InviteError, match="already holds a live code"):
-        await invites.mint(7)
+    await invites.mint(7, "founder@acme.com")
+    with pytest.raises(InviteError, match="object #7 already holds a live invite"):
+        await invites.mint(7, "other@second.com")
 
 
-async def test_live_invite_uniqueness_is_database_enforced(store: OnboardStore) -> None:
+async def test_mint_refuses_a_second_live_grant_for_a_domain(store: OnboardStore) -> None:
     invites = InviteCodes(pool=store.pool)
-    await invites.mint(8)
+    await invites.mint(7, "founder@acme.com")
+    with pytest.raises(InviteError, match=r"acme\.com already holds a live invite"):
+        await invites.mint(8, "someone.else@acme.com")
+
+
+async def test_mint_refuses_an_address_that_could_never_sign_in(store: OnboardStore) -> None:
+    """The claim flow rejects free and disposable domains, so granting one would mint a grant no
+    member could ever redeem."""
+    invites = InviteCodes(pool=store.pool)
+    with pytest.raises(WorkEmailError, match="not a work email domain"):
+        await invites.mint(7, "someone@gmail.com")
+    with pytest.raises(WorkEmailError, match="malformed"):
+        await invites.mint(7, "not-an-email")
+
+
+async def test_live_grant_uniqueness_is_database_enforced(store: OnboardStore) -> None:
+    invites = InviteCodes(pool=store.pool)
+    await invites.mint(8, "founder@acme.com")
     with pytest.raises(asyncpg.UniqueViolationError):
         await store.pool.execute(
-            "insert into ufo_control.invite_code (id, code_hash, object_number, expires_at)"
-            " values ($1, $2, 8, now() + interval '1 day')",
+            "insert into ufo_control.invite_code"
+            " (id, object_number, email, email_domain, expires_at)"
+            " values ($1, 9, 'other@acme.com', 'acme.com', now() + interval '1 day')",
             uuid4(),
-            "x" * 64,
         )
 
 
 async def test_mint_reissues_after_expiry_but_not_after_identification(
     store: OnboardStore,
 ) -> None:
-    await InviteCodes(pool=store.pool, ttl=timedelta(days=-1)).mint(7)
+    await InviteCodes(pool=store.pool, ttl=timedelta(days=-1)).mint(7, "founder@acme.com")
     invites = InviteCodes(pool=store.pool)
-    minted = await invites.mint(7)
-    assert isinstance(await invites.redeem(minted.code, uuid4()), InviteAccepted)
+    await invites.mint(7, "founder@acme.com")
+    assert isinstance(await invites.redeem("acme.com", uuid4()), InviteAccepted)
     with pytest.raises(InviteError, match="already identified"):
-        await invites.mint(7)
+        await invites.mint(7, "founder@acme.com")
 
 
-async def test_expired_invite_reports_its_expiry(store: OnboardStore) -> None:
+async def test_expired_grant_reports_its_expiry(store: OnboardStore) -> None:
     invites = InviteCodes(pool=store.pool, ttl=timedelta(days=-1))
-    minted = await invites.mint(7)
-    outcome = await invites.redeem(minted.code, uuid4())
+    minted = await invites.mint(7, "founder@acme.com")
+    outcome = await invites.redeem("acme.com", uuid4())
     assert isinstance(outcome, InviteExpired)
     assert outcome.expires_at == minted.expires_at
 
 
-async def test_unknown_invite_is_not_recognized(store: OnboardStore) -> None:
+async def test_an_ungranted_domain_is_not_recognized(store: OnboardStore) -> None:
     invites = InviteCodes(pool=store.pool)
-    assert isinstance(await invites.redeem("zzzz-zzzz-zzzz", uuid4()), InviteUnknown)
+    assert isinstance(await invites.redeem("nobody.com", uuid4()), InviteUnknown)
 
 
-async def test_a_consumed_code_reports_consumed_even_after_expiry(store: OnboardStore) -> None:
+async def test_a_consumed_grant_reports_consumed_even_after_expiry(store: OnboardStore) -> None:
     invites = InviteCodes(pool=store.pool)
-    minted = await invites.mint(7)
-    assert isinstance(await invites.redeem(minted.code, uuid4()), InviteAccepted)
+    await invites.mint(7, "founder@acme.com")
+    assert isinstance(await invites.redeem("acme.com", uuid4()), InviteAccepted)
     await store.pool.execute(
         "update ufo_control.invite_code set expires_at = now() - interval '1 day'"
     )
-    assert isinstance(await invites.redeem(minted.code, uuid4()), InviteConsumed)
+    assert isinstance(await invites.redeem("acme.com", uuid4()), InviteConsumed)

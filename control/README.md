@@ -4,8 +4,9 @@ The hosted gateway and database bootstrap for ufo's shared workspace fleet.
 
 One `ufoctl serve` fleet hosts every workspace. A signed bearer selects the workspace before the
 request reaches core, and Postgres row-level security enforces the same scope on every transaction.
-The gateway verifies a work email, gates new workspace creation with a one-time invite, creates the
-workspace and default agent, and returns the bearer consumed by the `ufo` surface.
+The gateway verifies a work email, gates new workspace creation on a one-time grant to that email's
+domain, creates the workspace and default agent, and returns the bearer consumed by the `ufo`
+surface.
 
 ## Commands
 
@@ -13,7 +14,7 @@ workspace and default agent, and returns the bearer consumed by the `ufo` surfac
 |---|---|
 | `ufo-control gateway` | Serves `/ufo`, `/fleet`, and `/v1/onboard/{channel}`. |
 | `ufo-control migrate` | Shapes the `ufo_control` schema — the ledgers below — as the database owner. |
-| `ufo-control invite <object-number>` | Mints a one-time new-workspace invite for a waitlist object and prints its email once. |
+| `ufo-control invite <object-number> <email>` | Grants a waitlist object's email domain one new workspace and prints its invitation once. |
 | `ufo-control rls-bootstrap` | Creates the `ufo_serve` role, its DBOS database, grants, and workspace policies. |
 
 ## Source
@@ -23,7 +24,7 @@ workspace and default agent, and returns the bearer consumed by the `ufo` surfac
 | `gateway.py` | HTTP routes and the onboarding workflow. |
 | `gateway_claim.py` | Email-code expiry, hashing, and attempt limits. |
 | `gateway_email.py` | Work-email policy and SES delivery. |
-| `gateway_invite.py` | One-time invite custody. |
+| `gateway_invite.py` | One-time domain-grant custody. |
 | `gateway_shared.py` | Workspace, member, and default-agent writes. |
 | `gateway_store.py` | The platform onboarding ledger. |
 | `gateway_token.py` | Bearer minting; the ufo surface owns verification. |
@@ -45,9 +46,9 @@ workspace and default agent, and returns the bearer consumed by the `ufo` surfac
 Email delivery requires `UFO_SES_SENDER`, `AWS_ROLE_ARN`, and
 `AWS_WEB_IDENTITY_TOKEN_FILE`; `UFO_SES_REGION` defaults to `us-east-1`.
 
-`UFO_INVITE_REQUIRED` defaults to `true`: creating a new workspace demands a one-time invite. The
-local hosted stack (root README) sets it `false` so signup needs no code; unset means required, so
-a deploy never opens signup by forgetting the knob.
+`UFO_INVITE_REQUIRED` defaults to `true`: creating a new workspace demands a live grant for the
+member's verified email domain. The local hosted stack (root README) sets it `false` so signup needs
+no grant; unset means required, so a deploy never opens signup by forgetting the knob.
 
 ## Validation
 

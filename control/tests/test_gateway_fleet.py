@@ -22,7 +22,7 @@ from ufo_control.gateway_email import (
     AWS_WEB_IDENTITY_TOKEN_FILE_ENV,
     SES_SENDER_ENV,
 )
-from ufo_control.gateway_invite import InviteCodes
+from ufo_control.gateway_invite import INVITE_TTL, InviteCodes
 from ufo_control.gateway_shared import SERVE_DSN_ENV
 from ufo_control.gateway_slack_connect import (
     BOT_TOKEN_ENV,
@@ -123,62 +123,99 @@ def test_fleet_answers_the_workspace_count(
         assert client.get("/fleet").json()["craft"] == before + 2
 
 
-def test_http_invite_gate_reports_each_code_state(
+def test_a_granted_domain_is_identified_without_a_third_prompt(
     gateway_postgres: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    """The step this cut removes: verifying the email is the last thing a granted member does. The
+    grant went to the founder, and the colleague who actually runs the installer redeems it — no
+    prompt, nothing retyped, and the claim still stamps its invite so the Slack Connect invitation
+    keeps its trigger."""
     _configure(monkeypatch, tmp_path, gateway_postgres)
     sender = RecordingSender()
     monkeypatch.setattr(gateway, "email_sender_from_env", lambda: sender)
-    expired_code, live_code = asyncio.run(_mint_invites(gateway_postgres))
+    asyncio.run(_grant(gateway_postgres, 9, "founder@inviteco.io"))
     headers = {"x-ufo-session": "invite-flow", "x-ufo-installed": "1"}
     with TestClient(gateway_app()) as client:
-        email = "founder@inviteco.io"
+        email = "colleague@inviteco.io"
         client.post("/v1/onboard/ufo", headers=headers, content="")
         client.post("/v1/onboard/ufo", headers=headers, content=email)
-        gate = client.post("/v1/onboard/ufo", headers=headers, content=sender.sent[email])
-        assert "a new workspace needs an invite code." in gate.text
+        signed_in = client.post("/v1/onboard/ufo", headers=headers, content=sender.sent[email])
 
-        unknown = client.post("/v1/onboard/ufo", headers=headers, content="zzzz-zzzz-zzzz")
-        assert "code not recognized." in unknown.text
+    assert "enter your invite" not in signed_in.text
+    assert re.search(r"object #9 identified\. \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", signed_in.text)
+    assert f"signed in: {email}" in signed_in.text
+    assert asyncio.run(_claim_invite_id(gateway_postgres, email)) is not None
+
+
+def test_the_gate_ends_the_session_on_every_refusal(
+    gateway_postgres: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No refusal prompts, because the member holds nothing that could change the answer: each one
+    says why, names the waitlist, and exits cleanly rather than looping on a dead question."""
+    _configure(monkeypatch, tmp_path, gateway_postgres)
+    sender = RecordingSender()
+    monkeypatch.setattr(gateway, "email_sender_from_env", lambda: sender)
+    asyncio.run(_grant(gateway_postgres, 8, "founder@expiredco.io", timedelta(days=-1)))
+    with TestClient(gateway_app()) as client:
+        ungranted = _walk(client, "no-grant", "founder@ungrantedco.io", sender)
+        assert "ungrantedco.io is not identified yet." in ungranted
         assert (
             "request identification: curl https://flyingobject.ai/waitlist"
-            " -d email=you@yourco.com" in unknown.text
+            " -d email=founder@ungrantedco.io" in ungranted
         )
+        assert "exit\t0" in ungranted
+        assert "\task\t" not in ungranted
 
-        expired = client.post("/v1/onboard/ufo", headers=headers, content=expired_code)
+        expired = _walk(client, "expired-grant", "founder@expiredco.io", sender)
         assert re.search(
-            rf"code {expired_code} expired \d{{4}}-\d{{2}}-\d{{2}} \d{{2}}:\d{{2}} UTC\.",
-            expired.text,
+            r"expiredco\.io identification expired \d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC\.", expired
         )
-        assert "reply to your invite email for a new one." in expired.text
+        assert "reply to your invite email for a new one." in expired
+        assert "exit\t0" in expired
 
-        accepted = client.post("/v1/onboard/ufo", headers=headers, content=live_code)
-        assert re.search(
-            rf"code {live_code} accepted\. object #9 identified\."
-            r" \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z",
-            accepted.text,
-        )
-        assert f"signed in: {email}" in accepted.text
-
-        second = {"x-ufo-session": "invite-flow-2", "x-ufo-installed": "1"}
-        other = "boss@twiceco.io"
-        client.post("/v1/onboard/ufo", headers=second, content="")
-        client.post("/v1/onboard/ufo", headers=second, content=other)
-        client.post("/v1/onboard/ufo", headers=second, content=sender.sent[other])
-        consumed = client.post("/v1/onboard/ufo", headers=second, content=live_code)
-        assert f"code {live_code} already used. contact us if that wasn't your team." in (
-            consumed.text
-        )
+        asyncio.run(_grant(gateway_postgres, 10, "founder@burnedco.io"))
+        asyncio.run(_burn_grant(gateway_postgres, "burnedco.io"))
+        burned = _walk(client, "burned-grant", "founder@burnedco.io", sender)
+        assert "burnedco.io is already identified." in burned
+        assert "contact us if you cannot reach your fleet." in burned
+        assert "exit\t0" in burned
 
 
-async def _mint_invites(dsn: str) -> tuple[str, str]:
+def _walk(client: TestClient, session: str, email: str, sender: RecordingSender) -> str:
+    headers = {"x-ufo-session": session, "x-ufo-installed": "1"}
+    client.post("/v1/onboard/ufo", headers=headers, content="")
+    client.post("/v1/onboard/ufo", headers=headers, content=email)
+    return client.post("/v1/onboard/ufo", headers=headers, content=sender.sent[email]).text
+
+
+async def _grant(dsn: str, object_number: int, email: str, ttl: timedelta = INVITE_TTL) -> None:
     pool = await asyncpg.create_pool(dsn, min_size=1, max_size=1)
     try:
-        expired = await InviteCodes(pool=pool, ttl=timedelta(days=-1)).mint(8)
-        live = await InviteCodes(pool=pool).mint(9)
-        return expired.code, live.code
+        await InviteCodes(pool=pool, ttl=ttl).mint(object_number, email)
     finally:
         await pool.close()
+
+
+async def _burn_grant(dsn: str, domain: str) -> None:
+    """A grant consumed with no workspace behind it — the state a crash between the two writes
+    leaves, and the only way the flow meets a consumed grant at all."""
+    connection = await asyncpg.connect(dsn)
+    try:
+        await connection.execute(
+            "update ufo_control.invite_code set consumed_at = now() where email_domain = $1", domain
+        )
+    finally:
+        await connection.close()
+
+
+async def _claim_invite_id(dsn: str, email: str) -> UUID | None:
+    connection = await asyncpg.connect(dsn)
+    try:
+        return await connection.fetchval(
+            "select invite_id from ufo_control.onboard_claim where email = $1", email
+        )
+    finally:
+        await connection.close()
 
 
 def test_health_rejects_a_mismatched_database_role(
@@ -271,14 +308,13 @@ def test_signup_completes_and_delivery_runs_while_slack_is_unreachable(
     monkeypatch.setattr(gateway, "slack_connect_from_env", promptly)
     sender = RecordingSender()
     monkeypatch.setattr(gateway, "email_sender_from_env", lambda: sender)
-    code = asyncio.run(_mint_invite(gateway_postgres, 11))
     email = "founder@slackco.io"
+    asyncio.run(_grant(gateway_postgres, 11, email))
     headers = {"x-ufo-session": "slack-connect-flow", "x-ufo-installed": "1"}
     with TestClient(gateway_app()) as client:
         client.post("/v1/onboard/ufo", headers=headers, content="")
         client.post("/v1/onboard/ufo", headers=headers, content=email)
-        client.post("/v1/onboard/ufo", headers=headers, content=sender.sent[email])
-        signed_in = client.post("/v1/onboard/ufo", headers=headers, content=code)
+        signed_in = client.post("/v1/onboard/ufo", headers=headers, content=sender.sent[email])
         assert f"signed in: {email}" in signed_in.text
         row = _await_attempted_delivery(gateway_postgres, email)
     assert row["state"] == "pending"
@@ -295,14 +331,6 @@ def test_enabled_slack_connect_without_a_token_fails_startup(
     monkeypatch.delenv(BOT_TOKEN_ENV, raising=False)
     with pytest.raises(RuntimeError, match=BOT_TOKEN_ENV), TestClient(gateway_app()):
         pass
-
-
-async def _mint_invite(dsn: str, object_number: int) -> str:
-    pool = await asyncpg.create_pool(dsn, min_size=1, max_size=1)
-    try:
-        return (await InviteCodes(pool=pool).mint(object_number)).code
-    finally:
-        await pool.close()
 
 
 def _await_attempted_delivery(dsn: str, email: str) -> asyncpg.Record:
