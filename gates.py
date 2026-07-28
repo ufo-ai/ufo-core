@@ -39,6 +39,11 @@ MIGRATION_DIR_PART = "migrations"
 CORE_OWNER = "core"
 NAME_SEPARATOR = "-"
 CANDIDATES_FIELD = "candidates"
+ENV_ROOTS = Path("infra/envs")
+ACCOUNT_SINGLETON_RESOURCES = (
+    "datadog_integration_aws_account",
+    "datadog_integration_aws_external_id",
+)
 
 
 def _is_skill_content(path: Path) -> bool:
@@ -626,6 +631,29 @@ def _naming_failures(manifests: tuple[Manifest, ...], packs: tuple[Pack, ...]) -
     return failures
 
 
+def _env_terraform() -> dict[Path, str]:
+    """Every environment root's terraform, keyed by path so a gate can name the root a declaration
+    sits in. Read through one function because a mistyped root is silent otherwise — a glob that
+    matches nothing turns every gate over it into a no-op that still reports success."""
+    return {path: path.read_text() for path in (ROOT / ENV_ROOTS).glob("*/*.tf")}
+
+
+def _account_singleton_failures(sources: dict[Path, str]) -> list[str]:
+    """A resource that is per AWS account, declared in more than one environment root. Every root
+    deploys into the same account, so a second declaration puts two states on one remote object and
+    each apply takes it back from the other."""
+    failures = []
+    for resource in ACCOUNT_SINGLETON_RESOURCES:
+        declaration = f'resource "{resource}"'
+        roots = sorted({path.parent.name for path, text in sources.items() if declaration in text})
+        if len(roots) > 1:
+            failures.append(
+                f"{resource} is per AWS account but is declared in {', '.join(roots)}; "
+                "one root owns it and the others read its effects"
+            )
+    return failures
+
+
 def _registered_naming_failures() -> list[str]:
     """Load the installed manifests and packs the way the loader does — every `ufo.extension` and
     `ufo.pack` entry point resolved to the value object it declares — and scan their registered
@@ -678,6 +706,10 @@ def main() -> int:
     failures.extend(_skill_boundary_failures(skill_trees))
     failures.extend(_migration_failures(trees))
     failures.extend(_registered_naming_failures())
+    terraform = _env_terraform()
+    if not terraform:
+        failures.append(f"env roots: no terraform found under {ENV_ROOTS}")
+    failures.extend(_account_singleton_failures(terraform))
 
     for failure in failures:
         print(f"GATE: {failure}")

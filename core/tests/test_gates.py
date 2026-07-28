@@ -291,3 +291,39 @@ def test_set_cookie_gate_exempts_the_factory_module() -> None:
 def test_set_cookie_gate_allows_the_factory_helper_at_call_sites() -> None:
     trees = {WEB_SURFACE: ast.parse("set_session_cookie(response, 's', token, samesite='lax')\n")}
     assert gates._set_cookie_failures(trees) == []
+
+
+TESTING_TF = Path("infra/envs/testing/datadog_aws.tf")
+PROD_TF = Path("infra/envs/prod/datadog_aws.tf")
+INTEGRATION = 'resource "datadog_integration_aws_account" "ufo" {}\n'
+EXTERNAL_ID = 'resource "datadog_integration_aws_external_id" "ufo" {}\n'
+
+
+def test_account_singleton_gate_flags_an_integration_declared_in_two_roots() -> None:
+    failures = gates._account_singleton_failures({TESTING_TF: INTEGRATION, PROD_TF: INTEGRATION})
+    assert failures and "prod, testing" in failures[0]
+
+
+def test_account_singleton_gate_allows_one_root() -> None:
+    assert gates._account_singleton_failures({TESTING_TF: INTEGRATION + EXTERNAL_ID}) == []
+
+
+def test_account_singleton_gate_covers_the_external_id_that_pairs_with_it() -> None:
+    """The external id carries no arguments, so nothing about a second declaration looks wrong on
+    its own — it is the integration it pairs with that cannot exist twice."""
+    failures = gates._account_singleton_failures({TESTING_TF: EXTERNAL_ID, PROD_TF: EXTERNAL_ID})
+    assert failures and "datadog_integration_aws_external_id" in failures[0]
+
+
+def test_env_terraform_reaches_every_environment_root() -> None:
+    """The gate above judges what this collects, so a root it cannot see is a rule that quietly
+    stops applying. Nothing else in the suite would notice: a glob matching nothing yields no
+    sources, no failures, and a green gate."""
+    roots = {path.parent.name for path in gates._env_terraform()}
+    assert {"prod", "testing"} <= roots
+
+
+def test_account_singleton_gate_allows_two_files_in_one_root() -> None:
+    """A root may split its terraform across files. The rule is one root, not one file."""
+    other = Path("infra/envs/testing/datadog_extra.tf")
+    assert gates._account_singleton_failures({TESTING_TF: INTEGRATION, other: INTEGRATION}) == []
