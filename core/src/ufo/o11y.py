@@ -41,6 +41,7 @@ METRICS = (
     "sandbox_egress_total",
     "sandbox_tool_output_dir_reclaimed_total",
     "tool_offload_failed_total",
+    "db_tx_unavailable_total",
 )
 SENSITIVE_FIELD_KEYS = frozenset(
     {

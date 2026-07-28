@@ -1,6 +1,9 @@
 import os
 import sqlite3
 import warnings
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -12,9 +15,24 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 from ufo_testsupport.tables import reset_workspace_data
 
-from ufo.db import MIGRATIONS_DIR, apply_migrations, workspace_tx
+from ufo import o11y
+from ufo.db import MIGRATIONS_DIR, _opened, apply_migrations, workspace_tx
 from ufo.ext.loader import migration_locations
 from ufo.schema import tables
+
+
+@dataclass
+class _RefusingEngine:
+    """An engine whose `begin()` refuses to open, standing in for a Postgres that never answers the
+    connect. The real engine cannot be made to fail this way without a database to take away."""
+
+    error: Exception | None
+
+    @asynccontextmanager
+    async def begin(self) -> AsyncIterator[object]:
+        if self.error is not None:
+            raise self.error
+        yield object()
 
 
 def test_migrations_are_idempotent(database_url: str) -> None:
@@ -699,6 +717,37 @@ async def test_workspace_tx_requires_init() -> None:
     with pytest.raises(RuntimeError):
         async with workspace_tx():
             pass
+
+
+async def test_a_transaction_that_never_opens_is_counted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The connect that never lands is invisible to the database — it never receives it — so this
+    count is the only place the failure exists. It has to be the acquisition alone: counting the
+    whole block would report every failing query as a database that could not be reached."""
+    counted: list[tuple[str, dict[str, str]]] = []
+    monkeypatch.setattr(
+        o11y, "emit_metric", lambda name, **dimensions: counted.append((name, dimensions))
+    )
+
+    with pytest.raises(TimeoutError):
+        async with _opened(_RefusingEngine(TimeoutError()), "workspace"):
+            pass
+    async with _opened(_RefusingEngine(None), "workspace"):
+        pass
+    with pytest.raises(ValueError):
+        async with _opened(_RefusingEngine(None), "workspace"):
+            raise ValueError("the caller's own failure")
+
+    assert counted == [
+        ("db_tx_unavailable_total", {"path": "workspace", "error_class": "TimeoutError"})
+    ]
+
+
+def test_the_unavailable_count_is_a_registered_metric() -> None:
+    """`_opened` emits from inside its except block, so a name `o11y` does not know would raise
+    `unknown metric` there and leave the caller holding that instead of the connect failure the
+    count exists to report — the instrumentation destroying the error it was added to surface. The
+    test above mocks the emit away to read its arguments, so this is what holds the name."""
+    o11y.emit_metric("db_tx_unavailable_total", path="workspace", error_class="TimeoutError")
 
 
 async def test_turn_protocol_state_is_constrained(db: None) -> None:

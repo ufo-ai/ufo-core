@@ -15,7 +15,7 @@ import os
 import threading
 import warnings
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
@@ -110,10 +110,31 @@ async def dispose_db() -> None:
 
 
 @asynccontextmanager
+async def _opened(engine: AsyncEngine, path: str) -> AsyncIterator[AsyncConnection]:
+    """Begin a transaction, counting the ones that never begin. NullPool means every transaction
+    dials Postgres fresh, so there is no warm connection to absorb a lost packet: a single one costs
+    whatever was waiting on it. The database side cannot see this — it never receives the
+    connection — so the count has to be taken here, where the wait actually happens. Only the
+    acquisition is watched; a failure inside the caller's transaction is the caller's own.
+
+    `emit_metric` is imported here because `o11y` reads this module's ambient workspace, the same
+    cycle `apply_migrations` breaks the same way."""
+    from ufo.o11y import emit_metric
+
+    async with AsyncExitStack() as stack:
+        try:
+            connection = await stack.enter_async_context(engine.begin())
+        except Exception as error:
+            emit_metric("db_tx_unavailable_total", path=path, error_class=type(error).__name__)
+            raise
+        yield connection
+
+
+@asynccontextmanager
 async def workspace_tx() -> AsyncIterator[AsyncConnection]:
     if _engine is None:
         raise RuntimeError("db not initialized (init_db runs in the composition root)")
-    async with _engine.begin() as connection:
+    async with _opened(_engine, "workspace") as connection:
         workspace_id = current_workspace.get()
         if workspace_id is not None and connection.dialect.name == "postgresql":
             await connection.execute(
@@ -136,7 +157,7 @@ async def owner_tx() -> AsyncIterator[AsyncConnection]:
     engine = _owner_engine or _engine
     if engine is None:
         raise RuntimeError("db not initialized (init_db runs in the composition root)")
-    async with engine.begin() as connection:
+    async with _opened(engine, "owner") as connection:
         yield connection
 
 

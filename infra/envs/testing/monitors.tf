@@ -40,3 +40,21 @@ resource "datadog_monitor" "deploy_failed" {
 
   tags = ["env:testing", "managed-by:terraform"]
 }
+
+# The database a turn could not reach. Serve holds no connection pool — a pooled connection binds
+# to one event loop and this process runs several — so every transaction dials Postgres fresh and
+# a single lost packet ends whatever was waiting on it. Postgres never sees the connection, so no
+# database-side metric can show this; the count is taken in `db._opened`, where the wait happens.
+# Any occurrence is a turn or a job that died, so the threshold is one.
+resource "datadog_monitor" "db_tx_unavailable" {
+  name    = "ufo testing could not reach the database"
+  type    = "query alert"
+  query   = "sum(last_15m):sum:ufo.db_tx_unavailable_total{env:testing}.as_count() >= 1"
+  message = "A transaction never opened: {{value}} in 15 minutes. Serve dials Postgres per transaction, so this is a turn or job that ended with no answer. Check RDS reachability and connection count before assuming a blip. @ops@flyingobject.ai @slack-alerts"
+
+  monitor_thresholds {
+    critical = 1
+  }
+
+  tags = ["env:testing", "managed-by:terraform"]
+}
