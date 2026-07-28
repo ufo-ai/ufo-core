@@ -23,9 +23,12 @@ is a no-op and a fresh lease reuses the running Chrome. The BUA engine (the brow
 connects whatever endpoint the lease yields — only the transport is this provider's concern, never
 the engine."""
 
+import asyncio
+import base64
+import shlex
 from dataclasses import dataclass
 
-from ufo.sdk.browser import CdpEndpoint, CdpLease, SessionGone
+from ufo.sdk.browser import CdpEndpoint, CdpLease, FileBytes, SessionGone
 from ufo.sdk.manifest import CdpProviderSpec, Manifest
 from ufo.sdk.sandbox import SandboxSession
 
@@ -52,6 +55,8 @@ BROWSER_POLL_SLEEP_SECONDS = 0.1
 BROWSER_DIR = "/tmp/ufo-browser"
 CHROME_LOG_PATH = f"{BROWSER_DIR}/chromium.log"
 CHROME_PROFILE_DIR = f"{BROWSER_DIR}/profile"
+DOWNLOAD_DIR = f"{BROWSER_DIR}/downloads"
+MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024
 CHROME_PID_PATH = "/tmp/ufo-browser.pid"
 PROXY_LOG_PATH = f"{BROWSER_DIR}/proxy.log"
 PROXY_PID_PATH = "/tmp/ufo-browser-proxy.pid"
@@ -124,6 +129,7 @@ asyncio.run(main())
 
 BRING_UP_SOURCE = (
     f"""BROWSER_DIR = "{BROWSER_DIR}"
+DOWNLOAD_DIR = "{DOWNLOAD_DIR}"
 CHROME_URL = "http://127.0.0.1:{BROWSER_CDP_PORT}/json/version"
 CHROME_ARGV_TAIL = [
     "--headless=new",
@@ -241,6 +247,7 @@ def serving(url, argv, log_path, pid_path, budget, what):
 
 
 Path(BROWSER_DIR).mkdir(parents=True, exist_ok=True)
+Path(DOWNLOAD_DIR).mkdir(parents=True, exist_ok=True)
 browser = next((found for found in map(which, BROWSER_COMMANDS) if found), None)
 if browser is None:
     raise SystemExit("Chromium is required in the sandbox image")
@@ -278,15 +285,55 @@ BRINGUP
 class SandboxChromeCdpLease:
     """The per-turn lease over the sandbox's Chrome: `endpoint` returns the resolved wss endpoint,
     `token` the durable reattach handle (that endpoint's url), `aclose` a no-op because Chrome and
-    its proxy persist inside the per-conversation sandbox and outlive the turn."""
+    its proxy persist inside the per-conversation sandbox and outlive the turn. Files move by path,
+    not by wire: this Chrome opens the workspace directly, and a download it takes lands in the
+    sandbox — so the lease holds the sandbox to read those bytes back out of it."""
 
     endpoint_: CdpEndpoint
+    sandbox: SandboxSession
 
     async def endpoint(self) -> CdpEndpoint:
         return self.endpoint_
 
     async def token(self) -> str:
         return self.endpoint_.url
+
+    async def place_file(self, path: str, read: FileBytes) -> str:
+        """This Chrome runs inside the turn's own sandbox and opens the workspace directly, so the
+        path it can reach is the path the caller already holds. `read` goes unawaited: nothing is
+        copied out of the sandbox and back to hand a local browser a file it can already see."""
+        return path
+
+    async def download_dir(self) -> str:
+        """A path inside the sandbox: this Chrome runs there, so that is the only filesystem it can
+        write to and the only one the bytes can be read back from."""
+        return DOWNLOAD_DIR
+
+    async def fetch_download(self, guid: str) -> bytes:
+        """The download's bytes, read out of the sandbox Chrome wrote them to. `allowAndName` stores
+        a completed download under its guid, so that is the file to read. The encoding reads stdin
+        rather than passing a width flag: the flag is GNU-only, and the local carrier runs this on
+        whatever host the deploy sits on. It stands alone in the command so the exit code is its own
+        — a pipeline reports its last stage, which would mask an unreadable file as an empty
+        download. Decoding drops the line wrapping, and runs in a thread: a whole file's worth of it
+        is CPU work every other turn on this one loop would wait through. The file is sized first —
+        it crosses whole into this process, and what a page downloads is not ours to trust."""
+        stored = f"{DOWNLOAD_DIR}/{shlex.quote(guid)}"
+        sized = await self.sandbox.bash(f"wc -c < {stored}")
+        if sized.exit_code != 0:
+            raise RuntimeError(f"sandbox_chrome could not read download {guid}: {sized.stderr}")
+        if int(sized.stdout.strip()) > MAX_DOWNLOAD_BYTES:
+            raise ValueError(
+                f"download {guid} is {sized.stdout.strip()} bytes; this browser returns at most "
+                f"{MAX_DOWNLOAD_BYTES}"
+            )
+        result = await self.sandbox.bash(
+            f"base64 < {stored}",
+            timeout_s=BROWSER_START_TIMEOUT_SECONDS,
+        )
+        if result.exit_code != 0:
+            raise RuntimeError(f"sandbox_chrome could not read download {guid}: {result.stderr}")
+        return await asyncio.to_thread(base64.b64decode, result.stdout)
 
     async def aclose(self) -> None:
         return None
@@ -314,7 +361,7 @@ class SandboxChromeCdpProvider:
         host = await sandbox.host(BROWSER_CDP_PROXY_PORT)
         headers = {TRAFFIC_ACCESS_HEADER: sandbox.traffic_token} if sandbox.traffic_token else {}
         endpoint = CdpEndpoint(url=_remote_ws_url(host, _ws_path(result.stdout)), headers=headers)
-        return SandboxChromeCdpLease(endpoint)
+        return SandboxChromeCdpLease(endpoint, sandbox)
 
     async def reattach(self, token: str) -> CdpLease:
         raise SessionGone(token)

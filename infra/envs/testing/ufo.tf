@@ -92,7 +92,7 @@ locals {
     search_provider = "exa"
 
     [browser]
-    cdp_provider = "sandbox_chrome"
+    cdp_provider = "browserbase"
 
     [serve]
     host = "0.0.0.0"

@@ -5,7 +5,7 @@ Core owns only the transport seam — never a browser engine, and never a defaul
 `CdpLease`: a `CdpEndpoint` (a resolvable CDP URL plus any connection headers) held for the turn and
 released at turn end. Every provider is contributed by an extension at the `cdp_providers` Manifest
 seam — the `sandbox_chrome` provider resolves its endpoint against the Chrome running inside the
-turn's own sandbox, a `browserbase` provider leases a remote hosted endpoint. The engine that
+turn's own sandbox, the `browserbase` provider leases a remote hosted session. The engine that
 connects the endpoint and drives the page is the browser extension, never core. `FindCompleter` is
 the host-side element-ranking hook that engine calls back through, metered onto the turn."""
 
@@ -18,6 +18,7 @@ from typing import Protocol
 from ufo.sandbox.session import SandboxSession
 
 FindCompleter = Callable[[str, str], Awaitable[str]]
+FileBytes = Callable[[], Awaitable[bytes]]
 
 
 class SessionGone(Exception):
@@ -40,11 +41,30 @@ class CdpLease(Protocol):
     configured), `token` yields a durable, serializable reattach handle (a hosted session id, or the
     static URL) the browser extension persists so a recovered turn can reconnect, and `aclose`
     releases the hold at turn end — a no-op for a static endpoint, a hosted session release for a
-    remote provider."""
+    remote provider.
+
+    `place_file` answers where the leased Chrome can open a workspace file, because only the
+    transport knows whether that Chrome shares the turn's filesystem: a provider running Chrome in
+    the turn's own sandbox answers the same path, while a remote provider ships the bytes and
+    answers the location it uploaded them to. `read` pulls the bytes out of the sandbox and is
+    awaited only by a transport that must ship them, so a sandbox-local Chrome copies nothing.
+
+    `download_dir` and `fetch_download` are the same question in the other direction: where this
+    Chrome may write a download, and how its bytes come back. A browser in the turn's sandbox writes
+    to a path there and the bytes are read from the sandbox; a hosted browser writes into its
+    provider's storage and the bytes come back over that provider's API. Chrome is told
+    `download_dir` with `allowAndName`, so a completed download is stored under its CDP guid — which
+    is what `fetch_download` is keyed on."""
 
     async def endpoint(self) -> CdpEndpoint: ...
 
     async def token(self) -> str: ...
+
+    async def place_file(self, path: str, read: FileBytes) -> str: ...
+
+    async def download_dir(self) -> str: ...
+
+    async def fetch_download(self, guid: str) -> bytes: ...
 
     async def aclose(self) -> None: ...
 

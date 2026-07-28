@@ -331,6 +331,16 @@ async def test_sample_cdp_provider_yields_a_drivable_lease() -> None:
     lease = await sample.SampleCdpProvider().lease()
     endpoint = await lease.endpoint()
     assert endpoint.url == sample.SAMPLE_CDP_URL
+    assert await lease.token() == sample.SAMPLE_CDP_URL
+
+    async def unread() -> bytes:
+        raise AssertionError("a sandbox-local transport must not pull the file across")
+
+    assert await lease.place_file("/workspace/report.pdf", unread) == "/workspace/report.pdf"
+    download_dir = Path(await lease.download_dir())
+    await asyncio.to_thread(download_dir.mkdir, parents=True, exist_ok=True)
+    await asyncio.to_thread((download_dir / "guid-3").write_bytes, b"probe download")
+    assert await lease.fetch_download("guid-3") == b"probe download"
     await lease.aclose()
 
 

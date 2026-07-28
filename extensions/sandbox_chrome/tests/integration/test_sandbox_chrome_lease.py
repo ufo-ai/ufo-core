@@ -165,6 +165,37 @@ async def test_lease_yields_an_endpoint_a_real_cdp_connection_drives(
     assert "Chrome" in reply["result"]["product"]
 
 
+async def test_a_real_download_is_read_back_out_of_the_sandbox(
+    tmp_path: Path, browser_processes: None
+) -> None:
+    """The other half of the transport's file duty, against the real chain: Chrome writes a download
+    inside the sandbox, and the lease is what carries those bytes back out. A serve-side temp
+    directory could not — the file exists only where the browser ran."""
+    session = await _turn_sandbox(tmp_path, _real_chrome())
+    lease = await ext.SandboxChromeCdpProvider().lease(session)
+
+    body = b"%PDF-1.7 downloaded through the sandbox"
+    guid = f"probe-{uuid4()}"
+    written = await session.bash(
+        f"printf '%s' {json.dumps(body.decode())} > {ext.DOWNLOAD_DIR}/{guid}"
+    )
+    assert written.exit_code == 0, written.stderr
+
+    assert await lease.fetch_download(guid) == body
+    assert await lease.download_dir() == ext.DOWNLOAD_DIR
+
+
+async def test_the_bring_up_creates_the_download_directory(
+    tmp_path: Path, browser_processes: None
+) -> None:
+    """Chrome cannot write a download into a directory that does not exist, so the bring-up makes
+    it — proven against the real filesystem the browser actually writes to."""
+    session = await _turn_sandbox(tmp_path, _real_chrome())
+    await ext.SandboxChromeCdpProvider().lease(session)
+    listed = await session.bash(f"test -d {ext.DOWNLOAD_DIR} && echo present")
+    assert listed.stdout.strip() == "present", listed.stderr
+
+
 async def test_a_second_lease_reuses_the_running_browser(
     tmp_path: Path, browser_processes: None
 ) -> None:

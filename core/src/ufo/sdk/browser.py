@@ -5,8 +5,10 @@ selects through `config.browser.cdp_provider`. A `CdpProvider` mints a per-turn 
 a `CdpEndpoint` — the CDP URL plus any connection headers — released at turn end (browserbase mints
 and releases a fresh hosted session per turn). A lease's `token` is the durable reattach handle an
 extension persists, and `CdpProvider.reattach` reconnects to it on a recovered turn or raises
-`SessionGone`. `FindCompleter` is the host-side element-ranking hook the browser engine calls back
-through. The concrete seam lives in `ufo.browser`, reached only here."""
+`SessionGone`; its `place_file` answers where the leased Chrome can open a workspace file, reading
+the bytes through the `FileBytes` thunk only when the browser is remote. `FindCompleter` is the
+host-side element-ranking hook the browser engine calls back through. The concrete seam lives in
+`ufo.browser`, reached only here."""
 
 from ufo.browser import (
     CdpEndpoint as CdpEndpoint,
@@ -16,6 +18,9 @@ from ufo.browser import (
 )
 from ufo.browser import (
     CdpProvider as CdpProvider,
+)
+from ufo.browser import (
+    FileBytes as FileBytes,
 )
 from ufo.browser import (
     FindCompleter as FindCompleter,

@@ -9,6 +9,7 @@ log), so the tests read those rows back through the same public surfaces core wr
 `UNDECLARED_SLOT` names a slot the Manifest never declares — the probe that a handler asking for an
 undeclared slot is refused."""
 
+import asyncio
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -22,7 +23,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from ufo.sdk.audience import conversation_audience
 from ufo.sdk.authproxy import AuthProxySpec, Credential
 from ufo.sdk.bearer import workspace_claim
-from ufo.sdk.browser import CdpEndpoint, CdpLease
+from ufo.sdk.browser import CdpEndpoint, CdpLease, FileBytes
 from ufo.sdk.connectors import (
     BrokerFile,
     BrokerSearch,
@@ -187,6 +188,7 @@ SKILL_SCRIPT_MARKER = "sample-skill-probe-ok"
 SKILL_DIR = Path(__file__).parent / "skills" / SKILL_NAME
 CDP_PROVIDER = "sample_cdp"
 SAMPLE_CDP_URL = "wss://sample.test/cdp"
+SAMPLE_DOWNLOAD_DIR = "/tmp/ufo-sample-downloads"
 CARRIER_NAME = "sample_carrier"
 CARRIER_CONTAINER = "sample-container"
 AUTH_PROXY_BACKEND = "sample_auth_proxy"
@@ -902,14 +904,24 @@ class SampleModelClient:
 @dataclass(frozen=True)
 class SampleCdpLease:
     """The canned per-turn lease the sample's cdp provider mints: `endpoint` returns a fixed
-    `CdpEndpoint`, `token` the durable reattach handle (the fixed URL), `aclose` is a no-op — a real
-    object exercised through the `CdpLease` protocol the browser engine drives, never a mock."""
+    `CdpEndpoint`, `token` the durable reattach handle (the fixed URL), `place_file` answers the
+    path unchanged as a sandbox-local browser does, `aclose` is a no-op — a real object exercised
+    through the `CdpLease` protocol the browser engine drives, never a mock."""
 
     async def endpoint(self) -> CdpEndpoint:
         return CdpEndpoint(url=SAMPLE_CDP_URL)
 
     async def token(self) -> str:
         return SAMPLE_CDP_URL
+
+    async def place_file(self, path: str, read: FileBytes) -> str:
+        return path
+
+    async def download_dir(self) -> str:
+        return SAMPLE_DOWNLOAD_DIR
+
+    async def fetch_download(self, guid: str) -> bytes:
+        return await asyncio.to_thread((Path(SAMPLE_DOWNLOAD_DIR) / guid).read_bytes)
 
     async def aclose(self) -> None:
         return None

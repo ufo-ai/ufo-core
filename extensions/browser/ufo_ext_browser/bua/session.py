@@ -5,13 +5,14 @@ A session opens one WebSocket to the CDP endpoint the provider yielded, wires th
 navigate / read_page / get_page_text / find / form_input / computer / tabs_* / upload_file /
 wait_for_download — each delegating to a per-call reader dataclass beneath it. The session holds the
 mutable per-turn state (tabs, downloads, out-of-process frame sessions, keyboard) the readers act
-on; it is disposable, recreated per turn against the persistent browser."""
+on; it is disposable, recreated per turn against the persistent browser.
+
+`download_dir` is where the transport says this Chrome may write, and a completed download is
+reported rather than read: whoever owns that location owns fetching the bytes back."""
 
 from __future__ import annotations
 
 import asyncio
-import shutil
-import tempfile
 from collections.abc import Coroutine
 from typing import Any, Self
 
@@ -48,6 +49,7 @@ class BrowserSession:
         self,
         cdp: CdpEndpoint | None = None,
         model: str | None = None,
+        download_dir: str = "",
     ) -> None:
         self.cdp = cdp
         self.model_size = model_coordinate_space(model) or MODEL_SIZE
@@ -55,7 +57,7 @@ class BrowserSession:
         self.tabs: list[Tab] = []
         self.oop_sessions: dict[str, str] = {}
         self.downloads: list[BrowserDownload] = []
-        self.download_dir: str | None = None
+        self.download_dir = download_dir
         self.is_mac = False
         self.last_batch_scroll_only = False
         self.settle = Settle()
@@ -82,7 +84,6 @@ class BrowserSession:
         conn = self.conn
         version = await conn.send("Browser.getVersion")
         self.is_mac = "Mac" in str(version.get("userAgent", ""))
-        self.download_dir = await asyncio.to_thread(tempfile.mkdtemp, prefix="ufo-downloads-")
         tabs = self.tab_reader()
         downloads = self.download_reader()
         dialogs = self.dialog_reader()
@@ -90,7 +91,11 @@ class BrowserSession:
         conn.on("Browser.downloadProgress", downloads.on_download_progress)
         await conn.send(
             "Browser.setDownloadBehavior",
-            {"behavior": "allowAndName", "downloadPath": self.download_dir, "eventsEnabled": True},
+            {
+                "behavior": "allowAndName",
+                "downloadPath": self.download_dir,
+                "eventsEnabled": True,
+            },
         )
         tabs.remember_initial_targets(await conn.send("Target.getTargets"))
         conn.on("Target.targetCreated", tabs.on_target_created)
@@ -117,13 +122,10 @@ class BrowserSession:
                         pass
                 await self.conn.close()
         finally:
-            if self.download_dir is not None:
-                await asyncio.to_thread(shutil.rmtree, self.download_dir, ignore_errors=True)
             self.conn = None
             self.tabs = []
             self.oop_sessions = {}
             self.downloads = []
-            self.download_dir = None
             self.last_batch_scroll_only = False
             self.settle = Settle()
             self.dialogs = []
@@ -200,6 +202,9 @@ class BrowserSession:
     async def upload_file(self, args: JsonDict) -> JsonDict:
         return await self.form_reader().upload_file(args)
 
+    async def attached_sizes(self, args: JsonDict) -> list[int]:
+        return await self.form_reader().attached_sizes(args)
+
     async def tree(self, args: JsonDict, filter_type: str = "all") -> str:
         return await self.content_reader().tree(args, filter_type)
 
@@ -218,10 +223,8 @@ class BrowserSession:
     async def computer(self, args: JsonDict) -> JsonDict:
         return await BrowserComputer(self, VIEWPORT, MAX_WAIT_SECONDS).run(args)
 
-    async def wait_for_download(self, args: JsonDict) -> JsonDict:
-        if self.download_dir is None:
-            raise BrowserUnavailable("browser is not open")
-        return await self.download_reader().wait(args, self.download_dir)
+    async def wait_for_download(self, args: JsonDict) -> BrowserDownload:
+        return await self.download_reader().wait(args)
 
     async def eval_js(self, session_id: str, expression: str) -> Json:
         return await self.runtime_reader().eval(session_id, expression)

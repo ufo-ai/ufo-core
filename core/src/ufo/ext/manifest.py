@@ -254,10 +254,10 @@ class CdpProviderSpec:
     is the name; `build` constructs the process-wide CdpProvider once at boot, only when selected,
     given a credential reader scoped to this manifest's slots (a remote provider reads its key
     in-process, host-side, never in the sandbox). Core ships no provider: the `sandbox_chrome`
-    extension leases CDP from the turn's own sandbox, and a `browserbase` extension leases a remote
-    hosted endpoint. The one BUA engine (the browser extension) connects whatever endpoint the
-    selected provider's per-turn lease yields — only the transport is configurable, never the
-    engine."""
+    extension leases CDP from the turn's own sandbox, and the `browserbase` extension mints a hosted
+    session per browser run. The one BUA engine (the browser extension) connects whatever endpoint
+    the selected provider's per-turn lease yields, and reaches a workspace file through that lease's
+    `place_file` — only the transport is configurable, never the engine."""
 
     backend: str
     build: Callable[[CredentialAccess], CdpProvider]

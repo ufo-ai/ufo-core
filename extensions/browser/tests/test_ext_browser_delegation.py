@@ -14,6 +14,8 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
+import ufo_ext_browser.delegation as delegation
+import ufo_ext_browserbase as browserbase
 from pydantic import BaseModel, ValidationError
 from ufo_ext_browser.delegation import (
     BROWSER_TASK_TIMEOUT_FLOOR_MINUTES,
@@ -258,3 +260,30 @@ async def test_wide_browse_caps_the_entity_count(tmp_path: Path) -> None:
                 }
             ),
         )
+
+
+def test_a_browser_task_budget_stays_within_what_a_leased_session_can_hold() -> None:
+    """The browser a run holds is one leased session. A budget above what a transport will keep
+    alive would drop the live connection mid-task instead of ending it through the graceful cancel
+    path, so the tool refuses it rather than accepting a budget it cannot honour."""
+    assert (
+        delegation.BrowserTaskInput(
+            url="https://example.com",
+            task="t",
+            task_name="n",
+            user_description="d",
+            timeout_minutes=delegation.BROWSER_TASK_TIMEOUT_CEILING_MINUTES,
+        ).timeout_minutes
+        == delegation.BROWSER_TASK_TIMEOUT_CEILING_MINUTES
+    )
+    with pytest.raises(ValidationError):
+        delegation.BrowserTaskInput(
+            url="https://example.com",
+            task="t",
+            task_name="n",
+            user_description="d",
+            timeout_minutes=delegation.BROWSER_TASK_TIMEOUT_CEILING_MINUTES + 1,
+        )
+    assert (
+        browserbase.SESSION_TIMEOUT_SECONDS > delegation.BROWSER_TASK_TIMEOUT_CEILING_MINUTES * 60
+    )

@@ -11,6 +11,7 @@ asserted. The BUA engine keeps its own live-CDP end-to-end proof in test_browser
 
 import base64
 import json
+import shlex
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -19,10 +20,14 @@ from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
+import ufo_ext_browser.bua.backend as backend_module
+import ufo_ext_browser.bua.session as session_module
 import ufo_ext_browser.manifest as browser_manifest
 import ufo_ext_browser.tools as browser_tools
 from pydantic import JsonValue
-from ufo_ext_browser.bua.backend import CDP_TOKEN_KEY, BuaSurface
+from ufo_ext_browser.bua.backend import CDP_TOKEN_KEY, MAX_READ_BYTES, BuaSurface
+from ufo_ext_browser.bua.downloads import Download
+from ufo_ext_browser.bua.session import BrowserSession
 from ufo_ext_browser.subagent import (
     BROWSER_PROFILE,
     BROWSER_SUBAGENT_NAME,
@@ -32,7 +37,7 @@ from ufo_ext_browser.subagent import (
 from ufo_ext_browser.tools import BROWSER_TOOL_NAMES, BROWSER_TOOLS
 
 from ufo.blob import FilesystemBlobStore
-from ufo.browser import CdpEndpoint, CdpLease, CdpProvider, SessionGone
+from ufo.browser import CdpEndpoint, CdpLease, CdpProvider, FileBytes, SessionGone
 from ufo.db import workspace_tx
 from ufo.ext.context import ScopedStore
 from ufo.ext.loader import skill_registry, turn_subagents
@@ -56,6 +61,7 @@ class RecordingSurface:
 
     reply: dict[str, JsonValue]
     calls: list[tuple[str, dict[str, JsonValue]]] = field(default_factory=list)
+    attached: list[int] = field(default_factory=list)
 
     def _record(self, method: str, args: dict[str, JsonValue]) -> dict[str, JsonValue]:
         self.calls.append((method, args))
@@ -94,6 +100,9 @@ class RecordingSurface:
     async def wait_for_download(self, args: dict[str, JsonValue]) -> dict[str, JsonValue]:
         return self._record("wait_for_download", args)
 
+    async def attached_sizes(self, args: dict[str, JsonValue]) -> list[int]:
+        return list(self.attached)
+
     async def aclose(self) -> None:
         return None
 
@@ -117,6 +126,15 @@ class FakeCdpLease:
 
     async def token(self) -> str:
         return self.session_id
+
+    async def place_file(self, path: str, read: FileBytes) -> str:
+        return path
+
+    async def download_dir(self) -> str:
+        return "/tmp/ufo-downloads"
+
+    async def fetch_download(self, guid: str) -> bytes:
+        return b""
 
     async def aclose(self) -> None:
         self.released = True
@@ -169,6 +187,348 @@ class WritesCarrier:
 
     async def destroy(self, handle: SandboxHandle) -> None:
         raise AssertionError("browser tools do not destroy containers")
+
+
+@dataclass
+class FileCarrier:
+    """Serves the two reads the surface makes of a workspace file it must ship to a remote browser
+    (its size, then its bytes) and records every command, so a test can prove a sandbox-local
+    transport reads nothing at all."""
+
+    files: dict[str, bytes] = field(default_factory=dict)
+    commands: list[str] = field(default_factory=list)
+
+    async def create(self, spec: SandboxSpec) -> SandboxHandle:
+        raise AssertionError("browser tools do not create containers")
+
+    async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None:
+        self.files[path] = content
+
+    async def exec(
+        self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
+    ) -> ExecResult:
+        command = argv[-1]
+        self.commands.append(command)
+        for path, content in self.files.items():
+            if shlex.quote(path) not in command:
+                continue
+            if command.startswith("stat"):
+                return ExecResult(stdout=f"{len(content)}\n", stderr="", exit_code=0)
+            if command.startswith("base64"):
+                return ExecResult(stdout=base64.b64encode(content).decode(), stderr="", exit_code=0)
+        return ExecResult(stdout="", stderr="no such file", exit_code=1)
+
+    async def destroy(self, handle: SandboxHandle) -> None:
+        raise AssertionError("browser tools do not destroy containers")
+
+
+@dataclass
+class UploadingLease:
+    """A remote transport's lease: `place_file` ships the bytes it is handed and answers where it
+    put them, exactly as the browserbase provider does. Records what it received so a test can prove
+    the surface read the sandbox's real bytes."""
+
+    uploaded: list[tuple[str, bytes]] = field(default_factory=list)
+    fetched: list[str] = field(default_factory=list)
+
+    async def endpoint(self) -> CdpEndpoint:
+        raise _StopAtConnect()
+
+    async def token(self) -> str:
+        return "remote-session"
+
+    async def place_file(self, path: str, read: FileBytes) -> str:
+        data = await read()
+        name = path.rsplit("/", 1)[-1]
+        self.uploaded.append((name, data))
+        return f"/tmp/.uploads/{name}"
+
+    async def download_dir(self) -> str:
+        return "downloads"
+
+    async def fetch_download(self, guid: str) -> bytes:
+        self.fetched.append(guid)
+        return b"downloaded bytes"
+
+    async def aclose(self) -> None:
+        return None
+
+
+@dataclass
+class SandboxLocalLease:
+    """A transport whose Chrome shares the turn's sandbox: `place_file` answers the path it was
+    given and leaves `read` unawaited, the shape sandbox_chrome's own lease implements."""
+
+    async def endpoint(self) -> CdpEndpoint:
+        raise _StopAtConnect()
+
+    async def token(self) -> str:
+        return "sandbox-session"
+
+    async def place_file(self, path: str, read: FileBytes) -> str:
+        return path
+
+    async def download_dir(self) -> str:
+        return "/tmp/ufo-downloads"
+
+    async def fetch_download(self, guid: str) -> bytes:
+        return b""
+
+    async def aclose(self) -> None:
+        return None
+
+
+def _staging_surface(carrier: FileCarrier, lease: CdpLease) -> tuple[BuaSurface, RecordingSurface]:
+    """A surface already holding its lease and an open session, which is the state every upload runs
+    in: `upload_file` stages the paths through the lease, then drives CDP through the session."""
+    session = RecordingSurface(reply={"ok": True})
+    surface = BuaSurface(
+        cdp_provider=cast(CdpProvider, None),
+        find_completer=None,
+        model=None,
+        sandbox=SandboxSession(
+            carrier=carrier, handle=SandboxHandle(conversation_id=uuid4(), container_id="test")
+        ),
+        lease=lease,
+        session=cast(object, session),  # type: ignore[arg-type]
+    )
+    return surface, session
+
+
+async def test_upload_through_a_remote_transport_ships_the_sandboxs_bytes() -> None:
+    """The producer half of `place_file`: a remote browser cannot open a workspace path, so the
+    surface reads the file out of the turn's sandbox, hands it to the lease, and drives CDP against
+    the location the transport answers — never the workspace path."""
+    carrier = FileCarrier(files={"/workspace/report.pdf": b"%PDF-1.7 body"})
+    lease = UploadingLease()
+    surface, session = _staging_surface(carrier, lease)
+    session.attached = [len(b"%PDF-1.7 body")]
+    await surface.upload_file({"ref": "ref_3", "files": ["/workspace/report.pdf"]})
+    assert lease.uploaded == [("report.pdf", b"%PDF-1.7 body")]
+    assert session.calls[-1] == (
+        "upload_file",
+        {"ref": "ref_3", "files": ["/tmp/.uploads/report.pdf"]},
+    )
+
+
+async def test_upload_through_a_sandbox_local_transport_copies_nothing() -> None:
+    """The other half: a transport whose Chrome shares the sandbox answers the path unchanged (what
+    sandbox_chrome's lease does), so the surface must not pull the file out of the sandbox to hand a
+    browser a file it can already open."""
+    carrier = FileCarrier(files={"/workspace/report.pdf": b"%PDF-1.7 body"})
+    surface, session = _staging_surface(carrier, SandboxLocalLease())
+    await surface.upload_file({"ref": "ref_3", "files": ["/workspace/report.pdf"]})
+    assert session.calls[-1] == (
+        "upload_file",
+        {"ref": "ref_3", "files": ["/workspace/report.pdf"]},
+    )
+    assert carrier.commands == []
+
+
+async def test_upload_refuses_a_file_larger_than_the_read_cap() -> None:
+    carrier = FileCarrier(files={"/workspace/huge.bin": b"x" * (MAX_READ_BYTES + 1)})
+    lease = UploadingLease()
+    surface, session = _staging_surface(carrier, lease)
+    with pytest.raises(ValueError, match="upload limit"):
+        await surface.upload_file({"ref": "ref_3", "files": ["/workspace/huge.bin"]})
+    assert lease.uploaded == []
+    assert session.calls == []
+
+
+class _StopBootstrap(RuntimeError):
+    """Ends `_bootstrap` once the download behaviour has been sent, so the payload can be read
+    without standing up every later CDP exchange."""
+
+
+@dataclass
+class RecordingConnection:
+    """Stands in for the websocket so the REAL `_bootstrap` runs and its emitted CDP calls can be
+    read back — the payload is the thing asserted, this is only the wire under it."""
+
+    sent: list[tuple[str, dict[str, JsonValue]]] = field(default_factory=list)
+
+    async def send(
+        self,
+        method: str,
+        params: dict[str, JsonValue] | None = None,
+        session_id: str | None = None,
+    ) -> dict[str, JsonValue]:
+        self.sent.append((method, params or {}))
+        if method == "Browser.getVersion":
+            return {"userAgent": "X11; Linux"}
+        if method == "Target.getTargets":
+            raise _StopBootstrap()
+        return {}
+
+    def on(self, event: str, handler: object) -> None:
+        return None
+
+    async def close(self) -> None:
+        return None
+
+    def payload(self, method: str) -> dict[str, JsonValue]:
+        for name, params in self.sent:
+            if name == method:
+                return params
+        raise AssertionError(f"{method} was never sent: {[n for n, _ in self.sent]}")
+
+
+async def _bootstrap_payloads(
+    monkeypatch: pytest.MonkeyPatch, download_dir: str
+) -> RecordingConnection:
+    recorder = RecordingConnection()
+
+    class _Opener:
+        @classmethod
+        async def open(cls, ws_url: str, headers: dict[str, str] | None = None) -> object:
+            return recorder
+
+    monkeypatch.setattr(session_module, "CdpConnection", _Opener)
+    session = BrowserSession(
+        cdp=CdpEndpoint(url="ws://browser.test/devtools"),
+        download_dir=download_dir,
+    )
+    with pytest.raises(_StopBootstrap):
+        await session.open()
+    return recorder
+
+
+async def test_a_hosted_transports_download_target_is_what_chrome_is_told(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The regression: a hosted Chrome answers `-32602 restricted directory` to an absolute download
+    path and the whole bootstrap dies with it, so nothing browses. What the lease names has to be
+    what `Browser.setDownloadBehavior` carries."""
+    recorder = await _bootstrap_payloads(monkeypatch, "downloads")
+    assert recorder.payload("Browser.setDownloadBehavior") == {
+        "behavior": "allowAndName",
+        "downloadPath": "downloads",
+        "eventsEnabled": True,
+    }
+
+
+async def test_a_sandbox_local_transports_download_target_is_what_chrome_is_told(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorder = await _bootstrap_payloads(monkeypatch, "/tmp/ufo-downloads")
+    assert recorder.payload("Browser.setDownloadBehavior")["downloadPath"] == "/tmp/ufo-downloads"
+
+
+async def test_a_finished_download_comes_back_through_the_transport() -> None:
+    """The browser wrote the file wherever the transport said, so the bytes are the transport's to
+    fetch — keyed on the guid `allowAndName` stored it under, never read off this process's disk."""
+
+    class _FinishedDownload:
+        async def wait_for_download(self, args: dict[str, JsonValue]) -> Download:
+            return Download(guid="guid-7", filename="invoice.pdf", state="completed")
+
+    lease = UploadingLease()
+    surface, _ = _staging_surface(FileCarrier(), lease)
+    surface.session = cast(BrowserSession, _FinishedDownload())
+    reply = await surface.wait_for_download({})
+    assert lease.fetched == ["guid-7"]
+    assert reply == {
+        "filename": "invoice.pdf",
+        "content_base64": base64.b64encode(b"downloaded bytes").decode(),
+        "size": len(b"downloaded bytes"),
+    }
+
+
+async def test_an_upload_waits_until_the_page_holds_the_bytes() -> None:
+    """A remote transport writes the file through after its upload call returns, so an attach made
+    too early leaves the page holding the right name and an empty file — measured against the live
+    API, where a zero-delay attach reported 0 bytes and a one-second one reported all 27. Re-attach
+    until the page agrees, rather than returning a success the member cannot see is hollow."""
+
+    @dataclass
+    class _FillsLate(RecordingSurface):
+        remaining_empty: int = 2
+
+        async def attached_sizes(self, args: dict[str, JsonValue]) -> list[int]:
+            if self.remaining_empty > 0:
+                self.remaining_empty -= 1
+                return [0]
+            return [len(b"%PDF-1.7 body")]
+
+    carrier = FileCarrier(files={"/workspace/report.pdf": b"%PDF-1.7 body"})
+    surface, _ = _staging_surface(carrier, UploadingLease())
+    session = _FillsLate(reply={"ok": True})
+    surface.session = cast(BrowserSession, session)
+    await surface.upload_file({"ref": "ref_3", "files": ["/workspace/report.pdf"]})
+    assert [name for name, _ in session.calls].count("upload_file") == 3
+
+
+async def test_an_upload_that_never_lands_fails_loud(monkeypatch: pytest.MonkeyPatch) -> None:
+
+    @dataclass
+    class _NeverFills(RecordingSurface):
+        async def attached_sizes(self, args: dict[str, JsonValue]) -> list[int]:
+            return [0]
+
+    monkeypatch.setattr(backend_module, "UPLOAD_SETTLE_ATTEMPTS", 3)
+    monkeypatch.setattr(backend_module, "UPLOAD_SETTLE_SLEEP_SECONDS", 0.0)
+    carrier = FileCarrier(files={"/workspace/report.pdf": b"%PDF-1.7 body"})
+    surface, _ = _staging_surface(carrier, UploadingLease())
+    surface.session = cast(BrowserSession, _NeverFills(reply={"ok": True}))
+    with pytest.raises(RuntimeError, match="never received the uploaded file"):
+        await surface.upload_file({"ref": "ref_3", "files": ["/workspace/report.pdf"]})
+
+
+async def test_a_download_reports_only_a_file_name_never_a_path() -> None:
+    """The visited page chooses the download's name and a caller joins it into a workspace path, so
+    a name carrying `../` would put the write in a directory that caller never asked for. What
+    comes back is one path segment."""
+
+    @dataclass
+    class _NamesATraversal(RecordingSurface):
+        suggested: str = "../../notes.md"
+
+        async def wait_for_download(self, args: dict[str, JsonValue]) -> Download:
+            return Download(guid="guid-7", filename=self.suggested, state="completed")
+
+    for suggested, expected in (
+        ("../../notes.md", "notes.md"),
+        ("/etc/passwd", "passwd"),
+        ("report.pdf", "report.pdf"),
+        ("..", "download"),
+    ):
+        surface, _ = _staging_surface(FileCarrier(), UploadingLease())
+        surface.session = cast(BrowserSession, _NamesATraversal(reply={}, suggested=suggested))
+        assert (await surface.wait_for_download({}))["filename"] == expected
+
+
+async def test_upload_refuses_a_path_outside_the_workspace() -> None:
+    """`upload_file` reads through an unconfined shell and a remote transport ships what it reads,
+    so a path escaping the workspace must never reach either."""
+    carrier = FileCarrier(files={"/etc/passwd": b"root:x:0:0"})
+    lease = UploadingLease()
+    surface, session = _staging_surface(carrier, lease)
+    for escape in ("/etc/passwd", "../../etc/passwd", "/workspace/../etc/passwd"):
+        with pytest.raises(ValueError, match="escape"):
+            await surface.upload_file({"ref": "ref_3", "files": [escape]})
+    assert lease.uploaded == []
+    assert carrier.commands == []
+    assert session.calls == []
+
+
+async def test_upload_quotes_a_path_carrying_shell_metacharacters() -> None:
+    """The reader builds a shell command, so a workspace file whose name is shell syntax must be
+    read as a name — not executed, and not silently read as some other file."""
+    tricky = "/workspace/quarterly report; rm -rf $HOME.pdf"
+    carrier = FileCarrier(files={tricky: b"quarterly bytes"})
+    lease = UploadingLease()
+    surface, session = _staging_surface(carrier, lease)
+    session.attached = [len(b"quarterly bytes")]
+    await surface.upload_file({"ref": "ref_3", "files": [tricky]})
+    assert lease.uploaded == [("quarterly report; rm -rf $HOME.pdf", b"quarterly bytes")]
+    assert all(shlex.quote(tricky) in command for command in carrier.commands)
+
+
+async def test_upload_surfaces_a_missing_workspace_file() -> None:
+    surface, session = _staging_surface(FileCarrier(), UploadingLease())
+    with pytest.raises(ValueError, match="no such file"):
+        await surface.upload_file({"ref": "ref_3", "files": ["/workspace/gone.pdf"]})
+    assert session.calls == []
 
 
 async def _no_spawn(

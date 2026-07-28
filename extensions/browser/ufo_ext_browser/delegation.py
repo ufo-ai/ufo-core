@@ -9,6 +9,10 @@ summaries into a workspace JSON file. Both reach the child through `ctx.spawn` �
 seam `spawn_subagent` uses — so a delegated browser run is scoped to the browser profile's tools,
 never a raw browser handle.
 
+A budget is bounded at both ends: below so a wedged site gets a fair run, above because the browser
+a run holds is one leased session, and a transport that reaps its own sessions would drop the live
+connection mid-task rather than ending it through the graceful cancel path below.
+
 `browser_task` wants a fresh session each call, so it passes no `dedup_key`. `wide_browse` is
 `side_effecting` and spawns each child under `dedup_key = f"{idempotency_key}/{entity}"`,
 deterministic across a crash-recovery re-run of the fan-out — a recovered parent reconnects to the
@@ -24,6 +28,7 @@ from ufo_ext_browser.subagent import BrowserResult
 
 BROWSER_PROFILE_NAME = "browser"
 BROWSER_TASK_TIMEOUT_FLOOR_MINUTES = 20
+BROWSER_TASK_TIMEOUT_CEILING_MINUTES = 60
 MAX_WIDE_BROWSE_ENTITIES = 128
 DEFAULT_SUBAGENT_FANOUT = 8
 WIDE_BROWSE_OUTPUT = "wide_browse.json"
@@ -55,6 +60,7 @@ class BrowserTaskInput(BaseModel):
     timeout_minutes: int = Field(
         default=BROWSER_TASK_TIMEOUT_FLOOR_MINUTES,
         ge=BROWSER_TASK_TIMEOUT_FLOOR_MINUTES,
+        le=BROWSER_TASK_TIMEOUT_CEILING_MINUTES,
         description="Wall-clock budget for the whole session; the task is cancelled when it "
         "expires.",
     )

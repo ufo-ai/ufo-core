@@ -10,9 +10,9 @@ surface and the operator session debugger, the Bedrock and OpenRouter model prov
 plan provisioning, usage and seat metering, and the coding
 subagent — but over managed backends instead
 of core's own: the Turbopuffer index (in place of the local index), the Slack surface, the Redis
-live-frame hub, the E2B sandbox carrier, and Chrome driven inside each conversation's sandbox (the
-sandbox_chrome cdp provider, in place of a static `BROWSER_CDP_URL`). Memory still retrieves through
-OpenAI embeddings
+live-frame hub, the E2B sandbox carrier, and a Browserbase-hosted Chrome per browser run (the
+browserbase cdp provider, in place of Chrome inside the conversation's own sandbox). Memory still
+retrieves through OpenAI embeddings
 (Turbopuffer is the index seam, embeddings are separate). A workspace admin connects Slack in chat
 — the slack extension's setup tools drive it. It bundles only extensions and adds no
 pack-level skills or onboarding of its own — each capability rides its own extension's manifest."""
@@ -46,7 +46,7 @@ EXTENSIONS = (
     "sources",
     "coding",
     "browser",
-    "sandbox_chrome",
+    "browserbase",
     "skill_create",
     "embed_openai",
     "metronome",

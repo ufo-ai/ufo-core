@@ -162,6 +162,7 @@ resource "aws_secretsmanager_secret_version" "api_keys" {
     "pipedream-project-id"                   = ""
     "pipedream-gmail-oauth-app-id"           = ""
     "e2b-api-key"                            = ""
+    "browserbase-api-key"                    = ""
     "exa-api-key"                            = ""
     "turbopuffer-api-key"                    = ""
     "datadog-api-key"                        = ""

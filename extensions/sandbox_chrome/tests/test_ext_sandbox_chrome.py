@@ -8,6 +8,8 @@ mocked provider. The commands themselves run for real, against a real Chrome, in
 
 from __future__ import annotations
 
+import asyncio
+import base64
 from dataclasses import dataclass, field
 from uuid import uuid4
 
@@ -31,19 +33,58 @@ class FakeCarrier:
     host_ports: list[int] = field(default_factory=list)
     timeouts: list[int] = field(default_factory=list)
     host_value: str = FAKE_HOST
+    download_bytes: bytes = b""
+    download_size: int = 0
 
     async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None: ...
 
     async def exec(
         self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
     ) -> ExecResult:
-        self.commands.append(argv[-1])
+        command = argv[-1]
+        self.commands.append(command)
         self.timeouts.append(timeout_s)
+        if command.startswith("wc -c"):
+            return ExecResult(stdout=f"{self.download_size}\n", stderr="", exit_code=0)
+        if command.startswith("base64"):
+            return ExecResult(
+                stdout=base64.b64encode(self.download_bytes).decode(), stderr="", exit_code=0
+            )
         return ExecResult(stdout=f"{CANNED_WS}\n", stderr="", exit_code=0)
 
     async def host(self, handle: SandboxHandle, port: int) -> str:
         self.host_ports.append(port)
         return self.host_value
+
+
+@dataclass
+class ShellCarrier:
+    """Answers the size read with a canned byte count and runs every other command through a real
+    shell. A fake cannot answer what a shell reports for the encode command's own failure, which is
+    the thing under test; canning the size is what puts the read in the state that matters — a file
+    the sizing saw and the encoder cannot open."""
+
+    sized: int = 8
+
+    async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None: ...
+
+    async def exec(
+        self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
+    ) -> ExecResult:
+        if argv[-1].startswith("wc -c"):
+            return ExecResult(stdout=f"{self.sized}\n", stderr="", exit_code=0)
+        process = await asyncio.create_subprocess_exec(
+            *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await process.communicate()
+        return ExecResult(
+            stdout=stdout.decode(),
+            stderr=stderr.decode(),
+            exit_code=process.returncode or 0,
+        )
+
+    async def host(self, handle: SandboxHandle, port: int) -> str:
+        raise AssertionError("host must not be reached when a download is read")
 
 
 @dataclass
@@ -129,6 +170,66 @@ async def test_lease_surfaces_what_the_bring_up_reported() -> None:
 async def test_reattach_reports_session_gone_so_the_caller_re_leases() -> None:
     with pytest.raises(SessionGone):
         await ext.SandboxChromeCdpProvider().reattach("wss://stale")
+
+
+async def test_downloads_land_in_the_sandbox_and_are_read_back_from_it() -> None:
+    """Chrome runs in the sandbox, so a download it takes exists only there: the target is a sandbox
+    path and the bytes come back through the sandbox, which is what a serve-side temp directory
+    could never do once the sandbox stopped sharing serve's filesystem."""
+    carrier = FakeCarrier()
+    lease = await ext.SandboxChromeCdpProvider().lease(_session(carrier))
+    assert await lease.download_dir() == f"{ext.BROWSER_DIR}/downloads"
+    carrier.download_bytes = b"the downloaded file"
+    carrier.download_size = len(b"the downloaded file")
+    assert await lease.fetch_download("guid-9") == b"the downloaded file"
+    assert any(f"{ext.DOWNLOAD_DIR}/guid-9" in command for command in carrier.commands)
+
+
+async def test_place_file_answers_the_workspace_path_without_reading_it() -> None:
+    """This Chrome opens the workspace itself, so the path a file input needs is the path the
+    caller already holds — and the bytes-reader the seam offers must go unawaited rather than
+    copying a file out of the sandbox and back into it."""
+    read_calls = 0
+
+    async def read() -> bytes:
+        nonlocal read_calls
+        read_calls += 1
+        return b"never needed"
+
+    lease = await ext.SandboxChromeCdpProvider().lease(_session(FakeCarrier()))
+    assert await lease.place_file("/workspace/report.pdf", read) == "/workspace/report.pdf"
+    assert read_calls == 0
+
+
+async def test_a_download_the_sandbox_cannot_read_fails_loud() -> None:
+    lease = ext.SandboxChromeCdpLease(
+        ext.CdpEndpoint(url="wss://sandbox.test/devtools"), _session(FailingCarrier())
+    )
+    with pytest.raises(RuntimeError, match="could not read download"):
+        await lease.fetch_download("guid-9")
+
+
+async def test_a_download_the_encoder_cannot_open_raises_instead_of_returning_nothing() -> None:
+    """The size read and the byte read are two commands, so a file the first one saw can be gone by
+    the second — a Chrome that cleaned up, a sandbox that recycled. The encoder's own exit code has
+    to reach the caller: piping it anywhere reports the pipe's last stage, which turns an unreadable
+    download into a silent empty one."""
+    lease = ext.SandboxChromeCdpLease(
+        ext.CdpEndpoint(url="wss://sandbox.test/devtools"), _session(ShellCarrier())
+    )
+    with pytest.raises(RuntimeError, match="could not read download"):
+        await lease.fetch_download("guid-9")
+
+
+async def test_an_oversized_download_is_refused_before_it_is_encoded() -> None:
+    """The file crosses whole into this shared process, so its size decides before any of it is
+    read — the same bound the upload side already holds."""
+    carrier = FakeCarrier()
+    carrier.download_size = ext.MAX_DOWNLOAD_BYTES + 1
+    lease = await ext.SandboxChromeCdpProvider().lease(_session(carrier))
+    with pytest.raises(ValueError, match="at most"):
+        await lease.fetch_download("guid-9")
+    assert not any(command.startswith("base64") for command in carrier.commands)
 
 
 def test_manifest_registers_the_sandbox_chrome_cdp_provider() -> None:

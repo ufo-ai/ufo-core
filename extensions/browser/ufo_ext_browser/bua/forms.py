@@ -8,6 +8,12 @@ from ufo_ext_browser.bua.errors import HallucinationError
 from ufo_ext_browser.bua.page import Cdp
 from ufo_ext_browser.bua.wire import Json, JsonDict, as_list, as_map, as_str
 
+JS_ATTACHED_SIZES = """
+function() {
+  return {sizes: Array.from(this.files || []).map((file) => file.size)};
+}
+"""
+
 JS_FORM_INPUT = """
 function(value) {
   const el = this;
@@ -50,6 +56,22 @@ class BrowserFormSession(Protocol):
 @dataclass(frozen=True)
 class BrowserForms:
     browser: BrowserFormSession
+
+    async def attached_sizes(self, args: JsonDict) -> list[int]:
+        """The byte sizes the file input is actually holding. A remote transport's upload is visible
+        to its browser only once the file is written through, so this is how the engine tells a
+        finished upload from a name with nothing behind it."""
+        tab = await self.browser.page(_tab_id(args.get("tab_id")))
+        node, backend_id = self.browser.resolve_ref(tab, as_str(args.get("ref"), "ref"))
+        resolved = await self.browser.connection().send(
+            "DOM.resolveNode", {"backendNodeId": backend_id}, session_id=node.session_id
+        )
+        object_id = as_str(as_map(resolved.get("object"), "object").get("objectId"), "objectId")
+        reply = await self.browser.call_on(node.session_id, object_id, JS_ATTACHED_SIZES, [])
+        sizes = reply.get("sizes")
+        if not isinstance(sizes, list):
+            return []
+        return [int(size) for size in sizes if isinstance(size, int | float)]
 
     async def upload_file(self, args: JsonDict) -> JsonDict:
         tab = await self.browser.page(_tab_id(args.get("tab_id")))

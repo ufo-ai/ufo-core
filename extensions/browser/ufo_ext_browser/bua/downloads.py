@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import logging
 import time
 from collections.abc import Coroutine
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Protocol
 
 from ufo_ext_browser.bua.cdp import CdpError
@@ -149,7 +147,10 @@ class BrowserDownloads:
             await asyncio.sleep(DOWNLOAD_POLL_S)
         return False
 
-    async def wait(self, args: JsonDict, download_dir: str) -> JsonDict:
+    async def wait(self, args: JsonDict) -> BrowserDownload:
+        """Wait for a download to finish and report which one, by the guid Chrome stored it under
+        and the name the site suggested. Fetching the bytes belongs to the transport that owns
+        wherever the browser wrote them, so nothing is read here."""
         timeout = float_or_default(args.get("timeout"), self.max_wait_seconds)
         deadline = time.monotonic() + timeout
         while True:
@@ -161,13 +162,7 @@ class BrowserDownloads:
             await asyncio.sleep(DOWNLOAD_POLL_S)
         if not completed:
             raise TimeoutError("no browser download completed")
-        download = completed[-1]
-        data = await asyncio.to_thread((Path(download_dir) / download.guid).read_bytes)
-        return {
-            "filename": download.filename,
-            "content_base64": base64.b64encode(data).decode(),
-            "size": len(data),
-        }
+        return completed[-1]
 
 
 def float_or_default(value: Json | None, default: float) -> float:

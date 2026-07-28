@@ -13,6 +13,7 @@ import os
 import shutil
 import socket
 import subprocess
+import tempfile
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -23,7 +24,7 @@ import httpx
 import pytest
 from ufo_ext_browser.bua.backend import BuaSurface
 
-from ufo.browser import CdpEndpoint, CdpLease
+from ufo.browser import CdpEndpoint, CdpLease, FileBytes
 
 CHROME_CANDIDATES = (
     "google-chrome",
@@ -114,6 +115,15 @@ class _StaticLease:
 
     async def token(self) -> str:
         return self.endpoint_.url
+
+    async def place_file(self, path: str, read: FileBytes) -> str:
+        return path
+
+    async def download_dir(self) -> str:
+        return tempfile.gettempdir()
+
+    async def fetch_download(self, guid: str) -> bytes:
+        return (Path(tempfile.gettempdir()) / guid).read_bytes()
 
     async def aclose(self) -> None:
         return None

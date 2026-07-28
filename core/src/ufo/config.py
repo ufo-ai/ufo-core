@@ -203,8 +203,9 @@ class BrowserConfig(BaseModel):
     """The browser transport. `cdp_provider` selects where the one BUA engine (the browser
     extension) connects — every provider is contributed by an extension at the `cdp_providers`
     Manifest point; core ships none. The default `sandbox_chrome` leases CDP from the turn's own
-    sandbox (zero-config, no URL); `browserbase` leases a remote hosted endpoint. Selecting a name
-    no active extension registers fails loud at boot only when a browser extension needs it."""
+    sandbox (zero-config, no key); `browserbase` mints a hosted session per browser run, which is
+    what hosted deploys select. Selecting a name no active extension registers fails loud at boot
+    only when a browser extension needs it."""
 
     model_config = ConfigDict(extra="forbid")
     cdp_provider: str = DEFAULT_CDP_PROVIDER

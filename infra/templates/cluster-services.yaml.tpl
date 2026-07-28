@@ -68,6 +68,9 @@ spec:
     - {secretKey: PIPEDREAM_PROJECT_ID, remoteRef: {key: ${secret_api_keys}, property: pipedream-project-id}}
     - {secretKey: PIPEDREAM_GMAIL_OAUTH_APP_ID, remoteRef: {key: ${secret_api_keys}, property: pipedream-gmail-oauth-app-id}}
     - {secretKey: E2B_API_KEY, remoteRef: {key: ${secret_api_keys}, property: e2b-api-key}}
+    # The hosted browser every browser subagent run drives over CDP; read in-process by serve to
+    # mint and release that run's session, never injected at the proxy.
+    - {secretKey: BROWSERBASE_API_KEY, remoteRef: {key: ${secret_api_keys}, property: browserbase-api-key}}
     - {secretKey: TURBOPUFFER_API_KEY, remoteRef: {key: ${secret_api_keys}, property: turbopuffer-api-key}}
     - {secretKey: EXA_API_KEY, remoteRef: {key: ${secret_api_keys}, property: exa-api-key}}
     - {secretKey: METRONOME_BEARER_TOKEN, remoteRef: {key: ${secret_api_keys}, property: metronome-bearer-token}}

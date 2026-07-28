@@ -8,6 +8,11 @@ the lease — so a turn that never browses never dials Chrome, and a turn that d
 CDP connection and (for a remote provider) the hosted session at turn end. The browser tools build
 one `BuaSurface` per turn from `ctx.cdp_provider` and register its `aclose` on the turn cleanup.
 
+File inputs go through the lease too: a workspace path only reaches the page once the transport
+has placed it where its Chrome can open it, which is the same path for a Chrome inside the turn's
+sandbox and an upload for a remote one. The surface holds both the lease and the sandbox, so it is
+where the bytes are read; `BrowserSession` keeps driving raw CDP against whatever path comes back.
+
 Recovery reconnect: on first use the surface persists the lease's durable `token` under its
 conversation's key in the extension's scoped store. A hard crash skips `aclose`, so the token
 survives; when the recovered turn re-dispatches the in-flight browser tool call, the fresh surface
@@ -18,17 +23,26 @@ a released session is never reattached by a later turn."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import asyncio
+import base64
+import shlex
+from dataclasses import dataclass, field
+from functools import partial
+from pathlib import PurePosixPath
 from uuid import UUID
 
 from pydantic import JsonValue
 
 from ufo.sdk.browser import CdpLease, CdpProvider, FindCompleter, SessionGone
 from ufo.sdk.context import ScopedStore
-from ufo.sdk.sandbox import SandboxSession
+from ufo.sdk.sandbox import SandboxSession, workspace_path
 from ufo_ext_browser.bua.session import BrowserSession
 
 CDP_TOKEN_KEY = "cdp-token/{conversation_id}"
+MAX_READ_BYTES = 20 * 1024 * 1024
+DEFAULT_DOWNLOAD_NAME = "download"
+UPLOAD_SETTLE_ATTEMPTS = 20
+UPLOAD_SETTLE_SLEEP_SECONDS = 0.5
 
 
 @dataclass
@@ -41,6 +55,7 @@ class BuaSurface:
     conversation_id: UUID | None = None
     lease: CdpLease | None = None
     session: BrowserSession | None = None
+    _shipped: list[int] = field(default_factory=list)
 
     async def _open(self) -> BrowserSession:
         if self.session is not None:
@@ -48,7 +63,11 @@ class BuaSurface:
         if self.lease is None:
             self.lease = await self._acquire_lease()
         endpoint = await self.lease.endpoint()
-        session = BrowserSession(cdp=endpoint, model=self.model)
+        session = BrowserSession(
+            cdp=endpoint,
+            model=self.model,
+            download_dir=await self.lease.download_dir(),
+        )
         await session.open()
         self.session = session
         return self.session
@@ -100,8 +119,79 @@ class BuaSurface:
         return await session.tabs_close(args)
 
     async def upload_file(self, args: dict[str, JsonValue]) -> dict[str, JsonValue]:
+        """Set a file input from workspace paths, each resolved under the workspace and then placed
+        where the leased Chrome can open it — the same path when Chrome runs in this turn's sandbox,
+        an uploaded location when the browser is remote. Only the transport knows which, so every
+        path goes through the lease. `workspace_path` is what makes "workspace paths" true rather
+        than merely stated: the reader below runs an unconfined shell, and a remote transport would
+        carry whatever it read off the box."""
         session = await self._open()
-        return await session.upload_file(args)
+        files = args.get("files")
+        if not isinstance(files, list):
+            raise ValueError("upload_file requires a files list")
+        placed: list[JsonValue] = []
+        self._shipped = []
+        for path in files:
+            if not isinstance(path, str) or not path:
+                raise ValueError("upload_file requires workspace path strings")
+            target = workspace_path(path)
+            placed.append(await self._lease().place_file(target, partial(self._read, target)))
+        attached = {**args, "files": placed}
+        reply = await session.upload_file(attached)
+        await self._settle_upload(session, attached)
+        return reply
+
+    async def _settle_upload(self, session: BrowserSession, args: dict[str, JsonValue]) -> None:
+        """Wait until the input holds the bytes that were shipped to it. A remote transport writes
+        the file through after its upload call returns, so an attach made too early leaves the page
+        holding the right name and an empty file — the page would submit nothing and no error would
+        say so. Re-attaching picks the file up once it lands. Only sizes this surface actually
+        shipped are checked, so a browser reading the workspace directly waits on nothing."""
+        if not self._shipped:
+            return
+        expected = list(self._shipped)
+        attempts = UPLOAD_SETTLE_ATTEMPTS
+        for attempt in range(attempts):
+            if await session.attached_sizes(args) == expected:
+                return
+            if attempt + 1 == attempts:
+                break
+            await asyncio.sleep(UPLOAD_SETTLE_SLEEP_SECONDS)
+            await session.upload_file(args)
+        raise RuntimeError(
+            "the page never received the uploaded file: the browser reported "
+            f"{await session.attached_sizes(args)} bytes where {expected} were sent"
+        )
+
+    def _lease(self) -> CdpLease:
+        if self.lease is None:
+            raise RuntimeError("the browser has no cdp lease")
+        return self.lease
+
+    async def _read(self, path: str) -> bytes:
+        """The workspace file's bytes, read out of the turn's sandbox for a transport that must ship
+        them to a remote browser. Sized first: the whole file would land in this process, so an
+        oversized upload fails here rather than filling serve's memory on the way out. The encoding
+        reads stdin rather than passing a width flag, which is GNU-only, and stands alone in the
+        command so the exit code is its own — a pipeline reports its last stage, which would mask an
+        unreadable file as an empty upload. Decoding drops the line wrapping, and runs in a thread:
+        a whole file's worth of it is CPU work every other turn on this loop would wait through."""
+        if self.sandbox is None:
+            raise RuntimeError(
+                "uploading to a remote browser needs the turn's sandbox to read from"
+            )
+        quoted = shlex.quote(path)
+        size = await self.sandbox.bash(f"stat -c %s -- {quoted}")
+        if size.exit_code != 0:
+            raise ValueError(size.stderr.strip() or f"cannot read {path}")
+        if int(size.stdout.strip()) > MAX_READ_BYTES:
+            raise ValueError(f"{path} is larger than the {MAX_READ_BYTES}-byte upload limit")
+        encoded = await self.sandbox.bash(f"base64 < {quoted}")
+        if encoded.exit_code != 0:
+            raise ValueError(encoded.stderr.strip() or f"cannot read {path}")
+        data = await asyncio.to_thread(base64.b64decode, encoded.stdout)
+        self._shipped.append(len(data))
+        return data
 
     async def read_page(self, args: dict[str, JsonValue]) -> dict[str, JsonValue]:
         session = await self._open()
@@ -124,8 +214,22 @@ class BuaSurface:
         return await session.computer(args)
 
     async def wait_for_download(self, args: dict[str, JsonValue]) -> dict[str, JsonValue]:
+        """Wait for a download to finish, then have the transport hand its bytes back — the browser
+        wrote them wherever the transport said, which is a path in the turn's sandbox or a hosted
+        provider's storage, and only the transport can reach either.
+
+        The name is cut to one path segment. The visited page chooses it, and a caller joins it into
+        a workspace path, so `../` in it would land the write in a directory that caller never asked
+        for. Encoding runs in a thread for the same reason the read does."""
         session = await self._open()
-        return await session.wait_for_download(args)
+        download = await session.wait_for_download(args)
+        data = await self._lease().fetch_download(download.guid)
+        encoded = await asyncio.to_thread(base64.b64encode, data)
+        return {
+            "filename": _file_name(download.filename),
+            "content_base64": encoded.decode(),
+            "size": len(data),
+        }
 
     async def aclose(self) -> None:
         """Release the CDP session and the transport lease, and clear the durable reattach token so
@@ -142,6 +246,15 @@ class BuaSurface:
                 await self.lease.aclose()
                 self.lease = None
             await self._store_token(None)
+
+
+def _file_name(suggested: str) -> str:
+    """One path segment naming a downloaded file. The visited page chooses this string, and a caller
+    joins it into a workspace path, so a name that is really a path — `../notes.md`, `/etc/passwd` —
+    would put the write somewhere that caller never asked for. `.` and `..` name a directory rather
+    than a file, so they fall back too."""
+    name = PurePosixPath(suggested).name
+    return DEFAULT_DOWNLOAD_NAME if name in ("", ".", "..") else name
 
 
 def _tab_id(value: JsonValue) -> int | None:
