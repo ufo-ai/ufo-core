@@ -3,7 +3,9 @@
 Registration is dynamic — `DBOS.apply_schedules` for cron jobs, an enqueue for one-shots — not the
 import-time `@DBOS.scheduled` decorator, because jobs are discovered from the installed extensions
 at boot, not known when this module is imported; `apply_schedules` upserts, so re-registration on
-every restart is idempotent. Registration is the synchronous DBOS API: the async variants repoint
+every restart is idempotent, and a schedule outliving the job that wrote it is skipped by `tick`
+rather than deleted — one schedule table serves every process, and none of them can tell which
+peer's code version owns a key. Registration is the synchronous DBOS API: the async variants repoint
 the running loop's default executor at DBOS's shared pool, so a short-lived boot loop closing would
 shut that pool down. Two durable workflows carry every fire: `job_tick` fans out one queued
 `job_workflow` per candidate workspace, deduplicated on (job key, workspace) held from enqueue to
@@ -738,7 +740,17 @@ class JobRunner:
         """One fire of a job: fan out to the workspaces holding work, one queued execution per
         workspace under a (job, workspace) deduplication id held from enqueue to terminal — a
         workspace still running its previous execution absorbs the tick alone, never stalling its
-        neighbors, and the first tick after it completes starts its next one."""
+        neighbors, and the first tick after it completes starts its next one.
+
+        A key this process holds no binding for is skipped, not raised. `apply_schedules` upserts
+        and never deletes, and the binding set is discovered per process at boot, so a schedule can
+        name a job this process does not run — an extension uninstalled since the schedule was
+        written, or a job only a newer peer registers. Deleting the schedule instead would let an
+        older peer silently drop one a newer peer owns, since every process shares one schedule
+        table and none can tell the versions apart."""
+        if self._registered(key) is None:
+            warn("jobs.tick_unregistered", key=key)
+            return
         for workspace_id in await self.candidates(key):
             with SetEnqueueOptions(deduplication_id=f"{key}:{workspace_id}"):
                 try:
@@ -772,8 +784,14 @@ class JobRunner:
                 log_error("jobs.failed", job=key, error_class=type(error).__name__)
                 raise
 
+    def _registered(self, key: str) -> _Binding | None:
+        return next((binding for binding in self.bindings if binding.key == key), None)
+
     def _binding(self, key: str) -> _Binding:
-        binding = next((b for b in self.bindings if b.key == key), None)
+        """The binding for a key this process is running. A tick asks `_registered` first, because a
+        schedule outliving its job is expected; reaching here without one means work was handed to a
+        process that cannot do it, which is a fault."""
+        binding = self._registered(key)
         if binding is None:
             raise RuntimeError(f"no job registered for key {key!r}")
         return binding

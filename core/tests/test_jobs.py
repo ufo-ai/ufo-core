@@ -2,6 +2,7 @@ import asyncio
 import logging
 import threading
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
@@ -20,6 +21,7 @@ from ufo.workspace import ws, ws_current
 FIRE_TIMEOUT_SECONDS = 25
 MARKER_KEY = "fired"
 MARKER_VALUE = {"ran": True}
+DORMANT_CRON = "0 0 5 * * *"
 
 
 async def _workspace() -> UUID:
@@ -148,6 +150,29 @@ async def test_recurring_core_job_registers_at_boot_and_fires(
     finally:
         DBOS.delete_schedule(key)
         jobs_module._firing = None
+
+
+async def test_tick_skips_a_key_this_process_registers_no_job_for(
+    db: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    """`apply_schedules` upserts and never deletes, so a schedule outlives the job that wrote it —
+    an extension uninstalled, or a job only a newer peer registers. The binding set is discovered
+    per process at boot, so such a tick is a normal condition: it names itself and returns, never
+    reaching the candidate selector. Deleting the schedule instead would let an older peer silently
+    drop one a newer peer owns, since one schedule table serves every process."""
+    vanished = f"{CORE_EXTENSION}:uninstalled"
+
+    async def _never() -> tuple[UUID, ...]:
+        raise AssertionError("an unregistered key must not reach a candidate selector")
+
+    spec = JobSpec(
+        name="installed", schedule=DORMANT_CRON, handler=_write_marker, candidates=_never
+    )
+    with caplog.at_level(logging.WARNING, logger="ufo"):
+        await _runner((spec,)).tick(datetime.now(UTC), vanished)
+
+    record = next(r for r in caplog.records if r.message == "jobs.tick_unregistered")
+    assert record.ufo == {"key": vanished}
 
 
 async def test_one_shot_core_job_fires_once_at_boot(db: None, dbos_launched: object) -> None:

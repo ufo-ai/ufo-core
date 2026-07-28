@@ -149,6 +149,10 @@ as a portfolio, not a single bet:
 ## Completing work
 
 - Land tear-outs whole; before claiming done, grep for the source shape by name.
+- **A tear-out includes its rows.** Removing an extension drops its tables *and* its `ext_store`
+  rows in the same migration — nothing else ever will, and absence alone cannot be the trigger,
+  since a failed import would then destroy the live cursors of an extension that is merely
+  unreachable this boot.
 - **Both ends or neither** — every declared surface (column, field, event, frame kind, enum
   member, config knob, Manifest point) ships with its producer AND its consumer in the same
   change, and the unit's proof exercises both. A producer without a consumer is dead weight; a
