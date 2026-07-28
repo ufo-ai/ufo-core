@@ -106,9 +106,8 @@ class TurnDispatcher:
     QUEUED turn's DBOS workflow id is the turn id, making an ambiguous duplicate offer safe.
 
     PARKED rows share the same scanner and advisory dispatch stamp, but remain spend- and
-    seat-gated: a parked turn stays held while its gate member — the speaker, or the member a
-    scheduled fire acts on behalf of (its schedule's creator) — holds no seat, and resumes when
-    one is granted again. A row
+    seat-gated: a parked turn stays held while its founder, scheduled creator, or any pending
+    absorbed speaker holds no seat, and resumes when every one is seated. A row
     that has ever been claimed — a PARKED one, or a QUEUED one a fold resumed from park — needs a
     fresh DBOS workflow id because the run that claimed it consumed its original id; the choice
     reads `running_attempt` from the stamping update itself, so a claim-park-requeue racing the
@@ -133,7 +132,30 @@ class TurnDispatcher:
                         turn.admission_source,
                         turn.on_behalf_of_member_id,
                     )
-                    seated = gate is None or await Seats(turn.workspace_id).admits(connection, gate)
+                    members = {gate} if gate is not None else set()
+                    members.update(
+                        (
+                            await connection.execute(
+                                sa.select(tables.inbound_message.c.speaker_member_id)
+                                .where(
+                                    tables.inbound_message.c.workspace_id == turn.workspace_id,
+                                    tables.inbound_message.c.conversation_id
+                                    == turn.conversation_id,
+                                    tables.inbound_message.c.consumed_turn_id.is_(None),
+                                    tables.inbound_message.c.speaker_member_id.is_not(None),
+                                )
+                                .distinct()
+                            )
+                        )
+                        .scalars()
+                        .all()
+                    )
+                    seats = Seats(turn.workspace_id)
+                    seated = True
+                    for member in members:
+                        if member is not None and not await seats.admits(connection, member):
+                            seated = False
+                            break
                     decision = await SpendEvaluator(
                         turn.workspace_id, turn.member_id, turn.agent_id
                     ).decide(connection, 0)

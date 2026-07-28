@@ -12,6 +12,7 @@ import pytest
 from ufo.ext.loader import load_manifests
 from ufo.loop.prompts.render import (
     COMPACTION_SYSTEM_PROMPT,
+    SHELL,
     render_skill_index,
     render_system_prompt,
     render_template,
@@ -33,6 +34,11 @@ def test_system_prompt_slots_the_agent_prompt_sections_and_citation() -> None:
     assert "<search>Search the web before answering factual questions.</search>" in rendered.content
     assert "<citation_instructions>" in rendered.content
     assert "{{" not in rendered.content
+
+
+def test_shell_requires_message_authority_for_admin_actions() -> None:
+    assert "including admin actions" in SHELL
+    assert "Omit it only for conversation-common work." in SHELL
 
 
 def test_digest_is_stable_for_equal_content_and_shifts_with_it() -> None:

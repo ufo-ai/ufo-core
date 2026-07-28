@@ -27,7 +27,7 @@ from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.store import MemoryStore, PageIndexer
 
 from ufo.agent_scope import agent
-from ufo.audience import conversation_audience
+from ufo.audience import audience_subjects, conversation_audience
 from ufo.bearer import mint_token
 from ufo.blob import FilesystemBlobStore
 from ufo.config import (
@@ -173,6 +173,7 @@ async def _grantable(workspace_id: UUID) -> tuple[UUID, UUID, UUID]:
                 name="assistant",
                 prompt="p",
                 model="claude-opus-4-8",
+                is_main=True,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -521,7 +522,7 @@ async def test_sample_search_provider_answers_a_query_and_fetches() -> None:
     assert page.text == sample.SAMPLE_FETCH_TEXT
 
 
-async def test_sample_memory_search_provider_receives_the_exact_audience(db: None) -> None:
+async def test_sample_memory_search_provider_receives_the_exact_subjects(db: None) -> None:
     workspace_id = await _workspace()
     audience = conversation_audience(uuid4())
     access = memory_search(
@@ -529,12 +530,12 @@ async def test_sample_memory_search_provider_receives_the_exact_audience(db: Non
     )
     assert access is not None
     with ws(workspace_id):
-        matches = await access.search(audience, ("customer history",))
+        matches = await access.search(audience_subjects(audience), ("customer history",))
         recorded = await ScopedStore(extension=sample.NAME).get(sample.MEMORY_SEARCH_KEY)
     assert matches[0].text == sample.SAMPLE_MEMORY_TEXT
     assert recorded == {
         "queries": ["customer history"],
-        "audience": str(audience),
+        "subjects": sorted(audience_subjects(audience)),
         "start": None,
         "end": None,
     }
@@ -1194,6 +1195,7 @@ async def _surface_workspace() -> tuple[UUID, UUID, str]:
                 name="assistant",
                 prompt="p",
                 model="claude-opus-4-8",
+                is_main=True,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )

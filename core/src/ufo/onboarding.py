@@ -1,13 +1,12 @@
-"""First-run onboarding: the durable workspace + owner + default agent, the model key,
+"""First-run onboarding: the durable workspace + initial admin + main agent, the model key,
 environment-provided credential slots, then each installed extension's onboarding steps — the flow
 a cold start runs.
 
-The core steps create the workspace and its owner exactly once; a second run against a workspace
-that already has an owner raises `AlreadyInitialized` rather than double-creating. Each installed
-extension's onboarding steps then fire with that extension's scoped `ExtensionContext` — the same
-handle its jobs receive. Onboarding runs within an already-open db boundary (the CLI opens it and
-owns migrations, since Alembic drives its own event loop), so it mirrors the job runner rather than
-managing the connection itself."""
+The core steps create the workspace and its principals exactly once; a second run against a
+workspace that already has a member raises `AlreadyInitialized` rather than double-creating. Each
+installed extension's onboarding steps then fire with that extension's scoped `ExtensionContext`
+— the same handle its jobs receive. Onboarding runs within an already-open db boundary; the CLI
+owns migrations because Alembic drives its own event loop."""
 
 import os
 from dataclasses import dataclass
@@ -33,12 +32,12 @@ DEFAULT_AGENT_MODEL = AUTO_MODEL
 
 
 class AlreadyInitialized(RuntimeError):
-    """A first run was asked of a workspace that already has an owner."""
+    """A first run was asked of an initialized workspace."""
 
 
 @dataclass(frozen=True)
 class Onboarded:
-    """The workspace and owner a first run created; a surface binds its identity to them."""
+    """The workspace and initial admin a first run created; a surface binds its identity to them."""
 
     workspace_id: UUID
     member_id: UUID
@@ -78,7 +77,8 @@ async def run_onboarding_steps(
 @dataclass(frozen=True)
 class Onboarding:
     """The durable first-run flow behind `ufoctl init`: require the chosen model's key, create the
-    workspace + owner + default agent once, then run each installed extension's onboarding steps."""
+    workspace + initial admin + main agent once, then run each installed extension's onboarding
+    steps."""
 
     config: Config
     email: str
@@ -93,8 +93,8 @@ class Onboarding:
 
     async def create(self) -> Onboarded:
         """Establish the durable core with no dependency on any extension — model key, then
-        workspace + owner + default agent in one transaction — so `ufoctl init` can bind the CLI
-        token (core access) before running add-on onboarding steps that might fail."""
+        workspace + initial admin + main agent in one transaction — so `ufoctl init` can bind the
+        CLI token before running add-on onboarding steps that might fail."""
         self._require_model_key()
         self._require_credentials_for_steps()
         return await self._create_workspace()
@@ -131,16 +131,16 @@ class Onboarding:
 
     async def _create_workspace(self) -> Onboarded:
         async with workspace_tx() as connection:
-            owner = (await connection.execute(sa.select(tables.member.c.email))).first()
-            if owner is not None:
-                raise AlreadyInitialized(f"already initialized (owner {owner.email})")
+            member = (await connection.execute(sa.select(tables.member.c.email))).first()
+            if member is not None:
+                raise AlreadyInitialized(f"already initialized (member {member.email})")
             workspace_id, agent_id = uuid4(), uuid4()
             await connection.execute(
                 sa.insert(tables.workspace).values(
                     id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
                 )
             )
-            member_id = await create_member(connection, workspace_id, self.email)
+            member_id = await create_member(connection, workspace_id, self.email, is_admin=True)
             await connection.execute(
                 sa.insert(tables.agent).values(
                     id=agent_id,
@@ -148,6 +148,7 @@ class Onboarding:
                     name=DEFAULT_AGENT_NAME,
                     prompt=DEFAULT_AGENT_PROMPT,
                     model=self.model,
+                    is_main=True,
                     created_at=sa.func.now(),
                     updated_at=sa.func.now(),
                 )

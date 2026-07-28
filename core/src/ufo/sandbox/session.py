@@ -25,14 +25,16 @@ DEFAULT_EXEC_TIMEOUT_SECONDS = 120
 SENTINEL_MODEL_KEY = "UFO_SENTINEL_MODEL_KEY"
 SANDBOX_UID = 1000
 SANDBOX_GID = 1000
+PROXY_ENV_NAMES = frozenset(("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"))
 
 
 @dataclass(frozen=True, slots=True)
 class RunToken:
-    """The workspace and turn attributed to one sandbox egress request."""
+    """The turn and member authority attributed to one sandbox process tree."""
 
     workspace_id: UUID
     turn_id: UUID
+    acting_member_id: UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,7 +51,8 @@ class RunTokenCodec:
         return cls(secret=value.encode())
 
     def encode(self, run: RunToken) -> str:
-        payload = f"ufo-run/{run.workspace_id}/{run.turn_id}".encode()
+        member = "-" if run.acting_member_id is None else str(run.acting_member_id)
+        payload = f"ufo-run/{run.workspace_id}/{run.turn_id}/{member}".encode()
         return sign_token(self.secret, payload)
 
     def from_proxy_auth(self, header: str) -> RunToken:
@@ -58,10 +61,14 @@ class RunTokenCodec:
             raise ValueError("proxy authorization is not basic auth")
         try:
             username = base64.b64decode(encoded, validate=True).decode("utf-8").split(":", 1)[0]
-            kind, workspace, turn = verify_token(username, self.secret).decode().split("/")
+            kind, workspace, turn, member = verify_token(username, self.secret).decode().split("/")
             if kind != "ufo-run":
                 raise ValueError("invalid run token domain")
-            return RunToken(workspace_id=UUID(workspace), turn_id=UUID(turn))
+            return RunToken(
+                workspace_id=UUID(workspace),
+                turn_id=UUID(turn),
+                acting_member_id=None if member == "-" else UUID(member),
+            )
         except (UnicodeDecodeError, SignedTokenError, ValueError) as error:
             raise ValueError("invalid signed run token") from error
 
@@ -129,14 +136,15 @@ class SandboxHandle:
     carries the workspace `mount` so the carrier can stream a produced file straight out of the
     mount on `export` without a whole-file read across the boundary, the `traffic_token` a
     carrier that gates its public per-port host behind one (e2b) sets at create so a caller dialing
-    `host` carries it as a connection header, and the turn's `egress_env` — the run-token proxy URL
-    and sentinel entries the carrier built from the spec at create — applied to every exec, so a
-    container shared across turns never runs a command under another turn's token."""
+    `host` carries it as a connection header, and the base `run_token` plus `egress_env` a scoped
+    session rewrites for each exec. A container shared across turns never pins either one's
+    authority."""
 
     conversation_id: UUID
     container_id: str
     mount: MountSpec | None = None
     traffic_token: str | None = None
+    run_token: str | None = None
     egress_env: Mapping[str, str] = field(default_factory=dict)
 
 
@@ -232,6 +240,34 @@ class SandboxSession:
 
     carrier: Carrier
     handle: SandboxHandle
+
+    def authorize(
+        self,
+        run_token: str,
+        cleared_env: frozenset[str],
+        env: Mapping[str, str],
+    ) -> "SandboxSession":
+        current = self.handle.run_token
+        if current is None:
+            raise RuntimeError("sandbox handle carries no run token")
+        authorized = {
+            key: (value.replace(current, run_token) if key in PROXY_ENV_NAMES else value)
+            for key, value in self.handle.egress_env.items()
+            if key not in cleared_env
+        }
+        if any(current not in self.handle.egress_env.get(name, "") for name in PROXY_ENV_NAMES):
+            raise RuntimeError("sandbox proxy environment does not carry its run token")
+        return SandboxSession(
+            carrier=self.carrier,
+            handle=SandboxHandle(
+                conversation_id=self.handle.conversation_id,
+                container_id=self.handle.container_id,
+                mount=self.handle.mount,
+                traffic_token=self.handle.traffic_token,
+                run_token=run_token,
+                egress_env={**authorized, **env},
+            ),
+        )
 
     async def bash(self, command: str, timeout_s: int | None = None) -> ExecResult:
         return await self.carrier.exec(

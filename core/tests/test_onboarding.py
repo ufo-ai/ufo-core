@@ -1,5 +1,5 @@
-"""The onboarding engine end-to-end: a cold start creates the durable workspace + owner + agent,
-requires the chosen model's key, refuses a second run, and runs each installed extension's steps.
+"""The onboarding engine end-to-end: a cold start creates the workspace, initial admin, and main
+agent, requires the chosen model's key, refuses a second run, and runs installed extension steps.
 
 The engine tests drive `Onboarding.run` against a fresh db (both dialects) and assert the rows the
 turn path consumes. The cold-start test drives the real `ufoctl init` command through Click: a
@@ -53,7 +53,7 @@ def _onboarding(
     )
 
 
-async def test_onboarding_creates_the_workspace_owner_and_default_agent(
+async def test_onboarding_creates_the_initial_admin_and_main_agent(
     db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-onboard")
@@ -68,12 +68,14 @@ async def test_onboarding_creates_the_workspace_owner_and_default_agent(
         OWNER_EMAIL,
         onboarded.workspace_id,
     )
+    assert member.is_admin
     assert (agent.name, agent.model, agent.prompt) == (
         DEFAULT_AGENT_NAME,
         DEFAULT_MODEL,
         DEFAULT_AGENT_PROMPT,
     )
     assert agent.workspace_id == onboarded.workspace_id
+    assert agent.is_main
 
 
 async def test_re_running_against_an_initialized_workspace_fails_loud(

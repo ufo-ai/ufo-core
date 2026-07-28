@@ -5,9 +5,9 @@ description: Load when the user wants to create a Slack app, make a Slack bot, o
 # Slack app setup — connect Slack to this assistant
 
 **Prefer the one-click OAuth install.** When the deploy has its own Slack app configured,
-`slack_connect` (default `method="oauth"`) returns an "Add to Slack" link the owner clicks — no app
+`slack_connect` (default `method="oauth"`) returns an "Add to Slack" link an admin clicks — no app
 to build, no secrets to paste. This skill is the **bring-your-own-app** alternative: use it when the
-owner wants their own Slack app, or when `slack_connect` reports OAuth is not configured on this
+admin wants their own Slack app, or when `slack_connect` reports OAuth is not configured on this
 deploy. Reach it explicitly with `slack_connect(method="manifest")`.
 
 Stand up a Slack bot and wire it into the slack surface this deploy already runs. There is no new
@@ -131,7 +131,7 @@ hidden input, and they never appear in this conversation:
 - `slack_signing_secret` — **Signing Secret**, under *Basic Information → App Credentials* (click
   **Show**).
 
-Only the workspace owner can fill these — the bot is shared by every member.
+Only a workspace admin can fill these — the bot is shared by every member.
 
 ## Step 4 — finish and verify
 

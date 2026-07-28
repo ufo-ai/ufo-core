@@ -449,6 +449,7 @@ async def _bootstrap_workspace() -> UUID:
                 name=DEFAULT_AGENT_NAME,
                 prompt="be brief",
                 model="claude-opus-4-8",
+                is_main=True,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )

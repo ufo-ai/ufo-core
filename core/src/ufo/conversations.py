@@ -12,7 +12,6 @@ import sqlalchemy as sa
 from pydantic import BaseModel, ConfigDict, Field
 
 from ufo.agent_scope import agent_current
-from ufo.audience import audience_subjects, parse_audience
 from ufo.blob import BlobNotFound
 from ufo.db import workspace_tx
 from ufo.ext.context import JsonValue
@@ -77,7 +76,7 @@ class ConversationObjects:
 
     async def status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None:
         row = await self._find(ctx, name)
-        if row is None or parse_audience(row.audience) != ctx.audience:
+        if row is None or row.audience not in ctx.read_subjects:
             return None
         exchange = await self._exchange(ctx, row.id)
         body = "\n".join(exchange).encode()
@@ -144,7 +143,7 @@ class ConversationObjects:
         ).where(
             tables.conversation.c.workspace_id == ws_current().workspace_id,
             tables.conversation.c.agent_id == agent_current().agent_id,
-            tables.conversation.c.audience.in_(audience_subjects(ctx.audience)),
+            tables.conversation.c.audience.in_(ctx.read_subjects),
         )
 
 
@@ -157,8 +156,8 @@ CONVERSATION_OBJECT = ObjectKind(
     guidance=(
         "Conversations resolve artifact `created_in` and scheduled-task `reports_to` links: get "
         "one by its id to see which surface and audience it runs on and when it started. Reads "
-        "show this agent's conversations visible to the current audience; another agent's are not "
-        "found. When a conversation has the same audience as the current turn, "
+        "show this agent's conversations visible to the acting audience; another agent's are not "
+        "found. When a conversation has the same acting audience, "
         "`status.workspace_path` is its text exchange written into your workspace. Conversations "
         "cannot be created, changed, or deleted through objects."
     ),

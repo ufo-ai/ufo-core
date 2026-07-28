@@ -104,8 +104,7 @@ async def _unavailable_spawn(
 
 
 async def _seed() -> tuple[UUID, UUID, UUID]:
-    """A workspace whose owner (the earliest member) is OWNER_EMAIL plus one later joiner, so the
-    connect tool's owner gate has both sides to check."""
+    """A workspace with one admin plus one member, exercising both sides of the connect gate."""
     workspace_id, owner_id, joiner_id, agent_id = uuid4(), uuid4(), uuid4(), uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
@@ -120,6 +119,7 @@ async def _seed() -> tuple[UUID, UUID, UUID]:
                 name="assistant",
                 prompt="be brief",
                 model="claude-opus-4-8",
+                is_main=True,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -133,6 +133,7 @@ async def _seed() -> tuple[UUID, UUID, UUID]:
                     id=member_id,
                     workspace_id=workspace_id,
                     email=email,
+                    is_admin=member_id == owner_id,
                     created_at=created,
                     updated_at=created,
                 )
@@ -247,10 +248,10 @@ def _patch_httpx(monkeypatch: pytest.MonkeyPatch, transport: httpx.MockTransport
     monkeypatch.setattr(slack.httpx, "AsyncClient", factory)
 
 
-async def test_owner_mints_an_add_to_slack_link_carrying_sealed_state(
+async def test_admin_mints_an_add_to_slack_link_carrying_sealed_state(
     db: None, tmp_path: Path
 ) -> None:
-    """With Slack not yet installed, the owner's call returns not_installed and an authorize link
+    """With Slack not yet installed, the admin's call returns not_installed and an authorize link
     that carries the deploy app's client id, the bot scopes, the redirect, and a state that
     decrypts to this workspace, this owner, and the bot-token install marker."""
     workspace_id, owner_id, _ = await _seed()
@@ -277,8 +278,8 @@ async def test_owner_mints_an_add_to_slack_link_carrying_sealed_state(
     assert claims.payload == slack.SLACK_INSTALL_PAYLOAD
 
 
-async def test_non_owner_reads_state_but_cannot_mint(db: None, tmp_path: Path) -> None:
-    """A joiner sees the install state but gets no link — the bot is shared, so only the owner
+async def test_non_admin_reads_state_but_cannot_mint(db: None, tmp_path: Path) -> None:
+    """A member sees the install state but gets no link — the bot is shared, so only an admin
     installs it."""
     workspace_id, _, joiner_id = await _seed()
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
@@ -290,7 +291,7 @@ async def test_non_owner_reads_state_but_cannot_mint(db: None, tmp_path: Path) -
         result = json.loads(await _run(registry, "slack_connect", ctx))
     assert result["state"] == "not_installed"
     assert "authorize_url" not in result
-    assert "owner" in result["hint"]
+    assert "admin" in result["hint"]
 
 
 async def test_connect_reads_pending_then_connected(db: None, tmp_path: Path) -> None:
@@ -384,7 +385,7 @@ async def test_manifest_path_walks_not_configured_to_pending_to_connected(
         assert bare["events_url"] == f"{PUBLIC_BASE_URL}/surface/slack"
         await store.put(workspace_id, SLACK_BOT_TOKEN_SLOT, "xoxb-byo")
         await store.put(workspace_id, SLACK_SIGNING_SECRET_SLOT, "byo-secret")
-        with pytest.raises(ValueError, match="workspace owner"):
+        with pytest.raises(ValueError, match="workspace admin"):
             await _run(registry, "slack_connect", joiner, method="manifest")
         assert recorder == []
         derived = json.loads(await _run(registry, "slack_connect", owner, method="manifest"))
@@ -452,6 +453,8 @@ async def test_manifest_tool_matches_the_skill_and_validates_the_name(
         f"{PUBLIC_BASE_URL}/surface/slack"
     )
     skill_body = skill_registry((slack_manifest(),)).named("slack-app-setup").instructions
+    assert "Only a workspace admin can fill these" in skill_body
+    assert "workspace owner" not in skill_body
     block = re.search(r"```yaml\n(.*?)```", skill_body, re.DOTALL)
     assert block is not None
     skill_yaml = yaml.safe_load(
@@ -821,7 +824,7 @@ def test_reply_text_renders_a_cancelled_turns_reason() -> None:
         turn_id=uuid4(),
         queue_key="C1:1.0",
         status="cancelled",
-        text="This workspace has no open seat for you yet — ask the workspace owner.",
+        text="This workspace has no open seat for you yet — ask a workspace admin.",
         tokens=0,
         cost_micro_usd=0,
         cache_percent=0,

@@ -12,6 +12,7 @@ from collections.abc import AsyncIterator, Iterator
 
 import asyncpg
 import pytest
+from ufo.db import apply_migrations
 
 from ufo_control.gateway_store import OnboardStore
 from ufo_control.rls import POSTGRES_OWNER_DSN_ENV
@@ -23,32 +24,6 @@ OWNER_DSN = f"postgresql://ufo:ufo@127.0.0.1:{PORT}/ufo"
 IMAGE = "pgvector/pgvector:pg17"
 WORKSPACE_ID = "11111111-1111-1111-1111-111111111111"
 
-RUNTIME_SCHEMA = (
-    "create table if not exists workspace ("
-    "  id uuid primary key,"
-    "  seat_limit integer check (seat_limit is null or seat_limit > 0),"
-    "  included_seats integer check (included_seats is null or included_seats > 0),"
-    "  created_at timestamptz not null default now(),"
-    "  updated_at timestamptz not null default now())",
-    "create table if not exists member ("
-    "  id uuid primary key,"
-    "  workspace_id uuid not null references workspace(id) on delete cascade,"
-    "  email text not null,"
-    "  seated_at timestamptz,"
-    "  created_at timestamptz not null,"
-    "  updated_at timestamptz not null,"
-    "  unique (workspace_id, email))",
-    "create table if not exists agent ("
-    "  id uuid primary key,"
-    "  workspace_id uuid not null references workspace(id) on delete cascade,"
-    "  name text not null,"
-    "  prompt text not null,"
-    "  model text not null,"
-    "  created_at timestamptz not null,"
-    "  updated_at timestamptz not null,"
-    "  unique (workspace_id, name))",
-)
-
 
 async def _prepare_schema() -> None:
     """The control schema arrives the way a deploy brings it: the one-shot verb, never a replica."""
@@ -56,10 +31,9 @@ async def _prepare_schema() -> None:
     pool = await asyncpg.create_pool(OWNER_DSN)
     try:
         async with pool.acquire() as connection:
-            for statement in RUNTIME_SCHEMA:
-                await connection.execute(statement)
             await connection.execute(
-                "insert into workspace (id) values ($1) on conflict do nothing",
+                "insert into workspace (id, created_at, updated_at) "
+                "values ($1, now(), now()) on conflict do nothing",
                 uuid.UUID(WORKSPACE_ID),
             )
     finally:
@@ -97,6 +71,10 @@ def gateway_postgres(monkeypatch_session: pytest.MonkeyPatch) -> Iterator[str]:
         pytest.skip(f"could not start Postgres container: {started.stderr.strip()}")
     try:
         _await_ready()
+        apply_migrations(
+            OWNER_DSN.replace("postgresql://", "postgresql+asyncpg://"),
+            "assistant_hosted",
+        )
         asyncio.run(_prepare_schema())
         monkeypatch_session.setenv(POSTGRES_OWNER_DSN_ENV, OWNER_DSN)
         yield OWNER_DSN

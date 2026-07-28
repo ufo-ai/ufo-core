@@ -373,6 +373,7 @@ class Admission:
                                 inbound=body,
                                 admission_source=MEMBER_ADMISSION,
                                 speaker_member_id=speaker_member_id,
+                                on_behalf_of_member_id=None,
                                 context=None
                                 if context is None
                                 else context.model_dump(mode="json"),
@@ -427,18 +428,40 @@ class Admission:
                         live_turn.on_behalf_of_member_id,
                     )
                 )
+                parked_members = {parked_gate} if parked_gate is not None else set()
+                if live_turn is not None and live_turn.status == PARKED:
+                    parked_members.update(
+                        (
+                            await connection.execute(
+                                sa.select(tables.inbound_message.c.speaker_member_id)
+                                .where(
+                                    tables.inbound_message.c.workspace_id == workspace_id,
+                                    tables.inbound_message.c.conversation_id == conversation_id,
+                                    tables.inbound_message.c.consumed_turn_id.is_(None),
+                                    tables.inbound_message.c.speaker_member_id.is_not(None),
+                                )
+                                .distinct()
+                            )
+                        )
+                        .scalars()
+                        .all()
+                    )
+                parked_seated = True
+                seats = Seats(workspace_id)
+                for parked_member in parked_members:
+                    if parked_member is not None and not await seats.admits(
+                        connection, parked_member
+                    ):
+                        parked_seated = False
+                        break
                 fold_admitted = (
                     live_turn is not None
                     and (
-                        await Seats(workspace_id).admits(connection, speaker_member_id)
+                        await seats.admits(connection, speaker_member_id)
                         if speaker_member_id is not None
-                        else pending_pause is None
-                        or not await Seats(workspace_id).gated(connection)
+                        else pending_pause is None or not await seats.gated(connection)
                     )
-                    and (
-                        parked_gate is None
-                        or await Seats(workspace_id).admits(connection, parked_gate)
-                    )
+                    and parked_seated
                 )
                 fold_decision = (
                     None

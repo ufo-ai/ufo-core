@@ -5,7 +5,7 @@ seat-reporting job declares — the rules stay core's, the extension decides whe
 surface lives in named modules like this one."""
 
 from ufo.seats import (
-    OwnerSeatRevocation as OwnerSeatRevocation,
+    LastAdminSeatRevocation as LastAdminSeatRevocation,
 )
 from ufo.seats import (
     SeatEntry as SeatEntry,
@@ -23,8 +23,8 @@ from ufo.seats import (
     UnknownMember as UnknownMember,
 )
 from ufo.seats import (
-    member_workspaces as member_workspaces,
+    admin_conversation as admin_conversation,
 )
 from ufo.seats import (
-    owner_conversation as owner_conversation,
+    member_workspaces as member_workspaces,
 )

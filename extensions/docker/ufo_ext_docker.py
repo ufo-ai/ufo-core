@@ -103,6 +103,7 @@ class DockerCarrier:
                 conversation_id=spec.conversation_id,
                 container_id=running,
                 mount=spec.mount,
+                run_token=spec.run_token,
                 egress_env=egress_env,
             )
             await self._mount_s3(handle, spec.mount, self._credential_url(spec))
@@ -136,6 +137,7 @@ class DockerCarrier:
                 conversation_id=spec.conversation_id,
                 container_id=container_id,
                 mount=spec.mount,
+                run_token=spec.run_token,
                 egress_env=egress_env,
             )
             await self._mount_s3(handle, spec.mount, self._credential_url(spec))

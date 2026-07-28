@@ -1,11 +1,11 @@
 """The object seam's conformance probe: drive the sample's registered kinds through the five verbs.
 
 The sample declares two kinds — `sample_widget` (full CRUD over its own `ext_store` rows, delete
-owner-gated) and `sample_relic` (read-only, every mutation refused) — so these tests exercise the
+admin-gated) and `sample_relic` (read-only, every mutation refused) — so these tests exercise the
 whole surface through the real tool dispatch and read results back through the sample's own store:
 create/update/get/list/delete round-trip, keyset paging under `OBJECT_LIST_PAGE`, the envelope and
 name-grammar refusals, spec validation naming its field, handler-raised `VerbNotSupported` and
-`OwnerRequired`, and the boot gates (kind collision, spec-model gates) failing loud."""
+`AdminRequired`, and the boot gates (kind collision, spec-model gates) failing loud."""
 
 import json
 from collections.abc import Callable
@@ -51,6 +51,7 @@ from ufo.objects import (
     OBJECT_LIST_PAGE,
     OBJECT_NAME_MAX_LENGTH,
     OBJECT_NAME_PATTERN,
+    AdminRequired,
     BoundKind,
     InvalidManifest,
     InvalidName,
@@ -61,7 +62,6 @@ from ufo.objects import (
     ObjectOwner,
     ObjectRow,
     OwnedRow,
-    OwnerRequired,
     SpecValidationFailed,
     UnknownKind,
     UnknownObject,
@@ -87,7 +87,7 @@ from ufo.workspace import ws
 
 SANDBOX_UNTOUCHED = "object verbs run against stores and must not reach the sandbox"
 OBJECT_NARRATION = "checking the workspace records"
-OWNER_CREATED_AT = datetime(2026, 7, 1, tzinfo=UTC)
+ADMIN_CREATED_AT = datetime(2026, 7, 1, tzinfo=UTC)
 JOINER_CREATED_AT = datetime(2026, 7, 2, tzinfo=UTC)
 
 
@@ -131,6 +131,7 @@ async def _member(workspace_id: UUID, created_at: datetime) -> UUID:
                 id=member_id,
                 workspace_id=workspace_id,
                 email=f"{member_id.hex[:8]}@x.test",
+                is_admin=created_at == ADMIN_CREATED_AT,
                 created_at=created_at,
                 updated_at=created_at,
             )
@@ -142,6 +143,7 @@ def _tool_context(
     workspace_id: UUID,
     speaker_member_id: UUID | None = None,
     agent_model: str = "claude-opus-4-8",
+    agent_id: UUID | None = None,
 ) -> ToolContext:
     return ToolContext(
         sandbox=SandboxSession(
@@ -153,7 +155,7 @@ def _tool_context(
             id=uuid4(),
             workspace_id=workspace_id,
             conversation_id=uuid4(),
-            agent_id=uuid4(),
+            agent_id=agent_id or uuid4(),
             seq=1,
             status="running",
             inbound="hi",
@@ -215,7 +217,7 @@ async def test_widget_crud_round_trips_through_the_verbs(db: None) -> None:
     workspace_id = await _workspace()
     tools = _object_tools()
     with ws(workspace_id):
-        owner = await _member(workspace_id, OWNER_CREATED_AT)
+        owner = await _member(workspace_id, ADMIN_CREATED_AT)
         ctx = _tool_context(workspace_id, speaker_member_id=owner)
 
         kinds = json.loads(await _text(tools, "object_list", ctx))["kinds"]
@@ -348,7 +350,7 @@ async def test_widget_delete_gates_on_the_owner(db: None) -> None:
     workspace_id = await _workspace()
     tools = _object_tools()
     with ws(workspace_id):
-        owner = await _member(workspace_id, OWNER_CREATED_AT)
+        owner = await _member(workspace_id, ADMIN_CREATED_AT)
         joiner = await _member(workspace_id, JOINER_CREATED_AT)
         owner_ctx = _tool_context(workspace_id, speaker_member_id=owner)
         await _text(tools, "object_apply", owner_ctx, manifest=_widget_manifest("guarded"))
@@ -357,9 +359,9 @@ async def test_widget_delete_gates_on_the_owner(db: None) -> None:
         args = delete_tool.input_model.model_validate(
             {"user_description": OBJECT_NARRATION, "kind": sample.WIDGET_KIND, "name": "guarded"}
         )
-        with pytest.raises(OwnerRequired):
+        with pytest.raises(AdminRequired):
             await delete_tool.handler(_tool_context(workspace_id), args)
-        with pytest.raises(OwnerRequired):
+        with pytest.raises(AdminRequired):
             await delete_tool.handler(_tool_context(workspace_id, speaker_member_id=joiner), args)
         deleted = json.loads(
             await _text(tools, "object_delete", owner_ctx, kind=sample.WIDGET_KIND, name="guarded")
@@ -629,6 +631,8 @@ async def _agent_row(
     prompt: str = "be brief",
     model: str = "claude-opus-4-8",
     internet_access_allowed: bool = True,
+    *,
+    is_main: bool = False,
 ) -> UUID:
     agent_id = uuid4()
     async with workspace_tx() as connection:
@@ -639,6 +643,7 @@ async def _agent_row(
                 name=name,
                 prompt=prompt,
                 model=model,
+                is_main=is_main,
                 internet_access_allowed=internet_access_allowed,
                 created_at=datetime(2026, 7, 1, tzinfo=UTC),
                 updated_at=datetime(2026, 7, 2, tzinfo=UTC),
@@ -647,14 +652,18 @@ async def _agent_row(
     return agent_id
 
 
-async def test_agent_kind_updates_model_owner_gated_and_shows_prompt_readonly(db: None) -> None:
+async def test_agent_kind_updates_model_admin_gated_and_shows_prompt_readonly(db: None) -> None:
     workspace_id = await _workspace()
     tools = _object_tools()
     with ws(workspace_id):
-        owner = await _member(workspace_id, OWNER_CREATED_AT)
+        owner = await _member(workspace_id, ADMIN_CREATED_AT)
         joiner = await _member(workspace_id, JOINER_CREATED_AT)
-        await _agent_row(workspace_id)
-        owner_ctx = _tool_context(workspace_id, speaker_member_id=owner)
+        agent_id = await _agent_row(workspace_id, is_main=True)
+        owner_ctx = _tool_context(
+            workspace_id,
+            speaker_member_id=owner,
+            agent_id=agent_id,
+        )
 
         fetched = yaml.safe_load(
             await _text(tools, "object_get", owner_ctx, kind=AGENT_KIND, name="assistant")
@@ -717,9 +726,9 @@ async def test_agent_kind_updates_model_owner_gated_and_shows_prompt_readonly(db
         args = apply_tool.input_model.model_validate(
             {"user_description": OBJECT_NARRATION, "manifest": manifest}
         )
-        with pytest.raises(OwnerRequired):
+        with pytest.raises(AdminRequired):
             await apply_tool.handler(_tool_context(workspace_id, speaker_member_id=joiner), args)
-        with pytest.raises(OwnerRequired):
+        with pytest.raises(AdminRequired):
             await apply_tool.handler(_tool_context(workspace_id), args)
 
         prompt_write = apply_tool.input_model.model_validate(
@@ -750,8 +759,8 @@ async def test_agent_kind_reports_the_model_an_auto_agent_actually_runs(db: None
     workspace_id = await _workspace()
     tools = _object_tools()
     with ws(workspace_id):
-        owner = await _member(workspace_id, OWNER_CREATED_AT)
-        await _agent_row(workspace_id, model="auto")
+        owner = await _member(workspace_id, ADMIN_CREATED_AT)
+        await _agent_row(workspace_id, model="auto", is_main=True)
         ctx = _tool_context(workspace_id, speaker_member_id=owner, agent_model="claude-opus-5")
 
         fetched = yaml.safe_load(
@@ -769,9 +778,13 @@ async def test_agent_kind_refuses_create_and_delete(db: None) -> None:
     workspace_id = await _workspace()
     tools = _object_tools()
     with ws(workspace_id):
-        owner = await _member(workspace_id, OWNER_CREATED_AT)
-        await _agent_row(workspace_id)
-        ctx = _tool_context(workspace_id, speaker_member_id=owner)
+        owner = await _member(workspace_id, ADMIN_CREATED_AT)
+        agent_id = await _agent_row(workspace_id, is_main=True)
+        ctx = _tool_context(
+            workspace_id,
+            speaker_member_id=owner,
+            agent_id=agent_id,
+        )
 
         apply_tool = tools["object_apply"]
         create = apply_tool.input_model.model_validate(
@@ -786,7 +799,7 @@ async def test_agent_kind_refuses_create_and_delete(db: None) -> None:
                 ),
             }
         )
-        with pytest.raises(VerbNotSupported, match="one agent per workspace"):
+        with pytest.raises(VerbNotSupported, match="cannot be created"):
             await apply_tool.handler(ctx, create)
 
         delete_tool = tools["object_delete"]
@@ -806,9 +819,13 @@ async def test_agent_apply_and_pending_proposal_write_disjoint_fields(db: None) 
     workspace_id = await _workspace()
     tools = _object_tools()
     with ws(workspace_id):
-        owner = await _member(workspace_id, OWNER_CREATED_AT)
-        agent_id = await _agent_row(workspace_id)
-        ctx = _tool_context(workspace_id, speaker_member_id=owner)
+        owner = await _member(workspace_id, ADMIN_CREATED_AT)
+        agent_id = await _agent_row(workspace_id, is_main=True)
+        ctx = _tool_context(
+            workspace_id,
+            speaker_member_id=owner,
+            agent_id=agent_id,
+        )
 
         ref = await Governance(workspace_id=workspace_id, extension="probe").propose_change(
             AgentChange(
@@ -852,6 +869,55 @@ async def test_agent_apply_and_pending_proposal_write_disjoint_fields(db: None) 
             ).one()
     assert status == "approved"
     assert (row.prompt, row.model) == ("proposed prompt", "claude-fable-5")
+
+
+async def test_main_agent_controls_children_and_a_child_controls_only_itself(db: None) -> None:
+    workspace_id = await _workspace()
+    tools = _object_tools()
+    with ws(workspace_id):
+        admin = await _member(workspace_id, ADMIN_CREATED_AT)
+        main = await _agent_row(workspace_id, name="ufo", is_main=True)
+        child = await _agent_row(workspace_id, name="research")
+        sibling = await _agent_row(workspace_id, name="exec")
+
+        async def set_model(controller: UUID, target: str, model: str) -> None:
+            await _text(
+                tools,
+                "object_apply",
+                _tool_context(
+                    workspace_id,
+                    speaker_member_id=admin,
+                    agent_id=controller,
+                ),
+                manifest=yaml.safe_dump(
+                    {
+                        "kind": AGENT_KIND,
+                        "name": target,
+                        "spec": {
+                            "model": model,
+                            "internet_access_allowed": True,
+                        },
+                    }
+                ),
+            )
+
+        await set_model(main, "research", "main-choice")
+        await set_model(child, "research", "child-choice")
+        with pytest.raises(AdminRequired, match="workspace admin"):
+            await set_model(child, "exec", "forbidden")
+
+    async with workspace_tx() as connection:
+        models = {
+            row.id: row.model
+            for row in (
+                await connection.execute(
+                    sa.select(tables.agent.c.id, tables.agent.c.model).where(
+                        tables.agent.c.id.in_((child, sibling))
+                    )
+                )
+            )
+        }
+    assert models == {child: "child-choice", sibling: "claude-opus-4-8"}
 
 
 ARTIFACT_TEST_SECRET = "artifact-test-secret"
@@ -1303,7 +1369,7 @@ async def test_conversation_transcript_keeps_member_and_agent_gates(
     workspace_id = await _workspace()
     tools = _object_tools()
     with ws(workspace_id):
-        member = await _member(workspace_id, OWNER_CREATED_AT)
+        member = await _member(workspace_id, ADMIN_CREATED_AT)
         other = await _member(workspace_id, JOINER_CREATED_AT)
         private = await _turn_row(workspace_id, member_id=member)
         reader = await _turn_row(workspace_id, agent_id=private.agent_id, member_id=other)
@@ -1356,13 +1422,58 @@ async def test_conversation_transcript_keeps_member_and_agent_gates(
     assert (workspace_dir / path).is_file()
 
 
-async def test_private_turn_sees_shared_conversation_metadata_but_not_its_transcript(
+async def test_message_requester_reads_their_private_conversation_from_a_shared_turn(
     db: None, tmp_path: Path
 ) -> None:
     workspace_id = await _workspace()
     tools = _object_tools()
     with ws(workspace_id):
-        member = await _member(workspace_id, OWNER_CREATED_AT)
+        member = await _member(workspace_id, ADMIN_CREATED_AT)
+        private = await _turn_row(workspace_id, member_id=member)
+        shared = await _turn_row(
+            workspace_id,
+            agent_id=private.agent_id,
+            audience=SHARED_AUDIENCE,
+        )
+        ctx, workspace_dir = await _workspace_context(shared, tmp_path)
+        ctx = replace(ctx, speaker_member_id=member)
+        await Transcript(blob=ctx.blob, conversation_id=private.conversation_id).write(
+            LAUNCH_EXCHANGE
+        )
+
+        listing = yaml.safe_load(
+            await _agent_text(
+                private.agent_id,
+                tools,
+                "object_list",
+                ctx,
+                kind=CONVERSATION_KIND,
+            )
+        )
+        fetched = yaml.safe_load(
+            await _agent_text(
+                private.agent_id,
+                tools,
+                "object_get",
+                ctx,
+                kind=CONVERSATION_KIND,
+                name=str(private.conversation_id),
+            )
+        )
+
+    assert str(private.conversation_id) in {row["name"] for row in listing["objects"]}
+    path = f"transcripts/{private.conversation_id}.txt"
+    assert fetched["status"]["workspace_path"] == path
+    assert (workspace_dir / path).is_file()
+
+
+async def test_private_turn_can_open_a_shared_conversation_transcript(
+    db: None, tmp_path: Path
+) -> None:
+    workspace_id = await _workspace()
+    tools = _object_tools()
+    with ws(workspace_id):
+        member = await _member(workspace_id, ADMIN_CREATED_AT)
         shared = await _turn_row(workspace_id)
         reader = await _turn_row(workspace_id, agent_id=shared.agent_id, member_id=member)
         ctx, workspace_dir = await _workspace_context(
@@ -1384,11 +1495,12 @@ async def test_private_turn_sees_shared_conversation_metadata_but_not_its_transc
         )
 
     assert fetched["spec"]["audience"] == "shared"
-    assert fetched["status"] is None
-    assert not (workspace_dir / "transcripts").exists()
+    path = f"transcripts/{shared.conversation_id}.txt"
+    assert fetched["status"]["workspace_path"] == path
+    assert (workspace_dir / path).is_file()
 
 
-async def test_room_conversations_share_metadata_only_with_their_audience(
+async def test_room_conversations_open_shared_and_same_room_transcripts(
     db: None, tmp_path: Path
 ) -> None:
     workspace_id = await _workspace()
@@ -1441,10 +1553,84 @@ async def test_room_conversations_share_metadata_only_with_their_audience(
     assert names == {str(shared.conversation_id), str(same.conversation_id)}
     assert str(other.conversation_id) not in names
     assert str(sealed.conversation_id) not in names
-    assert shared_get["status"] is None
+    assert shared_get["status"]["workspace_path"] == f"transcripts/{shared.conversation_id}.txt"
     assert same_get["spec"]["audience"] == str(room)
     assert same_get["status"]["workspace_path"] == f"transcripts/{same.conversation_id}.txt"
-    assert not (workspace_dir / "transcripts" / f"{shared.conversation_id}.txt").exists()
+    assert (workspace_dir / "transcripts" / f"{shared.conversation_id}.txt").is_file()
+
+
+async def test_explicit_room_request_opens_room_and_requester_private_conversations(
+    db: None, tmp_path: Path
+) -> None:
+    workspace_id = await _workspace()
+    tools = _object_tools()
+    room = room_audience("slack", "CPRIVATE")
+    with ws(workspace_id):
+        alice = await _member(workspace_id, ADMIN_CREATED_AT)
+        bob = await _member(workspace_id, JOINER_CREATED_AT)
+        room_turn = await _turn_row(workspace_id, audience=room)
+        mine = await _turn_row(
+            workspace_id,
+            agent_id=room_turn.agent_id,
+            member_id=alice,
+        )
+        theirs = await _turn_row(
+            workspace_id,
+            agent_id=room_turn.agent_id,
+            member_id=bob,
+        )
+        ctx, _ = await _workspace_context(room_turn, tmp_path, audience=room)
+        ctx = replace(ctx, speaker_member_id=alice)
+        for turn in (room_turn, mine, theirs):
+            await Transcript(blob=ctx.blob, conversation_id=turn.conversation_id).write(
+                LAUNCH_EXCHANGE
+            )
+
+        listing = yaml.safe_load(
+            await _agent_text(
+                room_turn.agent_id,
+                tools,
+                "object_list",
+                ctx,
+                kind=CONVERSATION_KIND,
+            )
+        )
+        room_get = yaml.safe_load(
+            await _agent_text(
+                room_turn.agent_id,
+                tools,
+                "object_get",
+                ctx,
+                kind=CONVERSATION_KIND,
+                name=str(room_turn.conversation_id),
+            )
+        )
+        mine_get = yaml.safe_load(
+            await _agent_text(
+                room_turn.agent_id,
+                tools,
+                "object_get",
+                ctx,
+                kind=CONVERSATION_KIND,
+                name=str(mine.conversation_id),
+            )
+        )
+        with pytest.raises(UnknownObject):
+            await _agent_text(
+                room_turn.agent_id,
+                tools,
+                "object_get",
+                ctx,
+                kind=CONVERSATION_KIND,
+                name=str(theirs.conversation_id),
+            )
+
+    assert {row["name"] for row in listing["objects"]} == {
+        str(room_turn.conversation_id),
+        str(mine.conversation_id),
+    }
+    assert room_get["status"]["messages"] == 2
+    assert mine_get["status"]["messages"] == 2
 
 
 async def test_foreign_conversation_cannot_see_shared_metadata(db: None, tmp_path: Path) -> None:
@@ -1610,8 +1796,8 @@ class _BootSpec(BaseModel):
     pass
 
 
-class _OwnerOnlyStore(MemberOwnedObjects[_BootSpec]):
-    kind_name = "owner-only-test"
+class _AdminOnlyStore(MemberOwnedObjects[_BootSpec]):
+    kind_name = "admin-only-test"
     mutate_gate = "mutate refused"
     delete_gate = "delete refused"
 
@@ -1638,14 +1824,14 @@ class _OwnerOnlyStore(MemberOwnedObjects[_BootSpec]):
         raise AssertionError("gate must refuse before _delete_owned")
 
 
-async def test_shared_owner_only_row_refuses_a_non_owner_speakerless_turn() -> None:
-    """A shared owner-only row (owner member_id None, shared) is visible to everyone but mutable
-    only by the workspace owner. A speakerless turn has acting member None, which must never
+async def test_shared_admin_only_row_refuses_a_speakerless_turn() -> None:
+    """A shared admin-only row (owner member_id None, shared) is visible to everyone but mutable
+    only by a workspace admin. A speakerless turn has acting member None, which must never
     collide with the None owner into 'owned' — the gate refuses both its mutation and its
     deletion, and the domain hooks are never reached."""
-    store = _OwnerOnlyStore()
+    store = _AdminOnlyStore()
     ctx = _tool_context(uuid4())
-    with pytest.raises(OwnerRequired, match="delete refused"):
+    with pytest.raises(AdminRequired, match="delete refused"):
         await store.delete(ctx, "boot")
-    with pytest.raises(OwnerRequired, match="mutate refused"):
+    with pytest.raises(AdminRequired, match="mutate refused"):
         await store.apply(ctx, "boot", _BootSpec(), None)

@@ -34,16 +34,16 @@ class _StubDbos:
 
 
 async def _workspace_with_two_agents() -> tuple[UUID, UUID, UUID]:
-    workspace_id, first_agent, second_agent = uuid4(), uuid4(), uuid4()
+    workspace_id, main_agent, child_agent = uuid4(), uuid4(), uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.workspace).values(
                 id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
             )
         )
-        for agent_id, name, created_at in (
-            (first_agent, "assistant", datetime(2026, 7, 1, tzinfo=UTC)),
-            (second_agent, "exec", datetime(2026, 7, 2, tzinfo=UTC)),
+        for agent_id, name, created_at, is_main in (
+            (child_agent, "exec", datetime(2026, 7, 1, tzinfo=UTC), False),
+            (main_agent, "assistant", datetime(2026, 7, 2, tzinfo=UTC), True),
         ):
             await connection.execute(
                 sa.insert(tables.agent).values(
@@ -52,11 +52,12 @@ async def _workspace_with_two_agents() -> tuple[UUID, UUID, UUID]:
                     name=name,
                     prompt="be brief",
                     model="claude-opus-4-8",
+                    is_main=is_main,
                     created_at=created_at,
                     updated_at=created_at,
                 )
             )
-    return workspace_id, first_agent, second_agent
+    return workspace_id, main_agent, child_agent
 
 
 def _context(workspace_id: UUID, surface: str) -> SurfaceContext:
@@ -126,13 +127,13 @@ async def test_rebinding_an_installation_keeps_its_agent(db: None) -> None:
     assert await _turn_agent(turn_id) == second_agent
 
 
-async def test_unbound_surface_lands_on_the_earliest_agent(db: None) -> None:
-    workspace_id, first_agent, _ = await _workspace_with_two_agents()
+async def test_unbound_surface_lands_on_the_explicit_main_agent(db: None) -> None:
+    workspace_id, main_agent, _ = await _workspace_with_two_agents()
     with ws(workspace_id):
         context = _context(workspace_id, "cli")
         conversation_id = await context.conversation_for("session", conversation_audience(None))
         turn_id = await context.admit(conversation_id, "hi", speaker_member_id=None)
-    assert await _turn_agent(turn_id) == first_agent
+    assert await _turn_agent(turn_id) == main_agent
 
 
 async def test_invoke_refuses_a_conversation_bound_to_another_agent(db: None) -> None:

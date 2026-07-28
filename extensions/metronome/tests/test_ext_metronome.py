@@ -10,7 +10,7 @@ the real `JobRunner`: candidates find the workspace, the dispatcher binds it, an
 ships scoped."""
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import parse_qsl
@@ -41,7 +41,7 @@ from ufo.sandbox.session import ExecResult, SandboxHandle, SandboxSession, Sandb
 from ufo.schema import tables
 from ufo.schema.records import Agent, TerminalFrame, Turn, Usage
 from ufo.sdk.audience import SHARED_AUDIENCE, Audience, conversation_audience
-from ufo.seats import OwnerSeatRevocation, SeatLimitReached
+from ufo.seats import LastAdminSeatRevocation, SeatLimitReached
 from ufo.surfaces.admission import Admission
 from ufo.tools.context import SpawnResult, ToolContext
 from ufo.tools.registry import ToolDef
@@ -491,8 +491,7 @@ async def test_manifest_job_fires_through_job_runner(
 
 
 async def _seat_seed(limit: int | None = 2) -> tuple[UUID, UUID, UUID]:
-    """A workspace under a seat limit whose owner (earliest member) is seated and whose later
-    joiner is not — both sides of the owner gate and the seat count in one seed."""
+    """A workspace under a seat limit whose admin is seated and whose later joiner is not."""
     workspace_id, owner_id, joiner_id, agent_id = uuid4(), uuid4(), uuid4(), uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
@@ -523,6 +522,7 @@ async def _seat_seed(limit: int | None = 2) -> tuple[UUID, UUID, UUID]:
                     id=member_id,
                     workspace_id=workspace_id,
                     email=email,
+                    is_admin=member_id == owner_id,
                     seated_at=created if seated else None,
                     created_at=created,
                     updated_at=created,
@@ -610,8 +610,8 @@ async def test_owner_grants_and_revokes_a_seat_through_real_dispatch(
     assert payload["billed_overage_seats"] == 0
     assert payload["seated"] == 2
     assert payload["members"] == [
-        {"email": "owner@example.com", "seated": True, "owner": True},
-        {"email": "late@example.com", "seated": True, "owner": False},
+        {"email": "owner@example.com", "seated": True, "admin": True},
+        {"email": "late@example.com", "seated": True, "admin": False},
     ]
     payload = await _run_tool(
         workspace_id, tmp_path, owner_id, metronome.REVOKE_SEAT_TOOL, email="late@example.com"
@@ -622,7 +622,7 @@ async def test_owner_grants_and_revokes_a_seat_through_real_dispatch(
 
 async def test_non_owner_and_speakerless_seat_changes_are_refused(db: None, tmp_path: Path) -> None:
     workspace_id, _, joiner_id = await _seat_seed()
-    with pytest.raises(ValueError, match="only the workspace owner"):
+    with pytest.raises(ValueError, match="only a workspace admin"):
         await _run_tool(
             workspace_id, tmp_path, joiner_id, metronome.GRANT_SEAT_TOOL, email="late@example.com"
         )
@@ -643,7 +643,7 @@ async def test_grant_at_the_limit_surfaces_the_seat_error(db: None, tmp_path: Pa
 
 async def test_revoking_the_owner_is_refused(db: None, tmp_path: Path) -> None:
     workspace_id, owner_id, _ = await _seat_seed()
-    with pytest.raises(OwnerSeatRevocation):
+    with pytest.raises(LastAdminSeatRevocation):
         await _run_tool(
             workspace_id, tmp_path, owner_id, metronome.REVOKE_SEAT_TOOL, email="owner@example.com"
         )
@@ -994,6 +994,7 @@ async def test_seat_approvals_ask_the_owner_once_per_unseated_member(db: None) -
                 name="assistant",
                 prompt="p",
                 model=MODEL,
+                is_main=True,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -1029,7 +1030,7 @@ async def test_seat_approvals_ask_the_owner_once_per_unseated_member(db: None) -
     assert "overage" in asks[0].inbound
 
 
-async def test_seat_approvals_wait_for_an_owner_conversation(db: None) -> None:
+async def test_seat_approvals_wait_for_an_admin_conversation(db: None) -> None:
     workspace_id, _owner_id, _joiner_id = await _seat_seed(limit=25)
     async with workspace_tx() as connection:
         await connection.execute(
@@ -1222,7 +1223,7 @@ def _form(request: httpx.Request) -> dict[str, str]:
 
 
 async def _billing_seed() -> tuple[UUID, UUID, UUID, UUID]:
-    """A workspace with an owner, a teammate, the default agent, and the owner's own conversation —
+    """A workspace with an admin, a teammate, the default agent, and the admin's own conversation —
     the venue the activation job notifies into."""
     workspace_id, owner_id, mate_id = uuid4(), uuid4(), uuid4()
     agent_id, conversation_id = uuid4(), uuid4()
@@ -1241,6 +1242,7 @@ async def _billing_seed() -> tuple[UUID, UUID, UUID, UUID]:
                     id=member_id,
                     workspace_id=workspace_id,
                     email=email,
+                    is_admin=member_id == owner_id,
                     seated_at=created,
                     created_at=created,
                     updated_at=created,
@@ -1253,6 +1255,7 @@ async def _billing_seed() -> tuple[UUID, UUID, UUID, UUID]:
                 name="assistant",
                 prompt="p",
                 model=MODEL,
+                is_main=True,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -1293,6 +1296,24 @@ async def _manage_billing(
     tool, ext = _billing_tool(audience)
     ctx = _tool_context(workspace_id, ext, tmp_path, speaker, audience)
     with ws(workspace_id):
+        async with workspace_tx() as connection:
+            conversation = (
+                await connection.execute(
+                    sa.select(tables.conversation.c.id, tables.conversation.c.agent_id)
+                    .where(tables.conversation.c.workspace_id == workspace_id)
+                    .order_by(tables.conversation.c.created_at, tables.conversation.c.id)
+                    .limit(1)
+                )
+            ).one()
+        ctx = replace(
+            ctx,
+            turn=ctx.turn.model_copy(
+                update={
+                    "conversation_id": conversation.id,
+                    "agent_id": conversation.agent_id,
+                }
+            ),
+        )
         result = await tool.handler(
             ctx,
             tool.input_model.model_validate({"user_description": TOOL_NARRATION, "action": action}),
@@ -1329,11 +1350,11 @@ async def _owner_turns(conversation_id: UUID) -> list[str]:
 async def test_setup_returns_the_payment_method_portal_link_and_records_pending_work(
     db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The whole owner-facing act: one Stripe Customer under a workspace-deterministic idempotency
+    """The whole admin-facing act: one Stripe Customer under a workspace-deterministic idempotency
     key, one portal session narrowed to the payment-method flow, and a durable pending record the
-    activation job owns — all before the owner is handed the link."""
+    activation job owns — all before the admin is handed the link."""
     _billing_env(monkeypatch)
-    workspace_id, owner_id, _mate_id, _conversation_id = await _billing_seed()
+    workspace_id, owner_id, _mate_id, conversation_id = await _billing_seed()
     providers = _Providers()
     monkeypatch.setattr(metronome, "BILLING_TRANSPORT", providers.transport)
 
@@ -1361,33 +1382,32 @@ async def test_setup_returns_the_payment_method_portal_link_and_records_pending_
     assert record is not None
     assert record.stripe_customer_id == "cus_1"
     assert record.package_alias == PACKAGE_ALIAS
+    assert record.notification_conversation_id == conversation_id
     assert record.metronome_customer_id is None
     assert record.metronome_contract_id is None
     assert record.activated_at is None
     assert not [r for r in providers.requests if "subscription" in r.url.path]
 
 
-async def test_billing_is_refused_off_the_owners_private_conversation(
+async def test_billing_requires_a_speaking_admin(
     db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Every gate runs before any provider call: a teammate, a speakerless turn, and the owner
-    speaking to a shared audience are all refused with nothing sent and nothing recorded."""
+    """A teammate and a speakerless turn are refused before any provider call."""
     _billing_env(monkeypatch)
     workspace_id, owner_id, mate_id, _conversation_id = await _billing_seed()
     providers = _Providers()
     monkeypatch.setattr(metronome, "BILLING_TRANSPORT", providers.transport)
 
-    with pytest.raises(ValueError, match="only the workspace owner"):
+    with pytest.raises(ValueError, match="only a workspace admin"):
         await _manage_billing(workspace_id, tmp_path, mate_id, mate_id, "setup")
     with pytest.raises(ValueError, match="speaking member"):
         await _manage_billing(workspace_id, tmp_path, None, None, "setup")
-    with pytest.raises(ValueError, match="private conversation"):
-        await _manage_billing(workspace_id, tmp_path, owner_id, None, "setup")
-    with pytest.raises(ValueError, match="private conversation"):
-        await _manage_billing(workspace_id, tmp_path, owner_id, mate_id, "portal")
 
     assert providers.requests == []
     assert await _stored_record(workspace_id) is None
+
+    result = await _manage_billing(workspace_id, tmp_path, owner_id, None, "setup")
+    assert result["portal_url"] == "https://billing.stripe.com/session/1"
 
 
 async def test_the_job_waits_for_a_saved_card_then_provisions_customer_and_contract(
@@ -1584,18 +1604,26 @@ async def test_a_failed_provider_call_leaves_pending_work_for_the_next_tick(
     )
 
 
-async def test_activation_waits_for_an_owner_conversation_before_marking_active(
+async def test_activation_notifies_the_initiating_conversation_after_its_audience_changes(
     db: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """No venue to speak into yet: the providers are provisioned but the record stays pending, so
-    the owner is told on a later tick instead of never."""
+    """Billing follow-through stays with the initiating conversation rather than whichever admin
+    spoke most recently. A later audience change does not redirect it."""
     _billing_env(monkeypatch)
-    workspace_id, owner_id, _mate_id, _conversation_id = await _billing_seed()
+    workspace_id, owner_id, mate_id, conversation_id = await _billing_seed()
+    other_conversation_id = uuid4()
     providers = _Providers()
     providers.default_payment_method = SAVED_CARD
     monkeypatch.setattr(metronome, "BILLING_TRANSPORT", providers.transport)
     await _manage_billing(workspace_id, tmp_path, owner_id, owner_id, "setup")
     async with workspace_tx() as connection:
+        agent_id = (
+            await connection.execute(
+                sa.select(tables.conversation.c.agent_id).where(
+                    tables.conversation.c.id == conversation_id
+                )
+            )
+        ).scalar_one()
         await connection.execute(
             sa.update(tables.conversation)
             .values(
@@ -1605,6 +1633,21 @@ async def test_activation_waits_for_an_owner_conversation_before_marking_active(
             )
             .where(tables.conversation.c.workspace_id == workspace_id)
         )
+        await connection.execute(
+            sa.update(tables.member).where(tables.member.c.id == mate_id).values(is_admin=True)
+        )
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=other_conversation_id,
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                surface="ufo",
+                queue_key="other-admin",
+                member_id=mate_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
 
     with ws(workspace_id):
         await _activation(workspace_id, providers).run()
@@ -1612,7 +1655,9 @@ async def test_activation_waits_for_an_owner_conversation_before_marking_active(
     record = await _stored_record(workspace_id)
     assert record is not None
     assert record.metronome_contract_id == "ct_1"
-    assert record.activated_at is None
+    assert record.activated_at is not None
+    assert len(await _owner_turns(conversation_id)) == 1
+    assert await _owner_turns(other_conversation_id) == []
 
 
 async def test_status_reads_provider_truth_and_portal_opens_a_full_session(
@@ -1912,6 +1957,26 @@ async def test_an_unconfigured_deploy_leaves_the_billing_job_silent(
     providers = _Providers()
     with ws(workspace_id):
         await _activation(workspace_id, providers).run()
+    assert providers.requests == []
+
+
+async def test_activation_fails_loud_on_a_record_without_its_notification_target(
+    db: None,
+) -> None:
+    workspace_id, _owner_id, _mate_id, _conversation_id = await _billing_seed()
+    providers = _Providers()
+    activation = _activation(workspace_id, providers)
+    with ws(workspace_id):
+        await activation.ctx.store.put(
+            metronome.BILLING_KEY,
+            {
+                "stripe_customer_id": "cus_internal",
+                "package_alias": PACKAGE_ALIAS,
+                "contract_starting_at": datetime(2026, 7, 1, tzinfo=UTC).isoformat(),
+            },
+        )
+        with pytest.raises(ValueError, match="notification_conversation_id"):
+            await activation.run()
     assert providers.requests == []
 
 

@@ -305,6 +305,7 @@ async def _seed(*, member_email: str | None = None) -> tuple[UUID, UUID | None]:
                 name="assistant",
                 prompt="be brief",
                 model="claude-opus-4-8",
+                is_main=True,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -731,8 +732,8 @@ def _sign_with(secret: str, body: bytes) -> dict[str, str]:
 
 
 def _install_state(store: CredentialStore, workspace_id: UUID, member_id: UUID) -> str:
-    """A Fernet-sealed install handoff the surface's callback opens — the same seal the owner's
-    `slack_connect` mints, carrying the workspace, owner, bot-token slot, and install marker."""
+    """A Fernet-sealed install handoff the surface's callback opens — the same seal an admin's
+    `slack_connect` mints, carrying the workspace, member, bot-token slot, and install marker."""
     return seal_credential_request(
         store.fernet,
         CredentialRequestState(

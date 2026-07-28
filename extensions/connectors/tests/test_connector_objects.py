@@ -1,7 +1,7 @@
 """The `connector` object kind end to end: real grant rows read and revoked through the object
 verbs. Seeded rows stand where the OAuth callback writes them; the tests drive list/get/status
 through the real tool dispatch, prove create is refused naming `connect_account`, and prove the
-revoke gate — the grantor may revoke their own account, an unrelated member may not, the owner
+revoke gate — the grantor may revoke their own account, an unrelated member may not, an admin
 may revoke anyone's."""
 
 import json
@@ -21,7 +21,7 @@ from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.ext.loader import turn_tools
 from ufo.grants import GrantStore, grant_summaries, workspace_grant_summaries
-from ufo.objects import OwnerRequired, UnknownObject, VerbNotSupported
+from ufo.objects import AdminRequired, UnknownObject, VerbNotSupported
 from ufo.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
@@ -31,8 +31,7 @@ from ufo.tools.registry import ToolDef
 from ufo.workspace import ws
 
 TOOL_NARRATION = "checking their connected accounts"
-
-OWNER_CREATED_AT = datetime(2026, 7, 1, tzinfo=UTC)
+ADMIN_CREATED_AT = datetime(2026, 7, 1, tzinfo=UTC)
 GRANTOR_CREATED_AT = datetime(2026, 7, 2, tzinfo=UTC)
 OTHER_CREATED_AT = datetime(2026, 7, 3, tzinfo=UTC)
 SANDBOX_UNTOUCHED = "object verbs run against stores and must not reach the sandbox"
@@ -61,7 +60,7 @@ async def _unavailable_spawn(
 
 async def _seed() -> tuple[UUID, UUID, UUID, UUID, UUID, UUID]:
     workspace_id, agent_id, conversation_id = uuid4(), uuid4(), uuid4()
-    owner_id, grantor_id, other_id = uuid4(), uuid4(), uuid4()
+    admin_id, grantor_id, other_id = uuid4(), uuid4(), uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.workspace).values(
@@ -69,7 +68,7 @@ async def _seed() -> tuple[UUID, UUID, UUID, UUID, UUID, UUID]:
             )
         )
         for member_id, created_at in (
-            (owner_id, OWNER_CREATED_AT),
+            (admin_id, ADMIN_CREATED_AT),
             (grantor_id, GRANTOR_CREATED_AT),
             (other_id, OTHER_CREATED_AT),
         ):
@@ -78,6 +77,7 @@ async def _seed() -> tuple[UUID, UUID, UUID, UUID, UUID, UUID]:
                     id=member_id,
                     workspace_id=workspace_id,
                     email=f"{member_id.hex[:8]}@x.test",
+                    is_admin=member_id == admin_id,
                     created_at=created_at,
                     updated_at=created_at,
                 )
@@ -100,12 +100,12 @@ async def _seed() -> tuple[UUID, UUID, UUID, UUID, UUID, UUID]:
                 agent_id=agent_id,
                 surface="cli",
                 queue_key="session",
-                member_id=owner_id,
+                member_id=admin_id,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
         )
-    return workspace_id, agent_id, conversation_id, owner_id, grantor_id, other_id
+    return workspace_id, agent_id, conversation_id, admin_id, grantor_id, other_id
 
 
 async def _grant(
@@ -233,6 +233,21 @@ async def test_connect_stays_the_only_create_path(db: None) -> None:
         await apply_tool.handler(_tool_context(workspace_id, agent_id), args)
 
 
+async def test_explain_limits_admins_to_narrowing_or_revoking(db: None) -> None:
+    workspace_id, agent_id, *_ = await _seed()
+    with ws(workspace_id), agent(agent_id):
+        explained = json.loads(
+            await _text(
+                _object_tool("object_explain"),
+                _tool_context(workspace_id, agent_id),
+                kind=CONNECTOR_KIND,
+            )
+        )
+    assert "grantor may share a private account" in explained["guidance"]
+    assert "grantor or a workspace admin may make a shared one private" in explained["guidance"]
+    assert "grantor (or a workspace admin) shares" not in explained["guidance"]
+
+
 async def test_object_verbs_touch_only_the_turn_agents_binding(db: None) -> None:
     """Two agents each bound to the same provider account: through agent A's turn the kind lists
     one object, flipping `shared` flips A's row alone, and revoking deletes A's binding alone —
@@ -304,7 +319,7 @@ async def test_object_verbs_touch_only_the_turn_agents_binding(db: None) -> None
 
 
 async def test_revoke_admits_the_grantor_and_the_owner_only(db: None) -> None:
-    workspace_id, agent_id, conversation_id, owner_id, grantor_id, other_id = await _seed()
+    workspace_id, agent_id, conversation_id, admin_id, grantor_id, other_id = await _seed()
     delete_tool = _object_tool("object_delete")
     with ws(workspace_id), agent(agent_id):
         await _grant(
@@ -327,7 +342,7 @@ async def test_revoke_admits_the_grantor_and_the_owner_only(db: None) -> None:
             _tool_context(workspace_id, agent_id, grantor_id),
             manifest=_share_manifest("alice@example.com", True),
         )
-        with pytest.raises(OwnerRequired, match="grantor or the workspace owner"):
+        with pytest.raises(AdminRequired, match="grantor or a workspace admin"):
             await delete_tool.handler(_tool_context(workspace_id, agent_id, other_id), args)
 
         revoked = json.loads(
@@ -347,7 +362,7 @@ async def test_revoke_admits_the_grantor_and_the_owner_only(db: None) -> None:
         )
         await _text(
             delete_tool,
-            _tool_context(workspace_id, agent_id, owner_id),
+            _tool_context(workspace_id, agent_id, admin_id),
             kind=CONNECTOR_KIND,
             name="gmail-alice-example-com",
         )
@@ -391,13 +406,22 @@ async def test_the_grantor_shares_their_account_and_get_reflects_it(db: None) ->
         assert fetched["spec"]["shared"] is True
 
 
-async def test_an_unrelated_member_may_not_flip_sharing_but_the_owner_may(db: None) -> None:
-    workspace_id, agent_id, conversation_id, owner_id, grantor_id, other_id = await _seed()
+async def test_only_the_grantor_may_widen_and_an_admin_may_narrow(db: None) -> None:
+    workspace_id, agent_id, conversation_id, admin_id, grantor_id, other_id = await _seed()
     apply_tool = _object_tool("object_apply")
     with ws(workspace_id), agent(agent_id):
         await _grant(
             workspace_id, agent_id, conversation_id, grantor_id, "gmail", "alice@example.com"
         )
+        widen = apply_tool.input_model.model_validate(
+            {
+                "user_description": TOOL_NARRATION,
+                "manifest": _share_manifest("alice@example.com", True),
+            }
+        )
+        with pytest.raises(AdminRequired, match="only the grantor may share"):
+            await apply_tool.handler(_tool_context(workspace_id, agent_id, admin_id), widen)
+        assert (await grant_summaries())[0].shared is False
         await _text(
             apply_tool,
             _tool_context(workspace_id, agent_id, grantor_id),
@@ -409,12 +433,12 @@ async def test_an_unrelated_member_may_not_flip_sharing_but_the_owner_may(db: No
                 "manifest": _share_manifest("alice@example.com", False),
             }
         )
-        with pytest.raises(OwnerRequired, match="grantor or the workspace owner"):
+        with pytest.raises(AdminRequired, match="grantor or an admin"):
             await apply_tool.handler(_tool_context(workspace_id, agent_id, other_id), args)
 
         await _text(
             apply_tool,
-            _tool_context(workspace_id, agent_id, owner_id),
+            _tool_context(workspace_id, agent_id, admin_id),
             manifest=_share_manifest("alice@example.com", False),
         )
         assert (await grant_summaries())[0].shared is False
@@ -468,7 +492,7 @@ async def test_list_summary_tags_private_and_shared_accounts(db: None) -> None:
 
 
 async def test_read_verbs_hide_other_members_private_connectors(db: None) -> None:
-    workspace_id, agent_id, conversation_id, owner_id, grantor_id, other_id = await _seed()
+    workspace_id, agent_id, conversation_id, admin_id, grantor_id, other_id = await _seed()
     with ws(workspace_id), agent(agent_id):
         await _grant(
             workspace_id, agent_id, conversation_id, grantor_id, "gmail", "alice@example.com"
@@ -509,7 +533,7 @@ async def test_read_verbs_hide_other_members_private_connectors(db: None) -> Non
 
         for ctx in (
             _tool_context(workspace_id, agent_id, grantor_id),
-            _tool_context(workspace_id, agent_id, owner_id),
+            _tool_context(workspace_id, agent_id, admin_id),
         ):
             listing = json.loads(await _text(_object_tool("object_list"), ctx, kind=CONNECTOR_KIND))
             assert {row["name"] for row in listing["objects"]} == {private_name, shared_name}
@@ -534,7 +558,7 @@ async def test_reshare_and_revoke_need_a_live_speaker(db: None) -> None:
         speakerless = replace(
             _tool_context(workspace_id, agent_id), on_behalf_of_member_id=grantor_id
         )
-        with pytest.raises(OwnerRequired):
+        with pytest.raises(AdminRequired):
             await apply_tool.handler(
                 speakerless,
                 apply_tool.input_model.model_validate(
@@ -544,7 +568,7 @@ async def test_reshare_and_revoke_need_a_live_speaker(db: None) -> None:
                     }
                 ),
             )
-        with pytest.raises(OwnerRequired):
+        with pytest.raises(AdminRequired):
             await delete_tool.handler(
                 speakerless,
                 delete_tool.input_model.model_validate(

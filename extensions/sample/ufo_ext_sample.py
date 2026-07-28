@@ -19,7 +19,7 @@ from uuid import UUID
 import sqlalchemy as sa
 from pydantic import BaseModel, ConfigDict, Field
 
-from ufo.sdk.audience import Audience, conversation_audience
+from ufo.sdk.audience import conversation_audience
 from ufo.sdk.authproxy import AuthProxySpec, Credential
 from ufo.sdk.bearer import workspace_claim
 from ufo.sdk.browser import CdpEndpoint, CdpLease
@@ -83,12 +83,12 @@ from ufo.sdk.models import (
     Usage,
 )
 from ufo.sdk.objects import (
+    AdminRequired,
     ObjectDetail,
     ObjectKind,
     ObjectListQuery,
     ObjectPage,
     ObjectRow,
-    OwnerRequired,
     VerbNotSupported,
     object_page,
 )
@@ -206,10 +206,10 @@ RELIC_KIND = "sample_relic"
 RELIC_NAME = "meteor-shard"
 RELIC_INSCRIPTION = "the sample relic is excavated, never authored"
 RELIC_REFUSAL = "sample relics are read-only — they are excavated, never applied or deleted"
-WIDGET_DELETE_GATE = "only the workspace owner can delete a sample widget"
+WIDGET_DELETE_GATE = "only a workspace admin can delete a sample widget"
 WIDGET_GUIDANCE = (
     "Apply a color and size to create or update a probe widget; any member may write, and "
-    "delete requires the workspace owner."
+    "delete requires a workspace admin."
 )
 RELIC_GUIDANCE = (
     "Read-only probes of the object surface: list and get them, but every mutation is "
@@ -339,8 +339,8 @@ class StoredWidget(BaseModel):
 class WidgetStore:
     """The full-CRUD probe store over the sample's own `ext_store` keys: apply/get/delete round a
     spec through `WIDGET_KEY_PREFIX` rows, list pages by keyset over the store's key order, and
-    delete gates on the workspace owner — so the conformance tests drive create, update, paging,
-    owner refusal, and delete through the real verbs and read back through this public store."""
+    delete gates on a workspace admin — so the conformance tests drive create, update, paging,
+    admin refusal, and delete through the real verbs and read back through this public store."""
 
     async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage:
         entries = await self._ext(ctx).store.list(WIDGET_KEY_PREFIX)
@@ -380,8 +380,8 @@ class WidgetStore:
         )
 
     async def delete(self, ctx: ToolContext, name: str) -> None:
-        if not await ctx.speaker_is_owner():
-            raise OwnerRequired(WIDGET_DELETE_GATE)
+        if not await ctx.speaker_is_admin():
+            raise AdminRequired(WIDGET_DELETE_GATE)
         await self._ext(ctx).store.delete(WIDGET_KEY_PREFIX + name)
 
     def _ext(self, ctx: ToolContext) -> ExtensionContext:
@@ -929,15 +929,17 @@ class SampleMemorySearch:
     async def search(
         self,
         queries: tuple[str, ...],
-        audience: Audience,
+        subjects: frozenset[str],
         start: datetime | None = None,
         end: datetime | None = None,
     ) -> tuple[MemoryMatch, ...]:
+        query_values: list[JsonValue] = [query for query in queries]
+        subject_values: list[JsonValue] = [subject for subject in sorted(subjects)]
         await self.ctx.store.put(
             MEMORY_SEARCH_KEY,
             {
-                "queries": list(queries),
-                "audience": str(audience),
+                "queries": query_values,
+                "subjects": subject_values,
                 "start": None if start is None else start.isoformat(),
                 "end": None if end is None else end.isoformat(),
             },
@@ -958,7 +960,11 @@ class SampleCarrier:
         self.written: dict[str, bytes] = {}
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
-        return SandboxHandle(conversation_id=spec.conversation_id, container_id=CARRIER_CONTAINER)
+        return SandboxHandle(
+            conversation_id=spec.conversation_id,
+            container_id=CARRIER_CONTAINER,
+            run_token=spec.run_token,
+        )
 
     async def exec(
         self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
@@ -1017,7 +1023,7 @@ def manifest() -> Manifest:
             ObjectKind(
                 name=WIDGET_KIND,
                 description=(
-                    "Probe widgets: full CRUD through the object verbs; delete is owner-only."
+                    "Probe widgets: full CRUD through the object verbs; delete is admin-only."
                 ),
                 guidance=WIDGET_GUIDANCE,
                 spec_model=WidgetSpec,

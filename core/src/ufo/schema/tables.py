@@ -33,6 +33,7 @@ member = sa.Table(
     sa.Column("id", sa.Uuid, primary_key=True),
     sa.Column("workspace_id", sa.Uuid, sa.ForeignKey("workspace.id"), nullable=False),
     sa.Column("email", sa.Text, nullable=False),
+    sa.Column("is_admin", sa.Boolean, nullable=False, server_default=sa.false()),
     sa.Column("seated_at", sa.DateTime(timezone=True), nullable=True),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
@@ -79,10 +80,18 @@ agent = sa.Table(
     sa.Column("name", sa.Text, nullable=False),
     sa.Column("prompt", sa.Text, nullable=False),
     sa.Column("model", sa.Text, nullable=False),
+    sa.Column("is_main", sa.Boolean, nullable=False, server_default=sa.false()),
     sa.Column("internet_access_allowed", sa.Boolean, nullable=False, server_default=sa.true()),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     sa.UniqueConstraint("workspace_id", "name"),
+    sa.Index(
+        "agent_workspace_main",
+        "workspace_id",
+        unique=True,
+        postgresql_where=sa.text("is_main"),
+        sqlite_where=sa.text("is_main"),
+    ),
 )
 
 conversation = sa.Table(

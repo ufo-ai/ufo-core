@@ -106,15 +106,15 @@ class ObjectStore(Protocol):
 state rendered beside the spec on get (next fire time, last sync, grantor); it is rendered to the
 model as YAML and read by no code, the one place a loose mapping is the honest type.
 
-**Refusal lives in the handler, not a declaration.** There is no verb set and no owner flag on
+**Refusal lives in the handler, not a declaration.** There is no verb set and no role flag on
 `ObjectKind`: a kind that doesn't support a mutation raises from `apply`/`delete` with the domain
-reason, and a kind that gates on role calls `ctx.speaker_is_owner()` in its own handler — the
+reason, and a kind that gates on admin role calls `ctx.speaker_is_admin()` in its own handler — the
 gate `sync_source` already uses (`extensions/sources/ufo_ext_sources/tools.py:132`). Since kinds
 own their storage, a declared verb set could enforce nothing the handler couldn't bypass in its
 own code — it would be static metadata beside behavior, a second answer to "what does this kind
 do" that drifts. The handler's exception is the single truth and carries the better message
 ("connecting an account involves a third party and a secret — use `connect_account`"). The SDK
-ships `VerbNotSupported` and `OwnerRequired` so refusals render uniformly (§2's error table); a
+ships `VerbNotSupported` and `AdminRequired` so refusals render uniformly (§2's error table); a
 read-only kind is simply one whose handlers refuse every mutation.
 
 **Kinds keep their own storage.** `store` handlers run over the tables and stores that already
@@ -194,7 +194,7 @@ Semantics, fixed here so implementation doesn't relitigate them:
 - **One manifest per apply**, `yaml.safe_load`, bounded at `OBJECT_MANIFEST_MAX_BYTES = 65_536`
   next to the parse. Unknown top-level keys, multi-document streams, and non-mapping specs are
   refused at the envelope, before any kind code runs.
-- **Gating is the handler's.** A kind that owner-gates calls `ctx.speaker_is_owner()` in its own
+- **Gating is the handler's.** A kind that admin-gates calls `ctx.speaker_is_admin()` in its own
   mutation handlers, exactly as `sync_source` does today
   (`extensions/sources/ufo_ext_sources/tools.py:132`); a finer rule needs no new mechanism (the
   connector kind admits the grantor, §3).
@@ -209,7 +209,7 @@ Every failure is terminal for the call and names its cause:
 | `validation_failed` | spec fails `spec_model` — field and reason named |
 | `unknown_object` | get/delete on a name that doesn't exist |
 | `VerbNotSupported` | handler-raised: the kind doesn't do that mutation — the message names the path that does (create on `connector` → `connect_account`) |
-| `OwnerRequired` | handler-raised: mutation gated on role, speaker isn't an owner |
+| `AdminRequired` | handler-raised: mutation gated on role, speaker isn't an admin |
 | kind-raised `ValueError` | domain rules: bad cron, skill shadowing a core skill, unsupported stream — rendered with the handler's message |
 
 ### 3. The kinds landing with this RFC
@@ -252,8 +252,8 @@ while an *identical* re-apply is an idempotent no-op (registration is config-has
 which is also what makes a replayed apply safe (§2). Apply validates provider and streams against the boot-time catalog and schedules
 an immediate first sync; an unknown provider or stream fails naming the valid set — the
 progressive disclosure `sync_source` performed becomes error-driven discovery plus
-`object_explain`. Mutations stay owner-gated in the handler, as `sync_source` gates today.
-Delete removes the row
+`object_explain`. Only the registering member changes its source; an admin may inspect or remove
+another member's source but cannot widen it. Delete removes the row
 and stops the sync; the source's synced pages are derived state, reaped by the existing job
 machinery, never inline in the delete.
 
@@ -264,7 +264,7 @@ The only mutation is delete — revocation: the handler removes the `grant` row 
 provider broker's revoke as a best-effort external call. **Create and update raise
 `VerbNotSupported`**: connecting an account involves a third party and a secret, so it stays
 the `connect_account` chat flow where the speaker gates the granting act — the refusal message
-says exactly that. Delete is admitted to the grantor or an owner, checked in the handler against
+says exactly that. Delete is admitted to the grantor or an admin, checked in the handler against
 `grant.grantor_member_id`.
 
 **`credential`.** The declared BYOK slots across installed extensions (the `credentials`
@@ -277,14 +277,13 @@ that changed. **The value appears in no read — no field, no digest** (a digest
 secret invites offline guessing), so the kind meets §1's no-secrets gate by shape, not
 exemption. Fill and rotate stay `request_credentials` — a secret and a private handoff, the
 speaker gating the act — so create and update raise `VerbNotSupported` naming it. Delete clears
-the stored value, owner-gated in the handler: the in-chat unset that previously had no path.
+the stored value, admin-gated in the handler: the in-chat unset that previously had no path.
 The slot stays listed as empty afterward.
 
-**`agent`.** One instance today — the workspace's main agent, named at `ufoctl init` — so the
-handlers accept update alone, owner-gated; create and delete raise `VerbNotSupported` with the
-reason (one agent per workspace today — a domain rule the handler owns, and the message changes
-the day multi-agent lands). **Each agent field has exactly one write path.** The kind's spec is
-`model` alone — the knob nothing could update before — and apply writes it directly. `prompt`
+**`agent`.** Each workspace has one explicit main agent and may have child agents. The handlers
+accept update alone, admin-gated: the main agent can update any agent, while a child can only
+update itself. Create and delete are refused. **Each agent field has exactly one write
+path.** The kind's spec carries `model` and `internet_access_allowed`, applied directly. `prompt`
 belongs to the existing proposal path — `Governance`'s prompt-only CAS
 (`core/src/ufo/governance.py`), the `proposal` table, `ctx.propose_change`, and the
 self-improvement extension over them (RFC 0016's subject) — which **stays and runs independently
@@ -348,7 +347,6 @@ surface that would need reshaping to admit them would be the wrong surface:
 | `page` | `page` table (`tables.py:376-391`) | tens of thousands | delete | cursor paging; spec = metadata, body by reference |
 | `conversation` | `conversation` table | thousands | delete | derived, id-shaped names |
 | `website` | sites extension (no durable rows today) | few | create · update · delete | a kind needs a durable row family first — the extension persists deployments before it registers |
-| `seat` | `member` table | tens | create · update · delete | role gating; the last-live-owner refusal is the kind's own invariant |
 | `surface` | `surfaces` manifest point (deploy config, not rows) | few | create · update · delete | a workspace-level surface→agent binding. metalcraft's precedent is a **separate kind** (`Channel`: surface, `bind.agentRef`, identity — `~/src/metalcraft/src/metalcraft_contracts/kinds/channel.py:49-66`), not an agent field: a binding carries its own identity config and lifecycle, and an agent field could not say *which* of several bindings changed. Recommended: separate kind, designed when multi-agent or multi-binding lands |
 
 What those rows pin on the surface now — all already in §1–§2, none deferrable:
@@ -364,16 +362,15 @@ What those rows pin on the surface now — all already in §1–§2, none deferr
    stay in the kind's own storage, referenced from spec, so get stays bounded.
 6. Deleting a high-cardinality object clears derived state via jobs, never inline
    (`CLAUDE.md` §Hot paths).
-7. Mutations gate on speaker role inside handlers — the seam `seat` needs
-   (`ctx.speaker_is_owner()`, finer grantor-style rules) is the one `source` and `connector`
-   already exercise.
+7. Mutations gate on speaker role inside handlers — `member`, `source`, and `connector` use the
+   same seam (`ctx.speaker_is_admin()`, finer grantor-style rules).
 
 ### 6. Conformance
 
 The sample extension registers a probe kind through its own store, per the testing doctrine: the
 proof drives create, update, get, list (with paging), and delete through the real tool dispatch,
 reads the results back through the extension's own capability APIs, and asserts that a refused
-mutation, a bad spec, a non-owner mutation on an owner-gated kind, and a kind-name collision at
+mutation, a bad spec, a non-admin mutation on an admin-gated kind, and a kind-name collision at
 boot each fail loud with the named error.
 
 ### 7. Landing order
@@ -383,9 +380,9 @@ boot each fail loud with the named error.
 | 1 | SDK types + kind registry + five builtins + sample probe kind | §6 end to end; boot fails on a colliding or gate-violating kind |
 | 2 | `scheduled_task` kind; three tools deleted | "every weekday at 9, digest investor email" creates it in chat; the fire re-enters the conversation; get shows `next_run_at`; delete stops it; a bad cron names the field; `pause_and_wait` untouched |
 | 3 | `skill` kind; `save_custom_skill` deleted | author in workspace → apply with `FileFrom` → `load_skill` mounts it next turn; get shows the files; delete removes it from the index; a core-skill shadow is refused |
-| 4 | `source` kind; `sync_source` deleted | create syncs pages; a wrong stream error lists the valid ones; a non-owner mutation is refused; delete stops the sync and pages are reaped by job |
+| 4 | `source` kind; `sync_source` deleted | create syncs pages; a wrong stream error lists the valid ones; a non-registrar mutation is refused; registrar or admin delete stops the sync and pages are reaped by job |
 | 5 | `connector` + `credential` kinds | connector: list shows granted accounts with grantors; delete revokes (row gone, broker revoke attempted); create is refused pointing at `connect_account`. credential: list shows filled and empty slots; **no read contains a value, asserted**; delete clears one and status flips to empty; fill is refused pointing at `request_credentials` |
-| 6 | `agent` kind (core-registered) | "switch the agent to claude-fable-5" applies owner-gated and the next turn runs on it; a non-owner or speakerless apply is refused; a spec carrying `prompt` is refused naming the proposal path; create and delete refuse with the domain reason; a model update under a pending prompt proposal leaves its approval clean — the disjoint-writers contract, pinned by a test |
+| 6 | `agent` kind (core-registered) | "switch the research agent to claude-fable-5" applies through the main agent and the next turn runs on it; a non-admin or sibling child apply is refused; a spec carrying `prompt` is refused naming the proposal path; create and delete refuse with the domain reason; a model update under a pending prompt proposal leaves its approval clean — the disjoint-writers contract, pinned by a test |
 
 Each unit updates `spec.md` in the same commit (§Minimal built-in tools gains the five verbs;
 §Extension system gains the `objects` point — `propose_change` stays documented there, since the
@@ -413,7 +410,7 @@ proposal path survives this RFC, §3/§4); rows for `docs/plan.md` when accepted
   typed secret fields) make "no declared secret ever appears in a spec, a transcript, or a get"
   a construction property (§1 scopes what the gate can and cannot see); the envelope bound sits
   next to the parse. The same rule shapes `ObjectKind` itself:
-  no declared verb set or owner flag beside the handlers that would have to enforce them — the
+  no declared verb set or role flag beside the handlers that would have to enforce them — the
   refusal in the handler is the one truth (§1).
 - **Hot paths:** every verb is a turn-time tool call over indexed rows the kinds already own;
   no reconciler, no watch loop, no derived work inline on a write.
@@ -429,12 +426,4 @@ proposal path survives this RFC, §3/§4); rows for `docs/plan.md` when accepted
 | Fewer tools via a ref/view mini-grammar (`config_get(ref, view)`, RFC 0013 §6) | An in-band addressing DSL the model must learn; five flat verbs match how models already use kubectl-shaped surfaces, and each stays trivially simple |
 | Per-kind bespoke tools (status quo) | The Current-state table is the verdict: three tools where six kinds needed eighteen, and the read/delete halves simply never got built |
 | A `files` parameter on `object_apply` (RFC 0013's content channel) | `FileFrom` inside the one kind that needs it keeps content handling out of the envelope and the other kinds' way |
-| Declared `verbs` / `owner_mutations` fields on `ObjectKind` | Kinds own their storage, so a declaration enforces nothing the handler couldn't bypass in its own code — static metadata beside behavior, free to drift (the agent kind's "no create" is a domain rule that changes with multi-agent, not a capability fact). The handler's exception is the single truth and carries the better message; the cost is one instructive failed call in place of pre-flight verb discovery, and the kind `description` carries that in prose |
-
-## Open decisions
-
-1. **Owner-gating defaults.** Proposed: match today's behavior, kind by kind, in each handler
-   (`source`, `agent`, `connector`, `credential` gated; `scheduled_task`, `skill` open to any
-   member). Open only if the owner wants mutations gated across the board from day one.
-2. **`ufoctl` read twins.** `ufoctl objects list|get <kind>` as operator conveniences over the
-   same registry. Proposed: not now — chat is the member surface, and the operator has the DB.
+| Declared `verbs` / role-mutation fields on `ObjectKind` | Kinds own their storage, so a declaration enforces nothing the handler couldn't bypass in its own code — static metadata beside behavior, free to drift. The handler's exception is the single truth and carries the better message; the cost is one instructive failed call in place of pre-flight verb discovery, and the kind `description` carries that in prose |

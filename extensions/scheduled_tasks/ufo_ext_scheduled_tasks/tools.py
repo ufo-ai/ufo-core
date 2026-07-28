@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator
 
 from ufo.sdk.objects import (
     CONVERSATION_KIND,
+    AdminRequired,
     MemberOwnedObjects,
     ObjectDetail,
     ObjectKind,
@@ -24,7 +25,6 @@ from ufo.sdk.objects import (
     ObjectOwner,
     ObjectRef,
     OwnedRow,
-    OwnerRequired,
 )
 from ufo.sdk.scheduling import ScheduledTask, ScheduleStore
 from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
@@ -34,7 +34,8 @@ SCHEDULED_TASK_KIND = "scheduled_task"
 SUMMARY_MAX = 120
 RESPONSE_EXCERPT_MAX = 400
 SCHEDULE_GATE = "only the task's creator may change a scheduled task"
-DELETE_GATE = "only the task's creator or the workspace owner may delete a scheduled task"
+SCHEDULE_REQUESTER_GATE = "creating a scheduled task requires a member requester"
+DELETE_GATE = "only the task's creator or a workspace admin may delete a scheduled task"
 MAX_WAIT_MINUTES = 10_080
 PAUSE_DIRECTIVE = (
     "Reply with `ai_response`, then end your turn. The workflow resumes when a new message arrives "
@@ -99,16 +100,15 @@ def _summary(task: ScheduledTask) -> str:
 @dataclass(frozen=True)
 class ScheduledTaskObjects(MemberOwnedObjects[ScheduledTaskSpec]):
     """The kind's handlers over `ScheduleStore`: a task is private to the member who created it, so
-    only that member or the workspace owner sees and deletes it — the per-member visibility and
-    ownership gate is the base's. This kind supplies the task rows, their specs and status, and the
+    only that member or a workspace admin sees and deletes it — the per-member visibility and
+    admin gate is the base's. This kind supplies the task rows, their specs and status, and the
     upsert/cancel domain acts. Each apply binds the applying turn's conversation and agent, so a
     later fire re-enters that conversation as that agent, acting on behalf of the creator.
 
-    Editing is narrower than deleting: an upsert keeps the original creator, so an owner's edit of
-    another member's task would fire the owner's prompt as that member, against their private
-    memory and connections. Only the creator edits a task that has one. A task created on a turn
-    with no acting member has no creator to act as, so the workspace owner administers it — the
-    base already admits none but the owner to a creatorless row."""
+    Editing is narrower than deleting: an upsert keeps the original creator, so an admin's edit of
+    another member's task would fire the admin's prompt as that member, against their private
+    memory and connections. Every new task requires an acting member and only its creator edits
+    it."""
 
     kind_name: ClassVar[str] = SCHEDULED_TASK_KIND
     mutate_gate: ClassVar[str] = SCHEDULE_GATE
@@ -179,10 +179,13 @@ class ScheduledTaskObjects(MemberOwnedObjects[ScheduledTaskSpec]):
         old: ScheduledTaskSpec | None,
         owner: ObjectOwner | None,
     ) -> None:
-        creator = None if owner is None else owner.member_id
-        if creator is not None and creator != ctx.acting_member_id:
-            raise OwnerRequired(SCHEDULE_GATE)
         schedule = validate_cron(spec.schedule)
+        acting_member = ctx.acting_member_id
+        if acting_member is None:
+            raise AdminRequired(SCHEDULE_REQUESTER_GATE)
+        creator = None if owner is None else owner.member_id
+        if creator is not None and creator != acting_member:
+            raise AdminRequired(SCHEDULE_GATE)
         await _require_scheduler(ctx).create(
             conversation_id=ctx.turn.conversation_id,
             name=name,
@@ -190,7 +193,7 @@ class ScheduledTaskObjects(MemberOwnedObjects[ScheduledTaskSpec]):
             prompt=spec.prompt,
             description=spec.description,
             next_run_at=next_fire(schedule, datetime.now(UTC)),
-            created_by_member_id=ctx.acting_member_id,
+            created_by_member_id=acting_member,
             expires_at=spec.expires_at,
         )
 
@@ -208,17 +211,17 @@ SCHEDULED_TASK_OBJECT = ObjectKind(
     description=(
         "A durable recurring task: a 5-field UTC cron schedule that re-invokes the agent with "
         "the spec's prompt, reporting into the conversation that created it. Private to its "
-        "creator — only the creator or the workspace owner sees, updates, or deletes it; a fire "
-        "acts on the creator's behalf. One-shot scheduling is not supported."
+        "creator — the creator may read, update, or delete it; an admin may inspect or delete it; "
+        "a fire acts on the creator's behalf. One-shot scheduling is not supported."
     ),
     guidance=(
         "Apply a manifest to schedule a recurring task for yourself: give a 5-field cron "
         "schedule and the task prompt. The platform materializes a locked-down recurring task "
         "that searches memory, then invokes you on that schedule in the conversation the task "
         "was created from; re-applying an existing name updates the definition in place and "
-        "never moves where it reports. A task is private to its creator: reads, updates, and "
-        "delete are the creator's or the workspace owner's — another member's tasks are not "
-        "visible. A fire acts as the creator and uses the creator's private connections, but "
+        "never moves where it reports. A task is private to its creator: an admin may inspect or "
+        "delete another member's task but cannot alter its prompt or schedule. Other members "
+        "cannot see it. A fire acts as the creator and uses the creator's private connections, but "
         "recalls only the memory its reporting conversation can see (shared-only in a channel). "
         "Listing returns each task's name, schedule, and description; get shows where it reports "
         "and the latest run's response. A run's per-run output is not durable memory — it belongs "

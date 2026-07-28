@@ -92,12 +92,16 @@ class ToolContext(Protocol):    # capability-scoped view a handler gets
     sandbox: SandboxSession; memory: MemoryService; blob: BlobStore
     turn: Turn; agent: AgentRuntime
     speaker_member_id: UUID | None; audience: Audience
+    acting_member_id: UUID | None; effective_audience: Audience
     async def ask_user(self, question: Question) -> Answer: ...
     async def spawn(self, profile: str, input: BaseModel, background: bool = False) -> SpawnResult: ...
 class ToolResult(BaseModel):    content: tuple[ContentBlock, ...]; is_error: bool = False
 ```
 Builtins: `bash read write edit memory_search memory_update ask_user spawn_subagent load_skill
 share_file`. Registry rejects a second registration of an existing name.
+Every tool schema also accepts optional `requested_by`: a visible active inbound message ref.
+Dispatch strips it before validating the declared input and binds that message's member to the
+context; omission is common authority unless the turn carries `on_behalf_of_member_id`.
 
 ## sandbox/
 
@@ -108,7 +112,8 @@ class Carrier(Protocol):
     async def write(self, h: SandboxHandle, path: str, content: bytes) -> None: ...  # copy-in
     async def route(self, h: SandboxHandle, port: int) -> str: ...       # serving URL
     async def destroy(self, h: SandboxHandle) -> None: ...
-class SandboxSpec(BaseModel):  conversation_id: UUID; image_digest: str; mount: MountSpec; proxy: ProxyEndpoint
+class SandboxSpec(BaseModel):  conversation_id: UUID; image_digest: str; mount: MountSpec
+                               proxy: ProxyEndpoint; run_token: str
 ```
 Docker implements in core; a reaper job reclaims idle containers. Proxy rules (module-private in
 `sandbox/proxy/`, no public register API):
@@ -211,8 +216,11 @@ extension may touch; a CI gate fails any `extensions/` import outside `ufo.sdk`.
 - `workspace_tx()` is the only session source; the engine is unreachable elsewhere.
 - The sandbox proxy is the only egress route; rules derive from manifests + grants; no register API.
 - At most one running turn per conversation; every awaited turn ends in a committed terminal frame.
+- A live turn absorbs every speaker's inbound FIFO and emits one terminal reply and writeback.
 - A conversation persists one exact audience; foreign rooms cannot read workspace-shared subjects.
 - The sandbox reaches only `conversations/<cid>/workspace/`; the container is disposable cache.
+- Sandbox commands carry signed `(workspace, turn, acting member)` authority; descendants inherit
+  their launch environment, while unbound commands carry common authority.
 - Extensions import `ufo.sdk` only; credentials resolve only for declared slots.
 - Derived state (embeddings, summaries, index rows) is produced by jobs, never inline.
 - Every model/tool/proxy call meters into the ledger in the turn's terminal commit — one write

@@ -15,8 +15,8 @@ from ufo.sandbox.session import ExecResult
 from ufo.schema.records import Agent, Turn
 from ufo.skills.runtime import CORE_SKILL_REGISTRY, RuntimeSkill, SkillRegistry
 from ufo.tools.builtins import BUILTIN_TOOLS
-from ufo.tools.context import Spawn, SpawnResult, SubagentStatus, ToolContext
-from ufo.tools.registry import ToolRegistry
+from ufo.tools.context import Spawn, SpawnResult, SubagentStatus, ToolContext, ToolResult
+from ufo.tools.registry import REQUESTED_BY, ToolDef, ToolRegistry
 
 REGISTRY = ToolRegistry(BUILTIN_TOOLS)
 ARTIFACT_SECRET = "tools-test-secret"
@@ -156,6 +156,31 @@ def test_registry_schemas_cover_every_tool() -> None:
     }
     bash = next(schema for schema in schemas if schema.name == "bash")
     assert "command" in bash.input_schema["properties"]
+    assert all(REQUESTED_BY in schema.input_schema["properties"] for schema in schemas)
+    assert bash.input_schema["properties"][REQUESTED_BY]["description"] == (
+        "Message ref that explicitly requested this call. Required for any member-specific "
+        "authority or capability, including admin actions; omit only for conversation-common work."
+    )
+
+
+def test_registry_reserves_the_message_authority_field() -> None:
+    class CollidingInput(BaseModel):
+        requested_by: str
+
+    async def handler(ctx: ToolContext, args: CollidingInput) -> ToolResult:
+        raise NotImplementedError
+
+    with pytest.raises(ValueError, match="tool inputs reserve 'requested_by': collision"):
+        ToolRegistry(
+            (
+                ToolDef(
+                    name="collision",
+                    description="d",
+                    input_model=CollidingInput,
+                    handler=handler,
+                ),
+            )
+        )
 
 
 async def test_bash_combines_output_and_flags_nonzero_exit(tmp_path: Path) -> None:

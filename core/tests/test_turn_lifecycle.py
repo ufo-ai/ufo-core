@@ -326,7 +326,18 @@ class StandInCarrier:
     writes: list[tuple[str, bytes]] = field(default_factory=list)
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
-        return SandboxHandle(conversation_id=spec.conversation_id, container_id="test")
+        proxy = f"http://{spec.run_token}:@proxy"
+        return SandboxHandle(
+            conversation_id=spec.conversation_id,
+            container_id="test",
+            run_token=spec.run_token,
+            egress_env={
+                "HTTP_PROXY": proxy,
+                "HTTPS_PROXY": proxy,
+                "http_proxy": proxy,
+                "https_proxy": proxy,
+            },
+        )
 
     async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None:
         self.writes.append((path, content))
@@ -720,24 +731,38 @@ async def test_redelivery_of_a_finished_turn_republishes_through_the_worker(
 
 
 async def test_mid_turn_messages_absorb_into_the_running_turn(surface: Turns) -> None:
-    """Messages sent while a turn runs land on the conversation's inbound queue and the running
-    turn absorbs them: the done-commit refuses to close over pending arrivals, the next round
-    drains each as its own context-tagged user message, and one reply answers everything. The
-    armed gate holds the first turn mid-stream — past its first (empty) drain, before its answer —
-    so both sends land in the guarded window deterministically."""
+    """A1, B1, A2 remain one FIFO turn, terminal, and durable writeback."""
     seed = await _bootstrap()
+    second_member = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=second_member,
+                workspace_id=seed.workspace_id,
+                email=f"{second_member.hex[:8]}@example.com",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    durable = Turns(
+        hub=surface.hub,
+        admission=Admission(
+            dbos=surface.admission.dbos,
+            durable_surfaces=frozenset(("cli",)),
+        ),
+    )
     STREAM_GATE.arm()
-    first = await surface.admit(seed, "one")
+    first = await durable.admit(seed, "one")
     async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
         while True:
             if first in STREAM_GATE._gates:
                 break
             await asyncio.sleep(0.01)
-    second = await surface.admit(seed, "two")
-    third = await surface.admit(seed, "three")
+    second = await durable.admit(replace(seed, member_id=second_member), "two")
+    third = await durable.admit(seed, "three")
     assert second == first
     assert third == first
-    streamed, terminal = await surface.consume(seed, first)
+    streamed, terminal = await durable.consume(seed, first)
     assert terminal["status"] == "done"
     assert streamed == "echo:1echo:4"
     assert terminal["text"] == "echo:4"
@@ -758,8 +783,28 @@ async def test_mid_turn_messages_absorb_into_the_running_turn(surface: Turns) ->
                 .where(tables.inbound_message.c.consumed_turn_id.is_(None))
             )
         ).scalar_one()
+        writebacks = (
+            await connection.execute(
+                sa.select(sa.func.count())
+                .select_from(tables.writeback)
+                .where(tables.writeback.c.turn_id == UUID(first))
+            )
+        ).scalar_one()
+        speakers = (
+            (
+                await connection.execute(
+                    sa.select(tables.inbound_message.c.speaker_member_id)
+                    .where(tables.inbound_message.c.conversation_id == conversation_id)
+                    .order_by(tables.inbound_message.c.seq)
+                )
+            )
+            .scalars()
+            .all()
+        )
     assert turns == 1
     assert unconsumed == 0
+    assert writebacks == 1
+    assert speakers == [second_member, seed.member_id]
     _, _, blob = _runtime_parts()
     stored = await _read_transcript(blob, conversation_id, 1)
     assert stored.seq == 1

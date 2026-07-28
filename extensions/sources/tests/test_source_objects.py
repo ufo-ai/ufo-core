@@ -5,7 +5,7 @@ assertions read back through the durable `source` rows and the verbs' own result
 error-driven discovery (unknown provider/stream refusals listing the valid sets), the tenant-URL
 safety rules, broker- and direct-auth resolution, delete marking the row removed and tombstoning
 its pages, and revival on an identical re-registration. A source is private to its registering
-member by default; sharing it and deleting it are gated to the registrar or the workspace owner."""
+member by default; sharing it and deleting it are gated to the registrar or a workspace admin."""
 
 import json
 from collections import Counter
@@ -43,7 +43,7 @@ from ufo.sdk.audience import conversation_audience
 from ufo.sdk.authproxy import DIRECT_ACCOUNT
 from ufo.sdk.connectors import ConnectorEntry, ConnectorRegistry
 from ufo.sdk.manifest import HookContext, PageChangeBatch
-from ufo.sdk.objects import OwnerRequired, VerbNotSupported
+from ufo.sdk.objects import AdminRequired, VerbNotSupported
 from ufo.sdk.sources import ConnectorSourceConfig, PageChange
 from ufo.sdk.tools import ToolContext
 from ufo.sources.sync import SyncDriver
@@ -106,6 +106,7 @@ async def _workspace() -> _Workspace:
                     "id": owner_id,
                     "workspace_id": workspace_id,
                     "email": f"{owner_id.hex}@x.test",
+                    "is_admin": True,
                     "created_at": created_at,
                     "updated_at": created_at,
                 },
@@ -113,6 +114,7 @@ async def _workspace() -> _Workspace:
                     "id": member_id,
                     "workspace_id": workspace_id,
                     "email": f"{member_id.hex}@x.test",
+                    "is_admin": False,
                     "created_at": created_at + timedelta(seconds=1),
                     "updated_at": created_at + timedelta(seconds=1),
                 },
@@ -125,6 +127,7 @@ async def _workspace() -> _Workspace:
                 name="assistant",
                 prompt="p",
                 model="claude-opus-4-8",
+                is_main=True,
                 created_at=created_at,
                 updated_at=created_at,
             )
@@ -448,7 +451,7 @@ async def test_the_model_registers_a_shared_source_on_request(
     assert {row["owner_member_id"] for row in rows} == {state.member_id}
 
 
-async def test_the_registrar_shares_their_source_and_a_stranger_cannot(
+async def test_only_the_registrar_may_widen_a_private_source(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("GREENHOUSE", "secret")
@@ -485,24 +488,25 @@ async def test_the_registrar_shares_their_source_and_a_stranger_cannot(
             )
 
         await _apply(member_ctx, _manifest_text(GREENHOUSE, ("jobs",), gh_name, shared=True))
-        await _apply(
-            owner_ctx,
-            _manifest_text(
-                FRESHDESK,
-                ("tickets",),
-                fd_name,
-                base_url="https://acme.freshdesk.com",
-                shared=True,
-            ),
-        )
+        with pytest.raises(AdminRequired, match="only the registering member may change"):
+            await _apply(
+                owner_ctx,
+                _manifest_text(
+                    FRESHDESK,
+                    ("tickets",),
+                    fd_name,
+                    base_url="https://acme.freshdesk.com",
+                    shared=True,
+                ),
+            )
 
-        with pytest.raises(
-            OwnerRequired, match="registering member or the workspace owner"
-        ) as raised:
+        with pytest.raises(AdminRequired, match="only the registering member may change") as raised:
             await _apply(stranger_ctx, _manifest_text(GREENHOUSE, ("jobs",), gh_name))
         assert str(state.member_id) not in str(raised.value)
     assert {row["subject"] for row in await _rows(state, GREENHOUSE)} == {SHARED_SUBJECT}
-    assert {row["subject"] for row in await _rows(state, FRESHDESK)} == {SHARED_SUBJECT}
+    assert {row["subject"] for row in await _rows(state, FRESHDESK)} == {
+        member_subject(state.member_id)
+    }
     async with workspace_tx() as connection:
         page = (
             (await connection.execute(sa.select(tables.page).where(tables.page.c.id == page_id)))
@@ -537,7 +541,7 @@ async def test_stranger_applying_a_private_source_name_is_not_found(
             )
             with pytest.raises(UnknownObject) as raised:
                 await apply_tool.handler(stranger_ctx, args)
-            assert "registering member or the workspace owner" not in str(raised.value)
+            assert "only the registering member may change" not in str(raised.value)
             assert str(state.member_id) not in str(raised.value)
             messages.append(str(raised.value))
         assert messages[0] == messages[1]
@@ -565,7 +569,7 @@ async def test_unsharing_is_delete_and_recreate(db: None, monkeypatch: pytest.Mo
     assert {row["subject"] for row in await _rows(state, GREENHOUSE)} == {SHARED_SUBJECT}
 
 
-async def test_delete_is_registrar_or_owner(db: None, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_delete_is_registrar_or_admin(db: None, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GREENHOUSE", "secret")
     monkeypatch.setenv("FRESHDESK", "secret")
     state = await _workspace()
@@ -604,7 +608,7 @@ async def test_delete_is_registrar_or_owner(db: None, monkeypatch: pytest.Monkey
             subject=SHARED_SUBJECT,
             owner_member_id=None,
         )
-        with pytest.raises(OwnerRequired, match="registering member or the workspace owner"):
+        with pytest.raises(AdminRequired, match="registering member or a workspace admin"):
             await delete_tool.handler(
                 member_ctx,
                 delete_tool.input_model.model_validate(
@@ -1021,7 +1025,7 @@ async def test_source_delete_needs_a_live_speaker(
     member_name = binding_name(GREENHOUSE, DIRECT_ACCOUNT, None)
     with ws(state.workspace_id), agent(state.agent_id):
         await _apply(member_ctx, _manifest_text(GREENHOUSE, ("jobs",), member_name))
-        with pytest.raises(OwnerRequired):
+        with pytest.raises(AdminRequired):
             await delete_tool.handler(
                 speakerless,
                 delete_tool.input_model.model_validate(
@@ -1032,11 +1036,11 @@ async def test_source_delete_needs_a_live_speaker(
     assert row["removed_at"] is None
 
 
-async def test_owner_reapplying_a_members_private_source_is_a_noop(
+async def test_admin_reapplying_a_members_private_source_is_a_noop(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The workspace owner re-applying another member's private source with the identical spec is a
-    no-op: it neither errors nor re-attributes the source to the owner (an existing binding never
+    """The workspace admin re-applying another member's private source with the identical spec is a
+    no-op: it neither errors nor re-attributes the source to the admin (an existing binding never
     falls through to the create path, which would stamp the acting caller as owner)."""
     monkeypatch.setenv("GREENHOUSE", "secret")
     state = await _workspace()

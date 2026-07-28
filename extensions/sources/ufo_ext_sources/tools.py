@@ -6,8 +6,8 @@ row the core sync driver polls. Identity IS the binding, so names derive from it
 (`<provider>-<8-hex digest>`): apply with the wrong name refuses and hands back the exact one,
 changing streams is delete-and-recreate, and re-applying the identical spec is a no-op. A source
 is private to its registering member by default; the model decides `shared` at registration, and
-only the registrar or the workspace owner may later flip a private source to shared — the
-reverse is delete-and-recreate. Delete is registrar-or-owner too. Validation refuses with the
+only the registrar may later flip a private source to shared — the reverse is
+delete-and-recreate. Delete is registrar-or-admin. Validation refuses with the
 valid provider and stream sets, so discovery is error-driven plus `object_explain`.
 
 The `subscribers` field is the one part any member who can see the source may change: a
@@ -35,6 +35,7 @@ from ufo.sdk.connectors import ConnectorRegistry
 from ufo.sdk.context import CredentialSlotUnset, ExtensionContext
 from ufo.sdk.manifest import HookContext, HookOutcome, PageChangeBatch
 from ufo.sdk.objects import (
+    AdminRequired,
     MemberOwnedObjects,
     ObjectDetail,
     ObjectKind,
@@ -259,8 +260,10 @@ def _self_only_change(old: tuple[str, ...], new: tuple[str, ...], caller: str) -
         )
 
 
-SHARE_GATE = "only the registering member or the workspace owner may change a source's sharing"
-DELETE_GATE = "only the registering member or the workspace owner may remove a source"
+SHARE_GATE = (
+    "only the registering member may change a source; workspace admins may inspect or remove it"
+)
+DELETE_GATE = "only the registering member or a workspace admin may remove a source"
 
 
 @dataclass(frozen=True)
@@ -270,7 +273,7 @@ class SourceObjects(MemberOwnedObjects[SourceSpec]):
     tenant URL, and auth exactly as registration always has, then registers one row per stream
     (the first sync is scheduled immediately) — private to the registering member unless the
     model asks for `shared`; delete removes the binding's rows and their synced pages follow
-    through the page-tombstone pipeline. The per-member visibility and registrar-or-owner gate is
+    through the page-tombstone pipeline. The per-member visibility and registrar-or-admin gate is
     the base's; this kind supplies the bindings, their specs, and the register/share/remove acts."""
 
     kind_name: ClassVar[str] = SOURCE_KIND
@@ -284,10 +287,14 @@ class SourceObjects(MemberOwnedObjects[SourceSpec]):
         """A subscribers-only edit on a source the caller can already see (`old` is non-None only
         for a visible source, since the base `get` hides the rest) is gated on visibility, not
         ownership: any member who sees the source may add or remove their own conversation. Every
-        other apply — register, share-flip, recreate — goes through the base's registrar-or-owner
-        gate."""
+        other apply — register, share-flip, recreate — goes through the base's member/admin gate."""
         if old is not None and _binding_identity(spec) == _binding_identity(old):
             caller = ctx.turn.conversation_id.hex
+            owner = await self._owner(ctx, name)
+            if owner is not None and not owner.shared and owner.member_id != ctx.acting_member_id:
+                if spec.subscribers != old.subscribers:
+                    raise AdminRequired(SHARE_GATE)
+                return
             _self_only_change(old.subscribers, spec.subscribers, caller)
             await self._edit_subscribers(
                 _require_ext(ctx), name, spec.subscribers, caller, ctx.turn.agent_id
@@ -679,7 +686,7 @@ SOURCE_OBJECT = ObjectKind(
     description=(
         "A registered content-sync binding: one provider account's selected streams, synced "
         "privately to its registering member unless shared. Changing streams is "
-        "delete-and-recreate; sharing and delete are gated to the registrar or the owner."
+        "delete-and-recreate; only the registrar may share, while an admin may inspect or remove."
     ),
     guidance=(
         "Apply a manifest to register selected streams of a content-source provider; an unknown "
@@ -688,14 +695,14 @@ SOURCE_OBJECT = ObjectKind(
         "tenant URL). Brokered providers use this agent's active connected-account grant; "
         "providers without a broker use their workspace credential. A source syncs privately to "
         "its registering member by default; set `shared: true` at apply — or in a later "
-        "re-apply by the registrar or the workspace owner — to sync it into workspace-shared "
+        "re-apply by the registrar — to sync it into workspace-shared "
         "memory instead, only when the member's words say the source is for the team. "
         "Unsharing is delete-and-recreate; a source's identity is otherwise its config, so "
-        "changing streams is delete and recreate too. Delete is registrar-or-owner. Reads show "
-        "shared sources plus the member's own — a workspace owner sees all. To be alerted when a "
+        "changing streams is delete and recreate too. Delete is registrar-or-admin. Reads show "
+        "shared sources plus the member's own — a workspace admin sees all. To be alerted when a "
         "source you can see changes, object_get it, then object_apply the same manifest with your "
         "own conversation id (shown as status.subscriber_id) added to `subscribers`; remove it to "
-        "stop. You may only add or remove your own id, and subscribing is not owner-gated."
+        "stop. You may only add or remove your own id, and subscribing is not admin-gated."
     ),
     spec_model=SourceSpec,
     store=SourceObjects(),

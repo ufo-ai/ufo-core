@@ -8,7 +8,7 @@ returns its schema-validated output; background returns the child turn id at onc
 
 import asyncio
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
@@ -135,6 +135,14 @@ class Subagents:
     registry: SubagentRegistry
     parent: Turn
     audience: Audience
+    requester_member_id: UUID | None = None
+
+    def authorize(self, requester_member_id: UUID | None) -> "Subagents":
+        return replace(self, requester_member_id=requester_member_id)
+
+    @property
+    def acting_member_id(self) -> UUID | None:
+        return self.requester_member_id or self.parent.on_behalf_of_member_id
 
     async def spawn(
         self,
@@ -264,9 +272,7 @@ class Subagents:
                     inbound=text,
                     admission_source=INTERNAL_ADMISSION,
                     speaker_member_id=None,
-                    on_behalf_of_member_id=(
-                        self.parent.on_behalf_of_member_id or self.parent.speaker_member_id
-                    ),
+                    on_behalf_of_member_id=self.acting_member_id,
                     terminal=None,
                     parent_turn_id=self.parent.id,
                     subagent_profile=child.subagent_profile,
@@ -310,12 +316,18 @@ class Subagents:
         async with workspace_tx() as connection:
             row = (
                 await connection.execute(
-                    sa.select(tables.turn.c.parent_turn_id, tables.turn.c.subagent_profile).where(
-                        tables.turn.c.id == turn_id
-                    )
+                    sa.select(
+                        tables.turn.c.parent_turn_id,
+                        tables.turn.c.subagent_profile,
+                        tables.turn.c.on_behalf_of_member_id,
+                    ).where(tables.turn.c.id == turn_id)
                 )
             ).one_or_none()
-        if row is None or row.parent_turn_id != self.parent.id:
+        if (
+            row is None
+            or row.parent_turn_id != self.parent.id
+            or row.on_behalf_of_member_id != self.acting_member_id
+        ):
             raise ValueError(f"{turn_id} is not a subagent this turn spawned")
         return row.subagent_profile
 
@@ -356,9 +368,7 @@ class Subagents:
                     inbound=inbound,
                     admission_source=INTERNAL_ADMISSION,
                     speaker_member_id=None,
-                    on_behalf_of_member_id=(
-                        self.parent.on_behalf_of_member_id or self.parent.speaker_member_id
-                    ),
+                    on_behalf_of_member_id=self.acting_member_id,
                     terminal=None,
                     parent_turn_id=self.parent.id,
                     subagent_profile=profile,
@@ -368,14 +378,19 @@ class Subagents:
                 )
                 .on_conflict_do_nothing()
             )
-            status = (
+            claimed = (
                 await connection.execute(
-                    sa.select(tables.turn.c.status)
+                    sa.select(
+                        tables.turn.c.status,
+                        tables.turn.c.on_behalf_of_member_id,
+                    )
                     .where(tables.turn.c.id == turn_id)
                     .with_for_update()
                 )
-            ).scalar_one()
-            if status != "queued":
+            ).one()
+            if claimed.on_behalf_of_member_id != self.acting_member_id:
+                raise ValueError("subagent dedup key belongs to another member request")
+            if claimed.status != "queued":
                 return False
             await connection.execute(
                 sa.update(tables.turn)

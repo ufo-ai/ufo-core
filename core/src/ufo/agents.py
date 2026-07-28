@@ -1,12 +1,11 @@
 """The core-registered `agent` object kind: the workspace's agent as a workspace object.
 
 Each agent field has exactly one write path, so this kind and the governance proposal path can
-never conflict. Spec holds the model and public-internet policy, applied directly and owner-gated
+never conflict. Spec holds the model and public-internet policy, applied directly and admin-gated
 over the `agent` table; `prompt` belongs to `Governance`'s proposal CAS and appears here read-only
 in status beside its digest (the `from_digest` a proposal presents, so `object_get agent` is the
-read half of the proposal flow). One agent exists per workspace, created at `ufoctl init`, so the
-kind is update-only: changes take effect on the next turn. Create and delete raise with that
-reason; a non-owner mutation raises `OwnerRequired`."""
+read half of the proposal flow). The kind is update-only: changes take effect on the next turn.
+Create and delete raise; a non-admin mutation raises `AdminRequired`."""
 
 from dataclasses import dataclass
 
@@ -18,12 +17,12 @@ from ufo.ext.context import JsonValue
 from ufo.governance import prompt_digest
 from ufo.models.interface import AUTO_MODEL
 from ufo.objects import (
+    AdminRequired,
     ObjectDetail,
     ObjectKind,
     ObjectListQuery,
     ObjectPage,
     ObjectRow,
-    OwnerRequired,
     VerbNotSupported,
     object_page,
 )
@@ -32,9 +31,12 @@ from ufo.tools.context import ToolContext
 from ufo.workspace import ws_current
 
 AGENT_KIND = "agent"
-SINGLE_AGENT = "one agent per workspace today — it is created at workspace init, never applied"
-AGENT_UNDELETABLE = "one agent per workspace today — the agent cannot be deleted"
-AGENT_EDIT_GATE = "only the workspace owner can edit the agent"
+AGENT_CREATE = "agents cannot be created through object_apply"
+AGENT_UNDELETABLE = "agents cannot be deleted through objects"
+AGENT_EDIT_GATE = (
+    "editing an agent requires a workspace admin; editing another agent also requires "
+    "the main agent"
+)
 
 
 def _effective_model(ctx: ToolContext, stored: str) -> str:
@@ -66,7 +68,7 @@ class AgentSpec(BaseModel):
 @dataclass(frozen=True)
 class AgentObjects:
     """Update-only handlers over the `agent` table: apply rewrites the model and internet policy
-    in place, owner-gated; the prompt is proposal-owned and rendered read-only in status."""
+    in place, admin-gated; the prompt is proposal-owned and rendered read-only in status."""
 
     async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage:
         async with workspace_tx() as connection:
@@ -75,6 +77,7 @@ class AgentObjects:
                     sa.select(
                         tables.agent.c.name,
                         tables.agent.c.model,
+                        tables.agent.c.is_main,
                         tables.agent.c.internet_access_allowed,
                     )
                     .where(tables.agent.c.workspace_id == ws_current().workspace_id)
@@ -86,7 +89,8 @@ class AgentObjects:
                 ObjectRow(
                     name=row.name,
                     summary=(
-                        f"the workspace agent, on {_effective_model(ctx, row.model)}, public "
+                        f"{'main agent' if row.is_main else 'agent'}, "
+                        f"on {_effective_model(ctx, row.model)}, public "
                         f"internet {'allowed' if row.internet_access_allowed else 'blocked'}"
                     ),
                 )
@@ -115,6 +119,7 @@ class AgentObjects:
         if row is None:
             return None
         return {
+            "main": row.is_main,
             "prompt": row.prompt,
             "prompt_digest": prompt_digest(row.prompt),
             "model": _effective_model(ctx, row.model),
@@ -124,9 +129,14 @@ class AgentObjects:
         self, ctx: ToolContext, name: str, spec: AgentSpec, old: AgentSpec | None
     ) -> None:
         if old is None:
-            raise VerbNotSupported(SINGLE_AGENT)
-        if not await ctx.speaker_is_owner():
-            raise OwnerRequired(AGENT_EDIT_GATE)
+            raise VerbNotSupported(AGENT_CREATE)
+        row = await self._row(name)
+        if row is None:
+            raise VerbNotSupported(AGENT_CREATE)
+        if not await ctx.speaker_is_admin() or (
+            row.id != ctx.turn.agent_id and not await ctx.agent_is_main()
+        ):
+            raise AdminRequired(AGENT_EDIT_GATE)
         async with workspace_tx() as connection:
             await connection.execute(
                 sa.update(tables.agent)
@@ -150,7 +160,9 @@ class AgentObjects:
                 await connection.execute(
                     sa.select(
                         tables.agent.c.prompt,
+                        tables.agent.c.id,
                         tables.agent.c.model,
+                        tables.agent.c.is_main,
                         tables.agent.c.internet_access_allowed,
                         tables.agent.c.created_at,
                         tables.agent.c.updated_at,
@@ -165,16 +177,17 @@ class AgentObjects:
 AGENT_OBJECT = ObjectKind(
     name=AGENT_KIND,
     description=(
-        "The workspace's agent: its model and public-internet policy, readable by all members and "
-        "updatable by the workspace owner. It cannot be created or deleted."
+        "A workspace agent: its model and public-internet policy, readable by all members and "
+        "updatable by a workspace admin. It cannot be created or deleted through objects."
     ),
     guidance=(
-        "The workspace's main agent as an object. Apply {model, internet_access_allowed} to change "
-        "its model or public-internet access — workspace owner only, taking effect on the next "
+        "A workspace agent as an object. Apply {model, internet_access_allowed} to change "
+        "its model or public-internet access — admin only, taking effect on the next "
         "turn. Blocking public internet leaves exact model, credential, connector, and transfer "
         "hosts available. The system prompt is read-only here: prompt changes use the governed "
-        "proposal path, and status carries its current value and digest. Create and delete are "
-        "refused: one agent per workspace today. Confirm before changing either setting."
+        "proposal path, and status carries its current value and digest. The main agent may manage "
+        "other agents; a child agent may only manage itself. Create and delete are refused. "
+        "Confirm before changing either setting."
     ),
     spec_model=AgentSpec,
     store=AgentObjects(),

@@ -603,6 +603,56 @@ async def test_seated_reply_does_not_resume_a_seat_blocked_parked_turn(db: None)
     assert await _queued_bodies(conversation_id) == []
 
 
+async def test_seated_reply_does_not_resume_an_aggregate_with_an_unseated_speaker(
+    db: None,
+) -> None:
+    workspace_id, member_id, _, conversation_id = await _seed()
+    await _set_limit(workspace_id, 2)
+    await _seat(member_id)
+    unseated = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=unseated,
+                workspace_id=workspace_id,
+                email="unseated@example.com",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    dbos = StubDbos()
+    admission = Admission(dbos=dbos, durable_surfaces=frozenset())
+    first = await admission.admit_member(workspace_id, conversation_id, "first", member_id)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .values(status="parked", updated_at=sa.func.now())
+            .where(tables.turn.c.id == first)
+        )
+        await connection.execute(
+            sa.insert(tables.inbound_message).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                seq=1,
+                body="pending",
+                admission_source="member",
+                speaker_member_id=unseated,
+                admitted_turn_id=first,
+                created_at=sa.func.now(),
+            )
+        )
+
+    second = await admission.admit_member(workspace_id, conversation_id, "resume", member_id)
+
+    assert second != first
+    first_status, _ = await _turn_row(first)
+    second_status, _ = await _turn_row(second)
+    assert first_status == "parked"
+    assert second_status == "queued"
+    assert await _queued_bodies(conversation_id) == ["pending"]
+
+
 async def test_unseated_speakers_message_does_not_take_over_a_timer_turn(db: None) -> None:
     workspace_id, member_id, agent_id, conversation_id = await _seed()
     task_id, timer_turn_id = uuid4(), uuid4()

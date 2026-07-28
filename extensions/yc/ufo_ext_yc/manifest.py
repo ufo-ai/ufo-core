@@ -50,7 +50,7 @@ YC_READ_TOOL = ToolDef(
 YC_AUTH_TOOL = ToolDef(
     name="yc_auth",
     description=(
-        "Connect the workspace owner's YC account through browser device authorization. Call "
+        "Connect a workspace admin's YC account through browser device authorization. Call "
         "`start` when the member asks to connect YC, then reply with the returned URL and code. "
         "After the member says they approved it, call `complete`; if still pending, show the same "
         "URL and code. The resulting credential is encrypted and never enters chat or the sandbox."

@@ -23,7 +23,6 @@ from uuid import UUID
 import sqlalchemy as sa
 from pydantic import BaseModel, ConfigDict, Field
 
-from ufo.sdk.audience import Audience
 from ufo.sdk.context import ExtensionContext
 from ufo.sdk.index import TextChunker
 from ufo.sdk.jobs import JobSpec, owner_candidates
@@ -167,14 +166,13 @@ class MemorySearchService:
     async def search(
         self,
         queries: tuple[str, ...],
-        audience: Audience,
+        subjects: frozenset[str],
         start: datetime | None = None,
         end: datetime | None = None,
     ) -> tuple[MemoryMatch, ...]:
         if not 1 <= len(queries) <= MAX_MEMORY_QUERIES:
             raise ValueError(f"memory search requires 1-{MAX_MEMORY_QUERIES} queries")
         store = store_for(self.ctx)
-        subjects = recall_subjects(audience)
         recall_batch = asyncio.gather(
             *(store.recall(query, subjects, MEMORY_SEARCH_LIMIT, start, end) for query in queries)
         )
@@ -236,7 +234,7 @@ async def memory_search_handler(ctx: ToolContext, args: MemorySearchInput) -> To
         raise RuntimeError("memory_search dispatched without its ExtensionContext")
     start = _date_bound(args.start_date, end=False)
     end = _date_bound(args.end_date, end=True)
-    matches = await MemorySearchService(ctx.ext).search(args.queries, ctx.audience, start, end)
+    matches = await MemorySearchService(ctx.ext).search(args.queries, ctx.read_subjects, start, end)
     if not matches:
         return ToolResult(content=(TextContent(text="No matching memory."),))
     return ToolResult(
@@ -247,7 +245,7 @@ async def memory_search_handler(ctx: ToolContext, args: MemorySearchInput) -> To
 async def memory_update_handler(ctx: ToolContext, args: MemoryUpdateInput) -> ToolResult:
     if ctx.ext is None:
         raise RuntimeError("memory_update dispatched without its ExtensionContext")
-    subject = str(ctx.audience)
+    subject = str(ctx.effective_audience)
     await store_for(ctx.ext).commit(
         MemoryWrite(
             subject=subject,

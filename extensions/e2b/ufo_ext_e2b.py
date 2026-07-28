@@ -238,6 +238,7 @@ class E2BCarrier:
             container_id=sandbox.sandbox_id,
             mount=spec.mount,
             traffic_token=sandbox.traffic_access_token,
+            run_token=spec.run_token,
             egress_env={**egress_env, **spec.env},
         )
 

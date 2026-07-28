@@ -6,7 +6,7 @@ registers kinds through the `objects` Manifest point; each kind's `store` handle
 extension's own tables, so the handler IS the create/update/delete trigger — core validates the
 envelope, the name grammar, and the spec, then calls it. Refusal lives in the handler, not a
 declaration: a kind that doesn't do a mutation raises `VerbNotSupported` with the domain reason,
-and a kind that gates on role checks `ctx.speaker_is_owner()` itself, raising `OwnerRequired`.
+and a kind that gates on role checks `ctx.speaker_is_admin()` itself, raising `AdminRequired`.
 
 `object_registry` is the boot gate: kind-name collisions and spec models that admit unknown keys,
 non-JSON types, or secret-bearing fields fail loud before serving — specs are stored, rendered
@@ -131,8 +131,8 @@ class VerbNotSupported(ValueError):
     """Handler-raised: the kind does not do this mutation; the message names the path that does."""
 
 
-class OwnerRequired(ValueError):
-    """Handler-raised: the mutation is gated on the workspace owner and the speaker is not one."""
+class AdminRequired(ValueError):
+    """Handler-raised: the mutation requires a speaking workspace admin."""
 
 
 @dataclass(frozen=True)
@@ -289,7 +289,7 @@ class ObjectStore[SpecT: BaseModel](Protocol):
     everything the owning row carries — spec, timestamps, links; `apply` receives the validated
     spec and the currently applied one (None on create); `status` is kind-specific live state
     rendered beside the spec on get — read by no code, so a loose mapping is the honest type.
-    Handlers raise `VerbNotSupported` / `OwnerRequired` / domain `ValueError`s; each renders as
+    Handlers raise `VerbNotSupported` / `AdminRequired` / domain `ValueError`s; each renders as
     the tool error."""
 
     async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage: ...
@@ -306,7 +306,7 @@ class ObjectStore[SpecT: BaseModel](Protocol):
 @dataclass(frozen=True)
 class ObjectOwner:
     """Who a member-owned row belongs to and whether the workspace shares it. `member_id` None
-    means owner-only: visible to and mutable by the workspace owner alone."""
+    means admin-only."""
 
     member_id: UUID | None
     shared: bool
@@ -327,9 +327,9 @@ class MemberOwnedObjects[SpecT: BaseModel]:
     once, so a kind cannot ship without it. A subclass supplies only data (`_owned_rows`, `_detail`,
     `_status`) and domain mutation (`_apply_owned`, `_delete_owned`); the gate hides a row invisible
     to the acting member (absent from `list`, not-found from `get`/`status`, `UnknownObject` from
-    `apply`/`delete`) and refuses `OwnerRequired` when a visible row is not the actor's to change.
-    A row is visible when it is shared, owned by the acting member, or the speaker is the workspace
-    owner; a row whose owner `member_id` is None is owner-only. A kind whose mutation or deletion is
+    `apply`/`delete`) and refuses `AdminRequired` when a visible row is not the actor's to change.
+    A row is visible when it is shared, owned by the acting member, or the speaker is a workspace
+    admin; a row whose owner `member_id` is None is admin-only. A kind whose mutation or deletion is
     a grant/disclosure act sets `mutate_requires_speaker`/`delete_requires_speaker` so the gate also
     refuses it on a speakerless (scheduled/subagent) turn — an act that discloses or revokes access
     needs a live member, never a background turn acting on someone's behalf. The class vars name the
@@ -342,19 +342,19 @@ class MemberOwnedObjects[SpecT: BaseModel]:
     delete_requires_speaker: ClassVar[bool] = False
 
     async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage:
-        is_owner = await ctx.speaker_is_owner()
+        is_admin = await ctx.speaker_is_admin()
         acting = ctx.acting_member_id
         rows = tuple(
             ObjectRow(name=row.name, summary=row.summary)
             for row in await self._owned_rows(ctx)
-            if self._visible(row.owner, acting, is_owner)
+            if self._visible(row.owner, acting, is_admin)
         )
         return object_page(rows, query)
 
     async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[SpecT] | None:
         owner = await self._owner(ctx, name)
         if owner is None or not self._visible(
-            owner, ctx.acting_member_id, await ctx.speaker_is_owner()
+            owner, ctx.acting_member_id, await ctx.speaker_is_admin()
         ):
             return None
         return await self._detail(ctx, name)
@@ -362,7 +362,7 @@ class MemberOwnedObjects[SpecT: BaseModel]:
     async def status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None:
         owner = await self._owner(ctx, name)
         if owner is None or not self._visible(
-            owner, ctx.acting_member_id, await ctx.speaker_is_owner()
+            owner, ctx.acting_member_id, await ctx.speaker_is_admin()
         ):
             return None
         return await self._status(ctx, name)
@@ -370,36 +370,44 @@ class MemberOwnedObjects[SpecT: BaseModel]:
     async def apply(self, ctx: ToolContext, name: str, spec: SpecT, old: SpecT | None) -> None:
         owner = await self._owner(ctx, name)
         if owner is not None:
-            is_owner = await ctx.speaker_is_owner()
-            if not self._visible(owner, ctx.acting_member_id, is_owner):
+            is_admin = await ctx.speaker_is_admin()
+            if not self._visible(owner, ctx.acting_member_id, is_admin):
                 raise UnknownObject(f"no {self.kind_name} object named {name!r}")
-            if not self._owned(owner, ctx.acting_member_id) and not is_owner:
-                raise OwnerRequired(self.mutate_gate)
+            if not self._owned(owner, ctx.acting_member_id):
+                if (
+                    not is_admin
+                    or old is None
+                    or (owner.member_id is not None and not self._admin_can_apply(old, spec))
+                ):
+                    raise AdminRequired(self.mutate_gate)
             if self.mutate_requires_speaker and ctx.speaker_member_id is None:
-                raise OwnerRequired(self.mutate_gate)
+                raise AdminRequired(self.mutate_gate)
         await self._apply_owned(ctx, name, spec, old, owner)
 
     async def delete(self, ctx: ToolContext, name: str) -> None:
         owner = await self._owner(ctx, name)
         if owner is None:
             raise UnknownObject(f"no {self.kind_name} object named {name!r}")
-        is_owner = await ctx.speaker_is_owner()
-        if not self._visible(owner, ctx.acting_member_id, is_owner):
+        is_admin = await ctx.speaker_is_admin()
+        if not self._visible(owner, ctx.acting_member_id, is_admin):
             raise UnknownObject(f"no {self.kind_name} object named {name!r}")
-        if not self._owned(owner, ctx.acting_member_id) and not is_owner:
-            raise OwnerRequired(self.delete_gate)
+        if not self._owned(owner, ctx.acting_member_id) and not is_admin:
+            raise AdminRequired(self.delete_gate)
         if self.delete_requires_speaker and ctx.speaker_member_id is None:
-            raise OwnerRequired(self.delete_gate)
+            raise AdminRequired(self.delete_gate)
         await self._delete_owned(ctx, name, owner)
 
     def _owned(self, owner: ObjectOwner, acting: UUID | None) -> bool:
-        """Whether the acting member is the row's member-owner. An owner-only row (`member_id`
-        None) is owned by no member — only the workspace owner (`is_owner`) may touch it — so this
+        """Whether the acting member is the row's member-owner. An admin-only row (`member_id`
+        None) is owned by no member — only a workspace admin may touch it — so this
         is never true for it, even on a turn whose acting member is also None."""
         return owner.member_id is not None and owner.member_id == acting
 
-    def _visible(self, owner: ObjectOwner, acting: UUID | None, is_owner: bool) -> bool:
-        return owner.shared or self._owned(owner, acting) or is_owner
+    def _visible(self, owner: ObjectOwner, acting: UUID | None, is_admin: bool) -> bool:
+        return owner.shared or self._owned(owner, acting) or is_admin
+
+    def _admin_can_apply(self, old: SpecT, spec: SpecT) -> bool:
+        return False
 
     async def _owner(self, ctx: ToolContext, name: str) -> ObjectOwner | None:
         return next((row.owner for row in await self._owned_rows(ctx) if row.name == name), None)

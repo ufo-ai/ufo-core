@@ -58,9 +58,13 @@ def test_extended_context_survives_the_spawn_payload_serialization() -> None:
 
 
 def test_coding_skills_parse_and_index() -> None:
-    index = dict(skill_registry((coding.manifest(),)).index())
+    registry = skill_registry((coding.manifest(),))
+    index = dict(registry.index())
     for name in ("coding", "code-review"):
         assert name in index
+    instructions = registry.named("coding").instructions
+    assert "only a workspace admin can do it" in instructions
+    assert "only the owner" not in instructions
 
 
 def test_coding_prompt_wraps_with_citation_and_fills_the_skill_index() -> None:

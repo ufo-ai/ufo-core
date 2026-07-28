@@ -11,6 +11,9 @@ from ufo.objects import (
     OBJECT_LIST_PAGE as OBJECT_LIST_PAGE,
 )
 from ufo.objects import (
+    AdminRequired as AdminRequired,
+)
+from ufo.objects import (
     MemberOwnedObjects as MemberOwnedObjects,
 )
 from ufo.objects import (
@@ -42,9 +45,6 @@ from ufo.objects import (
 )
 from ufo.objects import (
     OwnedRow as OwnedRow,
-)
-from ufo.objects import (
-    OwnerRequired as OwnerRequired,
 )
 from ufo.objects import (
     UnknownObject as UnknownObject,

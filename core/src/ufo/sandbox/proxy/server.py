@@ -219,7 +219,7 @@ class PerAgentRules:
             turn = await self._turn_of(run)
             if turn is None:
                 return self.base
-            agent_id, acting_member_id, internet_access_allowed = turn
+            agent_id, internet_access_allowed = turn
             with agent(agent_id):
                 rules = (*self.base, *self.internet) if internet_access_allowed else self.base
                 if self.credentials is not None and self.slots:
@@ -235,19 +235,16 @@ class PerAgentRules:
                 return (
                     *rules,
                     *derive_grant_rules(granted, self.transfer_hosts),
-                    *derive_cli_rules(granted, acting_member_id, self.clis),
+                    *derive_cli_rules(granted, run.acting_member_id, self.clis),
                 )
 
-    async def _turn_of(self, run: RunToken) -> tuple[UUID, UUID | None, bool] | None:
-        """The turn's agent, acting member, and snapshotted internet policy in one indexed read.
-        CLI-credential use gates on the acting member exactly as connector tools do."""
+    async def _turn_of(self, run: RunToken) -> tuple[UUID, bool] | None:
+        """The turn's agent and snapshotted internet policy in one indexed read."""
         async with workspace_tx() as connection:
             row = (
                 await connection.execute(
                     sa.select(
                         tables.turn.c.agent_id,
-                        tables.turn.c.speaker_member_id,
-                        tables.turn.c.on_behalf_of_member_id,
                         tables.agent.c.internet_access_allowed,
                     )
                     .select_from(
@@ -265,12 +262,7 @@ class PerAgentRules:
             ).one_or_none()
         if row is None:
             return None
-        acting = (
-            row.speaker_member_id
-            if row.speaker_member_id is not None
-            else row.on_behalf_of_member_id
-        )
-        return row.agent_id, acting, row.internet_access_allowed
+        return row.agent_id, row.internet_access_allowed
 
     async def turn_live(self, run: RunToken) -> bool:
         """The egress-authorization gate: True only while the run token names a turn the DB still

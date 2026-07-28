@@ -573,6 +573,55 @@ async def test_spawn_inherits_a_private_audience_from_a_speakerless_parent(
     assert child_member_id == member_id
 
 
+async def test_message_bound_spawn_keeps_shared_audience_and_member_authority(
+    db: None, dbos_launched: Config
+) -> None:
+    workspace_id, agent_id = await _workspace_agent()
+    requester, other = uuid4(), uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member),
+            [
+                {
+                    "id": requester,
+                    "workspace_id": workspace_id,
+                    "email": "requester@example.com",
+                    "created_at": datetime(2026, 7, 9, tzinfo=UTC),
+                    "updated_at": datetime(2026, 7, 9, tzinfo=UTC),
+                },
+                {
+                    "id": other,
+                    "workspace_id": workspace_id,
+                    "email": "other@example.com",
+                    "created_at": datetime(2026, 7, 9, tzinfo=UTC),
+                    "updated_at": datetime(2026, 7, 9, tzinfo=UTC),
+                },
+            ],
+        )
+    parent = await _parent(workspace_id, agent_id)
+    common = Subagents(
+        client=_RecordingClient(),
+        registry=SubagentRegistry((_profile("research"),)),
+        parent=parent,
+        audience=conversation_audience(None),
+    )
+
+    spawned = await common.authorize(requester).spawn(
+        "research", {"task": "acme"}, background=True, dedup_key="acme"
+    )
+    child, _, child_audience = await _load_turn(spawned.turn_id)
+    assert child_audience == conversation_audience(None)
+    assert child.speaker_member_id is None
+    assert child.on_behalf_of_member_id == requester
+
+    with pytest.raises(ValueError, match="belongs to another member request"):
+        await common.authorize(other).spawn(
+            "research", {"task": "acme"}, background=True, dedup_key="acme"
+        )
+    with pytest.raises(ValueError, match="not a subagent this turn spawned"):
+        await common.authorize(other).cancel(spawned.turn_id)
+
+
 @pytest.mark.parametrize(
     "audience",
     (room_audience("slack", "CPRIVATE"), foreign_room_audience("slack", "CCONNECT")),
@@ -631,7 +680,7 @@ async def test_spawn_with_a_dedup_key_reconnects_to_a_finished_child_without_res
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
         audience=conversation_audience(speaker),
-    )
+    ).authorize(speaker)
 
     first = await subagents.spawn("research", {"task": "acme"}, background=True, dedup_key="acme")
     loaded, _, child_audience = await _load_turn(first.turn_id)

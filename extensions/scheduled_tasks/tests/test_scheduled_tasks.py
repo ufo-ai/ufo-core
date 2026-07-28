@@ -41,7 +41,7 @@ from ufo.ext.loader import skill_registry, turn_tools
 from ufo.jobs import JobRunner, bindings_from
 from ufo.loop.engine import _claim_turn
 from ufo.loop.queue import _load_turn
-from ufo.objects import OwnerRequired, UnknownObject
+from ufo.objects import AdminRequired, UnknownObject
 from ufo.scheduling import ONE_TIME_SCHEDULE, ScheduleStore, due_task_workspaces
 from ufo.schema import tables
 from ufo.schema.records import WRITEBACK_PENDING, Agent, TerminalFrame, Turn
@@ -291,6 +291,18 @@ async def test_applied_task_writes_durable_row_bound_to_the_turn(db: None) -> No
     assert fetched["spec"]["schedule"] == DAILY_9AM
     assert fetched["status"]["next_run_at"] == tasks[0].next_run_at.isoformat()
     assert fetched["status"]["last_run_at"] is None
+
+
+async def test_applied_task_requires_a_member_requester(db: None) -> None:
+    workspace_id, agent_id, conversation_id = await _seed()
+    with ws(workspace_id), agent(agent_id):
+        with pytest.raises(AdminRequired, match="member requester"):
+            await _dispatch(
+                _object_tool("object_apply"),
+                _tool_ctx(workspace_id, conversation_id, agent_id),
+                manifest=_task_manifest("digest", DAILY_9AM, "check the inbox"),
+            )
+        assert await ScheduleStore().list() == ()
 
 
 async def test_pause_and_wait_runs_tool_to_timer_to_resumed_turn(db: None) -> None:
@@ -973,6 +985,7 @@ async def test_one_time_pause_rejects_runtime_instruction(db: None) -> None:
 
 async def test_member_message_takes_over_a_timer_waiting_to_enqueue(db: None) -> None:
     workspace_id, agent_id, conversation_id = await _seed()
+    member_id = await _member(workspace_id)
     now = datetime.now(UTC)
     dbos = _FirstBlockingDbos()
     admission = Admission(dbos=dbos, durable_surfaces=frozenset())
@@ -987,6 +1000,7 @@ async def test_member_message_takes_over_a_timer_waiting_to_enqueue(db: None) ->
             "timer",
             now - timedelta(minutes=1),
             0,
+            created_by_member_id=member_id,
         )
         [claimed] = await store.claim_due(now, 300)
         timer_fire = asyncio.create_task(runner._fire(store, claimed, now, now))
@@ -995,7 +1009,7 @@ async def test_member_message_takes_over_a_timer_waiting_to_enqueue(db: None) ->
             conversation_id,
             "The approval arrived.",
             "approval-after-timer",
-            speaker_member_id=None,
+            speaker_member_id=member_id,
         )
         dbos.release.set()
         assert await timer_fire is None
@@ -1013,6 +1027,8 @@ async def test_member_message_takes_over_a_timer_waiting_to_enqueue(db: None) ->
                 )
             ).scalar_one()
     assert [(turn["id"], turn["inbound"]) for turn in turns] == [(turn_id, "The approval arrived.")]
+    assert turns[0]["speaker_member_id"] == member_id
+    assert turns[0]["on_behalf_of_member_id"] is None
     assert dbos.enqueued == [str(turn_id), str(turn_id)]
     assert pauses == 0
 
@@ -2144,7 +2160,9 @@ async def test_pause_resume_retries_the_same_turn_after_enqueue_failure(db: None
     assert dbos.enqueued == [str(failed["id"])]
 
 
-async def _member(workspace_id: UUID, created_at: datetime | None = None) -> UUID:
+async def _member(
+    workspace_id: UUID, created_at: datetime | None = None, *, is_admin: bool = False
+) -> UUID:
     member_id = uuid4()
     when = created_at or datetime.now(UTC)
     async with workspace_tx() as connection:
@@ -2153,6 +2171,7 @@ async def _member(workspace_id: UUID, created_at: datetime | None = None) -> UUI
                 id=member_id,
                 workspace_id=workspace_id,
                 email=f"{member_id.hex[:8]}@x.test",
+                is_admin=is_admin,
                 created_at=when,
                 updated_at=when,
             )
@@ -2217,9 +2236,8 @@ async def test_scheduled_fire_runs_on_behalf_of_the_creator(db: None) -> None:
 
 async def test_a_stranger_cannot_hijack_or_read_another_members_task(db: None) -> None:
     """A scheduled task is private to its creator: a stranger cannot read it, re-point it (the
-    re-point hijack), or delete it — reads and mutations are the creator's or the workspace
-    owner's, enforced by the object base, so the created_by identity cannot be reassigned by a
-    non-creator."""
+    re-point hijack), or delete it. An admin may inspect or delete, but only the creator may edit,
+    so the created_by identity cannot be reassigned."""
     workspace_id, agent_id, conversation_id = await _seed()
     creator = await _member(workspace_id, created_at=datetime(2027, 1, 1, tzinfo=UTC))
     stranger = await _member(workspace_id, created_at=datetime(2027, 1, 2, tzinfo=UTC))
@@ -2403,7 +2421,7 @@ async def test_workspace_clock_fires_exact_records_across_agents(db: None) -> No
 
 async def test_reapply_preserves_the_original_creator(db: None) -> None:
     """An update never reassigns who a task runs as: created_by is fixed at creation, so a
-    workspace owner (or anyone) editing a member's task can change its definition but not make it
+    workspace admin (or anyone) editing a member's task can change its definition but not make it
     run with a different member's connections."""
     workspace_id, agent_id, conversation_id = await _seed()
     creator = await _member(workspace_id)
@@ -2436,13 +2454,13 @@ async def test_reapply_preserves_the_original_creator(db: None) -> None:
     assert tasks[0].schedule == "0 17 * * 1"
 
 
-async def test_owner_edits_a_task_no_member_created(db: None) -> None:
+async def test_admin_edits_a_task_no_member_created(db: None) -> None:
     """A task applied on a turn with no acting member is stored creatorless, and the workspace
-    owner administers it: there is no creator to fire the prompt as, so the creator gate that
-    protects another member's task must not deny the owner a creatorless one."""
+    admin administers it: there is no creator to fire the prompt as, so the creator gate that
+    protects another member's task must not deny the admin a creatorless one."""
     workspace_id, agent_id, conversation_id = await _seed()
-    owner = await _member(workspace_id, created_at=datetime(2020, 1, 1, tzinfo=UTC))
-    owner_ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=owner)
+    admin = await _member(workspace_id, created_at=datetime(2020, 1, 1, tzinfo=UTC), is_admin=True)
+    admin_ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=admin)
     apply = _object_tool("object_apply")
     with ws(workspace_id), agent(agent_id):
         await ScheduleStore().create(
@@ -2454,44 +2472,44 @@ async def test_owner_edits_a_task_no_member_created(db: None) -> None:
             datetime.now(UTC),
             created_by_member_id=None,
         )
-        await _dispatch(apply, owner_ctx, manifest=_task_manifest("intel", "0 17 * * 1", "v2"))
+        await _dispatch(apply, admin_ctx, manifest=_task_manifest("intel", "0 17 * * 1", "v2"))
         tasks = await ScheduleStore().list()
     assert tasks[0].prompt == "v2"
     assert tasks[0].schedule == "0 17 * * 1"
     assert tasks[0].created_by_member_id is None
 
 
-async def test_owner_may_delete_but_not_edit_another_members_task(db: None) -> None:
-    """The workspace owner administers a member's task — it stays visible and deletable to the
-    owner — but the owner cannot edit its prompt: an edit would run the owner's prompt as the
+async def test_admin_may_delete_but_not_edit_another_members_task(db: None) -> None:
+    """The workspace admin administers a member's task — it stays visible and deletable to the
+    admin — but the admin cannot edit its prompt: an edit would run the admin's prompt as the
     creator, against the creator's private memory and connections, and read the result back."""
     workspace_id, agent_id, conversation_id = await _seed()
-    owner = await _member(workspace_id, created_at=datetime(2020, 1, 1, tzinfo=UTC))
+    admin = await _member(workspace_id, created_at=datetime(2020, 1, 1, tzinfo=UTC), is_admin=True)
     creator = await _member(workspace_id, created_at=datetime(2027, 1, 1, tzinfo=UTC))
     creator_ctx = replace(
         _tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=creator
     )
-    owner_ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=owner)
+    admin_ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=admin)
     apply = _object_tool("object_apply")
     delete = _object_tool("object_delete")
     with ws(workspace_id), agent(agent_id):
         await _dispatch(
             apply, creator_ctx, manifest=_task_manifest("digest", DAILY_9AM, "creator's prompt")
         )
-        with pytest.raises(OwnerRequired, match="creator"):
+        with pytest.raises(AdminRequired, match="creator"):
             await apply.handler(
-                owner_ctx,
+                admin_ctx,
                 apply.input_model.model_validate(
                     {
                         "user_description": TOOL_NARRATION,
                         "manifest": _task_manifest(
-                            "digest", "0 17 * * 1", "owner's injected prompt"
+                            "digest", "0 17 * * 1", "admin's injected prompt"
                         ),
                     }
                 ),
             )
         after_edit = await ScheduleStore().list()
-        await _dispatch(delete, owner_ctx, kind=SCHEDULED_TASK_KIND, name="digest")
+        await _dispatch(delete, admin_ctx, kind=SCHEDULED_TASK_KIND, name="digest")
         after_delete = await ScheduleStore().list()
     assert after_edit[0].prompt == "creator's prompt"
     assert after_edit[0].created_by_member_id == creator

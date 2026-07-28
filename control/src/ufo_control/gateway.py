@@ -206,7 +206,7 @@ class Onboarding:
             else b"",
             directive("say", f"signed in: {claim.email}"),
             directive("choose", FIRST_MOVE_PROMPT, BILLING_CHOICE, TOUR_CHOICE)
-            if ensured.owner and claim.surface != WEB_CHANNEL
+            if ensured.admin and claim.surface != WEB_CHANNEL
             else directive("ask", PROMPT),
         )
 

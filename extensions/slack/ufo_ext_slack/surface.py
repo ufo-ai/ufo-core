@@ -8,7 +8,7 @@ context fetched from Slack at admit time — the thread's earlier un-addressed m
 mentioned mid-thread, the channel's recent messages when starting a fresh thread; after that
 every member reply is its own turn, so the transcript itself holds the thread. A first-time DM
 speaker resolves by Slack-confirmed email: an existing member links, and a same-domain teammate
-joins as a new member — only the owner ever onboards through the CLI.
+joins as a new member — only the initial member onboards through the CLI.
 
 While the turn runs, a per-turn status task tails its live frames off the hub and keeps the
 thread's native status (`assistant.threads.setStatus`) current — "Thinking…", each tool call's
@@ -1343,7 +1343,7 @@ async def _resolve_member(
 ) -> UUID | None:
     """The speaker's member: the already-linked identity, else what their Slack-confirmed email
     resolves — an existing member links, and a same-domain email joins them as a new member, so
-    only the owner ever onboards through the CLI and teammates become members on first contact.
+    only the initial member onboards through the CLI and teammates become members on first contact.
     No confirmed email leaves the turn without a speaker."""
     linked = await ctx.linked_member(slack_user_id)
     if linked is not None:

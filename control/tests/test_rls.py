@@ -368,11 +368,11 @@ async def test_shared_ensure_writes_workspace_and_members(
         workspace_id = founder.workspace_id
         assert await shared.exists("sharedco.io")
         assert workspace_id == str(uuid5(NAMESPACE_DNS, "sharedco.io"))
-        assert founder.owner
+        assert founder.admin
         assert await shared.ensure("sharedco.io", "founder@sharedco.io") == founder
         colleague = await shared.ensure("sharedco.io", "colleague@sharedco.io")
         assert colleague.workspace_id == workspace_id
-        assert not colleague.owner
+        assert not colleague.admin
         assert await _members_in(workspace_id) == ["colleague@sharedco.io", "founder@sharedco.io"]
         with ws(UUID(workspace_id)):
             async with workspace_tx() as connection:

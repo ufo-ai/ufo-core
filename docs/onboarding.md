@@ -91,14 +91,15 @@ Onboarding.advance(channel, session, body, install)
   |
   +-- workspace ready -------------------> mint bearer token
                                             emit token + workspace directives
-                                            owner: choose (billing) · teammate: ask
+                                            admin: choose (billing) · teammate: ask
 ```
 
-The earliest member's email domain owns the workspace. Resolution fails if that domain owns more
-than one; creation derives the workspace UUID from the domain. `SharedWorkspaces.ensure` reports
-which of the two the member is (`EnsuredWorkspace.owner`), and the last screen turns on it: the
-owner is offered `Set up billing` as a `choose`, a joined teammate gets the ordinary `ask` prompt.
-The `workspace` directive has already landed by then, so whichever option the owner picks posts to
+The initial member's email domain identifies the workspace. Resolution fails if that domain
+identifies more than one; creation derives the workspace UUID from the domain.
+`SharedWorkspaces.ensure` reports whether the member is an admin (`EnsuredWorkspace.admin`), and
+the last screen turns on it: an admin is offered `Set up billing` as a `choose`, a joined teammate
+gets the ordinary `ask` prompt. The `workspace` directive has already landed by then, so whichever
+option the admin picks posts to
 `/surface/ufo` as their first chat message and the agent drives billing from there — the gateway
 mints no billing link and adds no billing directive.
 
@@ -107,7 +108,7 @@ mints no billing link and adds no billing directive.
 Billing lives in the `metronome` extension, which `assistant_hosted` bundles and the local
 `assistant` pack does not — a dev stack has no business shipping usage to a billing vendor. The
 `assistant_billing` pack is the local assistant bundle plus that one extension, selected through
-`UFO_DEV_PACK`, so the owner's `Set up billing` choice has something to service on a laptop:
+`UFO_DEV_PACK`, so the admin's `Set up billing` choice has something to service on a laptop:
 
 ```
 export STRIPE_SECRET_KEY=sk_test_…                     # Stripe TEST mode
@@ -220,36 +221,36 @@ the agent drives either in chat with `slack_connect` (default `method="oauth"`).
 
 **Preferred — OAuth on the deploy's own app.** The deploy holds one Slack app; its client id, client
 secret, and signing secret are read from env in-process (never per-workspace BYOK, never the
-sandbox). The owner installs it with one click:
+sandbox). An admin installs it with one click:
 
 ```text
-owner: connect slack
+admin: connect slack
   |
   v
 slack_connect ---------------> not_installed + an "Add to Slack" link. The link's state is a
-  |                            Fernet-sealed handoff to the owner and the bot-token slot
+  |                            Fernet-sealed handoff to the admin and the bot-token slot
   |                            (begin_credential_authorization), TTL-bound.
   |
-owner opens the link --------> slack.com/oauth/v2/authorize?client_id=…&scope=…
+admin opens the link --------> slack.com/oauth/v2/authorize?client_id=…&scope=…
   |                            &redirect_uri=<base>/surface/slack/oauth&state=<sealed>
   |
 Slack redirects -------------> GET /surface/slack/oauth?code=…&state=…
-  |                            oauth_callback: open the seal (it names this workspace + owner),
+  |                            oauth_callback: open the seal (it names this workspace + member),
   |                            exchange the code at oauth.v2.access for this workspace's xoxb bot
   |                            token, store it, bind team:<team_id>, write the identity record
   v
 first DM / @mention ---------> writes the url-verified marker; slack_connect reads connected
 ```
 
-Only the owner mints the link (the bot is shared); the seal binds the install to the owner and the
+Only an admin mints the link (the bot is shared); the seal binds the install to that member and the
 workspace, so a forged callback cannot bind another team to this workspace. The bot token is
 per-workspace, minted by the callback rather than pasted; the client and signing secrets belong to
 the deploy's app and live in env.
 
 **Alternative — bring-your-own app** (`slack_connect method="manifest"`, driven by the
-`slack-app-setup` skill). Used when the owner wants their own Slack app, or when the deploy has no
+`slack-app-setup` skill). Used when an admin wants their own Slack app, or when the deploy has no
 OAuth app configured (`slack_connect` says so and points here). `slack_app_manifest` renders the
-exact app YAML; the owner creates the app at api.slack.com and fills the per-workspace
+exact app YAML; the admin creates the app at api.slack.com and fills the per-workspace
 `slack_bot_token` and `slack_signing_secret` slots through `request_credentials` (privately, never
 in chat); `slack_connect` derives the identity with `auth.test`.
 
@@ -264,7 +265,7 @@ manifest: not_configured --(secrets + auth.test)--> pending --(first verified ev
 ```
 
 ```text
-no bot token / identity mismatch, method=oauth   -> not_installed + "Add to Slack" link (owner)
+no bot token / identity mismatch, method=oauth   -> not_installed + "Add to Slack" link (admin)
 no bot token / identity mismatch, method=manifest -> not_configured + manifest instructions
 identity present, no matching url-verified marker  -> pending
 marker fingerprint matches the verifying secret    -> connected
@@ -300,7 +301,7 @@ by its Fernet-sealed state, and it resolves its workspace from that state alone.
 
 ```text
 request_credentials (core builtin)
-  gates: speaking member · workspace owner · declared slots · credential key
+  gates: speaking member · workspace admin · declared slots · credential key
   seals: {workspace, member, slots} under the credential Fernet, TTL-bound
   ends the turn; the request rides the terminal frame / writeback
 
@@ -310,8 +311,8 @@ ufo surface fulfillment (POST /surface/ufo/{channel} + x-ufo-secret headers)
                                                             + that slot's own marker
 
 slack_connect tool (ToolContext) — OAuth path
-  ctx.begin_credential_authorization  seals the install handoff to the owner + bot-token slot
-  ctx.speaker_is_owner()              the owner gate on minting the link / deriving identity
+  ctx.begin_credential_authorization  seals the install handoff to the admin + bot-token slot
+  ctx.speaker_is_admin()              the admin gate on minting the link / deriving identity
   ctx.public_base_url                 renders the OAuth redirect / authorize URL
 
 slack_connect tool (ToolContext) — manifest path
@@ -320,7 +321,7 @@ slack_connect tool (ToolContext) — manifest path
   ctx.ext.installations.bind          binds the unique Slack team to this workspace
 
 slack oauth_callback (SurfaceContext)
-  ctx.open_credential_authorization   recovers the sealed {workspace, owner, slot}
+  ctx.open_credential_authorization   recovers the sealed {workspace, member, slot}
   ctx.fulfill_credential_request      verify seal -> encrypted bot-token slot
   ctx.bind_installation               binds the unique Slack team to this workspace
   ctx.blob                            writes the identity record
@@ -346,7 +347,7 @@ the deploy Slack app's env secrets, and its `slack_connect` / `slack_app_manifes
 - The `flyingobject.ai` domain is onboarded in Cloudflare Email Sending; the edge binding permits
   only `no-reply@flyingobject.ai` as its sender.
 - The ufo surface requires `UFO_TOKEN_SECRET`; a missing secret is a configuration error, not a 401.
-- Only the owner (the earliest workspace member) can mint the "Add to Slack" link or derive a
+- Only a workspace admin can mint the "Add to Slack" link or derive a
   bring-your-own-app identity; the OAuth callback installs into the workspace the sealed state names.
   A teammate may call `slack_connect` to read the install status but never installs.
 - A secret value is bounded (4 KiB) and travels bearer-authenticated on the existing chat

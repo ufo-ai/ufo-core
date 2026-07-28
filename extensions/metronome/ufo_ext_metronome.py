@@ -12,8 +12,8 @@ moves after, so a settled row ships however long it waited.
 The seat job establishes the workspace's seat limit once (core's `ensure_limit` writes only while
 it is NULL) and ships one seat-count snapshot per day under `transaction_id =
 "seats:<workspace>:<date>"` — snapshots self-correct on the next day's event, so a lost mark can
-never accumulate an undercount. Seat changes are chat acts: the owner asks and the agent calls
-`grant_seat`/`revoke_seat`; the rules (the count, the limit, the owner's irrevocable seat) are
+never accumulate an undercount. Seat changes are chat acts: an admin asks and the agent calls
+`grant_seat`/`revoke_seat`; the rules (the count, the limit, the last admin's irrevocable seat) are
 core's — this module only decides when to apply them and what to report back.
 
 Every usage event is labelled `byok`: a workspace holding its own key for the provider serving
@@ -24,11 +24,12 @@ freezes the label into each export intent at mint, resolved through the deploy's
 this module only relays `export.byok` — so a backlog drained after an outage carries the key
 state that served it, and a re-send is byte-identical whatever changed since.
 
-Billing setup is a chat act too. The owner asks, the agent calls `manage_billing`, and the tool
+Billing setup is a chat act too. An admin asks, the agent calls `manage_billing`, and the tool
 hands back a short-lived Stripe Customer Portal link for saving a payment method — no callback, no
 webhook, no billing table. What the tool persists is the workspace's provider ids and the package
 it intends to buy; the `billing_activation` job turns that intent into a live plan once Stripe
-reports a default payment method, and tells the owner once. Every provider write carries a durable
+reports a default payment method, and tells the initiating conversation once. Every provider write
+carries a durable
 identity — a deterministic key for the Stripe Customer, the workspace UUID as the Metronome
 customer's ingest alias (the same id every usage event is stamped with), a stable `uniqueness_key`
 for the Contract — so a conflict is reconciled by fetching the object that already exists and a key
@@ -59,12 +60,11 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
 from ufo.sdk.accounting import UsageExport, metered_workspaces
-from ufo.sdk.audience import conversation_audience
 from ufo.sdk.context import ExtensionContext
 from ufo.sdk.jobs import JobSpec
 from ufo.sdk.manifest import CredentialSlot, Manifest, PromptSection
 from ufo.sdk.o11y import log
-from ufo.sdk.seats import Seats, SeatSnapshot, member_workspaces, owner_conversation
+from ufo.sdk.seats import Seats, SeatSnapshot, admin_conversation, member_workspaces
 from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 
 NAME = "metronome"
@@ -92,7 +92,7 @@ SEAT_APPROVAL_JOB_SCHEDULE = "30 * * * * *"
 SEAT_APPROVAL_KEY_PREFIX = "seat_approval_asked/"
 SEAT_APPROVAL_PROMPT = (
     "[seat approval request] {email} joined the workspace but every included seat is taken "
-    "({seated} seated, {included} included in the plan). Ask the workspace owner to decide with "
+    "({seated} seated, {included} included in the plan). Ask a workspace admin to decide with "
     "the ask_user tool, question 'Grant {email} a seat? It bills as overage on the invoice.' and "
     "options 'Grant the seat' and 'Decline'. When they choose Grant, call grant_seat with that "
     "email and confirm the overage; when they Decline, confirm and take no action — the member "
@@ -114,7 +114,7 @@ STRIPE_DELIVERY_METHOD = "direct_to_billing_provider"
 PAYMENT_METHOD_UPDATE_FLOW = "payment_method_update"
 BILLING_ACTIVE_PROMPT = (
     "[billing activated] The workspace's payment method is saved and the {package} plan is live. "
-    "Tell the workspace owner in one short line, and mention they can ask you for billing status "
+    "Tell a workspace admin in one short line, and mention they can ask you for billing status "
     "or the billing portal whenever they want."
 )
 
@@ -124,45 +124,43 @@ LIST_SEATS_TOOL = "list_seats"
 MANAGE_BILLING_TOOL = "manage_billing"
 
 GRANT_SEAT_DESCRIPTION = (
-    "Grant a workspace seat to a member by email so the agent answers them. Owner-only. A seat "
+    "Grant a workspace seat to a member by email so the agent answers them. Admin-only. A seat "
     "beyond the plan's included allowance bills as overage on the invoice — say so when the "
-    "owner approves one. Fails when the hard seat limit is reached; raising that is not a chat "
+    "admin approves one. Fails when the hard seat limit is reached; raising that is not a chat "
     "act, contact us."
 )
 REVOKE_SEAT_DESCRIPTION = (
-    "Revoke a member's seat by email. Owner-only; the owner's own seat cannot be revoked. The "
+    "Revoke a member's seat by email. Admin-only; the last seated admin cannot be revoked. The "
     "member's next message is refused immediately, and a running turn of theirs holds at its "
     "next model round."
 )
 LIST_SEATS_DESCRIPTION = "Show the workspace's seat limit and who holds a seat."
 MANAGE_BILLING_DESCRIPTION = (
-    "Set up or inspect the workspace's billing plan. Owner-only, and only in the owner's own "
-    "private conversation. 'setup' returns a short-lived Stripe link for saving a payment method "
-    "and records the plan to activate once it is saved; 'status' reports the card and the plan as "
-    "the providers currently hold them; 'portal' returns a fresh link for invoices, payment "
-    "methods, and billing details. Give the returned portal_url to the owner as a link."
+    "Set up or inspect the workspace's billing plan. Admin-only. 'setup' returns a short-lived "
+    "Stripe link for saving a payment method and records the plan to activate once it is saved; "
+    "'status' reports the card and plan as the providers hold them; 'portal' returns a fresh link "
+    "for invoices, payment methods, and billing details."
 )
 
 SEATS_SECTION_NAME = "seats"
 SEATS_SECTION_BODY = (
     "Seats gate who this agent answers. A newly joined member is seated automatically while an "
     "included seat is open; beyond the included allowance they stay unseated, their messages are "
-    "refused, and the owner receives a seat approval request — if the owner approves, call "
+    "refused, and an admin receives a seat approval request — if they approve, call "
     "grant_seat with the member's email and note the seat bills as overage; if they decline, do "
-    "nothing. Only the workspace owner can change seats (grant_seat / revoke_seat); list_seats "
+    "nothing. Only a workspace admin can change seats (grant_seat / revoke_seat); list_seats "
     "shows the limit, the included allowance, billed overage seats, and who holds one."
 )
 
 BILLING_SECTION_NAME = "billing"
 BILLING_SECTION_BODY = (
-    "Billing belongs to the workspace owner and is discussed only in their own private "
-    "conversation. When the owner asks to set up billing, add a card, or start a plan — including "
+    "When a workspace admin asks to set up billing, add a card, or start a plan — including "
     "the 'Set up billing' choice that ends hosted onboarding — call manage_billing with action "
     "'setup' and give them the returned portal_url as a link to open. Say that the plan goes live "
     "shortly after they save a card and that you will tell them here when it does; never claim it "
     "is active before the tool reports it. 'status' reports whether a card is on file and whether "
     "the plan is live; 'portal' returns a fresh link for invoices, payment methods, and billing "
-    "details. Never show a billing link to anyone but the owner."
+    "details."
 )
 
 INGEST_TRANSPORT: httpx.AsyncBaseTransport | None = None
@@ -183,7 +181,7 @@ class MetronomeConflict(MetronomeError):
 
 class StripeError(RuntimeError):
     """Stripe answered a non-2xx status — surfaced with status and body. Nothing is recorded for a
-    failed call, so the owner's next attempt or the next job tick starts from the same state."""
+    failed call, so the admin's next attempt or the next job tick starts from the same state."""
 
 
 @dataclass(frozen=True)
@@ -299,14 +297,14 @@ async def _ship_seats(ctx: ExtensionContext) -> None:
 
 @dataclass(frozen=True)
 class SeatApprovals:
-    """Turn every never-asked unseated member into one approval request in the owner's own
-    conversation: an internal turn tells the owner who needs a seat and that granting bills as
-    overage, and the owner's reply drives grant_seat — chat-native consent, no new surface. The
-    ask is marked per member only after the invoke lands, so a fire without an owner conversation
+    """Turn every never-asked unseated member into one approval request in an admin's main-agent
+    conversation: an internal turn says who needs a seat and that granting bills as overage, and
+    the admin's reply drives grant_seat — chat-native consent, no new surface. The ask is marked
+    per member only after the invoke lands, so a fire without an admin conversation
     retries next tick, and a granted or declined member is never re-asked (the mark is the ask,
     not the answer; revoke_seat marks too, so an explicitly unseated member is a decision, not a
     request). Asks fire only while the included allowance is exhausted — an unseated member with
-    a silent seat still open is the owner's own doing, never a request."""
+    a silent seat still open is an admin's own doing, never a request."""
 
     ctx: ExtensionContext
 
@@ -321,7 +319,7 @@ class SeatApprovals:
             if await self.ctx.store.get(marker) is not None:
                 continue
             async with self.ctx.transaction() as connection:
-                venue = await owner_conversation(connection, self.ctx.store.workspace_id)
+                venue = await admin_conversation(connection, self.ctx.store.workspace_id)
             if venue is None:
                 return
             conversation_id, agent_id = venue
@@ -382,16 +380,19 @@ class BillingConfig(BaseModel):
 
 class BillingRecord(BaseModel):
     """One workspace's billing provisioning state, as the extension store holds it. Written by the
-    `setup` tool the moment a Stripe Customer exists — before the owner is handed the portal link —
+    `setup` tool the moment a Stripe Customer exists — before the admin is handed the portal link —
     and completed by the activation job. The provider ids are the durable identities every later
     call resolves against; `package_alias` and `contract_starting_at` are the intent captured at
-    setup, so neither a package the deploy renames nor the passage of time changes what a pending
-    workspace was promised — and every contract-create retry, however far apart, sends
-    byte-identical parameters. A record with no `activated_at` is the job's pending work."""
+    setup, and the notification target is the conversation and agent that initiated it. Neither a
+    package the deploy renames nor the passage of time changes what a pending workspace was
+    promised — and every contract-create retry, however far apart, sends byte-identical
+    parameters. A record with no `activated_at` is the job's pending work."""
 
     stripe_customer_id: str
     package_alias: str
     contract_starting_at: datetime
+    notification_conversation_id: UUID
+    notification_agent_id: UUID
     metronome_customer_id: str | None = None
     metronome_contract_id: str | None = None
     activated_at: datetime | None = None
@@ -405,9 +406,8 @@ class BillingActivation:
     stopped rather than redoing provider writes: no default payment method leaves the record
     untouched and pending, a created Metronome customer is recorded (and recovered by ingest alias
     if the record was lost), and the contract's stable uniqueness key makes a duplicate create a
-    409 the next tick reconciles by reading the contract that already exists. The owner is told
-    once, and the activation mark lands only after that turn is admitted — so a workspace whose
-    owner has no conversation yet stays pending instead of going quiet."""
+    409 the next tick reconciles by reading the contract that already exists. The initiating
+    conversation is told once, and the activation mark lands only after that turn is admitted."""
 
     ctx: ExtensionContext
     transport: httpx.AsyncBaseTransport | None = None
@@ -446,15 +446,10 @@ class BillingActivation:
         return record
 
     async def _notify(self, record: BillingRecord) -> None:
-        async with self.ctx.transaction() as connection:
-            venue = await owner_conversation(connection, self.ctx.store.workspace_id)
-        if venue is None:
-            return
-        conversation_id, agent_id = venue
         workspace_id = self.ctx.store.workspace_id
         await self.ctx.invoke(
-            conversation_id,
-            agent_id,
+            record.notification_conversation_id,
+            record.notification_agent_id,
             BILLING_ACTIVE_PROMPT.format(package=record.package_alias),
             idempotency_key=f"billing-active:{workspace_id}",
         )
@@ -518,7 +513,7 @@ class ManageBillingInput(BaseModel):
 
 
 async def grant_seat(ctx: ToolContext, args: GrantSeatInput) -> ToolResult:
-    seats = await _owner_seats(ctx)
+    seats = await _admin_seats(ctx)
     assert ctx.ext is not None
     async with ctx.ext.transaction() as connection:
         await seats.grant(connection, args.email)
@@ -527,7 +522,7 @@ async def grant_seat(ctx: ToolContext, args: GrantSeatInput) -> ToolResult:
 
 
 async def revoke_seat(ctx: ToolContext, args: RevokeSeatInput) -> ToolResult:
-    seats = await _owner_seats(ctx)
+    seats = await _admin_seats(ctx)
     assert ctx.ext is not None
     async with ctx.ext.transaction() as connection:
         await seats.revoke(connection, args.email)
@@ -547,37 +542,36 @@ async def list_seats(ctx: ToolContext, args: ListSeatsInput) -> ToolResult:
 
 
 async def manage_billing(ctx: ToolContext, args: ManageBillingInput) -> ToolResult:
-    ext = await _owner_billing(ctx)
+    ext = await _admin_billing(ctx)
     config = BillingConfig.from_env()
     match args.action:
         case "setup":
-            return await _billing_setup(ext, config)
+            return await _billing_setup(ctx, ext, config)
         case "status":
             return await _billing_status(ext, config)
         case "portal":
             return await _billing_portal(ext, config)
 
 
-async def _owner_billing(ctx: ToolContext) -> ExtensionContext:
-    """Billing is the owner's act and never leaves their private conversation: a speakerless turn, a
-    teammate, or a shared channel is refused here — before any provider call, so a refused caller
-    cannot even cause a Stripe write."""
+async def _admin_billing(ctx: ToolContext) -> ExtensionContext:
     if ctx.speaker_member_id is None:
         raise ValueError("billing requires a speaking member")
-    if ctx.audience != conversation_audience(ctx.speaker_member_id):
-        raise ValueError("billing requires the speaker's private conversation")
-    if not await ctx.speaker_is_owner():
-        raise ValueError("only the workspace owner can manage billing")
+    if not await ctx.speaker_is_admin():
+        raise ValueError("only a workspace admin can manage billing")
     assert ctx.ext is not None
     return ctx.ext
 
 
-async def _billing_setup(ext: ExtensionContext, config: BillingConfig) -> ToolResult:
+async def _billing_setup(
+    ctx: ToolContext,
+    ext: ExtensionContext,
+    config: BillingConfig,
+) -> ToolResult:
     """Resolve the workspace's one Stripe Customer, then hand back a portal link that does exactly
     one thing: save a payment method.
 
     The record is written once — only when it does not exist yet — and that write lands before the
-    link is returned, so the activation job owns the follow-through by the time the owner opens it.
+    link is returned, so the activation job owns the follow-through by the time the admin opens it.
     A later setup has nothing to add and must not write: putting a re-read record back would let a
     setup overlapping the job revert the provider ids that job had just recorded. What the first
     setup captures is what every later provisioning attempt replays: the package, and a contract
@@ -590,6 +584,8 @@ async def _billing_setup(ext: ExtensionContext, config: BillingConfig) -> ToolRe
             stripe_customer_id=await _stripe_customer(config, workspace_id, BILLING_TRANSPORT),
             package_alias=config.metronome_package_alias,
             contract_starting_at=datetime.now(UTC).replace(minute=0, second=0, microsecond=0),
+            notification_conversation_id=ctx.turn.conversation_id,
+            notification_agent_id=ctx.turn.agent_id,
         )
         await ext.store.put(BILLING_KEY, record.model_dump(mode="json"))
     url = await _portal_session(
@@ -651,11 +647,11 @@ async def _billing_portal(ext: ExtensionContext, config: BillingConfig) -> ToolR
     return _text_result({"portal_url": url})
 
 
-async def _owner_seats(ctx: ToolContext) -> Seats:
+async def _admin_seats(ctx: ToolContext) -> Seats:
     if ctx.speaker_member_id is None:
         raise ValueError("seat changes require a speaking member")
-    if not await ctx.speaker_is_owner():
-        raise ValueError("only the workspace owner can change seats")
+    if not await ctx.speaker_is_admin():
+        raise ValueError("only a workspace admin can change seats")
     return Seats(ctx.turn.workspace_id)
 
 
@@ -669,7 +665,7 @@ def _snapshot_result(snapshot: SeatSnapshot) -> ToolResult:
             ),
             "seated": snapshot.seated,
             "members": [
-                {"email": entry.email, "seated": entry.seated, "owner": entry.owner}
+                {"email": entry.email, "seated": entry.seated, "admin": entry.admin}
                 for entry in snapshot.members
             ],
         }
@@ -760,7 +756,7 @@ async def _has_default_payment_method(
 ) -> bool:
     """Whether Stripe holds a default payment method for the customer — the one gate on activation.
     The portal's payment-method-update flow sets exactly this field, so it is the provider's own
-    answer to 'has the owner paid', never a flag of ours."""
+    answer to 'has the workspace paid', never a flag of ours."""
     customer = await _stripe(config, "GET", f"/customers/{customer_id}", transport)
     match customer.get("invoice_settings"):
         case {"default_payment_method": str()}:
@@ -799,7 +795,7 @@ async def _metronome_customer(
     id every usage event is stamped with, so events match the customer they bill. Looked up by that
     alias first and reconciled to it on conflict, so the alias (not a 24-hour idempotency key) is
     the durable identity. Created with the Stripe automatic-collection configuration, so Metronome
-    invoices charge the card the owner just saved."""
+    invoices charge the card the admin just saved."""
     existing = await _customer_by_alias(config, alias, transport)
     if existing is not None:
         return existing

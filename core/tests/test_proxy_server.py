@@ -2148,9 +2148,7 @@ def test_forward_response_bytes_drops_headers_carrying_crlf() -> None:
 
 
 async def test_resolve_derives_forward_rules_for_the_acting_member(db: None) -> None:
-    """The per-turn resolver joins the turn's acting member to its agent's grants: the speaker's own
-    private grant forwards, and a speakerless turn (no on-behalf-of) resolves no private forward —
-    the wire-side mirror of `connector_accounts`."""
+    """The signed process claim selects private grants; the turn's speaker is only attribution."""
     async with workspace_tx() as connection:
         spoken = await _seed_turn(connection, speaker=True)
     store = GrantStore()
@@ -2165,17 +2163,16 @@ async def test_resolve_derives_forward_rules_for_the_acting_member(db: None) -> 
         )
     cli = CliCredential(env="HUB_TOKEN", header="authorization", forward=_RecordingForwarder())
     resolver = PerAgentRules(base=(), grants=store, clis={"hub": cli})
-    rules = await resolver.resolve(RunToken(spoken.workspace_id, spoken.turn_id))
-    forward = next(rule for rule in rules if isinstance(rule, ForwardRule))
-    assert forward.sentinel == grant_sentinel("acct-1")
-    assert forward.account_id == "acct-1"
     async with workspace_tx() as connection:
         await connection.execute(
             sa.update(tables.turn)
             .values(speaker_member_id=None)
             .where(tables.turn.c.id == spoken.turn_id)
         )
-    resolver = PerAgentRules(base=(), grants=store, clis={"hub": cli})
+    rules = await resolver.resolve(RunToken(spoken.workspace_id, spoken.turn_id, spoken.member_id))
+    forward = next(rule for rule in rules if isinstance(rule, ForwardRule))
+    assert forward.sentinel == grant_sentinel("acct-1")
+    assert forward.account_id == "acct-1"
     silent = await resolver.resolve(RunToken(spoken.workspace_id, spoken.turn_id))
     assert not any(isinstance(rule, ForwardRule) for rule in silent)
 

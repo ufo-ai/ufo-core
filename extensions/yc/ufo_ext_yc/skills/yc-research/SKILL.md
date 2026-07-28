@@ -29,4 +29,4 @@ Use indexed YC manuals and Startup Library pages for broad synthesis. Use `yc_re
 
 ## Credential setup
 
-The workspace shares one read-only YC identity. If the credential is unset, call `yc_auth` with `start` and give the workspace owner its browser URL and code. After they say they approved it, call `complete`; if it remains pending, repeat the same URL and code. Never ask for credential JSON or a token.
+The workspace shares one read-only YC identity. If the credential is unset, call `yc_auth` with `start` and give a workspace admin its browser URL and code. After they say they approved it, call `complete`; if it remains pending, repeat the same URL and code. Never ask for credential JSON or a token.

@@ -2,7 +2,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from itertools import pairwise
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from connector_payload import CONNECTOR_WINDOW_TOKENS, connector_window
@@ -147,6 +147,27 @@ async def test_force_compacts_below_the_trigger(tmp_path: Path) -> None:
     assert isinstance(result[0].content, str)
     assert result[0].content.startswith(COMPACTED_CONTEXT_PREFIX)
     assert result[-1].content == messages[-1].content
+
+
+async def test_compaction_preserves_each_active_ref_with_its_exact_request(tmp_path: Path) -> None:
+    compaction = _compaction(tmp_path, trigger_tokens=1_000_000, keep_messages=2)
+    first_ref = UUID("11111111-1111-1111-1111-111111111111")
+    second_ref = UUID("22222222-2222-2222-2222-222222222222")
+    first = f"<context>\nmessage_ref: {first_ref}\nsender: Alice\n</context>\napprove access"
+    second = f"<context>\nmessage_ref: {second_ref}\nsender: Bob\n</context>\nonly inspect access"
+
+    result, usage = await compaction.maybe_compact(
+        _history(),
+        force=True,
+        active_requests=(first, second),
+    )
+
+    assert len(usage) == 1
+    rendered = result[0].content
+    assert isinstance(rendered, str)
+    assert first in rendered
+    assert second in rendered
+    assert rendered.index(first) < rendered.index(second)
 
 
 async def test_force_noops_when_the_window_is_within_keep_messages(tmp_path: Path) -> None:

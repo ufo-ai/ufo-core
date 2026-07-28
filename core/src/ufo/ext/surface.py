@@ -254,21 +254,19 @@ def _email_domain(email: str) -> str:
     return domain if local and domain else ""
 
 
-async def _earliest_agent(workspace_id: UUID) -> UUID:
-    """The workspace's earliest agent by (created_at, id) — the agent a binding or conversation
-    lands on when no surface binding names one, mirroring how the earliest member is the owner.
-    Onboarding creates the first agent, so a workspace without one is broken configuration."""
+async def _main_agent(workspace_id: UUID) -> UUID:
+    """The workspace's main agent, used when no surface binding names an agent."""
     async with workspace_tx() as connection:
         agent = (
             await connection.execute(
-                sa.select(tables.agent.c.id)
-                .where(tables.agent.c.workspace_id == workspace_id)
-                .order_by(tables.agent.c.created_at, tables.agent.c.id)
-                .limit(1)
+                sa.select(tables.agent.c.id).where(
+                    tables.agent.c.workspace_id == workspace_id,
+                    tables.agent.c.is_main,
+                )
             )
         ).one_or_none()
     if agent is None:
-        raise RuntimeError(f"workspace {workspace_id} has no agent")
+        raise RuntimeError(f"workspace {workspace_id} has no main agent")
     return agent.id
 
 
@@ -276,7 +274,7 @@ async def _bind_surface_installation(
     workspace_id: UUID, surface: str, installation_id: str
 ) -> None:
     """Upsert one surface's installation binding for a workspace, replacing any prior binding for
-    that (workspace, surface). A new binding lands on the workspace's earliest agent; rebinding
+    that (workspace, surface). A new binding lands on the workspace's main agent; rebinding
     replaces the installation identity and keeps the binding's agent. The fleet-wide uniqueness on
     (surface, installation_id) raises `SurfaceInstallationConflict` when the installation already
     belongs to another workspace. The one place the binding is written — a tool
@@ -284,7 +282,7 @@ async def _bind_surface_installation(
     (`SurfaceContext.bind_installation`) both land it here."""
     if not installation_id:
         raise ValueError("surface installation id is empty")
-    agent_id = await _earliest_agent(workspace_id)
+    agent_id = await _main_agent(workspace_id)
     try:
         async with workspace_tx() as connection:
             insert = postgres_insert if connection.dialect.name == "postgresql" else sqlite_insert
@@ -433,11 +431,8 @@ class SurfaceContext:
     async def linked_member(self, external_id: str) -> UUID | None:
         return await self._identity_member(self.surface, external_id)
 
-    async def _owner_email(self) -> str | None:
-        """The earliest member's email. Their domain doubles as the workspace's own domain: the
-        owner onboarded through provisioning's vetted domain match, and the workspace stores no
-        domain of its own (the shared tier derives its id from the domain; the enterprise tier
-        labels the Tenant CR)."""
+    async def _workspace_email(self) -> str | None:
+        """The first member's email, whose vetted domain identifies the workspace."""
         async with workspace_tx() as connection:
             row = (
                 await connection.execute(
@@ -451,13 +446,15 @@ class SurfaceContext:
 
     async def is_operator_workspace(self) -> bool:
         """Whether this workspace is the fleet operator's own — the workspace whose own domain
-        (its owner's email domain, the same resolution hosted onboarding joins by) is
-        `OPERATOR_EMAIL_DOMAIN`. Gates renderings meant for the operator alone, like Slack's
-        accounting footer and its debugger link — never a tenant-facing capability; an ownerless
-        workspace is never the operator's, so internals render nowhere rather than in a
-        customer's thread."""
-        owner = await self._owner_email()
-        return owner is not None and _email_domain(owner) == OPERATOR_EMAIL_DOMAIN
+        (its initial member's vetted email domain, the same resolution hosted onboarding joins by)
+        is `OPERATOR_EMAIL_DOMAIN`. Gates renderings meant for the operator alone, like Slack's
+        accounting footer and its debugger link — never a tenant-facing capability; an
+        unidentified workspace is never the operator's, so internals render nowhere rather than
+        in a customer's thread."""
+        workspace_email = await self._workspace_email()
+        return (
+            workspace_email is not None and _email_domain(workspace_email) == OPERATOR_EMAIL_DOMAIN
+        )
 
     async def adopt_identity(self, peer_surface: str, external_id: str) -> UUID | None:
         """Link this surface's external id to the member a peer surface already knows it by, so one
@@ -517,18 +514,18 @@ class SurfaceContext:
 
     async def join_member(self, external_id: str, email: str) -> UUID | None:
         """`link_member`, plus the domain-match join: an email with no member row whose domain is
-        the workspace's own — the owner's email domain — creates the member and links it in one
-        step, so a teammate becomes a member on first contact and only the owner ever onboards
-        through provisioning. The surface asserting the email is the trust anchor: it calls this
-        only with an email its channel verified. A foreign-domain email stays unlinked; a lost
-        creation race collapses on the member's (workspace_id, email) uniqueness and links the
-        surviving row."""
+        the workspace's own — the initial member's vetted email domain — creates the member and
+        links it in one step, so a teammate becomes a member on first contact and only the initial
+        member onboards through provisioning. The surface asserting the email is the trust anchor:
+        it calls this only with an email its channel verified. A foreign-domain email stays
+        unlinked; a lost creation race collapses on the member's (workspace_id, email) uniqueness
+        and links the surviving row."""
         linked = await self.link_member(external_id, email)
         if linked is not None:
             return linked
-        owner = await self._owner_email()
+        workspace_email = await self._workspace_email()
         domain = _email_domain(email)
-        if owner is None or not domain or domain != _email_domain(owner):
+        if workspace_email is None or not domain or domain != _email_domain(workspace_email):
             return None
         async with workspace_tx() as connection:
             await create_member(connection, self.workspace_id, email.strip().lower())
@@ -557,7 +554,7 @@ class SurfaceContext:
         """Get-or-create the conversation this surface keys by `queue_key`, outside any admission
         transaction; a lost creation race re-reads the surviving row. A new conversation binds
         permanently to the surface's agent — the surface's installation binding when one exists,
-        else the workspace's earliest agent — and admission derives every turn's agent from that
+        else the workspace's main agent — and admission derives every turn's agent from that
         binding. A shared conversation is narrowed when the surface learns its exact member or
         room; an audience is never widened, and a room becoming externally shared seals as
         foreign."""
@@ -623,7 +620,7 @@ class SurfaceContext:
             ).one_or_none()
         if bound is not None:
             return bound.agent_id
-        return await _earliest_agent(self.workspace_id)
+        return await _main_agent(self.workspace_id)
 
     async def admit(
         self,

@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
 
-from ufo.audience import Audience
 from ufo.objects import ObjectRef
 
 DEFAULT_MEMORY_SEARCH_PROVIDER = "default"
@@ -29,7 +28,7 @@ class MemorySearchProvider(Protocol):
     async def search(
         self,
         queries: tuple[str, ...],
-        audience: Audience,
+        subjects: frozenset[str],
         start: datetime | None = None,
         end: datetime | None = None,
     ) -> tuple[MemoryMatch, ...]: ...
@@ -37,16 +36,15 @@ class MemorySearchProvider(Protocol):
 
 @dataclass(frozen=True)
 class MemorySearch:
-    """Dispatch one exact conversation audience to the selected provider."""
+    """Dispatch one exact readable subject set to the selected provider."""
 
     provider: MemorySearchProvider
 
     async def search(
         self,
-        audience: Audience,
+        subjects: frozenset[str],
         queries: tuple[str, ...],
         start: datetime | None = None,
         end: datetime | None = None,
     ) -> tuple[MemoryMatch, ...]:
-        """Search exactly what the conversation audience may read."""
-        return await self.provider.search(queries, audience, start, end)
+        return await self.provider.search(queries, subjects, start, end)

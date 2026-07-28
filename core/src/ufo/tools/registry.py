@@ -21,6 +21,12 @@ from pydantic import BaseModel
 from ufo.models.interface import ToolSchema
 from ufo.tools.context import ToolContext, ToolResult
 
+REQUESTED_BY = "requested_by"
+REQUESTED_BY_DESCRIPTION = (
+    "Message ref that explicitly requested this call. Required for any member-specific authority "
+    "or capability, including admin actions; omit only for conversation-common work."
+)
+
 
 @dataclass(frozen=True)
 class ToolDef[ModelT: BaseModel]:
@@ -35,10 +41,17 @@ class ToolDef[ModelT: BaseModel]:
     profile_only: bool = False
 
     def schema(self) -> ToolSchema:
+        input_schema = self.input_model.model_json_schema()
+        properties = input_schema.setdefault("properties", {})
+        properties[REQUESTED_BY] = {
+            "type": "string",
+            "format": "uuid",
+            "description": REQUESTED_BY_DESCRIPTION,
+        }
         return ToolSchema(
             name=self.name,
             description=self.description,
-            input_schema=self.input_model.model_json_schema(),
+            input_schema=input_schema,
         )
 
 
@@ -51,6 +64,11 @@ class ToolRegistry:
         duplicates = sorted({name for name in names if names.count(name) > 1})
         if duplicates:
             raise ValueError(f"duplicate tool names: {', '.join(duplicates)}")
+        collisions = sorted(
+            tool.name for tool in self.tools if REQUESTED_BY in tool.input_model.model_fields
+        )
+        if collisions:
+            raise ValueError(f"tool inputs reserve {REQUESTED_BY!r}: {', '.join(collisions)}")
 
     def schemas(self) -> tuple[ToolSchema, ...]:
         return tuple(tool.schema() for tool in self.tools)

@@ -226,7 +226,7 @@ def test_provision_strips_an_ambient_owner_dsn(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A UFO_OWNER_DSN in the shell must not reach a stack's serve. Shared serve prefers it over the
-    config's owner_url, so an inherited one would point the run's cross-workspace owner engine at a
+    config's owner_url, so an inherited one would point the run's cross-workspace admin engine at a
     foreign (possibly production) database instead of the derived per-run one."""
     monkeypatch.delenv("UFO_CREDENTIAL_KEY", raising=False)
     monkeypatch.setenv(OWNER_DSN_ENV, "postgresql://ufo_owner@prod/ufo")

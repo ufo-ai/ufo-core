@@ -67,6 +67,7 @@ class LocalCarrier:
             conversation_id=spec.conversation_id,
             container_id=LOCAL_CONTAINER_ID,
             mount=spec.mount,
+            run_token=spec.run_token,
             egress_env={
                 **os.environ,
                 "HOME": str(self._scratch / "home"),

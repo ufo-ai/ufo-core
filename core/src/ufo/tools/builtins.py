@@ -45,7 +45,6 @@ from ufo.artifact_token import (
     mint_artifact_token,
 )
 from ufo.artifacts import artifact_object_names
-from ufo.audience import conversation_audience
 from ufo.db import workspace_tx
 from ufo.grants import installed_connect_flow
 from ufo.sandbox.session import WORKSPACE_DIR, workspace_path
@@ -622,20 +621,18 @@ REQUEST_CREDENTIALS_DIRECTIVE = (
 async def request_credentials_handler(
     ctx: ToolContext, args: RequestCredentialsInput
 ) -> ToolResult:
-    """Collect BYOK secrets from the speaking owner without them touching the transcript: seal
+    """Collect BYOK secrets from a speaking admin without them touching the transcript: seal
     which slots this member will fill (the same Fernet that guards the slots signs the grant), and
     return the structured request so a capable surface prompts for the values privately and
     fulfills against the seal. Ends the turn like ask_user — the member returns once entered. Slots
-    are workspace-global, so only the owner may fill them; a non-owner speaker, an undeclared slot,
+    are workspace-global, so only an admin may fill them; a non-admin speaker, an undeclared slot,
     or a deploy without a credential key raises, surfacing as a recoverable tool error."""
     if ctx.speaker_member_id is None:
         raise ValueError("collecting credentials requires a speaking member")
-    if ctx.audience != conversation_audience(ctx.speaker_member_id):
-        raise ValueError("collecting credentials requires the speaker's private audience")
     if ctx.requestable_credentials is None:
         raise ValueError("no credential key is configured — this deploy cannot store secrets")
-    if not await ctx.speaker_is_owner():
-        raise ValueError("only the workspace owner can fill credential slots")
+    if not await ctx.speaker_is_admin():
+        raise ValueError("only a workspace admin can fill credential slots")
     sealed = ctx.requestable_credentials.seal(
         ctx.turn.workspace_id,
         ctx.speaker_member_id,
@@ -834,7 +831,7 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
             "Ask the speaking member to fill credential slots (API keys, bot tokens, signing "
             "secrets) without the values passing through this conversation — their terminal "
             "prompts for each one privately. Use it when a capability needs a secret a member "
-            "must supply; never ask for a secret in chat prose. Only the workspace owner can "
+            "must supply; never ask for a secret in chat prose. Only a workspace admin can "
             "fill slots. After calling it, explain what you need in your reply and end your "
             "turn; verify the slots once the member says they have entered them."
         ),

@@ -128,10 +128,10 @@ def _fields(directives: list[dict[str, object]], verb: str) -> list[str]:
 def test_web_channel_walks_email_code_invite_to_the_signed_in_card(
     gateway_postgres: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The web renderer end to end, and the one directive it must never receive: this member owns
-    the workspace they just created, but the page ends on its signed-in card rather than a prompt,
-    so it is never handed a `choose` menu it has no way to drive. The terminal owner's billing
-    choice is asserted in test_rls."""
+    """The web renderer end to end, and the one directive it must never receive: this member
+    administers the workspace they just created, but the page ends on its signed-in card rather
+    than a prompt, so it is never handed a `choose` menu it has no way to drive. The terminal
+    admin's billing choice is asserted in test_rls."""
     _configure(monkeypatch, tmp_path, gateway_postgres)
     sender = RecordingSender()
     monkeypatch.setattr(gateway, "email_sender_from_env", lambda: sender)

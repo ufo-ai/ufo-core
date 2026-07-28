@@ -2,7 +2,7 @@
 
 The seal decides which workspace a browser redirect belongs to; GitHub decides whether the member
 behind it reaches the installation being claimed. Both halves are exercised here, including the
-attack the flow exists to stop — a workspace owner who holds a perfectly valid link for their own
+attack the flow exists to stop — a workspace admin who holds a perfectly valid link for their own
 workspace returning with somebody else's installation id. GitHub stands in as a transport; the
 assertions are on what we send and what we do with the answer, never on the fake."""
 

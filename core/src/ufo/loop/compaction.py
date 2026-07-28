@@ -56,6 +56,7 @@ MAX_PTL_RETRIES = 3
 PTL_DROP_DENOMINATOR = 5
 MAX_REFERENCE_PATHS = 5
 COMPACTED_CONTEXT_PREFIX = "Compacted context:\n"
+ACTIVE_REQUESTS_HEADING = "## Active member requests"
 COMPACTION_FORMAT_RESTATEMENT = (
     "\n\n---\nEnd of transcript head. Respond now with the SINGLE JSON object described in "
     "your instructions — no prose, no markdown fences, nothing else."
@@ -113,7 +114,10 @@ class Compaction:
     speaker_member_id: UUID | None = None
 
     async def maybe_compact(
-        self, messages: tuple[Message, ...], force: bool = False
+        self,
+        messages: tuple[Message, ...],
+        force: bool = False,
+        active_requests: tuple[str, ...] = (),
     ) -> tuple[tuple[Message, ...], tuple[Usage, ...]]:
         """Compact when the window crosses the trigger, or unconditionally when `force` — the
         reactive path after a provider context-overflow. Either way the compactibility guards hold:
@@ -129,11 +133,14 @@ class Compaction:
         )
         if not force and self._tokens(messages) <= trigger:
             return messages, ()
-        return await self._compact(messages, "force" if force else "auto")
+        return await self._compact(messages, "force" if force else "auto", active_requests)
 
     @DBOS.step()
     async def _compact(
-        self, messages: tuple[Message, ...], reason: Literal["auto", "force"]
+        self,
+        messages: tuple[Message, ...],
+        reason: Literal["auto", "force"],
+        active_requests: tuple[str, ...],
     ) -> tuple[tuple[Message, ...], tuple[Usage, ...]]:
         """The compaction itself, memoized as a DBOS step: the summarize model call, the blob
         writes, the index selection, and the pre/post_compact hook fires all run once and replay
@@ -160,7 +167,7 @@ class Compaction:
         summary, usages = await self._summarize(head_rounds)
         summary = summary.model_copy(update={"loaded_skills": self.loaded_skills.drain()})
         references = self._references(head_rounds, tail)
-        rendered = self._render(summary, references)
+        rendered = self._render(summary, references, active_requests)
         after = (Message(role="user", content=rendered), *tail)
         await self._persist(index, messages, after, summary)
         await self.hooks.fire(
@@ -359,11 +366,18 @@ class Compaction:
                         found.append(path)
         return tuple(found[-MAX_REFERENCE_PATHS:])
 
-    def _render(self, summary: CompactionSummary, references: tuple[str, ...]) -> str:
+    def _render(
+        self,
+        summary: CompactionSummary,
+        references: tuple[str, ...],
+        active_requests: tuple[str, ...],
+    ) -> str:
         """Render the validated CompactionSummary and the durable reference block into the one user
         message that replaces the head — deterministically, so the same summary always yields the
-        same window. Only sections with content appear; the prefix marks the message as compacted
-        context. This same text is what `post_compact` observes as the summary."""
+        same window. Each active member request survives verbatim outside the model-authored
+        summary, preserving its authority ref and exact request together. Only sections with
+        content appear; the prefix marks the message as compacted context. This same text is what
+        `post_compact` observes as the summary."""
         blocks: list[str] = []
         if summary.intent.strip():
             blocks.append(f"## Primary request and intent\n{summary.intent}")
@@ -390,6 +404,8 @@ class Compaction:
             blocks.append(
                 "## Durable references (re-read with the file tools)\n" + self._bullets(references)
             )
+        if active_requests:
+            blocks.append(ACTIVE_REQUESTS_HEADING + "\n" + "\n\n".join(active_requests))
         return COMPACTED_CONTEXT_PREFIX + "\n".join(blocks)
 
     def _bullets(self, items: tuple[str, ...]) -> str:

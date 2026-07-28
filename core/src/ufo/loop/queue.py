@@ -81,6 +81,7 @@ from ufo.schema.records import (
 )
 from ufo.search import SearchProvider
 from ufo.skills.runtime import LoadedSkill, SkillRegistry, mount_skill
+from ufo.tools.context import Spawn
 from ufo.tools.registry import ToolRegistry
 from ufo.workspace import ws
 
@@ -242,6 +243,13 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             parent=turn,
             audience=audience,
         )
+
+        def subagents_for(
+            acting_member_id: UUID | None,
+        ) -> tuple[Spawn, Subagents]:
+            authorized = subagents.authorize(acting_member_id)
+            return authorized.spawn, authorized
+
         all_tools, tool_ext = turn_tools(
             runtime.manifests,
             runtime.credentials,
@@ -296,6 +304,8 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             max_rounds = MAIN_ROUND_LIMIT if payload.get("extended_context") else profile.max_rounds
             output_model = profile.output_model
         model = await runtime.registry.client_for(resolved.model)
+        grants = GrantStore() if runtime.credentials is not None else None
+        clis = connector_clis(runtime.manifests)
         handle = await _open_sandbox(
             runtime.carrier,
             runtime.config.sandbox.backend,
@@ -304,12 +314,19 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             runtime.proxy,
             runtime.run_tokens,
             turn,
-            GrantStore() if runtime.credentials is not None else None,
-            connector_clis(runtime.manifests),
+            grants,
+            clis,
             runtime.credentials,
             injecting_slots(runtime.manifests),
         )
         sandbox = SandboxSession(carrier=runtime.carrier, handle=handle)
+        sandbox_authorizer = SandboxAuthorizer(
+            sandbox=sandbox,
+            run_tokens=runtime.run_tokens,
+            grants=grants,
+            clis=clis,
+            turn=turn,
+        )
         for entry in preload:
             await mount_skill(sandbox, entry.skill)
         engine = TurnEngine(
@@ -327,10 +344,11 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
                 hooks=hooks,
                 turn=turn,
                 agent=resolved,
-                speaker_member_id=turn.speaker_member_id,
+                speaker_member_id=None,
             ),
             hub=runtime.hub,
             sandbox=sandbox,
+            sandbox_for=sandbox_authorizer.authorize,
             cdp_provider=runtime.cdp_provider,
             search_provider=runtime.search_provider,
             memory=runtime.memory,
@@ -352,9 +370,10 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             blob=runtime.blob,
             spawn=subagents.spawn,
             subagents=subagents,
+            subagents_for=subagents_for,
             audience=audience,
             artifact_token_secret=runtime.artifact_token_secret,
-            grants=(GrantStore() if runtime.credentials is not None else None),
+            grants=grants,
             pricing=runtime.registry.pricing,
             reasoning=runtime.config.models.reasoning_effort,
             attempt=attempt,
@@ -522,7 +541,7 @@ async def _open_sandbox(
                         *await _git_credential_config(credentials, slots, turn.workspace_id),
                     )
                 ),
-                **await _grant_cli_env(grants, clis, turn),
+                **await _grant_cli_env(grants, clis, None, turn.id),
                 **await _keyed_provider_env(credentials, slots, turn.workspace_id),
             },
         )
@@ -608,32 +627,53 @@ async def _keyed_provider_env(
     return env
 
 
+@dataclass(frozen=True)
+class SandboxAuthorizer:
+    sandbox: SandboxSession
+    run_tokens: RunTokenCodec
+    grants: GrantStore | None
+    clis: Mapping[str, CliCredential]
+    turn: Turn
+
+    async def authorize(self, acting_member_id: UUID | None) -> SandboxSession:
+        run_token = self.run_tokens.encode(
+            RunToken(
+                workspace_id=self.turn.workspace_id,
+                turn_id=self.turn.id,
+                acting_member_id=acting_member_id,
+            )
+        )
+        return self.sandbox.authorize(
+            run_token,
+            frozenset(cli.env for cli in self.clis.values()),
+            await _grant_cli_env(self.grants, self.clis, acting_member_id, self.turn.id),
+        )
+
+
 async def _grant_cli_env(
-    grants: GrantStore | None, clis: Mapping[str, CliCredential], turn: Turn
+    grants: GrantStore | None,
+    clis: Mapping[str, CliCredential],
+    acting_member_id: UUID | None,
+    turn_id: UUID,
 ) -> dict[str, str]:
-    """Each connector-declared CLI env var whose provider this turn may use — the acting member's
+    """Each connector-declared CLI env var whose provider this process may use — its member's
     own grant preferred, one shared with the agent's audience as the fallback — set to that
     grant's sentinel, so the CLI inside the sandbox authenticates and the proxy forwards by the
-    same sentinel (engine and proxy derive it independently from the grant, no shared
-    registration). The acting member is the speaker, else the member the turn acts on behalf of,
-    mirroring `connector_account`. A static env var names no account, so two accounts in the
+    same sentinel. A static env var names no account, so two accounts in the
     winning tier cannot be disambiguated per request: rather than silently pick one —
     `connector_account` fails loud on the same ambiguity — the export is skipped and logged,
     so the CLI fails visibly to authenticate instead of acting as an unintended account."""
     if grants is None or not clis:
         return {}
-    acting = (
-        turn.speaker_member_id
-        if turn.speaker_member_id is not None
-        else turn.on_behalf_of_member_id
-    )
     granted = await grants.active_grants()
     env: dict[str, str] = {}
     for provider, cli in clis.items():
         private = sorted(
             grant.account_id
             for grant in granted
-            if grant.provider == provider and not grant.shared and grant.grantor_member_id == acting
+            if grant.provider == provider
+            and not grant.shared
+            and grant.grantor_member_id == acting_member_id
         )
         shared = sorted(
             grant.account_id for grant in granted if grant.provider == provider and grant.shared
@@ -643,7 +683,7 @@ async def _grant_cli_env(
             log(
                 "sandbox.cli_grant_ambiguous",
                 provider=provider,
-                turn_id=str(turn.id),
+                turn_id=str(turn_id),
                 accounts=len(accounts),
             )
             continue

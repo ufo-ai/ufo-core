@@ -25,7 +25,13 @@ from ufo.credentials import CredentialStore, HostChoice
 from ufo.db import workspace_tx
 from ufo.ext.manifest import CredentialSlot, InjectionTarget
 from ufo.grants import GrantStore, grant_sentinel
-from ufo.loop.queue import GIT_PROXY_AUTH_CONFIG, _git_config_env, _open_sandbox
+from ufo.loop.queue import (
+    GIT_PROXY_AUTH_CONFIG,
+    SandboxAuthorizer,
+    _git_config_env,
+    _grant_cli_env,
+    _open_sandbox,
+)
 from ufo.sandbox.fs_creds import SandboxFsCredentialMinter
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import (
@@ -33,6 +39,7 @@ from ufo.sandbox.session import (
     RunToken,
     RunTokenCodec,
     SandboxHandle,
+    SandboxSession,
     SandboxSpec,
 )
 from ufo.schema import tables
@@ -365,10 +372,7 @@ async def _seed_grant(workspace_id: UUID, conversation_id: UUID, shared: bool) -
 async def test_open_sandbox_exports_the_acting_members_grant_sentinels(
     db: None, tmp_path: Path
 ) -> None:
-    """A turn whose acting member may use a connector-CLI grant gets that grant's sentinel in the
-    spec env (`HUB_TOKEN=<sentinel>`), so the CLI inside the sandbox authenticates and the proxy
-    forwards by the same sentinel. The engine and the proxy derive it independently from the grant —
-    no shared registration."""
+    """The base sandbox carries no first-speaker grant; a message-bound call derives it."""
     workspace_id, conversation_id = await _conversation()
     agent_id, member_id = await _seed_grant(workspace_id, conversation_id, shared=False)
     carrier = _ResumeRecordingCarrier(container_id="sbx-1")
@@ -391,8 +395,53 @@ async def test_open_sandbox_exports_the_acting_members_grant_sentinels(
             None,
             (),
         )
+        scoped = await _grant_cli_env(GrantStore(), {"hub": HUB_CLI}, member_id, turn.id)
 
-    assert carrier.specs[0].env == {**GIT_PROXY_AUTH_ENV, "HUB_TOKEN": grant_sentinel("acct-1")}
+    assert carrier.specs[0].env == GIT_PROXY_AUTH_ENV
+    assert scoped == {"HUB_TOKEN": grant_sentinel("acct-1")}
+
+
+async def test_sandbox_authorizer_binds_run_token_and_cli_grants_to_the_acting_member(
+    db: None,
+) -> None:
+    workspace_id, conversation_id = await _conversation()
+    agent_id, member_id = await _seed_grant(workspace_id, conversation_id, shared=False)
+    turn = _turn(workspace_id, conversation_id).model_copy(update={"agent_id": agent_id})
+    common_token = RUN_TOKENS.encode(RunToken(workspace_id, turn.id))
+    proxy = f"http://{common_token}:@proxy:8080"
+    base = SandboxSession(
+        carrier=_ResumeRecordingCarrier(container_id="sbx-1"),
+        handle=SandboxHandle(
+            conversation_id=conversation_id,
+            container_id="sbx-1",
+            run_token=common_token,
+            egress_env={
+                "HTTP_PROXY": proxy,
+                "HTTPS_PROXY": proxy,
+                "http_proxy": proxy,
+                "https_proxy": proxy,
+            },
+        ),
+    )
+    authorizer = SandboxAuthorizer(
+        sandbox=base,
+        run_tokens=RUN_TOKENS,
+        grants=GrantStore(),
+        clis={"hub": HUB_CLI},
+        turn=turn,
+    )
+
+    with ws(workspace_id), agent(agent_id):
+        authorized = await authorizer.authorize(member_id)
+
+    basic = "Basic " + base64.b64encode(f"{authorized.handle.run_token}:".encode()).decode()
+    assert RUN_TOKENS.from_proxy_auth(basic) == RunToken(
+        workspace_id=workspace_id,
+        turn_id=turn.id,
+        acting_member_id=member_id,
+    )
+    assert authorized.handle.egress_env["HUB_TOKEN"] == grant_sentinel("acct-1")
+    assert "HUB_TOKEN" not in base.handle.egress_env
 
 
 async def test_open_sandbox_exports_nothing_for_a_foreign_private_grant(
@@ -428,9 +477,7 @@ async def test_open_sandbox_exports_nothing_for_a_foreign_private_grant(
 async def test_open_sandbox_exports_the_private_sentinel_over_the_shared_one(
     db: None, tmp_path: Path
 ) -> None:
-    """A provider bound both privately and agent-shared is not ambiguous: the acting member's own
-    account wins the tier, so their sentinel is exported and the shared account stays the fallback
-    for members without one — mirroring `connector_account`'s preference."""
+    """Common execution gets the shared grant; a message-bound call prefers its private grant."""
     workspace_id, conversation_id = await _conversation()
     agent_id, member_id = await _seed_grant(workspace_id, conversation_id, shared=False)
     with ws(workspace_id), agent(agent_id):
@@ -462,8 +509,13 @@ async def test_open_sandbox_exports_the_private_sentinel_over_the_shared_one(
             None,
             (),
         )
+        scoped = await _grant_cli_env(GrantStore(), {"hub": HUB_CLI}, member_id, turn.id)
 
-    assert carrier.specs[0].env == {**GIT_PROXY_AUTH_ENV, "HUB_TOKEN": grant_sentinel("acct-1")}
+    assert carrier.specs[0].env == {
+        **GIT_PROXY_AUTH_ENV,
+        "HUB_TOKEN": grant_sentinel("acct-shared"),
+    }
+    assert scoped == {"HUB_TOKEN": grant_sentinel("acct-1")}
 
 
 async def test_open_sandbox_exports_nothing_when_the_shared_tier_is_ambiguous(

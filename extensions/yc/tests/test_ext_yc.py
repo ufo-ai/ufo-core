@@ -187,6 +187,7 @@ async def test_device_auth_starts_in_chat_and_fulfills_the_encrypted_slot(
                 id=owner_id,
                 workspace_id=workspace_id,
                 email="owner@yc.test",
+                is_admin=True,
                 created_at=created_at,
                 updated_at=created_at,
             )
@@ -259,12 +260,8 @@ async def test_device_auth_starts_in_chat_and_fulfills_the_encrypted_slot(
         )
         async with async_client(transport=httpx.MockTransport(auth)) as http:
             with ws(workspace_id):
-                with pytest.raises(ValueError, match="private audience"):
-                    await YcAuth(replace(context, audience=conversation_audience(None)), http).run(
-                        "start", "session"
-                    )
                 non_owner = uuid4()
-                with pytest.raises(ValueError, match="workspace owner"):
+                with pytest.raises(ValueError, match="workspace admin"):
                     await YcAuth(
                         replace(
                             context,
@@ -275,6 +272,7 @@ async def test_device_auth_starts_in_chat_and_fulfills_the_encrypted_slot(
                     ).run("start", "session")
                 assert authorization_calls == 0
         with ws(workspace_id):
+            context = replace(context, audience=conversation_audience(None))
             tool_result = await yc_auth(
                 context, YcAuthInput(action="start", user_description="looking it up in YC")
             )

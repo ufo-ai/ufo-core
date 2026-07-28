@@ -187,3 +187,40 @@ async def test_exec_env_rides_the_handle_not_the_conversation(tmp_path: Path) ->
 
     assert result_a.stdout == f"http://turn-a:@127.0.0.1:{PROXY_PORT}|none"
     assert result_b.stdout == f"http://turn-b:@127.0.0.1:{PROXY_PORT}|sent-b"
+
+
+async def test_background_descendant_keeps_its_authority_across_later_execs(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    carrier = LocalCarrier()
+    base = SandboxSession(carrier=carrier, handle=await carrier.create(_spec(workspace)))
+    first = base.authorize(
+        "member-a",
+        frozenset(("GH_TOKEN",)),
+        {"GH_TOKEN": "sent-a"},
+    )
+    second = base.authorize(
+        "member-b",
+        frozenset(("GH_TOKEN",)),
+        {"GH_TOKEN": "sent-b"},
+    )
+
+    launched = await first.bash(
+        "nohup sh -c 'while [ ! -f release ]; do :; done; "
+        'printf "%s|%s" "$HTTPS_PROXY" "$GH_TOKEN" > first.txt\' '
+        ">/dev/null 2>&1 &"
+    )
+    assert launched.exit_code == 0
+    written = await second.bash(
+        'printf "%s|%s" "$HTTPS_PROXY" "$GH_TOKEN" > second.txt; '
+        "touch release; while [ ! -f first.txt ]; do :; done"
+    )
+    assert written.exit_code == 0
+
+    assert (workspace / "first.txt").read_text() == (
+        f"http://member-a:@127.0.0.1:{PROXY_PORT}|sent-a"
+    )
+    assert (workspace / "second.txt").read_text() == (
+        f"http://member-b:@127.0.0.1:{PROXY_PORT}|sent-b"
+    )

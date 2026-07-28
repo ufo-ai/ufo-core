@@ -6,7 +6,7 @@ timestamps are null). The value appears in no read: spec is the declaration (slo
 injection host), status says filled or empty — no value field, no value digest. Fill and rotate
 stay `request_credentials` (a secret
 and a private handoff, the speaker gating the act), so create and update refuse naming it;
-delete clears the stored value, owner-gated in the handler, and the slot stays listed as empty.
+delete clears the stored value, admin-gated in the handler, and the slot stays listed as empty.
 
 Core-registered: the loader builds the kind from every active manifest's declared slots and binds
 it with no extension context — the handlers read the ambient workspace directly, exactly as
@@ -23,11 +23,11 @@ from ufo.credentials import CredentialStore, HostChoice, credential_host
 from ufo.db import workspace_tx
 from ufo.ext.context import JsonValue
 from ufo.objects import (
+    AdminRequired,
     ObjectDetail,
     ObjectListQuery,
     ObjectPage,
     ObjectRow,
-    OwnerRequired,
     VerbNotSupported,
     object_page,
 )
@@ -40,7 +40,7 @@ FILL_REFUSAL = (
     "filling or rotating a credential involves a secret and a private handoff — use "
     "request_credentials"
 )
-UNSET_GATE = "only the workspace owner can clear a credential slot"
+UNSET_GATE = "only a workspace admin can clear a credential slot"
 NAME_DIGEST_LENGTH = 8
 
 
@@ -150,8 +150,8 @@ class CredentialObjects:
         raise VerbNotSupported(FILL_REFUSAL)
 
     async def delete(self, ctx: ToolContext, name: str) -> None:
-        if not await ctx.speaker_is_owner():
-            raise OwnerRequired(UNSET_GATE)
+        if not await ctx.speaker_is_admin():
+            raise AdminRequired(UNSET_GATE)
         slot = self._named()[name]
         async with workspace_tx() as connection:
             await connection.execute(
@@ -189,13 +189,13 @@ class CredentialObjects:
 
 CREDENTIAL_DESCRIPTION = (
     "A declared BYOK credential slot, filled or empty — the value itself is never shown. Fill "
-    "or rotate through request_credentials; delete (owner-only) clears the stored value while "
+    "or rotate through request_credentials; delete (admin-only) clears the stored value while "
     "the slot stays declared."
 )
 CREDENTIAL_GUIDANCE = (
     "The BYOK secret slots installed extensions declare, filled or empty; values never appear "
     "in any read. Create and update are refused — filling or rotating a secret goes through "
-    "request_credentials, a private handoff the workspace owner authorizes. Delete clears a "
-    "stored value (workspace owner only); the slot stays listed as empty because its "
+    "request_credentials, a private handoff a workspace admin authorizes. Delete clears a "
+    "stored value (workspace admin only); the slot stays listed as empty because its "
     "declaration lives in the extension, not the row."
 )

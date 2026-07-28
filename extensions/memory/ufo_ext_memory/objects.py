@@ -27,7 +27,7 @@ from ufo.sdk.objects import (
     object_page,
 )
 from ufo.sdk.tools import ToolContext
-from ufo_ext_memory.store import memory_item, recall_subjects
+from ufo_ext_memory.store import memory_item
 
 MEMORY_KIND = "memory"
 PAGE_OBJECT_KIND = "page"
@@ -68,7 +68,7 @@ class MemoryObjects:
 
     async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage:
         ext = _require_ext(ctx)
-        subjects = recall_subjects(ctx.audience)
+        subjects = ctx.read_subjects
         async with ext.transaction() as connection:
             rows = (
                 (
@@ -127,7 +127,7 @@ class MemoryObjects:
         except ValueError:
             return None
         ext = _require_ext(ctx)
-        subjects = recall_subjects(ctx.audience)
+        subjects = ctx.read_subjects
         async with ext.transaction() as connection:
             row = (
                 (

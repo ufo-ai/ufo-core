@@ -822,7 +822,7 @@ async def test_a_connector_sized_result_offloads_to_a_file_the_sandbox_can_filte
     assert len(payload) // GITHUB_SEARCH_HITS > GITHUB_SEARCH_CHARS_PER_HIT
     engine = _dispatch_engine(ctx, ToolRegistry((_fixed_result_tool("search_code", payload),)))
 
-    block = await engine._dispatch(ctx, ToolUseBlock(id="call1", name="search_code", input={}))
+    block = await engine._dispatch(ctx, ToolUseBlock(id="call1", name="search_code", input={}), {})
     path = f"{TOOL_OUTPUT_DIR}/call1.txt"
     assert not block.is_error
     assert isinstance(block.content, str)
@@ -858,7 +858,7 @@ async def test_the_offload_preview_carries_one_whole_record_of_the_payload(
     assert envelope + len(first_record) > 4_096
     engine = _dispatch_engine(ctx, ToolRegistry((_fixed_result_tool("search_code", payload),)))
 
-    block = await engine._dispatch(ctx, ToolUseBlock(id="call2", name="search_code", input={}))
+    block = await engine._dispatch(ctx, ToolUseBlock(id="call2", name="search_code", input={}), {})
     assert isinstance(block.content, str)
     assert first_record in block.content
     assert '"total_count":15800' in block.content
@@ -885,11 +885,11 @@ async def test_the_offload_fires_only_past_the_cap(
         ),
     )
 
-    inline = await engine._dispatch(ctx, ToolUseBlock(id="call3", name="at_cap", input={}))
+    inline = await engine._dispatch(ctx, ToolUseBlock(id="call3", name="at_cap", input={}), {})
     assert inline.content == at_cap
     assert not (workspace / ".tool-output" / "call3.txt").exists()
 
-    offloaded = await engine._dispatch(ctx, ToolUseBlock(id="call5", name="over_cap", input={}))
+    offloaded = await engine._dispatch(ctx, ToolUseBlock(id="call5", name="over_cap", input={}), {})
     assert isinstance(offloaded.content, str)
     assert f"{TOOL_OUTPUT_DIR}/call5.txt" in offloaded.content
     assert (workspace / ".tool-output" / "call5.txt").read_text() == at_cap + "y"
@@ -907,7 +907,9 @@ async def test_a_read_over_the_cap_offloads_without_losing_the_file_it_read(
     engine = _dispatch_engine(ctx, ToolRegistry(BUILTIN_TOOLS))
 
     block = await engine._dispatch(
-        ctx, ToolUseBlock(id="call4", name="read", input={"file_path": "wide.log"})
+        ctx,
+        ToolUseBlock(id="call4", name="read", input={"file_path": "wide.log"}),
+        {},
     )
     assert isinstance(block.content, str)
     assert f"{TOOL_OUTPUT_DIR}/call4.txt" in block.content

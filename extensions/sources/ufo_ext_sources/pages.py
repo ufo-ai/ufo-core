@@ -7,7 +7,7 @@ through the sanctioned `ExtensionContext.source_pages` accessor and get reads th
 turn's blob capability, scoped to the caller's own visibility subjects; delete tombstones one page
 through `forget_page` so the existing page-change pipeline reaps its derived index state. Pages are
 produced by the sync driver, never authored, so create and update raise `VerbNotSupported`; delete
-is owner-gated.
+is admin-gated.
 """
 
 from collections.abc import AsyncGenerator
@@ -17,9 +17,9 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ufo.sdk.audience import audience_subjects
 from ufo.sdk.context import ExtensionContext, JsonValue
 from ufo.sdk.objects import (
+    AdminRequired,
     ObjectDetail,
     ObjectKind,
     ObjectLink,
@@ -27,7 +27,6 @@ from ufo.sdk.objects import (
     ObjectPage,
     ObjectRef,
     ObjectRow,
-    OwnerRequired,
     VerbNotSupported,
     object_page,
 )
@@ -39,7 +38,7 @@ PAGE_KIND = "page"
 PAGES_ARE_SYNCED = (
     "pages are landed by the content-sync driver, not authored — register a source to sync them"
 )
-PAGE_FORGET_GATE = "only the workspace owner can forget a synced page"
+PAGE_FORGET_GATE = "only a workspace admin can forget a synced page"
 SUMMARY_MAX = 120
 PAGE_BODY_MAX_BYTES = 65_536
 
@@ -142,7 +141,7 @@ class PageObjects:
     """The kind's handlers over the workspace's live (non-tombstoned) pages the caller may see:
     list and get read metadata through `source_pages`, joining each page to its source for the
     provider name via `sources()`; delete tombstones the row through `forget_page` so the
-    page-change pipeline clears its derived index state. Only the workspace owner may forget a
+    page-change pipeline clears its derived index state. Only a workspace admin may forget a
     page."""
 
     async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage:
@@ -193,8 +192,8 @@ class PageObjects:
         raise VerbNotSupported(PAGES_ARE_SYNCED)
 
     async def delete(self, ctx: ToolContext, name: str) -> None:
-        if not await ctx.speaker_is_owner():
-            raise OwnerRequired(PAGE_FORGET_GATE)
+        if not await ctx.speaker_is_admin():
+            raise AdminRequired(PAGE_FORGET_GATE)
         page = await self._find(ctx, name)
         if page is None:
             raise ValueError(f"no page named {name!r}")
@@ -229,7 +228,7 @@ class PageObjects:
                 updated_at=record.updated_at,
                 source_name=source_names.get(record.source_id),
             )
-            for record in await ext.source_pages(audience_subjects(ctx.audience))
+            for record in await ext.source_pages(ctx.read_subjects)
         )
 
 
@@ -237,7 +236,7 @@ PAGE_OBJECT = ObjectKind(
     name=PAGE_KIND,
     description=(
         "A synced source page: one document the content-sync driver landed from a registered "
-        "source, read-only with an owner-only forget (delete). Created and updated only by the "
+        "source, read-only with an admin-only forget (delete). Created and updated only by the "
         "sync driver."
     ),
     guidance=(
@@ -245,7 +244,7 @@ PAGE_OBJECT = ObjectKind(
         "or updated_at and `order_by` any of those fields; for example, filter one source's issues "
         "and order by created_at desc. Get by name returns those fields plus a bounded page body. "
         "Pages are landed by the content-sync driver, so create and update are "
-        "refused; only the workspace owner can delete (forget) a page, which tombstones it and "
+        "refused; only a workspace admin can delete (forget) a page, which tombstones it and "
         "clears its derived index state. A source subscription's change alert references the "
         "changed pages by name so you can object_get them here."
     ),

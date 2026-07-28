@@ -60,6 +60,7 @@ from ufo.ext.manifest import (
     SubagentProfile,
 )
 from ufo.indexing import EmbedClient, IndexBackend
+from ufo.members import MEMBER_OBJECT
 from ufo.memory import DEFAULT_MEMORY_SEARCH_PROVIDER, MemorySearch
 from ufo.o11y import log
 from ufo.objects import BoundKind, ObjectKind, ObjectVerbs, object_registry
@@ -77,6 +78,7 @@ CORE_OBJECT_KINDS: tuple[BoundKind, ...] = (
     BoundKind(kind=AGENT_OBJECT, extension=None, context=None),
     BoundKind(kind=ARTIFACT_OBJECT, extension=None, context=None),
     BoundKind(kind=CONVERSATION_OBJECT, extension=None, context=None),
+    BoundKind(kind=MEMBER_OBJECT, extension=None, context=None),
 )
 EXTENSION_ENTRY_POINT_GROUP = "ufo.extension"
 PACK_ENTRY_POINT_GROUP = "ufo.pack"

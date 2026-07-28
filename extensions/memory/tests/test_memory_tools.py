@@ -163,7 +163,7 @@ async def test_memory_search_provider_rejects_an_empty_query_set() -> None:
     embed = StubEmbed(vec((0, 1.0)))
     provider = spec.build(_ext(DefaultIndex(transaction=workspace_tx), embed))
     with pytest.raises(ValueError, match="requires 1-3 queries"):
-        await provider.search((), SHARED_AUDIENCE)
+        await provider.search((), frozenset({"shared"}))
 
 
 async def test_user_prompt_submit_hook_injects_and_observes_a_recalled_fact(
@@ -399,21 +399,20 @@ async def test_memory_update_writes_only_the_conversation_audience(
     member = uuid4()
     embed = StubEmbed(vec((0, 1.0)))
     index = DefaultIndex(transaction=workspace_tx)
-    private_ext = _ext(index, embed, conversation_audience(member))
     shared_ext = _ext(index, embed)
-    private_ctx = _tool_ctx(private_ext, member, tmp_path)
-    shared_ctx = _tool_ctx(shared_ext, member, tmp_path, audience=SHARED_AUDIENCE)
+    bound_ctx = _tool_ctx(shared_ext, member, tmp_path, audience=SHARED_AUDIENCE)
+    common_ctx = _tool_ctx(shared_ext, None, tmp_path, audience=SHARED_AUDIENCE)
     with ws(workspace_id):
-        await _run("memory_update", private_ctx, body="a private note")
-        await _run("memory_update", shared_ctx, body="a team note")
+        await _run("memory_update", bound_ctx, body="a private note")
+        await _run("memory_update", common_ctx, body="a team note")
         async with workspace_tx() as connection:
             subjects = sorted(
                 row.subject
                 for row in (await connection.execute(sa.select(memory_item.c.subject))).all()
             )
         await _indexer(embed).run()
-        private_read = await _run("memory_search", private_ctx, queries=["note"])
-        shared_read = await _run("memory_search", shared_ctx, queries=["note"])
+        private_read = await _run("memory_search", bound_ctx, queries=["note"])
+        shared_read = await _run("memory_search", common_ctx, queries=["note"])
     assert subjects == sorted([member_subject(member), "shared"])
     assert "a private note" in private_read.content[0].text
     assert "a team note" in private_read.content[0].text
@@ -421,6 +420,51 @@ async def test_memory_update_writes_only_the_conversation_audience(
     assert "a team note" in shared_read.content[0].text
     with pytest.raises(ValidationError):
         memory.MemoryUpdateInput.model_validate({"body": "widened", "shared": True})
+
+
+async def test_shared_recall_excludes_message_bound_private_memory(
+    db: None, tmp_path: Path
+) -> None:
+    workspace_id = await _workspace()
+    member = uuid4()
+    embed = StubEmbed(vec((0, 1.0)))
+    index = DefaultIndex(transaction=workspace_tx)
+    ext = _ext(index, embed)
+    with ws(workspace_id):
+        await _run(
+            "memory_update",
+            _tool_ctx(ext, member, tmp_path, audience=SHARED_AUDIENCE),
+            body="member private launch note",
+        )
+        await _run(
+            "memory_update",
+            _tool_ctx(ext, None, tmp_path, audience=SHARED_AUDIENCE),
+            body="common launch note",
+        )
+        await _indexer(embed).run()
+        outcome = await memory.recall_hook(
+            HookContext(
+                ext=ext,
+                turn=Turn(
+                    id=uuid4(),
+                    workspace_id=workspace_id,
+                    conversation_id=uuid4(),
+                    agent_id=uuid4(),
+                    seq=1,
+                    status="running",
+                    inbound="launch note",
+                    created_at=datetime(2026, 7, 9, tzinfo=UTC),
+                ),
+                agent=Agent(prompt="p", model="claude-opus-4-8"),
+                speaker_member_id=member,
+                audience=SHARED_AUDIENCE,
+                payload=UserPromptSubmit(text="launch note"),
+            )
+        )
+
+    assert isinstance(outcome, InjectContext)
+    assert "common launch note" in outcome.text
+    assert "member private launch note" not in outcome.text
 
 
 async def test_room_memory_reads_shared_while_foreign_memory_is_sealed(
@@ -454,6 +498,32 @@ async def test_room_memory_reads_shared_while_foreign_memory_is_sealed(
     assert "foreign launch note" not in other_read.content[0].text
     assert "foreign launch note" in foreign_read.content[0].text
     assert "shared launch note" not in foreign_read.content[0].text
+
+
+async def test_explicit_room_request_reads_the_room_and_requesters_private_memory(
+    db: None, tmp_path: Path
+) -> None:
+    workspace_id = await _workspace()
+    alice, bob = uuid4(), uuid4()
+    embed = StubEmbed(vec((0, 1.0)))
+    index = DefaultIndex(transaction=workspace_tx)
+    room = room_audience("slack", "CPRIVATE")
+    room_ext = _ext(index, embed, room)
+    common = _tool_ctx(room_ext, None, tmp_path, audience=room)
+    alice_ctx = _tool_ctx(room_ext, alice, tmp_path, audience=room)
+    bob_ctx = _tool_ctx(room_ext, bob, tmp_path, audience=room)
+
+    with ws(workspace_id):
+        await _run("memory_update", common, body="room launch note")
+        await _run("memory_update", alice_ctx, body="alice private launch note")
+        await _indexer(embed).run()
+        alice_read = await _run("memory_search", alice_ctx, queries=["launch note"])
+        bob_read = await _run("memory_search", bob_ctx, queries=["launch note"])
+
+    assert "room launch note" in alice_read.content[0].text
+    assert "alice private launch note" in alice_read.content[0].text
+    assert "room launch note" in bob_read.content[0].text
+    assert "alice private launch note" not in bob_read.content[0].text
 
 
 async def test_memory_search_reports_no_match_on_empty_memory(db: None, tmp_path: Path) -> None:

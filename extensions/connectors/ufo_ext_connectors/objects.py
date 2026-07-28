@@ -3,7 +3,8 @@
 A grant is created only through the `connect_account` chat flow — a third party and a secret are
 involved, so create refuses naming that path. A grant is private to its grantor by default; apply
 admits exactly one mutation, flipping `shared` — disclosure to this agent's audience — gated to
-the grantor or an owner. Delete revokes this agent's binding, gated the same way. The broker
+the grantor when widening, and to the grantor or an admin when narrowing. Delete admits the
+grantor or an admin. The broker
 holds the account's token and exposes no revoke surface, so revocation is the grant-row delete:
 the account stops resolving for the agent's tools, syncs, and proxy rules at once, and the same
 account connected to another agent keeps that agent's own binding.
@@ -32,8 +33,8 @@ from ufo.sdk.tools import ToolContext
 
 CONNECTOR_KIND = "connector"
 CONNECT_REFUSAL = "connecting an account involves a third party and a secret — use connect_account"
-REVOKE_GATE = "only the grantor or the workspace owner may revoke a connected account"
-SHARE_GATE = "only the grantor or the workspace owner may change an account's sharing"
+REVOKE_GATE = "only the grantor or a workspace admin may revoke a connected account"
+SHARE_GATE = "only the grantor may share; the grantor or an admin may make an account private"
 NAME_DIGEST_LENGTH = 8
 
 
@@ -52,15 +53,18 @@ def _slug(raw: str) -> str:
 class ConnectorObjects(MemberOwnedObjects[ConnectorSpec]):
     """The kind's handlers over the turn agent's grant rows: list and get read the audit view,
     apply flips sharing, delete revokes — both through the grant store on the turn's context,
-    acting on this agent's binding alone. The per-member visibility and grantor-or-owner gate is
-    the base's; this kind supplies the grant rows, their specs, and the flip/revoke domain
-    acts."""
+    acting on this agent's binding alone. The base admits only the grantor to widen; an admin may
+    inspect, narrow, or revoke. This kind supplies the grant rows, their specs, and the
+    flip/revoke domain acts."""
 
     kind_name: ClassVar[str] = CONNECTOR_KIND
     mutate_gate: ClassVar[str] = SHARE_GATE
     delete_gate: ClassVar[str] = REVOKE_GATE
     mutate_requires_speaker: ClassVar[bool] = True
     delete_requires_speaker: ClassVar[bool] = True
+
+    def _admin_can_apply(self, old: ConnectorSpec, spec: ConnectorSpec) -> bool:
+        return old.shared and spec == old.model_copy(update={"shared": False})
 
     async def _owned_rows(self, ctx: ToolContext) -> tuple[OwnedRow, ...]:
         return tuple(
@@ -143,16 +147,16 @@ CONNECTOR_OBJECT = ObjectKind(
     description=(
         "A connected provider account (an OAuth grant), private to its grantor by default. "
         "Created only through connect_account; apply flips `shared`; delete revokes — both "
-        "admitted to the grantor or the workspace owner."
+        "grantor-controlled, with admins limited to narrowing or revoking."
     ),
     guidance=(
         "Connected accounts granted to this agent, one object per provider account. Create is "
         "refused — connecting an account involves a third party and a secret, so it stays the "
         "connect_account chat flow. Apply admits exactly one change: flipping `shared` — the "
-        "grantor (or a workspace owner) shares a private account with every member's turns, or "
-        "makes a shared one private again. Delete revokes: the grantor or a workspace owner "
-        "removes the grant and the agent loses the account's tools and syncs. Reads show shared "
-        "accounts plus the member's own — a workspace owner sees all."
+        "grantor may share a private account with every member's turns; the grantor or a workspace "
+        "admin may make a shared one private again. Delete revokes: the grantor or a workspace "
+        "admin removes the grant and the agent loses the account's tools and syncs. Reads show "
+        "shared accounts plus the member's own — a workspace admin sees all."
     ),
     spec_model=ConnectorSpec,
     store=ConnectorObjects(),

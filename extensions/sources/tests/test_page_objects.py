@@ -4,12 +4,12 @@ the owner.
 Rows are landed through the sync driver for the producer-consumer proof and seeded directly for
 row-specific cases. The tests drive list/get/status through the real tool dispatch, prove create
 and update are refused naming the sync driver, and prove delete tombstones the row and is
-owner-gated.
+admin-gated.
 """
 
 import json
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import ClassVar
@@ -32,10 +32,11 @@ from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import Audience, conversation_audience, foreign_room_audience, room_audience
 from ufo.sdk.connectors import ConnectorRegistry
-from ufo.sdk.objects import OwnerRequired, VerbNotSupported
+from ufo.sdk.objects import AdminRequired, VerbNotSupported
 from ufo.sdk.sources import ConnectorSourceConfig, Page, SourceAuth, SyncResult
 from ufo.sdk.tools import ToolContext
 from ufo.sources.sync import SyncDriver
+from ufo.subjects import member_subject
 from ufo.tools.registry import ToolDef
 from ufo.workspace import ws
 
@@ -82,6 +83,7 @@ async def _workspace() -> _Workspace:
                     "id": owner_id,
                     "workspace_id": workspace_id,
                     "email": f"{owner_id.hex}@x.test",
+                    "is_admin": True,
                     "created_at": OWNER_CREATED_AT,
                     "updated_at": OWNER_CREATED_AT,
                 },
@@ -89,6 +91,7 @@ async def _workspace() -> _Workspace:
                     "id": member_id,
                     "workspace_id": workspace_id,
                     "email": f"{member_id.hex}@x.test",
+                    "is_admin": False,
                     "created_at": MEMBER_CREATED_AT,
                     "updated_at": MEMBER_CREATED_AT,
                 },
@@ -101,6 +104,7 @@ async def _workspace() -> _Workspace:
                 name="assistant",
                 prompt="p",
                 model="claude-opus-4-8",
+                is_main=True,
                 created_at=OWNER_CREATED_AT,
                 updated_at=OWNER_CREATED_AT,
             )
@@ -418,14 +422,52 @@ async def test_foreign_room_cannot_read_shared_source_pages(db: None, tmp_path: 
     with ws(state.workspace_id):
         source_id = await _seed_source(state, "asana")
         await _seed_page(state, source_id, blob)
-        room = _context(state, blob, audience=room_audience("slack", "CPRIVATE"))
-        foreign = _context(state, blob, audience=foreign_room_audience("slack", "CCONNECT"))
+        room = replace(
+            _context(state, blob, audience=room_audience("slack", "CPRIVATE")),
+            speaker_member_id=None,
+        )
+        foreign = replace(
+            _context(state, blob, audience=foreign_room_audience("slack", "CCONNECT")),
+            speaker_member_id=None,
+        )
 
         room_listing = json.loads(await _text(_TOOLS["object_list"], room, kind=PAGE_KIND))
         foreign_listing = json.loads(await _text(_TOOLS["object_list"], foreign, kind=PAGE_KIND))
 
     assert len(room_listing["objects"]) == 1
     assert foreign_listing["objects"] == []
+
+
+async def test_explicit_room_request_reads_shared_and_requester_private_pages(
+    db: None, tmp_path: Path
+) -> None:
+    state = await _workspace()
+    blob = FilesystemBlobStore(root=tmp_path)
+    room = room_audience("slack", "CPRIVATE")
+    with ws(state.workspace_id):
+        source_id = await _seed_source(state, "asana")
+        shared = await _seed_page(state, source_id, blob, title="Shared")
+        private = await _seed_page(
+            state,
+            source_id,
+            blob,
+            title="Mine",
+            subject=member_subject(state.member_id),
+        )
+        hidden = await _seed_page(
+            state,
+            source_id,
+            blob,
+            title="Other member",
+            subject=member_subject(state.owner_id),
+        )
+        ctx = _context(state, blob, speaker_id=state.member_id, audience=room)
+
+        listing = json.loads(await _text(_TOOLS["object_list"], ctx, kind=PAGE_KIND))
+
+    names = {row["name"] for row in listing["objects"]}
+    assert names == {str(shared), str(private)}
+    assert str(hidden) not in names
 
 
 async def test_pages_order_timestamp_variants_chronologically(db: None, tmp_path: Path) -> None:
@@ -635,7 +677,7 @@ async def test_delete_tombstones_and_is_owner_gated(db: None, tmp_path: Path) ->
         args = delete_tool.input_model.model_validate(
             {"user_description": TOOL_NARRATION, "kind": PAGE_KIND, "name": str(page_id)}
         )
-        with pytest.raises(OwnerRequired):
+        with pytest.raises(AdminRequired):
             await delete_tool.handler(_context(state, blob, speaker_id=state.member_id), args)
         assert await _tombstone(state, page_id) in (False, 0)
 

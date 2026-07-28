@@ -13,7 +13,7 @@ of core's own: the Turbopuffer index (in place of the local index), the Slack su
 live-frame hub, the E2B sandbox carrier, and Chrome driven inside each conversation's sandbox (the
 sandbox_chrome cdp provider, in place of a static `BROWSER_CDP_URL`). Memory still retrieves through
 OpenAI embeddings
-(Turbopuffer is the index seam, embeddings are separate). A workspace owner connects Slack in chat
+(Turbopuffer is the index seam, embeddings are separate). A workspace admin connects Slack in chat
 — the slack extension's setup tools drive it. It bundles only extensions and adds no
 pack-level skills or onboarding of its own — each capability rides its own extension's manifest."""
 

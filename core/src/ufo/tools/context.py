@@ -2,13 +2,13 @@
 
 A handler reaches the outside world only through the fields here: the sandbox for filesystem and
 shell, the blob store for artifacts, the turn/agent it runs under, `spawn` to delegate a typed
-subtask to a child turn, the speaking member who gates authorization, the exact conversation
-audience that scopes disclosure, and `artifact_token_secret` with which
+subtask to a child turn, the message requester who gates private authorization, the exact
+conversation audience that scopes disclosure, and `artifact_token_secret` with which
 `share_file` mints the signed download URLs the web surface verifies. `read_paths` is the working
 set that lets `edit` refuse to touch a file the turn has not read first. `connector_account` hands
 a connector tool the broker's connected-account id it passes to the broker's server-side execute
-API, resolved from the turn-agent's grants admitted to the speaking member (their own plus shared)
-so a tool reaches only the accounts the speaker may use. `skills` is the loadable
+API, resolved from the turn-agent's grants admitted to the requester (their own plus shared)
+so a tool reaches only the accounts its requester may use. `skills` is the loadable
 skill set for the deploy (core plus the active packs') that `load_skill` resolves against; it
 defaults to the core floor so a context built without the loader still resolves the core three.
 `loaded_skills` is the turn's live record of which of those workflows the context already holds, so
@@ -29,9 +29,10 @@ from dataclasses import dataclass, field
 from typing import Annotated, Any, Literal, Protocol
 from uuid import UUID
 
+import sqlalchemy as sa
 from pydantic import BaseModel, Field
 
-from ufo.audience import Audience, conversation_audience
+from ufo.audience import Audience, audience_subjects, conversation_audience
 from ufo.blob import BlobStore
 from ufo.browser import CdpProvider, FindCompleter
 from ufo.connectors import ConnectorRegistry
@@ -41,9 +42,10 @@ from ufo.ext.context import ExtensionContext
 from ufo.grants import ConnectUnavailable, GrantStore
 from ufo.o11y import log
 from ufo.sandbox.session import SandboxSession
+from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.search import SearchProvider
-from ufo.seats import owner_member_id
+from ufo.seats import member_is_admin
 from ufo.skills.runtime import CORE_SKILL_REGISTRY, LoadedSkills, SkillRegistry
 from ufo.workspace import ws_current
 
@@ -193,30 +195,54 @@ class ToolContext:
 
     @property
     def acting_member_id(self) -> UUID | None:
-        """The member this turn acts on behalf of when using that member's own resources: the
-        speaking member when one authored the turn, otherwise the initiator carried as
-        `on_behalf_of_member_id` — the member who created the schedule a fire re-enters, or who
-        spawned a subagent chain (copied forward at spawn). Capability USE resolves against this
-        so a member's scheduled job or delegated subagent keeps their private connections; the
-        granting acts (connect_account, credential slots) stay speaker-only, so a speakerless turn
-        can use what its member already connected but can never grant anew. A turn with no member
-        at all (an anonymous internal turn) resolves nothing private."""
+        """The member whose authority and capabilities this call may use: the author of its
+        validated `requested_by` message, otherwise the initiator carried by a scheduled turn or
+        subagent. Granting acts stay live-member-only."""
         return (
             self.speaker_member_id
             if self.speaker_member_id is not None
             else self.on_behalf_of_member_id
         )
 
-    async def speaker_is_owner(self) -> bool:
-        """Whether this turn's speaking member is the workspace owner — the earliest-created member
-        (there is no owner column; roles are deferred). Workspace-wide acts a tool drives (filling a
-        shared credential slot) gate on this, so a joined teammate cannot rewrite what every member
-        shares. No speaker is never the owner."""
+    @property
+    def effective_audience(self) -> Audience:
+        """The exact audience a write belongs to."""
+        acting = self.acting_member_id
+        return conversation_audience(acting) if acting is not None else self.audience
+
+    @property
+    def read_subjects(self) -> frozenset[str]:
+        """What the conversation and exact requester may jointly read."""
+        subjects = audience_subjects(self.audience)
+        acting = self.acting_member_id
+        if acting is None:
+            return subjects
+        return subjects | audience_subjects(conversation_audience(acting))
+
+    async def speaker_is_admin(self) -> bool:
+        """Whether this call's requesting member is a workspace admin. Workspace-wide acts gate on
+        the requester, so a background call cannot exercise admin authority."""
         if self.speaker_member_id is None:
             return False
         async with workspace_tx() as connection:
-            owner = await owner_member_id(connection, self.turn.workspace_id)
-        return owner is not None and owner == self.speaker_member_id
+            return await member_is_admin(
+                connection,
+                self.turn.workspace_id,
+                self.speaker_member_id,
+            )
+
+    async def agent_is_main(self) -> bool:
+        async with workspace_tx() as connection:
+            return bool(
+                (
+                    await connection.execute(
+                        sa.select(tables.agent.c.is_main).where(
+                            tables.agent.c.id == self.turn.agent_id,
+                            tables.agent.c.workspace_id == self.turn.workspace_id,
+                        )
+                    )
+                ).scalar_one_or_none()
+            )
 
     async def begin_credential_authorization(self, slot: str, payload: str) -> str:
         requests, member_id = await self._credential_authorization(slot)
@@ -236,14 +262,12 @@ class ToolContext:
     async def _credential_authorization(self, slot: str) -> tuple[CredentialRequests, UUID]:
         if self.speaker_member_id is None:
             raise ValueError("credential authorization requires a speaking member")
-        if self.audience != conversation_audience(self.speaker_member_id):
-            raise ValueError("credential authorization requires the speaker's private audience")
         if self.ext is None or slot not in self.ext.credentials.declared:
             raise ValueError(f"this extension does not declare credential slot {slot!r}")
         if self.requestable_credentials is None:
             raise ValueError("no credential key is configured — this deploy cannot store secrets")
-        if not await self.speaker_is_owner():
-            raise ValueError("only the workspace owner can authorize credential slots")
+        if not await self.speaker_is_admin():
+            raise ValueError("only a workspace admin can authorize credential slots")
         return self.requestable_credentials, self.speaker_member_id
 
     async def connector_account(self, provider: str, account_id: str | None = None) -> str:

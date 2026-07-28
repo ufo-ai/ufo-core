@@ -33,13 +33,13 @@ A coding subagent should not spend startup time deciding whether to clone.
 
 ## Connecting GitHub for private repositories
 
-A private clone or push needs the workspace connected, and only the owner can do it. Call `connect_github` and give them the link it returns. On GitHub they choose the organization and which repositories the ufo App may reach; GitHub returns them to ufo and the connection completes itself. Nothing is pasted back and no id or token is ever typed — GitHub confirms under the owner's own authorization that the installation is one they reach, which is why a workspace can only connect its own. The link is single-purpose and expires shortly, so mint a fresh one rather than reusing an old message.
+A private clone or push needs the workspace connected, and only a workspace admin can do it. Call `connect_github` and give them the link it returns. On GitHub they choose the organization and which repositories the ufo App may reach; GitHub returns them to ufo and the connection completes itself. Nothing is pasted back and no id or token is ever typed — GitHub confirms under that admin's authorization that they reach the installation. The link is single-purpose and expires shortly, so mint a fresh one rather than reusing an old message.
 
-For a repository outside any organization that installed the App, the fallback is the owner's own fine-grained personal access token with Contents read and write, collected privately into `github_git_token`. Never accept a token pasted into the conversation itself.
+For a repository outside any organization that installed the App, the fallback is an admin's fine-grained personal access token with Contents read and write, collected privately into `github_git_token`. Never accept a token pasted into the conversation itself.
 
 With either in place, `git clone` and `git push` authenticate inside the sandbox — which holds only a sentinel, never the credential.
 
-**A GitHub connector grant is not git access.** It authenticates `gh` and `call_external_tool` against `api.github.com` only; git reaches `github.com`, which the grant does not cover. So when asked whether GitHub is connected, answer for the thing being asked about: a working issue read, a connected-account id, or a `credential` object proves the API works and proves nothing about clone or push. If git has no credential, the honest answer is that git is not connected and the owner needs to run the connect flow — never cite the grant as evidence that a clone should work.
+**A GitHub connector grant is not git access.** It authenticates `gh` and `call_external_tool` against `api.github.com` only; git reaches `github.com`, which the grant does not cover. So when asked whether GitHub is connected, answer for the thing being asked about: a working issue read, a connected-account id, or a `credential` object proves the API works and proves nothing about clone or push. If git has no credential, the honest answer is that git is not connected and an admin needs to run the connect flow — never cite the grant as evidence that a clone should work.
 
 ## Finding the Repository
 

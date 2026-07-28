@@ -1,5 +1,5 @@
 """Seat rules proven against the real schema on both dialects: grants count and stop at the
-limit, the owner's seat is irrevocable, creation always succeeds and seats while a seat is open,
+limit, the last seated admin is irrevocable, creation always succeeds and seats while open,
 an unlimited workspace admits everyone (and primes the per-round fast-path), the parked-resume
 sweep holds a revoked speaker's turn, and the migration backfills every existing member as
 seated."""
@@ -24,19 +24,19 @@ from ufo.schema import tables
 from ufo.schema.records import INTERNAL_ADMISSION, MEMBER_ADMISSION, SCHEDULED_ADMISSION
 from ufo.seats import (
     SEAT_REVOKED_MESSAGE,
-    OwnerSeatRevocation,
+    LastAdminSeatRevocation,
     SeatLimitReached,
     Seats,
     UnknownMember,
+    admin_conversation,
     create_member,
     gate_member,
-    owner_conversation,
     seat_gate_absent,
 )
 from ufo.surfaces.hub_tail import PARK_NOTICE, turn_status_frame
 from ufo.workspace import ws
 
-OWNER_EMAIL = "owner@example.com"
+ADMIN_EMAIL = "owner@example.com"
 TEAMMATE_EMAIL = "teammate@example.com"
 
 
@@ -65,6 +65,7 @@ async def _member(
                 id=member_id,
                 workspace_id=workspace_id,
                 email=email,
+                is_admin=email == ADMIN_EMAIL,
                 seated_at=created if seated else None,
                 created_at=created,
                 updated_at=created,
@@ -84,7 +85,7 @@ async def _seated_at(member_id: UUID) -> datetime | None:
 
 async def test_grant_seats_under_limit_and_is_idempotent(db: None) -> None:
     workspace_id = await _workspace(limit=2)
-    await _member(workspace_id, OWNER_EMAIL, offset_seconds=0)
+    await _member(workspace_id, ADMIN_EMAIL, offset_seconds=0)
     teammate = await _member(workspace_id, TEAMMATE_EMAIL, seated=False, offset_seconds=1)
     async with workspace_tx() as connection:
         await Seats(workspace_id).grant(connection, TEAMMATE_EMAIL)
@@ -97,7 +98,7 @@ async def test_grant_seats_under_limit_and_is_idempotent(db: None) -> None:
 
 async def test_grant_at_limit_raises(db: None) -> None:
     workspace_id = await _workspace(limit=1)
-    await _member(workspace_id, OWNER_EMAIL, offset_seconds=0)
+    await _member(workspace_id, ADMIN_EMAIL, offset_seconds=0)
     teammate = await _member(workspace_id, TEAMMATE_EMAIL, seated=False, offset_seconds=1)
     async with workspace_tx() as connection:
         with pytest.raises(SeatLimitReached, match="all 1 seats"):
@@ -107,7 +108,7 @@ async def test_grant_at_limit_raises(db: None) -> None:
 
 async def test_grant_unknown_email_raises(db: None) -> None:
     workspace_id = await _workspace(limit=5)
-    await _member(workspace_id, OWNER_EMAIL)
+    await _member(workspace_id, ADMIN_EMAIL)
     async with workspace_tx() as connection:
         with pytest.raises(UnknownMember, match="stranger@example"):
             await Seats(workspace_id).grant(connection, "stranger@example.com")
@@ -115,7 +116,7 @@ async def test_grant_unknown_email_raises(db: None) -> None:
 
 async def test_revoke_unseats_and_is_idempotent(db: None) -> None:
     workspace_id = await _workspace(limit=5)
-    await _member(workspace_id, OWNER_EMAIL, offset_seconds=0)
+    await _member(workspace_id, ADMIN_EMAIL, offset_seconds=0)
     teammate = await _member(workspace_id, TEAMMATE_EMAIL, offset_seconds=1)
     for _ in range(2):
         async with workspace_tx() as connection:
@@ -123,14 +124,14 @@ async def test_revoke_unseats_and_is_idempotent(db: None) -> None:
         assert await _seated_at(teammate) is None
 
 
-async def test_revoke_owner_refused(db: None) -> None:
+async def test_revoke_last_admin_refused(db: None) -> None:
     workspace_id = await _workspace(limit=5)
-    owner = await _member(workspace_id, OWNER_EMAIL, offset_seconds=0)
+    administrator = await _member(workspace_id, ADMIN_EMAIL, offset_seconds=0)
     await _member(workspace_id, TEAMMATE_EMAIL, offset_seconds=1)
     async with workspace_tx() as connection:
-        with pytest.raises(OwnerSeatRevocation):
-            await Seats(workspace_id).revoke(connection, OWNER_EMAIL)
-    assert await _seated_at(owner) is not None
+        with pytest.raises(LastAdminSeatRevocation):
+            await Seats(workspace_id).revoke(connection, ADMIN_EMAIL)
+    assert await _seated_at(administrator) is not None
 
 
 async def test_ensure_limit_writes_only_when_null(db: None) -> None:
@@ -158,10 +159,10 @@ async def test_ensure_limit_rejects_nonpositive(db: None) -> None:
 async def test_create_member_seats_while_open_and_leaves_unseated_at_limit(db: None) -> None:
     workspace_id = await _workspace(limit=2)
     async with workspace_tx() as connection:
-        owner = await create_member(connection, workspace_id, OWNER_EMAIL)
+        administrator = await create_member(connection, workspace_id, ADMIN_EMAIL)
         second = await create_member(connection, workspace_id, TEAMMATE_EMAIL)
         third = await create_member(connection, workspace_id, "third@example.com")
-    assert await _seated_at(owner) is not None
+    assert await _seated_at(administrator) is not None
     assert await _seated_at(second) is not None
     assert await _seated_at(third) is None
 
@@ -179,7 +180,7 @@ async def test_create_member_seats_everyone_without_a_limit(db: None) -> None:
 
 async def test_admits_everyone_without_a_limit_and_primes_the_fast_path(db: None) -> None:
     workspace_id = await _workspace(limit=None)
-    unseated = await _member(workspace_id, OWNER_EMAIL, seated=False)
+    unseated = await _member(workspace_id, ADMIN_EMAIL, seated=False)
     assert not seat_gate_absent(workspace_id)
     async with workspace_tx() as connection:
         assert await Seats(workspace_id).admits(connection, unseated)
@@ -188,7 +189,7 @@ async def test_admits_everyone_without_a_limit_and_primes_the_fast_path(db: None
 
 async def test_admits_only_seated_members_under_a_limit(db: None) -> None:
     workspace_id = await _workspace(limit=1)
-    seated = await _member(workspace_id, OWNER_EMAIL, offset_seconds=0)
+    seated = await _member(workspace_id, ADMIN_EMAIL, offset_seconds=0)
     unseated = await _member(workspace_id, TEAMMATE_EMAIL, seated=False, offset_seconds=1)
     async with workspace_tx() as connection:
         assert await Seats(workspace_id).admits(connection, seated)
@@ -196,16 +197,16 @@ async def test_admits_only_seated_members_under_a_limit(db: None) -> None:
     assert not seat_gate_absent(workspace_id)
 
 
-async def test_snapshot_orders_members_and_flags_owner(db: None) -> None:
+async def test_snapshot_orders_members_and_flags_admin(db: None) -> None:
     workspace_id = await _workspace(limit=5)
-    await _member(workspace_id, OWNER_EMAIL, offset_seconds=0)
+    await _member(workspace_id, ADMIN_EMAIL, offset_seconds=0)
     await _member(workspace_id, TEAMMATE_EMAIL, seated=False, offset_seconds=1)
     async with workspace_tx() as connection:
         snapshot = await Seats(workspace_id).snapshot(connection)
     assert snapshot.limit == 5
     assert snapshot.seated == 1
-    assert [(entry.email, entry.seated, entry.owner) for entry in snapshot.members] == [
-        (OWNER_EMAIL, True, True),
+    assert [(entry.email, entry.seated, entry.admin) for entry in snapshot.members] == [
+        (ADMIN_EMAIL, True, True),
         (TEAMMATE_EMAIL, False, False),
     ]
 
@@ -275,7 +276,7 @@ async def _parked_turn(
 
 async def test_sweep_holds_a_revoked_speakers_parked_turn_until_regranted(db: None) -> None:
     workspace_id = await _workspace(limit=2)
-    await _member(workspace_id, OWNER_EMAIL, offset_seconds=0)
+    await _member(workspace_id, ADMIN_EMAIL, offset_seconds=0)
     speaker = await _member(workspace_id, TEAMMATE_EMAIL, seated=False, offset_seconds=1)
     turn_id = await _parked_turn(workspace_id, speaker)
     dbos = _StubDbos()
@@ -289,9 +290,46 @@ async def test_sweep_holds_a_revoked_speakers_parked_turn_until_regranted(db: No
     assert dbos.enqueued == [str(turn_id)]
 
 
+async def test_sweep_holds_a_parked_aggregate_for_every_pending_speaker(db: None) -> None:
+    workspace_id = await _workspace(limit=2)
+    founder = await _member(workspace_id, ADMIN_EMAIL, offset_seconds=0)
+    pending = await _member(workspace_id, TEAMMATE_EMAIL, seated=False, offset_seconds=1)
+    turn_id = await _parked_turn(workspace_id, founder)
+    async with workspace_tx() as connection:
+        conversation_id = (
+            await connection.execute(
+                sa.select(tables.turn.c.conversation_id).where(tables.turn.c.id == turn_id)
+            )
+        ).scalar_one()
+        await connection.execute(
+            sa.insert(tables.inbound_message).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                seq=1,
+                body="pending speaker",
+                admission_source=MEMBER_ADMISSION,
+                speaker_member_id=pending,
+                admitted_turn_id=turn_id,
+                created_at=sa.func.now(),
+            )
+        )
+    dbos = _StubDbos()
+
+    with ws(workspace_id):
+        await TurnDispatcher(client=dbos).run()
+    assert dbos.enqueued == []
+
+    async with workspace_tx() as connection:
+        await Seats(workspace_id).grant(connection, TEAMMATE_EMAIL)
+    with ws(workspace_id):
+        await TurnDispatcher(client=dbos).run()
+    assert dbos.enqueued == [str(turn_id)]
+
+
 async def test_sweep_resumes_a_speakerless_parked_turn(db: None) -> None:
     workspace_id = await _workspace(limit=1)
-    await _member(workspace_id, OWNER_EMAIL)
+    await _member(workspace_id, ADMIN_EMAIL)
     turn_id = await _parked_turn(workspace_id, None)
     dbos = _StubDbos()
     with ws(workspace_id):
@@ -311,7 +349,7 @@ def test_migration_backfills_existing_members_as_seated(tmp_path: Path) -> None:
     config.set_main_option("sqlalchemy.url", url)
     command.upgrade(config, "0038")
     engine = sa.create_engine(f"sqlite:///{tmp_path / 'backfill.db'}")
-    workspace_id, member_id = uuid4(), uuid4()
+    workspace_id, member_id, agent_id = uuid4(), uuid4(), uuid4()
     created = datetime(2026, 7, 1, tzinfo=UTC)
     with engine.connect() as connection:
         connection.execute(
@@ -327,6 +365,14 @@ def test_migration_backfills_existing_members_as_seated(tmp_path: Path) -> None:
                 "values (:id, :workspace_id, 'owner@example.com', :created, :created)"
             ),
             {"id": member_id.hex, "workspace_id": workspace_id.hex, "created": created},
+        )
+        connection.execute(
+            sa.text(
+                "insert into agent "
+                "(id, workspace_id, name, prompt, model, created_at, updated_at) "
+                "values (:id, :workspace_id, 'assistant', 'p', 'm', :created, :created)"
+            ),
+            {"id": agent_id.hex, "workspace_id": workspace_id.hex, "created": created},
         )
         connection.commit()
     command.upgrade(config, "heads")
@@ -353,7 +399,7 @@ def test_gate_member_is_the_speaker_else_the_scheduled_acting_member() -> None:
 
 async def test_sweep_holds_a_scheduled_turn_for_an_unseated_creator(db: None) -> None:
     workspace_id = await _workspace(limit=2)
-    await _member(workspace_id, OWNER_EMAIL, offset_seconds=0)
+    await _member(workspace_id, ADMIN_EMAIL, offset_seconds=0)
     member = await _member(workspace_id, TEAMMATE_EMAIL, seated=False, offset_seconds=1)
     turn_id = await _parked_turn(
         workspace_id,
@@ -375,7 +421,7 @@ async def test_sweep_holds_a_scheduled_turn_for_an_unseated_creator(db: None) ->
 
 async def test_park_notice_names_the_seat_when_the_gate_member_lost_it(db: None) -> None:
     workspace_id = await _workspace(limit=2)
-    await _member(workspace_id, OWNER_EMAIL, offset_seconds=0)
+    await _member(workspace_id, ADMIN_EMAIL, offset_seconds=0)
     speaker = await _member(workspace_id, TEAMMATE_EMAIL, seated=False, offset_seconds=1)
     turn_id = await _parked_turn(workspace_id, speaker)
     with ws(workspace_id):
@@ -391,8 +437,8 @@ async def test_park_notice_names_the_seat_when_the_gate_member_lost_it(db: None)
 async def test_create_member_collapses_a_lost_race_onto_the_surviving_row(db: None) -> None:
     workspace_id = await _workspace(limit=2)
     async with workspace_tx() as connection:
-        first = await create_member(connection, workspace_id, OWNER_EMAIL)
-        second = await create_member(connection, workspace_id, OWNER_EMAIL)
+        first = await create_member(connection, workspace_id, ADMIN_EMAIL)
+        second = await create_member(connection, workspace_id, ADMIN_EMAIL)
     assert second == first
     async with workspace_tx() as connection:
         rows = (
@@ -417,7 +463,7 @@ async def test_auto_seat_stops_at_the_included_allowance(db: None) -> None:
     workspace_id = await _workspace(limit=25)
     await _set_included(workspace_id, 1)
     async with workspace_tx() as connection:
-        first = await create_member(connection, workspace_id, OWNER_EMAIL)
+        first = await create_member(connection, workspace_id, ADMIN_EMAIL)
         second = await create_member(connection, workspace_id, TEAMMATE_EMAIL)
     assert await _seated_at(first) is not None
     assert await _seated_at(second) is None
@@ -446,7 +492,7 @@ async def test_ensure_included_writes_only_when_null(db: None) -> None:
 async def test_admits_gates_on_included_even_without_a_hard_limit(db: None) -> None:
     workspace_id = await _workspace(limit=None)
     await _set_included(workspace_id, 1)
-    seated = await _member(workspace_id, OWNER_EMAIL, offset_seconds=0)
+    seated = await _member(workspace_id, ADMIN_EMAIL, offset_seconds=0)
     unseated = await _member(workspace_id, TEAMMATE_EMAIL, seated=False, offset_seconds=1)
     async with workspace_tx() as connection:
         assert await Seats(workspace_id).admits(connection, seated)
@@ -454,16 +500,16 @@ async def test_admits_gates_on_included_even_without_a_hard_limit(db: None) -> N
         assert await Seats(workspace_id).gated(connection)
 
 
-async def test_owner_conversation_answers_with_the_conversations_bound_agent(db: None) -> None:
+async def test_admin_conversation_routes_through_the_main_agent(db: None) -> None:
     workspace_id = await _workspace(limit=25)
-    owner = await _member(workspace_id, OWNER_EMAIL, offset_seconds=0)
+    administrator = await _member(workspace_id, ADMIN_EMAIL, offset_seconds=0)
     async with workspace_tx() as connection:
-        assert await owner_conversation(connection, workspace_id) is None
-    earliest_agent, bound_agent, conversation_id = uuid4(), uuid4(), uuid4()
+        assert await admin_conversation(connection, workspace_id) is None
+    main_agent, child_agent, main_conversation, child_conversation = (uuid4() for _ in range(4))
     async with workspace_tx() as connection:
-        for agent_id, name, created_at in (
-            (earliest_agent, "assistant", datetime(2026, 7, 1, tzinfo=UTC)),
-            (bound_agent, "exec", datetime(2026, 7, 2, tzinfo=UTC)),
+        for agent_id, name, is_main, created_at in (
+            (main_agent, "ufo", True, datetime(2026, 7, 1, tzinfo=UTC)),
+            (child_agent, "exec", False, datetime(2026, 7, 2, tzinfo=UTC)),
         ):
             await connection.execute(
                 sa.insert(tables.agent).values(
@@ -472,22 +518,37 @@ async def test_owner_conversation_answers_with_the_conversations_bound_agent(db:
                     name=name,
                     prompt="p",
                     model="claude-opus-4-8",
+                    is_main=is_main,
                     created_at=created_at,
                     updated_at=created_at,
                 )
             )
-        await connection.execute(
-            sa.insert(tables.conversation).values(
-                id=conversation_id,
-                workspace_id=workspace_id,
-                agent_id=bound_agent,
-                surface="slack",
-                queue_key="dm",
-                member_id=owner,
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
+        for conversation_id, agent_id, queue_key, updated_at in (
+            (
+                main_conversation,
+                main_agent,
+                "main-dm",
+                datetime(2026, 7, 2, tzinfo=UTC),
+            ),
+            (
+                child_conversation,
+                child_agent,
+                "child-dm",
+                datetime(2026, 7, 3, tzinfo=UTC),
+            ),
+        ):
+            await connection.execute(
+                sa.insert(tables.conversation).values(
+                    id=conversation_id,
+                    workspace_id=workspace_id,
+                    agent_id=agent_id,
+                    surface="slack",
+                    queue_key=queue_key,
+                    member_id=administrator,
+                    created_at=updated_at,
+                    updated_at=updated_at,
+                )
             )
-        )
     async with workspace_tx() as connection:
-        venue = await owner_conversation(connection, workspace_id)
-    assert venue == (conversation_id, bound_agent)
+        venue = await admin_conversation(connection, workspace_id)
+    assert venue == (main_conversation, main_agent)

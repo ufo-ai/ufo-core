@@ -142,7 +142,7 @@ def manifest() -> Manifest:
             ToolDef(
                 name="connect_github",
                 description="Connect the workspace's GitHub so the agent can clone and push "
-                "private repositories: hands the owner the App install link. Owner-only.",
+                "private repositories: hands an admin the App install link. Admin-only.",
                 input_model=ConnectGitHubInput,
                 handler=connect_github,
             ),

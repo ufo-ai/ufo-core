@@ -52,7 +52,10 @@ async def _add_workspaces(dsn: str, count: int) -> None:
     connection = await asyncpg.connect(dsn)
     try:
         for _ in range(count):
-            await connection.execute("insert into workspace (id) values ($1)", uuid.uuid4())
+            await connection.execute(
+                "insert into workspace (id, created_at, updated_at) values ($1, now(), now())",
+                uuid.uuid4(),
+            )
     finally:
         await connection.close()
 
@@ -61,11 +64,14 @@ async def _add_workspace(dsn: str, workspace_id: UUID, owner_email: str) -> None
     connection = await asyncpg.connect(dsn)
     try:
         await connection.execute(
-            "insert into workspace (id) values ($1) on conflict do nothing", workspace_id
+            "insert into workspace (id, created_at, updated_at) "
+            "values ($1, now(), now()) on conflict do nothing",
+            workspace_id,
         )
         await connection.execute(
-            "insert into member (id, workspace_id, email, created_at, updated_at) "
-            "values ($1, $2, $3, now(), now())",
+            "insert into member "
+            "(id, workspace_id, email, is_admin, created_at, updated_at) "
+            "values ($1, $2, $3, true, now(), now())",
             uuid.uuid4(),
             workspace_id,
             owner_email,

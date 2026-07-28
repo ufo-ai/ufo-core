@@ -1,5 +1,5 @@
 """The `credential` object kind end to end: declared BYOK slots listed filled-or-empty, read
-without the value ever appearing, cleared by the owner alone. The sample extension's declared
+without the value ever appearing, cleared by an admin alone. The sample extension's declared
 slot is the real instance; a stored secret is asserted absent — plaintext and ciphertext — from
 every verb's output."""
 
@@ -21,7 +21,7 @@ from ufo.credentials import CredentialStore, HostChoice
 from ufo.db import workspace_tx
 from ufo.ext.loader import load_manifests, turn_tools
 from ufo.ext.manifest import CredentialSlot, InjectionTarget, Manifest
-from ufo.objects import OwnerRequired, VerbNotSupported
+from ufo.objects import AdminRequired, VerbNotSupported
 from ufo.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
@@ -32,7 +32,7 @@ from ufo.workspace import ws
 TOOL_NARRATION = "checking their saved keys"
 
 SECRET = "hunter2-super-secret-value"
-OWNER_CREATED_AT = datetime(2026, 7, 1, tzinfo=UTC)
+ADMIN_CREATED_AT = datetime(2026, 7, 1, tzinfo=UTC)
 JOINER_CREATED_AT = datetime(2026, 7, 2, tzinfo=UTC)
 SANDBOX_UNTOUCHED = "object verbs run against stores and must not reach the sandbox"
 
@@ -77,6 +77,7 @@ async def _member(workspace_id: UUID, created_at: datetime) -> UUID:
                 id=member_id,
                 workspace_id=workspace_id,
                 email=f"{member_id.hex[:8]}@x.test",
+                is_admin=created_at == ADMIN_CREATED_AT,
                 created_at=created_at,
                 updated_at=created_at,
             )
@@ -134,7 +135,7 @@ async def test_declared_slot_lists_reads_and_clears_without_the_value(db: None) 
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
     outputs: list[str] = []
     with ws(workspace_id):
-        owner = await _member(workspace_id, OWNER_CREATED_AT)
+        owner = await _member(workspace_id, ADMIN_CREATED_AT)
         ctx = _tool_context(workspace_id, speaker_member_id=owner)
 
         kinds = json.loads(await _text(_object_tool("object_list"), ctx))
@@ -246,13 +247,13 @@ async def test_clearing_a_slot_is_owner_gated(db: None) -> None:
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
     delete_tool = _object_tool("object_delete")
     with ws(workspace_id):
-        owner = await _member(workspace_id, OWNER_CREATED_AT)
+        owner = await _member(workspace_id, ADMIN_CREATED_AT)
         joiner = await _member(workspace_id, JOINER_CREATED_AT)
         await store.put(workspace_id, sample.API_SLOT, SECRET)
         args = delete_tool.input_model.model_validate(
             {"user_description": TOOL_NARRATION, "kind": CREDENTIAL_KIND, "name": "sample-api"}
         )
-        with pytest.raises(OwnerRequired):
+        with pytest.raises(AdminRequired):
             await delete_tool.handler(_tool_context(workspace_id, joiner), args)
         await _text(
             delete_tool,
@@ -299,7 +300,7 @@ async def test_a_host_choice_slot_renders_its_options_through_tool_dispatch(db: 
     tools, _ = turn_tools((probe,), store, audience=conversation_audience(None))
     get_tool = next(tool for tool in tools if tool.name == "object_get")
     with ws(workspace_id):
-        owner = await _member(workspace_id, OWNER_CREATED_AT)
+        owner = await _member(workspace_id, ADMIN_CREATED_AT)
         ctx = _tool_context(workspace_id, speaker_member_id=owner)
         await store.put(workspace_id, "probe_api_key", "probe-secret")
         default_text = await _text(get_tool, ctx, kind=CREDENTIAL_KIND, name="probe-api-key")

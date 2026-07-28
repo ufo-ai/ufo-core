@@ -1,8 +1,8 @@
-"""Slack setup as chat tools: the owner connects Slack in conversation and the agent drives it.
+"""Slack setup as chat tools: an admin connects Slack in conversation and the agent drives it.
 
 Two install paths converge on the same per-workspace bot token and identity record. `slack_connect`
 defaults to `method="oauth"`: when the deploy has its own Slack app configured, it seals an install
-handoff to the owner and the bot-token slot and returns an "Add to Slack" link; the OAuth callback
+handoff to the admin and the bot-token slot and returns an "Add to Slack" link; the OAuth callback
 lands the token, team binding, and identity. `method="manifest"` is the bring-your-own-app path —
 `slack_app_manifest` renders the exact app YAML the member creates the app from, the two secrets
 (bot token, signing secret) travel through `request_credentials` fulfillment into per-workspace
@@ -148,9 +148,9 @@ def _state(state: str, hint: str, events_url: str | None, **extra: object) -> To
 async def slack_connect_handler(ctx: ToolContext, args: SlackConnectInput) -> ToolResult:
     """One idempotent walk of the install state machine. Once identity exists (either path) it
     reports `pending`, or `connected` once a signature-verified request has marked the deploy
-    reachable. Otherwise it installs by `method`: `oauth` mints the owner an Add to Slack link;
+    reachable. Otherwise it installs by `method`: `oauth` mints the admin an Add to Slack link;
     `manifest` reports `not_configured` until the secrets are entered, then derives the identity
-    with `auth.test`. Minting the link and deriving identity are owner-only — the bot is shared."""
+    with `auth.test`. Minting the link and deriving identity are admin-only — the bot is shared."""
     assert ctx.ext is not None
     events_url = None if ctx.public_base_url is None else _events_url(ctx.public_base_url)
     try:
@@ -194,7 +194,7 @@ async def slack_connect_handler(ctx: ToolContext, args: SlackConnectInput) -> To
 
 
 async def _oauth_link(ctx: ToolContext, events_url: str | None) -> ToolResult:
-    """Mint the owner an Add to Slack link for the deploy's own app; the OAuth callback completes
+    """Mint the admin an Add to Slack link for the deploy's own app; the OAuth callback completes
     the install. Falls back to the manifest path when the deploy has no app configured."""
     if not (os.environ.get(SLACK_CLIENT_ID_ENV) and os.environ.get(SLACK_CLIENT_SECRET_ENV)):
         return _state(
@@ -203,10 +203,10 @@ async def _oauth_link(ctx: ToolContext, events_url: str | None) -> ToolResult:
             "method='manifest' to bring your own app.",
             events_url,
         )
-    if not await ctx.speaker_is_owner():
+    if not await ctx.speaker_is_admin():
         return _state(
             "not_installed",
-            "Ask the workspace owner to connect Slack — only they can install it.",
+            "Ask a workspace admin to connect Slack — only they can install it.",
             events_url,
         )
     if not ctx.public_base_url:
@@ -230,7 +230,7 @@ async def _derive_manifest_identity(
     ctx: ToolContext, events_url: str | None
 ) -> SlackIdentity | ToolResult:
     """The bring-your-own-app path: report `not_configured` until both secret slots are filled, then
-    prove and persist the identity with `auth.test` (owner-only), returning it for the common tail —
+    prove and persist the identity with `auth.test` (admin-only), returning it for the common tail —
     or a `not_configured` diagnosis when Slack rejects the token."""
     assert ctx.ext is not None
     missing = []
@@ -248,8 +248,8 @@ async def _derive_manifest_identity(
             missing=missing,
         )
     bot_token = await ctx.ext.credentials.get(SLACK_BOT_TOKEN_SLOT)
-    if not await ctx.speaker_is_owner():
-        raise ValueError("only the workspace owner can connect Slack")
+    if not await ctx.speaker_is_admin():
+        raise ValueError("only a workspace admin can connect Slack")
     try:
         return await SlackIdentityResolver(ctx.blob, ctx.turn.workspace_id, bot_token).resolve()
     except SlackIdentityError as error:
@@ -345,8 +345,8 @@ TOOLS = (
             "Walk the Slack install state machine and report where it stands (not_configured / "
             "not_installed / pending / connected). Idempotent — call it before, during, and after "
             "setup. Defaults to the one-click OAuth install (returns an 'Add to Slack' link for "
-            "the owner); pass method='manifest' for the bring-your-own-app path. Minting the link "
-            "and deriving identity are owner-only."
+            "an admin); pass method='manifest' for the bring-your-own-app path. Minting the link "
+            "and deriving identity are admin-only."
         ),
         input_model=SlackConnectInput,
         handler=slack_connect_handler,

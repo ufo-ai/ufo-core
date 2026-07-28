@@ -14,7 +14,7 @@ import asyncio
 import json
 import time
 from base64 import b64decode, b64encode
-from collections.abc import Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from html import escape
@@ -35,7 +35,7 @@ from ufo.accounting import (
     read_turn_cost,
     record_turn_usage,
 )
-from ufo.audience import Audience, audience_member
+from ufo.audience import Audience, audience_member, audience_subjects
 from ufo.blob import BlobStore
 from ufo.browser import CdpProvider
 from ufo.connectors import ConnectorRegistry
@@ -98,7 +98,7 @@ from ufo.schema.records import (
     Usage,
 )
 from ufo.search import SearchProvider
-from ufo.seats import SEAT_REVOKED_MESSAGE, Seats, gate_member, seat_gate_absent
+from ufo.seats import SEAT_REVOKED_MESSAGE, Seats, seat_gate_absent
 from ufo.skills.runtime import CORE_SKILL_REGISTRY, LoadedSkill, SkillRegistry
 from ufo.tools.context import (
     ImageContent,
@@ -108,7 +108,7 @@ from ufo.tools.context import (
     ToolContext,
     UntrustedContentError,
 )
-from ufo.tools.registry import ToolRegistry
+from ufo.tools.registry import REQUESTED_BY, ToolRegistry
 from ufo.transcript import Conversation
 
 MAX_OUTPUT_TOKENS = 32_768
@@ -128,6 +128,7 @@ TRUNCATION_SALVAGE_NOTICE = (
     " The cut-off response (its text and tool-call arguments as raw JSON) was saved to {path} — "
     "read it and salvage what it already contains instead of regenerating it."
 )
+DENIED_INBOUND_NOTICE = "<denied_member_message>{reason}</denied_member_message>"
 CONTEXT_TIME_FORMAT = "%A %Y-%m-%d %H:%M %Z"
 FORCE_FINAL_PROMPT = (
     "You have reached the maximum number of tool-use rounds. Do not call any more tools. "
@@ -158,6 +159,9 @@ FINISH_ALONE = (
 FINISH_SCHEMA_ERROR = (
     "finish failed the output schema — fix the payload and call it again:\n{error}"
 )
+
+SandboxFor = Callable[[UUID | None], Awaitable[SandboxSession]]
+SubagentsFor = Callable[[UUID | None], tuple[Spawn, SubagentControl | None]]
 SCHEDULED_MEMORY_CONTEXT = "<recalled_memory>\n{recalled}\n</recalled_memory>"
 SCHEDULED_MEMORY_SEARCH_TIMEOUT_SECONDS = 4.0
 
@@ -319,12 +323,20 @@ class StreamResult(BaseModel):
 class Arrival(BaseModel):
     """One drained inbound-queue row — the `_claim_arrivals` DBOS step's memoized output, so a
     crash-recovery replay reads back exactly the batch the first run consumed. `rendered` is the
-    message text exactly as the model sees it — user_prompt_submit fired once inside the step,
-    None when it denied — so a workflow replay reuses the recorded rendering instead of
-    re-firing hooks."""
+    message text exactly as the model sees it — user_prompt_submit fired once inside the step.
+    A denied arrival carries only the hook's safe denial text, never the member body or authority
+    ref, so a workflow replay closes that arrival without re-firing hooks."""
 
     id: UUID
+    speaker_member_id: UUID | None = None
     rendered: str | None = None
+    denial: str | None = None
+
+
+@dataclass(frozen=True)
+class ActiveMessage:
+    member_id: UUID | None
+    rendered: str
 
 
 class ImageRef(BaseModel):
@@ -425,14 +437,17 @@ def _parse_args(partials: list[str]) -> dict[str, object]:
     return json.loads(joined) if joined.strip() else {}
 
 
-def _context_tag(context: TurnContext | None, admitted_at: datetime) -> str:
+def _context_tag(message_id: UUID, context: TurnContext | None, admitted_at: datetime) -> str:
     """The <context> tag rendered before a member inbound: the admission moment (in the sender's
     zone when the surface supplied one, else UTC) and the sender the surface named. The persisted
     moment — the turn row's for the founding message, the queue row's for a drained arrival —
     never the wall clock, so a queued, parked, or replayed message keeps the time the member
     actually spoke."""
     zone = ZoneInfo(context.timezone) if context is not None and context.timezone else UTC
-    lines = [f"time: {admitted_at.astimezone(zone).strftime(CONTEXT_TIME_FORMAT)}"]
+    lines = [
+        f"message_ref: {message_id}",
+        f"time: {admitted_at.astimezone(zone).strftime(CONTEXT_TIME_FORMAT)}",
+    ]
     if context is not None and context.sender:
         lines.append(f"sender: {context.sender}")
     return "<context>\n" + "\n".join(lines) + "\n</context>\n"
@@ -568,14 +583,26 @@ class TranscriptRepair:
             injected=injected or None,
         )
 
-    async def persist_inbound(self, arrivals: tuple[Message, ...] = ()) -> None:
+    async def persist_inbound(
+        self,
+        arrivals: tuple[Message, ...] = (),
+        founding_denial: str | None = None,
+    ) -> None:
         """Preserve the member's messages on a non-done terminal — the founding inbound plus every
         arrival this run absorbed — so the next turn still sees them; the assistant's error or
         partial text is never persisted, and the monotonic guard lets a done turn's fuller
         transcript win over this at the same seq. Only a run whose turn is over writes here: an
         executor pre-emption commits no terminal and persists nothing, because DBOS re-runs the
         turn and the run that finishes it is the seq's sole transcript writer."""
-        await self.write_conversation((*await self.load_messages(), *arrivals))
+        founding = (
+            await self.load_messages()
+            if founding_denial is None
+            else (
+                *await self._prior_messages(),
+                Message(role="user", content=founding_denial),
+            )
+        )
+        await self.write_conversation((*founding, *arrivals))
 
     async def load_messages(self) -> tuple[Message, ...]:
         """Prior transcript plus this turn's inbound, prefixed with the <context> tag on a member
@@ -584,7 +611,7 @@ class TranscriptRepair:
         inbound stays the bare schema payload its profile contract promises."""
         inbound = self.turn.inbound
         if self.turn.subagent_profile is None:
-            inbound = _context_tag(self.turn.context, self.turn.created_at) + inbound
+            inbound = _context_tag(self.turn.id, self.turn.context, self.turn.created_at) + inbound
         return (*await self._prior_messages(), Message(role="user", content=inbound))
 
     async def _prior_messages(self) -> tuple[Message, ...]:
@@ -639,6 +666,8 @@ class TurnEngine:
     audience: Audience
     artifact_token_secret: str
     grants: GrantStore | None
+    sandbox_for: SandboxFor | None = None
+    subagents_for: SubagentsFor | None = None
     requestable_credentials: CredentialRequests | None = None
     memory: MemorySearch | None = None
     public_base_url: str | None = None
@@ -676,6 +705,8 @@ class TurnEngine:
             usage_events: list[Usage] = []
             arrival_log: list[Message] = []
             absorbed_ids: list[UUID] = []
+            requesters: dict[UUID, ActiveMessage] = {}
+            founding_denial: str | None = None
 
             async def rank_find(system: str, user: str) -> str:
                 """The browser `find` tool's element ranking: a host-side model call (the engine
@@ -703,7 +734,7 @@ class TurnEngine:
                 agent=self.agent,
                 spawn=self.spawn,
                 subagents=self.subagents,
-                speaker_member_id=self.turn.speaker_member_id,
+                speaker_member_id=None,
                 audience=self.audience,
                 on_behalf_of_member_id=self.turn.on_behalf_of_member_id,
                 artifact_token_secret=self.artifact_token_secret,
@@ -744,14 +775,23 @@ class TurnEngine:
                             await self._load_messages(), inbound.denied, system, inbound.injected
                         )
                         return denial
+                    founding_denial = DENIED_INBOUND_NOTICE.format(reason=escape(inbound.denied))
                     messages = (
-                        *await self._load_messages(),
-                        Message(role="assistant", content=inbound.denied),
+                        *await self._repair()._prior_messages(),
+                        Message(role="user", content=founding_denial),
                     )
                 else:
                     if inbound.injected:
                         system = f"{system}\n\n{inbound.injected}"
                     messages = await self._load_messages()
+                    if self.turn.subagent_profile is None:
+                        founding = messages[-1].content
+                        if not isinstance(founding, str):
+                            raise RuntimeError("founding inbound did not render as text")
+                        requesters[self.turn.id] = ActiveMessage(
+                            member_id=self.turn.speaker_member_id,
+                            rendered=founding,
+                        )
                 while True:
                     (
                         final_messages,
@@ -766,13 +806,14 @@ class TurnEngine:
                         system,
                         arrival_log,
                         absorbed_ids,
+                        requesters,
                     )
                     await self.hooks.fire(
                         "stop",
                         Stop(answer=answer),
                         self.turn,
                         self.agent,
-                        self.turn.speaker_member_id,
+                        None,
                     )
                     frame = await self._commit(
                         "done",
@@ -792,7 +833,7 @@ class TurnEngine:
                             final_messages, answer, system, inbound.injected
                         )
                     else:
-                        await self._persist_inbound(tuple(arrival_log))
+                        await self._persist_inbound(tuple(arrival_log), founding_denial)
                     return frame
             except TurnParked as parked:
                 await self._park(parked.message, usage_events)
@@ -800,7 +841,7 @@ class TurnEngine:
             except DBOSWorkflowCancelledError:
                 await self._bill_cancelled(usage_events)
                 await self._release_unabsorbed(tuple(absorbed_ids))
-                await self._persist_inbound(tuple(arrival_log))
+                await self._persist_inbound(tuple(arrival_log), founding_denial)
                 raise
             except asyncio.CancelledError:
                 await self._bill_cancelled(usage_events)
@@ -809,7 +850,7 @@ class TurnEngine:
             except Exception as error:
                 await self._commit("failed", usage_events, error=error)
                 await self._release_unabsorbed(tuple(absorbed_ids))
-                await self._persist_inbound(tuple(arrival_log))
+                await self._persist_inbound(tuple(arrival_log), founding_denial)
                 raise
             finally:
                 await context.cleanup.drain()
@@ -819,7 +860,10 @@ class TurnEngine:
             raise RuntimeError("scheduled turn requires memory search; none is wired")
         try:
             async with asyncio.timeout(SCHEDULED_MEMORY_SEARCH_TIMEOUT_SECONDS):
-                matches = await self.memory.search(self.audience, (self.turn.inbound,))
+                matches = await self.memory.search(
+                    audience_subjects(self.audience),
+                    (self.turn.inbound,),
+                )
         except Exception as error:
             log(
                 "memory.scheduled_search_degraded",
@@ -867,6 +911,7 @@ class TurnEngine:
         system: str,
         arrival_log: list[Message],
         absorbed_ids: list[UUID],
+        requesters: dict[UUID, ActiveMessage],
     ) -> tuple[
         tuple[Message, ...],
         str,
@@ -913,18 +958,21 @@ class TurnEngine:
         credential_request: CredentialRequest | None = None
         connect_request: ConnectRequest | None = None
         for round_index in range(self.max_rounds):
-            absorbed = await self._absorb_arrivals(messages, arrival_log, absorbed_ids)
+            absorbed = await self._absorb_arrivals(messages, arrival_log, absorbed_ids, requesters)
             if len(absorbed) > len(messages):
                 question = credential_request = connect_request = None
             messages = absorbed
-            await self._enforce_spend(usage_events)
+            await self._enforce_spend(usage_events, requesters)
             self._reseed_loaded_skills(messages)
-            messages, compaction_usage = await self.compaction.maybe_compact(messages)
+            active_requests = tuple(message.rendered for message in requesters.values())
+            messages, compaction_usage = await self.compaction.maybe_compact(
+                messages, active_requests=active_requests
+            )
             self._reseed_loaded_skills(messages)
             usage_events.extend(compaction_usage)
             try:
                 messages, text, tool_calls = await self._stream_recovering_overflow(
-                    messages, usage_events, system
+                    messages, usage_events, system, active_requests=active_requests
                 )
             except ModelStreamError as error:
                 if error.model_error_class != MODEL_TRUNCATED_ERROR_CLASS:
@@ -989,7 +1037,7 @@ class TurnEngine:
                     )
                     continue
                 dispatched = await asyncio.gather(
-                    *(self._dispatch(context, call) for call in segment),
+                    *(self._dispatch(context, call, requesters) for call in segment),
                     return_exceptions=True,
                 )
                 failures = [outcome for outcome in dispatched if isinstance(outcome, BaseException)]
@@ -1009,7 +1057,7 @@ class TurnEngine:
                 Message(role="assistant", content=assistant_blocks),
                 Message(role="user", content=results),
             )
-        messages, text = await self._force_final(messages, usage_events, system)
+        messages, text = await self._force_final(messages, usage_events, system, requesters)
         return messages, text, None, None, None
 
     async def _absorb_arrivals(
@@ -1017,20 +1065,35 @@ class TurnEngine:
         messages: tuple[Message, ...],
         arrival_log: list[Message],
         absorbed_ids: list[UUID],
+        requesters: dict[UUID, ActiveMessage] | None = None,
     ) -> tuple[Message, ...]:
         """Fold the conversation's queued arrivals into the window, each as its own
         <context>-tagged user message firing user_prompt_submit exactly as the founding inbound
-        did — a denied arrival is dropped, an injection rides the message walled in its own
-        delimiter so it never reads as member text. Whoever spoke each arrival and whichever agent
-        it named, it joins this one turn: multiple members talking to a running bot is one turn,
-        and the model handles the mixed voices. A subagent turn takes no arrivals: its conversation
-        is the parent's private channel, never admitted into."""
+        did. A denied arrival contributes only a generic marker and the hook's safe denial text,
+        never its body or authority ref; an injection rides the message walled in its own delimiter
+        so it never reads as member text. Whoever spoke each arrival and whichever agent it named,
+        it joins this one turn: multiple members talking to a running bot is one turn, and the
+        model handles the mixed voices. A subagent turn takes no arrivals: its conversation is the
+        parent's private channel, never admitted into."""
         if self.turn.subagent_profile is not None:
             return messages
         for arrival in await self._claim_arrivals(tuple(absorbed_ids)):
             absorbed_ids.append(arrival.id)
-            if arrival.rendered is None:
+            if arrival.denial is not None:
+                denied = Message(
+                    role="user",
+                    content=DENIED_INBOUND_NOTICE.format(reason=escape(arrival.denial)),
+                )
+                arrival_log.append(denied)
+                messages = (*messages, denied)
                 continue
+            if arrival.rendered is None:
+                raise RuntimeError("arrival has neither rendered content nor a denial")
+            if requesters is not None:
+                requesters[arrival.id] = ActiveMessage(
+                    member_id=arrival.speaker_member_id,
+                    rendered=arrival.rendered,
+                )
             message = Message(role="user", content=arrival.rendered)
             arrival_log.append(message)
             messages = (*messages, message)
@@ -1038,14 +1101,16 @@ class TurnEngine:
 
     async def _render_arrival(
         self,
+        message_id: UUID,
         body: str,
         context: TurnContext | None,
         speaker_member_id: UUID | None,
         created_at: datetime,
-    ) -> str | None:
+    ) -> tuple[str | None, str | None]:
         """One arrival as the model sees it — user_prompt_submit fired exactly as for the founding
-        inbound (None when denied), the <context> tag from the persisted moment, any injection
-        walled in its own delimiter."""
+        inbound. An admitted message returns the <context> tag from the persisted moment plus any
+        injection walled in its own delimiter. A denied message returns only the hook's safe denial
+        text."""
         submitted = await self.hooks.fire(
             "user_prompt_submit",
             UserPromptSubmit(text=body),
@@ -1054,11 +1119,11 @@ class TurnEngine:
             speaker_member_id,
         )
         if submitted.denied is not None:
-            return None
-        content = _context_tag(context, created_at) + body
+            return None, submitted.denied
+        content = _context_tag(message_id, context, created_at) + body
         if submitted.injected:
             content = f"{content}\n\n<injected_context>\n{submitted.injected}\n</injected_context>"
-        return content
+        return content, None
 
     @DBOS.step(preemptible=True)
     async def _claim_arrivals(self, absorbed: tuple[UUID, ...]) -> tuple[Arrival, ...]:
@@ -1096,13 +1161,21 @@ class TurnEngine:
             ).all()
         arrivals: list[Arrival] = []
         for row in sorted(rows, key=lambda row: row.seq):
-            rendered = await self._render_arrival(
+            rendered, denial = await self._render_arrival(
+                row.id,
                 row.body,
                 None if row.context is None else TurnContext.model_validate(row.context),
                 row.speaker_member_id,
                 row.created_at if row.created_at.tzinfo else row.created_at.replace(tzinfo=UTC),
             )
-            arrivals.append(Arrival(id=row.id, rendered=rendered))
+            arrivals.append(
+                Arrival(
+                    id=row.id,
+                    speaker_member_id=row.speaker_member_id,
+                    rendered=rendered,
+                    denial=denial,
+                )
+            )
         return tuple(arrivals)
 
     async def _release_unabsorbed(self, absorbed: tuple[UUID, ...]) -> None:
@@ -1131,6 +1204,7 @@ class TurnEngine:
         messages: tuple[Message, ...],
         usage_events: list[Usage],
         system: str,
+        requesters: dict[UUID, ActiveMessage],
     ) -> tuple[tuple[Message, ...], str]:
         """The round budget is spent: rather than fail the turn, force one closing answer. Append
         the force-final prompt and run a single model turn with no tools offered — the model can no
@@ -1143,15 +1217,22 @@ class TurnEngine:
         tool-loop bug) that a plain `done` would hide."""
         emit_metric("turn_round_budget_exhausted_total")
         log("turn.force_final", turn_id=str(self.turn.id), rounds=self.max_rounds)
-        await self._enforce_spend(usage_events)
-        messages, compaction_usage = await self.compaction.maybe_compact(messages)
+        await self._enforce_spend(usage_events, requesters)
+        active_requests = tuple(message.rendered for message in requesters.values())
+        messages, compaction_usage = await self.compaction.maybe_compact(
+            messages, active_requests=active_requests
+        )
         usage_events.extend(compaction_usage)
         if self.output_model is not None:
             messages = (*messages, Message(role="user", content=FORCE_FINISH_PROMPT))
             return await self._force_finish(messages, usage_events, system)
         messages = (*messages, Message(role="user", content=FORCE_FINAL_PROMPT))
         messages, text, _ = await self._stream_recovering_overflow(
-            messages, usage_events, system, offer_tools=False
+            messages,
+            usage_events,
+            system,
+            offer_tools=False,
+            active_requests=active_requests,
         )
         await self._publish_cost(usage_events)
         return messages, text
@@ -1190,6 +1271,7 @@ class TurnEngine:
         system: str,
         offer_tools: bool = True,
         force_finish: bool = False,
+        active_requests: tuple[str, ...] = (),
     ) -> tuple[tuple[Message, ...], str, tuple[ToolUseBlock, ...]]:
         """Run one model round, recovering from a provider context-overflow: the proactive
         compaction already ran, so an overflow here means the window is still too large — force a
@@ -1208,7 +1290,11 @@ class TurnEngine:
         except Exception as error:
             if not is_context_overflow(error):
                 raise
-            compacted, compaction_usage = await self.compaction.maybe_compact(messages, force=True)
+            compacted, compaction_usage = await self.compaction.maybe_compact(
+                messages,
+                force=True,
+                active_requests=active_requests,
+            )
             if not compaction_usage:
                 raise
             usage_events.extend(compaction_usage)
@@ -1223,7 +1309,11 @@ class TurnEngine:
                 ) from None
             return compacted, result.text, result.tool_calls
 
-    async def _enforce_spend(self, usage_events: list[Usage]) -> None:
+    async def _enforce_spend(
+        self,
+        usage_events: list[Usage],
+        requesters: dict[UUID, ActiveMessage],
+    ) -> None:
         """Before each model round, re-decide against the caps with this turn's in-flight spend
         priced in (this attempt's tokens land on the ledger at park/terminal, not yet), so a turn
         that crosses a cap mid-run is held rather than left to run the workspace past its limit.
@@ -1234,22 +1324,24 @@ class TurnEngine:
         reject cap holds its awaiting parent until the cap is raised. The no-caps fast-path skips
         the DB round-trip entirely once a recent decision confirmed no cap applies to this turn.
 
-        The seat gate re-checks here too, so revoking a seat stops the running turn before its
-        next model call — disable latency is bounded by one round — behind its own no-limit
-        fast-path so unlimited deploys pay nothing. A scheduled turn gates on the member it acts on
-        behalf of, the same derivation admission and the resume sweep apply."""
-        speaker = self.turn.speaker_member_id
-        scheduled = self.turn.admission_source == SCHEDULED_ADMISSION
-        if (speaker is not None or scheduled) and not seat_gate_absent(self.turn.workspace_id):
+        The seat gate re-checks every member whose message the turn has absorbed, so revoking any
+        speaker's seat stops the aggregate before its next model call. A scheduled turn gates on
+        the member it acts on behalf of. The no-limit fast-path keeps unlimited deploys free of
+        per-round reads."""
+        members = {
+            message.member_id for message in requesters.values() if message.member_id is not None
+        }
+        if (
+            self.turn.admission_source == SCHEDULED_ADMISSION
+            and self.turn.on_behalf_of_member_id is not None
+        ):
+            members.add(self.turn.on_behalf_of_member_id)
+        if members and not seat_gate_absent(self.turn.workspace_id):
             async with workspace_tx() as connection:
-                gate = gate_member(
-                    speaker, self.turn.admission_source, self.turn.on_behalf_of_member_id
-                )
-                admitted = gate is None or await Seats(self.turn.workspace_id).admits(
-                    connection, gate
-                )
-            if not admitted:
-                raise TurnParked(SEAT_REVOKED_MESSAGE)
+                seats = Seats(self.turn.workspace_id)
+                for member in members:
+                    if not await seats.admits(connection, member):
+                        raise TurnParked(SEAT_REVOKED_MESSAGE)
         member_id = audience_member(self.audience)
         if applicable_caps_absent(self.turn.workspace_id, member_id, self.turn.agent_id):
             return
@@ -1399,7 +1491,12 @@ class TurnEngine:
             _loaded_skill_closures(messages, self.skills), preloaded=self.preload
         )
 
-    async def _dispatch(self, context: ToolContext, call: ToolUseBlock) -> ToolResultBlock:
+    async def _dispatch(
+        self,
+        context: ToolContext,
+        call: ToolUseBlock,
+        requesters: dict[UUID, ActiveMessage],
+    ) -> ToolResultBlock:
         """One tool call, assembled from its memoized `_dispatch_step`. The step returns the result
         with any image blocks offloaded to blob references (so no image bytes serialize into the
         step log); here — outside the step, in the workflow body — the referenced images are read
@@ -1407,6 +1504,14 @@ class TurnEngine:
         is a deterministic keyed fetch, so a crash-recovery replay reassembles the same result from
         the same blobs the first run wrote; the rehydrated bytes ride a step *input* (the messages
         list) which DBOS does not persist, so they never re-enter the checkpoint."""
+        try:
+            context, call = await self._bind_requester(context, call, requesters)
+        except Exception as error:
+            return ToolResultBlock(
+                tool_use_id=call.id,
+                content=f"{type(error).__name__}: {error}",
+                is_error=True,
+            )
         result = await self._dispatch_step(context, call)
         if not result.image_refs:
             return ToolResultBlock(
@@ -1426,6 +1531,47 @@ class TurnEngine:
         )
         return ToolResultBlock(
             tool_use_id=result.tool_use_id, content=blocks, is_error=result.is_error
+        )
+
+    async def _bind_requester(
+        self,
+        context: ToolContext,
+        call: ToolUseBlock,
+        requesters: dict[UUID, ActiveMessage],
+    ) -> tuple[ToolContext, ToolUseBlock]:
+        tool_input = dict(call.input)
+        requester: UUID | None = None
+        if REQUESTED_BY in tool_input:
+            raw = tool_input.pop(REQUESTED_BY)
+            if not isinstance(raw, str):
+                raise ValueError(f"{REQUESTED_BY} must be a message ref")
+            try:
+                message_id = UUID(raw)
+            except ValueError as error:
+                raise ValueError(f"{REQUESTED_BY} must be a message ref") from error
+            if message_id not in requesters:
+                raise ValueError(f"{REQUESTED_BY} does not name an active inbound message")
+            requester = requesters[message_id].member_id
+            if requester is None:
+                raise ValueError(f"{REQUESTED_BY} message has no member requester")
+        acting_member = requester if requester is not None else context.on_behalf_of_member_id
+        sandbox = (
+            self.sandbox if self.sandbox_for is None else await self.sandbox_for(acting_member)
+        )
+        spawn, subagents = (
+            (context.spawn, context.subagents)
+            if self.subagents_for is None
+            else self.subagents_for(acting_member)
+        )
+        return (
+            replace(
+                context,
+                sandbox=sandbox,
+                spawn=spawn,
+                subagents=subagents,
+                speaker_member_id=requester,
+            ),
+            call.model_copy(update={"input": tool_input}),
         )
 
     async def _offload(self, name: str, content: str) -> str | None:
@@ -1505,7 +1651,7 @@ class TurnEngine:
             PreToolUse(tool_name=call.name, tool_input=args),
             self.turn,
             self.agent,
-            self.turn.speaker_member_id,
+            context.speaker_member_id,
         )
         if pre.denied is not None:
             return DispatchResult(tool_use_id=call.id, text=pre.denied, is_error=True)
@@ -1556,7 +1702,7 @@ class TurnEngine:
                 PostToolUseFailure(tool_name=call.name, tool_input=args, output=content),
                 self.turn,
                 self.agent,
-                self.turn.speaker_member_id,
+                context.speaker_member_id,
             )
         else:
             post = await self.hooks.fire(
@@ -1564,7 +1710,7 @@ class TurnEngine:
                 PostToolUse(tool_name=call.name, tool_input=args, output=content),
                 self.turn,
                 self.agent,
-                self.turn.speaker_member_id,
+                context.speaker_member_id,
             )
             if post.output is not None:
                 content = post.output
@@ -1870,5 +2016,9 @@ class TurnEngine:
     ) -> None:
         await self._repair().persist_transcript(messages, answer, system, injected)
 
-    async def _persist_inbound(self, arrivals: tuple[Message, ...] = ()) -> None:
-        await self._repair().persist_inbound(arrivals)
+    async def _persist_inbound(
+        self,
+        arrivals: tuple[Message, ...] = (),
+        founding_denial: str | None = None,
+    ) -> None:
+        await self._repair().persist_inbound(arrivals, founding_denial)

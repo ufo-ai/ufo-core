@@ -30,7 +30,7 @@ def _basic(username: str) -> str:
 
 
 def test_run_token_round_trips_encode_then_proxy_auth() -> None:
-    token = RunToken(workspace_id=uuid4(), turn_id=uuid4())
+    token = RunToken(workspace_id=uuid4(), turn_id=uuid4(), acting_member_id=uuid4())
     assert RUN_TOKENS.from_proxy_auth(_basic(RUN_TOKENS.encode(token))) == token
 
 
@@ -59,6 +59,46 @@ def test_run_token_rejects_a_valid_shape_signed_by_another_deployment() -> None:
     forged = RunTokenCodec(b"other-deployment").encode(run)
     with pytest.raises(ValueError, match="signed"):
         RUN_TOKENS.from_proxy_auth(_basic(forged))
+
+
+def test_authorized_session_scopes_proxy_and_cli_environment_without_mutating_base() -> None:
+    conversation_id = uuid4()
+    common = RUN_TOKENS.encode(RunToken(uuid4(), uuid4()))
+    member = RUN_TOKENS.encode(RunToken(uuid4(), uuid4(), uuid4()))
+    proxy = f"http://{common}:@proxy:9000"
+    base = SandboxSession(
+        carrier=_RecordingCarrier(),
+        handle=SandboxHandle(
+            conversation_id=conversation_id,
+            container_id="c",
+            run_token=common,
+            egress_env={
+                "HTTP_PROXY": proxy,
+                "HTTPS_PROXY": proxy,
+                "http_proxy": proxy,
+                "https_proxy": proxy,
+                "ALICE_KEY": "alice",
+                "UNRELATED": common,
+            },
+        ),
+    )
+
+    authorized = base.authorize(
+        member,
+        frozenset(("ALICE_KEY", "BOB_KEY")),
+        {"BOB_KEY": "bob"},
+    )
+
+    assert authorized.handle.run_token == member
+    assert all(
+        member in authorized.handle.egress_env[name]
+        for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
+    )
+    assert authorized.handle.egress_env["UNRELATED"] == common
+    assert "ALICE_KEY" not in authorized.handle.egress_env
+    assert authorized.handle.egress_env["BOB_KEY"] == "bob"
+    assert base.handle.run_token == common
+    assert base.handle.egress_env["HTTP_PROXY"] == proxy
 
 
 class _RecordingCarrier:

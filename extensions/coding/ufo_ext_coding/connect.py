@@ -1,8 +1,8 @@
-"""Connecting the workspace's GitHub: the member proves the installation is theirs.
+"""Connecting the workspace's GitHub: an admin proves the installation is reachable.
 
 An installation id is a small integer and this deploy's App key mints a token for any installation
 of the App, so the id can never be taken on trust. A seal naming the workspace is not enough on its
-own either: the owner who can mint one could hand-craft the return leg carrying another
+own either: an admin who can mint one could hand-craft the return leg carrying another
 organization's id. What settles it is GitHub. The install returns with an authorization code, the
 code exchanges for a token that is the *member's own*, and `GET /user/installations` under that
 token names every ufo installation that member can actually reach. The id on the query string is
@@ -37,7 +37,7 @@ JSON_HEADERS = {"Accept": "application/json"}
 
 
 class ConnectGitHubInput(BaseModel):
-    """The connection is for the speaking owner's own workspace, so it takes no target."""
+    """The connection is for the speaking admin's workspace, so it takes no target."""
 
     user_description: str = Field(
         description="That you are getting their GitHub hooked up, in plain language for the "
@@ -46,15 +46,15 @@ class ConnectGitHubInput(BaseModel):
 
 
 async def connect_github(ctx: ToolContext, args: ConnectGitHubInput) -> ToolResult:
-    """Hand the owner the link that installs the ufo GitHub App on their organization. The link
+    """Hand an admin the link that installs the ufo GitHub App on their organization. The link
     carries a sealed state naming this workspace and this slot, which is what lets the return leg
     resolve a workspace from a browser redirect that has no turn behind it.
 
-    Owner-only, because the installation this binds is workspace-wide."""
+    Admin-only, because the installation this binds is workspace-wide."""
     from ufo_ext_coding.manifest import github_app_id
 
-    if not await ctx.speaker_is_owner():
-        raise ValueError("only the workspace owner can connect GitHub")
+    if not await ctx.speaker_is_admin():
+        raise ValueError("only a workspace admin can connect GitHub")
     if github_app_id() is None:
         raise RuntimeError("this deploy has no GitHub App configured")
     sealed = await ctx.begin_credential_authorization(GIT_INSTALLATION_SLOT, INSTALL_PAYLOAD)
@@ -143,7 +143,7 @@ def install_exchange() -> GitHubInstallExchange:
 async def github_installed(ctx: ExtensionContext, request: Request) -> Response:
     """GitHub's return leg. The state named the workspace — that is how this request found one at
     all — and the exchange decides the rest: bind only an installation the authorizing member
-    reaches. The claimed id is never trusted on its own, because the same owner who obtained a
+    reaches. The claimed id is never trusted on its own, because the same admin who obtained a
     valid link could otherwise return with an id belonging to an organization they have nothing to
     do with."""
     code = request.query_params.get("code", "")
