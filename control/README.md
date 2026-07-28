@@ -14,7 +14,7 @@ surface.
 |---|---|
 | `ufo-control gateway` | Serves `/ufo`, `/fleet`, and `/v1/onboard/{channel}`. |
 | `ufo-control migrate` | Shapes the `ufo_control` schema — the ledgers below — as the database owner. |
-| `ufo-control invite <object-number> <email>` | Grants a waitlist object's email domain one new workspace and prints its invitation once. |
+| `ufo-control invite <object-number> <email>` | Grants a waitlist object's email domain one new workspace and emails it the invitation. |
 | `ufo-control rls-bootstrap` | Creates the `ufo_serve` role, its DBOS database, grants, and workspace policies. |
 
 ## Source
@@ -44,7 +44,10 @@ surface.
 | `UFO_PUBLIC_BASE_URL` | URL stamped into the terminal client. |
 
 Email delivery requires `UFO_SES_SENDER`, `AWS_ROLE_ARN`, and
-`AWS_WEB_IDENTITY_TOKEN_FILE`; `UFO_SES_REGION` defaults to `us-east-1`.
+`AWS_WEB_IDENTITY_TOKEN_FILE`; `UFO_SES_REGION` defaults to `us-east-1`. Both the verification code
+and the invitation ride it, so `ufo-control invite` runs where the gateway runs — its IRSA identity
+reaches an `exec`'d process. `UFO_CONTROL_EMAIL_MODE=console` logs either message instead, for a
+local stack with no SES account.
 
 `UFO_INVITE_REQUIRED` defaults to `true`: creating a new workspace demands a live grant for the
 member's verified email domain. The local hosted stack (root README) sets it `false` so signup needs

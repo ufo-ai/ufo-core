@@ -2,7 +2,7 @@
 
 A verified email whose domain already has a workspace joins ungranted; only the flow that creates a
 workspace consults the ledger. ``ufo-control invite <object-number> <email>`` grants a waitlist
-object's domain and prints the rendered invite email once. Redeeming consumes the grant —
+object's domain and emails it the invitation. Redeeming consumes the grant —
 ``consumed_at`` claimed under a row lock while still null, so two concurrent flows can never both
 open a workspace on one grant — and stamps the claim's ``invite_id`` in the same transaction, so a
 crash can never leave a consumed grant detached from its claim. The consumption lands before the

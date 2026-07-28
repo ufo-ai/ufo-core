@@ -5,7 +5,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
 from uuid import UUID
 
@@ -40,12 +40,19 @@ DELIVERY_POLL_SECONDS = 0.05
 DELIVERY_TIMEOUT_SECONDS = 20.0
 
 
+CODE_IN_BODY = re.compile(r"\d{6}")
+
+
 @dataclass
 class RecordingSender:
     sent: dict[str, str] = field(default_factory=dict)
 
-    async def send(self, email: str, code: str, expires_at: datetime, ttl: timedelta) -> None:
-        self.sent[email] = code
+    async def send(self, email: str, subject: str, text: str) -> None:
+        """The sender is handed a rendered message, never a code, so the code is read back out of
+        the body the way a member reads it."""
+        found = CODE_IN_BODY.search(text)
+        assert found is not None
+        self.sent[email] = found.group()
 
 
 async def _add_workspaces(dsn: str, count: int) -> None:

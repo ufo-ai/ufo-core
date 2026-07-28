@@ -2,8 +2,9 @@
 denylist, hash-only storage, the TTL, the attempt cap, and the recording email sender fake that lets
 a test read the minted code back."""
 
+import re
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import timedelta
 from uuid import uuid4
 
 import asyncpg
@@ -21,20 +22,26 @@ from ufo_control.gateway_invite import (
 )
 from ufo_control.gateway_store import OnboardStore
 
+CODE_IN_BODY = re.compile(r"\d{6}")
+
 
 @dataclass
 class RecordingSender:
     sent: dict[str, str] = field(default_factory=dict)
 
-    async def send(self, email: str, code: str, expires_at: datetime, ttl: timedelta) -> None:
-        self.sent[email] = code
+    async def send(self, email: str, subject: str, text: str) -> None:
+        """The sender is handed a rendered message, never a code, so the code is read back out of
+        the body the way a member reads it."""
+        found = CODE_IN_BODY.search(text)
+        assert found is not None
+        self.sent[email] = found.group()
 
     def last_code(self, email: str) -> str:
         return self.sent[email]
 
 
 class FailingSender:
-    async def send(self, email: str, code: str, expires_at: datetime, ttl: timedelta) -> None:
+    async def send(self, email: str, subject: str, text: str) -> None:
         raise RuntimeError("mail unavailable")
 
 

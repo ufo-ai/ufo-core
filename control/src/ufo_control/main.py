@@ -15,8 +15,13 @@ from opentelemetry.sdk._logs import LoggerProvider
 from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
 from opentelemetry.sdk.resources import Resource
 
-from ufo_control.gateway_email import WorkEmailError, invite_email, public_apex_host
-from ufo_control.gateway_invite import InviteCodes, InviteError
+from ufo_control.gateway_email import (
+    WorkEmailError,
+    email_sender_from_env,
+    invite_email,
+    public_apex_host,
+)
+from ufo_control.gateway_invite import InviteCodes, InviteError, MintedInvite
 from ufo_control.gateway_slack_connect import rearm_failed_delivery
 from ufo_control.rls import bootstrap_policies, ensure_serve_role, owner_dsn
 from ufo_control.schema import require_control_schema, shape_control_schema
@@ -77,24 +82,38 @@ def migrate() -> None:
 @click.argument("object_number", type=click.IntRange(min=1))
 @click.argument("email")
 def invite(object_number: int, email: str) -> None:
-    """Grant a waitlist object's email domain one new workspace; print its invitation once."""
+    """Grant a waitlist object's email domain one new workspace and email it the invitation."""
     try:
-        click.echo(asyncio.run(_mint_invite(object_number, email)))
+        minted = asyncio.run(_mint_invite(object_number, email))
     except (InviteError, WorkEmailError) as error:
         raise click.ClickException(str(error)) from error
+    expires = minted.expires_at.astimezone(UTC).strftime("%Y-%m-%d %H:%M")
+    click.echo(f"object #{minted.object_number} granted to {minted.email}, expires {expires} UTC")
 
 
-async def _mint_invite(object_number: int, email: str) -> str:
+async def _mint_invite(object_number: int, email: str) -> MintedInvite:
+    """The SES sender is built before the grant lands, so a deploy missing its mail configuration
+    refuses without spending the object's one live grant. A grant that outlives its own invitation
+    still opens the workspace — the member proves it by verifying the granted address — so a failed
+    send is reported against a standing grant rather than withdrawing it."""
     apex_host = public_apex_host()
     dsn = owner_dsn()
     await require_control_schema(dsn)
+    sender = email_sender_from_env()
     pool = await asyncpg.create_pool(dsn=dsn, min_size=1, max_size=1)
     try:
         minted = await InviteCodes(pool=pool).mint(object_number, email)
     finally:
         await pool.close()
     subject, body = invite_email(minted.object_number, minted.email, minted.expires_at, apex_host)
-    return f"Subject: {subject}\n\n{body}"
+    try:
+        await sender.send(minted.email, subject, body)
+    except Exception as error:
+        raise click.ClickException(
+            f"object #{minted.object_number} is granted to {minted.email}, but the invitation "
+            f"could not be emailed ({error}); the grant stands — tell them to run the installer"
+        ) from error
+    return minted
 
 
 @main.command(name="slack-connect-retry")

@@ -6,9 +6,9 @@ refusal that ends on `exit`. The `debugger` directive is asserted at both poles:
 exact URL for an operator-domain email, absent for everyone else."""
 
 import asyncio
+import re
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
 from pathlib import Path
 from uuid import NAMESPACE_DNS, UUID, uuid5
 
@@ -52,12 +52,19 @@ assertion (does the arm mention `finished`?) passes on the nested form and would
 bug it exists for."""
 
 
+CODE_IN_BODY = re.compile(r"\d{6}")
+
+
 @dataclass
 class RecordingSender:
     sent: dict[str, str] = field(default_factory=dict)
 
-    async def send(self, email: str, code: str, expires_at: datetime, ttl: timedelta) -> None:
-        self.sent[email] = code
+    async def send(self, email: str, subject: str, text: str) -> None:
+        """The sender is handed a rendered message, never a code, so the code is read back out of
+        the body the way a member reads it."""
+        found = CODE_IN_BODY.search(text)
+        assert found is not None
+        self.sent[email] = found.group()
 
 
 def _configure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, gateway_postgres: str) -> None:

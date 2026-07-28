@@ -136,11 +136,13 @@ token is machine-consumed and never printed.
 
 Creating a workspace is invite-gated; joining an existing one never is. A grant names one email
 domain, so the verified email *is* the redemption: `ufo-control invite <object-number> <email>`
-grants a waitlist object's domain and prints the invitation once, and the flow burns the domain's
+grants a waitlist object's domain and emails the invitation to it, and the flow burns the domain's
 live grant and stamps the claim's `invite_id` in one transaction — no third prompt, and nothing for
 the member to carry from the invitation back into the terminal. The invitation therefore holds no
 secret, and a colleague at the granted domain is identified by the same grant, which is who usually
-runs the installer. `SharedWorkspaces.exists` decides create versus join.
+runs the installer. `SharedWorkspaces.exists` decides create versus join. Delivery rides the
+gateway's own SES sender, read before the object spends its one live grant; a grant whose invitation
+fails to send still stands, so the verb reports that rather than withdrawing it.
 
 The `ufo_control.invite_code` ledger keeps one live grant per object and one per domain (14-day
 expiry, both database-enforced), so one grant opens exactly one workspace and a resolution retry

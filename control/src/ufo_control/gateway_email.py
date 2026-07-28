@@ -1,8 +1,9 @@
-"""Work-email policy and the verification-code sender.
+"""Work-email policy and the outbound mail sender.
 
 `WorkEmailPolicy` rejects free, personal, and disposable domains so a workspace maps to a real
 organization — the denylist fails CLOSED and a malformed address is rejected up front. The sender
-delivers the 6-digit code through SESv2. The sender
+delivers a rendered subject and body through SESv2, carrying no message shape of its own:
+`verification_email` and `invite_email` are the two messages the service sends. The sender
 speaks SESv2 `SendEmail` over `httpx` with a local SigV4 signer — signing is pure CPU (hmac/sha256)
 so it runs inline, and every network call is async: no boto3 network client, no sync HTTP on the
 loop. Credentials are the pod's IRSA web identity (`AWS_ROLE_ARN` + `AWS_WEB_IDENTITY_TOKEN_FILE`,
@@ -10,7 +11,7 @@ injected by the EKS pod identity webhook from the gateway ServiceAccount's annot
 at STS per send. Missing SES configuration fails loud.
 
 `UFO_CONTROL_EMAIL_MODE` picks the sender: `ses` (the default) is the SES delivery above; `console`
-logs the code instead of sending it, so a local stack reads the code from the process log with no
+logs the message instead of sending it, so a local stack reads it from the process log with no
 SES account. An unrecognized mode fails loud."""
 
 import hashlib
@@ -162,9 +163,9 @@ def verification_email(code: str, expires_at: datetime, ttl: timedelta) -> tuple
 def invite_email(
     object_number: int, email: str, expires_at: datetime, apex_host: str
 ) -> tuple[str, str]:
-    """Subject and body for an invitation; ``ufo-control invite`` prints it once for the operator to
-    send by hand. It names the granted address rather than a secret: the flow identifies the domain
-    from the email the member verifies, so there is nothing to carry back into the terminal."""
+    """Subject and body for an invitation, delivered by ``ufo-control invite``. It names the granted
+    address rather than a secret: the flow identifies the domain from the email the member verifies,
+    so there is nothing to carry back into the terminal."""
     return INVITE_SUBJECT, INVITE_BODY.format(
         object_number=object_number,
         email=email,
@@ -174,7 +175,7 @@ def invite_email(
 
 
 class EmailSender(Protocol):
-    async def send(self, email: str, code: str, expires_at: datetime, ttl: timedelta) -> None: ...
+    async def send(self, email: str, subject: str, text: str) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -197,8 +198,7 @@ class SesEmailSender:
     role_arn: str
     token_file: Path
 
-    async def send(self, email: str, code: str, expires_at: datetime, ttl: timedelta) -> None:
-        subject, text = verification_email(code, expires_at, ttl)
+    async def send(self, email: str, subject: str, text: str) -> None:
         credentials = await self._assume_role()
         body = json.dumps(
             {
@@ -304,13 +304,12 @@ def _signing_key(secret_key: str, date_stamp: str, region: str) -> bytes:
 
 @dataclass(frozen=True)
 class ConsoleEmailSender:
-    """A local `EmailSender` that logs the verification code instead of delivering it — the code the
-    SES sender would email is read straight from the process log, so a local stack needs no SES
+    """A local `EmailSender` that logs the message instead of delivering it — the mail the SES
+    sender would send is read straight from the process log, so a local stack needs no SES
     account. Selected by `UFO_CONTROL_EMAIL_MODE=console`; a deploy that delivers real mail never
     sets it."""
 
-    async def send(self, email: str, code: str, expires_at: datetime, ttl: timedelta) -> None:
-        subject, text = verification_email(code, expires_at, ttl)
+    async def send(self, email: str, subject: str, text: str) -> None:
         logger.info("email (console mode) → %s | %s | %s", email, subject, text)
 
 

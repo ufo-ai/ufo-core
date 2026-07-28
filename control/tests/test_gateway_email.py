@@ -1,3 +1,4 @@
+import json
 import logging
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -24,6 +25,9 @@ from ufo_control.gateway_email import (
     public_apex_host,
     verification_email,
 )
+
+EXPIRES_AT = datetime(2026, 7, 16, 16, 10, tzinfo=UTC)
+CODE_TTL = timedelta(minutes=15)
 
 STS_RESPONSE = """\
 <AssumeRoleWithWebIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
@@ -124,6 +128,41 @@ def test_sigv4_headers_sign_the_session_token() -> None:
     assert "x-amz-security-token" in headers["authorization"].split("SignedHeaders=")[1]
 
 
+async def test_send_posts_the_rendered_subject_and_body(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    posted: list[str] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.host.startswith("sts."):
+            return httpx.Response(200, text=STS_RESPONSE)
+        posted.append(request.content.decode())
+        return httpx.Response(200, json={"MessageId": "0100018f4c1e"})
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda **kwargs: real_client(transport=httpx.MockTransport(respond), **kwargs),
+    )
+    token_file = tmp_path / "token"
+    token_file.write_text("projected-token\n")
+    sender = SesEmailSender(
+        source="no-reply@flyingobject.ai",
+        region="us-east-1",
+        role_arn="arn:aws:iam::111122223333:role/ufo-testing-gateway-ses",
+        token_file=token_file,
+    )
+    subject, body = invite_email(2, "founder@acme.com", EXPIRES_AT, "testing.flyingobject.ai")
+    await sender.send("founder@acme.com", subject, body)
+    assert len(posted) == 1
+    payload = json.loads(posted[0])
+    assert payload["FromEmailAddress"] == "no-reply@flyingobject.ai"
+    assert payload["Destination"]["ToAddresses"] == ["founder@acme.com"]
+    assert payload["Content"]["Simple"]["Subject"]["Data"] == "identification granted"
+    assert payload["Content"]["Simple"]["Body"]["Text"]["Data"] == body
+
+
 async def test_send_surfaces_the_ses_denial_body(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -149,12 +188,7 @@ async def test_send_surfaces_the_ses_denial_body(
         token_file=token_file,
     )
     with pytest.raises(RuntimeError, match="identity/no-reply@flyingobject"):
-        await sender.send(
-            "member@example.com",
-            "042042",
-            datetime(2026, 7, 16, 16, 10, tzinfo=UTC),
-            timedelta(minutes=15),
-        )
+        await sender.send("member@example.com", "a subject", "a body")
 
 
 async def test_assume_role_surfaces_the_sts_error_body(
@@ -178,12 +212,7 @@ async def test_assume_role_surfaces_the_sts_error_body(
         token_file=token_file,
     )
     with pytest.raises(RuntimeError, match="ExpiredTokenException"):
-        await sender.send(
-            "member@example.com",
-            "042042",
-            datetime(2026, 7, 16, 16, 10, tzinfo=UTC),
-            timedelta(minutes=15),
-        )
+        await sender.send("member@example.com", "a subject", "a body")
 
 
 def test_email_sender_from_env_builds_ses_from_irsa(
@@ -213,7 +242,7 @@ def test_email_sender_from_env_fails_loud_without_irsa(
         email_sender_from_env()
 
 
-async def test_console_mode_logs_the_code_and_needs_no_ses(
+async def test_console_mode_logs_the_message_and_needs_no_ses(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     monkeypatch.setenv(EMAIL_MODE_ENV, CONSOLE_EMAIL_MODE)
@@ -222,12 +251,7 @@ async def test_console_mode_logs_the_code_and_needs_no_ses(
     sender = email_sender_from_env()
     assert isinstance(sender, ConsoleEmailSender)
     with caplog.at_level(logging.INFO):
-        await sender.send(
-            "boss@webco.io",
-            "424242",
-            datetime(2026, 7, 16, 16, 10, tzinfo=UTC),
-            timedelta(minutes=15),
-        )
+        await sender.send("boss@webco.io", *verification_email("424242", EXPIRES_AT, CODE_TTL))
     assert "424242" in caplog.text
     assert "boss@webco.io" in caplog.text
 

@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from uuid import uuid4
 
-from ufo_control.gateway_email import EmailSender, WorkEmailPolicy
+from ufo_control.gateway_email import EmailSender, WorkEmailPolicy, verification_email
 from ufo_control.gateway_store import OnboardClaim, OnboardStore
 
 logger = logging.getLogger(__name__)
@@ -52,8 +52,9 @@ class ClaimWorkflow:
             invite_id=None,
         )
         await self.store.insert_claim(claim)
+        subject, text = verification_email(code, claim.expires_at, self.code_ttl)
         try:
-            await self.email_sender.send(claim.email, code, claim.expires_at, self.code_ttl)
+            await self.email_sender.send(claim.email, subject, text)
         except Exception as exc:
             await self.store.delete_claim(claim.claim_id)
             logger.exception("onboard.email.send_failed domain=%s surface=%s", domain, surface)

@@ -1,11 +1,12 @@
 """The hosted workspace boundary against a real Postgres database."""
 
 import asyncio
+import logging
 import os
+import re
 import socket
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
 from uuid import NAMESPACE_DNS, UUID, uuid4, uuid5
 
 import asyncpg
@@ -32,7 +33,7 @@ from ufo_control import gateway, rls
 from ufo_control.gateway import Onboarding
 from ufo_control.gateway_claim import ClaimWorkflow
 from ufo_control.gateway_directives import PROMPT
-from ufo_control.gateway_email import WorkEmailPolicy
+from ufo_control.gateway_email import CONSOLE_EMAIL_MODE, EMAIL_MODE_ENV, WorkEmailPolicy
 from ufo_control.gateway_invite import InviteAccepted, InviteCodes
 from ufo_control.gateway_shared import SharedWorkspaces
 from ufo_control.gateway_store import OnboardStore
@@ -135,12 +136,19 @@ class SharedRoleEnv:
     owner_dsn: str
 
 
+CODE_IN_BODY = re.compile(r"\d{6}")
+
+
 @dataclass
 class RecordingSender:
     sent: dict[str, str] = field(default_factory=dict)
 
-    async def send(self, email: str, code: str, expires_at: datetime, ttl: timedelta) -> None:
-        self.sent[email] = code
+    async def send(self, email: str, subject: str, text: str) -> None:
+        """The sender is handed a rendered message, never a code, so the code is read back out of
+        the body the way a member reads it."""
+        found = CODE_IN_BODY.search(text)
+        assert found is not None
+        self.sent[email] = found.group()
 
     def last_code(self, email: str) -> str:
         return self.sent[email]
@@ -512,11 +520,19 @@ def test_invite_cli_rejects_a_nonpositive_object_number() -> None:
     assert "not in the range" in result.output
 
 
-def test_invite_cli_grants_a_redeemable_domain(shared_role_env: SharedRoleEnv) -> None:
+def test_invite_cli_grants_a_redeemable_domain(
+    shared_role_env: SharedRoleEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The verb delivers the invitation rather than printing it, so its own output names only the
+    grant and the message is read where the sender put it."""
+    monkeypatch.setenv(EMAIL_MODE_ENV, CONSOLE_EMAIL_MODE)
     previous = os.environ.get(POSTGRES_OWNER_DSN_ENV)
     os.environ[POSTGRES_OWNER_DSN_ENV] = shared_role_env.owner_dsn
     try:
-        granted = CliRunner().invoke(main, ["invite", "42", "cli@mintco.io"])
+        with caplog.at_level(logging.INFO):
+            granted = CliRunner().invoke(main, ["invite", "42", "cli@mintco.io"])
         refused = CliRunner().invoke(main, ["invite", "43", "someone@gmail.com"])
     finally:
         if previous is None:
@@ -524,10 +540,11 @@ def test_invite_cli_grants_a_redeemable_domain(shared_role_env: SharedRoleEnv) -
         else:
             os.environ[POSTGRES_OWNER_DSN_ENV] = previous
     assert granted.exit_code == 0, granted.output
-    assert "Subject: identification granted" in granted.output
-    assert "  object:   #42 → identified" in granted.output
-    assert "  contact:  cli@mintco.io" in granted.output
-    assert "code:" not in granted.output
+    assert "object #42 granted to cli@mintco.io" in granted.output
+    assert "identification granted" in caplog.text
+    assert "  object:   #42 → identified" in caplog.text
+    assert "  contact:  cli@mintco.io" in caplog.text
+    assert "code:" not in caplog.text
     assert asyncio.run(_redeems(shared_role_env.owner_dsn, "mintco.io"))
 
     assert refused.exit_code != 0, refused.output
