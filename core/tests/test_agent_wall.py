@@ -105,8 +105,8 @@ async def test_each_installation_routes_conversations_to_its_own_agent(db: None)
         await private.bind_installation("team:T2")
         await _rebind_agent(workspace_id, "teams", second_agent)
 
-        company_conversation = await company.conversation_for("C1:1.0", None)
-        private_conversation = await private.conversation_for("C9:1.0", None)
+        company_conversation = await company.conversation_for("C1:1.0", conversation_audience(None))
+        private_conversation = await private.conversation_for("C9:1.0", conversation_audience(None))
         company_turn = await company.admit(company_conversation, "hi", speaker_member_id=None)
         private_turn = await private.admit(private_conversation, "hi", speaker_member_id=None)
 
@@ -121,7 +121,7 @@ async def test_rebinding_an_installation_keeps_its_agent(db: None) -> None:
         await context.bind_installation("team:T1")
         await _rebind_agent(workspace_id, "slack", second_agent)
         await context.bind_installation("team:T1-reinstalled")
-        conversation_id = await context.conversation_for("C1:1.0", None)
+        conversation_id = await context.conversation_for("C1:1.0", conversation_audience(None))
         turn_id = await context.admit(conversation_id, "hi", speaker_member_id=None)
     assert await _turn_agent(turn_id) == second_agent
 
@@ -130,7 +130,7 @@ async def test_unbound_surface_lands_on_the_earliest_agent(db: None) -> None:
     workspace_id, first_agent, _ = await _workspace_with_two_agents()
     with ws(workspace_id):
         context = _context(workspace_id, "cli")
-        conversation_id = await context.conversation_for("session", None)
+        conversation_id = await context.conversation_for("session", conversation_audience(None))
         turn_id = await context.admit(conversation_id, "hi", speaker_member_id=None)
     assert await _turn_agent(turn_id) == first_agent
 
@@ -140,7 +140,7 @@ async def test_invoke_refuses_a_conversation_bound_to_another_agent(db: None) ->
     admission = Admission(dbos=_StubDbos(), durable_surfaces=frozenset())
     with ws(workspace_id):
         context = _context(workspace_id, "cli")
-        conversation_id = await context.conversation_for("session", None)
+        conversation_id = await context.conversation_for("session", conversation_audience(None))
         with pytest.raises(ValueError, match="bound to another agent"):
             await admission.invoke(workspace_id, conversation_id, second_agent, "job")
     async with workspace_tx() as connection:
@@ -159,7 +159,7 @@ async def test_scheduled_fire_refuses_a_task_bound_to_another_agent(db: None) ->
     admission = Admission(dbos=_StubDbos(), durable_surfaces=frozenset())
     with ws(workspace_id):
         context = _context(workspace_id, "cli")
-        conversation_id = await context.conversation_for("session", None)
+        conversation_id = await context.conversation_for("session", conversation_audience(None))
         task_id = uuid4()
         fire_at = datetime(2026, 7, 25, tzinfo=UTC)
         async with workspace_tx() as connection:

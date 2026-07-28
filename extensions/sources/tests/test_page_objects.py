@@ -30,7 +30,7 @@ from ufo.ext.context import context_for
 from ufo.ext.loader import turn_tools
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
-from ufo.sdk.audience import conversation_audience
+from ufo.sdk.audience import Audience, conversation_audience, foreign_room_audience, room_audience
 from ufo.sdk.connectors import ConnectorRegistry
 from ufo.sdk.objects import OwnerRequired, VerbNotSupported
 from ufo.sdk.sources import ConnectorSourceConfig, Page, SourceAuth, SyncResult
@@ -131,9 +131,16 @@ _TOOLS: dict[str, ToolDef] = {
 
 
 def _context(
-    state: _Workspace, blob: FilesystemBlobStore, *, speaker_id: UUID | None = None
+    state: _Workspace,
+    blob: FilesystemBlobStore,
+    *,
+    speaker_id: UUID | None = None,
+    audience: Audience | None = None,
 ) -> ToolContext:
-    ext = context_for(NAME, DECLARED_PROVIDERS)
+    exact_audience = (
+        conversation_audience(speaker_id or state.owner_id) if audience is None else audience
+    )
+    ext = context_for(NAME, DECLARED_PROVIDERS, audience=exact_audience)
     return ToolContext(
         sandbox=None,
         blob=blob,
@@ -150,7 +157,7 @@ def _context(
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=None,
         speaker_member_id=speaker_id or state.owner_id,
-        audience=conversation_audience(speaker_id or state.owner_id),
+        audience=exact_audience,
         artifact_token_secret="",
         grants=None,
         connectors=ConnectorRegistry(entries={}, fallback=None),
@@ -403,6 +410,22 @@ async def test_pages_list_filter_order_and_read_body_through_the_verbs(
         ]
         assert fetched["created_at"] is not None
         assert fetched["updated_at"] is not None
+
+
+async def test_foreign_room_cannot_read_shared_source_pages(db: None, tmp_path: Path) -> None:
+    state = await _workspace()
+    blob = FilesystemBlobStore(root=tmp_path)
+    with ws(state.workspace_id):
+        source_id = await _seed_source(state, "asana")
+        await _seed_page(state, source_id, blob)
+        room = _context(state, blob, audience=room_audience("slack", "CPRIVATE"))
+        foreign = _context(state, blob, audience=foreign_room_audience("slack", "CCONNECT"))
+
+        room_listing = json.loads(await _text(_TOOLS["object_list"], room, kind=PAGE_KIND))
+        foreign_listing = json.loads(await _text(_TOOLS["object_list"], foreign, kind=PAGE_KIND))
+
+    assert len(room_listing["objects"]) == 1
+    assert foreign_listing["objects"] == []
 
 
 async def test_pages_order_timestamp_variants_chronologically(db: None, tmp_path: Path) -> None:

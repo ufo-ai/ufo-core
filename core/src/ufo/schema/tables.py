@@ -1,6 +1,14 @@
 """The one schema, dialect-neutral: SQLite (dev) and Postgres (deploys) from one metadata."""
 
 import sqlalchemy as sa
+from sqlalchemy.engine.default import DefaultExecutionContext
+
+from ufo.audience import conversation_audience
+
+
+def _conversation_audience(context: DefaultExecutionContext) -> str:
+    return str(conversation_audience(context.get_current_parameters().get("member_id")))
+
 
 metadata = sa.MetaData()
 
@@ -86,6 +94,13 @@ conversation = sa.Table(
     sa.Column("surface", sa.Text, nullable=False),
     sa.Column("queue_key", sa.Text, nullable=False),
     sa.Column("member_id", sa.Uuid, sa.ForeignKey("member.id"), nullable=True),
+    sa.Column(
+        "audience",
+        sa.Text,
+        nullable=False,
+        default=_conversation_audience,
+        server_default="shared",
+    ),
     sa.Column("sandbox_handle", sa.Text, nullable=True),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
@@ -96,6 +111,16 @@ conversation = sa.Table(
         name="conversation_workspace_surface_queue_key_key",
     ),
     sa.Index("conversation_workspace", "workspace_id"),
+    sa.CheckConstraint(
+        "audience = 'shared' or audience like 'member:%' or "
+        "audience like 'room:%:%' or audience like 'foreign:%:%'",
+        name="conversation_audience",
+    ),
+    sa.CheckConstraint(
+        "(member_id is null and audience not like 'member:%') or "
+        "(member_id is not null and audience like 'member:%')",
+        name="conversation_audience_member",
+    ),
     sa.Index(
         "conversation_sandbox",
         "workspace_id",

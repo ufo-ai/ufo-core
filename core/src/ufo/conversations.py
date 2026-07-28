@@ -1,10 +1,9 @@
 """The core-registered `conversation` object kind: past conversations as read-only objects.
 
 Artifacts and scheduled tasks link to the conversation they came from or report into; this kind is
-what those links resolve to — the surface, disclosure member, row timestamps, and, through status,
-the text exchange written into the turn's workspace. A conversation is visible inside its agent
-when it has no disclosure member or the caller is that member; surfaces create conversations, so
-every mutation is refused."""
+what those links resolve to — the surface, audience, row timestamps, and, through status, the text
+exchange written into the turn's workspace. Surfaces create conversations, so every mutation is
+refused."""
 
 from dataclasses import dataclass
 from uuid import UUID
@@ -13,7 +12,7 @@ import sqlalchemy as sa
 from pydantic import BaseModel, ConfigDict, Field
 
 from ufo.agent_scope import agent_current
-from ufo.audience import audience_member, conversation_audience
+from ufo.audience import audience_subjects, parse_audience
 from ufo.blob import BlobNotFound
 from ufo.db import workspace_tx
 from ufo.ext.context import JsonValue
@@ -43,18 +42,14 @@ CONVERSATIONS_ARE_SURFACE_MADE = (
 class ConversationSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
     surface: str = Field(description="The chat surface the conversation runs on.")
-    member_id: str | None = Field(
-        description="The disclosure member the conversation belongs to; null for a shared "
-        "(channel) conversation."
-    )
+    audience: str = Field(description="The conversation's disclosure audience.")
 
 
 @dataclass(frozen=True)
 class ConversationObjects:
-    """Read-only handlers over the agent's `conversation` rows the caller may see: a row with no
-    disclosure member is shared, a member-bound row is visible to that member alone. Another
-    agent's conversations are not found. Status materializes that same row's transcript. Resolves
-    artifact `created_in` and scheduled-task `reports_to` links; every mutation refuses."""
+    """Read-only handlers over the agent's conversations visible to the caller's audience. Another
+    agent's conversations are not found. Status materializes only an exact-audience transcript.
+    Resolves artifact and scheduled-task links; every mutation refuses."""
 
     async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage:
         rows = tuple(
@@ -74,7 +69,7 @@ class ConversationObjects:
         return ObjectDetail(
             spec=ConversationSpec(
                 surface=row.surface,
-                member_id=None if row.member_id is None else str(row.member_id),
+                audience=row.audience,
             ),
             created_at=row.created_at,
             updated_at=row.updated_at,
@@ -82,7 +77,7 @@ class ConversationObjects:
 
     async def status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None:
         row = await self._find(ctx, name)
-        if row is None or conversation_audience(row.member_id) != ctx.audience:
+        if row is None or parse_audience(row.audience) != ctx.audience:
             return None
         exchange = await self._exchange(ctx, row.id)
         body = "\n".join(exchange).encode()
@@ -140,40 +135,30 @@ class ConversationObjects:
         return tuple(rows)
 
     def _visible(self, ctx: ToolContext) -> sa.Select:
-        member = audience_member(ctx.audience)
-        visibility = (
-            tables.conversation.c.member_id.is_(None)
-            if member is None
-            else sa.or_(
-                tables.conversation.c.member_id.is_(None),
-                tables.conversation.c.member_id == member,
-            )
-        )
         return sa.select(
             tables.conversation.c.id,
             tables.conversation.c.surface,
-            tables.conversation.c.member_id,
+            tables.conversation.c.audience,
             tables.conversation.c.created_at,
             tables.conversation.c.updated_at,
         ).where(
             tables.conversation.c.workspace_id == ws_current().workspace_id,
             tables.conversation.c.agent_id == agent_current().agent_id,
-            visibility,
+            tables.conversation.c.audience.in_(audience_subjects(ctx.audience)),
         )
 
 
 CONVERSATION_OBJECT = ObjectKind(
     name=CONVERSATION_KIND,
     description=(
-        "A past conversation: its surface, disclosure member, timestamps, and text transcript. "
+        "A past conversation: its surface, audience, timestamps, and text transcript. "
         "Created by surfaces; every mutation is refused."
     ),
     guidance=(
         "Conversations resolve artifact `created_in` and scheduled-task `reports_to` links: get "
-        "one by its id to see which surface it runs on, whose private conversation it is "
-        "(member_id null means a shared channel), and when it started. Reads show this agent's "
-        "shared conversations plus the audience member's own; another agent's conversations are "
-        "not found. When a conversation has the same audience as the current turn, "
+        "one by its id to see which surface and audience it runs on and when it started. Reads "
+        "show this agent's conversations visible to the current audience; another agent's are not "
+        "found. When a conversation has the same audience as the current turn, "
         "`status.workspace_path` is its text exchange written into your workspace. Conversations "
         "cannot be created, changed, or deleted through objects."
     ),

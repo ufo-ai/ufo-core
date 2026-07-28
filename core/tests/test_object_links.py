@@ -321,7 +321,7 @@ async def test_search_to_object_get_walks_page_provenance_end_to_end(
         assert source["spec"]["provider"] == "asana"
 
 
-async def test_conversation_kind_gates_on_disclosure_and_refuses_mutation(db: None) -> None:
+async def test_conversation_kind_gates_on_audience_and_refuses_mutation(db: None) -> None:
     workspace_id = await _workspace()
     blob = FilesystemBlobStore(root=Path())
     tools = _verbs()
@@ -339,12 +339,12 @@ async def test_conversation_kind_gates_on_disclosure_and_refuses_mutation(db: No
         get_tool = tools["object_get"]
         with agent(agent_id):
             shared = await _get(tools, anyone, CONVERSATION_KIND, str(shared_conversation))
-            assert shared["spec"] == {"surface": "slack", "member_id": None}
+            assert shared["spec"] == {"surface": "slack", "audience": "shared"}
             assert shared["links"] == []
             assert shared["created_at"] is not None
 
             mine = await _get(tools, own, CONVERSATION_KIND, str(private_conversation))
-            assert mine["spec"] == {"surface": "cli", "member_id": str(member_id)}
+            assert mine["spec"] == {"surface": "cli", "audience": f"member:{member_id}"}
 
             for hidden in (_tool_ctx(workspace_id, blob, member_id=other_id), anyone):
                 with pytest.raises(UnknownObject):
@@ -381,7 +381,7 @@ async def test_conversation_kind_gates_on_disclosure_and_refuses_mutation(db: No
                                 {
                                     "kind": CONVERSATION_KIND,
                                     "name": str(shared_conversation),
-                                    "spec": {"surface": "slack", "member_id": None},
+                                    "spec": {"surface": "slack", "audience": "shared"},
                                 }
                             ),
                         }
@@ -413,7 +413,10 @@ async def test_conversation_kind_gates_on_disclosure_and_refuses_mutation(db: No
 
         with agent(other_agent_id):
             other_mine = await _get(tools, own, CONVERSATION_KIND, str(other_agent_conversation))
-            assert other_mine["spec"] == {"surface": "cli", "member_id": str(member_id)}
+            assert other_mine["spec"] == {
+                "surface": "cli",
+                "audience": f"member:{member_id}",
+            }
 
 
 async def test_conversation_kind_lists_only_visible_rows(db: None) -> None:

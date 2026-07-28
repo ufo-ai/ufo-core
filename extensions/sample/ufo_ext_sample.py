@@ -19,7 +19,7 @@ from uuid import UUID
 import sqlalchemy as sa
 from pydantic import BaseModel, ConfigDict, Field
 
-from ufo.sdk.audience import Audience
+from ufo.sdk.audience import Audience, conversation_audience
 from ufo.sdk.authproxy import AuthProxySpec, Credential
 from ufo.sdk.bearer import workspace_claim
 from ufo.sdk.browser import CdpEndpoint, CdpLease
@@ -779,7 +779,7 @@ async def _surface_ingest(ctx: SurfaceContext, request: Request) -> Response:
     member_id = await ctx.linked_member(args.external_id)
     if member_id is None and args.email is not None:
         member_id = await ctx.link_member(args.external_id, args.email)
-    conversation_id = await ctx.conversation_for(args.external_id, member_id)
+    conversation_id = await ctx.conversation_for(args.external_id, conversation_audience(member_id))
     if args.inbound_text is not None:
         await ctx.write_workspace_file(
             conversation_id, SURFACE_INBOX_REL, _one_chunk(args.inbound_text.encode())
@@ -816,7 +816,7 @@ async def _surface_live_admit(ctx: SurfaceContext, request: Request) -> Response
     member_id = await ctx.linked_member(args.external_id)
     if member_id is None:
         member_id = await ctx.adopt_identity(SURFACE_PEER, args.external_id)
-    conversation_id = await ctx.conversation_for(args.external_id, member_id)
+    conversation_id = await ctx.conversation_for(args.external_id, conversation_audience(member_id))
     turn_id = await ctx.admit(conversation_id, args.message, speaker_member_id=member_id)
     owner = await ctx.turn_owner(turn_id)
     report = await ctx.spend_rollup(SURFACE_SPEND_WINDOW_SECONDS)

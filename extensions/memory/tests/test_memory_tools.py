@@ -25,7 +25,13 @@ from ufo.ext.context import ExtensionContext, context_for
 from ufo.indexing import TextChunker
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
-from ufo.sdk.audience import SHARED_AUDIENCE, Audience, conversation_audience
+from ufo.sdk.audience import (
+    SHARED_AUDIENCE,
+    Audience,
+    conversation_audience,
+    foreign_room_audience,
+    room_audience,
+)
 from ufo.sdk.manifest import HookContext, InjectContext, UserPromptSubmit
 from ufo.subjects import member_subject
 from ufo.tools.context import SpawnResult, ToolContext, ToolResult
@@ -415,6 +421,39 @@ async def test_memory_update_writes_only_the_conversation_audience(
     assert "a team note" in shared_read.content[0].text
     with pytest.raises(ValidationError):
         memory.MemoryUpdateInput.model_validate({"body": "widened", "shared": True})
+
+
+async def test_room_memory_reads_shared_while_foreign_memory_is_sealed(
+    db: None, tmp_path: Path
+) -> None:
+    workspace_id = await _workspace()
+    embed = StubEmbed(vec((0, 1.0)))
+    index = DefaultIndex(transaction=workspace_tx)
+    shared = _tool_ctx(_ext(index, embed), None, tmp_path)
+    room = room_audience("slack", "CPRIVATE")
+    other_room = room_audience("slack", "COTHER")
+    foreign = foreign_room_audience("slack", "CCONNECT")
+    room_ctx = _tool_ctx(_ext(index, embed, room), None, tmp_path, audience=room)
+    other_ctx = _tool_ctx(_ext(index, embed, other_room), None, tmp_path, audience=other_room)
+    foreign_ctx = _tool_ctx(_ext(index, embed, foreign), None, tmp_path, audience=foreign)
+
+    with ws(workspace_id):
+        await _run("memory_update", shared, body="shared launch note")
+        await _run("memory_update", room_ctx, body="private room launch note")
+        await _run("memory_update", foreign_ctx, body="foreign launch note")
+        await _indexer(embed).run()
+        room_read = await _run("memory_search", room_ctx, queries=["launch note"])
+        other_read = await _run("memory_search", other_ctx, queries=["launch note"])
+        foreign_read = await _run("memory_search", foreign_ctx, queries=["launch note"])
+
+    assert "shared launch note" in room_read.content[0].text
+    assert "private room launch note" in room_read.content[0].text
+    assert "foreign launch note" not in room_read.content[0].text
+    assert "shared launch note" in other_read.content[0].text
+    assert "private room launch note" not in other_read.content[0].text
+    assert "foreign launch note" not in other_read.content[0].text
+    assert "foreign launch note" in foreign_read.content[0].text
+    assert "shared launch note" not in foreign_read.content[0].text
 
 
 async def test_memory_search_reports_no_match_on_empty_memory(db: None, tmp_path: Path) -> None:

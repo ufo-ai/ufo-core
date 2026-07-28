@@ -30,7 +30,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncConnection
 from sqlalchemy.sql.elements import ColumnElement
 
-from ufo.sdk.audience import Audience
+from ufo.sdk.audience import Audience, audience_subjects
 from ufo.sdk.context import ExtensionContext, PageState
 from ufo.sdk.index import (
     OWNER_KIND_MEMORY_ITEM,
@@ -42,7 +42,7 @@ from ufo.sdk.index import (
     TextChunker,
     chunk_embed_upsert,
 )
-from ufo.sdk.sources import SHARED_SUBJECT, PageChange
+from ufo.sdk.sources import PageChange
 
 RRF_K = 60
 RRF_WEIGHT = 0.7
@@ -111,8 +111,7 @@ mem_page = sa.Table(
 
 
 def recall_subjects(audience: Audience) -> frozenset[str]:
-    """The current audience plus shared memory, deduplicated for shared conversations."""
-    return frozenset({SHARED_SUBJECT, str(audience)})
+    return audience_subjects(audience)
 
 
 class MemoryInventoryItem(BaseModel):
@@ -126,8 +125,7 @@ class MemoryInventoryItem(BaseModel):
     it. Recall/decay: `half_life_days` is the recency half-life for its kind (None for
     episodic/semantic, which never decay) and `decay_factor` is the live multiplier recall applies
     to its relevance (`(confidence/10)·0.5**(age_days/half_life)` for facts, else 1.0). Lifecycle:
-    `superseded_by` non-NULL means consolidation replaced it; `subject` encodes shared-vs-member
-    visibility."""
+    `superseded_by` non-NULL means consolidation replaced it; `subject` is its exact audience."""
 
     subject: str
     body: str
@@ -158,8 +156,7 @@ async def inventory(
     `memory_item_inventory` index on `(workspace_id, created_at)`, so this is a bounded index scan —
     not a full-table scan and sort — and the `LIMIT` bounds what's serialized; one workspace's large
     store never stalls the shared request loop. Scoping is both the ambient RLS binding the opener
-    carries and the explicit workspace predicate; grouping by `subject` (shared vs a member's
-    private space) is the reader's to do."""
+    carries and the explicit workspace predicate; grouping by `subject` is the reader's to do."""
     async with transaction() as connection:
         rows = (
             (

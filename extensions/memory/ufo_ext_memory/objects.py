@@ -4,10 +4,9 @@
 inputs beside its provenance links: `created_from` names the synced page a derivation distilled it
 from, `superseded_by` the item consolidation replaced it with. Search excludes superseded items,
 so the link is the recovery path when an old id arrives through a stale reference; `get` resolves
-any visible row while `list` shows only live ones. Reads are scoped to the caller's own subjects —
-shared memory plus, in a member conversation, that member's private space. `memory_update` stays
-the write path, and there is no delete: index chunks are derived by jobs and no cleanup path
-exists for one item's chunks."""
+any visible row while `list` shows only live ones. Reads follow the caller's audience; foreign
+rooms are sealed from shared memory. `memory_update` stays the write path, and there is no delete:
+index chunks are derived by jobs and no cleanup path exists for one item's chunks."""
 
 from dataclasses import dataclass
 from uuid import UUID
@@ -43,7 +42,7 @@ MEMORY_LIST_MAX = 500
 class MemorySpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
     body: str = Field(description="The stored memory text.")
-    subject: str = Field(description="Visibility subject: 'shared' or 'member:<id>'.")
+    subject: str = Field(description="The exact visibility audience.")
     item_class: str = Field(description="fact, episodic, or semantic.")
     memory_kind: str = Field(
         description="Recency-decay kind: fact, preference, decision, event, or task."
@@ -211,8 +210,8 @@ MEMORY_OBJECT = ObjectKind(
         "Search excludes superseded items, so reaching one through an old reference means "
         "follow `superseded_by` to the current statement before relying on it. Listing shows "
         "live items newest first (filter subject, item_class, or memory_kind); search, not "
-        "listing, is how memory is recalled. Reads cover shared memory plus the conversation "
-        "member's own. Apply and delete are refused — memory_update is the write path, and "
+        "listing, is how memory is recalled. Reads follow the conversation audience. Apply and "
+        "delete are refused — memory_update is the write path, and "
         "consolidation is how an item ends."
     ),
     spec_model=MemorySpec,

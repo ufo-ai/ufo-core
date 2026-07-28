@@ -1598,7 +1598,11 @@ async def test_activation_waits_for_an_owner_conversation_before_marking_active(
     async with workspace_tx() as connection:
         await connection.execute(
             sa.update(tables.conversation)
-            .values(member_id=None, updated_at=sa.func.now())
+            .values(
+                member_id=None,
+                audience=str(SHARED_AUDIENCE),
+                updated_at=sa.func.now(),
+            )
             .where(tables.conversation.c.workspace_id == workspace_id)
         )
 

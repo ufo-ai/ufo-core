@@ -17,6 +17,7 @@ from collections.abc import AsyncIterator
 from uuid import UUID
 
 from ufo.sdk.accounting import MICRO_USD_PER_USD, SpendReport, SubjectTotal
+from ufo.sdk.audience import conversation_audience
 from ufo.sdk.bearer import verify_token, workspace_claim
 from ufo.sdk.http import (
     HTMLResponse,
@@ -79,7 +80,7 @@ async def chat(ctx: SurfaceContext, request: Request) -> Response:
         return Response("empty message", status_code=400)
     if len(inbound) > MAX_INBOUND_CHARS:
         return Response(f"message exceeds {MAX_INBOUND_CHARS} characters", status_code=413)
-    conversation_id = await ctx.conversation_for(email, member_id)
+    conversation_id = await ctx.conversation_for(email, conversation_audience(member_id))
     turn_id = await ctx.admit(conversation_id, inbound, speaker_member_id=member_id)
     return JSONResponse({"turn_id": str(turn_id)})
 

@@ -29,7 +29,13 @@ from ufo.agent_scope import agent
 from ufo.agents import AGENT_KIND
 from ufo.artifact_token import verify_artifact_token
 from ufo.artifacts import ARTIFACT_KIND, artifact_object_names
-from ufo.audience import SHARED_AUDIENCE, Audience, conversation_audience
+from ufo.audience import (
+    SHARED_AUDIENCE,
+    Audience,
+    conversation_audience,
+    foreign_room_audience,
+    room_audience,
+)
 from ufo.blob import FilesystemBlobStore
 from ufo.conversations import CONVERSATION_KIND
 from ufo.credentials import CredentialStore
@@ -852,7 +858,10 @@ ARTIFACT_TEST_SECRET = "artifact-test-secret"
 
 
 async def _turn_row(
-    workspace_id: UUID, agent_id: UUID | None = None, member_id: UUID | None = None
+    workspace_id: UUID,
+    agent_id: UUID | None = None,
+    member_id: UUID | None = None,
+    audience: Audience | None = None,
 ) -> Turn:
     if agent_id is None:
         agent_id = await _agent_row(workspace_id, name=f"agent-{uuid4().hex[:8]}")
@@ -866,6 +875,7 @@ async def _turn_row(
                 surface="cli",
                 queue_key=f"objects-{conversation_id.hex[:8]}",
                 member_id=member_id,
+                audience=str(conversation_audience(member_id) if audience is None else audience),
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -1373,9 +1383,90 @@ async def test_private_turn_sees_shared_conversation_metadata_but_not_its_transc
             )
         )
 
-    assert fetched["spec"]["member_id"] is None
+    assert fetched["spec"]["audience"] == "shared"
     assert fetched["status"] is None
     assert not (workspace_dir / "transcripts").exists()
+
+
+async def test_room_conversations_share_metadata_only_with_their_audience(
+    db: None, tmp_path: Path
+) -> None:
+    workspace_id = await _workspace()
+    tools = _object_tools()
+    room = room_audience("slack", "CPRIVATE")
+    other_room = room_audience("slack", "COTHER")
+    foreign = foreign_room_audience("slack", "CCONNECT")
+    with ws(workspace_id):
+        shared = await _turn_row(workspace_id)
+        same = await _turn_row(workspace_id, agent_id=shared.agent_id, audience=room)
+        other = await _turn_row(workspace_id, agent_id=shared.agent_id, audience=other_room)
+        sealed = await _turn_row(workspace_id, agent_id=shared.agent_id, audience=foreign)
+        ctx, workspace_dir = await _workspace_context(same, tmp_path, audience=room)
+        await Transcript(blob=ctx.blob, conversation_id=shared.conversation_id).write(
+            LAUNCH_EXCHANGE
+        )
+        await Transcript(blob=ctx.blob, conversation_id=same.conversation_id).write(LAUNCH_EXCHANGE)
+
+        listing = yaml.safe_load(
+            await _agent_text(
+                shared.agent_id,
+                tools,
+                "object_list",
+                ctx,
+                kind=CONVERSATION_KIND,
+            )
+        )
+        shared_get = yaml.safe_load(
+            await _agent_text(
+                shared.agent_id,
+                tools,
+                "object_get",
+                ctx,
+                kind=CONVERSATION_KIND,
+                name=str(shared.conversation_id),
+            )
+        )
+        same_get = yaml.safe_load(
+            await _agent_text(
+                shared.agent_id,
+                tools,
+                "object_get",
+                ctx,
+                kind=CONVERSATION_KIND,
+                name=str(same.conversation_id),
+            )
+        )
+
+    names = {row["name"] for row in listing["objects"]}
+    assert names == {str(shared.conversation_id), str(same.conversation_id)}
+    assert str(other.conversation_id) not in names
+    assert str(sealed.conversation_id) not in names
+    assert shared_get["status"] is None
+    assert same_get["spec"]["audience"] == str(room)
+    assert same_get["status"]["workspace_path"] == f"transcripts/{same.conversation_id}.txt"
+    assert not (workspace_dir / "transcripts" / f"{shared.conversation_id}.txt").exists()
+
+
+async def test_foreign_conversation_cannot_see_shared_metadata(db: None, tmp_path: Path) -> None:
+    workspace_id = await _workspace()
+    tools = _object_tools()
+    foreign = foreign_room_audience("slack", "CCONNECT")
+    with ws(workspace_id):
+        shared = await _turn_row(workspace_id)
+        sealed = await _turn_row(workspace_id, agent_id=shared.agent_id, audience=foreign)
+        ctx, _ = await _workspace_context(sealed, tmp_path, audience=foreign)
+
+        listing = yaml.safe_load(
+            await _agent_text(
+                shared.agent_id,
+                tools,
+                "object_list",
+                ctx,
+                kind=CONVERSATION_KIND,
+            )
+        )
+
+    assert [row["name"] for row in listing["objects"]] == [str(sealed.conversation_id)]
 
 
 async def test_conversation_transcript_uses_the_canonical_id_path(db: None, tmp_path: Path) -> None:

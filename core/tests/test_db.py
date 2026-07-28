@@ -154,9 +154,9 @@ def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None
         heads = scripts.get_heads()
     assert scripts.get_revision("memory_0008").dependencies == "0049"
     assert {
-        "0054",
+        "0055",
         "index_default_0002",
-        "memory_0010",
+        "memory_0011",
         "sample_ext_note_0001",
         "skill_create_0002",
         "eval_env_0001",
@@ -198,7 +198,7 @@ def test_one_memory_surface_advances_both_old_heads(tmp_path: Path, graph_instal
             row[0] for row in connection.execute("select version_num from alembic_version")
         }
     assert not {"graph_entity", "graph_edge"} & tables
-    assert "0054" in revisions
+    assert "0055" in revisions
     assert "knowledge_graph_0001" not in revisions
 
 
@@ -615,6 +615,84 @@ async def test_workspace_tx_round_trip(db: None) -> None:
             )
         ).one()
     assert row.id == workspace_id
+
+
+async def test_conversation_and_memory_audiences_are_constrained(db: None) -> None:
+    workspace_id, member_id, agent_id = uuid4(), uuid4(), uuid4()
+    memory_item = sa.table(
+        "memory_item",
+        sa.column("id", sa.Uuid()),
+        sa.column("workspace_id", sa.Uuid()),
+        sa.column("subject", sa.Text()),
+        sa.column("body", sa.Text()),
+        sa.column("item_class", sa.Text()),
+        sa.column("memory_kind", sa.Text()),
+        sa.column("confidence", sa.Integer()),
+        sa.column("created_at", sa.DateTime(timezone=True)),
+        sa.column("updated_at", sa.DateTime(timezone=True)),
+    )
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.workspace).values(
+                id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=member_id,
+                workspace_id=workspace_id,
+                email="member@example.com",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=agent_id,
+                workspace_id=workspace_id,
+                name="assistant",
+                prompt="p",
+                model="m",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        invalid = (
+            ("invalid", None),
+            (f"member:{member_id}", None),
+            ("shared", member_id),
+        )
+        for index, (audience, row_member_id) in enumerate(invalid):
+            with pytest.raises(sa.exc.IntegrityError):
+                async with connection.begin_nested():
+                    await connection.execute(
+                        sa.insert(tables.conversation).values(
+                            id=uuid4(),
+                            workspace_id=workspace_id,
+                            agent_id=agent_id,
+                            surface="test",
+                            queue_key=f"invalid-{index}",
+                            member_id=row_member_id,
+                            audience=audience,
+                            created_at=sa.func.now(),
+                            updated_at=sa.func.now(),
+                        )
+                    )
+        with pytest.raises(sa.exc.IntegrityError):
+            async with connection.begin_nested():
+                await connection.execute(
+                    sa.insert(memory_item).values(
+                        id=uuid4(),
+                        workspace_id=workspace_id,
+                        subject="invalid",
+                        body="probe",
+                        item_class="fact",
+                        memory_kind="fact",
+                        confidence=5,
+                        created_at=sa.func.now(),
+                        updated_at=sa.func.now(),
+                    )
+                )
 
 
 async def test_workspace_tx_requires_init() -> None:

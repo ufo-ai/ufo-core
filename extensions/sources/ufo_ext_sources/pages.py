@@ -17,6 +17,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from ufo.sdk.audience import audience_subjects
 from ufo.sdk.context import ExtensionContext, JsonValue
 from ufo.sdk.objects import (
     ObjectDetail,
@@ -30,7 +31,7 @@ from ufo.sdk.objects import (
     VerbNotSupported,
     object_page,
 )
-from ufo.sdk.sources import SHARED_SUBJECT, ConnectorSourceConfig
+from ufo.sdk.sources import ConnectorSourceConfig
 from ufo.sdk.tools import ToolContext
 from ufo_ext_sources.registry import CONNECTORS, SOURCE_KIND, binding_name
 
@@ -228,7 +229,7 @@ class PageObjects:
                 updated_at=record.updated_at,
                 source_name=source_names.get(record.source_id),
             )
-            for record in await ext.source_pages(frozenset({SHARED_SUBJECT, str(ctx.audience)}))
+            for record in await ext.source_pages(audience_subjects(ctx.audience))
         )
 
 

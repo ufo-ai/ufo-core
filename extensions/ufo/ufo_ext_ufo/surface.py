@@ -21,6 +21,7 @@ from functools import partial
 from uuid import UUID
 
 from ufo.sdk.accounting import MICRO_USD_PER_USD
+from ufo.sdk.audience import conversation_audience
 from ufo.sdk.bearer import verify_token, workspace_claim
 from ufo.sdk.http import PlainTextResponse, Request, Response, StreamingResponse
 from ufo.sdk.hub import CostTick, LiveFrame, Parked, SkillLoad, Terminal, TextDelta, ToolCall
@@ -226,7 +227,7 @@ async def channel(ctx: SurfaceContext, request: Request) -> Response:
     if sealed:
         return await _fulfill_secret(ctx, request, member_id, sealed)
     queue_key = f"{email}{QUEUE_KEY_SEPARATOR}{request.path_params['channel']}"
-    conversation_id = await ctx.conversation_for(queue_key, member_id)
+    conversation_id = await ctx.conversation_for(queue_key, conversation_audience(member_id))
     body = (await request.body()).decode("utf-8", "replace").strip()
     if not body:
         turn_id = await ctx.latest_turn(conversation_id)

@@ -11,7 +11,7 @@ import sqlalchemy as sa
 from dbos import DBOS, DBOSClient, EnqueueOptions, Queue
 
 from ufo.agent_scope import agent
-from ufo.audience import Audience, conversation_audience
+from ufo.audience import Audience, parse_audience
 from ufo.blob import BlobStore, FilesystemBlobStore, S3BlobStore
 from ufo.browser import CdpProvider
 from ufo.config import Config
@@ -439,7 +439,7 @@ async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, Audience]:
                     tables.turn.c.traceparent,
                     tables.agent.c.prompt,
                     tables.agent.c.model,
-                    tables.conversation.c.member_id,
+                    tables.conversation.c.audience,
                 )
                 .select_from(
                     tables.turn.join(
@@ -471,7 +471,7 @@ async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, Audience]:
         subagent_profile=row.subagent_profile,
         traceparent=row.traceparent,
     )
-    return turn, Agent(prompt=row.prompt, model=row.model), conversation_audience(row.member_id)
+    return turn, Agent(prompt=row.prompt, model=row.model), parse_audience(row.audience)
 
 
 async def _open_sandbox(

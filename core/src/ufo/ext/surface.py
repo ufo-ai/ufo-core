@@ -49,6 +49,7 @@ from ufo.artifact_token import (
     ARTIFACT_TOKEN_TTL_SECONDS,
     mint_artifact_token,
 )
+from ufo.audience import Audience, audience_member, narrow_audience, parse_audience
 from ufo.blob import BlobNotFound, BlobStore
 from ufo.candidates import WorkspaceCandidates, owner_candidates
 from ufo.credentials import (
@@ -534,7 +535,11 @@ class SurfaceContext:
         return await self.link_member(external_id, email)
 
     def _conversation_lookup(self, queue_key: str) -> sa.Select:
-        return sa.select(tables.conversation.c.id, tables.conversation.c.member_id).where(
+        return sa.select(
+            tables.conversation.c.id,
+            tables.conversation.c.member_id,
+            tables.conversation.c.audience,
+        ).where(
             tables.conversation.c.workspace_id == self.workspace_id,
             tables.conversation.c.surface == self.surface,
             tables.conversation.c.queue_key == queue_key,
@@ -548,28 +553,35 @@ class SurfaceContext:
             found = (await connection.execute(self._conversation_lookup(queue_key))).one_or_none()
         return None if found is None else found.id
 
-    async def conversation_for(self, queue_key: str, member_id: UUID | None) -> UUID:
+    async def conversation_for(self, queue_key: str, audience: Audience) -> UUID:
         """Get-or-create the conversation this surface keys by `queue_key`, outside any admission
         transaction; a lost creation race re-reads the surviving row. A new conversation binds
         permanently to the surface's agent — the surface's installation binding when one exists,
         else the workspace's earliest agent — and admission derives every turn's agent from that
-        binding. A memberless conversation whose resolver now names a member is claimed for
-        them — a DM that began before its speaker could resolve (an unconfirmed email, a
-        not-yet-joined teammate) becomes theirs, and their memory subject, from the turn that
-        resolves them; a conversation another member already owns is never re-claimed."""
+        binding. A shared conversation is narrowed when the surface learns its exact member or
+        room; an audience is never widened, and a room becoming externally shared seals as
+        foreign."""
+        audience = parse_audience(audience)
+        member_id = audience_member(audience)
         async with workspace_tx() as connection:
             found = (await connection.execute(self._conversation_lookup(queue_key))).one_or_none()
         if found is not None:
-            if member_id is not None and found.member_id is None:
+            narrowed = narrow_audience(parse_audience(found.audience), audience)
+            if narrowed != found.audience:
                 async with workspace_tx() as connection:
                     await connection.execute(
                         sa.update(tables.conversation)
                         .where(
                             tables.conversation.c.id == found.id,
-                            tables.conversation.c.member_id.is_(None),
+                            tables.conversation.c.audience == found.audience,
                         )
-                        .values(member_id=member_id, updated_at=sa.func.now())
+                        .values(
+                            member_id=audience_member(narrowed),
+                            audience=str(narrowed),
+                            updated_at=sa.func.now(),
+                        )
                     )
+                return await self.conversation_for(queue_key, audience)
             return found.id
         conversation_id = uuid4()
         agent_id = await self._surface_agent()
@@ -583,6 +595,7 @@ class SurfaceContext:
                         surface=self.surface,
                         queue_key=queue_key,
                         member_id=member_id,
+                        audience=str(audience),
                         created_at=sa.func.now(),
                         updated_at=sa.func.now(),
                     )
@@ -590,7 +603,12 @@ class SurfaceContext:
         except sa.exc.IntegrityError:
             log("surface.conversation_create_lost_race", surface=self.surface, queue_key=queue_key)
             async with workspace_tx() as connection:
-                return (await connection.execute(self._conversation_lookup(queue_key))).one().id
+                found = (
+                    await connection.execute(self._conversation_lookup(queue_key))
+                ).one_or_none()
+            if found is None:
+                raise
+            return await self.conversation_for(queue_key, audience)
         return conversation_id
 
     async def _surface_agent(self) -> UUID:

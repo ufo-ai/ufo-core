@@ -9,6 +9,7 @@ import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from uuid import UUID, uuid4
 
 import lz4.frame
@@ -17,7 +18,12 @@ import sqlalchemy as sa
 from cryptography.fernet import Fernet
 
 import ufo.ext.surface as surface_module
-from ufo.audience import SHARED_AUDIENCE, conversation_audience
+from ufo.audience import (
+    SHARED_AUDIENCE,
+    conversation_audience,
+    foreign_room_audience,
+    room_audience,
+)
 from ufo.blob import FilesystemBlobStore
 from ufo.credentials import (
     CredentialRequestInvalid,
@@ -344,7 +350,7 @@ async def test_admit_queues_a_turn_and_registers_a_writeback(db: None, tmp_path)
     workspace_id, _, member_id = await _seed(member_email="bee@example.com")
     dbos = StubDbos()
     context = _context(workspace_id, dbos, FilesystemBlobStore(root=tmp_path))
-    conversation_id = await context.conversation_for("C1:1.0", None)
+    conversation_id = await context.conversation_for("C1:1.0", SHARED_AUDIENCE)
     turn_id = await context.admit(
         conversation_id,
         "hello",
@@ -386,7 +392,7 @@ async def test_admit_refuses_a_speaker_from_another_workspace(db: None, tmp_path
     assert foreign_member_id is not None
     dbos = StubDbos()
     context = _context(workspace_id, dbos, FilesystemBlobStore(root=tmp_path))
-    conversation_id = await context.conversation_for("C1:1.0", None)
+    conversation_id = await context.conversation_for("C1:1.0", SHARED_AUDIENCE)
 
     with pytest.raises(ValueError, match="not a member of this workspace"):
         await context.admit(
@@ -416,7 +422,7 @@ async def test_find_conversation_reads_without_creating(db: None, tmp_path) -> N
             await connection.execute(sa.select(sa.func.count()).select_from(tables.conversation))
         ).scalar_one()
     assert created == 0
-    conversation_id = await context.conversation_for("C1:1.0", None)
+    conversation_id = await context.conversation_for("C1:1.0", SHARED_AUDIENCE)
     assert await context.find_conversation("C1:1.0") == conversation_id
     assert await replace(context, surface="other").find_conversation("C1:1.0") is None
 
@@ -426,7 +432,7 @@ async def test_conversation_for_claims_a_memberless_conversation(db: None, tmp_p
     turn, and never re-claimed from the member who owns it."""
     workspace_id, _, member_id = await _seed(member_email="bee@example.com")
     context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
-    conversation_id = await context.conversation_for("D9", None)
+    conversation_id = await context.conversation_for("D9", SHARED_AUDIENCE)
 
     async def _owner() -> UUID | None:
         async with workspace_tx() as connection:
@@ -439,7 +445,7 @@ async def test_conversation_for_claims_a_memberless_conversation(db: None, tmp_p
             ).scalar_one()
 
     assert await _owner() is None
-    assert await context.conversation_for("D9", member_id) == conversation_id
+    assert await context.conversation_for("D9", conversation_audience(member_id)) == conversation_id
     assert await _owner() == member_id
     turn_id = await context.admit(
         conversation_id,
@@ -460,8 +466,36 @@ async def test_conversation_for_claims_a_memberless_conversation(db: None, tmp_p
                 updated_at=sa.func.now(),
             )
         )
-    assert await context.conversation_for("D9", other_id) == conversation_id
+    with pytest.raises(ValueError, match="audience changed"):
+        await context.conversation_for("D9", conversation_audience(other_id))
     assert await _owner() == member_id
+
+
+async def test_conversation_audience_only_narrows(db: None, tmp_path: Path) -> None:
+    workspace_id, _, _ = await _seed()
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+    room = room_audience("slack", "C1")
+    foreign = foreign_room_audience("slack", "C1")
+    conversation_id = await context.conversation_for("C1:1.0", SHARED_AUDIENCE)
+
+    async def current_audience() -> str:
+        async with workspace_tx() as connection:
+            return (
+                await connection.execute(
+                    sa.select(tables.conversation.c.audience).where(
+                        tables.conversation.c.id == conversation_id
+                    )
+                )
+            ).scalar_one()
+
+    await context.conversation_for("C1:1.0", room)
+    assert await current_audience() == room
+    await context.conversation_for("C1:1.0", SHARED_AUDIENCE)
+    assert await current_audience() == room
+    await context.conversation_for("C1:1.0", foreign)
+    assert await current_audience() == foreign
+    await context.conversation_for("C1:1.0", room)
+    assert await current_audience() == foreign
 
 
 async def test_admitted_context_round_trips_to_the_loaded_turn(db: None, tmp_path) -> None:
@@ -470,7 +504,7 @@ async def test_admitted_context_round_trips_to_the_loaded_turn(db: None, tmp_pat
     the admission stamp the engine renders from."""
     workspace_id, _, member_id = await _seed(member_email="bee@example.com")
     context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
-    conversation_id = await context.conversation_for("C1:1.0", None)
+    conversation_id = await context.conversation_for("C1:1.0", SHARED_AUDIENCE)
     ambient = TurnContext(sender="Bee Jones (bee@example.com)", timezone="America/New_York")
     turn_id = await context.admit(
         conversation_id,

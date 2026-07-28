@@ -56,6 +56,7 @@ from ufo.hub import (
     TextDelta,
     ToolCall,
 )
+from ufo.loop.queue import _load_turn
 from ufo.schema import tables
 from ufo.schema.records import (
     WRITEBACK_PENDING,
@@ -65,7 +66,12 @@ from ufo.schema.records import (
     QuestionOption,
     TerminalFrame,
 )
-from ufo.sdk.audience import conversation_audience
+from ufo.sdk.audience import (
+    SHARED_AUDIENCE,
+    conversation_audience,
+    foreign_room_audience,
+    room_audience,
+)
 from ufo.serve import _mount_shared_surfaces
 from ufo.workspace import ws
 
@@ -170,6 +176,7 @@ def _mock_transport(
     recorder: list[httpx.Request],
     users: dict[str, str],
     unconfirmed: AbstractSet[str] = frozenset(),
+    channels: dict[str, dict[str, object] | None] | None = None,
 ) -> httpx.MockTransport:
     def handler(request: httpx.Request) -> httpx.Response:
         recorder.append(request)
@@ -206,8 +213,21 @@ def _mock_transport(
             return httpx.Response(200, json={"ok": True, "messages": []})
         if url == slack.SLACK_CONVERSATIONS_INFO_URL:
             channel_id = str(request.url.params.get("channel"))
+            configured = None if channels is None else channels.get(channel_id, {})
+            if channels is not None and channel_id in channels and configured is None:
+                return httpx.Response(500, json={"ok": False, "error": "unavailable"})
             return httpx.Response(
-                200, json={"ok": True, "channel": {"id": channel_id, "is_ext_shared": False}}
+                200,
+                json={
+                    "ok": True,
+                    "channel": {
+                        "id": channel_id,
+                        "is_channel": True,
+                        "is_ext_shared": False,
+                        "is_private": False,
+                        **(configured or {}),
+                    },
+                },
             )
         if url == slack.SLACK_CHAT_POST_MESSAGE_URL:
             return httpx.Response(200, json={"ok": True, "channel": "C5", "ts": "999.100"})
@@ -308,8 +328,14 @@ def _sign(body: bytes, ts: int) -> dict[str, str]:
     return {"x-slack-request-timestamp": str(ts), "x-slack-signature": signature}
 
 
-def _event_body(**event: object) -> bytes:
-    return json.dumps({"team_id": TEAM_ID, "event": event}).encode()
+def _event_body(*, is_ext_shared_channel: bool = False, **event: object) -> bytes:
+    return json.dumps(
+        {
+            "team_id": TEAM_ID,
+            "is_ext_shared_channel": is_ext_shared_channel,
+            "event": event,
+        }
+    ).encode()
 
 
 async def _mount_transport(
@@ -1001,6 +1027,15 @@ def _ambient_transport(
             return _messages(history)
         if url == slack.SLACK_USERS_INFO_URL:
             return httpx.Response(200, json={"ok": True, "user": {"profile": {}}})
+        if url == slack.SLACK_CONVERSATIONS_INFO_URL:
+            channel_id = str(request.url.params.get("channel"))
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "channel": {"id": channel_id, "is_channel": True, "is_private": False},
+                },
+            )
         if url == slack.SLACK_CHAT_POST_MESSAGE_URL:
             return httpx.Response(200, json={"ok": True, "channel": "C5", "ts": "999.100"})
         if url == slack.SLACK_ASSISTANT_STATUS_URL:
@@ -1450,6 +1485,290 @@ async def test_channel_persists_the_speaker_without_claiming_the_conversation(
     assert row.member_id is None
 
 
+async def _loaded_audiences(workspace_id: UUID) -> dict[str, str]:
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            rows = (
+                await connection.execute(
+                    sa.select(tables.conversation.c.queue_key, tables.turn.c.id)
+                    .select_from(tables.conversation.join(tables.turn))
+                    .where(tables.conversation.c.workspace_id == workspace_id)
+                )
+            ).all()
+        return {row.queue_key: str((await _load_turn(row.id))[2]) for row in rows}
+
+
+async def test_slack_transport_scopes_public_private_group_dm_and_connect_rooms(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    workspace_id, _ = await _seed()
+    recorder: list[httpx.Request] = []
+    _, client, _ = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
+    events = (
+        _event_body(
+            type="message",
+            channel_type="channel",
+            user="U1",
+            channel="CPUBLIC",
+            ts="1.0",
+            text=f"<@{BOT_USER_ID}> public",
+        ),
+        _event_body(
+            type="message",
+            channel_type="group",
+            user="U1",
+            channel="CPRIVATE",
+            ts="2.0",
+            text=f"<@{BOT_USER_ID}> private root",
+        ),
+        _event_body(
+            type="message",
+            channel_type="group",
+            user="U1",
+            channel="CPRIVATE",
+            ts="3.0",
+            text=f"<@{BOT_USER_ID}> another private thread",
+        ),
+        _event_body(
+            type="message",
+            channel_type="mpim",
+            user="U1",
+            channel="GMPIM",
+            ts="4.0",
+            text=f"<@{BOT_USER_ID}> group dm",
+        ),
+        _event_body(
+            is_ext_shared_channel=True,
+            type="message",
+            channel_type="channel",
+            user="U1",
+            channel="CCONNECT",
+            ts="5.0",
+            text=f"<@{BOT_USER_ID}> connect",
+        ),
+    )
+
+    async with client:
+        for body in events:
+            response = await client.post(
+                EVENTS_PATH, content=body, headers=_sign(body, int(time.time()))
+            )
+            assert response.json() == {"ok": True}
+
+    assert await _loaded_audiences(workspace_id) == {
+        "CPUBLIC:1.0": str(SHARED_AUDIENCE),
+        "CPRIVATE:2.0": str(room_audience(slack.SURFACE_SLACK, "CPRIVATE")),
+        "CPRIVATE:3.0": str(room_audience(slack.SURFACE_SLACK, "CPRIVATE")),
+        "GMPIM:4.0": str(room_audience(slack.SURFACE_SLACK, "GMPIM")),
+        "CCONNECT:5.0": str(foreign_room_audience(slack.SURFACE_SLACK, "CCONNECT")),
+    }
+    info = _fetches(recorder, slack.SLACK_CONVERSATIONS_INFO_URL)
+    assert [request.url.params["channel"] for request in info] == ["CPUBLIC"]
+
+
+@pytest.mark.parametrize(
+    "flag",
+    ("is_ext_shared", "is_pending_ext_shared", "is_org_shared", "is_shared"),
+)
+async def test_channel_live_external_flags_seal_foreign_room(
+    db: None, tmp_path, monkeypatch, flag: str
+) -> None:
+    workspace_id, _ = await _seed()
+    recorder: list[httpx.Request] = []
+    transport = _mock_transport(recorder, {}, channels={"CEXTERNAL": {flag: True}})
+    _, client, _ = await _mount_transport(monkeypatch, workspace_id, tmp_path, transport)
+    event = _event_body(
+        type="message",
+        channel_type="channel",
+        user="U1",
+        channel="CEXTERNAL",
+        ts="1.0",
+        text=f"<@{BOT_USER_ID}> external",
+    )
+
+    async with client:
+        response = await client.post(
+            EVENTS_PATH, content=event, headers=_sign(event, int(time.time()))
+        )
+
+    assert response.json() == {"ok": True}
+    assert await _loaded_audiences(workspace_id) == {
+        "CEXTERNAL:1.0": str(foreign_room_audience(slack.SURFACE_SLACK, "CEXTERNAL"))
+    }
+
+
+async def test_known_channel_survives_a_transient_audience_lookup_failure(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    workspace_id, _ = await _seed()
+    recorder: list[httpx.Request] = []
+    channels: dict[str, dict[str, object] | None] = {"C1": {}}
+    transport = _mock_transport(recorder, {}, channels=channels)
+    _, client, _ = await _mount_transport(monkeypatch, workspace_id, tmp_path, transport)
+    first = _event_body(
+        type="message",
+        channel_type="channel",
+        user="U1",
+        channel="C1",
+        ts="1.0",
+        text=f"<@{BOT_USER_ID}> start",
+    )
+    reply = _event_body(
+        type="message",
+        channel_type="channel",
+        user="U1",
+        channel="C1",
+        ts="2.0",
+        thread_ts="1.0",
+        text="follow up",
+    )
+
+    async with client:
+        first_response = await client.post(
+            EVENTS_PATH, content=first, headers=_sign(first, int(time.time()))
+        )
+        channels["C1"] = None
+        reply_response = await client.post(
+            EVENTS_PATH, content=reply, headers=_sign(reply, int(time.time()))
+        )
+
+    assert first_response.json() == {"ok": True}
+    assert reply_response.json() == {"ok": True}
+    assert await _loaded_audiences(workspace_id) == {"C1:1.0": str(SHARED_AUDIENCE)}
+    async with workspace_tx() as connection:
+        queued = (
+            await connection.execute(
+                sa.select(tables.inbound_message.c.body).where(
+                    tables.inbound_message.c.workspace_id == workspace_id
+                )
+            )
+        ).scalar_one()
+    assert queued == "follow up"
+    assert len(_fetches(recorder, slack.SLACK_CONVERSATIONS_INFO_URL)) == 2
+
+
+async def test_app_mention_resolves_missing_channel_type_without_persisting_uncertainty(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    workspace_id, _ = await _seed()
+    recorder: list[httpx.Request] = []
+    transport = _mock_transport(
+        recorder,
+        {},
+        channels={"CPRIVATE": {"is_private": True}, "CUNKNOWN": None},
+    )
+    _, client, _ = await _mount_transport(monkeypatch, workspace_id, tmp_path, transport)
+    private = _event_body(
+        type="app_mention",
+        user="U1",
+        channel="CPRIVATE",
+        ts="1.0",
+        text=f"<@{BOT_USER_ID}> private",
+    )
+    public = _event_body(
+        type="message",
+        channel_type="channel",
+        user="U1",
+        channel="CPUBLIC",
+        ts="2.0",
+        text=f"<@{BOT_USER_ID}> public",
+    )
+    unknown = _event_body(
+        type="app_mention",
+        user="U1",
+        channel="CUNKNOWN",
+        ts="2.1",
+        thread_ts="2.0",
+        text=f"<@{BOT_USER_ID}> unknown",
+    )
+
+    async with client:
+        private_response = await client.post(
+            EVENTS_PATH, content=private, headers=_sign(private, int(time.time()))
+        )
+        public_response = await client.post(
+            EVENTS_PATH, content=public, headers=_sign(public, int(time.time()))
+        )
+        unknown_response = await client.post(
+            EVENTS_PATH, content=unknown, headers=_sign(unknown, int(time.time()))
+        )
+
+    assert private_response.json() == {"ok": True}
+    assert public_response.json() == {"ok": True}
+    assert unknown_response.status_code == 503
+    assert await _loaded_audiences(workspace_id) == {
+        "CPRIVATE:1.0": str(room_audience(slack.SURFACE_SLACK, "CPRIVATE")),
+        "CPUBLIC:2.0": str(SHARED_AUDIENCE),
+    }
+    assert len(_fetches(recorder, slack.SLACK_CONVERSATIONS_INFO_URL)) == 3
+
+
+async def test_missing_and_unrecognized_channel_types_fail_closed(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    workspace_id, _ = await _seed()
+    recorder: list[httpx.Request] = []
+    transport = _mock_transport(
+        recorder,
+        {},
+        channels={
+            "CEXTERNAL": {"is_shared": True},
+            "GMPIM": {"is_channel": False, "is_mpim": True},
+            "CUNCLASSIFIABLE": {"is_channel": False},
+        },
+    )
+    _, client, _ = await _mount_transport(monkeypatch, workspace_id, tmp_path, transport)
+    events = (
+        _event_body(
+            type="app_mention",
+            user="U1",
+            channel="CEXTERNAL",
+            ts="1.0",
+            text=f"<@{BOT_USER_ID}> external",
+        ),
+        _event_body(
+            type="app_mention",
+            user="U1",
+            channel="GMPIM",
+            ts="2.0",
+            text=f"<@{BOT_USER_ID}> group dm",
+        ),
+        _event_body(
+            type="app_mention",
+            user="U1",
+            channel="CUNCLASSIFIABLE",
+            ts="3.0",
+            text=f"<@{BOT_USER_ID}> unknown",
+        ),
+        _event_body(
+            type="message",
+            channel_type="huddle",
+            user="U1",
+            channel="CTYPE",
+            ts="4.0",
+            text=f"<@{BOT_USER_ID}> unknown type",
+        ),
+    )
+
+    async with client:
+        responses = [
+            await client.post(EVENTS_PATH, content=event, headers=_sign(event, int(time.time())))
+            for event in events
+        ]
+
+    assert [response.status_code for response in responses] == [200, 200, 503, 503]
+    assert await _loaded_audiences(workspace_id) == {
+        "CEXTERNAL:1.0": str(foreign_room_audience(slack.SURFACE_SLACK, "CEXTERNAL")),
+        "GMPIM:2.0": str(room_audience(slack.SURFACE_SLACK, "GMPIM")),
+    }
+    info = _fetches(recorder, slack.SLACK_CONVERSATIONS_INFO_URL)
+    assert [request.url.params["channel"] for request in info] == [
+        "CEXTERNAL",
+        "GMPIM",
+        "CUNCLASSIFIABLE",
+    ]
+
+
 async def test_shared_channel_foreign_team_message_is_guest_skipped(
     db: None, tmp_path, monkeypatch
 ) -> None:
@@ -1888,6 +2207,15 @@ def _shared_slack_transport(
             slack.SLACK_CONVERSATIONS_HISTORY_URL,
         ):
             return httpx.Response(200, json={"ok": True, "messages": []})
+        if url == slack.SLACK_CONVERSATIONS_INFO_URL and label is not None:
+            channel_id = str(request.url.params.get("channel"))
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "channel": {"id": channel_id, "is_channel": True, "is_private": False},
+                },
+            )
         if url == slack.SLACK_ASSISTANT_STATUS_URL and label is not None:
             return httpx.Response(200, json={"ok": True})
         if url == slack.SLACK_CHAT_POST_MESSAGE_URL and label is not None:
@@ -2555,6 +2883,14 @@ async def test_inbound_oversize_file_is_skipped_and_reported(
             return httpx.Response(200, content=b"small")
         if url.endswith("/big.bin"):
             return httpx.Response(200, content=b"BIG-CONTENT-OVER-THE-CAP")
+        if url == slack.SLACK_CONVERSATIONS_INFO_URL:
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "channel": {"is_channel": True, "is_private": False},
+                },
+            )
         return httpx.Response(404, json={"ok": False, "error": "not_mocked"})
 
     _, client, blob = await _mount_transport(
@@ -2576,6 +2912,7 @@ async def test_inbound_oversize_file_is_skipped_and_reported(
     ]
     body = _event_body(
         type="app_mention",
+        channel_type="channel",
         user="U1",
         channel="C1",
         ts="6.0",

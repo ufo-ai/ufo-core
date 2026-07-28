@@ -338,6 +338,7 @@ class Subagents:
                     surface=SUBAGENT_SURFACE,
                     queue_key=str(turn_id),
                     member_id=audience_member(self.audience),
+                    audience=str(self.audience),
                     created_at=sa.func.now(),
                     updated_at=sa.func.now(),
                 )

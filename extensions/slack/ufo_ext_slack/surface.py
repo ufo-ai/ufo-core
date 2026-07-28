@@ -80,6 +80,12 @@ from uuid import UUID
 import httpx
 from pydantic import BaseModel, ValidationError
 
+from ufo.sdk.audience import (
+    Audience,
+    conversation_audience,
+    foreign_room_audience,
+    room_audience,
+)
 from ufo.sdk.http import JSONResponse, Request, Response
 from ufo.sdk.hub import Parked, SkillLoad, Terminal, TextDelta, ToolCall
 from ufo.sdk.o11y import log
@@ -676,6 +682,7 @@ SLACK_INBOX_DIR = "slack-inbox"
 MAX_INBOUND_FILES = 10
 DOWNLOAD_CHUNK_BYTES = 1024 * 1024
 SLACK_INBOUND_FILE_MAX_BYTES = 25 * 1024 * 1024
+PRIVATE_ROOM_CHANNEL_TYPES = frozenset({"group", "mpim"})
 
 SLACK_TURN_FAILED_TEXT = "⚠️ Something went wrong handling your message."
 SLACK_TURN_CANCELLED_TEXT = "\U0001f6d1 That request was cancelled."
@@ -694,6 +701,10 @@ class SlackBodyTooLarge(Exception):
 
 class SlackApiError(RuntimeError):
     """A Slack API call returned `ok: false` or a malformed response."""
+
+
+class SlackAudienceUnknown(RuntimeError):
+    """Slack did not provide enough channel metadata to choose a disclosure audience."""
 
 
 class SlackDownloadTooLarge(RuntimeError):
@@ -720,6 +731,7 @@ class Inbound:
     message_id: str
     ts: str
     is_dm: bool
+    audience: Audience | None
     body: str
     files: tuple[InboundFile, ...]
     conversation_id: UUID | None
@@ -1146,7 +1158,10 @@ async def ingest(ctx: SurfaceContext, request: Request) -> Response:
     if payload.get("team_id") != identity.team_id:
         return JSONResponse({"ok": True, "ignored": True})
     await _mark_url_verified(ctx, signing_secret)
-    inbound = await _to_inbound(ctx, payload, identity)
+    try:
+        inbound = await _to_inbound(ctx, payload, identity)
+    except SlackAudienceUnknown:
+        return Response("Slack channel audience is unavailable", status_code=503)
     if inbound is None:
         return JSONResponse({"ok": True, "ignored": True})
     bot_token = await ctx.credential(SLACK_BOT_TOKEN_SLOT)
@@ -1155,11 +1170,8 @@ async def ingest(ctx: SurfaceContext, request: Request) -> Response:
         _ambient_context(ctx, bot_token, inbound, identity),
     )
     member_id = await _resolve_member(ctx, inbound.slack_user_id, inbound.is_dm, sender)
-    conversation_id = inbound.conversation_id
-    if conversation_id is None:
-        conversation_id = await ctx.conversation_for(
-            inbound.queue_key, member_id if inbound.is_dm else None
-        )
+    audience = conversation_audience(member_id) if inbound.audience is None else inbound.audience
+    conversation_id = await ctx.conversation_for(inbound.queue_key, audience)
     body = f"{context}{inbound.body}"
     if inbound.files:
         downloaded = await _download_files(ctx, conversation_id, bot_token, inbound.files)
@@ -1185,6 +1197,39 @@ def _author_is_foreign(event: Mapping[str, object], team_id: str) -> bool:
     resolve to no member — and are skipped before any turn or identity read."""
     author_team = event.get("source_team") or event.get("user_team")
     return isinstance(author_team, str) and author_team != team_id
+
+
+async def _room_audience(
+    ctx: SurfaceContext,
+    payload: Mapping[str, object],
+    event: Mapping[str, object],
+    channel: str,
+    audience_known: bool,
+) -> Audience | None:
+    channel_type = event.get("channel_type")
+    if channel_type == "im":
+        return None
+    if payload.get("is_ext_shared_channel") is True:
+        return foreign_room_audience(SURFACE_SLACK, channel)
+    if channel_type in PRIVATE_ROOM_CHANNEL_TYPES:
+        return room_audience(SURFACE_SLACK, channel)
+    if channel_type not in (None, "channel"):
+        raise SlackAudienceUnknown
+    info = await _channel_info(await ctx.credential(SLACK_BOT_TOKEN_SLOT), channel)
+    if info is None:
+        if audience_known:
+            return conversation_audience(None)
+        raise SlackAudienceUnknown
+    if any(
+        info.get(flag) is True
+        for flag in ("is_ext_shared", "is_pending_ext_shared", "is_org_shared", "is_shared")
+    ):
+        return foreign_room_audience(SURFACE_SLACK, channel)
+    if info.get("is_private") is True or info.get("is_mpim") is True:
+        return room_audience(SURFACE_SLACK, channel)
+    if info.get("is_channel") is True and info.get("is_private") is False:
+        return conversation_audience(None)
+    raise SlackAudienceUnknown
 
 
 async def _to_inbound(
@@ -1219,6 +1264,9 @@ async def _to_inbound(
         message_id=f"{channel}:{ts}",
         ts=ts,
         is_dm=is_dm,
+        audience=await _room_audience(
+            ctx, payload, event, channel, audience_known=conversation_id is not None
+        ),
         body=str(event.get("text") or ""),
         files=_inbound_files(event),
         conversation_id=conversation_id,
@@ -1993,7 +2041,9 @@ async def interactive(ctx: SurfaceContext, request: Request) -> Response:
             if conversation_id is None:
                 return JSONResponse({"ok": True, "ignored": True})
             if click.is_dm and member_id is not None:
-                conversation_id = await ctx.conversation_for(click.queue_key, member_id)
+                conversation_id = await ctx.conversation_for(
+                    click.queue_key, conversation_audience(member_id)
+                )
             body = f"[Answered by <@{click.slack_user_id}> via button] {click.label}"
             answer_key = f"{click.queue_key}:{click.message_ts}:answer:{click.question_index}"
             turn_id = await ctx.admit(
@@ -2222,13 +2272,7 @@ async def _debug_link(ctx: SurfaceContext, writeback: Writeback) -> str | None:
     )
 
 
-async def _channel_is_externally_shared(bot_token: str, channel: str) -> bool:
-    """Whether the destination channel reaches beyond the bound workspace — a Slack Connect channel
-    shared with another org (`is_ext_shared`/`is_shared`/`is_pending_ext_shared`) or one shared
-    across an Enterprise Grid org (`is_org_shared`). Fails closed: any read error, a non-`ok`
-    payload, or a channel Slack won't describe (a `channel:read` scope a stale install lacks) counts
-    as shared, so the operator footer is withheld whenever the audience cannot be proven internal. A
-    DM carries none of these flags and settles to internal through the same read."""
+async def _channel_info(bot_token: str, channel: str) -> Mapping[str, object] | None:
     try:
         async with httpx.AsyncClient(timeout=AMBIENT_FETCH_TIMEOUT_SECONDS) as client:
             payload = await _slack_ok(
@@ -2240,9 +2284,15 @@ async def _channel_is_externally_shared(bot_token: str, channel: str) -> bool:
             )
     except Exception as error:
         _LOG.warning("slack conversations.info failed for %s: %s", channel, error)
-        return True
+        return None
     info = payload.get("channel")
-    if not isinstance(info, dict):
+    return info if isinstance(info, dict) else None
+
+
+async def _channel_is_externally_shared(bot_token: str, channel: str) -> bool:
+    """Whether the destination crosses the bound workspace. An unreadable channel fails closed."""
+    info = await _channel_info(bot_token, channel)
+    if info is None:
         return True
     return any(
         info.get(flag) is True

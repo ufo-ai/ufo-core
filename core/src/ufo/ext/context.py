@@ -700,9 +700,9 @@ class ExtensionContext:
     async def source_pages(self, subjects: frozenset[str] | None = None) -> tuple[PageRecord, ...]:
         """This workspace's live (non-tombstoned) synced pages, optionally narrowed to a set of
         visibility subjects — the sanctioned read over the core `page` table, scoped by workspace
-        exactly as `sources()` is. A subject-scoped caller passes `{audience, shared}` so a member
-        never reads another member's private page; the off-turn producer that wants every page
-        passes None. The body stays by reference in each record."""
+        exactly as `sources()` is. A subject-scoped caller passes its audience's readable subjects;
+        the off-turn producer that wants every page passes None. The body stays by reference in
+        each record."""
         query = (
             sa.select(
                 tables.page.c.id,

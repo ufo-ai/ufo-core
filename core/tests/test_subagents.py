@@ -8,7 +8,7 @@ from dbos import DBOSClient
 from opentelemetry import trace
 from pydantic import BaseModel, ValidationError
 
-from ufo.audience import conversation_audience
+from ufo.audience import Audience, conversation_audience, foreign_room_audience, room_audience
 from ufo.config import Config
 from ufo.db import workspace_tx
 from ufo.ext.manifest import SUBAGENT_ROUND_LIMIT, SubagentProfile
@@ -545,7 +545,10 @@ async def test_spawn_inherits_a_private_audience_from_a_speakerless_parent(
         )
         await connection.execute(
             sa.update(tables.conversation)
-            .values(member_id=member_id)
+            .values(
+                member_id=member_id,
+                audience=str(conversation_audience(member_id)),
+            )
             .where(tables.conversation.c.id == parent.conversation_id)
         )
     spawned = await Subagents(
@@ -568,6 +571,36 @@ async def test_spawn_inherits_a_private_audience_from_a_speakerless_parent(
             )
         ).scalar_one()
     assert child_member_id == member_id
+
+
+@pytest.mark.parametrize(
+    "audience",
+    (room_audience("slack", "CPRIVATE"), foreign_room_audience("slack", "CCONNECT")),
+)
+async def test_subagent_inherits_room_audience(
+    db: None, dbos_launched: Config, audience: Audience
+) -> None:
+    workspace_id, agent_id = await _workspace_agent()
+    subagents = Subagents(
+        client=_RecordingClient(),
+        registry=SubagentRegistry((_profile("research"),)),
+        parent=await _parent(workspace_id, agent_id),
+        audience=audience,
+    )
+
+    spawned = await subagents.spawn("research", {"task": "acme"}, background=True, dedup_key="room")
+    loaded, _, child_audience = await _load_turn(spawned.turn_id)
+    async with workspace_tx() as connection:
+        member_id = (
+            await connection.execute(
+                sa.select(tables.conversation.c.member_id).where(
+                    tables.conversation.c.id == loaded.conversation_id
+                )
+            )
+        ).scalar_one()
+
+    assert child_audience == audience
+    assert member_id is None
 
 
 async def test_spawn_with_a_dedup_key_reconnects_to_a_finished_child_without_respawning(

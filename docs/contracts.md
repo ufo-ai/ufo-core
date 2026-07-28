@@ -137,8 +137,9 @@ class IndexBackend(Protocol):                                  # pgvector core; 
 class Condenser(Protocol):                                     # the pluggable derivation stage
     async def condense(self, pages: tuple[Page, ...], ctx: ExtensionContext) -> tuple[MemoryWrite, ...]: ...
 ```
-Recall fuses lexical + vector (RRF), filters `subjects ⊆ {member:<id>, "shared"}`. Derivation runs
-as jobs, batch-at-interval, never inline with a write.
+Recall fuses lexical + vector (RRF). Member and room audiences include `shared`; foreign room
+audiences include only their sealed subject. Derivation runs as jobs, batch-at-interval, never
+inline with a write.
 
 ## sources.py
 
@@ -160,7 +161,7 @@ them via `search_sources`.
 class Surface(Protocol):
     async def to_inbound(self, request: HttpRequest) -> Inbound: ...     # verify, identify, key
     async def writeback(self, conversation: Conversation, terminal: TerminalFrame) -> None: ...
-class Inbound(BaseModel):  conversation_key: str; member_id: UUID | None; agent_name: str; body: str
+class Inbound(BaseModel):  conversation_key: str; audience: Audience; member_id: UUID | None; body: str
 ```
 The protocol forms when the second surface lands (U6). Slack: signature verify,
 `channel:thread_ts` key, member linking via `SurfaceIdentity`, Block Kit writeback. Web: session
@@ -210,6 +211,7 @@ extension may touch; a CI gate fails any `extensions/` import outside `ufo.sdk`.
 - `workspace_tx()` is the only session source; the engine is unreachable elsewhere.
 - The sandbox proxy is the only egress route; rules derive from manifests + grants; no register API.
 - At most one running turn per conversation; every awaited turn ends in a committed terminal frame.
+- A conversation persists one exact audience; foreign rooms cannot read workspace-shared subjects.
 - The sandbox reaches only `conversations/<cid>/workspace/`; the container is disposable cache.
 - Extensions import `ufo.sdk` only; credentials resolve only for declared slots.
 - Derived state (embeddings, summaries, index rows) is produced by jobs, never inline.
