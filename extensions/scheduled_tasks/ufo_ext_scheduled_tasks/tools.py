@@ -98,7 +98,7 @@ def _summary(task: ScheduledTask) -> str:
 
 
 @dataclass(frozen=True)
-class ScheduledTaskObjects(MemberOwnedObjects[ScheduledTaskSpec]):
+class ScheduledTaskObjects(MemberOwnedObjects[ScheduledTaskSpec, ObjectOwner]):
     """The kind's handlers over `ScheduleStore`: a task is private to the member who created it, so
     only that member or a workspace admin sees and deletes it — the per-member visibility and
     admin gate is the base's. This kind supplies the task rows, their specs and status, and the
@@ -114,7 +114,7 @@ class ScheduledTaskObjects(MemberOwnedObjects[ScheduledTaskSpec]):
     mutate_gate: ClassVar[str] = SCHEDULE_GATE
     delete_gate: ClassVar[str] = DELETE_GATE
 
-    async def _owned_rows(self, ctx: ToolContext) -> tuple[OwnedRow, ...]:
+    async def _owned_rows(self, ctx: ToolContext) -> tuple[OwnedRow[ObjectOwner], ...]:
         return tuple(
             OwnedRow(
                 name=task.name,
@@ -124,7 +124,9 @@ class ScheduledTaskObjects(MemberOwnedObjects[ScheduledTaskSpec]):
             for task in await _require_scheduler(ctx).list()
         )
 
-    async def _detail(self, ctx: ToolContext, name: str) -> ObjectDetail[ScheduledTaskSpec] | None:
+    async def _detail(
+        self, ctx: ToolContext, name: str, _owner: ObjectOwner
+    ) -> ObjectDetail[ScheduledTaskSpec] | None:
         task = await self._find(ctx, name)
         if task is None:
             return None
@@ -145,7 +147,9 @@ class ScheduledTaskObjects(MemberOwnedObjects[ScheduledTaskSpec]):
             ),
         )
 
-    async def _status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None:
+    async def _status(
+        self, ctx: ToolContext, name: str, _owner: ObjectOwner
+    ) -> dict[str, JsonValue] | None:
         inspection = await _require_scheduler(ctx).inspect(name)
         if inspection is None:
             return None

@@ -342,7 +342,9 @@ async def test_web_stream_privately_opens_the_speakers_connect_handoff(
                 terminal=TerminalFrame(
                     status="done",
                     text="Use the connection control.",
-                    connect_request=ConnectRequest(provider="github"),
+                    connect_request=ConnectRequest(
+                        provider="github", requester_member_id=member_id
+                    ),
                 ).model_dump(mode="json"),
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),

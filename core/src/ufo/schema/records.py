@@ -118,10 +118,11 @@ class CredentialRequest(BaseModel):
 
 class ConnectRequest(BaseModel):
     """The `connect_account` tool's structured terminal handoff; `shared` carries the model's
-    disclosure decision to the grant. The provider is durable while
-    the authorization URL is minted only after the speaking member privately claims it."""
+    disclosure decision to the grant. The exact requester is durable while the authorization URL
+    is minted only after that member privately claims it."""
 
     provider: str
+    requester_member_id: UUID
     shared: bool = False
 
 

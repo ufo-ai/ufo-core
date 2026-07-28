@@ -222,7 +222,7 @@ def derive_cli_rules(
         )
         for grant in grants
         if (cli := clis.get(grant.provider)) is not None
-        and (grant.shared or grant.grantor_member_id == acting_member_id)
+        and (grant.shared or grant.owner_member_id == acting_member_id)
     )
 
 

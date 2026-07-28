@@ -313,16 +313,24 @@ class ObjectOwner:
 
 
 @dataclass(frozen=True)
-class OwnedRow:
+class GeneratedObjectOwner(ObjectOwner):
+    """An owner whose row may be replaced under the same object name."""
+
+    member_id: UUID
+    generation: UUID
+
+
+@dataclass(frozen=True)
+class OwnedRow[OwnerT: ObjectOwner]:
     """One row a member-owned kind hands the gate: its name, one-line summary, and owner."""
 
     name: str
     summary: str
-    owner: ObjectOwner
+    owner: OwnerT
 
 
 @dataclass(frozen=True)
-class MemberOwnedObjects[SpecT: BaseModel]:
+class MemberOwnedObjects[SpecT: BaseModel, OwnerT: ObjectOwner]:
     """Base for a member-owned object kind: the per-member visibility and ownership gate lives here
     once, so a kind cannot ship without it. A subclass supplies only data (`_owned_rows`, `_detail`,
     `_status`) and domain mutation (`_apply_owned`, `_delete_owned`); the gate hides a row invisible
@@ -357,7 +365,7 @@ class MemberOwnedObjects[SpecT: BaseModel]:
             owner, ctx.acting_member_id, await ctx.speaker_is_admin()
         ):
             return None
-        return await self._detail(ctx, name)
+        return await self._detail(ctx, name, owner)
 
     async def status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None:
         owner = await self._owner(ctx, name)
@@ -365,7 +373,7 @@ class MemberOwnedObjects[SpecT: BaseModel]:
             owner, ctx.acting_member_id, await ctx.speaker_is_admin()
         ):
             return None
-        return await self._status(ctx, name)
+        return await self._status(ctx, name, owner)
 
     async def apply(self, ctx: ToolContext, name: str, spec: SpecT, old: SpecT | None) -> None:
         owner = await self._owner(ctx, name)
@@ -397,28 +405,32 @@ class MemberOwnedObjects[SpecT: BaseModel]:
             raise AdminRequired(self.delete_gate)
         await self._delete_owned(ctx, name, owner)
 
-    def _owned(self, owner: ObjectOwner, acting: UUID | None) -> bool:
+    def _owned(self, owner: OwnerT, acting: UUID | None) -> bool:
         """Whether the acting member is the row's member-owner. An admin-only row (`member_id`
         None) is owned by no member — only a workspace admin may touch it — so this
         is never true for it, even on a turn whose acting member is also None."""
         return owner.member_id is not None and owner.member_id == acting
 
-    def _visible(self, owner: ObjectOwner, acting: UUID | None, is_admin: bool) -> bool:
+    def _visible(self, owner: OwnerT, acting: UUID | None, is_admin: bool) -> bool:
         return owner.shared or self._owned(owner, acting) or is_admin
 
     def _admin_can_apply(self, old: SpecT, spec: SpecT) -> bool:
         return False
 
-    async def _owner(self, ctx: ToolContext, name: str) -> ObjectOwner | None:
+    async def _owner(self, ctx: ToolContext, name: str) -> OwnerT | None:
         return next((row.owner for row in await self._owned_rows(ctx) if row.name == name), None)
 
-    async def _owned_rows(self, ctx: ToolContext) -> tuple[OwnedRow, ...]:
+    async def _owned_rows(self, ctx: ToolContext) -> tuple[OwnedRow[OwnerT], ...]:
         raise NotImplementedError
 
-    async def _detail(self, ctx: ToolContext, name: str) -> ObjectDetail[SpecT] | None:
+    async def _detail(
+        self, ctx: ToolContext, name: str, owner: OwnerT
+    ) -> ObjectDetail[SpecT] | None:
         raise NotImplementedError
 
-    async def _status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None:
+    async def _status(
+        self, ctx: ToolContext, name: str, owner: OwnerT
+    ) -> dict[str, JsonValue] | None:
         raise NotImplementedError
 
     async def _apply_owned(
@@ -427,11 +439,11 @@ class MemberOwnedObjects[SpecT: BaseModel]:
         name: str,
         spec: SpecT,
         old: SpecT | None,
-        owner: ObjectOwner | None,
+        owner: OwnerT | None,
     ) -> None:
         raise NotImplementedError
 
-    async def _delete_owned(self, ctx: ToolContext, name: str, owner: ObjectOwner) -> None:
+    async def _delete_owned(self, ctx: ToolContext, name: str, owner: OwnerT) -> None:
         raise NotImplementedError
 
 

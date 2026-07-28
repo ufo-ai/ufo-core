@@ -178,6 +178,12 @@ class _Binding:
         return f"{self.provider} ({self.account}): {streams}"[:SUMMARY_MAX]
 
 
+@dataclass(frozen=True)
+class _ResolvedAccount:
+    account: str
+    connection_id: UUID | None
+
+
 def _require_ext(ctx: ToolContext) -> ExtensionContext:
     if ctx.ext is None:
         raise RuntimeError("source objects dispatched without their ExtensionContext")
@@ -267,7 +273,7 @@ DELETE_GATE = "only the registering member or a workspace admin may remove a sou
 
 
 @dataclass(frozen=True)
-class SourceObjects(MemberOwnedObjects[SourceSpec]):
+class SourceObjects(MemberOwnedObjects[SourceSpec, ObjectOwner]):
     """The kind's handlers over the workspace's registered source rows: get/list reconstruct
     bindings by grouping rows on (provider, account, base_url); apply validates provider, streams,
     tenant URL, and auth exactly as registration always has, then registers one row per stream
@@ -315,7 +321,7 @@ class SourceObjects(MemberOwnedObjects[SourceSpec]):
             mapping.pop(caller, None)
         await _store_subscribers(ext, name, mapping)
 
-    async def _owned_rows(self, ctx: ToolContext) -> tuple[OwnedRow, ...]:
+    async def _owned_rows(self, ctx: ToolContext) -> tuple[OwnedRow[ObjectOwner], ...]:
         return tuple(
             OwnedRow(
                 name=binding.name,
@@ -328,7 +334,9 @@ class SourceObjects(MemberOwnedObjects[SourceSpec]):
             for binding in await self._bindings(ctx)
         )
 
-    async def _detail(self, ctx: ToolContext, name: str) -> ObjectDetail[SourceSpec] | None:
+    async def _detail(
+        self, ctx: ToolContext, name: str, _owner: ObjectOwner
+    ) -> ObjectDetail[SourceSpec] | None:
         binding = await self._find(ctx, name)
         if binding is None:
             return None
@@ -339,7 +347,9 @@ class SourceObjects(MemberOwnedObjects[SourceSpec]):
             updated_at=binding.updated_at,
         )
 
-    async def _status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None:
+    async def _status(
+        self, ctx: ToolContext, name: str, _owner: ObjectOwner
+    ) -> dict[str, JsonValue] | None:
         binding = await self._find(ctx, name)
         if binding is None:
             return None
@@ -393,8 +403,8 @@ class SourceObjects(MemberOwnedObjects[SourceSpec]):
                 f"streams: {', '.join(available)}"
             )
         base_url = _validated_base_url(spec.provider, spec.base_url or None)
-        account = await self._resolved_account(ctx, spec)
-        derived = binding_name(spec.provider, account, base_url)
+        resolved_account = await self._resolved_account(ctx, spec)
+        derived = binding_name(spec.provider, resolved_account.account, base_url)
         if name != derived:
             raise ValueError(
                 f"source names derive from the binding — apply this spec as name {derived!r}"
@@ -402,7 +412,9 @@ class SourceObjects(MemberOwnedObjects[SourceSpec]):
         resolved = SourceSpec(
             provider=spec.provider,
             streams=streams,
-            account_id="" if account == DIRECT_ACCOUNT else account,
+            account_id=(
+                "" if resolved_account.account == DIRECT_ACCOUNT else resolved_account.account
+            ),
             base_url=base_url or "",
             shared=spec.shared,
         )
@@ -427,9 +439,14 @@ class SourceObjects(MemberOwnedObjects[SourceSpec]):
         for stream in streams:
             await ext.register_source(
                 spec.provider,
-                ConnectorSourceConfig(account=account, stream=stream, base_url=base_url),
+                ConnectorSourceConfig(
+                    account=resolved_account.account,
+                    stream=stream,
+                    base_url=base_url,
+                ),
                 subject=subject,
                 owner_member_id=ctx.speaker_member_id,
+                connection_id=resolved_account.connection_id,
             )
 
     async def _delete_owned(self, ctx: ToolContext, name: str, owner: ObjectOwner) -> None:
@@ -441,14 +458,14 @@ class SourceObjects(MemberOwnedObjects[SourceSpec]):
             await ext.remove_source(stream.source_id)
         await _store_subscribers(ext, name, {})
 
-    async def _resolved_account(self, ctx: ToolContext, spec: SourceSpec) -> str:
+    async def _resolved_account(self, ctx: ToolContext, spec: SourceSpec) -> _ResolvedAccount:
         """The account a source authenticates as. An explicitly registered connector always uses its
         broker; an open provider the broker namespace serves uses the broker once an account is
         connected, else its direct BYOK credential when one is declared — so a member picks the path
         by connecting an account or setting a key, never a flag. The handle returned here IS that
         choice: it lands in `ConnectorSourceConfig.account`, and every run replays it through
-        `ConnectorRegistry.credential`, which sends `DIRECT_ACCOUNT` to the deploy's fallback
-        backend and a connected account to its broker."""
+        the connection-bound source credential resolver, which sends `DIRECT_ACCOUNT` to the
+        deploy's fallback backend and a connected account to its broker."""
         ext = _require_ext(ctx)
         registry = _require_connectors(ctx)
         explicit = spec.provider in registry.entries
@@ -477,7 +494,15 @@ class SourceObjects(MemberOwnedObjects[SourceSpec]):
                     f"this agent has no active {spec.provider!r} grant for {account!r}; "
                     f"accounts: {', '.join(accounts)}"
                 )
-            return account
+            connection = await ctx.connector_connection(spec.provider, account)
+            if connection.owner_member_id != ctx.speaker_member_id:
+                raise ValueError(
+                    "only the member who owns a connection may register a persistent source from it"
+                )
+            return _ResolvedAccount(
+                account=connection.account_id,
+                connection_id=connection.id,
+            )
         if not direct_capable:
             if brokerable:
                 raise ValueError(
@@ -496,7 +521,7 @@ class SourceObjects(MemberOwnedObjects[SourceSpec]):
                 f"add the {spec.provider!r} credential before registering its sources "
                 f"(request_credentials for slot {spec.provider!r})"
             ) from None
-        return DIRECT_ACCOUNT
+        return _ResolvedAccount(account=DIRECT_ACCOUNT, connection_id=None)
 
     async def _find(self, ctx: ToolContext, name: str) -> _Binding | None:
         return next(

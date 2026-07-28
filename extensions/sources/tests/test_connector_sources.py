@@ -29,7 +29,12 @@ from ufo_ext_sources.direct import DirectAuthProxy
 from ufo_ext_sources.github import GitHubConnector
 
 from ufo.blob import FilesystemBlobStore
-from ufo.connectors import Credential
+from ufo.connectors import (
+    DIRECT_ACCOUNT,
+    ConnectorRegistry,
+    Credential,
+    SourceCredentialResolver,
+)
 from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.context import CredentialAccess, context_for
@@ -553,7 +558,7 @@ async def test_asana_source_syncs_through_the_driver_into_recallable_memory(
     with ws(workspace_id):
         await context.register_source(
             "asana",
-            ConnectorSourceConfig(account=ACCOUNT, stream="workspaces"),
+            ConnectorSourceConfig(account=DIRECT_ACCOUNT, stream="workspaces"),
             subject=SHARED_SUBJECT,
             owner_member_id=None,
         )
@@ -567,7 +572,9 @@ async def test_asana_source_syncs_through_the_driver_into_recallable_memory(
         backends={"asana": ConnectorBackend(connector=AsanaConnector())},
         blob=blob,
         postgres=postgres,
-        auth_proxy=_MockProxy(handler=handler),
+        source_credentials=SourceCredentialResolver(
+            ConnectorRegistry(entries={}, fallback=_MockProxy(handler=handler))
+        ),
     )
     page_feed = CorePageFeed(blob=blob)
     page_indexer = PageIndexer(

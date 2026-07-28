@@ -5,7 +5,7 @@ the `page` object kind that projects the synced pages back for read, and the `pa
 that alerts a source's subscribers when its synced content changes. One extension, N backends —
 each provider builds on the REST connector framework from
 `ufo.sdk.sources`, consuming the pluggable auth-proxy seam rather than importing a broker: the sync
-runner routes a source holding a broker grant to the broker extension that registers its provider
+runner routes a source holding a broker connection to the extension that registers its provider
 (Composio, Pipedream) and a source holding `DIRECT_ACCOUNT` to the selected fallback — this
 `direct` backend, in every deploy that installs no other. `serve` sources the backends into the sync
 driver's backend map (so a registered account syncs offline into memory) and builds this sole

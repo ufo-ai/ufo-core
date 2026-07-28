@@ -1,163 +1,281 @@
-"""The `connector` object kind: the turn agent's granted provider accounts projected as objects.
-
-A grant is created only through the `connect_account` chat flow — a third party and a secret are
-involved, so create refuses naming that path. A grant is private to its grantor by default; apply
-admits exactly one mutation, flipping `shared` — disclosure to this agent's audience — gated to
-the grantor when widening, and to the grantor or an admin when narrowing. Delete admits the
-grantor or an admin. The broker
-holds the account's token and exposes no revoke surface, so revocation is the grant-row delete:
-the account stops resolving for the agent's tools, syncs, and proxy rules at once, and the same
-account connected to another agent keeps that agent's own binding.
-
-Names derive from the grant: `<provider>-<account-slug>`, each part canonicalized into the object
-name grammar, with a short digest suffix when two accounts collapse to one slug."""
+"""Member-owned connections and their per-agent connector grants as workspace objects."""
 
 import hashlib
 import re
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import ClassVar, Protocol
 
 from pydantic import BaseModel, ConfigDict
 
 from ufo.sdk.context import JsonValue
-from ufo.sdk.grants import GrantSummary, grant_summaries
+from ufo.sdk.grants import connection_summaries, grant_summaries
 from ufo.sdk.objects import (
+    GeneratedObjectOwner,
     MemberOwnedObjects,
     ObjectDetail,
     ObjectKind,
-    ObjectOwner,
     OwnedRow,
     VerbNotSupported,
 )
 from ufo.sdk.tools import ToolContext
 
-CONNECTOR_KIND = "connector"
-CONNECT_REFUSAL = "connecting an account involves a third party and a secret — use connect_account"
-REVOKE_GATE = "only the grantor or a workspace admin may revoke a connected account"
-SHARE_GATE = "only the grantor may share; the grantor or an admin may make an account private"
+CONNECTION_KIND = "connection"
+CONNECTOR_GRANT_KIND = "connector_grant"
+CONNECT_REFUSAL = "connecting an account involves a third party — use connect_account"
+DISCONNECT_GATE = "only the connection owner or a workspace admin may disconnect an account"
+REVOKE_GATE = "only the connection owner or a workspace admin may revoke an agent's grant"
+SHARE_GATE = (
+    "only the connection owner may share; the owner or a workspace admin may make it private"
+)
 NAME_DIGEST_LENGTH = 8
 
 
-class ConnectorSpec(BaseModel):
+class ConnectionSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
     provider: str
     account_id: str
+
+
+class ConnectorGrantSpec(ConnectionSpec):
     shared: bool = False
+
+
+class _AccountSummary(Protocol):
+    @property
+    def provider(self) -> str: ...
+
+    @property
+    def account_id(self) -> str: ...
 
 
 def _slug(raw: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", raw.lower()).strip("-")
 
 
-@dataclass(frozen=True)
-class ConnectorObjects(MemberOwnedObjects[ConnectorSpec]):
-    """The kind's handlers over the turn agent's grant rows: list and get read the audit view,
-    apply flips sharing, delete revokes — both through the grant store on the turn's context,
-    acting on this agent's binding alone. The base admits only the grantor to widen; an admin may
-    inspect, narrow, or revoke. This kind supplies the grant rows, their specs, and the
-    flip/revoke domain acts."""
+def _named[SummaryT: _AccountSummary](rows: tuple[SummaryT, ...]) -> dict[str, SummaryT]:
+    named: dict[str, SummaryT] = {}
+    for row in rows:
+        identity = f"{row.provider}\0{row.account_id}".encode()
+        qualifier = hashlib.sha256(identity).hexdigest()[:NAME_DIGEST_LENGTH]
+        named[f"{_slug(row.provider)}-{_slug(row.account_id)}-{qualifier}"] = row
+    return named
 
-    kind_name: ClassVar[str] = CONNECTOR_KIND
-    mutate_gate: ClassVar[str] = SHARE_GATE
-    delete_gate: ClassVar[str] = REVOKE_GATE
+
+@dataclass(frozen=True)
+class ConnectionObjects(MemberOwnedObjects[ConnectionSpec, GeneratedObjectOwner]):
+    kind_name: ClassVar[str] = CONNECTION_KIND
+    mutate_gate: ClassVar[str] = DISCONNECT_GATE
+    delete_gate: ClassVar[str] = DISCONNECT_GATE
     mutate_requires_speaker: ClassVar[bool] = True
     delete_requires_speaker: ClassVar[bool] = True
 
-    def _admin_can_apply(self, old: ConnectorSpec, spec: ConnectorSpec) -> bool:
-        return old.shared and spec == old.model_copy(update={"shared": False})
-
-    async def _owned_rows(self, ctx: ToolContext) -> tuple[OwnedRow, ...]:
+    async def _owned_rows(self, ctx: ToolContext) -> tuple[OwnedRow[GeneratedObjectOwner], ...]:
         return tuple(
             OwnedRow(
                 name=name,
-                summary=(
-                    f"{grant.provider} account {grant.account_id} "
-                    f"({'shared' if grant.shared else 'private'})"
+                summary=f"{row.provider} account {row.account_id}",
+                owner=GeneratedObjectOwner(
+                    member_id=row.owner_member_id,
+                    shared=False,
+                    generation=row.id,
                 ),
-                owner=ObjectOwner(member_id=grant.grantor_member_id, shared=grant.shared),
             )
-            for name, grant in (await self._named(ctx)).items()
+            for name, row in _named(await connection_summaries()).items()
         )
 
-    async def _detail(self, ctx: ToolContext, name: str) -> ObjectDetail[ConnectorSpec] | None:
-        grant = (await self._named(ctx)).get(name)
-        if grant is None:
+    async def _detail(
+        self, ctx: ToolContext, name: str, owner: GeneratedObjectOwner
+    ) -> ObjectDetail[ConnectionSpec] | None:
+        row = next(
+            (summary for summary in await connection_summaries() if summary.id == owner.generation),
+            None,
+        )
+        if row is None:
             return None
         return ObjectDetail(
-            spec=ConnectorSpec(
-                provider=grant.provider, account_id=grant.account_id, shared=grant.shared
-            ),
-            created_at=grant.granted_at,
-            updated_at=grant.updated_at,
+            spec=ConnectionSpec(provider=row.provider, account_id=row.account_id),
+            created_at=row.connected_at,
+            updated_at=row.updated_at,
         )
 
-    async def _status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None:
-        grant = (await self._named(ctx)).get(name)
-        if grant is None:
+    async def _status(
+        self, ctx: ToolContext, name: str, owner: GeneratedObjectOwner
+    ) -> dict[str, JsonValue] | None:
+        row = next(
+            (summary for summary in await connection_summaries() if summary.id == owner.generation),
+            None,
+        )
+        if row is None:
             return None
         return {
-            "grantor_member_id": str(grant.grantor_member_id),
-            "host": grant.host,
-            "agent": grant.agent,
-            "shared": grant.shared,
+            "owner_member_id": str(row.owner_member_id),
+            "host": row.host,
+            "agents": list(row.agents),
         }
 
     async def _apply_owned(
         self,
         ctx: ToolContext,
         name: str,
-        spec: ConnectorSpec,
-        old: ConnectorSpec | None,
-        owner: ObjectOwner | None,
+        spec: ConnectionSpec,
+        old: ConnectionSpec | None,
+        owner: GeneratedObjectOwner | None,
     ) -> None:
-        if old is None or spec.model_copy(update={"shared": old.shared}) != old:
-            raise VerbNotSupported(CONNECT_REFUSAL)
-        if spec.shared == old.shared:
-            return
-        grant = (await self._named(ctx))[name]
+        raise VerbNotSupported(CONNECT_REFUSAL)
+
+    async def _delete_owned(self, ctx: ToolContext, name: str, owner: GeneratedObjectOwner) -> None:
         if ctx.grants is None:
             raise RuntimeError("grants unavailable: no credential key configured")
-        await ctx.grants.set_shared(grant.provider, grant.account_id, spec.shared)
+        if ctx.speaker_member_id is None:
+            raise RuntimeError("disconnect requires a speaking member")
+        disconnected = await ctx.grants.disconnect(
+            owner.generation,
+            actor_member_id=ctx.speaker_member_id,
+        )
+        if not disconnected:
+            raise ValueError(f"connection {name!r} changed while disconnecting")
 
-    async def _delete_owned(self, ctx: ToolContext, name: str, owner: ObjectOwner) -> None:
-        grant = (await self._named(ctx))[name]
-        if ctx.grants is None:
-            raise RuntimeError("grants unavailable: no credential key configured")
-        await ctx.grants.revoke(grant.provider, grant.account_id)
 
-    async def _named(self, ctx: ToolContext) -> dict[str, GrantSummary]:
-        grouped: dict[str, list[GrantSummary]] = {}
-        for grant in await grant_summaries():
-            grouped.setdefault(f"{_slug(grant.provider)}-{_slug(grant.account_id)}", []).append(
-                grant
+@dataclass(frozen=True)
+class ConnectorGrantObjects(MemberOwnedObjects[ConnectorGrantSpec, GeneratedObjectOwner]):
+    kind_name: ClassVar[str] = CONNECTOR_GRANT_KIND
+    mutate_gate: ClassVar[str] = SHARE_GATE
+    delete_gate: ClassVar[str] = REVOKE_GATE
+    mutate_requires_speaker: ClassVar[bool] = True
+    delete_requires_speaker: ClassVar[bool] = True
+
+    def _admin_can_apply(self, old: ConnectorGrantSpec, spec: ConnectorGrantSpec) -> bool:
+        return old.shared and spec == old.model_copy(update={"shared": False})
+
+    async def _owned_rows(self, ctx: ToolContext) -> tuple[OwnedRow[GeneratedObjectOwner], ...]:
+        return tuple(
+            OwnedRow(
+                name=name,
+                summary=(
+                    f"{row.provider} account {row.account_id} "
+                    f"({'shared' if row.shared else 'private'})"
+                ),
+                owner=GeneratedObjectOwner(
+                    member_id=row.owner_member_id,
+                    shared=row.shared,
+                    generation=row.id,
+                ),
             )
-        named: dict[str, GrantSummary] = {}
-        for plain, group in grouped.items():
-            if len(group) == 1:
-                named[plain] = group[0]
-                continue
-            for grant in group:
-                qualifier = hashlib.sha256(grant.account_id.encode()).hexdigest()
-                named[f"{plain}-{qualifier[:NAME_DIGEST_LENGTH]}"] = grant
-        return named
+            for name, row in _named(await grant_summaries()).items()
+        )
+
+    async def _detail(
+        self, ctx: ToolContext, name: str, owner: GeneratedObjectOwner
+    ) -> ObjectDetail[ConnectorGrantSpec] | None:
+        row = next(
+            (summary for summary in await grant_summaries() if summary.id == owner.generation),
+            None,
+        )
+        if row is None:
+            return None
+        return ObjectDetail(
+            spec=ConnectorGrantSpec(
+                provider=row.provider,
+                account_id=row.account_id,
+                shared=row.shared,
+            ),
+            created_at=row.granted_at,
+            updated_at=row.updated_at,
+        )
+
+    async def _status(
+        self, ctx: ToolContext, name: str, owner: GeneratedObjectOwner
+    ) -> dict[str, JsonValue] | None:
+        row = next(
+            (summary for summary in await grant_summaries() if summary.id == owner.generation),
+            None,
+        )
+        if row is None:
+            return None
+        return {
+            "owner_member_id": str(row.owner_member_id),
+            "host": row.host,
+            "agent": row.agent,
+            "shared": row.shared,
+        }
+
+    async def _apply_owned(
+        self,
+        ctx: ToolContext,
+        name: str,
+        spec: ConnectorGrantSpec,
+        old: ConnectorGrantSpec | None,
+        owner: GeneratedObjectOwner | None,
+    ) -> None:
+        if old is None or owner is None:
+            raise VerbNotSupported(CONNECT_REFUSAL)
+        if ctx.grants is None:
+            raise RuntimeError("grants unavailable: no credential key configured")
+        if ctx.speaker_member_id is None:
+            raise RuntimeError("changing disclosure requires a speaking member")
+        row = next(
+            (summary for summary in await grant_summaries() if summary.id == owner.generation),
+            None,
+        )
+        if row is None:
+            raise ValueError(f"connector grant {name!r} changed while editing")
+        current = ConnectorGrantSpec(
+            provider=row.provider,
+            account_id=row.account_id,
+            shared=row.shared,
+        )
+        if spec.model_copy(update={"shared": current.shared}) != current:
+            raise VerbNotSupported(CONNECT_REFUSAL)
+        if spec.shared == current.shared:
+            return
+        updated = await ctx.grants.set_shared(
+            owner.generation,
+            spec.shared,
+            actor_member_id=ctx.speaker_member_id,
+        )
+        if not updated:
+            raise ValueError(f"connector grant {name!r} changed while editing")
+
+    async def _delete_owned(self, ctx: ToolContext, name: str, owner: GeneratedObjectOwner) -> None:
+        if ctx.grants is None:
+            raise RuntimeError("grants unavailable: no credential key configured")
+        if ctx.speaker_member_id is None:
+            raise RuntimeError("revoking access requires a speaking member")
+        revoked = await ctx.grants.revoke(
+            owner.generation,
+            actor_member_id=ctx.speaker_member_id,
+        )
+        if not revoked:
+            raise ValueError(f"connector grant {name!r} changed while revoking")
 
 
-CONNECTOR_OBJECT = ObjectKind(
-    name=CONNECTOR_KIND,
+CONNECTION_OBJECT = ObjectKind(
+    name=CONNECTION_KIND,
     description=(
-        "A connected provider account (an OAuth grant), private to its grantor by default. "
-        "Created only through connect_account; apply flips `shared`; delete revokes — both "
-        "grantor-controlled, with admins limited to narrowing or revoking."
+        "A member-owned provider connection. Created through connect_account; delete disconnects "
+        "it from every agent."
     ),
     guidance=(
-        "Connected accounts granted to this agent, one object per provider account. Create is "
-        "refused — connecting an account involves a third party and a secret, so it stays the "
-        "connect_account chat flow. Apply admits exactly one change: flipping `shared` — the "
-        "grantor may share a private account with every member's turns; the grantor or a workspace "
-        "admin may make a shared one private again. Delete revokes: the grantor or a workspace "
-        "admin removes the grant and the agent loses the account's tools and syncs. Reads show "
-        "shared accounts plus the member's own — a workspace admin sees all."
+        "Use this kind to inspect or disconnect a provider account. A connection belongs to the "
+        "member who completed consent and is independent of agents. Its owner or a workspace "
+        "admin may delete it, disconnecting every connector_grant edge."
     ),
-    spec_model=ConnectorSpec,
-    store=ConnectorObjects(),
+    spec_model=ConnectionSpec,
+    store=ConnectionObjects(),
+)
+
+CONNECTOR_GRANT_OBJECT = ObjectKind(
+    name=CONNECTOR_GRANT_KIND,
+    description=(
+        "One agent's access to a connected provider account. Apply flips `shared`; delete revokes "
+        "only this agent's access."
+    ),
+    guidance=(
+        "Use this kind to manage the current agent's connection access. Create is refused; "
+        "connect_account creates the edge. Its connection owner may share or make it private; a "
+        "workspace admin may only make it private. Its owner or an admin may delete it, revoking "
+        "only this agent's edge while leaving the connection and other agents' edges intact."
+    ),
+    spec_model=ConnectorGrantSpec,
+    store=ConnectorGrantObjects(),
 )

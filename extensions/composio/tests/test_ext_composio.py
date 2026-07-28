@@ -865,8 +865,8 @@ async def test_connect_binds_a_grant_and_call_external_tool_executes_via_composi
     async with workspace_tx() as connection:
         row = (
             await connection.execute(
-                sa.select(tables.grant.c.host, tables.grant.c.account_id).where(
-                    tables.grant.c.workspace_id == workspace_id
+                sa.select(tables.connection.c.host, tables.connection.c.account_id).where(
+                    tables.connection.c.workspace_id == workspace_id
                 )
             )
         ).one()
@@ -961,8 +961,8 @@ async def test_open_namespace_slug_connects_describes_searches_and_executes(
     async with workspace_tx() as connection:
         row = (
             await connection.execute(
-                sa.select(tables.grant.c.host, tables.grant.c.provider).where(
-                    tables.grant.c.workspace_id == workspace_id
+                sa.select(tables.connection.c.host, tables.connection.c.provider).where(
+                    tables.connection.c.workspace_id == workspace_id
                 )
             )
         ).one()
@@ -1084,9 +1084,17 @@ async def test_shared_oauth_bridge_verifies_workspace_and_lands_the_grant(
     async with workspace_tx() as connection:
         grant = (
             await connection.execute(
-                sa.select(tables.grant.c.account_id, tables.grant.c.agent_id).where(
-                    tables.grant.c.workspace_id == workspace_id
+                sa.select(
+                    tables.connection.c.account_id,
+                    tables.connector_grant.c.agent_id,
                 )
+                .select_from(
+                    tables.connector_grant.join(
+                        tables.connection,
+                        tables.connector_grant.c.connection_id == tables.connection.c.id,
+                    )
+                )
+                .where(tables.connector_grant.c.workspace_id == workspace_id)
             )
         ).one()
     assert (grant.account_id, grant.agent_id) == (COMPOSIO_ACCOUNT, agent_id)
@@ -1227,8 +1235,8 @@ async def test_complete_rejects_an_account_owned_by_a_foreign_composio_user(
         count = (
             await connection.execute(
                 sa.select(sa.func.count())
-                .select_from(tables.grant)
-                .where(tables.grant.c.workspace_id == workspace_id)
+                .select_from(tables.connector_grant)
+                .where(tables.connector_grant.c.workspace_id == workspace_id)
             )
         ).scalar_one()
     assert count == 0

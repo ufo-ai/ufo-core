@@ -1,13 +1,11 @@
-"""Grants: an OAuth account bound to an agent through `/connect` — a connection won in chat rather
-than a BYOK value set at deploy. The proxy derives authenticated egress from the workspace's
-grants, so only a granted account can inject or forward credentials to its provider.
+"""Connections and grants: an OAuth account owned by a member, with an edge granting one agent
+access. The proxy derives authenticated egress from the agent's edges, while feed sources resolve
+the member-owned connection directly. BYOK values remain workspace credentials.
 
 `ConnectFlow` runs the two-legged OAuth handoff: `authorize` opens a provider's link carrying sealed
-state; `complete` verifies that state, exchanges the code for the connected account, and records the
-grant. The broker holds the account's token and executes tools server-side, so no secret crosses
-into the grant — only the broker's connected-account id, frozen onto the row at record time so later
-derivation needs no live provider. The OAuth mechanics are an injected `OAuthProvider`, never known
-to core."""
+state; `complete` verifies that state, exchanges the code for the connected account, reuses or
+creates its connection, and grants the intended agent. The broker holds the account's token and
+executes tools server-side, so no secret crosses this boundary."""
 
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -20,6 +18,7 @@ from cryptography.fernet import Fernet, InvalidToken
 from pydantic import BaseModel
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.ext.asyncio import AsyncConnection
 from starlette.requests import Request
 
 from ufo.agent_scope import agent, agent_current
@@ -54,6 +53,14 @@ class ConnectUnavailable(RuntimeError):
 
 class ConnectRequestInvalid(ValueError):
     """A private connect handoff is absent, stale, or belongs to another member."""
+
+
+class ConnectionOwnedByAnotherMember(ValueError):
+    """The broker account already belongs to another member in this workspace."""
+
+
+class ConnectionPermissionDenied(ValueError):
+    """The member cannot mutate this connection or its agent grant."""
 
 
 @dataclass(frozen=True)
@@ -101,34 +108,47 @@ class OAuthProviderResolver(Protocol):
 
 @dataclass(frozen=True)
 class Grant:
-    """A grant as the proxy-rule derivation and connector tools read it: the host it admits and
-    meters, and the provider account that identifies it. The broker holds the account's token, so a
-    grant carries no secret — a connector tool passes its `account_id` to the broker's server-side
-    execute API, and the proxy injects nothing on the wire to `host`. `shared` is the grantor's
-    disclosure decision: a shared grant resolves for every member's turns, a private one only for
-    its grantor's."""
+    """One agent's usable view of a connection. Identity and ownership come from the connection;
+    disclosure comes from the edge."""
 
+    id: UUID
+    connection_id: UUID
     provider: str
     account_id: str
     host: str
-    grantor_member_id: UUID
+    owner_member_id: UUID
     shared: bool
 
 
 @dataclass(frozen=True)
 class GrantSummary:
-    """The audit view of a grant for `ufoctl grants` and the connector object kind — no secret,
-    only who granted which provider account to which agent, the host it admits, and when."""
+    """The audit view of one connector-grant edge joined to its connection."""
 
+    id: UUID
     agent: str
     provider: str
     account_id: str
     host: str
-    grantor_member_id: UUID
+    owner_member_id: UUID
     conversation_id: UUID
     granted_at: datetime
     updated_at: datetime
     shared: bool
+
+
+@dataclass(frozen=True)
+class ConnectionSummary:
+    """One member-owned broker connection and the agents currently granted it."""
+
+    id: UUID
+    provider: str
+    account_id: str
+    host: str
+    owner_member_id: UUID
+    conversation_id: UUID
+    connected_at: datetime
+    updated_at: datetime
+    agents: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -155,9 +175,7 @@ class ConnectState(BaseModel):
 
 @dataclass(frozen=True)
 class GrantStore:
-    """Persists and reads OAuth grants. A grant binds a provider account to an agent; the broker
-    holds the account's token and executes tools server-side, so nothing here is a secret — the
-    grant carries only the connected-account id, the host it admits, and its audit trail."""
+    """Persists member-owned connections and their per-agent grant edges."""
 
     @property
     def workspace_id(self) -> UUID:
@@ -177,27 +195,64 @@ class GrantStore:
         conversation_id: UUID,
         shared: bool,
     ) -> None:
-        """Upsert on (workspace, agent, provider, account): re-connecting the same account refreshes
-        its audit fields rather than duplicating the grant. One atomic insert-on-conflict, so two
-        near-simultaneous first connects of the same account settle on one row instead of colliding
-        on the unique identity — the loser updates, never raises. `account_id` comes from the
-        provider's OAuth exchange and a connector tool sends it to the broker, so a control
-        character (CR/LF and friends) that could forge a broker request is refused here, before any
-        grant it would malform is recorded."""
+        """Create or reuse the member's connection and grant the bound agent. A broker account has
+        one owner per workspace; reconnecting it as another member fails instead of reassigning the
+        account, its sources, and every existing edge."""
         if any(ord(char) < 0x20 or ord(char) == 0x7F for char in account_id):
             raise ValueError("account_id has a control character; refusing to record the grant")
         async with workspace_tx() as connection:
             insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
             await connection.execute(
-                insert(tables.grant)
+                insert(tables.connection)
+                .values(
+                    id=uuid4(),
+                    workspace_id=self.workspace_id,
+                    provider=provider,
+                    account_id=account_id,
+                    host=host,
+                    owner_member_id=grantor_member_id,
+                    conversation_id=conversation_id,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+                .on_conflict_do_nothing(
+                    index_elements=[
+                        tables.connection.c.workspace_id,
+                        tables.connection.c.provider,
+                        tables.connection.c.account_id,
+                    ]
+                )
+            )
+            existing = (
+                await connection.execute(
+                    sa.select(
+                        tables.connection.c.id,
+                        tables.connection.c.owner_member_id,
+                    )
+                    .where(
+                        tables.connection.c.workspace_id == self.workspace_id,
+                        tables.connection.c.provider == provider,
+                        tables.connection.c.account_id == account_id,
+                    )
+                    .with_for_update()
+                )
+            ).one()
+            if existing.owner_member_id != grantor_member_id:
+                raise ConnectionOwnedByAnotherMember(
+                    f"{provider!r} account {account_id!r} is connected by another member"
+                )
+            await connection.execute(
+                sa.update(tables.connection)
+                .values(host=host, updated_at=sa.func.now())
+                .where(tables.connection.c.id == existing.id)
+            )
+            await connection.execute(
+                insert(tables.connector_grant)
                 .values(
                     id=uuid4(),
                     workspace_id=self.workspace_id,
                     agent_id=self.agent_id,
-                    provider=provider,
-                    account_id=account_id,
-                    host=host,
-                    grantor_member_id=grantor_member_id,
+                    connection_id=existing.id,
                     conversation_id=conversation_id,
                     shared=shared,
                     created_at=sa.func.now(),
@@ -205,14 +260,11 @@ class GrantStore:
                 )
                 .on_conflict_do_update(
                     index_elements=[
-                        tables.grant.c.workspace_id,
-                        tables.grant.c.agent_id,
-                        tables.grant.c.provider,
-                        tables.grant.c.account_id,
+                        tables.connector_grant.c.workspace_id,
+                        tables.connector_grant.c.agent_id,
+                        tables.connector_grant.c.connection_id,
                     ],
                     set_={
-                        "host": host,
-                        "grantor_member_id": grantor_member_id,
                         "conversation_id": conversation_id,
                         "shared": shared,
                         "updated_at": sa.func.now(),
@@ -221,71 +273,215 @@ class GrantStore:
             )
 
     async def active_grants(self) -> tuple[Grant, ...]:
-        """One agent's grants in this workspace, in the shape the proxy-rule derivation and
-        connector tools read. Agent-scoped: the per-turn resolver admits and meters only the turn
-        agent's own grants, so agent A's rule set never carries agent B's host, and a tool executes
-        only against A's own accounts."""
+        """The bound agent's connection edges, joined to member-owned account identity."""
         async with workspace_tx() as connection:
             rows = (
                 await connection.execute(
                     sa.select(
-                        tables.grant.c.provider,
-                        tables.grant.c.account_id,
-                        tables.grant.c.host,
-                        tables.grant.c.grantor_member_id,
-                        tables.grant.c.shared,
-                    ).where(
-                        tables.grant.c.workspace_id == self.workspace_id,
-                        tables.grant.c.agent_id == self.agent_id,
+                        tables.connector_grant.c.id.label("grant_id"),
+                        tables.connection.c.id.label("connection_id"),
+                        tables.connection.c.provider,
+                        tables.connection.c.account_id,
+                        tables.connection.c.host,
+                        tables.connection.c.owner_member_id,
+                        tables.connector_grant.c.shared,
+                    )
+                    .select_from(
+                        tables.connector_grant.join(
+                            tables.connection,
+                            tables.connector_grant.c.connection_id == tables.connection.c.id,
+                        )
+                    )
+                    .where(
+                        tables.connector_grant.c.workspace_id == self.workspace_id,
+                        tables.connector_grant.c.agent_id == self.agent_id,
                     )
                 )
             ).all()
         return tuple(
             Grant(
+                id=row.grant_id,
+                connection_id=row.connection_id,
                 provider=row.provider,
                 account_id=row.account_id,
                 host=row.host,
-                grantor_member_id=row.grantor_member_id,
+                owner_member_id=row.owner_member_id,
                 shared=row.shared,
             )
             for row in rows
         )
 
-    async def revoke(self, provider: str, account_id: str) -> bool:
-        """Remove this agent's grant binding the provider account — the delete half of the
-        connector object kind. Connecting an account to an agent is one consent act, so its
-        withdrawal is that binding's row delete: the account stops resolving for the agent's
-        tools, syncs, and proxy-rule derivation the moment the row is gone, and the same account
-        connected to another agent keeps that agent's own binding. The broker holds the account's
-        token and exposes no revoke surface."""
+    async def revoke(self, grant_id: UUID, *, actor_member_id: UUID) -> bool:
+        """Remove the bound agent's edge after rechecking its connection owner or an admin."""
         async with workspace_tx() as connection:
+            selected = await self._grant_for_actor(connection, grant_id, actor_member_id)
+            if selected is None:
+                return False
             deleted = await connection.execute(
-                sa.delete(tables.grant).where(
-                    tables.grant.c.workspace_id == self.workspace_id,
-                    tables.grant.c.agent_id == self.agent_id,
-                    tables.grant.c.provider == provider,
-                    tables.grant.c.account_id == account_id,
+                sa.delete(tables.connector_grant).where(
+                    tables.connector_grant.c.workspace_id == self.workspace_id,
+                    tables.connector_grant.c.id == selected,
                 )
             )
         return deleted.rowcount > 0
 
-    async def set_shared(self, provider: str, account_id: str, shared: bool) -> bool:
-        """Flip the disclosure of this agent's grant binding the provider account — the
-        share/unshare half of the connector object kind. `shared` means shared with this agent's
-        audience, so disclosure is a property of the binding: the same account connected to
-        another agent carries that binding's own disclosure, untouched from here."""
+    async def set_shared(
+        self,
+        grant_id: UUID,
+        shared: bool,
+        *,
+        actor_member_id: UUID,
+    ) -> bool:
+        """Flip the bound agent's edge after rechecking owner and one-way admin authority."""
         async with workspace_tx() as connection:
+            selected = await self._grant_for_actor(
+                connection,
+                grant_id,
+                actor_member_id,
+                admin_allowed=not shared,
+            )
+            if selected is None:
+                return False
             updated = await connection.execute(
-                sa.update(tables.grant)
+                sa.update(tables.connector_grant)
                 .values(shared=shared, updated_at=sa.func.now())
                 .where(
-                    tables.grant.c.workspace_id == self.workspace_id,
-                    tables.grant.c.agent_id == self.agent_id,
-                    tables.grant.c.provider == provider,
-                    tables.grant.c.account_id == account_id,
+                    tables.connector_grant.c.workspace_id == self.workspace_id,
+                    tables.connector_grant.c.id == selected,
                 )
             )
         return updated.rowcount > 0
+
+    async def disconnect(self, connection_id: UUID, *, actor_member_id: UUID) -> bool:
+        """Stop every source bound to a connection, tombstone its pages, and remove the connection.
+        Connector-grant edges follow by cascade."""
+        async with workspace_tx() as connection:
+            selected = await self._connection_for_actor(connection, connection_id, actor_member_id)
+            if selected is None:
+                return False
+            source_ids = (
+                (
+                    await connection.execute(
+                        sa.select(tables.source.c.id).where(
+                            tables.source.c.workspace_id == self.workspace_id,
+                            tables.source.c.connection_id == selected,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            now = datetime.now(UTC)
+            if source_ids:
+                await connection.execute(
+                    sa.update(tables.source)
+                    .values(
+                        connection_id=None,
+                        removed_at=now,
+                        claimed_by=None,
+                        claim_expires_at=None,
+                        updated_at=sa.func.now(),
+                    )
+                    .where(
+                        tables.source.c.workspace_id == self.workspace_id,
+                        tables.source.c.id.in_(source_ids),
+                    )
+                )
+                await connection.execute(
+                    sa.update(tables.page)
+                    .values(tombstone=True, updated_at=now)
+                    .where(
+                        tables.page.c.workspace_id == self.workspace_id,
+                        tables.page.c.source_id.in_(source_ids),
+                        tables.page.c.tombstone.is_(False),
+                    )
+                )
+            await connection.execute(
+                sa.delete(tables.connection).where(
+                    tables.connection.c.workspace_id == self.workspace_id,
+                    tables.connection.c.id == selected,
+                )
+            )
+        return True
+
+    async def _connection_for_actor(
+        self,
+        connection: AsyncConnection,
+        connection_id: UUID,
+        actor_member_id: UUID,
+        *,
+        admin_allowed: bool = True,
+    ) -> UUID | None:
+        selected = (
+            await connection.execute(
+                sa.select(
+                    tables.connection.c.id,
+                    tables.connection.c.owner_member_id,
+                )
+                .where(
+                    tables.connection.c.workspace_id == self.workspace_id,
+                    tables.connection.c.id == connection_id,
+                )
+                .with_for_update()
+            )
+        ).one_or_none()
+        if selected is None:
+            return None
+        if selected.owner_member_id == actor_member_id:
+            return selected.id
+        is_admin = (
+            await connection.execute(
+                sa.select(tables.member.c.is_admin)
+                .where(
+                    tables.member.c.workspace_id == self.workspace_id,
+                    tables.member.c.id == actor_member_id,
+                )
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if not admin_allowed or not is_admin:
+            raise ConnectionPermissionDenied("member cannot mutate this connection")
+        return selected.id
+
+    async def _grant_for_actor(
+        self,
+        connection: AsyncConnection,
+        grant_id: UUID,
+        actor_member_id: UUID,
+        *,
+        admin_allowed: bool = True,
+    ) -> UUID | None:
+        connection_id = (
+            await connection.execute(
+                sa.select(tables.connector_grant.c.connection_id).where(
+                    tables.connector_grant.c.workspace_id == self.workspace_id,
+                    tables.connector_grant.c.agent_id == self.agent_id,
+                    tables.connector_grant.c.id == grant_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if connection_id is None:
+            return None
+        selected = await self._connection_for_actor(
+            connection,
+            connection_id,
+            actor_member_id,
+            admin_allowed=admin_allowed,
+        )
+        if selected is None:
+            return None
+        return (
+            await connection.execute(
+                sa.select(tables.connector_grant.c.id)
+                .where(
+                    tables.connector_grant.c.workspace_id == self.workspace_id,
+                    tables.connector_grant.c.agent_id == self.agent_id,
+                    tables.connector_grant.c.id == grant_id,
+                    tables.connector_grant.c.connection_id == selected,
+                )
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
 
 
 @dataclass(frozen=True)
@@ -393,7 +589,6 @@ class ConnectHandoff:
                     sa.select(
                         tables.turn.c.agent_id,
                         tables.turn.c.conversation_id,
-                        tables.turn.c.speaker_member_id,
                         tables.turn.c.connect_authorization_url,
                         tables.turn.c.connect_authorized_at,
                         tables.turn.c.terminal,
@@ -406,14 +601,16 @@ class ConnectHandoff:
                     .with_for_update()
                 )
             ).one_or_none()
-            if row is None or row.speaker_member_id != member_id:
-                raise ConnectRequestInvalid("connect request belongs to another member")
+            if row is None:
+                raise ConnectRequestInvalid("connect request is no longer available")
             if row.terminal is None:
                 raise ConnectRequestInvalid("connect request is no longer available")
             terminal = TerminalFrame.model_validate(row.terminal)
             request = terminal.connect_request
             if request is None:
                 raise ConnectRequestInvalid("connect request is no longer available")
+            if request.requester_member_id != member_id:
+                raise ConnectRequestInvalid("connect request belongs to another member")
             if not self.flow.knows_provider(request.provider):
                 raise ConnectRequestInvalid("connect provider is no longer available")
             now = datetime.now(UTC)
@@ -439,7 +636,7 @@ class ConnectHandoff:
                 workspace_id=workspace_id,
                 agent_id=row.agent_id,
                 provider=request.provider,
-                grantor_member_id=member_id,
+                grantor_member_id=request.requester_member_id,
                 conversation_id=row.conversation_id,
                 shared=request.shared,
             )
@@ -449,7 +646,6 @@ class ConnectHandoff:
                 .where(
                     tables.turn.c.id == turn_id,
                     tables.turn.c.workspace_id == workspace_id,
-                    tables.turn.c.speaker_member_id == member_id,
                     tables.turn.c.connect_authorization_url.is_(None),
                 )
             )
@@ -463,7 +659,6 @@ class ConnectHandoff:
                     ).where(
                         tables.turn.c.id == turn_id,
                         tables.turn.c.workspace_id == workspace_id,
-                        tables.turn.c.speaker_member_id == member_id,
                     )
                 )
             ).one_or_none()
@@ -505,19 +700,19 @@ def connect_bridge_workspace(request: Request) -> UUID | None:
 
 
 async def grant_summaries() -> tuple[GrantSummary, ...]:
-    """The bound agent's grants as provider-ordered audit rows."""
+    """The bound agent's connector grants as provider-ordered audit rows."""
     return await _grant_summaries(
         sa.and_(
-            tables.grant.c.workspace_id == ws_current().workspace_id,
-            tables.grant.c.agent_id == agent_current().agent_id,
+            tables.connector_grant.c.workspace_id == ws_current().workspace_id,
+            tables.connector_grant.c.agent_id == agent_current().agent_id,
         )
     )
 
 
 async def workspace_grant_summaries(workspace_id: UUID) -> tuple[GrantSummary, ...]:
-    """One workspace's grants for the operator surface."""
+    """One workspace's connector grants for the operator surface."""
     with ws(workspace_id):
-        return await _grant_summaries(tables.grant.c.workspace_id == workspace_id)
+        return await _grant_summaries(tables.connector_grant.c.workspace_id == workspace_id)
 
 
 async def _grant_summaries(scope: sa.ColumnElement[bool]) -> tuple[GrantSummary, ...]:
@@ -525,34 +720,104 @@ async def _grant_summaries(scope: sa.ColumnElement[bool]) -> tuple[GrantSummary,
         rows = (
             await connection.execute(
                 sa.select(
+                    tables.connector_grant.c.id.label("grant_id"),
                     tables.agent.c.name,
-                    tables.grant.c.provider,
-                    tables.grant.c.account_id,
-                    tables.grant.c.host,
-                    tables.grant.c.grantor_member_id,
-                    tables.grant.c.conversation_id,
-                    tables.grant.c.created_at,
-                    tables.grant.c.updated_at,
-                    tables.grant.c.shared,
+                    tables.connection.c.provider,
+                    tables.connection.c.account_id,
+                    tables.connection.c.host,
+                    tables.connection.c.owner_member_id,
+                    tables.connector_grant.c.conversation_id,
+                    tables.connector_grant.c.created_at,
+                    tables.connector_grant.c.updated_at,
+                    tables.connector_grant.c.shared,
                 )
                 .select_from(
-                    tables.grant.join(tables.agent, tables.grant.c.agent_id == tables.agent.c.id)
+                    tables.connector_grant.join(
+                        tables.connection,
+                        tables.connector_grant.c.connection_id == tables.connection.c.id,
+                    ).join(tables.agent, tables.connector_grant.c.agent_id == tables.agent.c.id)
                 )
                 .where(scope)
-                .order_by(tables.grant.c.provider)
+                .order_by(tables.connection.c.provider, tables.agent.c.name)
             )
         ).all()
     return tuple(
         GrantSummary(
+            id=row.grant_id,
             agent=row.name,
             provider=row.provider,
             account_id=row.account_id,
             host=row.host,
-            grantor_member_id=row.grantor_member_id,
+            owner_member_id=row.owner_member_id,
             conversation_id=row.conversation_id,
             granted_at=row.created_at,
             updated_at=row.updated_at,
             shared=row.shared,
         )
         for row in rows
+    )
+
+
+async def connection_summaries() -> tuple[ConnectionSummary, ...]:
+    """This workspace's member-owned connections, independent of the bound agent."""
+    async with workspace_tx() as connection:
+        rows = (
+            await connection.execute(
+                sa.select(
+                    tables.connection.c.id,
+                    tables.connection.c.provider,
+                    tables.connection.c.account_id,
+                    tables.connection.c.host,
+                    tables.connection.c.owner_member_id,
+                    tables.connection.c.conversation_id,
+                    tables.connection.c.created_at,
+                    tables.connection.c.updated_at,
+                    tables.agent.c.name,
+                )
+                .select_from(
+                    tables.connection.outerjoin(
+                        tables.connector_grant,
+                        tables.connector_grant.c.connection_id == tables.connection.c.id,
+                    ).outerjoin(
+                        tables.agent,
+                        tables.connector_grant.c.agent_id == tables.agent.c.id,
+                    )
+                )
+                .where(tables.connection.c.workspace_id == ws_current().workspace_id)
+                .order_by(tables.connection.c.provider, tables.connection.c.account_id)
+            )
+        ).all()
+    grouped: dict[tuple[str, str], ConnectionSummary] = {}
+    agent_names: dict[tuple[str, str], list[str]] = {}
+    for row in rows:
+        key = (row.provider, row.account_id)
+        grouped.setdefault(
+            key,
+            ConnectionSummary(
+                id=row.id,
+                provider=row.provider,
+                account_id=row.account_id,
+                host=row.host,
+                owner_member_id=row.owner_member_id,
+                conversation_id=row.conversation_id,
+                connected_at=row.created_at,
+                updated_at=row.updated_at,
+                agents=(),
+            ),
+        )
+        if row.name is not None:
+            agent_names.setdefault(key, []).append(row.name)
+    return tuple(
+        ConnectionSummary(
+            id=summary.id,
+            provider=summary.provider,
+            account_id=summary.account_id,
+            host=summary.host,
+            owner_member_id=summary.owner_member_id,
+            conversation_id=summary.conversation_id,
+            connected_at=summary.connected_at,
+            updated_at=summary.updated_at,
+            agents=tuple(sorted(agent_names.get(key, ()))),
+        )
+        for key, summary in grouped.items()
     )

@@ -91,7 +91,13 @@ OTHER = uuid4()
 
 def _grant(account: str = "acct-1", grantor=ACTING, shared: bool = False) -> Grant:
     return Grant(
-        provider="hub", account_id=account, host=CLI_HOST, grantor_member_id=grantor, shared=shared
+        id=uuid4(),
+        connection_id=uuid4(),
+        provider="hub",
+        account_id=account,
+        host=CLI_HOST,
+        owner_member_id=grantor,
+        shared=shared,
     )
 
 
@@ -109,7 +115,13 @@ def test_brokered_grant_admits_only_its_transfer_hosts_never_an_empty_host() -> 
     """A grant with no provider host (server-side execution) admits only its broker file-store hosts
     from the open namespace default — never a ScopeRule allowing the empty host."""
     grant = Grant(
-        provider="notion", account_id="a", host="", grantor_member_id=ACTING, shared=False
+        id=uuid4(),
+        connection_id=uuid4(),
+        provider="notion",
+        account_id="a",
+        host="",
+        owner_member_id=ACTING,
+        shared=False,
     )
     rules = derive_grant_rules((grant,), ConnectorTransferHosts({}, default=TRANSFER))
     scope = next(r for r in rules if isinstance(r, ScopeRule))
@@ -120,7 +132,13 @@ def test_brokered_grant_admits_only_its_transfer_hosts_never_an_empty_host() -> 
 
 def test_brokered_grant_without_any_host_derives_no_scope_rule() -> None:
     grant = Grant(
-        provider="notion", account_id="a", host="", grantor_member_id=ACTING, shared=False
+        id=uuid4(),
+        connection_id=uuid4(),
+        provider="notion",
+        account_id="a",
+        host="",
+        owner_member_id=ACTING,
+        shared=False,
     )
     assert derive_grant_rules((grant,)) == ()
 

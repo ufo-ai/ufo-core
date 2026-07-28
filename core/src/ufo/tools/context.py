@@ -39,7 +39,7 @@ from ufo.connectors import ConnectorRegistry
 from ufo.credentials import CredentialRequests
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext
-from ufo.grants import ConnectUnavailable, GrantStore
+from ufo.grants import ConnectUnavailable, Grant, GrantStore
 from ufo.o11y import log
 from ufo.sandbox.session import SandboxSession
 from ufo.schema import tables
@@ -168,6 +168,13 @@ class TurnCleanup:
 
 
 @dataclass(frozen=True)
+class ConnectorConnection:
+    id: UUID
+    account_id: str
+    owner_member_id: UUID
+
+
+@dataclass(frozen=True)
 class ToolContext:
     sandbox: SandboxSession
     blob: BlobStore
@@ -279,10 +286,26 @@ class ToolContext:
         preferred and agent-shared ones are the fallback — exactly one account must exist in the
         winning tier. Fails loud when no grant subsystem is configured or the selection is absent
         or ambiguous."""
+        return (await self.connector_connection(provider, account_id)).account_id
+
+    async def connector_connection(
+        self, provider: str, account_id: str | None = None
+    ) -> ConnectorConnection:
+        """The exact member-owned connection generation this turn may use. Source registration
+        persists its id so disconnecting and reconnecting the same external account cannot revive a
+        prior member's sync."""
         private, shared = await self._connector_account_tiers(provider)
         if account_id is not None:
-            if account_id in private or account_id in shared:
-                return account_id
+            match = next(
+                (grant for grant in (*private, *shared) if grant.account_id == account_id),
+                None,
+            )
+            if match is not None:
+                return ConnectorConnection(
+                    id=match.connection_id,
+                    account_id=match.account_id,
+                    owner_member_id=match.owner_member_id,
+                )
             raise ValueError(
                 f"no active {provider!r} account {account_id!r} is available to this turn"
             )
@@ -295,9 +318,14 @@ class ToolContext:
         if len(preferred) > 1:
             raise ValueError(
                 f"multiple active {provider!r} accounts; pass account_id as one of "
-                f"{list(preferred)!r}"
+                f"{[grant.account_id for grant in preferred]!r}"
             )
-        return preferred[0]
+        match = preferred[0]
+        return ConnectorConnection(
+            id=match.connection_id,
+            account_id=match.account_id,
+            owner_member_id=match.owner_member_id,
+        )
 
     async def connector_accounts(self, provider: str) -> tuple[str, ...]:
         """The connected-account ids this turn may use for one provider: the acting member's own
@@ -307,19 +335,25 @@ class ToolContext:
         so a member's own scheduled job and delegated subagents keep their private connections; a
         turn with no member at all resolves only shared grants."""
         private, shared = await self._connector_account_tiers(provider)
-        return tuple(sorted({*private, *shared}))
+        return tuple(sorted({grant.account_id for grant in (*private, *shared)}))
 
-    async def _connector_account_tiers(self, provider: str) -> tuple[list[str], list[str]]:
+    async def _connector_account_tiers(self, provider: str) -> tuple[list[Grant], list[Grant]]:
         if self.grants is None:
             raise ConnectUnavailable("grants unavailable: no credential key configured")
         acting = self.acting_member_id
         granted = await self.grants.active_grants()
         private = sorted(
-            grant.account_id
-            for grant in granted
-            if grant.provider == provider and not grant.shared and grant.grantor_member_id == acting
+            (
+                grant
+                for grant in granted
+                if grant.provider == provider
+                and not grant.shared
+                and grant.owner_member_id == acting
+            ),
+            key=lambda grant: grant.account_id,
         )
         shared = sorted(
-            grant.account_id for grant in granted if grant.provider == provider and grant.shared
+            (grant for grant in granted if grant.provider == provider and grant.shared),
+            key=lambda grant: grant.account_id,
         )
         return private, shared

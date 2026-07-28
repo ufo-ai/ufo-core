@@ -57,10 +57,12 @@ class _Grants(GrantStore):
     async def active_grants(self) -> tuple[Grant, ...]:
         return tuple(
             Grant(
+                id=uuid4(),
+                connection_id=uuid4(),
                 provider=provider,
                 account_id=env.ACCOUNT_ID,
                 host=host,
-                grantor_member_id=uuid4(),
+                owner_member_id=uuid4(),
                 shared=True,
             )
             for provider, host in self.providers

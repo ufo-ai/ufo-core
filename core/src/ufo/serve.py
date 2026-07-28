@@ -25,7 +25,7 @@ from ufo.config import (
     Config,
     load_config,
 )
-from ufo.connectors import AuthProxy, ConnectorEntry, ConnectorRegistry
+from ufo.connectors import AuthProxy, ConnectorEntry, ConnectorRegistry, SourceCredentialResolver
 from ufo.credentials import CredentialRequests, CredentialStore, install_credential_requests
 from ufo.db import current_workspace, init_db, init_owner_db
 from ufo.ext.context import CredentialAccess, context_for
@@ -232,7 +232,7 @@ def run() -> None:
         backends=_source_backends(manifests),
         blob=blob,
         postgres=config.database.url.startswith("postgresql"),
-        auth_proxy=connectors,
+        source_credentials=SourceCredentialResolver(connectors),
         identity_resolvers=_source_identity_resolvers(manifests, credentials, blob),
     )
     page_feed = CorePageFeed(blob=blob)

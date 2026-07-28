@@ -31,7 +31,13 @@ from ufo_ext_sources.tools import SourceObjects, SourceSpec
 from ufo.agent_scope import agent
 from ufo.blob import FilesystemBlobStore
 from ufo.config import Config
-from ufo.connectors import DIRECT_ACCOUNT, AuthProxy, ConnectorEntry, ConnectorRegistry
+from ufo.connectors import (
+    DIRECT_ACCOUNT,
+    AuthProxy,
+    ConnectorEntry,
+    ConnectorRegistry,
+    SourceCredentialResolver,
+)
 from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.context import context_for
@@ -50,6 +56,7 @@ TOOL_NARRATION = "syncing their pages"
 ASANA_ACCOUNT = "ca_asana_e2e"
 GMAIL_ACCOUNT = "apn_gmail_e2e"
 KLAVIYO_KEY = "pk_live_byok_e2e"
+DUE_AGAIN_AT = datetime(2000, 1, 1, tzinfo=UTC)
 KLAVIYO_PROFILE = {
     "type": "profile",
     "id": "p1",
@@ -183,15 +190,22 @@ def _selected_fallback(store: CredentialStore, broker: object) -> DirectAuthProx
 
 
 async def _register_grant(
-    state: State, grants: GrantStore, provider: str, account: str, host: str
+    state: State,
+    grants: GrantStore,
+    provider: str,
+    account: str,
+    host: str,
+    *,
+    member_id: UUID | None = None,
+    conversation_id: UUID | None = None,
 ) -> None:
     with ws(state.workspace_id), agent(state.agent_id):
         await grants.record(
             provider=provider,
             account_id=account,
             host=host,
-            grantor_member_id=state.member_id,
-            conversation_id=state.conversation_id,
+            grantor_member_id=member_id or state.member_id,
+            conversation_id=conversation_id or state.conversation_id,
             shared=False,
         )
 
@@ -205,7 +219,7 @@ async def _sync_and_search(
     query: str,
     database_url: str,
     tmp_path: Path,
-) -> str:
+) -> tuple[str, SyncDriver]:
     with ws(state.workspace_id), agent(state.agent_id):
         await SourceObjects().apply(
             context,
@@ -217,7 +231,7 @@ async def _sync_and_search(
             blob=FilesystemBlobStore(root=tmp_path / "blobs"),
             postgres=database_url.startswith("postgresql"),
             backends=_source_backends((sources_manifest.manifest(),)),
-            auth_proxy=context.connectors,
+            source_credentials=SourceCredentialResolver(context.connectors),
         )
         await driver.run()
 
@@ -245,7 +259,60 @@ async def _sync_and_search(
                 {"user_description": TOOL_NARRATION, "queries": [query]}
             ),
         )
-    return result.content[0].text
+    return result.content[0].text, driver
+
+
+async def _run_due(state: State, driver: SyncDriver) -> int:
+    with ws(state.workspace_id), agent(state.agent_id):
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.source)
+                .values(
+                    next_sync_at=DUE_AGAIN_AT,
+                    claimed_by=None,
+                    claim_expires_at=None,
+                )
+                .where(tables.source.c.workspace_id == state.workspace_id)
+            )
+        await driver.run()
+        async with workspace_tx() as connection:
+            return int(
+                (
+                    await connection.execute(
+                        sa.select(tables.source.c.consecutive_errors).where(
+                            tables.source.c.workspace_id == state.workspace_id
+                        )
+                    )
+                ).scalar_one()
+            )
+
+
+async def _add_member(state: State) -> tuple[UUID, UUID]:
+    member_id, conversation_id = uuid4(), uuid4()
+    now = datetime.now(UTC)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=member_id,
+                workspace_id=state.workspace_id,
+                email=f"{member_id.hex}@source.test",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=conversation_id,
+                workspace_id=state.workspace_id,
+                agent_id=state.agent_id,
+                surface="cli",
+                queue_key=uuid4().hex,
+                member_id=member_id,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    return member_id, conversation_id
 
 
 def _composio_transport(workspace_id: UUID) -> httpx.MockTransport:
@@ -310,6 +377,8 @@ def _pipedream_transport(workspace_id: UUID) -> httpx.MockTransport:
         url = httpx.URL(target)
         if url.path == "/gmail/v1/users/me/messages":
             return httpx.Response(200, json={"messages": [{"id": "m1"}]})
+        if url.path == "/gmail/v1/users/me/history":
+            return httpx.Response(200, json={"historyId": "9001"})
         if url.path.endswith("/messages/m1"):
             query = parse_qs(url.query.decode())
             if query.get("format") == ["minimal"]:
@@ -394,15 +463,144 @@ async def test_brokered_source_reaches_memory_search(
     await _register_grant(state, grants, provider, account, host)
     context = _context(state, grants, connectors)
 
-    resolved = await connectors.credential(state.workspace_id, provider, account)
+    with ws(state.workspace_id), agent(state.agent_id):
+        connection = await context.connector_connection(provider, account)
+        (grant,) = await grants.active_grants()
+    resolved = (
+        await SourceCredentialResolver(connectors)
+        .bind(
+            connection.id,
+            connection.owner_member_id,
+        )
+        .credential(state.workspace_id, provider, account)
+    )
     assert resolved.transport is not None
     assert resolved.bearer is None
 
-    recalled = await _sync_and_search(
+    recalled, driver = await _sync_and_search(
         state, context, provider, account, stream, query, database_url, tmp_path / provider
     )
 
     assert query.lower() in recalled.lower()
+    with ws(state.workspace_id), agent(state.agent_id):
+        assert (
+            await grants.revoke(
+                grant.id,
+                actor_member_id=state.member_id,
+            )
+            is True
+        )
+    assert await _run_due(state, driver) == 0
+    with ws(state.workspace_id), agent(state.agent_id):
+        assert (
+            await grants.disconnect(
+                connection.id,
+                actor_member_id=state.member_id,
+            )
+            is True
+        )
+    assert await _run_due(state, driver) == 0
+    assert state.workspace_id not in await driver.candidate_workspaces()
+    async with workspace_tx() as connection:
+        stopped = (
+            await connection.execute(
+                sa.select(
+                    tables.source.c.id,
+                    tables.source.c.removed_at,
+                    tables.source.c.connection_id,
+                ).where(tables.source.c.workspace_id == state.workspace_id)
+            )
+        ).one()
+        assert stopped.removed_at is not None
+        assert stopped.connection_id is None
+        removed_source_id = stopped.id
+        assert (
+            await connection.execute(
+                sa.select(sa.func.count())
+                .select_from(tables.page)
+                .where(
+                    tables.page.c.workspace_id == state.workspace_id,
+                    tables.page.c.tombstone.is_(False),
+                )
+            )
+        ).scalar_one() == 0
+
+    other_member, other_conversation = await _add_member(state)
+    await _register_grant(
+        state,
+        grants,
+        provider,
+        account,
+        host,
+        member_id=other_member,
+        conversation_id=other_conversation,
+    )
+    assert state.workspace_id not in await driver.candidate_workspaces()
+    bob = replace(
+        state,
+        member_id=other_member,
+        conversation_id=other_conversation,
+    )
+    bob_context = _context(bob, grants, connectors)
+    recalled, _ = await _sync_and_search(
+        bob,
+        bob_context,
+        provider,
+        account,
+        stream,
+        query,
+        database_url,
+        tmp_path / f"{provider}-bob",
+    )
+    assert query.lower() in recalled.lower()
+    async with workspace_tx() as connection:
+        sources = (
+            await connection.execute(
+                sa.select(
+                    tables.source.c.id,
+                    tables.source.c.owner_member_id,
+                    tables.source.c.connection_id,
+                    tables.source.c.removed_at,
+                )
+            )
+        ).all()
+        removed = next(source for source in sources if source.removed_at is not None)
+        rebound = next(source for source in sources if source.removed_at is None)
+        connection_owner = (
+            await connection.execute(
+                sa.select(tables.connection.c.owner_member_id).where(
+                    tables.connection.c.id == rebound.connection_id
+                )
+            )
+        ).scalar_one()
+        removed_live_pages = (
+            await connection.execute(
+                sa.select(sa.func.count())
+                .select_from(tables.page)
+                .where(
+                    tables.page.c.source_id == removed.id,
+                    tables.page.c.tombstone.is_(False),
+                )
+            )
+        ).scalar_one()
+        rebound_live_pages = (
+            await connection.execute(
+                sa.select(sa.func.count())
+                .select_from(tables.page)
+                .where(
+                    tables.page.c.source_id == rebound.id,
+                    tables.page.c.tombstone.is_(False),
+                )
+            )
+        ).scalar_one()
+    assert removed.id == removed_source_id
+    assert removed.removed_at is not None
+    assert removed.connection_id is None
+    assert rebound.id != removed.id
+    assert rebound.removed_at is None
+    assert (rebound.owner_member_id, connection_owner) == (other_member, other_member)
+    assert removed_live_pages == 0
+    assert rebound_live_pages > 0
 
 
 async def _klaviyo_listener(seen: list[tuple[str, dict[str, str]]]) -> asyncio.Server:
@@ -470,7 +668,7 @@ async def test_keyed_source_reaches_memory_search_with_the_broker_namespace_inst
     try:
         with ws(state.workspace_id), agent(state.agent_id):
             await ws_current().put_credential("klaviyo", KLAVIYO_KEY)
-        recalled = await _sync_and_search(
+        recalled, _driver = await _sync_and_search(
             state,
             context,
             "klaviyo",

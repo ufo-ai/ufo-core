@@ -460,6 +460,7 @@ class SourceRecord:
     config: dict[str, JsonValue]
     subject: str
     owner_member_id: UUID | None
+    connection_id: UUID | None
     next_sync_at: datetime
     consecutive_errors: int
     created_at: datetime
@@ -594,32 +595,79 @@ class ExtensionContext:
         }
 
     async def register_source(
-        self, backend: str, config: BaseModel, *, subject: str, owner_member_id: UUID | None
+        self,
+        backend: str,
+        config: BaseModel,
+        *,
+        subject: str,
+        owner_member_id: UUID | None,
+        connection_id: UUID | None = None,
     ) -> UUID:
         """Register a content-sync source for this workspace under `backend` — a `SourceBackend` an
         extension declared through its Manifest `sources` point — with `config` the backend's typed
         per-source parameters (the connected account, a folder root), `subject` the disclosure every
-        page it syncs is stamped with, and `owner_member_id` the registering member (None for a
-        shared feed). Idempotent on (workspace, backend, config): re-running onboarding or
-        re-connecting the same account settles on the one row, never a duplicate sync — but a live
-        row's disclosure is fixed at registration: re-registering it under a different `subject`
-        raises rather than silently reclassifying already-synced pages. The core sync driver polls
-        the row and lands its pages in memory; embedding stays a job."""
+        page it syncs is stamped with, `owner_member_id` the registering member, and `connection_id`
+        the exact member-owned connection generation behind a broker source (None for direct or
+        extension-owned feeds). Brokered row identity includes that connection generation; direct
+        row identity is (workspace, backend, config). Re-registering the same authority settles on
+        one row, while changing its owner or disclosure fails loud. The core sync driver polls the
+        row and lands its pages in memory; embedding stays a job."""
         payload = config.model_dump(mode="json")
-        source_id = source_row_id(self.store.workspace_id, backend, payload)
+        source_id = source_row_id(
+            self.store.workspace_id,
+            backend,
+            payload,
+            connection_id=connection_id,
+        )
         async with workspace_tx() as connection:
+            if connection_id is not None:
+                account = payload.get("account")
+                if owner_member_id is None or not isinstance(account, str):
+                    raise ValueError(
+                        "a connection-bound source requires its member owner and account"
+                    )
+                authorized = (
+                    await connection.execute(
+                        sa.select(tables.connection.c.id)
+                        .where(
+                            tables.connection.c.id == connection_id,
+                            tables.connection.c.workspace_id == self.store.workspace_id,
+                            tables.connection.c.owner_member_id == owner_member_id,
+                            tables.connection.c.provider == backend,
+                            tables.connection.c.account_id == account,
+                        )
+                        .with_for_update(read=True)
+                    )
+                ).scalar_one_or_none()
+                if authorized is None:
+                    raise ValueError(
+                        "the source connection is not active for its workspace, provider, "
+                        "account, and member owner"
+                    )
             present = (
                 await connection.execute(
                     sa.select(
-                        tables.source.c.id, tables.source.c.removed_at, tables.source.c.subject
+                        tables.source.c.id,
+                        tables.source.c.removed_at,
+                        tables.source.c.subject,
+                        tables.source.c.owner_member_id,
+                        tables.source.c.connection_id,
                     ).where(tables.source.c.id == source_id)
                 )
             ).one_or_none()
             if present is not None and present.removed_at is None:
-                if present.subject != subject:
+                if (
+                    present.subject,
+                    present.owner_member_id,
+                    present.connection_id,
+                ) != (
+                    subject,
+                    owner_member_id,
+                    connection_id,
+                ):
                     raise ValueError(
-                        "a source with this configuration is already registered; delete it "
-                        "before changing its disclosure"
+                        "a source with this configuration is already registered under a different "
+                        "owner, connection, or disclosure; delete it before changing its authority"
                     )
                 return source_id
             if present is not None:
@@ -629,6 +677,7 @@ class ExtensionContext:
                         removed_at=None,
                         subject=subject,
                         owner_member_id=owner_member_id,
+                        connection_id=connection_id,
                         cursor=None,
                         next_sync_at=datetime.now(UTC),
                         consecutive_errors=0,
@@ -647,6 +696,7 @@ class ExtensionContext:
                     config=payload,
                     subject=subject,
                     owner_member_id=owner_member_id,
+                    connection_id=connection_id,
                     cursor=None,
                     next_sync_at=datetime.now(UTC),
                     claimed_by=None,
@@ -667,6 +717,7 @@ class ExtensionContext:
                 tables.source.c.config,
                 tables.source.c.subject,
                 tables.source.c.owner_member_id,
+                tables.source.c.connection_id,
                 tables.source.c.next_sync_at,
                 tables.source.c.consecutive_errors,
                 tables.source.c.created_at,
@@ -689,6 +740,7 @@ class ExtensionContext:
                 config=row["config"],
                 subject=row["subject"],
                 owner_member_id=row["owner_member_id"],
+                connection_id=row["connection_id"],
                 next_sync_at=row["next_sync_at"],
                 consecutive_errors=row["consecutive_errors"],
                 created_at=row["created_at"],

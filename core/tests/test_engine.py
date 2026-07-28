@@ -9,6 +9,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 from uuid import UUID, uuid4
 
 import pytest
@@ -40,7 +41,14 @@ from ufo.ext.manifest import (
     InjectContext,
     UserPromptSubmit,
 )
-from ufo.grants import ConnectFlow, GrantStore, OAuthAccount, install_connect_flow
+from ufo.grants import (
+    ConnectFlow,
+    ConnectHandoff,
+    ConnectRequestInvalid,
+    GrantStore,
+    OAuthAccount,
+    install_connect_flow,
+)
 from ufo.hub import InProcessHub, LiveFrame, SkillLoad, ToolCall
 from ufo.loop.compaction import (
     COMPACTED_CONTEXT_PREFIX,
@@ -547,7 +555,7 @@ STUB_AUTHORIZE_URL = "https://stub.test/oauth"
 @dataclass(frozen=True)
 class ConnectStubProvider:
     """Stands in for a connector's OAuth descriptor so the connect tool can authorize without a
-    real provider; `authorize_url` echoes the sealed state, the only leg this engine test drives."""
+    real provider; `authorize_url` echoes the sealed state."""
 
     provider: str = "stub"
     host: str = "api.granted.test"
@@ -2225,41 +2233,88 @@ def test_a_subagent_engine_rejects_a_registry_tool_named_finish(tmp_path: Path) 
         replace(engine, tools=rogue, output_model=_Report)
 
 
-async def test_connect_account_tool_call_in_a_turn_yields_a_terminal_handoff(
+async def test_connect_handoff_binds_the_requesting_speaker_in_an_aggregate_turn(
     db: None, tmp_path: Path
 ) -> None:
     turn = await _seed_turn("queued", None)
-    fernet = Fernet(Fernet.generate_key())
-    install_connect_flow(
-        ConnectFlow(
-            providers={"stub": ConnectStubProvider()},
-            fernet=fernet,
-            store=GrantStore(),
-            redirect_uri="http://surface/v1/connect/callback",
-        )
-    )
-    try:
-        async with workspace_tx() as connection:
-            speaker = (
-                await connection.execute(
-                    sa.select(tables.member.c.id).where(
-                        tables.member.c.workspace_id == turn.workspace_id
-                    )
+    bob = uuid4()
+    async with workspace_tx() as connection:
+        alice = (
+            await connection.execute(
+                sa.select(tables.member.c.id).where(
+                    tables.member.c.workspace_id == turn.workspace_id
                 )
-            ).scalar_one()
-        engine = _engine(turn, ConnectCallingModel(turn.id), tmp_path)
-        engine = replace(engine, turn=engine.turn.model_copy(update={"speaker_member_id": speaker}))
+            )
+        ).scalar_one()
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=bob,
+                workspace_id=turn.workspace_id,
+                email="bob@example.com",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.update(tables.turn)
+            .values(
+                admission_source="member",
+                speaker_member_id=alice,
+                updated_at=sa.func.now(),
+            )
+            .where(tables.turn.c.id == turn.id)
+        )
+    bob_message = await _queue_arrival(turn, "connect my account", bob)
+    fernet = Fernet(Fernet.generate_key())
+    flow = ConnectFlow(
+        providers={"stub": ConnectStubProvider()},
+        fernet=fernet,
+        store=GrantStore(),
+        redirect_uri="http://surface/v1/connect/callback",
+    )
+    install_connect_flow(flow)
+    try:
+        engine = _engine(
+            turn.model_copy(
+                update={
+                    "admission_source": "member",
+                    "speaker_member_id": alice,
+                }
+            ),
+            ConnectCallingModel(bob_message),
+            tmp_path,
+            member_id=alice,
+        )
         frame = await engine.run()
+        assert frame.status == "done"
+        assert frame.connect_request == ConnectRequest(provider="stub", requester_member_id=bob)
+        with pytest.raises(ConnectRequestInvalid, match="another member"):
+            await ConnectHandoff(flow).authorize(turn.workspace_id, turn.id, alice)
+        url = await ConnectHandoff(flow).authorize(turn.workspace_id, turn.id, bob)
+        state = parse_qs(urlparse(url).query)["state"][0]
+        await flow.complete(state=state, code="the-code")
     finally:
         install_connect_flow(None)
-    assert frame.status == "done"
     stored = await engine.transcript.read()
     assert stored is not None
-    tool_result = stored.messages[2].content
-    assert isinstance(tool_result, tuple) and isinstance(tool_result[0], ToolResultBlock)
-    assert tool_result[0].is_error is False
-    assert STUB_AUTHORIZE_URL not in tool_result[0].content
-    assert frame.connect_request == ConnectRequest(provider="stub")
+    result = next(
+        block
+        for message in stored.messages
+        if isinstance(message.content, tuple)
+        for block in message.content
+        if isinstance(block, ToolResultBlock)
+    )
+    assert result.is_error is False
+    assert STUB_AUTHORIZE_URL not in result.content
+    async with workspace_tx() as connection:
+        owner = (
+            await connection.execute(
+                sa.select(tables.connection.c.owner_member_id).where(
+                    tables.connection.c.workspace_id == turn.workspace_id
+                )
+            )
+        ).scalar_one()
+    assert owner == bob
 
 
 async def test_engine_compacts_history_before_the_round_and_bills_the_summary(

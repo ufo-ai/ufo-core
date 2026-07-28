@@ -387,6 +387,16 @@ async def test_register_source_refuses_a_live_row_with_a_different_subject(db: N
             )
 
 
+def test_brokered_source_row_id_includes_connection_generation() -> None:
+    workspace_id = uuid4()
+    config = {"account": "same-account", "stream": "messages"}
+    first_connection, second_connection = uuid4(), uuid4()
+
+    assert source_row_id(
+        workspace_id, "gmail", config, connection_id=first_connection
+    ) != source_row_id(workspace_id, "gmail", config, connection_id=second_connection)
+
+
 async def test_register_source_conflict_does_not_leak_the_owner_subject(db: None) -> None:
     workspace_id = await _workspace()
     ctx = context_for("probe", frozenset())
@@ -967,6 +977,17 @@ class _BlockingReadBlob(FilesystemBlobStore):
         return await super().get(key)
 
 
+@dataclass(frozen=True)
+class _BlockingWriteBlob(FilesystemBlobStore):
+    entered: asyncio.Event = field(default_factory=asyncio.Event)
+    release: asyncio.Event = field(default_factory=asyncio.Event)
+
+    async def put(self, key: str, data: bytes) -> None:
+        self.entered.set()
+        await self.release.wait()
+        await super().put(key, data)
+
+
 def _scripted_driver(
     outcomes: list[SyncResult | Exception], database_url: str, blob_root: Path
 ) -> tuple[SyncDriver, _ScriptedSource]:
@@ -1062,6 +1083,92 @@ async def test_sync_uses_source_subject_current_after_fetch(
                 )
             ).scalar_one()
     assert page_subject == SHARED_SUBJECT
+
+
+async def test_stale_sync_cannot_overwrite_a_re_registered_source(
+    db: None, database_url: str, tmp_path: Path
+) -> None:
+    workspace_id = await _workspace()
+    alice, bob = uuid4(), uuid4()
+    blob = _BlockingWriteBlob(root=tmp_path / "blobs")
+    driver = SyncDriver(
+        backends={
+            SCRIPTED_BACKEND: _ScriptedSource(
+                [
+                    SyncResult(
+                        pages=(
+                            Page(
+                                source_ref="alice/doc",
+                                body="alice data",
+                                stream="docs",
+                                title="Alice",
+                            ),
+                        ),
+                        next_cursor="alice-cursor",
+                    )
+                ]
+            )
+        },
+        blob=blob,
+        postgres=database_url.startswith("postgresql"),
+    )
+    config = SourceConfig(root="/unused")
+    context = context_for("probe", frozenset())
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            for member_id, email in ((alice, "alice@example.com"), (bob, "bob@example.com")):
+                await connection.execute(
+                    sa.insert(tables.member).values(
+                        id=member_id,
+                        workspace_id=workspace_id,
+                        email=email,
+                        created_at=sa.func.now(),
+                        updated_at=sa.func.now(),
+                    )
+                )
+        source_id = await context.register_source(
+            SCRIPTED_BACKEND,
+            config,
+            subject=member_subject(alice),
+            owner_member_id=alice,
+        )
+        running = asyncio.create_task(driver.run())
+        try:
+            await blob.entered.wait()
+            await context.remove_source(source_id)
+            assert (
+                await context.register_source(
+                    SCRIPTED_BACKEND,
+                    config,
+                    subject=member_subject(bob),
+                    owner_member_id=bob,
+                )
+                == source_id
+            )
+        finally:
+            blob.release.set()
+            await running
+        async with workspace_tx() as connection:
+            source = (
+                await connection.execute(
+                    sa.select(
+                        tables.source.c.owner_member_id,
+                        tables.source.c.cursor,
+                        tables.source.c.consecutive_errors,
+                        tables.source.c.claimed_by,
+                        tables.source.c.removed_at,
+                    ).where(tables.source.c.id == source_id)
+                )
+            ).one()
+            pages = (
+                await connection.execute(
+                    sa.select(sa.func.count())
+                    .select_from(tables.page)
+                    .where(tables.page.c.source_id == source_id)
+                )
+            ).scalar_one()
+    assert source == (bob, None, 0, None, None)
+    assert pages == 0
 
 
 async def test_page_feed_reads_one_immutable_page_version_during_a_sync(

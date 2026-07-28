@@ -567,7 +567,9 @@ def test_block_kit_reply_body_renders_markdown_and_degrades() -> None:
     degraded = json.loads(slack.slack_reply_body("C5", None, big, metadata))
     assert "blocks" not in degraded
     assert degraded["text"] == f"{big}\n\n{metadata}"
-    connect = slack.slack_connect_blocks(ConnectRequest(provider="github"), uuid4())
+    connect = slack.slack_connect_blocks(
+        ConnectRequest(provider="github", requester_member_id=uuid4()), uuid4()
+    )
     assert connect is not None
     preserved = json.loads(slack.slack_reply_body("C5", None, big, metadata, actions=connect))
     assert "".join(block["text"] for block in preserved["blocks"][:-2]) == big
@@ -2790,7 +2792,10 @@ async def test_oversize_artifact_is_delivered_as_a_download_link(
     ("question", "connect_request"),
     [
         (None, None),
-        (None, ConnectRequest(provider="google_calendar")),
+        (
+            None,
+            ConnectRequest(provider="google_calendar", requester_member_id=uuid4()),
+        ),
         (ASK_QUESTION, None),
     ],
 )
@@ -4368,7 +4373,7 @@ async def test_connect_writeback_keeps_oauth_private_and_checks_the_requester(
         "Use the private connection control.",
         blob,
         artifact=False,
-        connect_request=ConnectRequest(provider="google_calendar"),
+        connect_request=ConnectRequest(provider="google_calendar", requester_member_id=member_id),
         speaker_member_id=member_id,
     )
     try:
@@ -4432,7 +4437,7 @@ async def test_dm_connect_click_posts_the_link_unthreaded(db: None, tmp_path, mo
         "Use the private connection control.",
         blob,
         artifact=False,
-        connect_request=ConnectRequest(provider="google_calendar"),
+        connect_request=ConnectRequest(provider="google_calendar", requester_member_id=member_id),
         speaker_member_id=member_id,
     )
     click = _click_body(

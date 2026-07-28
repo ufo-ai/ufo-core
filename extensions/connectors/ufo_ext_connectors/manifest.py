@@ -8,7 +8,7 @@ Manifest point."""
 from pathlib import Path
 
 from ufo.sdk.manifest import Manifest, PromptSection
-from ufo_ext_connectors.objects import CONNECTOR_OBJECT
+from ufo_ext_connectors.objects import CONNECTION_OBJECT, CONNECTOR_GRANT_OBJECT
 from ufo_ext_connectors.tools import CONNECTOR_TOOLS
 
 NAME = "connectors"
@@ -23,6 +23,6 @@ def manifest() -> Manifest:
         name=NAME,
         version=VERSION,
         tools=CONNECTOR_TOOLS,
-        objects=(CONNECTOR_OBJECT,),
+        objects=(CONNECTION_OBJECT, CONNECTOR_GRANT_OBJECT),
         prompt_sections=(PromptSection(name=SECTION_NAME, body=SECTION_BODY),),
     )

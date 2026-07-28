@@ -38,6 +38,7 @@ member = sa.Table(
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     sa.UniqueConstraint("workspace_id", "email"),
+    sa.UniqueConstraint("workspace_id", "id", name="member_workspace_identity"),
 )
 
 surface_identity = sa.Table(
@@ -85,6 +86,7 @@ agent = sa.Table(
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     sa.UniqueConstraint("workspace_id", "name"),
+    sa.UniqueConstraint("workspace_id", "id", name="agent_workspace_identity"),
     sa.Index(
         "agent_workspace_main",
         "workspace_id",
@@ -119,6 +121,7 @@ conversation = sa.Table(
         "queue_key",
         name="conversation_workspace_surface_queue_key_key",
     ),
+    sa.UniqueConstraint("workspace_id", "id", name="conversation_workspace_identity"),
     sa.Index("conversation_workspace", "workspace_id"),
     sa.CheckConstraint(
         "audience = 'shared' or audience like 'member:%' or "
@@ -303,24 +306,63 @@ credential = sa.Table(
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
 )
 
-grant = sa.Table(
-    "grant",
+connection = sa.Table(
+    "connection",
     metadata,
     sa.Column("id", sa.Uuid, primary_key=True),
     sa.Column("workspace_id", sa.Uuid, sa.ForeignKey("workspace.id"), nullable=False),
-    sa.Column("agent_id", sa.Uuid, sa.ForeignKey("agent.id"), nullable=False),
     sa.Column("provider", sa.Text, nullable=False),
     sa.Column("account_id", sa.Text, nullable=False),
     sa.Column("host", sa.Text, nullable=False),
-    sa.Column("grantor_member_id", sa.Uuid, sa.ForeignKey("member.id"), nullable=False),
-    sa.Column("conversation_id", sa.Uuid, sa.ForeignKey("conversation.id"), nullable=False),
+    sa.Column("owner_member_id", sa.Uuid, nullable=False),
+    sa.Column("conversation_id", sa.Uuid, nullable=False),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+    sa.UniqueConstraint("workspace_id", "provider", "account_id", name="connection_identity"),
+    sa.UniqueConstraint("workspace_id", "id", name="connection_workspace_identity"),
+    sa.UniqueConstraint(
+        "workspace_id",
+        "id",
+        "owner_member_id",
+        name="connection_owner_identity",
+    ),
+    sa.ForeignKeyConstraint(
+        ["workspace_id", "owner_member_id"],
+        ["member.workspace_id", "member.id"],
+    ),
+    sa.ForeignKeyConstraint(
+        ["workspace_id", "conversation_id"],
+        ["conversation.workspace_id", "conversation.id"],
+    ),
+)
+
+connector_grant = sa.Table(
+    "connector_grant",
+    metadata,
+    sa.Column("id", sa.Uuid, primary_key=True),
+    sa.Column("workspace_id", sa.Uuid, sa.ForeignKey("workspace.id"), nullable=False),
+    sa.Column("agent_id", sa.Uuid, nullable=False),
+    sa.Column("connection_id", sa.Uuid, nullable=False),
+    sa.Column("conversation_id", sa.Uuid, nullable=False),
     sa.Column("shared", sa.Boolean, nullable=False, server_default=sa.true()),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     sa.UniqueConstraint(
-        "workspace_id", "agent_id", "provider", "account_id", name="grant_identity"
+        "workspace_id", "agent_id", "connection_id", name="connector_grant_identity"
     ),
-    sa.Index("grant_workspace", "workspace_id"),
+    sa.ForeignKeyConstraint(
+        ["workspace_id", "connection_id"],
+        ["connection.workspace_id", "connection.id"],
+        ondelete="CASCADE",
+    ),
+    sa.ForeignKeyConstraint(
+        ["workspace_id", "agent_id"],
+        ["agent.workspace_id", "agent.id"],
+    ),
+    sa.ForeignKeyConstraint(
+        ["workspace_id", "conversation_id"],
+        ["conversation.workspace_id", "conversation.id"],
+    ),
 )
 
 proposal = sa.Table(
@@ -409,7 +451,8 @@ source = sa.Table(
     sa.Column("backend", sa.Text, nullable=False),
     sa.Column("config", sa.JSON, nullable=False),
     sa.Column("subject", sa.Text, nullable=False, server_default="shared"),
-    sa.Column("owner_member_id", sa.Uuid, sa.ForeignKey("member.id"), nullable=True),
+    sa.Column("owner_member_id", sa.Uuid, nullable=True),
+    sa.Column("connection_id", sa.Uuid, nullable=True),
     sa.Column("cursor", sa.Text, nullable=True),
     sa.Column("next_sync_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("consecutive_errors", sa.Integer, nullable=False, server_default="0"),
@@ -420,6 +463,18 @@ source = sa.Table(
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     sa.Index("source_due", "next_sync_at"),
     sa.CheckConstraint("subject = 'shared' or subject like 'member:%'", name="source_subject"),
+    sa.CheckConstraint(
+        "connection_id is null or owner_member_id is not null",
+        name="source_connection_owner",
+    ),
+    sa.ForeignKeyConstraint(
+        ["workspace_id", "owner_member_id"],
+        ["member.workspace_id", "member.id"],
+    ),
+    sa.ForeignKeyConstraint(
+        ["workspace_id", "connection_id", "owner_member_id"],
+        ["connection.workspace_id", "connection.id", "connection.owner_member_id"],
+    ),
 )
 
 scheduled_task = sa.Table(

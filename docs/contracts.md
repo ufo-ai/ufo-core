@@ -21,7 +21,7 @@ core/src/ufo/
   tools/         registry, context, builtins/
   sandbox/       carrier (+docker), image/, proxy/ (rewriters, sentinel swap, metering)
   memory/        service (store+recall), index (pgvector), pipeline (condensers), embed
-  sources.py     SourceBackend + folder + sync driver         grants.py   grant flow
+  sources.py     SourceBackend + folder + sync driver         grants.py   connection + agent edge
   credentials.py encrypted BYOK store                         accounting.py ledger, caps, prices
   surfaces/      slack, web, cli, onboarding                  ext/        loader, rule derivation
   sdk/           the ONLY public import surface for extensions

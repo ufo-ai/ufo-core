@@ -20,7 +20,12 @@ import pytest
 from ufo_ext_sources.slack import SlackConnector
 
 from ufo.blob import FilesystemBlobStore
-from ufo.connectors import Credential
+from ufo.connectors import (
+    DIRECT_ACCOUNT,
+    ConnectorRegistry,
+    Credential,
+    SourceCredentialResolver,
+)
 from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig
 from ufo.sources import backend as backend_module
 from ufo.sources.sync import ClaimedSource, SourceAuth, StreamSkipped, SyncDriver, SyncResult
@@ -279,15 +284,20 @@ async def test_sync_driver_resolves_the_current_surface_user_each_fetch(tmp_path
         backends={"slack": ConnectorBackend(connector=SlackConnector())},
         blob=FilesystemBlobStore(root=tmp_path),
         postgres=False,
-        auth_proxy=_MockProxy(_bot_message_handler),
+        source_credentials=SourceCredentialResolver(
+            ConnectorRegistry(entries={}, fallback=_MockProxy(_bot_message_handler))
+        ),
         identity_resolvers={"slack": resolve},
     )
     source = ClaimedSource(
         source_id=uuid4(),
         workspace_id=uuid4(),
+        claim="claim",
         backend="slack",
-        config=ConnectorSourceConfig(account=ACCOUNT, stream="messages").model_dump(),
+        config=ConnectorSourceConfig(account=DIRECT_ACCOUNT, stream="messages").model_dump(),
         subject="shared",
+        owner_member_id=None,
+        connection_id=None,
         cursor=None,
         consecutive_errors=0,
     )

@@ -473,8 +473,8 @@ async def test_connect_binds_a_grant_and_call_external_tool_executes_via_pipedre
     async with workspace_tx() as connection:
         row = (
             await connection.execute(
-                sa.select(tables.grant.c.host, tables.grant.c.account_id).where(
-                    tables.grant.c.workspace_id == workspace_id
+                sa.select(tables.connection.c.host, tables.connection.c.account_id).where(
+                    tables.connection.c.workspace_id == workspace_id
                 )
             )
         ).one()
@@ -784,8 +784,8 @@ async def test_complete_rejects_a_forged_success_marker(
         count = (
             await connection.execute(
                 sa.select(sa.func.count())
-                .select_from(tables.grant)
-                .where(tables.grant.c.workspace_id == workspace_id)
+                .select_from(tables.connector_grant)
+                .where(tables.connector_grant.c.workspace_id == workspace_id)
             )
         ).scalar_one()
     assert count == 0
@@ -874,9 +874,17 @@ async def test_overlapping_connect_flows_cannot_cross_bind_accounts(
     async with workspace_tx() as connection:
         rows = (
             await connection.execute(
-                sa.select(tables.grant.c.agent_id, tables.grant.c.account_id).where(
-                    tables.grant.c.workspace_id == workspace_id
+                sa.select(
+                    tables.connector_grant.c.agent_id,
+                    tables.connection.c.account_id,
                 )
+                .select_from(
+                    tables.connector_grant.join(
+                        tables.connection,
+                        tables.connector_grant.c.connection_id == tables.connection.c.id,
+                    )
+                )
+                .where(tables.connector_grant.c.workspace_id == workspace_id)
             )
         ).all()
     assert set(rows) == {(agent_a, account_a), (agent_b, account_b)}

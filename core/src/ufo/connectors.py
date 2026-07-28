@@ -24,11 +24,11 @@ provider's real tools, executes one with the granted account (the broker holds t
 injects it itself), and resolves the feed-sync `Credential` for that provider's accounts. A broker
 extension (Composio, Pipedream) declares one per provider through the `connectors` Manifest point;
 `serve` merges every declaration into the one `ConnectorRegistry`, threads it onto the turn's
-ToolContext for the dynamic connector tools, and hands it to the sync runner as its auth proxy —
-`credential` routes a source holding a broker grant to that provider's broker and a source holding
-`DIRECT_ACCOUNT` (the member set a key, not a grant) to the deploy-selected fallback backend
-(`[connectors] auth_backend`, the `auth_proxies` Manifest point), so one deploy brokers gmail
-through one broker and github through another while keyed providers sync through `direct`."""
+ToolContext for the dynamic connector tools, and hands its connection-bound credential resolver to
+the sync runner. A source holding `DIRECT_ACCOUNT` (the member set a key, not a connection) reaches
+the deploy-selected fallback backend (`[connectors] auth_backend`, the `auth_proxies` Manifest
+point), so one deploy brokers gmail through one broker and github through another while keyed
+providers sync through `direct`."""
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -36,6 +36,11 @@ from typing import Protocol
 from uuid import UUID
 
 import httpx
+import sqlalchemy as sa
+
+from ufo.db import workspace_tx
+from ufo.schema import tables
+from ufo.workspace import ws
 
 
 @dataclass(frozen=True, repr=False)
@@ -63,11 +68,10 @@ class Credential:
 
 DIRECT_ACCOUNT = "default"
 """The account handle a feed-sync source carries when it authenticates with the workspace's own
-provider key instead of a broker grant — the routing signal `ConnectorRegistry.credential` reads to
-reach the fallback backend. A source registers with it when the member set the provider's credential
-rather than connecting an account, so the run replays the decision registration made. It has to be
-the handle that carries it: a broker's open namespace claims every slug, so the provider name alone
-cannot tell a keyed source from a granted one."""
+provider key instead of a broker connection. A source registers with it when the member set the
+provider's credential rather than connecting an account, so the run replays the decision
+registration made. It has to be the handle that carries it: a broker's open namespace claims every
+slug, so the provider name alone cannot tell a keyed source from a connected one."""
 
 
 class AuthProxy(Protocol):
@@ -274,10 +278,8 @@ class ConnectorRegistry:
     `serve` builds from the manifests' `connectors` points. The dynamic connector tools read
     `entries` and `search_catalog` to list providers and dispatch through `entry` to the owning
     broker (`entry` resolves an unregistered slug through the resolver, else fails loud); the sync
-    runner uses the registry as its auth proxy — `credential` routes on the source's account handle
-    first, since a `DIRECT_ACCOUNT` source has no grant for any broker to resolve: it goes to the
-    fallback, and a granted account goes to its provider's broker (registered, else the resolver's),
-    falling back for a provider no installed broker claims."""
+    source runner reaches its broker routing only through `SourceCredentialResolver`, which binds
+    each request to the source's exact member-owned connection generation."""
 
     entries: Mapping[str, ConnectorEntry]
     resolver: ConnectorResolver | None = None
@@ -298,17 +300,123 @@ class ConnectorRegistry:
             return ()
         return await self.resolver.catalog(query, limit)
 
-    async def credential(self, workspace_id: UUID, provider: str, account: str) -> Credential:
-        if account != DIRECT_ACCOUNT:
-            found = self.entries.get(provider)
-            if found is not None:
-                return await found.broker.credential(workspace_id, provider, account)
-            if self.resolver is not None:
-                return await self.resolver.entry(provider).broker.credential(
-                    workspace_id, provider, account
+
+async def _credential(
+    registry: ConnectorRegistry,
+    workspace_id: UUID,
+    provider: str,
+    account: str,
+) -> Credential:
+    if account != DIRECT_ACCOUNT:
+        found = registry.entries.get(provider)
+        if found is not None:
+            return await found.broker.credential(workspace_id, provider, account)
+        if registry.resolver is not None:
+            return await registry.resolver.entry(provider).broker.credential(
+                workspace_id, provider, account
+            )
+        raise RuntimeError(f"no connector broker resolves {provider!r} credentials")
+    if registry.fallback is not None:
+        return await registry.fallback.credential(workspace_id, provider, account)
+    raise RuntimeError(f"no [connectors] auth_backend resolves {provider!r} credentials")
+
+
+async def _require_source_connection(
+    workspace_id: UUID,
+    connection_id: UUID,
+    owner_member_id: UUID,
+    provider: str,
+    account: str,
+) -> None:
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            authorized = (
+                await connection.execute(
+                    sa.select(tables.connection.c.id).where(
+                        tables.connection.c.workspace_id == workspace_id,
+                        tables.connection.c.id == connection_id,
+                        tables.connection.c.owner_member_id == owner_member_id,
+                        tables.connection.c.provider == provider,
+                        tables.connection.c.account_id == account,
+                    )
                 )
-        if self.fallback is not None:
-            return await self.fallback.credential(workspace_id, provider, account)
-        raise RuntimeError(
-            f"no connector broker or [connectors] auth_backend resolves {provider!r} credentials"
+            ).scalar_one_or_none()
+    if authorized is None:
+        raise ValueError(
+            f"the {provider!r} connection for account {account!r} "
+            "is no longer active for this source"
+        )
+
+
+@dataclass(frozen=True)
+class _ConnectionTransport(httpx.AsyncBaseTransport):
+    inner: httpx.AsyncBaseTransport
+    workspace_id: UUID
+    connection_id: UUID
+    owner_member_id: UUID
+    provider: str
+    account: str
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        await _require_source_connection(
+            self.workspace_id,
+            self.connection_id,
+            self.owner_member_id,
+            self.provider,
+            self.account,
+        )
+        return await self.inner.handle_async_request(request)
+
+    async def aclose(self) -> None:
+        await self.inner.aclose()
+
+
+@dataclass(frozen=True)
+class _BoundSourceCredentials:
+    registry: ConnectorRegistry
+    connection_id: UUID | None
+    owner_member_id: UUID | None
+
+    async def credential(self, workspace_id: UUID, provider: str, account: str) -> Credential:
+        if account == DIRECT_ACCOUNT:
+            if self.connection_id is not None:
+                raise ValueError("a connection-bound source cannot use direct credentials")
+            return await _credential(self.registry, workspace_id, provider, account)
+        if self.connection_id is None or self.owner_member_id is None:
+            raise ValueError(
+                f"source has no member-owned {provider!r} connection for account {account!r}"
+            )
+        await _require_source_connection(
+            workspace_id,
+            self.connection_id,
+            self.owner_member_id,
+            provider,
+            account,
+        )
+        credential = await _credential(self.registry, workspace_id, provider, account)
+        if credential.transport is None:
+            raise RuntimeError(
+                f"brokered {provider!r} source credentials did not provide a proxy transport"
+            )
+        return Credential(
+            transport=_ConnectionTransport(
+                inner=credential.transport,
+                workspace_id=workspace_id,
+                connection_id=self.connection_id,
+                owner_member_id=self.owner_member_id,
+                provider=provider,
+                account=account,
+            )
+        )
+
+
+@dataclass(frozen=True)
+class SourceCredentialResolver:
+    registry: ConnectorRegistry
+
+    def bind(self, connection_id: UUID | None, owner_member_id: UUID | None) -> AuthProxy:
+        return _BoundSourceCredentials(
+            registry=self.registry,
+            connection_id=connection_id,
+            owner_member_id=owner_member_id,
         )

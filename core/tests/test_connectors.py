@@ -12,7 +12,7 @@ injects nothing on the wire."""
 import asyncio
 import base64
 from collections.abc import Iterator
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from urllib.parse import parse_qs, urlparse
 from uuid import UUID, uuid4
@@ -21,10 +21,17 @@ import pytest
 import sqlalchemy as sa
 import ufo_ext_sample as sample
 from cryptography.fernet import Fernet
+from httpx import AsyncBaseTransport, AsyncClient, Request, Response
 
 from ufo.agent_scope import agent
 from ufo.audience import conversation_audience
 from ufo.config import Config
+from ufo.connectors import (
+    ConnectorEntry,
+    ConnectorRegistry,
+    Credential,
+    SourceCredentialResolver,
+)
 from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.grants import ConnectHandoff, GrantStore, install_connect_flow
@@ -41,7 +48,29 @@ from ufo.workspace import ws
 UNGRANTED_HOST = "api.ungranted.test"
 PUBLIC_BASE_URL = "https://ufo.example.com"
 EXPECTED_REDIRECT_URI = "https://ufo.example.com/v1/connect/callback"
+DISCONNECT_TIMEOUT_SECONDS = 5
 RUN_TOKENS = RunTokenCodec(b"connectors-test-run-token-secret")
+
+
+class _BarrierTransport(AsyncBaseTransport):
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+        self.requests = 0
+
+    async def handle_async_request(self, request: Request) -> Response:
+        self.requests += 1
+        self.entered.set()
+        await self.release.wait()
+        return Response(200, json={"ok": True})
+
+
+@dataclass(frozen=True)
+class _BarrierBroker:
+    transport: _BarrierTransport
+
+    async def credential(self, workspace_id: UUID, provider: str, account: str) -> Credential:
+        return Credential(transport=self.transport)
 
 
 @pytest.fixture(autouse=True)
@@ -155,12 +184,13 @@ async def test_connect_binds_a_grant_and_the_proxy_admits_and_meters_the_host(
     async with workspace_tx() as connection:
         row = (
             await connection.execute(
-                sa.select(tables.grant.c.host, tables.grant.c.grantor_member_id).where(
-                    tables.grant.c.workspace_id == workspace_id
-                )
+                sa.select(
+                    tables.connection.c.host,
+                    tables.connection.c.owner_member_id,
+                ).where(tables.connection.c.workspace_id == workspace_id)
             )
         ).one()
-    assert (row.host, row.grantor_member_id) == (sample.CONNECTOR_HOST, member_id)
+    assert (row.host, row.owner_member_id) == (sample.CONNECTOR_HOST, member_id)
 
     resolver = PerAgentRules(base=(), grants=flow.store)
     cert, key = await generate_ca()
@@ -271,6 +301,91 @@ async def test_connector_accounts_lists_only_the_turn_agents_provider_accounts(d
     ctx = _turn_context(workspace_id, agent_id, conversation_id, member_id, grants=store)
     with ws(workspace_id), agent(agent_id):
         assert await ctx.connector_accounts(sample.CONNECTOR_PROVIDER) == ("acct-1", "acct-2")
+
+
+async def test_source_credential_stays_bound_to_its_connection_generation(db: None) -> None:
+    workspace_id = await _workspace()
+    alice, agent_id = await _member_agent(workspace_id)
+    alice_conversation = await _conversation(workspace_id, alice)
+    store = GrantStore()
+    with ws(workspace_id), agent(agent_id):
+        await store.record(
+            provider="stub",
+            account_id="same-account",
+            host="api.stub.test",
+            grantor_member_id=alice,
+            conversation_id=alice_conversation,
+            shared=False,
+        )
+        (grant,) = await store.active_grants()
+
+    transport = _BarrierTransport()
+    registry = ConnectorRegistry(
+        entries={
+            "stub": ConnectorEntry(
+                provider="stub",
+                label="Stub",
+                broker=_BarrierBroker(transport),
+            )
+        }
+    )
+    credential = (
+        await SourceCredentialResolver(registry)
+        .bind(
+            grant.connection_id,
+            alice,
+        )
+        .credential(workspace_id, "stub", "same-account")
+    )
+    assert credential.transport is not None
+
+    async def disconnect() -> bool:
+        with ws(workspace_id), agent(agent_id):
+            return await store.disconnect(
+                grant.connection_id,
+                actor_member_id=alice,
+            )
+
+    async with AsyncClient(transport=credential.transport) as client:
+        request = asyncio.create_task(client.get("https://api.stub.test/items"))
+        await transport.entered.wait()
+        deletion = asyncio.create_task(disconnect())
+        assert await asyncio.wait_for(deletion, timeout=DISCONNECT_TIMEOUT_SECONDS) is True
+        transport.release.set()
+        assert (await request).status_code == 200
+
+        bob = uuid4()
+        with ws(workspace_id):
+            async with workspace_tx() as connection:
+                await connection.execute(
+                    sa.insert(tables.member).values(
+                        id=bob,
+                        workspace_id=workspace_id,
+                        email="bob@x.test",
+                        created_at=sa.func.now(),
+                        updated_at=sa.func.now(),
+                    )
+                )
+        bob_conversation = await _conversation(workspace_id, bob)
+        with ws(workspace_id), agent(agent_id):
+            await store.record(
+                provider="stub",
+                account_id="same-account",
+                host="api.stub.test",
+                grantor_member_id=bob,
+                conversation_id=bob_conversation,
+                shared=False,
+            )
+        with pytest.raises(ValueError, match="no longer active for this source"):
+            await (
+                SourceCredentialResolver(registry)
+                .bind(grant.connection_id, alice)
+                .credential(workspace_id, "stub", "same-account")
+            )
+        with pytest.raises(ValueError, match="no longer active for this source"):
+            await client.get("https://api.stub.test/items")
+
+    assert transport.requests == 1
 
 
 async def test_connector_account_prefers_the_acting_members_private_account(db: None) -> None:

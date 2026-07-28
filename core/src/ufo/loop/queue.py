@@ -697,7 +697,7 @@ async def _grant_cli_env(
             for grant in granted
             if grant.provider == provider
             and not grant.shared
-            and grant.grantor_member_id == acting_member_id
+            and grant.owner_member_id == acting_member_id
         )
         shared = sorted(
             grant.account_id for grant in granted if grant.provider == provider and grant.shared

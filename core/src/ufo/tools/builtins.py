@@ -606,7 +606,11 @@ async def connect_account_handler(ctx: ToolContext, args: ConnectAccountInput) -
     if ctx.speaker_member_id is None:
         raise ValueError("connect requires a speaking member to gate the grant")
     await installed_connect_flow().validate_provider(args.provider)
-    request = ConnectRequest(provider=args.provider, shared=args.shared)
+    request = ConnectRequest(
+        provider=args.provider,
+        requester_member_id=ctx.speaker_member_id,
+        shared=args.shared,
+    )
     return ToolResult(
         content=(TextContent(text=f"{CONNECT_ACCOUNT_DIRECTIVE}\n{request.model_dump_json()}"),)
     )

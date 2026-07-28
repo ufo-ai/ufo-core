@@ -32,7 +32,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ufo.blob import BlobStore
 from ufo.config import SourceConfig, SourceEntry
-from ufo.connectors import AuthProxy
+from ufo.connectors import AuthProxy, SourceCredentialResolver
 from ufo.db import owner_tx, workspace_tx
 from ufo.o11y import log
 from ufo.schema import tables
@@ -206,13 +206,18 @@ class FolderSource:
         )
 
 
-def source_row_id(workspace_id: UUID, backend: str, config: Mapping[str, object]) -> UUID:
-    """The deterministic id of a source row for this workspace + backend + config, so a restart
-    (folder `[[sources]]`) or a re-registration (an extension's `register_source`) settles on the
-    same row rather than duplicating the sync."""
+def source_row_id(
+    workspace_id: UUID,
+    backend: str,
+    config: Mapping[str, object],
+    *,
+    connection_id: UUID | None = None,
+) -> UUID:
+    """The deterministic source row id. Brokered rows include their connection generation."""
+    generation = "" if connection_id is None else f"/connection/{connection_id}"
     return uuid5(
         NAMESPACE_URL,
-        f"{workspace_id}/source/{backend}/{json.dumps(dict(config), sort_keys=True)}",
+        f"{workspace_id}/source/{backend}/{json.dumps(dict(config), sort_keys=True)}{generation}",
     )
 
 
@@ -263,9 +268,12 @@ async def register_sources(configured: tuple[SourceEntry, ...]) -> None:
 class ClaimedSource:
     source_id: UUID
     workspace_id: UUID
+    claim: str
     backend: str
     config: Mapping[str, object]
     subject: str
+    owner_member_id: UUID | None
+    connection_id: UUID | None
     cursor: str | None
     consecutive_errors: int
 
@@ -298,7 +306,7 @@ class SyncDriver:
     backends: Mapping[str, SourceBackend]
     blob: BlobStore
     postgres: bool
-    auth_proxy: AuthProxy | None = None
+    source_credentials: SourceCredentialResolver | None = None
     identity_resolvers: Mapping[str, SourceIdentityResolver] = field(default_factory=dict)
 
     async def candidate_workspaces(self) -> tuple[UUID, ...]:
@@ -357,6 +365,8 @@ class SyncDriver:
                 tables.source.c.backend,
                 tables.source.c.config,
                 tables.source.c.subject,
+                tables.source.c.owner_member_id,
+                tables.source.c.connection_id,
                 tables.source.c.cursor,
                 tables.source.c.consecutive_errors,
             )
@@ -385,9 +395,12 @@ class SyncDriver:
             ClaimedSource(
                 source_id=row["id"],
                 workspace_id=row["workspace_id"],
+                claim=claim,
                 backend=row["backend"],
                 config=row["config"],
                 subject=row["subject"],
+                owner_member_id=row["owner_member_id"],
+                connection_id=row["connection_id"],
                 cursor=row["cursor"],
                 consecutive_errors=row["consecutive_errors"],
             )
@@ -403,7 +416,14 @@ class SyncDriver:
         self_user_id = None if resolver is None else await resolver(source.workspace_id)
         auth = SourceAuth(
             workspace_id=source.workspace_id,
-            auth_proxy=self.auth_proxy,
+            auth_proxy=(
+                None
+                if self.source_credentials is None
+                else self.source_credentials.bind(
+                    source.connection_id,
+                    source.owner_member_id,
+                )
+            ),
             self_user_id=self_user_id,
         )
         return await backend.fetch(config, source.cursor, auth)
@@ -501,6 +521,7 @@ class SyncDriver:
             authority = sa.select(tables.source.c.subject).where(
                 tables.source.c.id == source.source_id,
                 tables.source.c.workspace_id == workspace_id,
+                tables.source.c.claimed_by == source.claim,
                 tables.source.c.removed_at.is_(None),
             )
             if connection.dialect.name == "postgresql":
@@ -592,7 +613,11 @@ class SyncDriver:
                     claim_expires_at=None,
                     updated_at=sa.func.now(),
                 )
-                .where(tables.source.c.id == source.source_id)
+                .where(
+                    tables.source.c.id == source.source_id,
+                    tables.source.c.claimed_by == source.claim,
+                    tables.source.c.removed_at.is_(None),
+                )
             )
 
     async def _release(self, source: ClaimedSource, cursor_reset: bool) -> None:
@@ -618,7 +643,11 @@ class SyncDriver:
                     claim_expires_at=None,
                     updated_at=sa.func.now(),
                 )
-                .where(tables.source.c.id == source.source_id)
+                .where(
+                    tables.source.c.id == source.source_id,
+                    tables.source.c.claimed_by == source.claim,
+                    tables.source.c.removed_at.is_(None),
+                )
             )
 
     async def _skip(self, source: ClaimedSource) -> None:
@@ -637,7 +666,11 @@ class SyncDriver:
                     claim_expires_at=None,
                     updated_at=sa.func.now(),
                 )
-                .where(tables.source.c.id == source.source_id)
+                .where(
+                    tables.source.c.id == source.source_id,
+                    tables.source.c.claimed_by == source.claim,
+                    tables.source.c.removed_at.is_(None),
+                )
             )
 
 

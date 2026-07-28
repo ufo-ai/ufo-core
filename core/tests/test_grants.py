@@ -20,6 +20,8 @@ from ufo.db import workspace_tx
 from ufo.grants import (
     ConnectFlow,
     ConnectHandoff,
+    ConnectionOwnedByAnotherMember,
+    ConnectionPermissionDenied,
     ConnectRequestInvalid,
     ConnectStateInvalid,
     ConnectUnavailable,
@@ -158,23 +160,30 @@ async def _set_shared(
     store: GrantStore,
     workspace_id: UUID,
     agent_id: UUID,
-    provider: str,
-    account_id: str,
+    actor_member_id: UUID,
+    grant_id: UUID,
     shared: bool,
 ) -> bool:
     with ws(workspace_id), agent(agent_id):
-        return await store.set_shared(provider, account_id, shared)
+        return await store.set_shared(
+            grant_id,
+            shared,
+            actor_member_id=actor_member_id,
+        )
 
 
 async def _revoke(
     store: GrantStore,
     workspace_id: UUID,
     agent_id: UUID,
-    provider: str,
-    account_id: str,
+    actor_member_id: UUID,
+    grant_id: UUID,
 ) -> bool:
     with ws(workspace_id), agent(agent_id):
-        return await store.revoke(provider, account_id)
+        return await store.revoke(
+            grant_id,
+            actor_member_id=actor_member_id,
+        )
 
 
 async def _summaries(workspace_id: UUID, agent_id: UUID) -> tuple[GrantSummary, ...]:
@@ -191,10 +200,12 @@ def test_derive_admits_and_meters_the_granted_host_without_injecting() -> None:
     """A grant admits and meters its host but injects nothing — the broker holds the account's token
     and runs connector tools server-side, so no secret is on the wire."""
     grant = Grant(
+        id=uuid4(),
+        connection_id=uuid4(),
         provider="stub",
         account_id="acct-42",
         host=GRANTED_HOST,
-        grantor_member_id=uuid4(),
+        owner_member_id=uuid4(),
         shared=False,
     )
     rules = derive_grant_rules((grant,))
@@ -215,10 +226,12 @@ def test_derive_admits_the_providers_transfer_hosts_with_the_grant() -> None:
     """A grant also admits and meters its broker's declared file-store hosts — where the sandbox
     fetches a tool's presigned file outputs and stages its file inputs — still injecting nothing."""
     grant = Grant(
+        id=uuid4(),
+        connection_id=uuid4(),
         provider="stub",
         account_id="acct-42",
         host=GRANTED_HOST,
-        grantor_member_id=uuid4(),
+        owner_member_id=uuid4(),
         shared=False,
     )
     rules = derive_grant_rules((grant,), ConnectorTransferHosts({"stub": (TRANSFER_HOST,)}))
@@ -230,10 +243,12 @@ def test_derive_admits_the_providers_transfer_hosts_with_the_grant() -> None:
 
 def test_derive_ignores_another_providers_transfer_hosts() -> None:
     grant = Grant(
+        id=uuid4(),
+        connection_id=uuid4(),
         provider="stub",
         account_id="acct-42",
         host=GRANTED_HOST,
-        grantor_member_id=uuid4(),
+        owner_member_id=uuid4(),
         shared=False,
     )
     rules = derive_grant_rules((grant,), ConnectorTransferHosts({"other": (TRANSFER_HOST,)}))
@@ -287,10 +302,12 @@ async def test_grant_round_trips_carrying_only_the_account_id(db: None) -> None:
     grants = await _active(store, workspace_id, agent_id)
     assert grants == (
         Grant(
+            id=grants[0].id,
+            connection_id=grants[0].connection_id,
             provider="stub",
             account_id="acct-42",
             host=GRANTED_HOST,
-            grantor_member_id=member_id,
+            owner_member_id=member_id,
             shared=False,
         ),
     )
@@ -334,12 +351,72 @@ async def test_reconnecting_the_same_account_updates_not_duplicates(db: None) ->
             shared=False,
         )
     async with workspace_tx() as connection:
-        count = (
-            await connection.execute(sa.select(sa.func.count()).select_from(tables.grant))
+        connection_count = (
+            await connection.execute(sa.select(sa.func.count()).select_from(tables.connection))
         ).scalar_one()
-    assert count == 1
+        grant_count = (
+            await connection.execute(sa.select(sa.func.count()).select_from(tables.connector_grant))
+        ).scalar_one()
+    assert (connection_count, grant_count) == (1, 1)
     grants = await _active(store, workspace_id, agent_id)
     assert grants[0].host == HOST_B
+
+
+async def test_reconnecting_an_owned_account_cannot_reassign_it(db: None) -> None:
+    workspace_id = await _workspace()
+    owner_id, agent_id = await _member_agent(workspace_id)
+    other_id = uuid4()
+    conversation_id = await _conversation(workspace_id, owner_id)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=other_id,
+                workspace_id=workspace_id,
+                email="other@x.test",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    store = GrantStore()
+    await _record(
+        store,
+        workspace_id,
+        agent_id,
+        provider="stub",
+        account_id="acct-42",
+        host=HOST_A,
+        grantor_member_id=owner_id,
+        conversation_id=conversation_id,
+        shared=False,
+    )
+    with pytest.raises(ConnectionOwnedByAnotherMember):
+        await _record(
+            store,
+            workspace_id,
+            agent_id,
+            provider="stub",
+            account_id="acct-42",
+            host=HOST_B,
+            grantor_member_id=other_id,
+            conversation_id=conversation_id,
+            shared=True,
+        )
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(
+                    tables.connection.c.owner_member_id,
+                    tables.connection.c.host,
+                    tables.connector_grant.c.shared,
+                ).select_from(
+                    tables.connection.join(
+                        tables.connector_grant,
+                        tables.connector_grant.c.connection_id == tables.connection.c.id,
+                    )
+                )
+            )
+        ).one()
+    assert (row.owner_member_id, row.host, row.shared) == (owner_id, HOST_A, False)
 
 
 async def test_connect_flow_records_a_durable_grant_with_account_id(db: None) -> None:
@@ -371,13 +448,13 @@ async def test_connect_flow_records_a_durable_grant_with_account_id(db: None) ->
         row = (
             await connection.execute(
                 sa.select(
-                    tables.grant.c.account_id,
-                    tables.grant.c.host,
-                    tables.grant.c.grantor_member_id,
-                ).where(tables.grant.c.workspace_id == workspace_id)
+                    tables.connection.c.account_id,
+                    tables.connection.c.host,
+                    tables.connection.c.owner_member_id,
+                ).where(tables.connection.c.workspace_id == workspace_id)
             )
         ).one()
-    assert (row.account_id, row.host, row.grantor_member_id) == (
+    assert (row.account_id, row.host, row.owner_member_id) == (
         "acct-42",
         GRANTED_HOST,
         member_id,
@@ -432,16 +509,18 @@ async def test_grant_summaries_expose_the_audit_view(db: None) -> None:
     assert len(summaries) == 1
     summary = summaries[0]
     assert (summary.agent, summary.provider, summary.account_id) == ("assistant", "stub", "acct-42")
-    assert (summary.grantor_member_id, summary.conversation_id) == (member_id, conversation_id)
+    assert (summary.owner_member_id, summary.conversation_id) == (member_id, conversation_id)
 
 
 async def test_proxy_resolves_the_granted_host_but_blocks_tokenless_connect() -> None:
     """A grant contributes an exact host rule but no unsigned caller can exercise it."""
     grant = Grant(
+        id=uuid4(),
+        connection_id=uuid4(),
         provider="stub",
         account_id="acct-42",
         host=GRANTED_HOST,
-        grantor_member_id=uuid4(),
+        owner_member_id=uuid4(),
         shared=False,
     )
     resolver = PerAgentRules(base=derive_grant_rules((grant,)), grants=None)
@@ -674,16 +753,23 @@ async def test_connect_account_handoff_is_private_memoized_and_binds_the_speaker
         rows = (
             await connection.execute(
                 sa.select(
-                    tables.grant.c.account_id,
-                    tables.grant.c.agent_id,
-                    tables.grant.c.grantor_member_id,
-                    tables.grant.c.conversation_id,
-                ).where(tables.grant.c.workspace_id == workspace_id)
+                    tables.connection.c.account_id,
+                    tables.connector_grant.c.agent_id,
+                    tables.connection.c.owner_member_id,
+                    tables.connector_grant.c.conversation_id,
+                )
+                .select_from(
+                    tables.connector_grant.join(
+                        tables.connection,
+                        tables.connector_grant.c.connection_id == tables.connection.c.id,
+                    )
+                )
+                .where(tables.connector_grant.c.workspace_id == workspace_id)
             )
         ).all()
     assert len(rows) == 1
     assert (rows[0].account_id, rows[0].agent_id) == ("acct-42", agent_id)
-    assert (rows[0].grantor_member_id, rows[0].conversation_id) == (member_id, conversation_id)
+    assert (rows[0].owner_member_id, rows[0].conversation_id) == (member_id, conversation_id)
 
 
 async def test_connect_handoff_expires_with_its_terminal_request(db: None) -> None:
@@ -697,7 +783,10 @@ async def test_connect_handoff_expires_with_its_terminal_request(db: None) -> No
         redirect_uri=REDIRECT_URI,
     )
     turn_id = uuid4()
-    terminal = TerminalFrame(status="done", connect_request=ConnectRequest(provider="stub"))
+    terminal = TerminalFrame(
+        status="done",
+        connect_request=ConnectRequest(provider="stub", requester_member_id=member_id),
+    )
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.turn).values(
@@ -730,7 +819,10 @@ async def test_connect_handoff_replays_against_its_authorization_ttl(db: None) -
         redirect_uri=REDIRECT_URI,
     )
     turn_id = uuid4()
-    terminal = TerminalFrame(status="done", connect_request=ConnectRequest(provider="stub"))
+    terminal = TerminalFrame(
+        status="done",
+        connect_request=ConnectRequest(provider="stub", requester_member_id=member_id),
+    )
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.turn).values(
@@ -822,7 +914,7 @@ async def test_connect_flow_records_the_models_shared_decision(db: None) -> None
     await flow.complete(state=state, code="c")
     (grant,) = await _active(store, workspace_id, agent_id)
     assert grant.shared is True
-    assert grant.grantor_member_id == member_id
+    assert grant.owner_member_id == member_id
 
 
 async def test_a_grant_defaults_private_and_reconnect_updates_shared(db: None) -> None:
@@ -866,12 +958,13 @@ async def test_set_shared_flips_only_the_named_agents_binding(db: None) -> None:
             conversation_id=conversation_id,
             shared=False,
         )
-    assert await _set_shared(store, workspace_id, agent_id, "stub", "acct-42", True) is True
+    (initial,) = await _active(store, workspace_id, agent_id)
+    assert await _set_shared(store, workspace_id, agent_id, member_id, initial.id, True) is True
     (flipped,) = await _active(store, workspace_id, agent_id)
     assert flipped.shared is True
     (untouched,) = await _active(store, workspace_id, second_agent)
     assert untouched.shared is False
-    assert await _set_shared(store, workspace_id, agent_id, "stub", "missing", True) is False
+    assert await _set_shared(store, workspace_id, agent_id, member_id, uuid4(), True) is False
 
 
 async def test_revoke_removes_only_the_named_agents_binding(db: None) -> None:
@@ -892,11 +985,192 @@ async def test_revoke_removes_only_the_named_agents_binding(db: None) -> None:
             conversation_id=conversation_id,
             shared=False,
         )
-    assert await _revoke(store, workspace_id, agent_id, "stub", "acct-42") is True
+    (initial,) = await _active(store, workspace_id, agent_id)
+    assert await _revoke(store, workspace_id, agent_id, member_id, initial.id) is True
     assert await _active(store, workspace_id, agent_id) == ()
     (kept,) = await _active(store, workspace_id, second_agent)
     assert kept.account_id == "acct-42"
-    assert await _revoke(store, workspace_id, agent_id, "stub", "acct-42") is False
+    assert await _revoke(store, workspace_id, agent_id, member_id, initial.id) is False
+
+
+async def test_same_owner_replacements_refuse_stale_generations(db: None) -> None:
+    workspace_id = await _workspace()
+    member_id, agent_id = await _member_agent(workspace_id)
+    conversation_id = await _conversation(workspace_id, member_id)
+    store = GrantStore()
+    await _record(
+        store,
+        workspace_id,
+        agent_id,
+        provider="stub",
+        account_id="acct-42",
+        host=GRANTED_HOST,
+        grantor_member_id=member_id,
+        conversation_id=conversation_id,
+        shared=False,
+    )
+    stale_connection = (await _active(store, workspace_id, agent_id))[0]
+    with ws(workspace_id), agent(agent_id):
+        assert (
+            await store.disconnect(
+                stale_connection.connection_id,
+                actor_member_id=member_id,
+            )
+            is True
+        )
+    await _record(
+        store,
+        workspace_id,
+        agent_id,
+        provider="stub",
+        account_id="acct-42",
+        host=GRANTED_HOST,
+        grantor_member_id=member_id,
+        conversation_id=conversation_id,
+        shared=False,
+    )
+    reconnected = (await _active(store, workspace_id, agent_id))[0]
+    assert reconnected.connection_id != stale_connection.connection_id
+    assert reconnected.id != stale_connection.id
+    with ws(workspace_id), agent(agent_id):
+        assert (
+            await store.disconnect(
+                stale_connection.connection_id,
+                actor_member_id=member_id,
+            )
+            is False
+        )
+        assert await store.revoke(reconnected.id, actor_member_id=member_id) is True
+    await _record(
+        store,
+        workspace_id,
+        agent_id,
+        provider="stub",
+        account_id="acct-42",
+        host=GRANTED_HOST,
+        grantor_member_id=member_id,
+        conversation_id=conversation_id,
+        shared=True,
+    )
+    regranted = (await _active(store, workspace_id, agent_id))[0]
+    assert regranted.connection_id == reconnected.connection_id
+    assert regranted.id != reconnected.id
+    with ws(workspace_id), agent(agent_id):
+        assert await store.set_shared(reconnected.id, False, actor_member_id=member_id) is False
+        assert await store.revoke(reconnected.id, actor_member_id=member_id) is False
+    assert (await _active(store, workspace_id, agent_id)) == (regranted,)
+
+
+async def test_admin_may_narrow_and_revoke_but_not_widen(db: None) -> None:
+    workspace_id = await _workspace()
+    member_id, agent_id = await _member_agent(workspace_id)
+    admin_id = uuid4()
+    conversation_id = await _conversation(workspace_id, member_id)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=admin_id,
+                workspace_id=workspace_id,
+                email="admin@x.test",
+                is_admin=True,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    store = GrantStore()
+    await _record(
+        store,
+        workspace_id,
+        agent_id,
+        provider="stub",
+        account_id="acct-42",
+        host=GRANTED_HOST,
+        grantor_member_id=member_id,
+        conversation_id=conversation_id,
+        shared=False,
+    )
+    private = (await _active(store, workspace_id, agent_id))[0]
+    with ws(workspace_id), agent(agent_id):
+        with pytest.raises(ConnectionPermissionDenied):
+            await store.set_shared(private.id, True, actor_member_id=admin_id)
+        assert await store.set_shared(private.id, False, actor_member_id=admin_id) is True
+        assert await store.set_shared(private.id, True, actor_member_id=member_id) is True
+        assert await store.revoke(private.id, actor_member_id=admin_id) is True
+    assert await _active(store, workspace_id, agent_id) == ()
+
+
+async def test_stale_owner_mutation_cannot_touch_a_reconnected_account(db: None) -> None:
+    workspace_id = await _workspace()
+    alice, agent_id = await _member_agent(workspace_id)
+    bob, admin = uuid4(), uuid4()
+    now = datetime.now(UTC)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member),
+            (
+                {
+                    "id": bob,
+                    "workspace_id": workspace_id,
+                    "email": "bob@x.test",
+                    "is_admin": False,
+                    "created_at": now,
+                    "updated_at": now,
+                },
+                {
+                    "id": admin,
+                    "workspace_id": workspace_id,
+                    "email": "admin@x.test",
+                    "is_admin": True,
+                    "created_at": now,
+                    "updated_at": now,
+                },
+            ),
+        )
+    alice_conversation = await _conversation(workspace_id, alice)
+    bob_conversation = await _conversation(workspace_id, bob)
+    store = GrantStore()
+    await _record(
+        store,
+        workspace_id,
+        agent_id,
+        provider="stub",
+        account_id="acct-42",
+        host=GRANTED_HOST,
+        grantor_member_id=alice,
+        conversation_id=alice_conversation,
+        shared=False,
+    )
+    stale = (await _active(store, workspace_id, agent_id))[0]
+    assert (await _summaries(workspace_id, agent_id))[0].owner_member_id == alice
+    with ws(workspace_id), agent(agent_id):
+        assert await store.disconnect(stale.connection_id, actor_member_id=admin) is True
+    await _record(
+        store,
+        workspace_id,
+        agent_id,
+        provider="stub",
+        account_id="acct-42",
+        host=GRANTED_HOST,
+        grantor_member_id=bob,
+        conversation_id=bob_conversation,
+        shared=False,
+    )
+    current = (await _active(store, workspace_id, agent_id))[0]
+    with ws(workspace_id), agent(agent_id):
+        assert await store.set_shared(stale.id, True, actor_member_id=alice) is False
+        assert await store.revoke(stale.id, actor_member_id=alice) is False
+        assert await store.disconnect(stale.connection_id, actor_member_id=alice) is False
+        with pytest.raises(ConnectionPermissionDenied):
+            await store.set_shared(
+                current.id,
+                True,
+                actor_member_id=alice,
+            )
+        with pytest.raises(ConnectionPermissionDenied):
+            await store.revoke(current.id, actor_member_id=alice)
+        with pytest.raises(ConnectionPermissionDenied):
+            await store.disconnect(current.connection_id, actor_member_id=alice)
+    assert (current.owner_member_id, current.shared) == (bob, False)
 
 
 async def test_connect_account_carries_the_shared_intent(db: None) -> None:
@@ -919,7 +1193,11 @@ async def test_connect_account_carries_the_shared_intent(db: None) -> None:
         ),
     )
     payload = json.loads(result.content[0].text.splitlines()[-1])
-    assert payload == {"provider": "stub", "shared": True}
+    assert payload == {
+        "provider": "stub",
+        "requester_member_id": str(member_id),
+        "shared": True,
+    }
 
 
 async def _agent(workspace_id: UUID, name: str) -> UUID:

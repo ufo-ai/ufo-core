@@ -20,7 +20,7 @@ import ufo_ext_sample as sample
 import yaml
 from cryptography.fernet import Fernet
 from pydantic import BaseModel, ConfigDict, SecretStr
-from ufo_ext_connectors.objects import CONNECTOR_OBJECT
+from ufo_ext_connectors.objects import CONNECTION_OBJECT, CONNECTOR_GRANT_OBJECT
 from ufo_ext_scheduled_tasks.tools import SCHEDULED_TASK_OBJECT
 from ufo_ext_sources.tools import SOURCE_OBJECT
 
@@ -541,7 +541,8 @@ def test_member_owned_kinds_gate_through_the_shared_base() -> None:
     """A member-owned kind cannot hand-roll its own visibility/ownership gate — it subclasses the
     core base that owns it. The connector and source kinds are the reference members; a future
     member-owned kind that reimplements the gate instead of subclassing fails here."""
-    assert isinstance(CONNECTOR_OBJECT.store, MemberOwnedObjects)
+    assert isinstance(CONNECTION_OBJECT.store, MemberOwnedObjects)
+    assert isinstance(CONNECTOR_GRANT_OBJECT.store, MemberOwnedObjects)
     assert isinstance(SOURCE_OBJECT.store, MemberOwnedObjects)
     assert isinstance(SCHEDULED_TASK_OBJECT.store, MemberOwnedObjects)
 
@@ -1796,18 +1797,22 @@ class _BootSpec(BaseModel):
     pass
 
 
-class _AdminOnlyStore(MemberOwnedObjects[_BootSpec]):
+class _AdminOnlyStore(MemberOwnedObjects[_BootSpec, ObjectOwner]):
     kind_name = "admin-only-test"
     mutate_gate = "mutate refused"
     delete_gate = "delete refused"
 
-    async def _owned_rows(self, ctx: ToolContext) -> tuple[OwnedRow, ...]:
+    async def _owned_rows(self, ctx: ToolContext) -> tuple[OwnedRow[ObjectOwner], ...]:
         return (OwnedRow(name="boot", summary="s", owner=ObjectOwner(member_id=None, shared=True)),)
 
-    async def _detail(self, ctx: ToolContext, name: str) -> ObjectDetail[_BootSpec] | None:
+    async def _detail(
+        self, ctx: ToolContext, name: str, owner: ObjectOwner
+    ) -> ObjectDetail[_BootSpec] | None:
         return ObjectDetail(spec=_BootSpec(), created_at=None, updated_at=None)
 
-    async def _status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None:
+    async def _status(
+        self, ctx: ToolContext, name: str, owner: ObjectOwner
+    ) -> dict[str, JsonValue] | None:
         return {}
 
     async def _apply_owned(

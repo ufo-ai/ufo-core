@@ -14,6 +14,9 @@ from ufo.objects import (
     AdminRequired as AdminRequired,
 )
 from ufo.objects import (
+    GeneratedObjectOwner as GeneratedObjectOwner,
+)
+from ufo.objects import (
     MemberOwnedObjects as MemberOwnedObjects,
 )
 from ufo.objects import (

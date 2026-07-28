@@ -175,7 +175,7 @@ async def test_stream_privately_renders_a_connect_handoff() -> None:
                 frame=TerminalFrame(
                     status="done",
                     text="Use the connection control.",
-                    connect_request=ConnectRequest(provider="github"),
+                    connect_request=ConnectRequest(provider="github", requester_member_id=uuid4()),
                 )
             ),
         )
@@ -621,7 +621,9 @@ async def test_empty_body_privately_opens_the_latest_connect_handoff(
                 terminal=TerminalFrame(
                     status="done",
                     text="Use the connection control.",
-                    connect_request=ConnectRequest(provider="github"),
+                    connect_request=ConnectRequest(
+                        provider="github", requester_member_id=member_id
+                    ),
                 ).model_dump(mode="json"),
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
