@@ -8,6 +8,7 @@ write."""
 
 import asyncio
 import json
+import shlex
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -24,7 +25,14 @@ from ufo_ext_browser.delegation import (
 )
 
 from ufo.blob import FilesystemBlobStore
-from ufo.sandbox.session import ExecResult
+from ufo.sandbox.local import LocalCarrier
+from ufo.sandbox.session import (
+    ExecResult,
+    MountSpec,
+    ProxyEndpoint,
+    SandboxSession,
+    SandboxSpec,
+)
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience
 from ufo.tools.context import SpawnResult, SubagentStatus, ToolContext
@@ -82,7 +90,7 @@ class FilesSandbox:
 
     async def bash(self, command: str, timeout_s: int = 120) -> ExecResult:
         for path, content in self.files.items():
-            if json.dumps(path) in command:
+            if shlex.quote(path) in command:
                 return ExecResult(stdout=content, stderr="", exit_code=0)
         return ExecResult(stdout="", stderr="not found", exit_code=1)
 
@@ -91,7 +99,7 @@ class FilesSandbox:
 
 
 def _context(
-    sandbox: FilesSandbox,
+    sandbox: FilesSandbox | SandboxSession,
     spawn: RecordingSpawn,
     tmp_path: Path,
     idempotency_key: str | None = None,
@@ -287,3 +295,42 @@ def test_a_browser_task_budget_stays_within_what_a_leased_session_can_hold() -> 
     assert (
         browserbase.SESSION_TIMEOUT_SECONDS > delegation.BROWSER_TASK_TIMEOUT_CEILING_MINUTES * 60
     )
+
+
+async def test_a_real_shell_reads_hostile_paths_literally(tmp_path: Path) -> None:
+    """The injection proof, against a REAL bash through LocalCarrier: BOTH reads the handler makes —
+    the entities file and the output schema — are given a name containing `$(…)` and backticks, and
+    each must come back as file contents with the substitution it would have run never happening."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    entities = 'entities.txt"; $(touch pwned_entities) `touch ticked_entities` $HOME'
+    schema = 'schema.json"; $(touch pwned_schema) `touch ticked_schema` $HOME'
+    (workspace / entities).write_text("acme.com\n")
+    (workspace / schema).write_text('{"price": "number"}')
+    carrier = LocalCarrier()
+    handle = await carrier.create(
+        SandboxSpec(
+            conversation_id=uuid4(),
+            image_ref="ufo-sandbox:latest",
+            mount=MountSpec(kind="filesystem", host_path=str(workspace)),
+            proxy=ProxyEndpoint(port=9999, ca_cert="CA-PEM-BYTES"),
+            run_token="run-token-abc",
+        )
+    )
+    session = SandboxSession(carrier=carrier, handle=handle)
+    spawn = RecordingSpawn()
+    tool = _tool("wide_browse")
+    await tool.handler(
+        _context(session, spawn, tmp_path),
+        tool.input_model.model_validate(
+            {
+                "entities_file": entities,
+                "prompt_template": "get pricing from {entity}",
+                "output_schema_file": schema,
+                "user_description": "batch",
+            }
+        ),
+    )
+    assert [payload["task_name"] for _, payload, *_ in spawn.spawned] == ["acme.com"]
+    assert all('{"price": "number"}' in payload["task"] for _, payload, *_ in spawn.spawned)
+    assert not any(workspace.glob("pwned_*")) and not any(workspace.glob("ticked_*"))

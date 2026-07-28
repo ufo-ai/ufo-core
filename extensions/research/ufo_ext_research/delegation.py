@@ -13,6 +13,7 @@ entities return their memoized result, only the remainder is fresh work."""
 
 import asyncio
 import json
+import shlex
 
 from pydantic import BaseModel
 
@@ -39,7 +40,9 @@ class WideResearchInput(BaseModel):
 
 
 async def _read_lines(ctx: ToolContext, path: str) -> list[str]:
-    read = await ctx.sandbox.bash(f"cat {json.dumps(path)}")
+    """Shell-quoted, not JSON-quoted: `sandbox.bash` execs a real shell, and JSON escaping leaves
+    `$(…)` and backticks live inside the double quotes."""
+    read = await ctx.sandbox.bash(f"cat {shlex.quote(path)}")
     if read.exit_code != 0:
         raise ValueError(read.stderr.strip() or f"cannot read {path}")
     seen: set[str] = set()
@@ -56,7 +59,7 @@ async def _wide_research(ctx: ToolContext, args: WideResearchInput) -> ToolResul
     entities = await _read_lines(ctx, args.entities_file)
     if len(entities) > MAX_WIDE_RESEARCH_ENTITIES:
         raise ValueError(f"wide_research supports at most {MAX_WIDE_RESEARCH_ENTITIES} entities")
-    schema = await ctx.sandbox.bash(f"cat {json.dumps(args.output_schema_file)}")
+    schema = await ctx.sandbox.bash(f"cat {shlex.quote(args.output_schema_file)}")
     output_schema = schema.stdout if schema.exit_code == 0 else ""
     semaphore = asyncio.Semaphore(DEFAULT_SUBAGENT_FANOUT)
 

@@ -5,6 +5,7 @@ tests assert the tool's own marshalling — the objectives spawned, the entity d
 write."""
 
 import json
+import shlex
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -12,10 +13,20 @@ from uuid import uuid4
 
 import pytest
 from pydantic import BaseModel
-from ufo_ext_research.delegation import MAX_WIDE_RESEARCH_ENTITIES, WIDE_RESEARCH_TOOL
+from ufo_ext_research.delegation import (
+    MAX_WIDE_RESEARCH_ENTITIES,
+    WIDE_RESEARCH_TOOL,
+)
 
 from ufo.blob import FilesystemBlobStore
-from ufo.sandbox.session import ExecResult
+from ufo.sandbox.local import LocalCarrier
+from ufo.sandbox.session import (
+    ExecResult,
+    MountSpec,
+    ProxyEndpoint,
+    SandboxSession,
+    SandboxSpec,
+)
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience
 from ufo.tools.context import SpawnResult, ToolContext
@@ -49,7 +60,7 @@ class FilesSandbox:
 
     async def bash(self, command: str, timeout_s: int = 120) -> ExecResult:
         for path, content in self.files.items():
-            if json.dumps(path) in command:
+            if shlex.quote(path) in command:
                 return ExecResult(stdout=content, stderr="", exit_code=0)
         return ExecResult(stdout="", stderr="not found", exit_code=1)
 
@@ -58,7 +69,7 @@ class FilesSandbox:
 
 
 def _context(
-    sandbox: FilesSandbox,
+    sandbox: FilesSandbox | SandboxSession,
     spawn: RecordingSpawn,
     tmp_path: Path,
     idempotency_key: str | None = None,
@@ -158,3 +169,42 @@ async def test_wide_research_caps_the_entity_count(tmp_path: Path) -> None:
                 }
             ),
         )
+
+
+async def test_a_real_shell_reads_hostile_paths_literally(tmp_path: Path) -> None:
+    """The injection proof, against a REAL bash through LocalCarrier: BOTH reads the handler makes —
+    the entities file and the output schema — are given a name containing `$(…)` and backticks, and
+    each must come back as file contents with the substitution it would have run never happening."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    entities = 'entities.txt"; $(touch pwned_entities) `touch ticked_entities` $HOME'
+    schema = 'schema.json"; $(touch pwned_schema) `touch ticked_schema` $HOME'
+    (workspace / entities).write_text("acme.com\n")
+    (workspace / schema).write_text('{"price": "number"}')
+    carrier = LocalCarrier()
+    handle = await carrier.create(
+        SandboxSpec(
+            conversation_id=uuid4(),
+            image_ref="ufo-sandbox:latest",
+            mount=MountSpec(kind="filesystem", host_path=str(workspace)),
+            proxy=ProxyEndpoint(port=9999, ca_cert="CA-PEM-BYTES"),
+            run_token="run-token-abc",
+        )
+    )
+    session = SandboxSession(carrier=carrier, handle=handle)
+    spawn = RecordingSpawn()
+    await WIDE_RESEARCH_TOOL.handler(
+        _context(session, spawn, tmp_path),
+        WIDE_RESEARCH_TOOL.input_model.model_validate(
+            {
+                "entities_file": entities,
+                "prompt_template": "research {entity}",
+                "output_schema_file": schema,
+                "user_description": "batch",
+            }
+        ),
+    )
+    objectives = [payload["objective"] for _, payload, *_ in spawn.spawned]
+    assert [o.splitlines()[0] for o in objectives] == ["research acme.com"]
+    assert all('{"price": "number"}' in objective for objective in objectives)
+    assert not any(workspace.glob("pwned_*")) and not any(workspace.glob("ticked_*"))
