@@ -1,7 +1,9 @@
 import asyncio
 import base64
+import gc
 import gzip
 import json
+import logging
 import os
 import re
 import socket
@@ -77,6 +79,9 @@ FULL_TOKEN_USAGE = Usage(
     input_tokens=1000, output_tokens=2000, cache_read_tokens=3000, cache_write_tokens=4000
 )
 RUN_TOKENS = RunTokenCodec(b"proxy-test-run-token-secret")
+STOP_DEADLINE_SECONDS = 5
+GRACE_WINDOW_SECONDS = 1
+ORPHAN_CLEANUP_SECONDS = 0.2
 SSE_RESPONSE_HEAD = b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n"
 ANTHROPIC_SSE_BODY = (
     b"event: message_start\r\n"
@@ -150,9 +155,17 @@ def _basic(run_token: str) -> str:
 
 
 async def _connect(port: int, host: str, run_token: str = "", target_port: int | str = 443) -> int:
-    """Drive one CONNECT through the proxy over its bound socket and return the status code,
-    draining to EOF so any off-relay metering the exchange schedules is queued before the caller
-    stops the proxy."""
+    """Drive one CONNECT through the proxy over its bound socket and return the status code."""
+    status, _ = await _connect_reason(port, host, run_token, target_port)
+    return status
+
+
+async def _connect_reason(
+    port: int, host: str, run_token: str = "", target_port: int | str = 443
+) -> tuple[int, bytes]:
+    """One CONNECT's status and the proxy's own plain-text reason — what an HTTP client inside the
+    sandbox surfaces, and the only place a refusal says why. Drains to EOF so any off-relay
+    metering the exchange schedules is queued before the caller stops the proxy."""
     reader, writer = await asyncio.open_connection("127.0.0.1", port)
     head = f"CONNECT {host}:{target_port} HTTP/1.1\r\nHost: {host}\r\n"
     if run_token:
@@ -160,9 +173,9 @@ async def _connect(port: int, host: str, run_token: str = "", target_port: int |
     writer.write((head + "\r\n").encode())
     await writer.drain()
     status_line = await reader.readline()
-    await reader.read()
+    _, _, body = (await reader.read()).partition(b"\r\n\r\n")
     writer.close()
-    return int(status_line.split()[1])
+    return int(status_line.split()[1]), body
 
 
 async def _get(port: int, path: str) -> tuple[int, bytes]:
@@ -342,9 +355,9 @@ async def test_workspace_credential_validation_failure_is_a_mint_failure() -> No
     assert b"AccessKeyId" not in body
 
 
-async def test_a_resolution_error_fails_closed_to_base_and_is_not_cached() -> None:
-    """A resolver that raises (a transient DB blip) yields the base for that one request and is NOT
-    cached, so the next request re-resolves — a blip degrades one request, never the turn."""
+async def test_a_resolution_error_is_not_cached_or_disguised_as_policy(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     base = (ScopeRule(allowed_hosts=frozenset({MODEL_HOST})),)
     granted = (
         *base,
@@ -369,8 +382,59 @@ async def test_a_resolution_error_fails_closed_to_base_and_is_not_cached() -> No
         run_tokens=RUN_TOKENS,
     )
     run = RunToken(uuid4(), uuid4())
-    assert await proxy._rules_for(run) == base
+    with (
+        caplog.at_level(logging.ERROR, logger="ufo"),
+        pytest.raises(RuntimeError, match="transient db blip"),
+    ):
+        await proxy._rules_for(run)
+    failed = next(record for record in caplog.records if record.message == "egress.resolve_failed")
+    assert failed.levelno == logging.ERROR
+    assert failed.ufo == {
+        "workspace_id": str(run.workspace_id),
+        "turn": str(run.turn_id),
+        "error_class": "RuntimeError",
+    }
     assert await proxy._rules_for(run) == granted
+
+
+async def test_a_resolution_error_is_service_unavailable_not_egress_denied(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A run whose own rules fault while the base resolves fine — a credential slot's store
+    unreachable for that workspace. Substituting the base would answer the sandbox 403 for
+    SEARCH_HOST, indistinguishable from the workspace never having been granted it. The fault is
+    recorded once, where it is raised."""
+    base = (ScopeRule(allowed_hosts=frozenset({MODEL_HOST})),)
+
+    async def resolve(run: RunToken | None) -> tuple:
+        if run is None:
+            return base
+        raise RuntimeError("rules unavailable")
+
+    async def authorize(_run: RunToken) -> bool:
+        return True
+
+    cert, key = await generate_ca()
+    proxy = EgressProxy(
+        resolve=resolve,
+        authorize=authorize,
+        ca_cert=cert,
+        ca_key=key,
+        run_tokens=RUN_TOKENS,
+    )
+    endpoint = await proxy.start(bind_host="127.0.0.1")
+    try:
+        token = RUN_TOKENS.encode(RunToken(uuid4(), uuid4()))
+        with caplog.at_level(logging.ERROR, logger="ufo"):
+            assert await _connect_reason(endpoint.port, SEARCH_HOST, token) == (
+                503,
+                b"egress authorization unavailable",
+            )
+        assert [record.message for record in caplog.records if record.name == "ufo"] == [
+            "egress.resolve_failed"
+        ]
+    finally:
+        await proxy.stop()
 
 
 async def test_concurrent_rule_cache_misses_share_one_resolution() -> None:
@@ -393,6 +457,59 @@ async def test_concurrent_rule_cache_misses_share_one_resolution() -> None:
     run = RunToken(uuid4(), uuid4())
     assert await asyncio.gather(*(proxy._rules_for(run) for _ in range(20))) == [rules] * 20
     assert calls == 1
+
+
+async def test_concurrent_rule_cache_misses_share_one_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    calls = 0
+    callers = 20
+    entered = 0
+    start = asyncio.Event()
+    all_entered = asyncio.Event()
+    release = asyncio.Event()
+    rules = (ScopeRule(allowed_hosts=frozenset({MODEL_HOST})),)
+
+    async def resolve(_run: RunToken | None) -> tuple:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            await release.wait()
+            raise RuntimeError("rules unavailable")
+        return rules
+
+    proxy = EgressProxy(
+        resolve=resolve,
+        authorize=_fixed().turn_live,
+        ca_cert="",
+        ca_key="",
+        run_tokens=RUN_TOKENS,
+    )
+    run = RunToken(uuid4(), uuid4())
+
+    async def request_rules() -> tuple:
+        nonlocal entered
+        await start.wait()
+        entered += 1
+        if entered == callers:
+            all_entered.set()
+        return await proxy._rules_for(run)
+
+    waiters = tuple(asyncio.create_task(request_rules()) for _ in range(callers))
+    start.set()
+    await all_entered.wait()
+    assert calls == 1
+    with caplog.at_level(logging.ERROR, logger="ufo"):
+        release.set()
+        results = await asyncio.gather(*waiters, return_exceptions=True)
+    assert [record.message for record in caplog.records if record.name == "ufo"] == [
+        "egress.resolve_failed"
+    ]
+    assert all(type(result) is RuntimeError for result in results)
+    assert {str(result) for result in results} == {"rules unavailable"}
+    assert proxy._rule_tasks == {}
+    assert await proxy._rules_for(run) == rules
+    assert calls == 2
 
 
 async def test_cancelled_rule_waiter_leaves_shared_resolution_owned() -> None:
@@ -423,6 +540,260 @@ async def test_cancelled_rule_waiter_leaves_shared_resolution_owned() -> None:
     await shared
     assert proxy._rule_tasks == {}
     assert await proxy._rules_for(run) == rules
+
+
+async def test_a_detached_failing_rule_resolution_is_never_reported_by_asyncio(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The last waiter cancelling detaches the shared resolution, so its fault has no reader. Left
+    unretrieved, asyncio reports it on its own logger with the exception rendered in full — a text
+    the OTLP bridge exports and field-name redaction cannot reach."""
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def resolve(_run: RunToken | None) -> tuple:
+        started.set()
+        await release.wait()
+        raise RuntimeError("postgresql://ufo:hunter2@db.test/ufo is unreachable")
+
+    proxy = EgressProxy(
+        resolve=resolve,
+        authorize=_fixed().turn_live,
+        ca_cert="",
+        ca_key="",
+        run_tokens=RUN_TOKENS,
+    )
+    run = RunToken(uuid4(), uuid4())
+    waiter = asyncio.create_task(proxy._rules_for(run))
+    await started.wait()
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    detached = proxy._rule_tasks[run]
+    release.set()
+    with caplog.at_level(logging.ERROR, logger="asyncio"):
+        await asyncio.wait({detached})
+        del detached
+        gc.collect()
+    assert [record.getMessage() for record in caplog.records if record.name == "asyncio"] == []
+
+
+async def test_stop_drains_a_detached_failing_rule_resolution() -> None:
+    started = asyncio.Event()
+    finished = asyncio.Event()
+
+    async def resolve(_run: RunToken | None) -> tuple:
+        started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError as error:
+            raise RuntimeError("rules unavailable") from error
+        finally:
+            finished.set()
+
+    proxy = EgressProxy(
+        resolve=resolve,
+        authorize=_fixed().turn_live,
+        ca_cert="",
+        ca_key="",
+        run_tokens=RUN_TOKENS,
+    )
+    run = RunToken(uuid4(), uuid4())
+    waiter = asyncio.create_task(proxy._rules_for(run))
+    await started.wait()
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    shared = proxy._rule_tasks[run]
+    try:
+        await proxy.stop()
+        assert finished.is_set()
+        assert shared.done()
+        assert proxy._rule_tasks == {}
+    finally:
+        if not shared.done():
+            shared.cancel()
+        await asyncio.gather(shared, return_exceptions=True)
+
+
+async def test_a_cancelled_rule_resolution_reaches_no_loop_exception_handler(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """`stop()` cancels an orphan that does not intercept the cancel, so it ends cancelled rather
+    than faulted. Reading an exception off a cancelled task raises `CancelledError` in the
+    done-callback itself, which the loop reports — the fault reader must skip that state."""
+    started = asyncio.Event()
+
+    async def resolve(_run: RunToken | None) -> tuple:
+        started.set()
+        await asyncio.Future()
+        return ()
+
+    proxy = EgressProxy(
+        resolve=resolve,
+        authorize=_fixed().turn_live,
+        ca_cert="",
+        ca_key="",
+        run_tokens=RUN_TOKENS,
+    )
+    run = RunToken(uuid4(), uuid4())
+    waiter = asyncio.create_task(proxy._rules_for(run))
+    await started.wait()
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    orphan = proxy._rule_tasks[run]
+    loop = asyncio.get_running_loop()
+    unhandled: list[dict] = []
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: unhandled.append(context))
+    try:
+        with caplog.at_level(logging.ERROR, logger="asyncio"):
+            await proxy.stop()
+            await asyncio.sleep(0)
+        assert orphan.cancelled()
+        assert unhandled == []
+        assert [record.getMessage() for record in caplog.records if record.name == "asyncio"] == []
+    finally:
+        loop.set_exception_handler(previous)
+
+
+async def test_stop_waits_out_the_grace_window_for_an_orphaned_rule_resolution() -> None:
+    """The window's value is threaded through, not just its boundedness: an orphan whose cleanup
+    needs several loop passes finishes inside a nonzero `graceful_shutdown_seconds`, where a
+    zero-length wait would abandon it still pending."""
+    started = asyncio.Event()
+    resume = asyncio.Event()
+    cleanup_passes = 10
+
+    async def resolve(_run: RunToken | None) -> tuple:
+        started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            await resume.wait()
+        return ()
+
+    async def let_cleanup_finish() -> None:
+        for _ in range(cleanup_passes):
+            await asyncio.sleep(0)
+        resume.set()
+
+    proxy = EgressProxy(
+        resolve=resolve,
+        authorize=_fixed().turn_live,
+        ca_cert="",
+        ca_key="",
+        run_tokens=RUN_TOKENS,
+    )
+    run = RunToken(uuid4(), uuid4())
+    waiter = asyncio.create_task(proxy._rules_for(run))
+    await started.wait()
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    orphan = proxy._rule_tasks[run]
+    releaser = asyncio.create_task(let_cleanup_finish())
+    try:
+        await proxy.stop(graceful_shutdown_seconds=STOP_DEADLINE_SECONDS)
+        assert orphan.done()
+    finally:
+        resume.set()
+        await asyncio.gather(releaser, orphan, return_exceptions=True)
+
+
+async def test_stop_leaves_a_rule_resolution_that_outlives_its_cancel_pending() -> None:
+    """An orphaned resolution gets the connection drain's window, never a second unbounded one: a
+    cleanup that outlives its own cancel is left pending rather than parking the shutdown, so the
+    caller's wait ends."""
+    started = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def resolve(_run: RunToken | None) -> tuple:
+        started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            await finish.wait()
+        return ()
+
+    proxy = EgressProxy(
+        resolve=resolve,
+        authorize=_fixed().turn_live,
+        ca_cert="",
+        ca_key="",
+        run_tokens=RUN_TOKENS,
+    )
+    run = RunToken(uuid4(), uuid4())
+    waiter = asyncio.create_task(proxy._rules_for(run))
+    await started.wait()
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    orphan = proxy._rule_tasks[run]
+    try:
+        await asyncio.wait_for(proxy.stop(), timeout=STOP_DEADLINE_SECONDS)
+        assert not orphan.done()
+    finally:
+        finish.set()
+        await asyncio.gather(orphan, return_exceptions=True)
+
+
+async def test_stop_spends_one_grace_window_across_both_drains() -> None:
+    """The connection drain and the orphaned-rule drain share one window, not one each. A parked
+    connection spends the whole window, so the orphan is cancelled against nothing left and is
+    abandoned pending — with a second window of its own it would instead finish its cleanup, and
+    a caller mapping this to a termination grace period would overrun by the difference."""
+    started = asyncio.Event()
+    connection_parked = asyncio.Event()
+    cleanup_started = asyncio.Event()
+
+    async def resolve(_run: RunToken | None) -> tuple:
+        started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            cleanup_started.set()
+            await asyncio.sleep(ORPHAN_CLEANUP_SECONDS)
+        return ()
+
+    async def authorize(_run: RunToken) -> bool:
+        connection_parked.set()
+        await asyncio.Future()
+        return True
+
+    cert, key = await generate_ca()
+    proxy = EgressProxy(
+        resolve=resolve,
+        authorize=authorize,
+        ca_cert=cert,
+        ca_key=key,
+        run_tokens=RUN_TOKENS,
+    )
+    endpoint = await proxy.start(bind_host="127.0.0.1")
+    parked_token = _basic(RUN_TOKENS.encode(RunToken(uuid4(), uuid4())))
+    _, parked = await asyncio.open_connection("127.0.0.1", endpoint.port)
+    parked.write(
+        f"CONNECT {MODEL_HOST}:443 HTTP/1.1\r\nHost: {MODEL_HOST}\r\n"
+        f"Proxy-Authorization: {parked_token}\r\n\r\n".encode()
+    )
+    await parked.drain()
+    await connection_parked.wait()
+    run = RunToken(uuid4(), uuid4())
+    waiter = asyncio.create_task(proxy._rules_for(run))
+    await started.wait()
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    orphan = proxy._rule_tasks[run]
+    try:
+        await proxy.stop(graceful_shutdown_seconds=GRACE_WINDOW_SECONDS)
+        assert cleanup_started.is_set()
+        assert not orphan.done()
+    finally:
+        parked.close()
+        orphan.cancel()
+        await asyncio.gather(orphan, return_exceptions=True)
 
 
 async def test_rule_cache_refreshes_before_injected_tokens_expire(
@@ -949,10 +1320,9 @@ async def test_proxy_connection_limit_preserves_capacity_between_workspaces(
         await stub.wait_closed()
 
 
-async def test_a_db_fault_in_the_authorize_gate_surfaces_loud() -> None:
-    """The reset guard is scoped to the client socket: an OSError out of the turn-liveness gate (the
-    fresh DB connection behind it refused) is an internal fault, and must reach the loop's exception
-    handler — never be swallowed as routine client noise."""
+async def test_a_db_fault_in_the_authorize_gate_returns_service_unavailable(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
 
     async def refused(run: RunToken) -> bool:
         raise ConnectionRefusedError("db connection refused")
@@ -975,17 +1345,23 @@ async def test_a_db_fault_in_the_authorize_gate_surfaces_loud() -> None:
     previous = loop.get_exception_handler()
     loop.set_exception_handler(lambda _loop, context: unhandled.append(context))
     try:
-        token = RUN_TOKENS.encode(RunToken(workspace_id=uuid4(), turn_id=uuid4()))
-        reader, writer = await asyncio.open_connection("127.0.0.1", endpoint.port)
-        writer.write(
-            f"CONNECT {MODEL_HOST}:443 HTTP/1.1\r\n"
-            f"Proxy-Authorization: {_basic(token)}\r\n\r\n".encode()
-        )
-        await writer.drain()
-        assert await reader.read() == b""
-        writer.close()
+        run = RunToken(workspace_id=uuid4(), turn_id=uuid4())
+        token = RUN_TOKENS.encode(run)
+        with caplog.at_level(logging.ERROR, logger="ufo"):
+            assert await _connect_reason(endpoint.port, MODEL_HOST, token) == (
+                503,
+                b"egress authorization unavailable",
+            )
         await asyncio.sleep(0.1)
-        assert [type(context["exception"]) for context in unhandled] == [ConnectionRefusedError]
+        assert unhandled == []
+        (failed,) = [record for record in caplog.records if record.name == "ufo"]
+        assert failed.message == "egress.authorize_failed"
+        assert failed.levelno == logging.ERROR
+        assert failed.ufo == {
+            "workspace_id": str(run.workspace_id),
+            "turn": str(run.turn_id),
+            "error_class": "ConnectionRefusedError",
+        }
     finally:
         loop.set_exception_handler(previous)
         await proxy.stop()

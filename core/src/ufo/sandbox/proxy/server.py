@@ -111,6 +111,7 @@ MAX_SSE_BUFFER_BYTES = 1_048_576
 MAX_FORWARD_BODY_BYTES = 1_048_576
 MAX_REFUSAL_DRAIN_BYTES = 8 * 1_048_576
 REFUSAL_DRAIN_TIMEOUT_SECONDS = 5
+EGRESS_AUTHORIZATION_UNAVAILABLE = "egress authorization unavailable"
 
 RuleResolver = Callable[["RunToken | None"], Awaitable[tuple[Rule, ...]]]
 TurnAuthorizer = Callable[["RunToken"], Awaitable[bool]]
@@ -198,9 +199,9 @@ class PerAgentRules:
     per-workspace resolution is the tenant's: a stored secret is read against the run token's own
     `workspace_id`, so one shared proxy injects for every workspace and none of them holds another's
     key. A run with no or unknown token yields the base alone; a resolution error raises to the
-    proxy, which fails closed to the base without caching it — never a broad allow, never another
-    workspace's secret. Deriving each call (not once at boot) is the liveness: a grant recorded or a
-    slot filled mid-serve is live for the next turn."""
+    proxy, which returns service unavailable without caching it — never a policy denial, broad
+    allow, or another workspace's secret. Deriving each call (not once at boot) is the liveness: a
+    grant recorded or a slot filled mid-serve is live for the next turn."""
 
     base: tuple[Rule, ...]
     grants: GrantStore | None
@@ -334,16 +335,25 @@ class EgressProxy:
         handler task finishes and would park an unbounded shutdown ahead of the bounded drain.
         A connection accepted just before the listener closed schedules its handler after the
         drain snapshot; `_handle` refuses service once the listener stops, so a late handler
-        finishes immediately instead of parking `wait_closed()` past the window."""
+        finishes immediately instead of parking `wait_closed()` past the window. Rule resolutions
+        left after the connection drain are orphaned: they cancel immediately and are awaited
+        against what the one window has left, never a second window of their own — a drain that
+        already spent it leaves them pending rather than parking the shutdown behind them."""
+        drain_deadline = time.monotonic() + graceful_shutdown_seconds
         if self._server is not None:
             self._server.close()
         if self._connection_tasks:
             _, pending = await asyncio.wait(
                 self._connection_tasks, timeout=graceful_shutdown_seconds
             )
-            for task in pending:
-                task.cancel()
+            for connection_task in pending:
+                connection_task.cancel()
             await asyncio.gather(*pending, return_exceptions=True)
+        rule_tasks = tuple(self._rule_tasks.values())
+        if rule_tasks:
+            for rule_task in rule_tasks:
+                rule_task.cancel()
+            await asyncio.wait(rule_tasks, timeout=max(0.0, drain_deadline - time.monotonic()))
         if self._server is not None:
             await self._server.wait_closed()
             self._server = None
@@ -413,7 +423,12 @@ class EgressProxy:
             if run is None:
                 await _respond(writer, 403, f"egress to {host} is not permitted")
                 return
-            if not await self.authorize(run):
+            try:
+                authorized = await self._turn_authorized(run)
+            except Exception:
+                await _respond(writer, 503, EGRESS_AUTHORIZATION_UNAVAILABLE)
+                return
+            if not authorized:
                 await _respond(writer, 403, f"egress to {host} is not permitted")
                 return
             workspace_connections = self._workspace_connections.get(run.workspace_id, 0)
@@ -422,7 +437,11 @@ class EgressProxy:
                 return
             self._workspace_connections[run.workspace_id] = workspace_connections + 1
             workspace_connection = run.workspace_id
-            rules = await self._rules_for(run)
+            try:
+                rules = await self._rules_for(run)
+            except Exception:
+                await _respond(writer, 503, EGRESS_AUTHORIZATION_UNAVAILABLE)
+                return
             connect_host = host
             exactly_scoped = any(
                 isinstance(rule, ScopeRule) and host in rule.allowed_hosts for rule in rules
@@ -489,10 +508,26 @@ class EgressProxy:
         except OSError:
             pass
 
+    async def _turn_authorized(self, run: RunToken) -> bool:
+        """The turn-liveness gate, whose fault is recorded here and raised on. Both authorization
+        faults — this and rule resolution — log once where they are raised, so `_handle` answers
+        each the same way and never writes a second record for one fault."""
+        try:
+            return await self.authorize(run)
+        except Exception as error:
+            log_error(
+                "egress.authorize_failed",
+                workspace_id=str(run.workspace_id),
+                turn=str(run.turn_id),
+                error_class=type(error).__name__,
+            )
+            raise
+
     async def _rules_for(self, run: RunToken | None) -> tuple[Rule, ...]:
         """The resolved rule set for this turn's agent, bounded and refreshed before an injected
         short-lived credential can expire. Concurrent misses for one run share one resolution. A
-        resolution error fails closed to the base and is not cached."""
+        resolution error fails closed with a service error, is not cached, and is recorded once by
+        that shared resolution rather than once per connection waiting on it."""
         if run is None:
             return await self.resolve(None)
         hit = self._rule_cache.get(run)
@@ -503,6 +538,7 @@ class EgressProxy:
         task = self._rule_tasks.get(run)
         if task is None:
             task = asyncio.create_task(self._resolve_rules(run))
+            task.add_done_callback(_read_fault)
             self._rule_tasks[run] = task
         return await asyncio.shield(task)
 
@@ -512,12 +548,13 @@ class EgressProxy:
             try:
                 rules = await self.resolve(run)
             except Exception as error:
-                log(
+                log_error(
                     "egress.resolve_failed",
+                    workspace_id=str(run.workspace_id),
                     turn=str(run.turn_id),
                     error_class=type(error).__name__,
                 )
-                return await self.resolve(None)
+                raise
             if len(self._rule_cache) >= RULE_CACHE_MAX:
                 del self._rule_cache[next(iter(self._rule_cache))]
             self._rule_cache[run] = _CachedRules(
@@ -862,6 +899,15 @@ class EgressProxy:
                     records=count,
                     error_class=type(error).__name__,
                 )
+
+
+def _read_fault(task: asyncio.Task[tuple[Rule, ...]]) -> None:
+    """Read the fault of a rule resolution whose every waiter cancelled. Left unread, asyncio
+    reports the abandoned task on its own logger with the exception rendered in full, and that text
+    leaves through the root-logger OTLP bridge, which redacts by field name and never scans a
+    message. Waiters that remain still see the fault raised as their own."""
+    if not task.cancelled():
+        task.exception()
 
 
 async def _start_tls_server(
