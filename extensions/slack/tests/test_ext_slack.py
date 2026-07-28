@@ -3090,7 +3090,8 @@ async def test_a_failed_status_write_lands_in_the_event_log(
 ) -> None:
     """Slack rejecting a status write must be observable — the failure event carries the Slack
     error, so a rejected `assistant.threads.setStatus` (wrong thread kind, missing feature) shows
-    up in the log pipeline instead of dying in a best-effort task."""
+    up in the log pipeline instead of dying in a best-effort task. A thread that refuses every write
+    is logged every time and still ends with its turn rather than with the first refusal."""
     caplog.set_level(logging.INFO, logger="ufo")
     workspace_id, _ = await _seed()
     recorder: list[httpx.Request] = []
@@ -3102,8 +3103,9 @@ async def test_a_failed_status_write_lands_in_the_event_log(
             return httpx.Response(200, json={"ok": False, "error": "feature_not_enabled"})
         return inner.handler(request)
 
+    hub = InProcessHub()
     _, client, _ = await _mount_transport(
-        monkeypatch, workspace_id, tmp_path, httpx.MockTransport(rejecting), hub=InProcessHub()
+        monkeypatch, workspace_id, tmp_path, httpx.MockTransport(rejecting), hub=hub
     )
     mention = _event_body(
         type="app_mention", user="U1", channel="C1", ts="100.5", text="<@UBOT00000> hi"
@@ -3119,12 +3121,344 @@ async def test_a_failed_status_write_lands_in_the_event_log(
                 sa.select(tables.turn.c.id).where(tables.turn.c.workspace_id == workspace_id)
             )
         ).scalar_one()
-    task = slack._STATUS_TASKS.get(turn_id)
-    if task is not None:
-        await task
+    task = slack._STATUS_TASKS[turn_id]
+    deadline = time.monotonic() + 5
+    while not task.done():
+        assert time.monotonic() < deadline, (
+            "a refused write left the follower running past its turn"
+        )
+        await hub.publish(turn_id, Terminal(frame=TerminalFrame(status="done", text="hi")))
+        await asyncio.sleep(0.01)
+    await task
     failures = [r for r in caplog.records if r.message == "slack.thread_status.failed"]
-    assert failures and "feature_not_enabled" in failures[0].ufo["error"]
+    assert [r.ufo["status_text"] for r in failures] == [
+        slack.STATUS_THINKING_TEXT,
+        slack.STATUS_CLEAR_TEXT,
+    ], "a refused admission write skipped the follower and its clear"
+    assert all("feature_not_enabled" in r.ufo["error"] for r in failures)
     assert not any(record.message == "slack.thread_status.write" for record in caplog.records)
+    assert not any(record.message == "slack.thread_status.dead" for record in caplog.records)
+
+
+async def test_a_refused_status_line_costs_one_update_not_the_rest_of_the_turn(
+    db: None, tmp_path, monkeypatch, caplog
+) -> None:
+    """Slack refuses some lines it is handed. A refusal costs that one line and nothing more: the
+    next frame still reaches Slack and the turn still clears, rather than the follower unwinding and
+    the member watching every later tool call go unreported. The refusal is not remembered as shown
+    either, so the same line is attempted again rather than skipped as already displayed, and the
+    event names the refused text and Slack's own account of it — the text being the only argument
+    that differs between an accepted write and a refused one."""
+    caplog.set_level(logging.INFO, logger="ufo")
+    workspace_id, _ = await _seed()
+    monkeypatch.setattr(slack, "STATUS_UPDATE_MIN_SECONDS", 0.0)
+    refused = slack.STATUS_DESCRIBED_TEXT.format(description="Reconciling the ledger")
+    later = slack.STATUS_DESCRIBED_TEXT.format(description="Filing the result")
+    recorder: list[httpx.Request] = []
+    inner = _mock_transport(recorder, {})
+
+    def _attempts(status: str) -> list[httpx.Request]:
+        return [
+            r
+            for r in _requests_to(recorder, slack.SLACK_ASSISTANT_STATUS_URL)
+            if json.loads(r.content)["status"] == status
+        ]
+
+    def refusing_once(request: httpx.Request) -> httpx.Response:
+        if str(request.url).split("?")[0] == slack.SLACK_ASSISTANT_STATUS_URL:
+            recorder.append(request)
+            if json.loads(request.content)["status"] == refused and len(_attempts(refused)) == 1:
+                return httpx.Response(
+                    200,
+                    json={
+                        "ok": False,
+                        "error": "invalid_arguments",
+                        "response_metadata": {"messages": ["[ERROR] status is too long"]},
+                    },
+                )
+            return httpx.Response(200, json={"ok": True})
+        return inner.handler(request)
+
+    hub = InProcessHub()
+    _, client, _ = await _mount_transport(
+        monkeypatch, workspace_id, tmp_path, httpx.MockTransport(refusing_once), hub=hub
+    )
+    mention = _event_body(
+        type="app_mention", user="U1", channel="C1", ts="100.5", text="<@UBOT00000> hi"
+    )
+    async with client:
+        response = await client.post(
+            EVENTS_PATH, content=mention, headers=_sign(mention, int(time.time()))
+        )
+    assert response.status_code == 200
+    async with workspace_tx() as connection:
+        turn_id = (
+            await connection.execute(
+                sa.select(tables.turn.c.id).where(tables.turn.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+    task = slack._STATUS_TASKS[turn_id]
+
+    async def _until_attempts(status: str, description: str, count: int) -> None:
+        deadline = time.monotonic() + 5
+        while len(_attempts(status)) < count:
+            assert time.monotonic() < deadline, (
+                f"{status!r} reached Slack {len(_attempts(status))}x, wanted {count}"
+            )
+            await hub.publish(turn_id, ToolCall(tool="bash", preview="{}", description=description))
+            await asyncio.sleep(0.01)
+
+    await _until_attempts(refused, "Reconciling the ledger", 2)
+    await _until_attempts(later, "Filing the result", 1)
+    await hub.publish(turn_id, Terminal(frame=TerminalFrame(status="done", text="hi")))
+    await task
+
+    written = [
+        r.ufo["status_text"] for r in caplog.records if r.message == "slack.thread_status.write"
+    ]
+    assert refused in written, "the refused line was never re-attempted after Slack took it"
+    assert later in written, "the follower died with the refused line instead of carrying on"
+    assert written[-1] == slack.STATUS_CLEAR_TEXT
+    failures = [r for r in caplog.records if r.message == "slack.thread_status.failed"]
+    assert [r.ufo["status_text"] for r in failures] == [refused]
+    assert "invalid_arguments" in failures[0].ufo["error"]
+    assert "status is too long" in failures[0].ufo["error"]
+    assert not any(record.message == "slack.thread_status.dead" for record in caplog.records)
+
+
+async def test_a_refused_admission_line_is_not_remembered_as_shown(
+    db: None, tmp_path, monkeypatch, caplog
+) -> None:
+    """The admission write is a write like any other: refused, it put nothing in front of the
+    member, so the same line must still go out when a frame asks for it — and the quiet-stretch
+    refresh must have nothing to re-stamp rather than re-sending a refused line or posting the empty
+    clear mid-turn. Seeding the follower with a line Slack never took would swallow that frame as
+    already displayed and leave the thread blank for the rest of the turn."""
+    caplog.set_level(logging.INFO, logger="ufo")
+    workspace_id, _ = await _seed()
+    monkeypatch.setattr(slack, "STATUS_UPDATE_MIN_SECONDS", 0.0)
+    monkeypatch.setattr(slack, "STATUS_REFRESH_SECONDS", 0.02)
+    recorder: list[httpx.Request] = []
+    inner = _mock_transport(recorder, {})
+
+    def _sent() -> list[str]:
+        return [
+            json.loads(r.content)["status"]
+            for r in _requests_to(recorder, slack.SLACK_ASSISTANT_STATUS_URL)
+        ]
+
+    def refusing_admission(request: httpx.Request) -> httpx.Response:
+        if str(request.url).split("?")[0] == slack.SLACK_ASSISTANT_STATUS_URL:
+            recorder.append(request)
+            if _sent() == [slack.STATUS_THINKING_TEXT]:
+                return httpx.Response(200, json={"ok": False, "error": "invalid_arguments"})
+            return httpx.Response(200, json={"ok": True})
+        return inner.handler(request)
+
+    hub = InProcessHub()
+    _, client, _ = await _mount_transport(
+        monkeypatch, workspace_id, tmp_path, httpx.MockTransport(refusing_admission), hub=hub
+    )
+    mention = _event_body(
+        type="app_mention", user="U1", channel="C1", ts="100.5", text="<@UBOT00000> hi"
+    )
+    async with client:
+        response = await client.post(
+            EVENTS_PATH, content=mention, headers=_sign(mention, int(time.time()))
+        )
+    assert response.status_code == 200
+    async with workspace_tx() as connection:
+        turn_id = (
+            await connection.execute(
+                sa.select(tables.turn.c.id).where(tables.turn.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+    task = slack._STATUS_TASKS[turn_id]
+
+    deadline = time.monotonic() + 5
+    while _sent().count(slack.STATUS_THINKING_TEXT) < 2:
+        assert time.monotonic() < deadline, (
+            "the refused admission line was remembered as shown, so the frame asking for it was "
+            "swallowed as already displayed"
+        )
+        await hub.publish(turn_id, ToolCall(tool="bash", preview="{}", description="Thinking"))
+        await asyncio.sleep(0.01)
+    await hub.publish(turn_id, Terminal(frame=TerminalFrame(status="done", text="hi")))
+    await task
+
+    written = [
+        r.ufo["status_text"] for r in caplog.records if r.message == "slack.thread_status.write"
+    ]
+    assert slack.STATUS_THINKING_TEXT in written
+    failures = [r for r in caplog.records if r.message == "slack.thread_status.failed"]
+    assert [r.ufo["status_text"] for r in failures] == [slack.STATUS_THINKING_TEXT]
+    sent = _sent()
+    assert sent[-1] == slack.STATUS_CLEAR_TEXT
+
+
+async def test_a_quiet_stretch_with_nothing_shown_re_stamps_nothing(
+    db: None, tmp_path, monkeypatch, caplog
+) -> None:
+    """The refresh keeps a line alive past Slack's two-minute drop, so it has a line to re-stamp
+    only when one is up. With the admission write refused nothing is up, and posting `shown`
+    regardless would send the empty string — the clear — on every quiet stretch of a turn still
+    running. The refresh interval is zero here, so the follower takes that branch on every pass of
+    its loop rather than once per window, and the next line to reach Slack must be the frame's own
+    rather than a clear the member never earned."""
+    caplog.set_level(logging.INFO, logger="ufo")
+    workspace_id, _ = await _seed()
+    monkeypatch.setattr(slack, "STATUS_REFRESH_SECONDS", 0.0)
+    recorder: list[httpx.Request] = []
+    inner = _mock_transport(recorder, {})
+
+    def refusing_admission(request: httpx.Request) -> httpx.Response:
+        if str(request.url).split("?")[0] == slack.SLACK_ASSISTANT_STATUS_URL:
+            recorder.append(request)
+            if json.loads(request.content)["status"] == slack.STATUS_THINKING_TEXT:
+                return httpx.Response(200, json={"ok": False, "error": "invalid_arguments"})
+            return httpx.Response(200, json={"ok": True})
+        return inner.handler(request)
+
+    hub = InProcessHub()
+    _, client, _ = await _mount_transport(
+        monkeypatch, workspace_id, tmp_path, httpx.MockTransport(refusing_admission), hub=hub
+    )
+    mention = _event_body(
+        type="app_mention", user="U1", channel="C1", ts="100.5", text="<@UBOT00000> hi"
+    )
+    async with client:
+        response = await client.post(
+            EVENTS_PATH, content=mention, headers=_sign(mention, int(time.time()))
+        )
+    assert response.status_code == 200
+    async with workspace_tx() as connection:
+        turn_id = (
+            await connection.execute(
+                sa.select(tables.turn.c.id).where(tables.turn.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+    task = slack._STATUS_TASKS[turn_id]
+
+    def _sent() -> list[str]:
+        return [
+            json.loads(r.content)["status"]
+            for r in _requests_to(recorder, slack.SLACK_ASSISTANT_STATUS_URL)
+        ]
+
+    filing = slack.STATUS_DESCRIBED_TEXT.format(description="Filing the result")
+    deadline = time.monotonic() + 5
+    while filing not in _sent():
+        assert time.monotonic() < deadline, "the frame's own line never reached Slack"
+        await hub.publish(
+            turn_id, ToolCall(tool="bash", preview="{}", description="Filing the result")
+        )
+        await asyncio.sleep(0.01)
+    assert _sent()[:2] == [slack.STATUS_THINKING_TEXT, filing], (
+        "a quiet stretch with nothing shown wrote to the thread anyway"
+    )
+
+    while not task.done():
+        await hub.publish(turn_id, Terminal(frame=TerminalFrame(status="done", text="hi")))
+        await asyncio.sleep(0.01)
+    await task
+    assert _sent()[-1] == slack.STATUS_CLEAR_TEXT
+
+
+async def test_a_revoked_bot_token_kills_the_status_follower(
+    db: None, tmp_path, monkeypatch, caplog
+) -> None:
+    """The other half of the split: a refused line is one lost update, but the credential read at
+    the top of `run` is the loss of every remaining one, and it says so under its own name. A token
+    revoked after the turn was admitted fails the read the follower cannot start without, so nothing
+    reaches the thread and no write event can carry the reason."""
+    caplog.set_level(logging.INFO, logger="ufo")
+    workspace_id, _ = await _seed()
+    real_get = CredentialStore.get
+
+    async def revoked_after_admit(self: CredentialStore, workspace: UUID, slot: str) -> str:
+        if slot == slack.SLACK_BOT_TOKEN_SLOT and slack._STATUS_TASKS:
+            raise CredentialSlotUnset(slot)
+        return await real_get(self, workspace, slot)
+
+    monkeypatch.setattr(CredentialStore, "get", revoked_after_admit)
+    recorder: list[httpx.Request] = []
+    _, client, _ = await _mount(monkeypatch, workspace_id, tmp_path, recorder, hub=InProcessHub())
+    mention = _event_body(
+        type="app_mention", user="U1", channel="C1", ts="100.5", text="<@UBOT00000> hi"
+    )
+    async with client:
+        response = await client.post(
+            EVENTS_PATH, content=mention, headers=_sign(mention, int(time.time()))
+        )
+    assert response.status_code == 200
+    async with workspace_tx() as connection:
+        turn_id = (
+            await connection.execute(
+                sa.select(tables.turn.c.id).where(tables.turn.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+
+    deadline = time.monotonic() + 10
+    while not [r for r in caplog.records if r.message == "slack.thread_status.dead"]:
+        assert time.monotonic() < deadline, "a revoked token never reached the event log"
+        await asyncio.sleep(0.01)
+
+    dead = [r for r in caplog.records if r.message == "slack.thread_status.dead"]
+    assert slack.SLACK_BOT_TOKEN_SLOT in dead[0].ufo["error"]
+    assert dead[0].ufo["turn"] == str(turn_id)
+    assert not _requests_to(recorder, slack.SLACK_ASSISTANT_STATUS_URL)
+    assert not any(record.message == "slack.thread_status.failed" for record in caplog.records)
+
+
+async def test_a_dead_tail_kills_the_status_follower_and_still_clears(
+    db: None, tmp_path, monkeypatch, caplog
+) -> None:
+    """The follower's other declared death: the tail it reads, not the credential. This breaks the
+    one thing inside the real `tail_frames` that can raise — its opening `turn_status_frame` read —
+    which surfaces from the future `_follow` already holds, the only exception there other than the
+    `StopAsyncIteration` that ends a healthy turn. It costs every remaining update, so it says so
+    under `dead` rather than as a refused line, and the thread is still left clean: the admission
+    line goes up, the clear takes it down, and the member is not left watching a `Thinking…` that
+    nothing will ever replace."""
+    caplog.set_level(logging.INFO, logger="ufo")
+    workspace_id, _ = await _seed()
+
+    async def failing_status_read(turn_id: UUID) -> LiveFrame | None:
+        raise RuntimeError("turn status read failed")
+
+    monkeypatch.setattr(hub_tail, "turn_status_frame", failing_status_read)
+    recorder: list[httpx.Request] = []
+    _, client, _ = await _mount(monkeypatch, workspace_id, tmp_path, recorder, hub=InProcessHub())
+    mention = _event_body(
+        type="app_mention", user="U1", channel="C1", ts="100.5", text="<@UBOT00000> hi"
+    )
+    async with client:
+        response = await client.post(
+            EVENTS_PATH, content=mention, headers=_sign(mention, int(time.time()))
+        )
+    assert response.status_code == 200
+    async with workspace_tx() as connection:
+        turn_id = (
+            await connection.execute(
+                sa.select(tables.turn.c.id).where(tables.turn.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+
+    deadline = time.monotonic() + 10
+    while not [r for r in caplog.records if r.message == "slack.thread_status.dead"]:
+        assert time.monotonic() < deadline, "a dead tail never reached the event log"
+        await asyncio.sleep(0.01)
+
+    dead = [r for r in caplog.records if r.message == "slack.thread_status.dead"]
+    assert "turn status read failed" in dead[0].ufo["error"]
+    assert dead[0].ufo["turn"] == str(turn_id)
+    assert turn_id not in slack._STATUS_TASKS
+    sent = [
+        json.loads(r.content)["status"]
+        for r in _requests_to(recorder, slack.SLACK_ASSISTANT_STATUS_URL)
+    ]
+    assert sent == [slack.STATUS_THINKING_TEXT, slack.STATUS_CLEAR_TEXT]
+    assert not any(record.message == "slack.thread_status.failed" for record in caplog.records)
 
 
 async def test_a_parked_turn_clears_the_status(db: None, tmp_path, monkeypatch) -> None:

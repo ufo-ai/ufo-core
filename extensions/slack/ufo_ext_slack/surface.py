@@ -1544,7 +1544,14 @@ class ThreadStatus:
     member is watching. Slack drops a status two minutes after its last write, so a quiet stretch
     re-stamps the shown text every STATUS_REFRESH_SECONDS. An update inside
     STATUS_UPDATE_MIN_SECONDS of the last send is dropped, not delayed: the next distinct frame
-    refreshes, and the clear ends the status regardless."""
+    refreshes, and the clear ends the status regardless.
+    Each write is contained: Slack rejecting one line costs that one update, never the follower, so
+    the next frame still reaches the member — and a rejected line is not remembered as shown, so the
+    refresh re-stamps the last line Slack did take rather than re-sending a refused one every
+    STATUS_REFRESH_SECONDS — the admission write included, so a thread that never got a line up has
+    nothing to re-stamp. The failure event carries the refused text and Slack's own account of
+    why, because the text is the only argument that varies between an accepted write and a rejected
+    one."""
 
     ctx: SurfaceContext
     turn_id: UUID
@@ -1554,18 +1561,22 @@ class ThreadStatus:
     async def run(self) -> None:
         bot_token = await self.ctx.credential(SLACK_BOT_TOKEN_SLOT)
         async with httpx.AsyncClient(timeout=SLACK_API_TIMEOUT_SECONDS) as client:
-            await self._set(client, bot_token, STATUS_THINKING_TEXT)
+            admitted = await self._set(client, bot_token, STATUS_THINKING_TEXT)
             try:
-                await self._follow(client, bot_token)
+                await self._follow(
+                    client, bot_token, STATUS_THINKING_TEXT if admitted else STATUS_CLEAR_TEXT
+                )
             finally:
                 await self._set(client, bot_token, STATUS_CLEAR_TEXT)
 
-    async def _set(self, client: httpx.AsyncClient, bot_token: str, status: str) -> None:
+    async def _set(self, client: httpx.AsyncClient, bot_token: str, status: str) -> bool:
+        """Whether Slack took the line, so the caller keeps `shown` on what a member can actually
+        see."""
         if (
             _THREAD_WRITERS.get((self.ctx.workspace_id, self.channel, self.thread_ts))
             != self.turn_id
         ):
-            return
+            return False
         body: dict[str, object] = {
             "channel_id": self.channel,
             "thread_ts": self.thread_ts,
@@ -1573,16 +1584,27 @@ class ThreadStatus:
         }
         if status:
             body["loading_messages"] = [status]
-        await _slack_ok(
-            client.post(
-                SLACK_ASSISTANT_STATUS_URL,
-                content=json.dumps(body),
-                headers={
-                    "Authorization": f"Bearer {bot_token}",
-                    "Content-Type": "application/json; charset=utf-8",
-                },
+        try:
+            await _slack_ok(
+                client.post(
+                    SLACK_ASSISTANT_STATUS_URL,
+                    content=json.dumps(body),
+                    headers={
+                        "Authorization": f"Bearer {bot_token}",
+                        "Content-Type": "application/json; charset=utf-8",
+                    },
+                )
             )
-        )
+        except Exception as error:
+            log(
+                "slack.thread_status.failed",
+                turn=str(self.turn_id),
+                channel=self.channel,
+                thread_ts=self.thread_ts,
+                status_text=status,
+                error=repr(error),
+            )
+            return False
         log(
             "slack.thread_status.write",
             turn=str(self.turn_id),
@@ -1590,9 +1612,9 @@ class ThreadStatus:
             thread_ts=self.thread_ts,
             status_text=status,
         )
+        return True
 
-    async def _follow(self, client: httpx.AsyncClient, bot_token: str) -> None:
-        shown = STATUS_THINKING_TEXT
+    async def _follow(self, client: httpx.AsyncClient, bot_token: str, shown: str) -> None:
         sent_at = time.monotonic()
         frames = aiter(self.ctx.tail(self.turn_id))
         upcoming = asyncio.ensure_future(anext(frames))
@@ -1600,8 +1622,9 @@ class ThreadStatus:
             while True:
                 done, _pending = await asyncio.wait([upcoming], timeout=STATUS_REFRESH_SECONDS)
                 if not done:
-                    await self._set(client, bot_token, shown)
-                    sent_at = time.monotonic()
+                    if shown:
+                        await self._set(client, bot_token, shown)
+                        sent_at = time.monotonic()
                     continue
                 try:
                     _cursor, frame = upcoming.result()
@@ -1627,8 +1650,9 @@ class ThreadStatus:
                 text = text[:STATUS_TEXT_LIMIT]
                 if text == shown or time.monotonic() - sent_at < STATUS_UPDATE_MIN_SECONDS:
                     continue
-                await self._set(client, bot_token, text)
-                shown, sent_at = text, time.monotonic()
+                if await self._set(client, bot_token, text):
+                    shown = text
+                sent_at = time.monotonic()
         finally:
             upcoming.cancel()
             await asyncio.gather(upcoming, return_exceptions=True)
@@ -1664,11 +1688,13 @@ def _track_status(ctx: SurfaceContext, turn_id: UUID, queue_key: str, message_ts
 
 
 async def _run_status(status: ThreadStatus) -> None:
+    """A write Slack refuses is the write's own event; reaching here means the follower itself is
+    gone — no credential, a dead tail — and the member sees nothing further for the turn."""
     try:
         await status.run()
     except Exception as error:
         log(
-            "slack.thread_status.failed",
+            "slack.thread_status.dead",
             turn=str(status.turn_id),
             channel=status.channel,
             thread_ts=status.thread_ts,
@@ -2470,5 +2496,8 @@ async def _slack_ok(request: Awaitable[httpx.Response]) -> dict[str, object]:
     response.raise_for_status()
     payload = response.json()
     if payload.get("ok") is not True:
-        raise SlackApiError(f"{response.url.path}: {payload.get('error')}")
+        metadata = payload.get("response_metadata")
+        messages = metadata.get("messages") if isinstance(metadata, dict) else None
+        named = f" {messages}" if messages else ""
+        raise SlackApiError(f"{response.url.path}: {payload.get('error')}{named}")
     return payload
