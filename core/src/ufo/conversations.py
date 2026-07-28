@@ -23,6 +23,7 @@ from ufo.objects import (
     ObjectListQuery,
     ObjectPage,
     ObjectRow,
+    UnknownObject,
     VerbNotSupported,
     object_page,
 )
@@ -76,9 +77,11 @@ class ConversationObjects:
 
     async def status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None:
         row = await self._find(ctx, name)
-        if row is None or row.audience not in ctx.read_subjects:
+        if row is None:
             return None
         exchange = await self._exchange(ctx, row.id)
+        if not await self._unchanged_visible(ctx, row):
+            raise UnknownObject(f"no conversation object named {name!r}")
         body = "\n".join(exchange).encode()
         path: str | None = None
         if body and len(body) <= MATERIALIZE_MAX_BYTES:
@@ -115,6 +118,21 @@ class ConversationObjects:
             if text:
                 lines.append(f"{message.role}: {text}")
         return tuple(lines)
+
+    async def _unchanged_visible(self, ctx: ToolContext, row: sa.Row) -> bool:
+        async with workspace_tx() as connection:
+            return (
+                await connection.execute(
+                    sa.select(
+                        sa.exists(
+                            self._visible(ctx).where(
+                                tables.conversation.c.id == row.id,
+                                tables.conversation.c.audience == row.audience,
+                            )
+                        )
+                    )
+                )
+            ).scalar_one()
 
     async def _find(self, ctx: ToolContext, name: str) -> sa.Row | None:
         try:

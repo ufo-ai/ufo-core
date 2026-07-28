@@ -7,9 +7,11 @@ create/update/get/list/delete round-trip, keyset paging under `OBJECT_LIST_PAGE`
 name-grammar refusals, spec validation naming its field, handler-raised `VerbNotSupported` and
 `AdminRequired`, and the boot gates (kind collision, spec-model gates) failing loud."""
 
+import asyncio
 import json
-from collections.abc import Callable
-from dataclasses import replace
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -20,15 +22,17 @@ import ufo_ext_sample as sample
 import yaml
 from cryptography.fernet import Fernet
 from pydantic import BaseModel, ConfigDict, SecretStr
+from sqlalchemy.ext.asyncio import AsyncConnection
 from ufo_ext_connectors.objects import CONNECTION_OBJECT, CONNECTOR_GRANT_OBJECT
 from ufo_ext_scheduled_tasks.tools import SCHEDULED_TASK_OBJECT
 from ufo_ext_sources.tools import SOURCE_OBJECT
 
+import ufo.artifacts as artifacts
 import ufo.conversations as conversations
 from ufo.agent_scope import agent
 from ufo.agents import AGENT_KIND
 from ufo.artifact_token import verify_artifact_token
-from ufo.artifacts import ARTIFACT_KIND, artifact_object_names
+from ufo.artifacts import ARTIFACT_KIND, ArtifactObjects, artifact_object_names
 from ufo.audience import (
     SHARED_AUDIENCE,
     Audience,
@@ -1021,6 +1025,19 @@ async def _shared_artifact_row(turn: Turn, blob_key: str, filename: str, size_by
         )
 
 
+async def _narrow_conversation(conversation_id: UUID, member_id: UUID) -> None:
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.conversation)
+            .where(tables.conversation.c.id == conversation_id)
+            .values(
+                member_id=member_id,
+                audience=str(conversation_audience(member_id)),
+                updated_at=sa.func.now(),
+            )
+        )
+
+
 def test_artifact_object_names_prefix_the_conversation_and_slug_the_filename() -> None:
     conv_a, conv_b = uuid4(), uuid4()
     names = artifact_object_names(
@@ -1282,6 +1299,243 @@ async def test_artifact_with_missing_bytes_fails_loud_on_get(db: None, tmp_path:
                 )
 
 
+async def test_artifact_status_refuses_audience_narrowing_during_blob_read(
+    db: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await _workspace()
+    with ws(workspace_id):
+        bob = await _member(workspace_id, JOINER_CREATED_AT)
+        turn = await _turn_row(workspace_id, audience=SHARED_AUDIENCE)
+        ctx, workspace_dir = await _workspace_context(turn, tmp_path)
+        blob_key = f"artifacts/{uuid4()}/secret.txt"
+        await ctx.blob.put(blob_key, b"shared until narrowed")
+        await _shared_artifact_row(turn, blob_key, "secret.txt", len(b"shared until narrowed"))
+        real_get = FilesystemBlobStore.get
+
+        async def narrow_during_read(store: FilesystemBlobStore, key: str) -> bytes:
+            data = await real_get(store, key)
+            await _narrow_conversation(turn.conversation_id, bob)
+            return data
+
+        monkeypatch.setattr(FilesystemBlobStore, "get", narrow_during_read)
+        with agent(turn.agent_id), pytest.raises(UnknownObject):
+            await ArtifactObjects().status(
+                ctx,
+                f"{turn.conversation_id.hex[:8]}-secret-txt",
+            )
+
+    assert not (workspace_dir / "artifacts").exists()
+
+
+async def test_artifact_delete_refuses_audience_narrowing_after_authorization(
+    db: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await _workspace()
+    with ws(workspace_id):
+        bob = await _member(workspace_id, JOINER_CREATED_AT)
+        turn = await _turn_row(workspace_id, audience=SHARED_AUDIENCE)
+        ctx, _ = await _workspace_context(turn, tmp_path)
+        blob_key = f"artifacts/{uuid4()}/secret.txt"
+        await ctx.blob.put(blob_key, b"shared until narrowed")
+        await _shared_artifact_row(turn, blob_key, "secret.txt", len(b"shared until narrowed"))
+        real_find = ArtifactObjects._find
+
+        async def narrow_after_find(
+            store: ArtifactObjects,
+            tool_ctx: ToolContext,
+            name: str,
+        ) -> tuple[sa.Row, ...] | None:
+            shares = await real_find(store, tool_ctx, name)
+            await _narrow_conversation(turn.conversation_id, bob)
+            return shares
+
+        monkeypatch.setattr(ArtifactObjects, "_find", narrow_after_find)
+        with agent(turn.agent_id), pytest.raises(ValueError, match="changed while deleting"):
+            await ArtifactObjects().delete(
+                ctx,
+                f"{turn.conversation_id.hex[:8]}-secret-txt",
+            )
+        async with workspace_tx() as connection:
+            row_exists = (
+                await connection.execute(
+                    sa.select(
+                        sa.exists(
+                            sa.select(tables.shared_artifact.c.blob_key).where(
+                                tables.shared_artifact.c.blob_key == blob_key
+                            )
+                        )
+                    )
+                )
+            ).scalar_one()
+
+    assert row_exists
+    assert await ctx.blob.exists(blob_key)
+
+
+ROW_LOCK_HELD = 'could not obtain lock on row in relation "conversation"'
+POSTGRES_ONLY_LOCK = "row locks are a PostgreSQL mechanism; sqlite queues writers on one slot"
+
+
+@dataclass(frozen=True)
+class _HoldsTheConversationRow:
+    """Parks the artifact delete inside its transaction the instant its authorization check has
+    read the conversation row, so a competing writer meets whatever lock that check took while the
+    delete is still open. The delete's check is the only single-table conversation select it
+    runs — `_groups` reads through a join — so the park never fires on the wrong statement."""
+
+    connection: AsyncConnection
+    reached: asyncio.Event
+    release: asyncio.Event
+
+    async def execute(self, statement: sa.Executable) -> sa.CursorResult:
+        result = await self.connection.execute(statement)
+        if isinstance(statement, sa.Select) and statement.get_final_froms() == [
+            tables.conversation
+        ]:
+            self.reached.set()
+            await self.release.wait()
+        return result
+
+
+async def test_artifact_delete_holds_the_conversation_row_against_a_concurrent_narrowing(
+    db: None,
+    database_url: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two live PostgreSQL backends: the delete takes the conversation row as it authorizes and
+    keeps it to commit, so a narrowing writer cannot move the audience out from under an
+    already-authorized delete. The competitor asks for the row with NOWAIT, so the contention is
+    read at the instant it happens instead of waited on."""
+    if not database_url.startswith("postgresql"):
+        pytest.skip(POSTGRES_ONLY_LOCK)
+    workspace_id = await _workspace()
+    with ws(workspace_id):
+        bob = await _member(workspace_id, JOINER_CREATED_AT)
+        turn = await _turn_row(workspace_id, audience=SHARED_AUDIENCE)
+        ctx, _ = await _workspace_context(turn, tmp_path)
+        blob_key = f"artifacts/{uuid4()}/secret.txt"
+        await ctx.blob.put(blob_key, b"shared until narrowed")
+        await _shared_artifact_row(turn, blob_key, "secret.txt", len(b"shared until narrowed"))
+        reached, release = asyncio.Event(), asyncio.Event()
+
+        @asynccontextmanager
+        async def park_on_the_conversation_row() -> AsyncIterator[_HoldsTheConversationRow]:
+            async with workspace_tx() as connection:
+                yield _HoldsTheConversationRow(connection, reached, release)
+
+        monkeypatch.setattr(artifacts, "workspace_tx", park_on_the_conversation_row)
+        with agent(turn.agent_id):
+            deleting = asyncio.create_task(
+                ArtifactObjects().delete(ctx, f"{turn.conversation_id.hex[:8]}-secret-txt")
+            )
+            authorized = asyncio.create_task(reached.wait())
+            await asyncio.wait((deleting, authorized), return_when=asyncio.FIRST_COMPLETED)
+            try:
+                assert reached.is_set()
+                with pytest.raises(sa.exc.DBAPIError, match=ROW_LOCK_HELD):
+                    async with workspace_tx() as connection:
+                        await connection.execute(
+                            sa.select(tables.conversation.c.id)
+                            .where(tables.conversation.c.id == turn.conversation_id)
+                            .with_for_update(nowait=True)
+                        )
+                        await connection.execute(
+                            sa.update(tables.conversation)
+                            .where(tables.conversation.c.id == turn.conversation_id)
+                            .values(
+                                member_id=bob,
+                                audience=str(conversation_audience(bob)),
+                                updated_at=sa.func.now(),
+                            )
+                        )
+            finally:
+                release.set()
+                authorized.cancel()
+                await deleting
+        async with workspace_tx() as connection:
+            audience = (
+                await connection.execute(
+                    sa.select(tables.conversation.c.audience).where(
+                        tables.conversation.c.id == turn.conversation_id
+                    )
+                )
+            ).scalar_one()
+            remaining = (
+                (
+                    await connection.execute(
+                        sa.select(tables.shared_artifact.c.blob_key).where(
+                            tables.shared_artifact.c.workspace_id == workspace_id
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+
+    assert audience == str(SHARED_AUDIENCE)
+    assert list(remaining) == []
+    assert not await ctx.blob.exists(blob_key)
+
+
+async def test_artifact_delete_refuses_when_a_version_is_taken_out_from_under_it(
+    db: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The delete removes the exact key set it read, so a version another deleter took first
+    leaves that set short. The count mismatch aborts the transaction before any bytes are
+    destroyed: the version the winner did not take keeps its row and its blob."""
+    workspace_id = await _workspace()
+    with ws(workspace_id):
+        turn = await _turn_row(workspace_id, audience=SHARED_AUDIENCE)
+        ctx, _ = await _workspace_context(turn, tmp_path)
+        first_key = f"artifacts/{uuid4()}/report.txt"
+        second_key = f"artifacts/{uuid4()}/report.txt"
+        for key, body in ((first_key, b"v1"), (second_key, b"v2")):
+            await ctx.blob.put(key, body)
+            await _shared_artifact_row(turn, key, "report.txt", len(body))
+        real_find = ArtifactObjects._find
+
+        async def take_one_version(
+            store: ArtifactObjects,
+            tool_ctx: ToolContext,
+            name: str,
+        ) -> tuple[sa.Row, ...] | None:
+            shares = await real_find(store, tool_ctx, name)
+            async with workspace_tx() as connection:
+                await connection.execute(
+                    sa.delete(tables.shared_artifact).where(
+                        tables.shared_artifact.c.blob_key == first_key
+                    )
+                )
+            return shares
+
+        monkeypatch.setattr(ArtifactObjects, "_find", take_one_version)
+        with agent(turn.agent_id), pytest.raises(ValueError, match="lost a version while deleting"):
+            await ArtifactObjects().delete(ctx, f"{turn.conversation_id.hex[:8]}-report-txt")
+        async with workspace_tx() as connection:
+            remaining = (
+                (
+                    await connection.execute(
+                        sa.select(tables.shared_artifact.c.blob_key).where(
+                            tables.shared_artifact.c.workspace_id == workspace_id
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+
+    assert list(remaining) == [second_key]
+    assert await ctx.blob.exists(first_key)
+    assert await ctx.blob.exists(second_key)
+
+
 async def test_artifact_slug_collisions_list_under_distinct_names(db: None) -> None:
     workspace_id = await _workspace()
     tools = _object_tools()
@@ -1424,6 +1678,43 @@ async def test_conversation_transcript_keeps_member_and_agent_gates(
     path = f"transcripts/{private.conversation_id}.txt"
     assert fetched["status"]["workspace_path"] == path
     assert (workspace_dir / path).is_file()
+
+
+async def test_conversation_status_refuses_audience_narrowing_during_transcript_read(
+    db: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await _workspace()
+    with ws(workspace_id):
+        bob = await _member(workspace_id, JOINER_CREATED_AT)
+        past = await _turn_row(workspace_id, audience=SHARED_AUDIENCE)
+        reader = await _turn_row(
+            workspace_id,
+            agent_id=past.agent_id,
+            audience=SHARED_AUDIENCE,
+        )
+        ctx, workspace_dir = await _workspace_context(reader, tmp_path)
+        await Transcript(blob=ctx.blob, conversation_id=past.conversation_id).write(LAUNCH_EXCHANGE)
+        real_exchange = conversations.ConversationObjects._exchange
+
+        async def narrow_during_read(
+            store: conversations.ConversationObjects,
+            tool_ctx: ToolContext,
+            conversation_id: UUID,
+        ) -> tuple[str, ...]:
+            exchange = await real_exchange(store, tool_ctx, conversation_id)
+            await _narrow_conversation(conversation_id, bob)
+            return exchange
+
+        monkeypatch.setattr(conversations.ConversationObjects, "_exchange", narrow_during_read)
+        with agent(past.agent_id), pytest.raises(UnknownObject):
+            await conversations.ConversationObjects().status(
+                ctx,
+                str(past.conversation_id),
+            )
+
+    assert not (workspace_dir / "transcripts").exists()
 
 
 async def test_main_targets_child_conversations_and_artifacts_with_the_requesters_audience(

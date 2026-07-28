@@ -43,6 +43,7 @@ from ufo.objects import (
     ObjectPage,
     ObjectRef,
     ObjectRow,
+    UnknownObject,
     VerbNotSupported,
     object_page,
 )
@@ -151,6 +152,23 @@ class ArtifactObjects:
         if shares is None:
             return None
         latest = shares[0]
+        data: bytes | None = None
+        if latest.size_bytes <= MATERIALIZE_MAX_BYTES:
+            try:
+                data = await ctx.blob.get(latest.blob_key)
+            except BlobNotFound as error:
+                raise ValueError(
+                    f"artifact {name!r} has no stored bytes under {latest.blob_key!r}"
+                ) from error
+        async with workspace_tx() as connection:
+            if (
+                await connection.execute(self._unchanged_visible(ctx, latest))
+            ).scalar_one_or_none() is None:
+                raise UnknownObject(f"no artifact object named {name!r}")
+        path: str | None = None
+        if data is not None:
+            path = f"{ARTIFACT_WORKSPACE_DIR}/{name}/{latest.filename}"
+            await ctx.sandbox.write_file(path, data)
         url: str | None = None
         if ctx.artifact_token_secret:
             expires_at = int(datetime.now(UTC).timestamp()) + ARTIFACT_TOKEN_TTL_SECONDS
@@ -164,7 +182,7 @@ class ArtifactObjects:
             "turn_id": str(latest.turn_id),
             "versions": len(shares),
             "download_url": url,
-            "workspace_path": await self._materialize(ctx, name, latest),
+            "workspace_path": path,
         }
 
     async def apply(
@@ -177,27 +195,29 @@ class ArtifactObjects:
         if shares is None:
             raise ValueError(f"no artifact named {name!r}")
         async with workspace_tx() as connection:
-            await connection.execute(
+            if (
+                await connection.execute(self._unchanged_visible(ctx, shares[0]).with_for_update())
+            ).scalar_one_or_none() is None:
+                raise ValueError(f"artifact {name!r} changed while deleting")
+            deleted = await connection.execute(
                 sa.delete(tables.shared_artifact).where(
                     tables.shared_artifact.c.workspace_id == ws_current().workspace_id,
                     tables.shared_artifact.c.blob_key.in_([share.blob_key for share in shares]),
                 )
             )
+            if deleted.rowcount != len(shares):
+                raise ValueError(f"artifact {name!r} lost a version while deleting")
         for share in shares:
             await ctx.blob.delete(share.blob_key)
 
-    async def _materialize(self, ctx: ToolContext, name: str, latest: sa.Row) -> str | None:
-        if latest.size_bytes > MATERIALIZE_MAX_BYTES:
-            return None
-        try:
-            data = await ctx.blob.get(latest.blob_key)
-        except BlobNotFound as error:
-            raise ValueError(
-                f"artifact {name!r} has no stored bytes under {latest.blob_key!r}"
-            ) from error
-        path = f"{ARTIFACT_WORKSPACE_DIR}/{name}/{latest.filename}"
-        await ctx.sandbox.write_file(path, data)
-        return path
+    def _unchanged_visible(self, ctx: ToolContext, latest: sa.Row) -> sa.Select:
+        return sa.select(tables.conversation.c.id).where(
+            tables.conversation.c.workspace_id == ws_current().workspace_id,
+            tables.conversation.c.id == latest.conversation_id,
+            tables.conversation.c.agent_id == object_agent_id(),
+            tables.conversation.c.audience == latest.audience,
+            tables.conversation.c.audience.in_(ctx.read_subjects),
+        )
 
     async def _find(self, ctx: ToolContext, name: str) -> tuple[sa.Row, ...] | None:
         matched = [shares for candidate, shares in await self._groups(ctx) if candidate == name]
@@ -216,6 +236,7 @@ class ArtifactObjects:
                         tables.shared_artifact.c.size_bytes,
                         tables.shared_artifact.c.created_at,
                         tables.turn.c.conversation_id,
+                        tables.conversation.c.audience,
                     )
                     .select_from(
                         tables.shared_artifact.join(
