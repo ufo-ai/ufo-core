@@ -497,8 +497,11 @@ class PageChangeRunner:
         the page table) and each workspace's cursor for this consumer from `ext_store`; a workspace
         whose high-water page is at or before its cursor has nothing changed since it last drained
         and is never opened, while a workspace with no cursor yet (never driven) has every page
-        pending. So a page-holding but change-free workspace runs no per-tick transaction. On a
-        per-tenant deploy `owner_tx` resolves to the single workspace, unchanged."""
+        pending. So a page-holding but change-free workspace runs no per-tick transaction. A
+        workspace whose stored cursor fails to parse counts as pending rather than aborting this
+        fleet-wide read — one workspace's unparseable cursor stays that workspace's `drive` failure,
+        never blocking every other workspace's tick. On a per-tenant deploy `owner_tx` resolves to
+        the single workspace, unchanged."""
         cursor_key = f"{PAGE_CHANGE_CURSOR_KEY}:{consumer.discriminator}"
         of_workspace = tables.page.c.workspace_id == tables.workspace.c.id
         newest_first = (tables.page.c.revision.desc(), tables.page.c.id.desc())
@@ -539,7 +542,17 @@ class PageChangeRunner:
         for row in page_rows:
             if row.revision is None:
                 continue
-            if _page_beyond_cursor(row.revision, row.id, cursors.get(row.workspace_id)):
+            try:
+                beyond = _page_beyond_cursor(row.revision, row.id, cursors.get(row.workspace_id))
+            except ValueError:
+                warn(
+                    "jobs.page_change_cursor_invalid",
+                    workspace_id=str(row.workspace_id),
+                    extension=consumer.extension,
+                    discriminator=consumer.discriminator,
+                )
+                beyond = True
+            if beyond:
                 pending.append(row.workspace_id)
         return tuple(pending)
 

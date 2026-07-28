@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -762,19 +763,46 @@ async def test_page_change_drive_skips_a_workspace_unchanged_since_its_cursor(
     assert isinstance(seen_b, str) and str(page_b) in seen_b
 
 
-async def test_page_change_candidates_reject_an_invalid_cursor(db: None, tmp_path: Path) -> None:
-    workspace_id = uuid4()
-    await _seed_page(workspace_id)
+async def test_page_change_candidates_isolate_an_invalid_cursor(
+    db: None, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A workspace whose stored cursor predates the revision-based format (or is otherwise
+    corrupt) counts as pending rather than aborting the fleet-wide candidate read — one broken
+    workspace must not stop every other workspace's tick from finding its own pending work — and
+    names itself, its consumer and its extension in `jobs.page_change_cursor_invalid`, the one
+    record that reaches an operator before the failure reappears inside a per-workspace drive.
+    Reading the cursor stays fail-loud: the broken workspace's own drive still raises, so it never
+    advances past pages it did not deliver."""
+    broken_id, healthy_id = uuid4(), uuid4()
+    await _seed_page(broken_id)
+    healthy_page = await _seed_page(healthy_id)
     runner = _probe_runner(tmp_path)
     (consumer,) = runner.consumers()
-    with ws(workspace_id):
+    with ws(broken_id):
         await ScopedStore(extension=PROBE_EXTENSION).put(
             f"{PAGE_CHANGE_CURSOR_KEY}:{consumer.discriminator}",
             f"{datetime(2030, 1, 1, tzinfo=UTC).isoformat()}|{uuid4()}",
         )
 
-    with pytest.raises(ValueError, match="invalid page cursor"):
-        await runner.workspaces_with_changes(consumer)
+    with caplog.at_level(logging.WARNING, logger="ufo"):
+        pending = await runner.workspaces_with_changes(consumer)
+    assert set(pending) == {broken_id, healthy_id}
+    record = next(
+        record for record in caplog.records if record.message == "jobs.page_change_cursor_invalid"
+    )
+    assert record.ufo == {
+        "workspace_id": str(broken_id),
+        "extension": PROBE_EXTENSION,
+        "discriminator": consumer.discriminator,
+    }
+
+    with ws(healthy_id):
+        await runner.drive(consumer)
+        seen = await ScopedStore(extension=PROBE_EXTENSION).get(SEEN_PAGES_KEY)
+    assert isinstance(seen, str) and str(healthy_page) in seen
+
+    with ws(broken_id), pytest.raises(ValueError, match="invalid page cursor"):
+        await runner.drive(consumer)
 
 
 async def test_shared_page_scoping_excludes_a_member_only_search(
