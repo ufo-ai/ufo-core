@@ -147,7 +147,13 @@ class ArtifactObjects:
             ),
         )
 
-    async def status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None:
+    async def status(
+        self,
+        ctx: ToolContext,
+        name: str,
+        *,
+        expected_generation: UUID | None,
+    ) -> dict[str, JsonValue] | None:
         shares = await self._find(ctx, name)
         if shares is None:
             return None
@@ -186,11 +192,23 @@ class ArtifactObjects:
         }
 
     async def apply(
-        self, ctx: ToolContext, name: str, spec: ArtifactSpec, old: ArtifactSpec | None
+        self,
+        ctx: ToolContext,
+        name: str,
+        spec: ArtifactSpec,
+        old: ArtifactSpec | None,
+        *,
+        expected_generation: UUID | None,
     ) -> None:
         raise VerbNotSupported(ARTIFACTS_ARE_SHARED)
 
-    async def delete(self, ctx: ToolContext, name: str) -> None:
+    async def delete(
+        self,
+        ctx: ToolContext,
+        name: str,
+        *,
+        expected_generation: UUID | None,
+    ) -> None:
         shares = await self._find(ctx, name)
         if shares is None:
             raise ValueError(f"no artifact named {name!r}")
@@ -304,4 +322,5 @@ ARTIFACT_OBJECT = ObjectKind(
     spec_model=ArtifactSpec,
     store=ArtifactObjects(),
     list_fields=frozenset({"filename", "subject"}),
+    agent_target_verbs=frozenset({"list", "get", "delete"}),
 )

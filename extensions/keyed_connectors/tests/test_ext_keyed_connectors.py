@@ -138,15 +138,15 @@ async def test_a_read_reports_the_host_this_workspace_actually_uses(db: None) ->
     ctx = cast(ToolContext, None)
     with ws(workspace_id):
         await store.put(workspace_id, "datadog_api_key", "dd-api-real")
-        unchosen = await objects.status(ctx, "datadog-api-key")
+        unchosen = await objects.status(ctx, "datadog-api-key", expected_generation=None)
         assert unchosen is not None and unchosen["host"] == "api.datadoghq.com"
 
         await store.put(workspace_id, "datadog_api_host", US5_HOST)
-        chosen = await objects.status(ctx, "datadog-api-key")
+        chosen = await objects.status(ctx, "datadog-api-key", expected_generation=None)
         assert chosen is not None and chosen["host"] == US5_HOST
 
         await store.put(workspace_id, "datadog_api_host", "169.254.169.254")
-        refused = await objects.status(ctx, "datadog-api-key")
+        refused = await objects.status(ctx, "datadog-api-key", expected_generation=None)
         assert refused is not None and refused["filled"] is True and refused["host"] is None
 
         keyed = await objects.get(ctx, "datadog-api-key")

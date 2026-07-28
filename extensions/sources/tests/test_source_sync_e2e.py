@@ -226,6 +226,7 @@ async def _sync_and_search(
             binding_name(provider, account, None),
             SourceSpec(provider=provider, streams=(stream,)),
             None,
+            expected_generation=None,
         )
         driver = SyncDriver(
             blob=FilesystemBlobStore(root=tmp_path / "blobs"),

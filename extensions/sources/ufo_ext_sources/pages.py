@@ -183,15 +183,33 @@ class PageObjects:
             links=page.links(),
         )
 
-    async def status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None:
+    async def status(
+        self,
+        ctx: ToolContext,
+        name: str,
+        *,
+        expected_generation: UUID | None,
+    ) -> dict[str, JsonValue] | None:
         return None
 
     async def apply(
-        self, ctx: ToolContext, name: str, spec: PageSpec, old: PageSpec | None
+        self,
+        ctx: ToolContext,
+        name: str,
+        spec: PageSpec,
+        old: PageSpec | None,
+        *,
+        expected_generation: UUID | None,
     ) -> None:
         raise VerbNotSupported(PAGES_ARE_SYNCED)
 
-    async def delete(self, ctx: ToolContext, name: str) -> None:
+    async def delete(
+        self,
+        ctx: ToolContext,
+        name: str,
+        *,
+        expected_generation: UUID | None,
+    ) -> None:
         if not await ctx.speaker_is_admin():
             raise AdminRequired(PAGE_FORGET_GATE)
         page = await self._find(ctx, name)

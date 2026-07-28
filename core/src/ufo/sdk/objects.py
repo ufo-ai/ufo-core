@@ -14,6 +14,9 @@ from ufo.objects import (
     AdminRequired as AdminRequired,
 )
 from ufo.objects import (
+    AgentTargetVerb as AgentTargetVerb,
+)
+from ufo.objects import (
     GeneratedObjectOwner as GeneratedObjectOwner,
 )
 from ufo.objects import (

@@ -185,15 +185,33 @@ class MemoryObjects:
             links=tuple(links),
         )
 
-    async def status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None:
+    async def status(
+        self,
+        ctx: ToolContext,
+        name: str,
+        *,
+        expected_generation: UUID | None,
+    ) -> dict[str, JsonValue] | None:
         return None
 
     async def apply(
-        self, ctx: ToolContext, name: str, spec: MemorySpec, old: MemorySpec | None
+        self,
+        ctx: ToolContext,
+        name: str,
+        spec: MemorySpec,
+        old: MemorySpec | None,
+        *,
+        expected_generation: UUID | None,
     ) -> None:
         raise VerbNotSupported(MEMORY_UPDATE_REFUSAL)
 
-    async def delete(self, ctx: ToolContext, name: str) -> None:
+    async def delete(
+        self,
+        ctx: ToolContext,
+        name: str,
+        *,
+        expected_generation: UUID | None,
+    ) -> None:
         raise VerbNotSupported(MEMORY_UNDELETABLE)
 
 

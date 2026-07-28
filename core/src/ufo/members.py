@@ -64,7 +64,13 @@ class MemberObjects:
             updated_at=row.updated_at,
         )
 
-    async def status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None:
+    async def status(
+        self,
+        ctx: ToolContext,
+        name: str,
+        *,
+        expected_generation: UUID | None,
+    ) -> dict[str, JsonValue] | None:
         row = await self._visible_row(ctx, name)
         return (
             None
@@ -81,6 +87,8 @@ class MemberObjects:
         name: str,
         spec: MemberSpec,
         old: MemberSpec | None,
+        *,
+        expected_generation: UUID | None,
     ) -> None:
         if not await ctx.agent_is_main() or ctx.speaker_member_id is None:
             raise AdminRequired(MEMBER_ADMIN_GATE)
@@ -147,7 +155,13 @@ class MemberObjects:
                 .values(is_admin=spec.admin, updated_at=sa.func.now())
             )
 
-    async def delete(self, ctx: ToolContext, name: str) -> None:
+    async def delete(
+        self,
+        ctx: ToolContext,
+        name: str,
+        *,
+        expected_generation: UUID | None,
+    ) -> None:
         raise VerbNotSupported(MEMBER_DELETE)
 
     async def _visible_rows(self, ctx: ToolContext) -> tuple[sa.Row, ...]:

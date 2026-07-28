@@ -364,11 +364,23 @@ class WidgetStore:
             spec=stored.spec, created_at=stored.created_at, updated_at=stored.updated_at
         )
 
-    async def status(self, ctx: ToolContext, name: str) -> None:
+    async def status(
+        self,
+        ctx: ToolContext,
+        name: str,
+        *,
+        expected_generation: UUID | None,
+    ) -> None:
         return None
 
     async def apply(
-        self, ctx: ToolContext, name: str, spec: WidgetSpec, old: WidgetSpec | None
+        self,
+        ctx: ToolContext,
+        name: str,
+        spec: WidgetSpec,
+        old: WidgetSpec | None,
+        *,
+        expected_generation: UUID | None,
     ) -> None:
         ext = self._ext(ctx)
         value = await ext.store.get(WIDGET_KEY_PREFIX + name)
@@ -379,7 +391,13 @@ class WidgetStore:
             StoredWidget(spec=spec, created_at=created_at, updated_at=now).model_dump(mode="json"),
         )
 
-    async def delete(self, ctx: ToolContext, name: str) -> None:
+    async def delete(
+        self,
+        ctx: ToolContext,
+        name: str,
+        *,
+        expected_generation: UUID | None,
+    ) -> None:
         if not await ctx.speaker_is_admin():
             raise AdminRequired(WIDGET_DELETE_GATE)
         await self._ext(ctx).store.delete(WIDGET_KEY_PREFIX + name)
@@ -408,15 +426,33 @@ class RelicStore:
             spec=RelicSpec(inscription=RELIC_INSCRIPTION), created_at=None, updated_at=None
         )
 
-    async def status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None:
+    async def status(
+        self,
+        ctx: ToolContext,
+        name: str,
+        *,
+        expected_generation: UUID | None,
+    ) -> dict[str, JsonValue] | None:
         return {"origin": "excavated"}
 
     async def apply(
-        self, ctx: ToolContext, name: str, spec: RelicSpec, old: RelicSpec | None
+        self,
+        ctx: ToolContext,
+        name: str,
+        spec: RelicSpec,
+        old: RelicSpec | None,
+        *,
+        expected_generation: UUID | None,
     ) -> None:
         raise VerbNotSupported(RELIC_REFUSAL)
 
-    async def delete(self, ctx: ToolContext, name: str) -> None:
+    async def delete(
+        self,
+        ctx: ToolContext,
+        name: str,
+        *,
+        expected_generation: UUID | None,
+    ) -> None:
         raise VerbNotSupported(RELIC_REFUSAL)
 
 

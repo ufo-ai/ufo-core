@@ -288,7 +288,13 @@ class SourceObjects(MemberOwnedObjects[SourceSpec, ObjectOwner]):
     delete_requires_speaker: ClassVar[bool] = True
 
     async def apply(
-        self, ctx: ToolContext, name: str, spec: SourceSpec, old: SourceSpec | None
+        self,
+        ctx: ToolContext,
+        name: str,
+        spec: SourceSpec,
+        old: SourceSpec | None,
+        *,
+        expected_generation: UUID | None,
     ) -> None:
         """A subscribers-only edit on a source the caller can already see (`old` is non-None only
         for a visible source, since the base `get` hides the rest) is gated on visibility, not
@@ -302,24 +308,33 @@ class SourceObjects(MemberOwnedObjects[SourceSpec, ObjectOwner]):
                     raise AdminRequired(SHARE_GATE)
                 return
             _self_only_change(old.subscribers, spec.subscribers, caller)
-            await self._edit_subscribers(
-                _require_ext(ctx), name, spec.subscribers, caller, ctx.turn.agent_id
-            )
+            await self._edit_subscribers(ctx, name, spec.subscribers, caller, ctx.turn.agent_id)
             return
-        await super().apply(ctx, name, spec, old)
+        await super().apply(ctx, name, spec, old, expected_generation=expected_generation)
 
     async def _edit_subscribers(
-        self, ext: ExtensionContext, name: str, desired: tuple[str, ...], caller: str, agent: UUID
+        self, ctx: ToolContext, name: str, desired: tuple[str, ...], caller: str, agent: UUID
     ) -> None:
         """Toggle only the caller's membership (the self-only rule already held the diff to it):
         add captures the caller's agent so the alert re-enters the same conversation and agent;
-        remove drops it. Other subscribers' entries are preserved untouched."""
+        remove drops it. Other subscribers' entries are preserved untouched. The map belongs to the
+        binding, so it stands only while the binding does: the removal that took the rows took the
+        subscribers with them, and re-reading after the write clears a map that landed behind it.
+        The recheck sees presence, not identity — a revival reuses the source row — so a write
+        landing inside a concurrent delete-then-revive of that name survives onto the revived
+        binding.
+        Bounded to `SHARED_SUBJECT` pages by the alert filter, so it is stale state rather than
+        disclosure; closing it needs the map to live in the source rows."""
+        ext = _require_ext(ctx)
         mapping = await _subscribers_map(ext, name)
         if caller in desired:
             mapping[caller] = agent.hex
         else:
             mapping.pop(caller, None)
         await _store_subscribers(ext, name, mapping)
+        if await self._find(ctx, name) is None:
+            await _store_subscribers(ext, name, {})
+            raise UnknownObject(f"no {SOURCE_KIND} object named {name!r}")
 
     async def _owned_rows(self, ctx: ToolContext) -> tuple[OwnedRow[ObjectOwner], ...]:
         return tuple(

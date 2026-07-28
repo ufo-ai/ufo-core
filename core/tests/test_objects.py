@@ -11,9 +11,10 @@ import asyncio
 import json
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import ClassVar
 from uuid import UUID, uuid4
 
 import pytest
@@ -44,7 +45,7 @@ from ufo.blob import FilesystemBlobStore
 from ufo.conversations import CONVERSATION_KIND
 from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
-from ufo.ext.context import JsonValue
+from ufo.ext.context import ExtensionContext, JsonValue, context_for
 from ufo.ext.loader import load_manifests, turn_tools, validate_ext_tools
 from ufo.ext.manifest import Manifest
 from ufo.governance import Governance, prompt_digest
@@ -57,6 +58,7 @@ from ufo.objects import (
     OBJECT_NAME_PATTERN,
     AdminRequired,
     BoundKind,
+    GeneratedObjectOwner,
     InvalidManifest,
     InvalidName,
     MemberOwnedObjects,
@@ -65,6 +67,7 @@ from ufo.objects import (
     ObjectListQuery,
     ObjectOwner,
     ObjectRow,
+    ObjectVerbs,
     OwnedRow,
     SpecValidationFailed,
     UnknownKind,
@@ -84,6 +87,7 @@ from ufo.sandbox.session import (
 )
 from ufo.schema import tables
 from ufo.schema.records import Agent, AgentChange, Turn
+from ufo.sdk.objects import AgentTargetVerb
 from ufo.tools.context import SpawnResult, TextContent, ToolContext, ToolResult
 from ufo.tools.registry import ToolDef
 from ufo.transcript import Conversation, transcript_key
@@ -293,6 +297,7 @@ async def test_widget_crud_round_trips_through_the_verbs(db: None) -> None:
         explained = json.loads(await _text(tools, "object_explain", ctx, kind=sample.WIDGET_KIND))
         assert "color" in explained["spec_schema"]["properties"]
         assert explained["guidance"] == sample.WIDGET_GUIDANCE
+        assert explained["agent_target_verbs"] == []
 
         deleted = json.loads(
             await _text(tools, "object_delete", ctx, kind=sample.WIDGET_KIND, name="anvil")
@@ -582,6 +587,155 @@ def test_boot_fails_on_a_colliding_kind() -> None:
                 ),
             )
         )
+
+
+def test_boot_fails_on_an_unknown_agent_target_verb() -> None:
+    kind = ObjectKind(
+        name="widget",
+        description="d",
+        guidance="g",
+        spec_model=sample.WidgetSpec,
+        store=sample.WidgetStore(),
+        agent_target_verbs=frozenset({"rename"}),
+    )
+    with pytest.raises(ValueError, match="unknown agent target verbs"):
+        object_registry((BoundKind(kind=kind, extension="sample", context=None),))
+
+
+def _target_tools(
+    verbs: frozenset[AgentTargetVerb],
+    context: ExtensionContext | None,
+) -> dict[str, ToolDef]:
+    kind = ObjectKind(
+        name=sample.WIDGET_KIND,
+        description="d",
+        guidance="g",
+        spec_model=sample.WidgetSpec,
+        store=sample.WidgetStore(),
+        agent_target_verbs=verbs,
+    )
+    registry = object_registry((BoundKind(kind=kind, extension="sample", context=context),))
+    return {tool.name: tool for tool in ObjectVerbs(registry).tools()}
+
+
+async def _target_setup() -> tuple[UUID, UUID, ToolContext]:
+    workspace_id = await _workspace()
+    member = await _member(workspace_id, ADMIN_CREATED_AT)
+    main = await _agent_row(workspace_id, name="ufo", is_main=True)
+    await _agent_row(workspace_id, name="research")
+    return (
+        workspace_id,
+        main,
+        _tool_context(workspace_id, speaker_member_id=member, agent_id=main),
+    )
+
+
+@pytest.mark.parametrize(
+    ("verb", "seed", "color", "result", "refused_name", "refused_verb"),
+    (
+        ("create", False, "teal", "created", "anvil", "update"),
+        ("update", True, "red", "updated", "missing", "create"),
+        (None, False, "", "", "", ""),
+    ),
+    ids=("create-only", "update-only", "neither"),
+)
+async def test_cross_agent_apply_requires_the_actual_declared_verb(
+    db: None,
+    verb: AgentTargetVerb | None,
+    seed: bool,
+    color: str,
+    result: str,
+    refused_name: str,
+    refused_verb: str,
+) -> None:
+    workspace_id, main, ctx = await _target_setup()
+    verbs: frozenset[AgentTargetVerb] = frozenset() if verb is None else frozenset({verb, "get"})
+    tools = _target_tools(
+        verbs,
+        None if verb is None else context_for(sample.NAME, frozenset()),
+    )
+
+    with ws(workspace_id), agent(main):
+        if verb is None:
+            with pytest.raises(ValueError, match="rejects an agent target"):
+                await _text(
+                    tools,
+                    "object_apply",
+                    ctx,
+                    manifest=_widget_manifest("anvil"),
+                    agent="research",
+                )
+            return
+        if seed:
+            await _text(tools, "object_apply", ctx, manifest=_widget_manifest("anvil"))
+        applied = json.loads(
+            await _text(
+                tools,
+                "object_apply",
+                ctx,
+                manifest=_widget_manifest("anvil", color=color),
+                agent="research",
+            )
+        )
+        fetched = yaml.safe_load(
+            await _text(
+                tools,
+                "object_get",
+                ctx,
+                kind=sample.WIDGET_KIND,
+                name="anvil",
+                agent="research",
+            )
+        )
+        with pytest.raises(VerbNotSupported, match=f"cross-agent {refused_verb}"):
+            await _text(
+                tools,
+                "object_apply",
+                ctx,
+                manifest=_widget_manifest(refused_name),
+                agent="research",
+            )
+
+    assert applied["result"] == result
+    assert fetched["spec"]["color"] == color
+
+
+async def test_explain_publishes_the_agent_target_verbs_the_kind_enforces(db: None) -> None:
+    """`object_explain` is where an agent learns whether a verb crosses to another agent, so the
+    published list is the enforced one: a declared verb takes a target, an undeclared one is
+    refused."""
+    workspace_id, main, ctx = await _target_setup()
+    tools = _target_tools(frozenset({"get", "update"}), context_for(sample.NAME, frozenset()))
+
+    with ws(workspace_id), agent(main):
+        explained = json.loads(await _text(tools, "object_explain", ctx, kind=sample.WIDGET_KIND))
+        await _text(tools, "object_apply", ctx, manifest=_widget_manifest("anvil"))
+        targeted = json.loads(
+            await _text(
+                tools,
+                "object_apply",
+                ctx,
+                manifest=_widget_manifest("anvil", color="red"),
+                agent="research",
+            )
+        )
+        with pytest.raises(ValueError, match="rejects an agent target"):
+            await _text(
+                tools,
+                "object_delete",
+                ctx,
+                kind=sample.WIDGET_KIND,
+                name="anvil",
+                agent="research",
+            )
+
+    assert explained["agent_target_verbs"] == ["get", "update"]
+    assert targeted == {
+        "kind": sample.WIDGET_KIND,
+        "name": "anvil",
+        "result": "updated",
+        "agent": "research",
+    }
 
 
 class _OpenSpec(BaseModel):
@@ -1324,6 +1478,7 @@ async def test_artifact_status_refuses_audience_narrowing_during_blob_read(
             await ArtifactObjects().status(
                 ctx,
                 f"{turn.conversation_id.hex[:8]}-secret-txt",
+                expected_generation=None,
             )
 
     assert not (workspace_dir / "artifacts").exists()
@@ -1358,6 +1513,7 @@ async def test_artifact_delete_refuses_audience_narrowing_after_authorization(
             await ArtifactObjects().delete(
                 ctx,
                 f"{turn.conversation_id.hex[:8]}-secret-txt",
+                expected_generation=None,
             )
         async with workspace_tx() as connection:
             row_exists = (
@@ -1431,7 +1587,9 @@ async def test_artifact_delete_holds_the_conversation_row_against_a_concurrent_n
         monkeypatch.setattr(artifacts, "workspace_tx", park_on_the_conversation_row)
         with agent(turn.agent_id):
             deleting = asyncio.create_task(
-                ArtifactObjects().delete(ctx, f"{turn.conversation_id.hex[:8]}-secret-txt")
+                ArtifactObjects().delete(
+                    ctx, f"{turn.conversation_id.hex[:8]}-secret-txt", expected_generation=None
+                )
             )
             authorized = asyncio.create_task(reached.wait())
             await asyncio.wait((deleting, authorized), return_when=asyncio.FIRST_COMPLETED)
@@ -1517,7 +1675,9 @@ async def test_artifact_delete_refuses_when_a_version_is_taken_out_from_under_it
 
         monkeypatch.setattr(ArtifactObjects, "_find", take_one_version)
         with agent(turn.agent_id), pytest.raises(ValueError, match="lost a version while deleting"):
-            await ArtifactObjects().delete(ctx, f"{turn.conversation_id.hex[:8]}-report-txt")
+            await ArtifactObjects().delete(
+                ctx, f"{turn.conversation_id.hex[:8]}-report-txt", expected_generation=None
+            )
         async with workspace_tx() as connection:
             remaining = (
                 (
@@ -1712,6 +1872,7 @@ async def test_conversation_status_refuses_audience_narrowing_during_transcript_
             await conversations.ConversationObjects().status(
                 ctx,
                 str(past.conversation_id),
+                expected_generation=None,
             )
 
     assert not (workspace_dir / "transcripts").exists()
@@ -1850,7 +2011,7 @@ async def test_main_targets_child_conversations_and_artifacts_with_the_requester
                     name=alice_artifact,
                     agent="research",
                 )
-            with pytest.raises(ValueError, match="cannot be applied across agents"):
+            with pytest.raises(ValueError, match="rejects an agent target"):
                 await _text(
                     tools,
                     "object_apply",
@@ -2437,6 +2598,169 @@ async def test_shared_admin_only_row_refuses_a_speakerless_turn() -> None:
     store = _AdminOnlyStore()
     ctx = _tool_context(uuid4())
     with pytest.raises(AdminRequired, match="delete refused"):
-        await store.delete(ctx, "boot")
+        await store.delete(ctx, "boot", expected_generation=None)
     with pytest.raises(AdminRequired, match="mutate refused"):
-        await store.apply(ctx, "boot", _BootSpec(), None)
+        await store.apply(ctx, "boot", _BootSpec(), None, expected_generation=None)
+
+
+async def test_an_ungenerated_kind_reads_a_vanished_row_as_absent_not_a_lost_race() -> None:
+    """A kind whose store returns no generation is unfenced: the expectation an active verb carries
+    is empty, so a row absent by the time the gate looks reads as absent — an empty status and a
+    not-found delete — never as a replacement the verb lost a race to."""
+    store = _AdminOnlyStore()
+    ctx = _tool_context(uuid4())
+    assert await store.status(ctx, "vanished", expected_generation=None) is None
+    with pytest.raises(UnknownObject, match="vanished"):
+        await store.delete(ctx, "vanished", expected_generation=None)
+
+
+@dataclass
+class _RaceRows:
+    """One member-owned row as successive gate reads find it. `reads` is what each `_owned_rows`
+    call sees — an owner, or None once a concurrent turn removed the row — and the last entry stands
+    once the list runs out, so a verb that reads twice sees the same final state. `applied` and
+    `deleted` record the owner every domain mutation the gate let through received."""
+
+    reads: list[ObjectOwner | None]
+    applied: list[ObjectOwner | None] = field(default_factory=list)
+    deleted: list[ObjectOwner] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class _RaceStore(MemberOwnedObjects[_BootSpec, ObjectOwner]):
+    """A member-owned kind whose row set changes under the verb, so the base gate's fence, its
+    visibility recheck, and the mutations it lets through are all exercised on the real class."""
+
+    kind_name: ClassVar[str] = "race-test"
+    mutate_gate: ClassVar[str] = "mutate refused"
+    delete_gate: ClassVar[str] = "delete refused"
+
+    race: _RaceRows
+
+    async def _owned_rows(self, ctx: ToolContext) -> tuple[OwnedRow[ObjectOwner], ...]:
+        owner = self.race.reads.pop(0) if len(self.race.reads) > 1 else self.race.reads[0]
+        if owner is None:
+            return ()
+        return (OwnedRow(name="boot", summary="s", owner=owner),)
+
+    async def _detail(
+        self, ctx: ToolContext, name: str, owner: ObjectOwner
+    ) -> ObjectDetail[_BootSpec] | None:
+        return ObjectDetail(spec=_BootSpec(), created_at=None, updated_at=None)
+
+    async def _status(
+        self, ctx: ToolContext, name: str, owner: ObjectOwner
+    ) -> dict[str, JsonValue] | None:
+        return {"read": True}
+
+    async def _apply_owned(
+        self,
+        ctx: ToolContext,
+        name: str,
+        spec: _BootSpec,
+        old: _BootSpec | None,
+        owner: ObjectOwner | None,
+    ) -> None:
+        self.race.applied.append(owner)
+
+    async def _delete_owned(self, ctx: ToolContext, name: str, owner: ObjectOwner) -> None:
+        self.race.deleted.append(owner)
+
+
+async def test_an_unfenced_kind_edits_through_a_row_created_or_removed_while_editing(
+    db: None,
+) -> None:
+    """A kind whose store returns no generation is last-write-wins, so the empty expectation its
+    read produced matches whatever the name holds when the gate looks: an apply that raced another
+    turn's create reaches the kind's mutation with the row that turn left, and one that raced a
+    delete reaches it with none. Whether that row is absorbed or refused is the kind's own domain
+    rule — the gate never terminates the turn with a lost race the docs promise it cannot lose."""
+    workspace_id = await _workspace()
+    member = await _member(workspace_id, JOINER_CREATED_AT)
+    ctx = _tool_context(workspace_id, speaker_member_id=member)
+    owner = ObjectOwner(member_id=member, shared=False)
+
+    with ws(workspace_id):
+        created = _RaceStore(race=_RaceRows(reads=[owner]))
+        await created.apply(ctx, "boot", _BootSpec(), None, expected_generation=None)
+        removed = _RaceStore(race=_RaceRows(reads=[None]))
+        await removed.apply(ctx, "boot", _BootSpec(), _BootSpec(), expected_generation=None)
+
+    assert created.race.applied == [owner]
+    assert removed.race.applied == [None]
+
+
+@pytest.mark.parametrize(
+    ("found", "expected", "refused"),
+    (
+        ("current", "current", False),
+        ("current", None, True),
+        (None, "current", True),
+        ("other", "current", True),
+    ),
+    ids=("unchanged", "created-while-active", "removed-while-active", "replaced-while-active"),
+)
+async def test_a_generated_kind_fences_every_verb_on_the_row_its_read_saw(
+    db: None,
+    found: str | None,
+    expected: str | None,
+    refused: bool,
+) -> None:
+    """A kind handing up `GeneratedObjectOwner` is fenced on that generation, so apply, status, and
+    delete each refuse once the name holds a row its own read never saw — a replacement, a create
+    that filled an absence, or a removal that emptied one — and reach the domain mutation only while
+    the generation still matches."""
+    workspace_id = await _workspace()
+    member = await _member(workspace_id, JOINER_CREATED_AT)
+    ctx = _tool_context(workspace_id, speaker_member_id=member)
+    generations = {"current": uuid4(), "other": uuid4()}
+    owner = (
+        None
+        if found is None
+        else GeneratedObjectOwner(member_id=member, shared=False, generation=generations[found])
+    )
+    generation = None if expected is None else generations[expected]
+    old = None if expected is None else _BootSpec()
+    applying = _RaceStore(race=_RaceRows(reads=[owner]))
+    reading = _RaceStore(race=_RaceRows(reads=[owner]))
+    deleting = _RaceStore(race=_RaceRows(reads=[owner]))
+
+    with ws(workspace_id):
+        if refused:
+            with pytest.raises(ValueError, match="changed while editing"):
+                await applying.apply(ctx, "boot", _BootSpec(), old, expected_generation=generation)
+            with pytest.raises(ValueError, match="changed while reading"):
+                await reading.status(ctx, "boot", expected_generation=generation)
+            with pytest.raises(ValueError, match="changed while deleting"):
+                await deleting.delete(ctx, "boot", expected_generation=generation)
+        else:
+            await applying.apply(ctx, "boot", _BootSpec(), old, expected_generation=generation)
+            status = await reading.status(ctx, "boot", expected_generation=generation)
+            await deleting.delete(ctx, "boot", expected_generation=generation)
+            assert status == {"read": True}
+
+    assert applying.race.applied == ([] if refused else [owner])
+    assert deleting.race.deleted == ([] if refused else [owner])
+
+
+@pytest.mark.parametrize("after", ("removed", "hidden"))
+async def test_a_status_read_rechecks_visibility_and_reports_a_removed_row_as_absent(
+    db: None, after: str
+) -> None:
+    """The read the gate opens with is not the state the store's live read ran under, so it looks
+    again: a row the caller may no longer see refuses instead of disclosing what was read, while a
+    row simply gone reports an empty status — the unfenced kind's absent case, not a lost race."""
+    workspace_id = await _workspace()
+    member = await _member(workspace_id, JOINER_CREATED_AT)
+    other = await _member(workspace_id, JOINER_CREATED_AT)
+    ctx = _tool_context(workspace_id, speaker_member_id=member)
+    owner = ObjectOwner(member_id=member, shared=True)
+    landed = None if after == "removed" else ObjectOwner(member_id=other, shared=False)
+    store = _RaceStore(race=_RaceRows(reads=[owner, landed]))
+
+    with ws(workspace_id):
+        if after == "removed":
+            assert await store.status(ctx, "boot", expected_generation=None) is None
+        else:
+            with pytest.raises(UnknownObject, match="boot"):
+                await store.status(ctx, "boot", expected_generation=None)

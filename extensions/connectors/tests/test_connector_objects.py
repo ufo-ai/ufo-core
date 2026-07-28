@@ -437,14 +437,53 @@ async def test_apply_compares_with_the_current_grant_generation(
             workspace_id, agent_id, conversation_id, grantor_id, "gmail", "alice@example.com"
         )
         before = (await grant_summaries())[0].id
-        await _text(
-            _object_tool("object_apply"),
-            _tool_context(workspace_id, agent_id, grantor_id),
-            manifest=_share_manifest("alice@example.com", False),
-        )
+        with pytest.raises(ValueError, match="changed while editing"):
+            await _text(
+                _object_tool("object_apply"),
+                _tool_context(workspace_id, agent_id, grantor_id),
+                manifest=_share_manifest("alice@example.com", False),
+            )
         current = (await grant_summaries())[0]
     assert current.id == replacement
     assert current.id != before
+    assert current.shared is True
+
+
+async def test_get_refuses_a_grant_made_private_after_its_detail_snapshot(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace_id, agent_id, conversation_id, _admin_id, grantor_id, other_id = await _seed()
+    real_status = ConnectorGrantObjects.status
+
+    with ws(workspace_id), agent(agent_id):
+        await _grant(
+            workspace_id, agent_id, conversation_id, grantor_id, "gmail", "alice@example.com"
+        )
+        grant_id = (await grant_summaries())[0].id
+        grants = GrantStore()
+        assert await grants.set_shared(grant_id, True, actor_member_id=grantor_id) is True
+
+        async def privatize_before_status(
+            store: ConnectorGrantObjects,
+            ctx: ToolContext,
+            name: str,
+            *,
+            expected_generation: UUID | None,
+        ):
+            assert await grants.set_shared(grant_id, False, actor_member_id=grantor_id) is True
+            return await real_status(store, ctx, name, expected_generation=expected_generation)
+
+        monkeypatch.setattr(ConnectorGrantObjects, "status", privatize_before_status)
+        with pytest.raises(UnknownObject):
+            await _text(
+                _object_tool("object_get"),
+                _tool_context(workspace_id, agent_id, other_id),
+                kind=CONNECTOR_GRANT_KIND,
+                name=GMAIL_ALICE_NAME,
+            )
+        current = (await grant_summaries())[0]
+
+    assert current.id == grant_id
     assert current.shared is False
 
 
@@ -489,9 +528,16 @@ async def test_connection_get_and_status_refuse_same_named_replacement(
             workspace_id, agent_id, conversation_id, grantor_id, "gmail", "alice@example.com"
         )
         name = GMAIL_ALICE_NAME
+        read = await original_owner(store, _tool_context(workspace_id, agent_id, grantor_id), name)
+        assert read is not None
         assert await store.get(_tool_context(workspace_id, agent_id, grantor_id), name) is None
         assert (await grant_summaries())[0].owner_member_id == other_id
-        assert await store.status(_tool_context(workspace_id, agent_id, other_id), name) is None
+        with pytest.raises(ValueError, match="changed while reading"):
+            await store.status(
+                _tool_context(workspace_id, agent_id, other_id),
+                name,
+                expected_generation=read.generation,
+            )
         assert (await grant_summaries())[0].owner_member_id == grantor_id
 
 
@@ -590,6 +636,7 @@ async def test_grant_apply_fails_if_replaced_before_current_lookup(
                 GMAIL_ALICE_NAME,
                 current_spec.model_copy(update={"shared": True}),
                 current_spec,
+                expected_generation=stale,
             )
         (current,) = await grant_summaries()
     assert current.id == replacement

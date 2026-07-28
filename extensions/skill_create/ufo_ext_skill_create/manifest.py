@@ -6,6 +6,7 @@ import json
 import shlex
 from dataclasses import dataclass
 from pathlib import Path
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
@@ -135,7 +136,13 @@ class SkillObjects:
             updated_at=updated_at,
         )
 
-    async def status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None:
+    async def status(
+        self,
+        ctx: ToolContext,
+        name: str,
+        *,
+        expected_generation: UUID | None,
+    ) -> dict[str, JsonValue] | None:
         files = await self._files(ctx, name)
         if files is None:
             return None
@@ -146,7 +153,13 @@ class SkillObjects:
         }
 
     async def apply(
-        self, ctx: ToolContext, name: str, spec: UserSkillSpec, old: UserSkillSpec | None
+        self,
+        ctx: ToolContext,
+        name: str,
+        spec: UserSkillSpec,
+        old: UserSkillSpec | None,
+        *,
+        expected_generation: UUID | None,
     ) -> None:
         ext = _require_ext(ctx)
         if len(spec.files) > MAX_SKILL_FILES:
@@ -157,7 +170,13 @@ class SkillObjects:
             raise ValueError(f"skill exceeds {MAX_SKILL_TOTAL_BYTES} bytes")
         await UserSkillStore(ext).save(name, resolved, frozenset(ctx.skills.by_name))
 
-    async def delete(self, ctx: ToolContext, name: str) -> None:
+    async def delete(
+        self,
+        ctx: ToolContext,
+        name: str,
+        *,
+        expected_generation: UUID | None,
+    ) -> None:
         ext = _require_ext(ctx)
         await UserSkillStore(ext).delete(name)
 

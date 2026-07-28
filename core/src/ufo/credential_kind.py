@@ -15,6 +15,7 @@ it with no extension context — the handlers read the ambient workspace directl
 import hashlib
 import re
 from dataclasses import dataclass
+from uuid import UUID
 
 import sqlalchemy as sa
 from pydantic import BaseModel, ConfigDict
@@ -124,7 +125,13 @@ class CredentialObjects:
             updated_at=None if row is None else row.updated_at,
         )
 
-    async def status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None:
+    async def status(
+        self,
+        ctx: ToolContext,
+        name: str,
+        *,
+        expected_generation: UUID | None,
+    ) -> dict[str, JsonValue] | None:
         slot = self._named().get(name)
         if slot is None:
             return None
@@ -145,11 +152,23 @@ class CredentialObjects:
         return status
 
     async def apply(
-        self, ctx: ToolContext, name: str, spec: CredentialSpec, old: CredentialSpec | None
+        self,
+        ctx: ToolContext,
+        name: str,
+        spec: CredentialSpec,
+        old: CredentialSpec | None,
+        *,
+        expected_generation: UUID | None,
     ) -> None:
         raise VerbNotSupported(FILL_REFUSAL)
 
-    async def delete(self, ctx: ToolContext, name: str) -> None:
+    async def delete(
+        self,
+        ctx: ToolContext,
+        name: str,
+        *,
+        expected_generation: UUID | None,
+    ) -> None:
         if not await ctx.speaker_is_admin():
             raise AdminRequired(UNSET_GATE)
         slot = self._named()[name]

@@ -296,6 +296,7 @@ SCHEDULED_TASK_OBJECT = ObjectKind(
     ),
     spec_model=ScheduledTaskSpec,
     store=ScheduledTaskObjects(),
+    agent_target_verbs=frozenset({"list", "get", "update", "delete"}),
 )
 
 

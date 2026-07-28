@@ -8,6 +8,7 @@ read half of the proposal flow). The kind is update-only: changes take effect on
 Create and delete raise; a non-admin mutation raises `AdminRequired`."""
 
 from dataclasses import dataclass
+from uuid import UUID
 
 import sqlalchemy as sa
 from pydantic import BaseModel, ConfigDict, Field
@@ -114,7 +115,13 @@ class AgentObjects:
             )
         )
 
-    async def status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None:
+    async def status(
+        self,
+        ctx: ToolContext,
+        name: str,
+        *,
+        expected_generation: UUID | None,
+    ) -> dict[str, JsonValue] | None:
         row = await self._row(name)
         if row is None:
             return None
@@ -126,7 +133,13 @@ class AgentObjects:
         }
 
     async def apply(
-        self, ctx: ToolContext, name: str, spec: AgentSpec, old: AgentSpec | None
+        self,
+        ctx: ToolContext,
+        name: str,
+        spec: AgentSpec,
+        old: AgentSpec | None,
+        *,
+        expected_generation: UUID | None,
     ) -> None:
         if old is None:
             raise VerbNotSupported(AGENT_CREATE)
@@ -151,7 +164,13 @@ class AgentObjects:
                 )
             )
 
-    async def delete(self, ctx: ToolContext, name: str) -> None:
+    async def delete(
+        self,
+        ctx: ToolContext,
+        name: str,
+        *,
+        expected_generation: UUID | None,
+    ) -> None:
         raise VerbNotSupported(AGENT_UNDELETABLE)
 
     async def _row(self, name: str) -> sa.Row | None:

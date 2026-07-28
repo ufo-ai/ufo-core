@@ -43,7 +43,7 @@ from ufo.ext.loader import skill_registry, turn_tools
 from ufo.jobs import JobRunner, bindings_from
 from ufo.loop.engine import _claim_turn
 from ufo.loop.queue import _load_turn
-from ufo.objects import AdminRequired, UnknownObject
+from ufo.objects import AdminRequired, UnknownObject, VerbNotSupported
 from ufo.scheduling import ONE_TIME_SCHEDULE, ScheduledTask, ScheduleStore, due_task_workspaces
 from ufo.schema import tables
 from ufo.schema.records import WRITEBACK_PENDING, Agent, TerminalFrame, Turn
@@ -2541,11 +2541,201 @@ async def test_update_cannot_overwrite_a_task_recreated_after_authorization(
     assert remaining.prompt == "Bob's digest"
 
 
-@pytest.mark.parametrize("method", ["get", "status"])
+@pytest.mark.parametrize(
+    "existing",
+    [False, True],
+    ids=("absent-to-created", "existing-to-deleted"),
+)
+async def test_object_apply_refuses_a_generation_change_after_its_snapshot(
+    db: None,
+    monkeypatch: pytest.MonkeyPatch,
+    existing: bool,
+) -> None:
+    workspace_id, agent_id, conversation_id = await _seed()
+    alice = await _member(workspace_id)
+    ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=alice)
+    scheduler = ScheduleStore()
+    real_get = ScheduledTaskObjects.get
+    replacement: ScheduledTask | None = None
+
+    with ws(workspace_id), agent(agent_id):
+        original = (
+            await scheduler.create(
+                conversation_id,
+                "digest",
+                DAILY_9AM,
+                "original",
+                "original",
+                datetime.now(UTC),
+                created_by_member_id=alice,
+            )
+            if existing
+            else None
+        )
+
+        async def change_after_get(
+            store: ScheduledTaskObjects,
+            tool_ctx: ToolContext,
+            name: str,
+        ):
+            nonlocal replacement
+            detail = await real_get(store, tool_ctx, name)
+            if original is not None:
+                await scheduler.cancel(original)
+            else:
+                replacement = await scheduler.create(
+                    conversation_id,
+                    name,
+                    DAILY_9AM,
+                    "replacement",
+                    "replacement",
+                    datetime.now(UTC),
+                    created_by_member_id=alice,
+                )
+            return detail
+
+        monkeypatch.setattr(ScheduledTaskObjects, "get", change_after_get)
+        with pytest.raises(ValueError, match="changed while editing"):
+            await _dispatch(
+                _object_tool("object_apply"),
+                ctx,
+                manifest=_task_manifest("digest", "0 17 * * 1", "stale create"),
+            )
+        remaining = await scheduler.list()
+
+    if existing:
+        assert remaining == ()
+    else:
+        assert replacement is not None
+        assert remaining == (replacement,)
+
+
+@pytest.mark.parametrize("change", ["none", "delete", "replace"])
+async def test_object_get_rechecks_generation_after_status(
+    db: None,
+    monkeypatch: pytest.MonkeyPatch,
+    change: str,
+) -> None:
+    workspace_id, agent_id, conversation_id = await _seed()
+    alice = await _member(workspace_id)
+    ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=alice)
+    scheduler = ScheduleStore()
+
+    with ws(workspace_id), agent(agent_id):
+        original = await scheduler.create(
+            conversation_id,
+            "digest",
+            DAILY_9AM,
+            "original",
+            "original",
+            datetime.now(UTC),
+            created_by_member_id=alice,
+        )
+
+        async def finish_status(store: ScheduleStore, expected: ScheduledTask):
+            if change != "none":
+                await scheduler.cancel(original)
+            if change == "replace":
+                await scheduler.create(
+                    conversation_id,
+                    expected.name,
+                    DAILY_9AM,
+                    "replacement",
+                    "replacement",
+                    datetime.now(UTC),
+                    created_by_member_id=alice,
+                )
+            return None
+
+        monkeypatch.setattr(ScheduleStore, "inspect", finish_status)
+        if change == "none":
+            fetched = yaml.safe_load(
+                await _dispatch(
+                    _object_tool("object_get"),
+                    ctx,
+                    kind=SCHEDULED_TASK_KIND,
+                    name="digest",
+                )
+            )
+            assert fetched["status"] is None
+        else:
+            with pytest.raises(ValueError, match="changed while reading"):
+                await _dispatch(
+                    _object_tool("object_get"),
+                    ctx,
+                    kind=SCHEDULED_TASK_KIND,
+                    name="digest",
+                )
+        remaining = await scheduler.list()
+
+    if change == "none":
+        assert remaining == (original,)
+    elif change == "delete":
+        assert remaining == ()
+    else:
+        assert len(remaining) == 1
+        assert remaining[0].prompt == "replacement"
+
+
+async def test_object_delete_refuses_a_replacement_after_its_detail_snapshot(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace_id, agent_id, conversation_id = await _seed()
+    alice = await _member(workspace_id)
+    ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=alice)
+    scheduler = ScheduleStore()
+    real_delete = ScheduledTaskObjects.delete
+    replacement: ScheduledTask | None = None
+
+    with ws(workspace_id), agent(agent_id):
+        original = await scheduler.create(
+            conversation_id,
+            "digest",
+            DAILY_9AM,
+            "original",
+            "original",
+            datetime.now(UTC),
+            created_by_member_id=alice,
+        )
+
+        async def replace_before_delete(
+            store: ScheduledTaskObjects,
+            tool_ctx: ToolContext,
+            name: str,
+            *,
+            expected_generation: UUID | None,
+        ) -> None:
+            nonlocal replacement
+            await scheduler.cancel(original)
+            replacement = await scheduler.create(
+                conversation_id,
+                name,
+                DAILY_9AM,
+                "replacement",
+                "replacement",
+                datetime.now(UTC),
+                created_by_member_id=alice,
+            )
+            await real_delete(store, tool_ctx, name, expected_generation=expected_generation)
+
+        monkeypatch.setattr(ScheduledTaskObjects, "delete", replace_before_delete)
+        with pytest.raises(ValueError, match="changed while deleting"):
+            await _dispatch(
+                _object_tool("object_delete"),
+                ctx,
+                kind=SCHEDULED_TASK_KIND,
+                name="digest",
+            )
+        [remaining] = await scheduler.list()
+
+    assert replacement is not None
+    assert remaining.id == replacement.id
+    assert remaining.prompt == "replacement"
+
+
 async def test_task_read_refuses_a_same_named_replacement(
     db: None,
     monkeypatch: pytest.MonkeyPatch,
-    method: str,
 ) -> None:
     workspace_id, agent_id, conversation_id = await _seed()
     alice = await _member(workspace_id)
@@ -2584,7 +2774,7 @@ async def test_task_read_refuses_a_same_named_replacement(
             return owner
 
         monkeypatch.setattr(ScheduledTaskObjects, "_owner", replace_after_authorization)
-        result = await getattr(objects, method)(ctx, "digest")
+        result = await objects.get(ctx, "digest")
         [remaining] = await scheduler.list()
 
     assert result is None
@@ -2629,10 +2819,10 @@ async def test_task_status_refuses_replacement_during_inspection(
             return await real_inspect(store, expected)
 
         monkeypatch.setattr(ScheduleStore, "inspect", replace_before_inspection)
-        result = await ScheduledTaskObjects().status(ctx, "digest")
+        with pytest.raises(ValueError, match="changed while reading"):
+            await ScheduledTaskObjects().status(ctx, "digest", expected_generation=original.id)
         [remaining] = await scheduler.list()
 
-    assert result is None
     assert remaining.prompt == "admin-only secret"
 
 
@@ -2671,6 +2861,7 @@ async def test_task_create_refuses_a_row_created_after_absence_check(
                 "digest",
                 ScheduledTaskSpec(schedule=DAILY_9AM, prompt="new task"),
                 None,
+                expected_generation=None,
             )
         [remaining] = await scheduler.list()
 
@@ -3186,7 +3377,7 @@ async def test_cross_agent_object_target_requires_main_live_member_authority(db:
                     kind=SCHEDULED_TASK_KIND,
                     agent="unknown-agent",
                 )
-            with pytest.raises(ValueError, match="workspace-scoped"):
+            with pytest.raises(ValueError, match="rejects an agent target"):
                 await _dispatch(listing, main_ctx, kind="agent", agent=child_name)
     assert "agent" not in self_listing
 
@@ -3215,8 +3406,8 @@ async def test_main_cross_agent_task_create_is_not_supported(
         with (
             agent(main_agent),
             pytest.raises(
-                ValueError,
-                match="cross-agent apply can only update an existing scheduled task",
+                VerbNotSupported,
+                match="do not support cross-agent create",
             ),
         ):
             await _dispatch(

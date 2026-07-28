@@ -75,7 +75,13 @@ class ConversationObjects:
             updated_at=row.updated_at,
         )
 
-    async def status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None:
+    async def status(
+        self,
+        ctx: ToolContext,
+        name: str,
+        *,
+        expected_generation: UUID | None,
+    ) -> dict[str, JsonValue] | None:
         row = await self._find(ctx, name)
         if row is None:
             return None
@@ -90,11 +96,23 @@ class ConversationObjects:
         return {"messages": len(exchange), "size_bytes": len(body), "workspace_path": path}
 
     async def apply(
-        self, ctx: ToolContext, name: str, spec: ConversationSpec, old: ConversationSpec | None
+        self,
+        ctx: ToolContext,
+        name: str,
+        spec: ConversationSpec,
+        old: ConversationSpec | None,
+        *,
+        expected_generation: UUID | None,
     ) -> None:
         raise VerbNotSupported(CONVERSATIONS_ARE_SURFACE_MADE)
 
-    async def delete(self, ctx: ToolContext, name: str) -> None:
+    async def delete(
+        self,
+        ctx: ToolContext,
+        name: str,
+        *,
+        expected_generation: UUID | None,
+    ) -> None:
         raise VerbNotSupported(CONVERSATIONS_ARE_SURFACE_MADE)
 
     async def _exchange(self, ctx: ToolContext, conversation_id: UUID) -> tuple[str, ...]:
@@ -181,4 +199,5 @@ CONVERSATION_OBJECT = ObjectKind(
     spec_model=ConversationSpec,
     store=ConversationObjects(),
     list_fields=frozenset({"surface"}),
+    agent_target_verbs=frozenset({"list", "get"}),
 )

@@ -24,6 +24,8 @@ from ufo_ext_sources.registry import CONNECTORS, binding_name
 from ufo_ext_sources.tools import (
     CHANGE_LOG_DIR,
     SOURCE_KIND,
+    SourceObjects,
+    SourceSpec,
     _subscribers_map,
     _validated_base_url,
     on_page_change,
@@ -33,7 +35,7 @@ from ufo.agent_scope import agent
 from ufo.blob import FilesystemBlobStore
 from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
-from ufo.ext.context import context_for
+from ufo.ext.context import JsonValue, context_for
 from ufo.ext.loader import turn_tools
 from ufo.grants import GrantStore
 from ufo.objects import UnknownObject
@@ -1230,6 +1232,171 @@ async def test_cannot_subscribe_to_another_members_private_source(db: None) -> N
                 ),
             )
         assert await _stored_subscribers(state, name) == {}
+
+
+async def test_get_renders_an_empty_status_for_a_binding_removed_mid_verb(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`source` returns no generation, so it is last-write-wins: `object_get` reads the spec, then
+    reads status under the snapshot it just took, and a binding removed in between is simply gone —
+    an empty status, never a refusal that the source changed while reading."""
+    state = await _workspace()
+    name, source_id = await _register(state, subject=SHARED_SUBJECT, owner=state.owner_id)
+    real_status = SourceObjects.status
+    get_tool = _TOOLS["object_get"]
+
+    async def remove_before_status(
+        store: SourceObjects,
+        ctx: ToolContext,
+        read: str,
+        *,
+        expected_generation: UUID | None,
+    ) -> dict[str, JsonValue] | None:
+        await context_for(NAME, DECLARED_PROVIDERS).remove_source(source_id)
+        return await real_status(store, ctx, read, expected_generation=expected_generation)
+
+    monkeypatch.setattr(SourceObjects, "status", remove_before_status)
+    with ws(state.workspace_id), agent(state.agent_id):
+        fetched = yaml.safe_load(
+            (
+                await get_tool.handler(
+                    _context(state, None),
+                    get_tool.input_model.model_validate(
+                        {"user_description": TOOL_NARRATION, "kind": SOURCE_KIND, "name": name}
+                    ),
+                )
+            )
+            .content[0]
+            .text
+        )
+    assert fetched["spec"]["provider"] == ASANA
+    assert fetched["status"] is None
+    [row] = await _rows(state, ASANA)
+    assert row["removed_at"] is not None
+
+
+def _delete_binding_before_apply(state: _Workspace, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Have the registrar's delete land between the subscribe verb's read and its edit, so the edit
+    commits against a binding whose rows and subscribers are already gone."""
+    real_apply = SourceObjects.apply
+    delete_tool = _TOOLS["object_delete"]
+
+    async def delete_before_apply(
+        store: SourceObjects,
+        ctx: ToolContext,
+        edited: str,
+        spec: SourceSpec,
+        old: SourceSpec | None,
+        *,
+        expected_generation: UUID | None,
+    ) -> None:
+        await delete_tool.handler(
+            _context(state, None),
+            delete_tool.input_model.model_validate(
+                {"user_description": TOOL_NARRATION, "kind": SOURCE_KIND, "name": edited}
+            ),
+        )
+        await real_apply(store, ctx, edited, spec, old, expected_generation=expected_generation)
+
+    monkeypatch.setattr(SourceObjects, "apply", delete_before_apply)
+
+
+async def test_a_subscription_edit_strands_nothing_on_a_binding_removed_mid_verb(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The subscribers map belongs to the binding, so the binding's removal takes it: an edit that
+    commits after the registrar's delete refuses and leaves nothing behind. A stored map outliving
+    its rows would alert a conversation about a source it can no longer see."""
+    state = await _workspace()
+    name, source_id = await _register(state, subject=SHARED_SUBJECT, owner=state.owner_id)
+    caller = state.conversation_id.hex
+    _delete_binding_before_apply(state, monkeypatch)
+
+    with ws(state.workspace_id), agent(state.agent_id):
+        with pytest.raises(UnknownObject, match=name):
+            await _apply(_context(state, None), _subscribe_manifest(name, (caller,), shared=True))
+        assert await _stored_subscribers(state, name) == {}
+        await on_page_change(
+            HookContext(
+                ext=context_for(NAME, DECLARED_PROVIDERS, invoker=_admitting(state.workspace_id)),
+                payload=PageChangeBatch(changes=(_change(source_id, "# asana tasks: dropped"),)),
+            )
+        )
+        assert await _turns(state.conversation_id) == []
+    [row] = await _rows(state, ASANA)
+    assert row["removed_at"] is not None
+
+
+async def test_re_registering_a_removed_binding_carries_no_old_subscribers(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A source name derives from its (provider, account, base_url) identity, so re-registering that
+    identity — the documented recreate path — revives the same name. It arrives unsubscribed: a
+    change on the revived rows alerts nobody, because no subscription to the binding that was
+    removed survives to be inherited."""
+    state = await _workspace()
+    name, _removed = await _register(state, subject=SHARED_SUBJECT, owner=state.owner_id)
+    caller = state.conversation_id.hex
+    _delete_binding_before_apply(state, monkeypatch)
+
+    with ws(state.workspace_id), agent(state.agent_id):
+        with pytest.raises(UnknownObject, match=name):
+            await _apply(_context(state, None), _subscribe_manifest(name, (caller,), shared=True))
+
+    revived_name, revived_id = await _register(state, subject=SHARED_SUBJECT, owner=state.owner_id)
+    with ws(state.workspace_id), agent(state.agent_id):
+        await on_page_change(
+            HookContext(
+                ext=context_for(NAME, DECLARED_PROVIDERS, invoker=_admitting(state.workspace_id)),
+                payload=PageChangeBatch(changes=(_change(revived_id, "# asana tasks: revived"),)),
+            )
+        )
+        assert await _stored_subscribers(state, name) == {}
+        assert await _turns(state.conversation_id) == []
+    assert revived_name == name
+    [row] = await _rows(state, ASANA)
+    assert row["removed_at"] is None
+
+
+async def test_a_registration_absorbs_a_binding_another_turn_created_first(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`source` returns no generation, so two turns registering one binding settle on one row: the
+    second reads no source, finds the first's rows when it applies, and the identical spec is the
+    idempotent no-op this kind already promises — never a refusal that the source changed while
+    editing, which would end the turn on a name the registrar asked for and now has."""
+    state = await _workspace()
+    grants = GrantStore()
+    await _grant(state, grants, ASANA, "acct-one")
+    ctx = _context(state, grants, brokered=(ASANA,))
+    name = binding_name(ASANA, "acct-one", None)
+    real_apply = SourceObjects.apply
+
+    async def register_before_apply(
+        store: SourceObjects,
+        tool_ctx: ToolContext,
+        applied: str,
+        spec: SourceSpec,
+        old: SourceSpec | None,
+        *,
+        expected_generation: UUID | None,
+    ) -> None:
+        await _register(state, subject=SHARED_SUBJECT, owner=state.owner_id, stream="workspaces")
+        await real_apply(
+            store, tool_ctx, applied, spec, old, expected_generation=expected_generation
+        )
+
+    monkeypatch.setattr(SourceObjects, "apply", register_before_apply)
+    with ws(state.workspace_id), agent(state.agent_id):
+        applied = await _apply(
+            ctx,
+            _manifest_text(ASANA, ("workspaces",), name, account_id="acct-one", shared=True),
+        )
+
+    assert applied == {"kind": SOURCE_KIND, "name": name, "result": "created"}
+    [row] = await _rows(state, ASANA)
+    assert row["config"]["stream"] == "workspaces"
+    assert row["subject"] == SHARED_SUBJECT
 
 
 async def test_page_change_alerts_only_subscribed_conversations_idempotently(db: None) -> None:

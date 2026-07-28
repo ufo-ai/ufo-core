@@ -193,8 +193,21 @@ Semantics, fixed here so implementation doesn't relitigate them:
   except on a kind whose instances are declared rather than created (`credential` slots stay
   listed when emptied), where it finds nothing left to clear and succeeds idempotently. All
   five ship `subagent_default=False`; a profile opts in through the existing grant mechanism.
-- **Last write wins.** No CAS, no digests: two racing updates resolve like any two tool calls
-  today. The concurrency story returns with governance, not before.
+- **Generation fencing is per kind.** Every active verb carries the generation its own read
+  observed through the get/status, get/apply, or get/delete chain, and a kind returning a non-null
+  opaque generation refuses once the name holds a different one — before mutation or disclosure and
+  after a disclosure read. `MemberOwnedObjects` enforces this for generated rows using their durable
+  id. Same-generation updates, and every kind returning no generation, stay last-write-wins: the row
+  a concurrent turn created or removed is that verb's ordinary absent-or-present case, resolved by
+  the kind's own domain rule, never a lost race. Visibility is rechecked after a disclosure read on
+  every kind — a row the caller may no longer see refuses instead of disclosing what was read.
+- **A kind's rows include the state it keeps beside them.** The `source` kind's subscriber map is
+  keyed by the binding name, so it is written only while that binding's rows still exist and is
+  dropped with them: the delete that takes the rows takes the map, and an edit that finds the binding
+  gone clears the map it just wrote. The map and the rows live in different tables and each write
+  opens its own transaction, so an edit whose write lands inside a concurrent delete-then-revive of
+  the same identity survives onto the revived binding — revival reuses the source row, so there is no
+  identity for the recheck to compare. Closing that needs the map to live in the source rows.
 - **One manifest per apply**, `yaml.safe_load`, bounded at `OBJECT_MANIFEST_MAX_BYTES = 65_536`
   next to the parse. Unknown top-level keys, multi-document streams, and non-mapping specs are
   refused at the envelope, before any kind code runs.
@@ -202,13 +215,15 @@ Semantics, fixed here so implementation doesn't relitigate them:
   mutation handlers, exactly as `sync_source` does today
   (`extensions/sources/ufo_ext_sources/tools.py:132`); a finer rule needs no new mechanism (the
   connector kind admits the grantor, §3).
-- **Agent targets are a core dispatch boundary.** Reads target `conversation`, `artifact`, and
-  `scheduled_task`; delete targets `artifact` and `scheduled_task`; apply targets only an existing
-  `scheduled_task`. Creation requires the executor's own conversation. Omission uses the executing
-  agent. A cross-agent target requires the configured main agent, a non-subagent turn, and an exact
-  live requesting member message. The task-local target changes only the audited store namespace:
-  member authority, audience, and sandbox stay on the call. Results and refs carry the stable agent
-  name in their own `agent` field; object names are unchanged. Workspace kinds reject the field.
+- **Agent targets are a core dispatch boundary.** A kind declares the target verbs it implements;
+  boot rejects unknown declarations. `conversation` declares list/get; `artifact` declares
+  list/get/delete; `scheduled_task` declares list/get/update/delete; workspace-scoped kinds
+  declare none. Apply resolves create or update from the current object and requires that exact
+  declaration. Omission uses the executing agent. A cross-agent target requires the configured
+  main agent, a non-subagent turn, and an exact live requesting member message. The task-local
+  target changes only the audited store namespace: member authority, audience, and sandbox stay
+  on the call. Results and refs carry the stable agent name in their own `agent` field; object
+  names are unchanged.
 
 Every failure is terminal for the call and names its cause:
 

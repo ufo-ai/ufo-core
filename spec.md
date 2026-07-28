@@ -159,14 +159,17 @@ terminal frame. A client's wait always ends — the terminal state commits on th
   only when a flow needs it. A link never grants visibility.
   A conversation get writes its text exchange to `status.workspace_path`; bulk transcript content
   never enters the tool result.
-  Object reads accept an optional stable agent name for `conversation`, `artifact`, and
-  `scheduled_task`; delete accepts one for `artifact` and `scheduled_task`; apply accepts one only
-  to update an existing `scheduled_task`. Task creation requires the executor's own conversation.
-  Omission means the executing agent. Crossing that boundary requires the configured main agent, a
-  non-subagent turn, and an exact live requesting message. The target is task-local to the object
+  A kind whose rows carry an opaque generation is fenced on it: an active verb refuses once the name
+  holds a row its own read never saw. A kind without one is last-write-wins — a concurrent create or
+  removal is the verb's ordinary absent-or-present case, not a lost race — while every kind
+  rechecks visibility after a disclosure read.
+  Each object kind declares its supported cross-agent verbs: `conversation` list/get, `artifact`
+  list/get/delete, `scheduled_task` list/get/update/delete; workspace-scoped kinds declare none.
+  Apply resolves create or update from the current object and requires that exact declaration.
+  Omission means the executing agent. Crossing that boundary requires the configured main agent,
+  a non-subagent turn, and an exact live requesting message. The target is task-local to the object
   dispatch, keeps the requester's member authority, audience, and sandbox, and appears as a
   separate `agent` field in results and refs — object names never gain a second encoded form.
-  Workspace-scoped kinds reject a target.
   Everything else arrives via extensions.
   Two tools where one would do is a defect. `share_file` ports the shipped design: byte custody in
   the blob store, a TTL-bound token URL served by core's artifact route — no token, no bytes.

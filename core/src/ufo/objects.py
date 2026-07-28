@@ -51,16 +51,17 @@ OBJECT_MANIFEST_MAX_BYTES = 65_536
 MATERIALIZE_MAX_BYTES = 33_554_432
 OBJECT_LIST_PAGE = 50
 ENVELOPE_KEYS = frozenset({"kind", "name", "spec"})
-AGENT_TARGETABLE_KINDS = frozenset({"artifact", "conversation", "scheduled_task"})
-AGENT_APPLY_TARGETABLE_KINDS = frozenset({"scheduled_task"})
 AGENT_TARGET_DESCRIPTION = (
     "Stable agent name for an agent-scoped kind. Omit for this agent. Only the workspace main "
     "agent may target another agent, on an exact member-requested call."
 )
 
 type Relation = Literal["created_from", "synced_by", "created_in", "reports_to", "superseded_by"]
+type AgentTargetVerb = Literal["list", "get", "create", "update", "delete"]
 
 type _SortRank = Literal[0, 1, 2, 3]
+
+AGENT_TARGET_VERBS = frozenset({"list", "get", "create", "update", "delete"})
 
 
 class ObjectRef(BaseModel):
@@ -111,13 +112,15 @@ class ObjectLink(BaseModel):
 class ObjectDetail[SpecT: BaseModel]:
     """One object as its store reads it: the applied spec, the owning row's timestamps (None for a
     kind whose instances are declarations, not rows), its typed outgoing links, and whether the
-    caller may receive the spec."""
+    caller may receive the spec. A non-null opaque generation opts the verb into replacement
+    fencing."""
 
     spec: SpecT
     created_at: datetime | None
     updated_at: datetime | None
     links: tuple[ObjectLink, ...] = ()
     spec_visible: bool = True
+    generation: UUID | None = None
 
 
 class UnknownKind(ValueError):
@@ -303,17 +306,41 @@ class ObjectStore[SpecT: BaseModel](Protocol):
     spec and the currently applied one (None on create); `status` is kind-specific live state
     rendered beside the spec on get — read by no code, so a loose mapping is the honest type.
     Handlers raise `VerbNotSupported` / `AdminRequired` / domain `ValueError`s; each renders as
-    the tool error."""
+    the tool error. Each active verb carries the generation its own read observed: a store
+    returning a non-null `ObjectDetail.generation` is fenced, and status/apply/delete refuse once
+    the row's generation no longer matches — before disclosure or mutation and after a disclosure
+    read. A kind returning no generation stays last-write-wins, so a row created or removed between
+    the read and the write is the verb's ordinary absent-or-present case, never a lost race."""
 
     async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage: ...
 
     async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[SpecT] | None: ...
 
-    async def status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None: ...
+    async def status(
+        self,
+        ctx: ToolContext,
+        name: str,
+        *,
+        expected_generation: UUID | None,
+    ) -> dict[str, JsonValue] | None: ...
 
-    async def apply(self, ctx: ToolContext, name: str, spec: SpecT, old: SpecT | None) -> None: ...
+    async def apply(
+        self,
+        ctx: ToolContext,
+        name: str,
+        spec: SpecT,
+        old: SpecT | None,
+        *,
+        expected_generation: UUID | None,
+    ) -> None: ...
 
-    async def delete(self, ctx: ToolContext, name: str) -> None: ...
+    async def delete(
+        self,
+        ctx: ToolContext,
+        name: str,
+        *,
+        expected_generation: UUID | None,
+    ) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -353,7 +380,15 @@ class MemberOwnedObjects[SpecT: BaseModel, OwnerT: ObjectOwner]:
     a grant/disclosure act sets `mutate_requires_speaker`/`delete_requires_speaker` so the gate also
     refuses it on a speakerless (scheduled/subagent) turn — an act that discloses or revokes access
     needs a live member, never a background turn acting on someone's behalf. The class vars name the
-    kind and the two gate messages the refusals carry."""
+    kind and the two gate messages the refusals carry.
+
+    A kind handing up `GeneratedObjectOwner` is fenced on that generation: every active verb refuses
+    once the name holds a different row than its read saw, and `status` re-checks after the read so
+    live state read under one row is never rendered beside another's spec. A kind handing up a plain
+    `ObjectOwner` is unfenced and stays last-write-wins — a row created or removed between the read
+    and the write is that verb's ordinary absent-or-present case. Both re-check visibility after a
+    disclosure read: a row the caller may no longer see refuses rather than disclose what was
+    read."""
 
     kind_name: ClassVar[str]
     mutate_gate: ClassVar[str]
@@ -377,35 +412,72 @@ class MemberOwnedObjects[SpecT: BaseModel, OwnerT: ObjectOwner]:
             owner, ctx.acting_member_id, await ctx.speaker_is_admin()
         ):
             return None
-        return await self._detail(ctx, name, owner)
+        detail = await self._detail(ctx, name, owner)
+        match owner, detail:
+            case GeneratedObjectOwner(generation=generation), ObjectDetail():
+                return replace(detail, generation=generation)
+            case _:
+                return detail
 
-    async def status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None:
+    async def status(
+        self,
+        ctx: ToolContext,
+        name: str,
+        *,
+        expected_generation: UUID | None,
+    ) -> dict[str, JsonValue] | None:
         owner = await self._owner(ctx, name)
-        if owner is None or not self._visible(
-            owner, ctx.acting_member_id, await ctx.speaker_is_admin()
-        ):
+        self._require_current_generation(name, owner, expected_generation, "reading")
+        if owner is None:
             return None
-        return await self._status(ctx, name, owner)
+        if not self._visible(owner, ctx.acting_member_id, await ctx.speaker_is_admin()):
+            raise UnknownObject(f"no {self.kind_name} object named {name!r}")
+        status = await self._status(ctx, name, owner)
+        current = await self._owner(ctx, name)
+        self._require_current_generation(name, current, expected_generation, "reading")
+        if current is None:
+            return None
+        if not self._visible(current, ctx.acting_member_id, await ctx.speaker_is_admin()):
+            raise UnknownObject(f"no {self.kind_name} object named {name!r}")
+        return status
 
-    async def apply(self, ctx: ToolContext, name: str, spec: SpecT, old: SpecT | None) -> None:
+    async def apply(
+        self,
+        ctx: ToolContext,
+        name: str,
+        spec: SpecT,
+        old: SpecT | None,
+        *,
+        expected_generation: UUID | None,
+    ) -> None:
         owner = await self._owner(ctx, name)
-        if owner is not None:
-            is_admin = await ctx.speaker_is_admin()
-            if not self._visible(owner, ctx.acting_member_id, is_admin):
-                raise UnknownObject(f"no {self.kind_name} object named {name!r}")
-            if not self._owned(owner, ctx.acting_member_id):
-                if (
-                    not is_admin
-                    or old is None
-                    or (owner.member_id is not None and not self._admin_can_apply(old, spec))
-                ):
-                    raise AdminRequired(self.mutate_gate)
-            if self.mutate_requires_speaker and ctx.speaker_member_id is None:
-                raise AdminRequired(self.mutate_gate)
+        if owner is None:
+            self._require_current_generation(name, owner, expected_generation, "editing")
+            await self._apply_owned(ctx, name, spec, old, owner)
+            return
+        is_admin = await ctx.speaker_is_admin()
+        if not self._visible(owner, ctx.acting_member_id, is_admin):
+            raise UnknownObject(f"no {self.kind_name} object named {name!r}")
+        self._require_current_generation(name, owner, expected_generation, "editing")
+        if not self._owned(owner, ctx.acting_member_id) and (
+            not is_admin
+            or old is None
+            or (owner.member_id is not None and not self._admin_can_apply(old, spec))
+        ):
+            raise AdminRequired(self.mutate_gate)
+        if self.mutate_requires_speaker and ctx.speaker_member_id is None:
+            raise AdminRequired(self.mutate_gate)
         await self._apply_owned(ctx, name, spec, old, owner)
 
-    async def delete(self, ctx: ToolContext, name: str) -> None:
+    async def delete(
+        self,
+        ctx: ToolContext,
+        name: str,
+        *,
+        expected_generation: UUID | None,
+    ) -> None:
         owner = await self._owner(ctx, name)
+        self._require_current_generation(name, owner, expected_generation, "deleting")
         if owner is None:
             raise UnknownObject(f"no {self.kind_name} object named {name!r}")
         is_admin = await ctx.speaker_is_admin()
@@ -428,6 +500,25 @@ class MemberOwnedObjects[SpecT: BaseModel, OwnerT: ObjectOwner]:
 
     def _admin_can_apply(self, old: SpecT, spec: SpecT) -> bool:
         return False
+
+    def _require_current_generation(
+        self,
+        name: str,
+        owner: OwnerT | None,
+        expected_generation: UUID | None,
+        action: str,
+    ) -> None:
+        """Refuse a verb whose read observed a different row than the one now under the name. An
+        ungenerated owner carries no generation, so it matches the empty expectation an unfenced
+        kind's read produces and the verb proceeds — the fence exists only for kinds that generate.
+        """
+        match owner:
+            case GeneratedObjectOwner(generation=generation):
+                stale = generation != expected_generation
+            case _:
+                stale = expected_generation is not None
+        if stale:
+            raise ValueError(f"{self.kind_name} {name!r} changed while {action}")
 
     async def _owner(self, ctx: ToolContext, name: str) -> OwnerT | None:
         return next((row.owner for row in await self._owned_rows(ctx) if row.name == name), None)
@@ -474,6 +565,7 @@ class ObjectKind[SpecT: BaseModel]:
     spec_model: type[SpecT]
     store: ObjectStore[SpecT]
     list_fields: frozenset[str] = frozenset()
+    agent_target_verbs: frozenset[AgentTargetVerb] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -501,6 +593,12 @@ def object_registry(bound: tuple[BoundKind, ...]) -> dict[str, BoundKind]:
         if kind.name in registry:
             other = registry[kind.name].extension or "core"
             raise ValueError(f"object kind {kind.name!r} from {owner!r} collides with {other!r}'s")
+        unknown_target_verbs = kind.agent_target_verbs.difference(AGENT_TARGET_VERBS)
+        if unknown_target_verbs:
+            raise ValueError(
+                f"{owner!r} object kind {kind.name!r}: unknown agent target verbs "
+                f"{sorted(unknown_target_verbs)}"
+            )
         _validate_spec_model(owner, kind)
         registry[kind.name] = entry
     return registry
@@ -594,8 +692,8 @@ class ObjectApplyInput(BaseModel):
     agent: str = Field(
         default="",
         description=(
-            "Stable agent name when updating an existing scheduled task. Omit for this agent. "
-            "Only the workspace main agent may target another agent, on an exact "
+            "Stable agent name for a kind declaring cross-agent create or update. Omit for this "
+            "agent. Only the workspace main agent may target another agent, on an exact "
             "member-requested call."
         ),
     )
@@ -632,9 +730,8 @@ class ObjectVerbs:
                     "`query` searches names, summaries, and string fields; `filters` exactly "
                     "matches first-class fields, and `order_by` with `order` sorts by a field. A "
                     "returned `next_cursor` passed back as `cursor` fetches the next page. Use "
-                    "object_get for one instance's full spec. For conversation, artifact, or "
-                    "scheduled_task, the main agent may pass a stable `agent` name to inspect "
-                    "that agent's namespace for the exact requesting member."
+                    "object_get for one instance's full spec. An agent-targetable kind accepts a "
+                    "stable `agent` name from the main agent for the exact requesting member."
                 ),
                 input_model=ObjectListInput,
                 handler=self._list,
@@ -647,9 +744,8 @@ class ObjectVerbs:
                     "live status (next fire time, last sync, fill state), its typed links to "
                     "related objects (each an object_get-able kind/name), and the row's "
                     "created_at/updated_at — recency is the first arbitration signal when "
-                    "retrieved facts conflict. For conversation, artifact, or scheduled_task, "
-                    "the main agent may pass a stable `agent` name to read that agent's namespace "
-                    "for the exact requesting member."
+                    "retrieved facts conflict. An agent-targetable kind accepts a stable `agent` "
+                    "name from the main agent for the exact requesting member."
                 ),
                 input_model=ObjectGetInput,
                 handler=self._get,
@@ -672,10 +768,9 @@ class ObjectVerbs:
                     "three top-level keys: `kind`, `name`, and `spec`. An existing name is an "
                     "update, a new one a create; the spec is validated against the kind's "
                     "schema (see object_explain) before anything runs. Kinds that don't accept "
-                    "a mutation refuse with the path that does. For `scheduled_task`, the main "
-                    "agent may pass a stable `agent` name only to update an existing task in that "
-                    "agent's namespace for the exact requesting member. Creating a task remains "
-                    "bound to the executing agent's conversation; artifact mutation is refused."
+                    "a mutation refuse with the path that does. The main agent may pass a stable "
+                    "`agent` name when the kind declares cross-agent create or update. Object "
+                    "explanation reports the declared target verbs."
                 ),
                 input_model=ObjectApplyInput,
                 handler=self._apply,
@@ -686,9 +781,8 @@ class ObjectVerbs:
                 description=(
                     "Delete a workspace object by kind and name. The result echoes the deleted "
                     "spec, so on a kind that accepts create an accidental delete can be "
-                    "re-applied from it. For artifact or scheduled_task, the main agent may pass "
-                    "a stable `agent` name to delete from that agent's namespace for the exact "
-                    "requesting member."
+                    "re-applied from it. An agent-targetable kind accepts a stable `agent` name "
+                    "from the main agent for the exact requesting member."
                 ),
                 input_model=ObjectDeleteInput,
                 handler=self._delete,
@@ -706,7 +800,7 @@ class ObjectVerbs:
             ]
             return _json_result({"kinds": kinds})
         bound = self._resolve(args.kind)
-        target = await self._target(ctx, args.kind, args.agent)
+        target = await self._target(ctx, bound, args.agent, frozenset({"list"}))
         with object_agent(target):
             page = await bound.kind.store.list(
                 self._bound_ctx(ctx, bound),
@@ -733,12 +827,16 @@ class ObjectVerbs:
     async def _get(self, ctx: ToolContext, args: ObjectGetInput) -> ToolResult:
         bound = self._resolve(args.kind)
         bound_ctx = self._bound_ctx(ctx, bound)
-        target = await self._target(ctx, args.kind, args.agent)
+        target = await self._target(ctx, bound, args.agent, frozenset({"get"}))
         with object_agent(target):
             detail = await bound.kind.store.get(bound_ctx, args.name)
             if detail is None:
                 raise UnknownObject(f"no {args.kind} object named {args.name!r}")
-            status = await bound.kind.store.status(bound_ctx, args.name)
+            status = await bound.kind.store.status(
+                bound_ctx,
+                args.name,
+                expected_generation=detail.generation,
+            )
         rendered: dict[str, object] = {
             "kind": args.kind,
             "name": args.name,
@@ -751,7 +849,8 @@ class ObjectVerbs:
                     }
                 ).model_dump(mode="json", exclude_none=True)
                 if target is not None
-                and link.target.kind in AGENT_TARGETABLE_KINDS
+                and (linked := self.registry.get(link.target.kind)) is not None
+                and "get" in linked.kind.agent_target_verbs
                 and link.target.agent is None
                 else link.model_dump(mode="json", exclude_none=True)
                 for link in detail.links
@@ -770,6 +869,7 @@ class ObjectVerbs:
                 "kind": bound.kind.name,
                 "description": bound.kind.description,
                 "guidance": bound.kind.guidance,
+                "agent_target_verbs": sorted(bound.kind.agent_target_verbs),
                 "name_rule": (
                     f"{OBJECT_NAME_PATTERN.pattern}, at most {OBJECT_NAME_MAX_LENGTH} chars"
                 ),
@@ -780,9 +880,12 @@ class ObjectVerbs:
     async def _apply(self, ctx: ToolContext, args: ObjectApplyInput) -> ToolResult:
         kind_name, name, spec_mapping = _parse_envelope(args.manifest)
         bound = self._resolve(kind_name)
-        target = await self._target(ctx, kind_name, args.agent)
-        if target is not None and kind_name not in AGENT_APPLY_TARGETABLE_KINDS:
-            raise ValueError(f"{kind_name!r} objects cannot be applied across agents")
+        target = await self._target(
+            ctx,
+            bound,
+            args.agent,
+            frozenset({"create", "update"}),
+        )
         _validate_name(name)
         try:
             spec = bound.kind.spec_model.model_validate(spec_mapping)
@@ -797,12 +900,17 @@ class ObjectVerbs:
         bound_ctx = self._bound_ctx(ctx, bound)
         with object_agent(target):
             existing = await bound.kind.store.get(bound_ctx, name)
-            if target is not None and existing is None:
+            operation: AgentTargetVerb = "create" if existing is None else "update"
+            if target is not None and operation not in bound.kind.agent_target_verbs:
                 raise VerbNotSupported(
-                    "cross-agent apply can only update an existing scheduled task"
+                    f"{kind_name!r} objects do not support cross-agent {operation}"
                 )
             await bound.kind.store.apply(
-                bound_ctx, name, spec, None if existing is None else existing.spec
+                bound_ctx,
+                name,
+                spec,
+                None if existing is None else existing.spec,
+                expected_generation=None if existing is None else existing.generation,
             )
         result = {
             "kind": kind_name,
@@ -816,12 +924,16 @@ class ObjectVerbs:
     async def _delete(self, ctx: ToolContext, args: ObjectDeleteInput) -> ToolResult:
         bound = self._resolve(args.kind)
         bound_ctx = self._bound_ctx(ctx, bound)
-        target = await self._target(ctx, args.kind, args.agent)
+        target = await self._target(ctx, bound, args.agent, frozenset({"delete"}))
         with object_agent(target):
             old = await bound.kind.store.get(bound_ctx, args.name)
             if old is None:
                 raise UnknownObject(f"no {args.kind} object named {args.name!r}")
-            await bound.kind.store.delete(bound_ctx, args.name)
+            await bound.kind.store.delete(
+                bound_ctx,
+                args.name,
+                expected_generation=old.generation,
+            )
         result = {
             "kind": args.kind,
             "name": args.name,
@@ -842,12 +954,18 @@ class ObjectVerbs:
     def _bound_ctx(self, ctx: ToolContext, bound: BoundKind) -> ToolContext:
         return replace(ctx, ext=bound.context)
 
-    async def _target(self, ctx: ToolContext, kind: str, name: str) -> ObjectAgent | None:
+    async def _target(
+        self,
+        ctx: ToolContext,
+        bound: BoundKind,
+        name: str,
+        verbs: frozenset[AgentTargetVerb],
+    ) -> ObjectAgent | None:
         if not name:
             return None
-        if kind not in AGENT_TARGETABLE_KINDS:
+        if not verbs.intersection(bound.kind.agent_target_verbs):
             raise ValueError(
-                f"object kind {kind!r} is workspace-scoped and rejects an agent target"
+                f"object kind {bound.kind.name!r} rejects an agent target for this verb"
             )
         async with workspace_tx() as connection:
             current = (
