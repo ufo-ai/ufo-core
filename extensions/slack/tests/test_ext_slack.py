@@ -2665,7 +2665,7 @@ async def test_status_follows_the_turn_pins_the_text_and_clears_at_terminal(
         "status": slack.STATUS_THINKING_TEXT,
         "loading_messages": [slack.STATUS_THINKING_TEXT],
     }
-    working = slack.STATUS_WORKING_TEXT.format(tool="bash")
+    working = slack.STATUS_DESCRIBED_TEXT.format(description="Reading the repo")
     assert statuses[1]["status"] == working
     assert statuses[1]["loading_messages"] == [working]
     assert statuses[2]["status"] == slack.STATUS_GENERATING_TEXT
@@ -2682,6 +2682,64 @@ async def test_status_follows_the_turn_pins_the_text_and_clears_at_terminal(
     assert working in written
     assert slack.STATUS_GENERATING_TEXT in written
     assert written[-1] == slack.STATUS_CLEAR_TEXT
+
+
+async def test_the_status_holds_whatever_prose_the_model_gave_it(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """The line is the model's prose, so the status takes it as it comes. A call that gave none
+    falls back to the slug form rather than blanking the status or pinning a stale line. One
+    trailing ellipsis, never two — the status supplies it, and prose that already ends in one is
+    not doubled up. Prose is unbounded upstream, so a long one is cut with room kept for that
+    ellipsis: the status stays inside Slack's limit and still reads as unfinished, rather than
+    losing the ellipsis to the slice and reading as a complete thought."""
+    workspace_id, _ = await _seed()
+    recorder: list[httpx.Request] = []
+    hub = InProcessHub()
+    _, client, _ = await _mount(monkeypatch, workspace_id, tmp_path, recorder, hub=hub)
+    mention = _event_body(
+        type="app_mention", user="U1", channel="C1", ts="100.5", text="<@UBOT00000> hi"
+    )
+    async with client:
+        response = await client.post(
+            EVENTS_PATH, content=mention, headers=_sign(mention, int(time.time()))
+        )
+    assert response.status_code == 200
+    async with workspace_tx() as connection:
+        turn_id = (
+            await connection.execute(
+                sa.select(tables.turn.c.id).where(tables.turn.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+    task = slack._STATUS_TASKS[turn_id]
+
+    async def _until(status: str, frame: ToolCall) -> None:
+        deadline = time.monotonic() + 5
+        while not any(
+            json.loads(r.content)["status"] == status
+            for r in _requests_to(recorder, slack.SLACK_ASSISTANT_STATUS_URL)
+        ):
+            assert time.monotonic() < deadline, f"{status!r} never reached Slack"
+            await hub.publish(turn_id, frame)
+            await asyncio.sleep(0.01)
+
+    await _until(
+        slack.STATUS_WORKING_TEXT.format(tool="bash"),
+        ToolCall(tool="bash", preview="{}", description=""),
+    )
+    await _until(
+        "Reading the deploy log…",
+        ToolCall(tool="bash", preview="{}", description="Reading the deploy log…"),
+    )
+    overlong = "Reconciling every invoice line against the ledger " * 8
+    cut = f"{overlong.strip()[: slack.STATUS_DESCRIPTION_LIMIT]}…"
+    await _until(cut, ToolCall(tool="bash", preview="{}", description=overlong))
+    await hub.publish(turn_id, Terminal(frame=TerminalFrame(status="done", text="hi")))
+    await task
+
+    assert len(overlong) > slack.STATUS_TEXT_LIMIT
+    assert len(cut) == slack.STATUS_TEXT_LIMIT
+    assert cut.endswith("…")
 
 
 async def test_a_failed_status_write_lands_in_the_event_log(
@@ -2826,7 +2884,8 @@ async def test_newest_turn_owns_the_thread_status(db: None, tmp_path, monkeypatc
         first_task = slack._STATUS_TASKS[first_id]
         deadline = time.monotonic() + 5
         while not any(
-            json.loads(r.content)["status"] == slack.STATUS_WORKING_TEXT.format(tool="primer")
+            json.loads(r.content)["status"]
+            == slack.STATUS_DESCRIBED_TEXT.format(description="Priming the tail")
             for r in _requests_to(recorder, slack.SLACK_ASSISTANT_STATUS_URL)
         ):
             await hub.publish(
@@ -2868,7 +2927,8 @@ async def test_newest_turn_owns_the_thread_status(db: None, tmp_path, monkeypatc
     )
     deadline = time.monotonic() + 5
     while not any(
-        json.loads(r.content)["status"] == slack.STATUS_WORKING_TEXT.format(tool="calendar")
+        json.loads(r.content)["status"]
+        == slack.STATUS_DESCRIBED_TEXT.format(description="Checking the calendar")
         for r in _requests_to(recorder, slack.SLACK_ASSISTANT_STATUS_URL)
     ):
         assert time.monotonic() < deadline, "the surviving turn never wrote its status"
@@ -2931,6 +2991,28 @@ def test_a_progress_post_carries_the_turns_own_narration_step_and_tally() -> Non
     assert "> Checking whether the migration already applied before rerunning it." in writing
 
 
+def test_a_progress_step_is_the_work_the_tally_is_the_plumbing() -> None:
+    """The "Now:" line is the member's read of a long-running turn, so it says what the turn is
+    doing in the model's own words rather than naming the tool it reached for. A call that gave no
+    description falls back to its slug in backticks, and the closing tally keeps the slugs — a
+    per-tool count is where a reader who wants the plumbing looks."""
+    activity = slack.TurnActivity()
+    activity.tool("bash", "Reading the deploy log")
+    assert activity.current_step() == "Reading the deploy log"
+    activity.tool("some_unlisted_tool", "")
+    assert (
+        slack.PROGRESS_ACTIVITY_LINE.format(activity=activity.current_step())
+        == "*Now:* `some_unlisted_tool`"
+    )
+
+    activity.tool("bash", "Restarting the worker")
+    report = activity.report(200.0)
+
+    assert report is not None
+    assert "*Now:* Restarting the worker" in report
+    assert "bash x2" in report
+
+
 def test_a_progress_post_bounds_the_model_supplied_text_and_the_tally() -> None:
     """Both halves of the body come from the model, so both are bounded before they reach Slack —
     and the tally accounts for every call it counts, naming the busiest tools and collapsing the
@@ -2963,8 +3045,7 @@ def test_every_closing_line_a_tool_free_checkpoint_can_render() -> None:
     stalled.checkpoint()
 
     assert stalled.report(4_500.0) == (
-        "*Now:* `bash` — running the integration suite\n"
-        "_1h 15m in · no new activity since the last update_"
+        "*Now:* running the integration suite\n_1h 15m in · no new activity since the last update_"
     )
 
     writing = slack.TurnActivity()
@@ -3292,7 +3373,7 @@ async def test_a_cost_tick_is_absorbed_without_reporting_anything(
         await asyncio.sleep(0.01)
 
     reported = str(_progress_posts(recorder)[0]["text"])
-    assert "*Now:* `bash` — applying the migration" in reported
+    assert "*Now:* applying the migration" in reported
     assert "1 tool calls since the last update: bash x1" in reported
     assert "1,234" not in reported and "567" not in reported
     await _finish_turn(turn_id, "migrated")

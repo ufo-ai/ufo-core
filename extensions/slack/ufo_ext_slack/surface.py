@@ -607,11 +607,13 @@ class SlackConversationSearch:
 
 
 STATUS_THINKING_TEXT = "Thinking…"
+STATUS_DESCRIBED_TEXT = "{description}…"
 STATUS_WORKING_TEXT = "Working… ({tool})"
 STATUS_SKILL_TEXT = "Loading skill {skill}…"
 STATUS_GENERATING_TEXT = "Generating…"
 STATUS_CLEAR_TEXT = ""
 STATUS_TEXT_LIMIT = 200
+STATUS_DESCRIPTION_LIMIT = STATUS_TEXT_LIMIT - len(STATUS_DESCRIBED_TEXT.format(description=""))
 STATUS_UPDATE_MIN_SECONDS = 1.0
 STATUS_REFRESH_SECONDS = 90.0
 
@@ -1484,13 +1486,16 @@ def _files_note(downloaded: DownloadedFiles) -> str:
 class ThreadStatus:
     """Live feedback for one running turn through the thread's native status
     (`assistant.threads.setStatus`): "Thinking…" the moment the turn is admitted, then the turn's
-    hub frames — each tool call as its slug, never the model's `user_description` (cycling prose
-    reads as agent chatter on a one-line status; narration belongs to the reply), streamed text as
-    "Generating…". Slack's agent UI renders its own canned phrases over a bare `status` string, so
-    every non-clear write pins the display through a one-element `loading_messages` rotation — the
-    field the client shows verbatim. The clear at turn end is always ours: a reply never ends the
-    status (a DM reply posts top-level, outside the status thread), so Terminal, Parked, and a
-    dead stream all clear alike.
+    hub frames — each tool call as the model's own `user_description` of what it is doing for the
+    member ("Checking the invoice totals…"), the slug form standing in only for a call that gave
+    none, streamed text as "Generating…". That prose is the model's and unbounded, so it is cut with
+    room kept for the trailing ellipsis rather than losing it to the STATUS_TEXT_LIMIT slice — that
+    ellipsis is the only mark a cut line gets.
+    Slack's agent UI renders its own canned phrases over a bare `status` string, so every non-clear
+    write pins the display through a one-element `loading_messages` rotation — the field the client
+    shows verbatim. The clear at turn end is always ours: a reply never ends the status (a DM reply
+    posts top-level, outside the status thread), so Terminal, Parked, and a dead stream all clear
+    alike.
     The status is state on the thread, not a message, and the thread has one writer — the newest
     turn (`_THREAD_WRITERS`) — so an
     outrun sibling's writes, its clear included, are skipped rather than blanking the status the
@@ -1564,8 +1569,13 @@ class ThreadStatus:
                 match frame:
                     case Terminal() | Parked():
                         return
-                    case ToolCall(tool=tool):
-                        text = STATUS_WORKING_TEXT.format(tool=tool)
+                    case ToolCall(tool=tool, description=description):
+                        stated = description.strip().rstrip(".…")[:STATUS_DESCRIPTION_LIMIT]
+                        text = (
+                            STATUS_DESCRIBED_TEXT.format(description=stated)
+                            if stated
+                            else STATUS_WORKING_TEXT.format(tool=tool)
+                        )
                     case SkillLoad(skill=skill):
                         text = STATUS_SKILL_TEXT.format(skill=skill)
                     case TextDelta():
@@ -1661,7 +1671,10 @@ class TurnActivity:
     never the text in flight, which is either that narration unfinished or the final answer a
     progress post must not preempt. `activity` is the step it is inside right now, and `tools`
     tallies the calls since the last post, so a post distinguishes a turn making progress from one
-    wedged inside a single call."""
+    wedged inside a single call. A step is the model's own `user_description` of the call — what it
+    is doing for the member, not the tool it reached for — with the slug in backticks standing in
+    for a call that gave none. The tally stays keyed by slug: it is a per-tool count, and it is
+    where a reader who wants the plumbing finds it."""
 
     narration: str = ""
     activity: str = ""
@@ -1670,7 +1683,7 @@ class TurnActivity:
 
     def tool(self, tool: str, description: str) -> None:
         self._close_narration()
-        step = f"`{tool}` — {description}" if description else f"`{tool}`"
+        step = description.strip() or f"`{tool}`"
         self.activity = step[:PROGRESS_ACTIVITY_LIMIT]
         self.tools[tool] += 1
 
