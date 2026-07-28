@@ -40,6 +40,7 @@ from ufo.sdk.manifest import Manifest
 from ufo.sdk.sandbox import (
     MOUNT_HEALTH_CHECK_TIMEOUT_SECONDS,
     MOUNT_TIMEOUT_SECONDS,
+    NO_PROXY_HOSTS,
     SANDBOX_FS_CREDENTIAL_PATH,
     SANDBOX_FS_TOKEN_STAGING_PATH,
     SENTINEL_MODEL_KEY,
@@ -85,14 +86,15 @@ INSTALL_CA_COMMAND = (
 
 
 def _egress_env(proxy: ProxyEndpoint, run_token: str) -> dict[str, str]:
-    """The environment a sandbox command runs under so its every network call routes through the
+    """The environment a sandbox command runs under so its every call off the box routes through the
     egress proxy: `HTTP(S)_PROXY` dial the proxy at its public base with the turn's run token as the
-    basic-auth username (so the proxy attributes and meters the request to the turn), the model keys
-    are the sentinels the proxy swaps for the real key on the wire, and the CA is the one written
-    into the sandbox so the proxy can terminate TLS the sandbox trusts. The signed run token is
-    URL-safe, so it drops into the URL's userinfo unescaped. Off-cluster means the public base is
-    required — absent it (the guard `serve` applies at boot), the sandbox would have no metered
-    route out, so this fails loud rather than build an open sandbox."""
+    basic-auth username (so the proxy attributes and meters the request to the turn), `NO_PROXY`
+    exempts the sandbox's own loopback (reaching a service this turn started inside the box is not
+    egress), the model keys are the sentinels the proxy swaps for the real key on the wire, and the
+    CA is the one written into the sandbox so the proxy can terminate TLS the sandbox trusts. The
+    signed run token is URL-safe, so it drops into the URL's userinfo unescaped. Off-cluster means
+    the public base is required — absent it (the guard `serve` applies at boot), the sandbox would
+    have no metered route out, so this fails loud rather than build an open sandbox."""
     if proxy.public_url is None:
         raise RuntimeError(
             "the e2b carrier runs off-cluster and needs a reachable egress proxy; "
@@ -110,6 +112,8 @@ def _egress_env(proxy: ProxyEndpoint, run_token: str) -> dict[str, str]:
         "HTTPS_PROXY": proxy_url,
         "http_proxy": proxy_url,
         "https_proxy": proxy_url,
+        "NO_PROXY": NO_PROXY_HOSTS,
+        "no_proxy": NO_PROXY_HOSTS,
         "ANTHROPIC_API_KEY": SENTINEL_MODEL_KEY,
         "OPENAI_API_KEY": SENTINEL_MODEL_KEY,
         "SSL_CERT_FILE": SYSTEM_CA_BUNDLE,

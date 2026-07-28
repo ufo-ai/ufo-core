@@ -3,17 +3,25 @@
 A hosted deploy runs one headless Chrome per conversation, inside that conversation's sandbox, and
 the serve process reaches its DevTools endpoint over the carrier's public per-port host. Selected by
 `[browser] cdp_provider = "sandbox_chrome"`, this provider's per-turn `lease` receives the turn's
-`SandboxSession` and, against it: launches Chrome idempotently on port 9222 (pidfile-guarded,
-backgrounded so the exec returns while it keeps running), starts an in-sandbox TCP proxy on 9223
-that rewrites each request's `Host:` header to `127.0.0.1:9222` (Chrome's DevTools rejects a
-non-localhost Host, and `--remote-allow-origins=*` does not fix that — the proxy is load-bearing:
-it carries the WebSocket upgrade and frames through), reads Chrome's `webSocketDebuggerUrl` path,
-and builds a
+`SandboxSession` and runs one bring-up command against it: launch Chrome on port 9222 if nothing
+answers there, launch an in-sandbox TCP proxy on 9223 that rewrites each request's `Host:` header to
+`127.0.0.1:9222` (Chrome's DevTools rejects a non-localhost Host, and `--remote-allow-origins=*`
+does not fix that — the proxy is load-bearing: it carries the WebSocket upgrade and frames through),
+and read Chrome's `webSocketDebuggerUrl` back *through* that proxy. A lease therefore returns only
+once the whole in-sandbox chain answers, and `lease` builds the
 `wss://<public-host-of-9223><ws-path>` endpoint carrying the sandbox's traffic token as a connection
-header. Chrome and the proxy persist across turns with the per-conversation sandbox, so a lease's
-`aclose` is a no-op and a fresh lease reuses the running Chrome. The BUA engine (the browser
-extension) connects whatever endpoint the lease yields — only the transport is this provider's
-concern, never the engine."""
+header.
+
+Readiness is a port that answers, never a pid that exists: a browser recorded but not serving is
+ended and relaunched, so one bad start cannot poison every later lease of the same sandbox. A
+browser that exits during bring-up reports its own log at once instead of spending the wait, and the
+wait itself stays strictly inside the carrier's command deadline, so a failure surfaces the
+browser's log rather than the carrier's timeout.
+
+Chrome and the proxy persist across turns with the per-conversation sandbox, so a lease's `aclose`
+is a no-op and a fresh lease reuses the running Chrome. The BUA engine (the browser extension)
+connects whatever endpoint the lease yields — only the transport is this provider's concern, never
+the engine."""
 
 from dataclasses import dataclass
 
@@ -26,80 +34,41 @@ VERSION = "0.1.0"
 CDP_BACKEND = "sandbox_chrome"
 BROWSER_CDP_PORT = 9222
 BROWSER_CDP_PROXY_PORT = 9223
-BROWSER_START_TIMEOUT_SECONDS = 45
-BROWSER_READY_ATTEMPTS = 150
-BROWSER_READY_SLEEP_SECONDS = 0.1
+CHROME_READY_BUDGET_SECONDS = 45
+"""The wait for a cold chromium to bind its DevTools port."""
+PROXY_READY_BUDGET_SECONDS = 10
+PROCESS_END_BUDGET_SECONDS = 5
+"""Each stage waits on its own budget, so a slow chromium cannot spend the proxy's and leave it
+reporting a budget it never had — one shared clock across stages starves whichever runs last."""
+IN_SANDBOX_WAIT_SECONDS = (
+    CHROME_READY_BUDGET_SECONDS + PROXY_READY_BUDGET_SECONDS + 2 * PROCESS_END_BUDGET_SECONDS
+)
+COMMAND_REPORT_MARGIN_SECONDS = 15
+BROWSER_START_TIMEOUT_SECONDS = IN_SANDBOX_WAIT_SECONDS + COMMAND_REPORT_MARGIN_SECONDS
+"""The carrier's deadline for the bring-up command, held above every wait it can enclose: a command
+the carrier kills reports only its own timeout, losing the browser log that says what failed."""
+BROWSER_PROBE_TIMEOUT_SECONDS = 0.2
+BROWSER_POLL_SLEEP_SECONDS = 0.1
+BROWSER_DIR = "/tmp/ufo-browser"
+CHROME_LOG_PATH = f"{BROWSER_DIR}/chromium.log"
+CHROME_PROFILE_DIR = f"{BROWSER_DIR}/profile"
+CHROME_PID_PATH = "/tmp/ufo-browser.pid"
+PROXY_LOG_PATH = f"{BROWSER_DIR}/proxy.log"
+PROXY_PID_PATH = "/tmp/ufo-browser-proxy.pid"
+PROXY_SCRIPT_PATH = "/tmp/ufo-browser-proxy.py"
+LOG_TAIL_LINES = 20
 TRAFFIC_ACCESS_HEADER = "e2b-traffic-access-token"
 
-CHROME_START_COMMAND = f"""
-if [ -f /tmp/ufo-browser.pid ] && kill -0 "$(cat /tmp/ufo-browser.pid)" 2>/dev/null; then
-  exit 0
-fi
-browser="$(command -v chromium || command -v chromium-browser \
-  || command -v google-chrome || command -v google-chrome-stable)"
-if [ -z "$browser" ]; then
-  echo "Chromium is required in the sandbox image" >&2
-  exit 127
-fi
-mkdir -p /tmp/ufo-browser
-nohup "$browser" --headless=new --no-sandbox --disable-dev-shm-usage --disable-gpu \
-  --remote-debugging-address=0.0.0.0 --remote-debugging-port={BROWSER_CDP_PORT} \
-  --remote-allow-origins='*' --user-data-dir=/tmp/ufo-browser/profile about:blank \
-  >/tmp/ufo-browser/chromium.log 2>&1 &
-echo "$!" >/tmp/ufo-browser.pid
-python3 - <<'PY' && exit 0
-import sys
-import time
-import urllib.request
-
-url = "http://127.0.0.1:{BROWSER_CDP_PORT}/json/version"
-for _ in range({BROWSER_READY_ATTEMPTS}):
-    try:
-        urllib.request.urlopen(url, timeout=0.2).read()
-        sys.exit(0)
-    except Exception:
-        time.sleep({BROWSER_READY_SLEEP_SECONDS})
-sys.exit(1)
-PY
-cat /tmp/ufo-browser/chromium.log >&2
-exit 1
-""".strip()
-
-WS_PATH_COMMAND = f"""
-python3 - <<'PY'
-import json
-import sys
-import time
-import urllib.request
-
-last_error = ""
-for _ in range({BROWSER_READY_ATTEMPTS}):
-    try:
-        version = json.load(
-            urllib.request.urlopen(
-                "http://127.0.0.1:{BROWSER_CDP_PORT}/json/version",
-                timeout=0.2,
-            )
-        )
-    except Exception as error:
-        last_error = str(error)
-        time.sleep({BROWSER_READY_SLEEP_SECONDS})
-        continue
-    print(version["webSocketDebuggerUrl"])
-    sys.exit(0)
-raise SystemExit(f"failed to resolve browser websocket: {{last_error}}")
-PY
-""".strip()
-
-PROXY_START_COMMAND = f"""
-cat >/tmp/ufo-browser-proxy.py <<'PY'
-import asyncio
-import contextlib
-
-CHROME_HOST = "127.0.0.1"
+PROXY_SOURCE = (
+    f"""CHROME_HOST = "127.0.0.1"
 CHROME_PORT = {BROWSER_CDP_PORT}
 PROXY_HOST = "0.0.0.0"
 PROXY_PORT = {BROWSER_CDP_PROXY_PORT}
+"""
+    + """
+import asyncio
+import contextlib
+
 BUFFER_BYTES = 65536
 
 
@@ -126,7 +95,7 @@ async def handle(
         request = await client_reader.readuntil(b"\\r\\n\\r\\n")
         lines = request.decode("iso-8859-1").split("\\r\\n")
         rewritten = [
-            f"Host: {{CHROME_HOST}}:{{CHROME_PORT}}"
+            f"Host: {CHROME_HOST}:{CHROME_PORT}"
             if line.lower().startswith("host:")
             else line
             for line in lines
@@ -150,36 +119,158 @@ async def main() -> None:
 
 
 asyncio.run(main())
-PY
-if [ -f /tmp/ufo-browser-proxy.pid ] \
-  && kill -0 "$(cat /tmp/ufo-browser-proxy.pid)" 2>/dev/null; then
-  python3 - <<'PY' && exit 0 || kill "$(cat /tmp/ufo-browser-proxy.pid)" 2>/dev/null || true
-import socket
-import sys
+"""
+)
 
-try:
-    sock = socket.create_connection(("127.0.0.1", {BROWSER_CDP_PROXY_PORT}), timeout=0.2)
-    sock.close()
-except OSError:
-    sys.exit(1)
-PY
-fi
-nohup python3 /tmp/ufo-browser-proxy.py >/tmp/ufo-browser/proxy.log 2>&1 &
-echo "$!" >/tmp/ufo-browser-proxy.pid
-for i in $(seq 1 {BROWSER_READY_ATTEMPTS}); do
-  python3 - <<'PY' && exit 0 || sleep {BROWSER_READY_SLEEP_SECONDS}
-import socket
-import sys
+BRING_UP_SOURCE = (
+    f"""BROWSER_DIR = "{BROWSER_DIR}"
+CHROME_URL = "http://127.0.0.1:{BROWSER_CDP_PORT}/json/version"
+CHROME_ARGV_TAIL = [
+    "--headless=new",
+    "--no-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-gpu",
+    "--remote-debugging-address=0.0.0.0",
+    "--remote-debugging-port={BROWSER_CDP_PORT}",
+    "--remote-allow-origins=*",
+    "--user-data-dir={CHROME_PROFILE_DIR}",
+    "about:blank",
+]
+CHROME_LOG = "{CHROME_LOG_PATH}"
+CHROME_PID = "{CHROME_PID_PATH}"
+PROXIED_URL = "http://127.0.0.1:{BROWSER_CDP_PROXY_PORT}/json/version"
+PROXY_ARGV = ["python3", "{PROXY_SCRIPT_PATH}"]
+PROXY_LOG = "{PROXY_LOG_PATH}"
+PROXY_PID = "{PROXY_PID_PATH}"
+PROBE_TIMEOUT_SECONDS = {BROWSER_PROBE_TIMEOUT_SECONDS}
+POLL_SLEEP_SECONDS = {BROWSER_POLL_SLEEP_SECONDS}
+CHROME_READY_BUDGET_SECONDS = {CHROME_READY_BUDGET_SECONDS}
+PROXY_READY_BUDGET_SECONDS = {PROXY_READY_BUDGET_SECONDS}
+PROCESS_END_BUDGET_SECONDS = {PROCESS_END_BUDGET_SECONDS}
+LOG_TAIL_LINES = {LOG_TAIL_LINES}
+"""
+    + '''
+import json
+import os
+import signal
+import subprocess
+import time
+import urllib.request
+from pathlib import Path
+from shutil import which
 
-try:
-    sock = socket.create_connection(("127.0.0.1", {BROWSER_CDP_PROXY_PORT}), timeout=0.2)
-    sock.close()
-except OSError:
-    sys.exit(1)
-PY
-done
-cat /tmp/ufo-browser/proxy.log >&2
-exit 1
+BROWSER_COMMANDS = ("chromium", "chromium-browser", "google-chrome", "google-chrome-stable")
+
+
+def answer(url):
+    """The DevTools version document, or None while nothing is serving that url yet."""
+    try:
+        with urllib.request.urlopen(url, timeout=PROBE_TIMEOUT_SECONDS) as reply:
+            return json.load(reply)
+    except Exception:
+        return None
+
+
+def tail(log_path):
+    try:
+        lines = Path(log_path).read_text(errors="replace").splitlines()
+    except OSError:
+        return f"{log_path} holds no log"
+    return "\\n".join(lines[-LOG_TAIL_LINES:])
+
+
+def end_recorded(pid_path):
+    """End what a prior bring-up recorded. It is not serving, so it is wedged, and leaving it alive
+    holds the port and the profile lock a fresh launch needs. Each launch is its own session leader,
+    so the recorded pid names the whole tree — a browser's renderers hold that lock too, and killing
+    the leader alone would leave them. Then wait for the pid to go, or the port stays taken."""
+    try:
+        pid = int(Path(pid_path).read_text())
+    except (OSError, ValueError):
+        return
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except OSError:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            return
+    deadline = time.monotonic() + PROCESS_END_BUDGET_SECONDS
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return
+        time.sleep(POLL_SLEEP_SECONDS)
+
+
+def launch(argv, log_path, pid_path):
+    log = open(log_path, "wb", buffering=0)
+    child = subprocess.Popen(
+        argv,
+        stdin=subprocess.DEVNULL,
+        stdout=log,
+        stderr=log,
+        start_new_session=True,
+    )
+    Path(pid_path).write_text(str(child.pid))
+    return child
+
+
+def serving(url, argv, log_path, pid_path, budget, what):
+    """The version document `url` answers, launching `argv` first when nothing does. The budget is
+    this stage's own, so the wait it reports is the wait it had. A child that exits is reported the
+    moment it does, so a browser that cannot run never spends the budget at all."""
+    served = answer(url)
+    if served is not None:
+        return served
+    end_recorded(pid_path)
+    child = launch(argv, log_path, pid_path)
+    deadline = time.monotonic() + budget
+    while True:
+        served = answer(url)
+        if served is not None:
+            return served
+        if child.poll() is not None:
+            raise SystemExit(
+                f"{what} exited {child.returncode} without serving {url}\\n{tail(log_path)}"
+            )
+        if time.monotonic() >= deadline:
+            raise SystemExit(f"{what} did not serve {url} within {budget}s\\n{tail(log_path)}")
+        time.sleep(POLL_SLEEP_SECONDS)
+
+
+Path(BROWSER_DIR).mkdir(parents=True, exist_ok=True)
+browser = next((found for found in map(which, BROWSER_COMMANDS) if found), None)
+if browser is None:
+    raise SystemExit("Chromium is required in the sandbox image")
+serving(
+    CHROME_URL,
+    [browser] + CHROME_ARGV_TAIL,
+    CHROME_LOG,
+    CHROME_PID,
+    CHROME_READY_BUDGET_SECONDS,
+    "the browser",
+)
+proxied = serving(
+    PROXIED_URL,
+    PROXY_ARGV,
+    PROXY_LOG,
+    PROXY_PID,
+    PROXY_READY_BUDGET_SECONDS,
+    "the browser proxy",
+)
+print(proxied["webSocketDebuggerUrl"])
+'''
+)
+
+BROWSER_UP_COMMAND = f"""
+cat >{PROXY_SCRIPT_PATH} <<'PROXY'
+{PROXY_SOURCE}
+PROXY
+python3 - <<'BRINGUP'
+{BRING_UP_SOURCE}
+BRINGUP
 """.strip()
 
 
@@ -204,7 +295,8 @@ class SandboxChromeCdpLease:
 @dataclass(frozen=True)
 class SandboxChromeCdpProvider:
     """Core's `cdp_providers` seam backed by Chrome inside the turn's sandbox. `lease` runs the
-    idempotent launch/proxy scripts against the sandbox, reads the DevTools websocket path, and
+    idempotent bring-up against the sandbox — which yields the DevTools websocket path read through
+    the in-sandbox proxy, so the whole chain is proven live before the endpoint is handed back — and
     builds the wss endpoint over the sandbox's public per-port host. `reattach` reports the session
     gone so a recovered turn re-grounds through a fresh `lease` — the endpoint resolves only from
     the live sandbox, which the caller supplies at lease time, never from the token alone."""
@@ -214,23 +306,18 @@ class SandboxChromeCdpProvider:
             raise RuntimeError(
                 "the sandbox_chrome cdp provider needs the turn's sandbox to reach its Chrome"
             )
-        await _run(sandbox, CHROME_START_COMMAND, "start browser")
-        await _run(sandbox, PROXY_START_COMMAND, "start browser proxy")
-        ws_path = _ws_path(await _run(sandbox, WS_PATH_COMMAND, "resolve browser websocket"))
+        result = await sandbox.bash(BROWSER_UP_COMMAND, timeout_s=BROWSER_START_TIMEOUT_SECONDS)
+        if result.exit_code != 0:
+            raise RuntimeError(
+                f"sandbox_chrome failed to bring up the browser: {result.stderr or result.stdout}"
+            )
         host = await sandbox.host(BROWSER_CDP_PROXY_PORT)
         headers = {TRAFFIC_ACCESS_HEADER: sandbox.traffic_token} if sandbox.traffic_token else {}
-        endpoint = CdpEndpoint(url=_remote_ws_url(host, ws_path), headers=headers)
+        endpoint = CdpEndpoint(url=_remote_ws_url(host, _ws_path(result.stdout)), headers=headers)
         return SandboxChromeCdpLease(endpoint)
 
     async def reattach(self, token: str) -> CdpLease:
         raise SessionGone(token)
-
-
-async def _run(sandbox: SandboxSession, command: str, what: str) -> str:
-    result = await sandbox.bash(command, timeout_s=BROWSER_START_TIMEOUT_SECONDS)
-    if result.exit_code != 0:
-        raise RuntimeError(f"sandbox_chrome failed to {what}: {result.stderr or result.stdout}")
-    return result.stdout
 
 
 def _ws_path(url: str) -> str:

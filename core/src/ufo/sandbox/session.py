@@ -26,6 +26,12 @@ SENTINEL_MODEL_KEY = "UFO_SENTINEL_MODEL_KEY"
 SANDBOX_UID = 1000
 SANDBOX_GID = 1000
 PROXY_ENV_NAMES = frozenset(("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"))
+NO_PROXY_HOSTS = "localhost,127.0.0.1,::1"
+"""The destinations every carrier's egress env exempts from the proxy, in both spellings the
+ecosystem reads. A sandbox reaching its own loopback is not egress: the proxy admits only globally
+routable addresses, so a proxied loopback request can only 403, and a service the turn started
+inside the container — Chrome's DevTools port, a dev-server preview — would be unreachable from
+inside it. Exempting loopback grants no reach a raw socket does not already have."""
 
 
 @dataclass(frozen=True, slots=True)

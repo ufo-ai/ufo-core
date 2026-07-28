@@ -44,6 +44,7 @@ from ufo_ext_e2b import (
 from ufo.blob import FilesystemBlobStore
 from ufo.config import BlobConfig, Config, DatabaseConfig, SandboxConfig
 from ufo.sandbox.session import (
+    NO_PROXY_HOSTS,
     WORKSPACE_DIR,
     ExecResult,
     MountSpec,
@@ -423,8 +424,9 @@ def test_ca_install_command_removes_a_target_after_a_failed_bundle_update(
 async def test_exec_runs_under_the_turn_egress_env() -> None:
     """Every sandbox command routes out through the proxy: exec passes an egress env whose
     HTTP(S)_PROXY dial the proxy's public URL with the turn's run token as the basic-auth username
-    (so the proxy meters the request to the turn), whose model keys are the sentinels the proxy
-    swaps for the real key on the wire, and whose CA vars point at the written proxy CA."""
+    (so the proxy meters the request to the turn), whose NO_PROXY exempts the sandbox's own
+    loopback, whose model keys are the sentinels the proxy swaps for the real key on the wire, and
+    whose CA vars point at the written proxy CA."""
     sdk = _Sdk()
     carrier = E2BCarrier(api_key="k", template="t", sdk=sdk)
     handle = await carrier.create(_spec(uuid4()))
@@ -438,6 +440,8 @@ async def test_exec_runs_under_the_turn_egress_env() -> None:
     assert envs["HTTPS_PROXY"] == proxy_url
     assert envs["http_proxy"] == proxy_url
     assert envs["https_proxy"] == proxy_url
+    assert envs["NO_PROXY"] == NO_PROXY_HOSTS
+    assert envs["no_proxy"] == NO_PROXY_HOSTS
     assert envs["ANTHROPIC_API_KEY"] == SENTINEL_MODEL_KEY
     assert envs["OPENAI_API_KEY"] == SENTINEL_MODEL_KEY
     assert envs["SSL_CERT_FILE"] == SYSTEM_CA_BUNDLE

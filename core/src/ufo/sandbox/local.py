@@ -22,6 +22,7 @@ from pathlib import Path, PurePosixPath
 
 from ufo.blob import BlobStore
 from ufo.sandbox.session import (
+    NO_PROXY_HOSTS,
     SENTINEL_MODEL_KEY,
     WORKSPACE_DIR,
     ExecResult,
@@ -78,6 +79,8 @@ class LocalCarrier:
                 "HTTPS_PROXY": proxy_url,
                 "http_proxy": proxy_url,
                 "https_proxy": proxy_url,
+                "NO_PROXY": NO_PROXY_HOSTS,
+                "no_proxy": NO_PROXY_HOSTS,
                 "ANTHROPIC_API_KEY": SENTINEL_MODEL_KEY,
                 "OPENAI_API_KEY": SENTINEL_MODEL_KEY,
                 "SSL_CERT_FILE": str(ca_path),

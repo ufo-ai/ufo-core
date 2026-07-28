@@ -22,6 +22,7 @@ from ufo.sandbox.fs_mount import (
     prepare_token_staging_command as prepare_token_staging_command,
 )
 from ufo.sandbox.fs_mount import s3fs_command as s3fs_command
+from ufo.sandbox.session import NO_PROXY_HOSTS as NO_PROXY_HOSTS
 from ufo.sandbox.session import SENTINEL_MODEL_KEY as SENTINEL_MODEL_KEY
 from ufo.sandbox.session import WORKSPACE_DIR as WORKSPACE_DIR
 from ufo.sandbox.session import Carrier as Carrier

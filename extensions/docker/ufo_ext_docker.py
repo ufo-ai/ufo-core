@@ -22,6 +22,7 @@ from ufo.sdk.manifest import Manifest
 from ufo.sdk.sandbox import (
     MOUNT_HEALTH_CHECK_TIMEOUT_SECONDS,
     MOUNT_TIMEOUT_SECONDS,
+    NO_PROXY_HOSTS,
     SANDBOX_FS_CREDENTIAL_PATH,
     SANDBOX_FS_TOKEN_STAGING_PATH,
     SENTINEL_MODEL_KEY,
@@ -93,6 +94,8 @@ class DockerCarrier:
             "HTTPS_PROXY": proxy_url,
             "http_proxy": proxy_url,
             "https_proxy": proxy_url,
+            "NO_PROXY": NO_PROXY_HOSTS,
+            "no_proxy": NO_PROXY_HOSTS,
             "ANTHROPIC_API_KEY": SENTINEL_MODEL_KEY,
             "OPENAI_API_KEY": SENTINEL_MODEL_KEY,
             **spec.env,

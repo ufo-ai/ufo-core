@@ -17,6 +17,7 @@ from ufo_ext_docker import DockerCarrier
 from ufo.blob import FilesystemBlobStore
 from ufo.config import BlobConfig, Config, DatabaseConfig, SandboxConfig
 from ufo.sdk.sandbox import (
+    NO_PROXY_HOSTS,
     SANDBOX_FS_TOKEN_PATH,
     SANDBOX_FS_TOKEN_STAGING_PATH,
     SENTINEL_MODEL_KEY,
@@ -273,6 +274,8 @@ async def test_exec_carries_the_turn_env_and_run_bakes_none(
     proxy_url = "http://turn-a:@host.docker.internal:8080"
     assert f"HTTPS_PROXY={proxy_url}" in exec_argv
     assert f"https_proxy={proxy_url}" in exec_argv
+    assert f"NO_PROXY={NO_PROXY_HOSTS}" in exec_argv
+    assert f"no_proxy={NO_PROXY_HOSTS}" in exec_argv
     assert f"ANTHROPIC_API_KEY={SENTINEL_MODEL_KEY}" in exec_argv
     assert "GH_TOKEN=UFO_SENTINEL_GRANT_acct-1" in exec_argv
     assert exec_argv.index("cid1") > exec_argv.index(f"HTTPS_PROXY={proxy_url}")
