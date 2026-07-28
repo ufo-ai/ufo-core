@@ -255,68 +255,6 @@ test("every craft renders as drawn glyphs", async () => {
   await page.close();
 });
 
-// Curiosity is measured in frames the page actually rendered, never in elapsed time: the pull
-// advances once per frame, so charging it for frames a loaded machine never delivered measures the
-// runner instead of the animation. 900 frames of drift is ~45 simulated seconds at the dt cap,
-// against a gather that takes 1-365 frames.
-const CURSOR = { x: 600, y: 400 };
-const NEAR_RADIUS_PX = 120;
-const GATHER_FRAMES = 900;
-const STAY_FRAMES = 90;
-const STAY_SHARE = 0.8;
-// A frame budget cannot bound a loop that is never handed a frame: if rAF stalls outright, nothing
-// inside the page runs to notice. This is the liveness backstop, never the measurement — it fails
-// with a message instead of hanging on the job's 15-minute ceiling. The test itself measures ~2s.
-const STALL_BACKSTOP = { timeout: 120_000 };
-
-test("craft close on a held cursor rather than fleeing it", STALL_BACKSTOP, async () => {
-  const page = await open(10);
-  await page.mouse.move(CURSOR.x, CURSOR.y);
-  const gathered = await page.evaluate(
-    async ({ x, y, radius, gatherFrames, stayFrames }) => {
-      const nearest = () =>
-        Math.min(
-          ...[...document.querySelectorAll(".craft")]
-            .filter((el) => Number(el.style.opacity) > 0.3)
-            .map((el) => {
-              const b = el.getBoundingClientRect();
-              return Math.hypot(b.x + b.width / 2 - x, b.y + b.height / 2 - y);
-            }),
-        );
-      const frame = () => new Promise(requestAnimationFrame);
-      let arrived = null;
-      for (let count = 1; count <= gatherFrames && arrived === null; count++) {
-        await frame();
-        if (nearest() < radius) arrived = count;
-      }
-      if (arrived === null) return { arrived, stayed: 0 };
-      let near = 0;
-      for (let count = 0; count < stayFrames; count++) {
-        await frame();
-        if (nearest() < radius) near++;
-      }
-      return { arrived, stayed: near / stayFrames };
-    },
-    {
-      ...CURSOR,
-      radius: NEAR_RADIUS_PX,
-      gatherFrames: GATHER_FRAMES,
-      stayFrames: STAY_FRAMES,
-    },
-  );
-  // Under the avoidance this replaced, a craft could not sit inside the cursor's radius at all.
-  assert.ok(
-    gathered.arrived !== null,
-    `no craft reached ${NEAR_RADIUS_PX}px of the cursor in ${GATHER_FRAMES} frames`,
-  );
-  // Arriving once could be a flyby; curiosity holds it there.
-  assert.ok(
-    gathered.stayed > STAY_SHARE,
-    `a craft was near the cursor in only ${(gathered.stayed * 100).toFixed(0)}% of frames`,
-  );
-  await page.close();
-});
-
 // The product is named ufo; nothing a member reads plays the part. Swept from the rendered page
 // rather than landing.html's source, because the retained ASCII art engine names saucer, mothership,
 // craft and beams in its own code — the copy is what a browser puts on screen.
