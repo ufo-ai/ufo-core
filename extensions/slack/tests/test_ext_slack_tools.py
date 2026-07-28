@@ -55,6 +55,8 @@ from ufo.sdk.surfaces import (
 from ufo.tools.context import SpawnResult, ToolContext
 from ufo.workspace import init_workspace_credentials, ws
 
+TOOL_NARRATION = "getting Slack connected"
+
 OWNER_EMAIL = "owner@acme.com"
 JOINER_EMAIL = "late@acme.com"
 PUBLIC_BASE_URL = "https://tenant.example.com"
@@ -193,7 +195,9 @@ async def _run(
     registry: dict[str, object], tool_name: str, ctx: ToolContext, **args: object
 ) -> str:
     tool = registry[tool_name]
-    result = await tool.handler(ctx, tool.input_model.model_validate(args))
+    result = await tool.handler(
+        ctx, tool.input_model.model_validate({"user_description": TOOL_NARRATION, **args})
+    )
     return result.content[0].text
 
 
@@ -561,8 +565,20 @@ async def test_slack_channels_searches_across_pages(
     ctx = _context(workspace_id, ext_by_tool["slack_channels"], blob, owner_id)
     tool = registry["slack_channels"]
     with ws(workspace_id):
-        matched = await tool.handler(ctx, tool.input_model.model_validate({"query": "engineering"}))
-        listed = await tool.handler(ctx, tool.input_model.model_validate({}))
+        matched = await tool.handler(
+            ctx,
+            tool.input_model.model_validate(
+                {"user_description": TOOL_NARRATION, "query": "engineering"}
+            ),
+        )
+        listed = await tool.handler(
+            ctx,
+            tool.input_model.model_validate(
+                {
+                    "user_description": TOOL_NARRATION,
+                }
+            ),
+        )
     assert matched.untrusted is True
     payload = json.loads(matched.content[0].text)
     # "engineering" hits each match on a different field — C2 by name, C3 by topic, C4 only by
@@ -626,7 +642,10 @@ async def test_slack_channels_finds_a_dm_by_its_people(
     ctx = _context(workspace_id, ext_by_tool["slack_channels"], blob, owner_id)
     tool = registry["slack_channels"]
     with ws(workspace_id):
-        result = await tool.handler(ctx, tool.input_model.model_validate({"query": "alice"}))
+        result = await tool.handler(
+            ctx,
+            tool.input_model.model_validate({"user_description": TOOL_NARRATION, "query": "alice"}),
+        )
     by_id = {convo["id"]: convo for convo in json.loads(result.content[0].text)["conversations"]}
     assert set(by_id) == {"D1", "G1"}
     assert by_id["D1"]["kind"] == "im"
@@ -662,7 +681,14 @@ async def test_slack_channels_requires_a_resolved_identity(db: None, tmp_path: P
     tool = registry["slack_channels"]
     with ws(workspace_id):
         with pytest.raises(ValueError, match="identity is not resolved"):
-            await tool.handler(ctx, tool.input_model.model_validate({}))
+            await tool.handler(
+                ctx,
+                tool.input_model.model_validate(
+                    {
+                        "user_description": TOOL_NARRATION,
+                    }
+                ),
+            )
 
 
 async def test_slack_channels_caps_people_resolution(
@@ -689,7 +715,14 @@ async def test_slack_channels_caps_people_resolution(
     ctx = _context(workspace_id, ext_by_tool["slack_channels"], blob, owner_id)
     tool = registry["slack_channels"]
     with ws(workspace_id):
-        result = await tool.handler(ctx, tool.input_model.model_validate({}))
+        result = await tool.handler(
+            ctx,
+            tool.input_model.model_validate(
+                {
+                    "user_description": TOOL_NARRATION,
+                }
+            ),
+        )
     assert json.loads(result.content[0].text)["truncated"] is True
 
 
@@ -719,7 +752,10 @@ async def test_slack_channels_stops_at_the_page_bound(
     ctx = _context(workspace_id, ext_by_tool["slack_channels"], blob, owner_id)
     tool = registry["slack_channels"]
     with ws(workspace_id):
-        result = await tool.handler(ctx, tool.input_model.model_validate({"query": "eng"}))
+        result = await tool.handler(
+            ctx,
+            tool.input_model.model_validate({"user_description": TOOL_NARRATION, "query": "eng"}),
+        )
     assert len(requests) == slack.SLACK_CONVERSATIONS_MAX_PAGES
     # the read scopes are exercised: every list request asks Slack for DMs and group DMs too.
     assert requests[0].url.params["types"] == "public_channel,private_channel,mpim,im"
@@ -740,7 +776,14 @@ async def test_slack_channels_needs_the_bot_token(db: None, tmp_path: Path) -> N
     tool = registry["slack_channels"]
     with ws(workspace_id):
         with pytest.raises(ValueError, match="Slack is not connected"):
-            await tool.handler(ctx, tool.input_model.model_validate({}))
+            await tool.handler(
+                ctx,
+                tool.input_model.model_validate(
+                    {
+                        "user_description": TOOL_NARRATION,
+                    }
+                ),
+            )
 
 
 def test_slack_writeback_hints_at_the_terminal_for_a_credential_request() -> None:

@@ -51,6 +51,8 @@ from ufo.tools.context import SpawnResult, ToolContext
 from ufo.tools.registry import ToolDef
 from ufo.workspace import ws
 
+TOOL_NARRATION = "setting up the reminder"
+
 DAILY_9AM = "0 9 * * *"
 
 
@@ -81,7 +83,9 @@ def _task_manifest(
 
 
 async def _dispatch(tool: ToolDef, ctx: ToolContext, **args: object) -> str:
-    result = await tool.handler(ctx, tool.input_model.model_validate(args))
+    result = await tool.handler(
+        ctx, tool.input_model.model_validate({"user_description": TOOL_NARRATION, **args})
+    )
     assert result.is_error is False
     return result.content[0].text
 
@@ -300,6 +304,7 @@ async def test_pause_and_wait_runs_tool_to_timer_to_resumed_turn(db: None) -> No
         result = await pause_and_wait(
             ctx,
             PauseAndWaitInput(
+                user_description=TOOL_NARRATION,
                 ai_response="I'll wait for the verification email.",
                 wait_minutes=10,
                 next_steps="Read the code and continue onboarding.",
@@ -442,6 +447,7 @@ async def test_new_message_resumes_pause_and_cancels_timer(db: None) -> None:
         await pause_and_wait(
             ctx,
             PauseAndWaitInput(
+                user_description=TOOL_NARRATION,
                 ai_response="Waiting.",
                 wait_minutes=10,
                 next_steps="Continue.",
@@ -511,6 +517,7 @@ async def test_pause_does_not_arm_after_a_newer_member_was_admitted(db: None) ->
         result = await pause_and_wait(
             ctx,
             PauseAndWaitInput(
+                user_description=TOOL_NARRATION,
                 ai_response="Waiting.",
                 wait_minutes=10,
                 next_steps="Continue.",
@@ -564,6 +571,7 @@ async def test_internal_arrivals_do_not_block_the_pause_timer(db: None) -> None:
         result = await pause_and_wait(
             ctx,
             PauseAndWaitInput(
+                user_description=TOOL_NARRATION,
                 ai_response="Waiting.",
                 wait_minutes=10,
                 next_steps="Continue.",
@@ -626,6 +634,7 @@ async def test_redelivered_terminal_message_does_not_cancel_a_later_pause(db: No
         await pause_and_wait(
             replace(base, turn=origin),
             PauseAndWaitInput(
+                user_description=TOOL_NARRATION,
                 ai_response="Waiting again.",
                 wait_minutes=10,
                 next_steps="Continue later.",
@@ -662,6 +671,7 @@ async def test_failed_member_enqueue_preserves_pause_for_the_same_turn_retry(db:
         await pause_and_wait(
             ctx,
             PauseAndWaitInput(
+                user_description=TOOL_NARRATION,
                 ai_response="Waiting.",
                 wait_minutes=10,
                 next_steps="Continue.",
@@ -786,6 +796,7 @@ async def test_background_turn_does_not_cancel_pause(db: None) -> None:
         await pause_and_wait(
             ctx,
             PauseAndWaitInput(
+                user_description=TOOL_NARRATION,
                 ai_response="Waiting.",
                 wait_minutes=10,
                 next_steps="Continue.",
@@ -824,6 +835,7 @@ async def test_internal_invoke_does_not_cancel_pause(db: None) -> None:
         await pause_and_wait(
             ctx,
             PauseAndWaitInput(
+                user_description=TOOL_NARRATION,
                 ai_response="Waiting.",
                 wait_minutes=10,
                 next_steps="Continue.",
@@ -1202,6 +1214,7 @@ async def test_pause_recovers_the_member_turn_after_process_death(db: None) -> N
 def test_pause_and_wait_bounds_the_timer(wait_minutes: int) -> None:
     with pytest.raises(ValueError):
         PauseAndWaitInput(
+            user_description=TOOL_NARRATION,
             ai_response="Waiting.",
             wait_minutes=wait_minutes,
             next_steps="Continue.",
@@ -1776,7 +1789,10 @@ async def test_applied_task_rejects_non_five_field_cron(db: None) -> None:
     ctx = _tool_ctx(workspace_id, conversation_id, agent_id)
     apply = _object_tool("object_apply")
     args = apply.input_model.model_validate(
-        {"manifest": _task_manifest("too-many", "0 9 * * * *", "too many fields")}
+        {
+            "user_description": TOOL_NARRATION,
+            "manifest": _task_manifest("too-many", "0 9 * * * *", "too many fields"),
+        }
     )
     with ws(workspace_id), agent(agent_id), pytest.raises(ValueError, match="5-field"):
         await apply.handler(ctx, args)
@@ -1789,6 +1805,7 @@ async def test_pause_rows_never_surface_as_objects(db: None) -> None:
         await pause_and_wait(
             ctx,
             PauseAndWaitInput(
+                user_description=TOOL_NARRATION,
                 ai_response="waiting",
                 wait_minutes=5,
                 next_steps="continue",
@@ -2233,19 +2250,34 @@ async def test_a_stranger_cannot_hijack_or_read_another_members_task(db: None) -
         with pytest.raises(UnknownObject):
             await get.handler(
                 stranger_ctx,
-                get.input_model.model_validate({"kind": SCHEDULED_TASK_KIND, "name": "digest"}),
+                get.input_model.model_validate(
+                    {
+                        "user_description": TOOL_NARRATION,
+                        "kind": SCHEDULED_TASK_KIND,
+                        "name": "digest",
+                    }
+                ),
             )
         with pytest.raises(UnknownObject):
             await apply.handler(
                 stranger_ctx,
                 apply.input_model.model_validate(
-                    {"manifest": _task_manifest("digest", "0 17 * * 1", "hijacked")}
+                    {
+                        "user_description": TOOL_NARRATION,
+                        "manifest": _task_manifest("digest", "0 17 * * 1", "hijacked"),
+                    }
                 ),
             )
         with pytest.raises(UnknownObject):
             await delete.handler(
                 stranger_ctx,
-                delete.input_model.model_validate({"kind": SCHEDULED_TASK_KIND, "name": "digest"}),
+                delete.input_model.model_validate(
+                    {
+                        "user_description": TOOL_NARRATION,
+                        "kind": SCHEDULED_TASK_KIND,
+                        "name": "digest",
+                    }
+                ),
             )
         creators_view = json.loads(await _dispatch(listing, creator_ctx, kind=SCHEDULED_TASK_KIND))
         tasks = await ScheduleStore().list()
@@ -2450,7 +2482,12 @@ async def test_owner_may_delete_but_not_edit_another_members_task(db: None) -> N
             await apply.handler(
                 owner_ctx,
                 apply.input_model.model_validate(
-                    {"manifest": _task_manifest("digest", "0 17 * * 1", "owner's injected prompt")}
+                    {
+                        "user_description": TOOL_NARRATION,
+                        "manifest": _task_manifest(
+                            "digest", "0 17 * * 1", "owner's injected prompt"
+                        ),
+                    }
                 ),
             )
         after_edit = await ScheduleStore().list()

@@ -68,6 +68,10 @@ class SearchWebInput(BaseModel):
         description="Only return results from these domains, e.g. ['nytimes.com', 'reuters.com']. "
         "Leave unset for all domains. Use this instead of site: syntax in queries.",
     )
+    user_description: str = Field(
+        description="What you are looking up on the web, in plain language for the activity "
+        "timeline."
+    )
 
 
 class FetchUrlInput(BaseModel):

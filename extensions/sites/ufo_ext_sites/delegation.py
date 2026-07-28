@@ -42,10 +42,15 @@ class BuildWebsiteInput(BaseModel):
         description="Run the child under the main agent's round ceiling instead of its default "
         "budget, for unusually large or multi-page builds that need more tool-use rounds.",
     )
+    user_description: str = Field(
+        description="What you are building for them, in plain language for the activity timeline."
+    )
 
 
 async def _build_website(ctx: ToolContext, args: BuildWebsiteInput) -> ToolResult:
-    result = await ctx.spawn(WEBSITE_BUILDING_NAME, args.model_dump(exclude_none=True))
+    result = await ctx.spawn(
+        WEBSITE_BUILDING_NAME, args.model_dump(exclude_none=True, exclude={"user_description"})
+    )
     text = "" if result.output is None else result.output.model_dump_json()
     return ToolResult(content=(TextContent(text=text),))
 

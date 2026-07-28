@@ -204,7 +204,10 @@ class StandInModel:
                 return
             if isinstance(request.messages[-1].content, str):
                 yield ToolCallStart(id="x1", name="bash")
-                yield ToolCallDelta(id="x1", partial_json='{"command": "true"}')
+                yield ToolCallDelta(
+                    id="x1",
+                    partial_json='{"command": "true", "user_description": "running a check"}',
+                )
                 yield Usage(input_tokens=2, output_tokens=2)
                 return
             payload = json.loads(request.messages[0].content)
@@ -220,7 +223,9 @@ class StandInModel:
                 yield Usage(input_tokens=5, output_tokens=5)
                 return
             yield ToolCallStart(id="e1", name="bash")
-            yield ToolCallDelta(id="e1", partial_json='{"command": "true"}')
+            yield ToolCallDelta(
+                id="e1", partial_json='{"command": "true", "user_description": "running a check"}'
+            )
             yield Usage(input_tokens=2, output_tokens=2)
             return
         contents = [m.content for m in request.messages]
@@ -229,21 +234,27 @@ class StandInModel:
         if isinstance(inbound, str) and "spawn-subagent" in inbound:
             yield ToolCallStart(id="s1", name="spawn_subagent")
             yield ToolCallDelta(
-                id="s1", partial_json='{"profile": "roundtrip", "payload": {"value": 21}}'
+                id="s1",
+                partial_json='{"profile": "roundtrip", "payload": {"value": 21}, '
+                '"user_description": "handing off the research"}',
             )
             yield Usage(input_tokens=4, output_tokens=4)
             return
         if isinstance(inbound, str) and "spawn-exhaust" in inbound:
             yield ToolCallStart(id="s2", name="spawn_subagent")
             yield ToolCallDelta(
-                id="s2", partial_json='{"profile": "exhaust", "payload": {"value": 99}}'
+                id="s2",
+                partial_json='{"profile": "exhaust", "payload": {"value": 99}, '
+                '"user_description": "handing off the research"}',
             )
             yield Usage(input_tokens=4, output_tokens=4)
             return
         if isinstance(inbound, str) and "spawn-pinned" in inbound:
             yield ToolCallStart(id="s3", name="spawn_subagent")
             yield ToolCallDelta(
-                id="s3", partial_json='{"profile": "pinned", "payload": {"value": 7}}'
+                id="s3",
+                partial_json='{"profile": "pinned", "payload": {"value": 7}, '
+                '"user_description": "handing off the research"}',
             )
             yield Usage(input_tokens=4, output_tokens=4)
             return
@@ -252,14 +263,17 @@ class StandInModel:
             yield ToolCallDelta(
                 id="s4",
                 partial_json='{"profile": "extend", "payload": '
-                '{"value": 42, "extended_context": true}}',
+                '{"value": 42, "extended_context": true}, '
+                '"user_description": "handing off the research"}',
             )
             yield Usage(input_tokens=4, output_tokens=4)
             return
         if isinstance(inbound, str) and "spawn-capped" in inbound:
             yield ToolCallStart(id="s5", name="spawn_subagent")
             yield ToolCallDelta(
-                id="s5", partial_json='{"profile": "extend", "payload": {"value": 42}}'
+                id="s5",
+                partial_json='{"profile": "extend", "payload": {"value": 42}, '
+                '"user_description": "handing off the research"}',
             )
             yield Usage(input_tokens=4, output_tokens=4)
             return
@@ -268,7 +282,8 @@ class StandInModel:
             yield ToolCallDelta(
                 id="s6",
                 partial_json='{"profile": "preload", "payload": '
-                '{"value": 5, "preload_skills": ["sandbox"]}}',
+                '{"value": 5, "preload_skills": ["sandbox"]}, '
+                '"user_description": "handing off the research"}',
             )
             yield Usage(input_tokens=4, output_tokens=4)
             return

@@ -51,6 +51,8 @@ from ufo.tools.builtins import ConnectAccountInput, connect_account_handler
 from ufo.tools.context import ToolContext
 from ufo.workspace import ws
 
+TOOL_NARRATION = "using the connected account"
+
 PUBLIC_BASE_URL = "https://ufo.example.com"
 EXPECTED_REDIRECT_URI = "https://ufo.example.com/v1/connect/callback"
 PROVIDER = "gmail"
@@ -397,7 +399,9 @@ async def test_describe_external_tools_builds_the_schema_from_configurable_props
     _install_transport(monkeypatch, _pipedream_handler("ufo_ws"))
     result = await describe_external_tools(
         _ctx(uuid4(), uuid4(), uuid4(), None),
-        DescribeExternalToolsInput(source_id=PROVIDER, tool_names=(GMAIL_ACTION,)),
+        DescribeExternalToolsInput(
+            user_description=TOOL_NARRATION, source_id=PROVIDER, tool_names=(GMAIL_ACTION,)
+        ),
     )
     payload = json.loads(result.content[0].text)
     schema = payload["schemas"][GMAIL_ACTION]["input_schema"]
@@ -412,7 +416,9 @@ async def test_describe_external_tools_marks_an_unknown_name_unresolved(
     _install_transport(monkeypatch, _pipedream_handler("ufo_ws"))
     result = await describe_external_tools(
         _ctx(uuid4(), uuid4(), uuid4(), None),
-        DescribeExternalToolsInput(source_id=PROVIDER, tool_names=(UNKNOWN_ACTION,)),
+        DescribeExternalToolsInput(
+            user_description=TOOL_NARRATION, source_id=PROVIDER, tool_names=(UNKNOWN_ACTION,)
+        ),
     )
     payload = json.loads(result.content[0].text)
     assert payload["unresolved"] == [UNKNOWN_ACTION]
@@ -441,7 +447,7 @@ async def test_connect_binds_a_grant_and_call_external_tool_executes_via_pipedre
 
     begin = await connect_account_handler(
         _turn_context(workspace_id, agent_id, conversation_id, member_id, turn_id),
-        ConnectAccountInput(provider=PROVIDER),
+        ConnectAccountInput(user_description=TOOL_NARRATION, provider=PROVIDER),
     )
     request = ConnectRequest.model_validate_json(begin.content[0].text.splitlines()[1])
     async with workspace_tx() as connection:
@@ -493,7 +499,12 @@ async def test_connect_binds_a_grant_and_call_external_tool_executes_via_pipedre
         result = await tool.handler(
             ctx,
             tool.input_model.model_validate(
-                {"tool_name": GMAIL_ACTION, "source_id": PROVIDER, "arguments": {"to": "a@b.test"}}
+                {
+                    "user_description": TOOL_NARRATION,
+                    "tool_name": GMAIL_ACTION,
+                    "source_id": PROVIDER,
+                    "arguments": {"to": "a@b.test"},
+                }
             ),
         )
     assert result.is_error is False
@@ -542,6 +553,7 @@ async def test_call_external_tool_executes_a_workspace_owned_grant(
                 speaker_member_id=member_id,
             ),
             CallExternalToolInput(
+                user_description=TOOL_NARRATION,
                 tool_name=GMAIL_ACTION,
                 source_id=PROVIDER,
                 arguments={"to": "a@b.test"},
@@ -628,7 +640,12 @@ async def test_call_external_tool_augments_an_unknown_key_with_the_real_actions(
     ):
         await call_external_tool(
             ctx,
-            CallExternalToolInput(tool_name=UNKNOWN_ACTION, source_id=PROVIDER, arguments={}),
+            CallExternalToolInput(
+                user_description=TOOL_NARRATION,
+                tool_name=UNKNOWN_ACTION,
+                source_id=PROVIDER,
+                arguments={},
+            ),
         )
 
 
@@ -668,7 +685,12 @@ async def test_call_external_tool_with_a_stale_grant_says_reconnect(
     ):
         await call_external_tool(
             ctx,
-            CallExternalToolInput(tool_name=GMAIL_ACTION, source_id=PROVIDER, arguments={}),
+            CallExternalToolInput(
+                user_description=TOOL_NARRATION,
+                tool_name=GMAIL_ACTION,
+                source_id=PROVIDER,
+                arguments={},
+            ),
         )
 
 
@@ -712,7 +734,12 @@ async def test_an_in_band_action_error_says_reconnect_only_for_a_stale_account(
     ):
         await call_external_tool(
             ctx,
-            CallExternalToolInput(tool_name=GMAIL_ACTION, source_id=PROVIDER, arguments={}),
+            CallExternalToolInput(
+                user_description=TOOL_NARRATION,
+                tool_name=GMAIL_ACTION,
+                source_id=PROVIDER,
+                arguments={},
+            ),
         )
 
     in_band_error.clear()
@@ -720,7 +747,12 @@ async def test_an_in_band_action_error_says_reconnect_only_for_a_stale_account(
     with ws(workspace_id), agent(agent_id), pytest.raises(pipedream.PipedreamError) as raised:
         await call_external_tool(
             ctx,
-            CallExternalToolInput(tool_name=GMAIL_ACTION, source_id=PROVIDER, arguments={}),
+            CallExternalToolInput(
+                user_description=TOOL_NARRATION,
+                tool_name=GMAIL_ACTION,
+                source_id=PROVIDER,
+                arguments={},
+            ),
         )
     assert "connect_account" not in str(raised.value)
 

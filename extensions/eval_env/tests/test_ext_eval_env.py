@@ -45,6 +45,8 @@ from ufo.sdk.context import ScopedStore
 from ufo.tools.context import ToolContext
 from ufo.workspace import ws
 
+TOOL_NARRATION = "using the connected account"
+
 BOB = "bob@evalco.test"
 
 
@@ -127,6 +129,7 @@ async def test_send_email_lands_a_durable_sent_row(db: None) -> None:
     result = await call_external_tool(
         _ctx(workspace_id),
         CallExternalToolInput(
+            user_description=TOOL_NARRATION,
             tool_name="send_email",
             source_id=env.EMAIL_PROVIDER,
             arguments={"to": [BOB], "subject": "Dinner", "body": "Friday at 7pm works."},
@@ -171,11 +174,17 @@ async def test_list_emails_reads_the_seeded_folder_with_filtering(db: None) -> N
 
     everything = await call_external_tool(
         _ctx(workspace_id),
-        CallExternalToolInput(tool_name="list_emails", source_id=env.EMAIL_PROVIDER, arguments={}),
+        CallExternalToolInput(
+            user_description=TOOL_NARRATION,
+            tool_name="list_emails",
+            source_id=env.EMAIL_PROVIDER,
+            arguments={},
+        ),
     )
     filtered = await call_external_tool(
         _ctx(workspace_id),
         CallExternalToolInput(
+            user_description=TOOL_NARRATION,
             tool_name="list_emails",
             source_id=env.EMAIL_PROVIDER,
             arguments={"query": "budget"},
@@ -195,6 +204,7 @@ async def test_calendar_lifecycle_updates_and_cancels_durably(db: None) -> None:
         await call_external_tool(
             ctx,
             CallExternalToolInput(
+                user_description=TOOL_NARRATION,
                 tool_name="create_event",
                 source_id=env.CALENDAR_PROVIDER,
                 arguments={
@@ -210,6 +220,7 @@ async def test_calendar_lifecycle_updates_and_cancels_durably(db: None) -> None:
         await call_external_tool(
             ctx,
             CallExternalToolInput(
+                user_description=TOOL_NARRATION,
                 tool_name="update_event",
                 source_id=env.CALENDAR_PROVIDER,
                 arguments={
@@ -226,6 +237,7 @@ async def test_calendar_lifecycle_updates_and_cancels_durably(db: None) -> None:
         await call_external_tool(
             ctx,
             CallExternalToolInput(
+                user_description=TOOL_NARRATION,
                 tool_name="cancel_event",
                 source_id=env.CALENDAR_PROVIDER,
                 arguments={"event_id": created["id"]},
@@ -249,6 +261,7 @@ async def test_updating_a_missing_event_fails_loud(db: None) -> None:
         await call_external_tool(
             _ctx(workspace_id),
             CallExternalToolInput(
+                user_description=TOOL_NARRATION,
                 tool_name="update_event",
                 source_id=env.CALENDAR_PROVIDER,
                 arguments={"event_id": str(uuid4()), "title": "renamed"},
@@ -265,7 +278,11 @@ async def test_unknown_slug_raises_for_the_wrong_provider() -> None:
 async def test_describe_exposes_the_catalog_schemas() -> None:
     result = await describe_external_tools(
         _ctx(uuid4()),
-        DescribeExternalToolsInput(source_id=env.EMAIL_PROVIDER, tool_names=("send_email",)),
+        DescribeExternalToolsInput(
+            user_description=TOOL_NARRATION,
+            source_id=env.EMAIL_PROVIDER,
+            tool_names=("send_email",),
+        ),
     )
     schema = _payload(result)["schemas"]["send_email"]
     assert set(schema["input_schema"]["properties"]) == {"to", "subject", "body"}
@@ -276,6 +293,7 @@ async def test_call_without_a_grant_fails_loud() -> None:
         await call_external_tool(
             _ctx(uuid4(), grants=()),
             CallExternalToolInput(
+                user_description=TOOL_NARRATION,
                 tool_name="send_email",
                 source_id=env.EMAIL_PROVIDER,
                 arguments={"to": [BOB], "subject": "s", "body": "b"},
@@ -287,7 +305,10 @@ async def test_describe_backfills_discovery_and_marks_unknown_unresolved() -> No
     result = await describe_external_tools(
         _ctx(uuid4()),
         DescribeExternalToolsInput(
-            source_id=env.EMAIL_PROVIDER, tool_names=("send_email", "bogus"), query="email"
+            user_description=TOOL_NARRATION,
+            source_id=env.EMAIL_PROVIDER,
+            tool_names=("send_email", "bogus"),
+            query="email",
         ),
     )
 
@@ -308,6 +329,7 @@ async def test_list_events_reads_the_calendar_with_filtering(db: None) -> None:
         await call_external_tool(
             ctx,
             CallExternalToolInput(
+                user_description=TOOL_NARRATION,
                 tool_name="create_event",
                 source_id=env.CALENDAR_PROVIDER,
                 arguments={"title": title, "start": start, "end": end, "attendees": []},
@@ -318,7 +340,10 @@ async def test_list_events_reads_the_calendar_with_filtering(db: None) -> None:
         await call_external_tool(
             ctx,
             CallExternalToolInput(
-                tool_name="list_events", source_id=env.CALENDAR_PROVIDER, arguments={}
+                user_description=TOOL_NARRATION,
+                tool_name="list_events",
+                source_id=env.CALENDAR_PROVIDER,
+                arguments={},
             ),
         )
     )
@@ -326,6 +351,7 @@ async def test_list_events_reads_the_calendar_with_filtering(db: None) -> None:
         await call_external_tool(
             ctx,
             CallExternalToolInput(
+                user_description=TOOL_NARRATION,
                 tool_name="list_events",
                 source_id=env.CALENDAR_PROVIDER,
                 arguments={"query": "sync"},
@@ -374,7 +400,10 @@ async def _searched(workspace_id: UUID, query: str) -> str:
     result = await call_external_tool(
         _ctx(workspace_id),
         CallExternalToolInput(
-            tool_name="search_code", source_id=env.CODE_PROVIDER, arguments={"query": query}
+            user_description=TOOL_NARRATION,
+            tool_name="search_code",
+            source_id=env.CODE_PROVIDER,
+            arguments={"query": query},
         ),
     )
     return result.content[0].text

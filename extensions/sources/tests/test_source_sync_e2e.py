@@ -45,6 +45,8 @@ from ufo.sources.sync import CorePageFeed, SyncDriver
 from ufo.tools.context import ToolContext
 from ufo.workspace import init_workspace_credentials, ws, ws_current
 
+TOOL_NARRATION = "syncing their pages"
+
 ASANA_ACCOUNT = "ca_asana_e2e"
 GMAIL_ACCOUNT = "apn_gmail_e2e"
 KLAVIYO_KEY = "pk_live_byok_e2e"
@@ -239,7 +241,9 @@ async def _sync_and_search(
                 context,
                 ext=context_for(memory.name, frozenset(), index=index, embed=embed),
             ),
-            search.input_model.model_validate({"queries": [query]}),
+            search.input_model.model_validate(
+                {"user_description": TOOL_NARRATION, "queries": [query]}
+            ),
         )
     return result.content[0].text
 

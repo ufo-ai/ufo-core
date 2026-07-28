@@ -108,11 +108,19 @@ class SlackConnectInput(BaseModel):
             "slack_app_manifest and enter its secrets privately)."
         ),
     )
+    user_description: str = Field(
+        description="What step of getting into Slack you are doing, in plain language for the "
+        "activity timeline."
+    )
 
 
 class SlackManifestInput(BaseModel):
     name: str = Field(
         default="ufo", description="The bot's display name shown in Slack, 1-35 plain characters."
+    )
+    user_description: str = Field(
+        description="That you are preparing their Slack app setup, in plain language for the "
+        "activity timeline."
     )
 
 
@@ -121,6 +129,10 @@ class SlackChannelsInput(BaseModel):
         default="",
         description="Case-insensitive text matched against each conversation's name, purpose, "
         "topic, and — for DMs and group DMs — the people in it. Leave empty to list from the top.",
+    )
+    user_description: str = Field(
+        description="Which Slack conversations you are looking for, in plain language for the "
+        "activity timeline."
     )
 
 

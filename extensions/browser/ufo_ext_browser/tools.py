@@ -14,7 +14,7 @@ from dataclasses import replace
 from typing import Literal
 from weakref import WeakKeyDictionary
 
-from pydantic import BaseModel, JsonValue
+from pydantic import BaseModel, Field, JsonValue
 
 from ufo.sdk.tools import ImageContent, TextContent, ToolContext, ToolDef, ToolResult
 from ufo_ext_browser.bua.backend import BuaSurface
@@ -33,7 +33,10 @@ class NavigateInput(BaseModel):
 
 
 class TabsContextInput(BaseModel):
-    pass
+    user_description: str = Field(
+        description="What you are checking about the pages you have open, in plain language for "
+        "the activity timeline."
+    )
 
 
 class TabsCreateInput(BaseModel):
@@ -42,10 +45,17 @@ class TabsCreateInput(BaseModel):
 
 
 class TabsCloseInput(BaseModel):
+    user_description: str = Field(
+        description="Which page you are done with, in plain language for the activity timeline."
+    )
     tab_id: int | None = None
 
 
 class UploadFileInput(BaseModel):
+    user_description: str = Field(
+        description="What you are uploading and where, in plain language for the activity "
+        "timeline. Name the document, never the path."
+    )
     ref: str
     files: tuple[str, ...]
     tab_id: int | None = None
@@ -145,12 +155,16 @@ async def _tabs_create(ctx: ToolContext, args: TabsCreateInput) -> ToolResult:
 
 
 async def _tabs_close(ctx: ToolContext, args: TabsCloseInput) -> ToolResult:
-    reply = await _browser(ctx).tabs_close(args.model_dump(mode="json", exclude_none=True))
+    reply = await _browser(ctx).tabs_close(
+        args.model_dump(mode="json", exclude_none=True, exclude={"user_description"})
+    )
     return _json_result(reply)
 
 
 async def _upload_file(ctx: ToolContext, args: UploadFileInput) -> ToolResult:
-    reply = await _browser(ctx).upload_file(args.model_dump(mode="json", exclude_none=True))
+    reply = await _browser(ctx).upload_file(
+        args.model_dump(mode="json", exclude_none=True, exclude={"user_description"})
+    )
     return _json_result(reply)
 
 

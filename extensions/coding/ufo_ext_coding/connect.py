@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from uuid import UUID
 
 import httpx
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ufo.sdk.context import ExtensionContext
 from ufo.sdk.credentials import authorized_slot_workspace
@@ -37,7 +37,12 @@ JSON_HEADERS = {"Accept": "application/json"}
 
 
 class ConnectGitHubInput(BaseModel):
-    """No arguments: the connection is for the speaking owner's own workspace."""
+    """The connection is for the speaking owner's own workspace, so it takes no target."""
+
+    user_description: str = Field(
+        description="That you are getting their GitHub hooked up, in plain language for the "
+        "activity timeline."
+    )
 
 
 async def connect_github(ctx: ToolContext, args: ConnectGitHubInput) -> ToolResult:

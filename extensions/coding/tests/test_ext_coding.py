@@ -12,13 +12,20 @@ from ufo.ext.loader import skill_registry
 from ufo.loop.subagents import FINISH_CONTRACT, subagent_system_prompt
 from ufo.tools.builtins import BUILTIN_TOOLS
 
+TOOL_NARRATION = "connecting their GitHub"
+
 
 def test_coding_manifest_registers_a_single_coding_profile() -> None:
     manifest = coding.manifest()
     assert [tool.name for tool in manifest.tools] == ["connect_github"]
     (profile,) = manifest.subagents
     assert profile.name == "coding"
-    assert profile.input_model.model_validate({"objective": "fix it"}).objective == "fix it"
+    assert (
+        profile.input_model.model_validate(
+            {"user_description": TOOL_NARRATION, "objective": "fix it"}
+        ).objective
+        == "fix it"
+    )
     assert profile.output_model.model_validate({"result": "fixed"}).result == "fixed"
 
 

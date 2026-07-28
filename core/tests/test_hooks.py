@@ -338,7 +338,12 @@ class BashThenAnswerModel:
             yield Usage(input_tokens=1, output_tokens=1)
             return
         yield ToolCallStart(id="c1", name="bash")
-        yield ToolCallDelta(id="c1", partial_json=json.dumps({"command": self.command}))
+        yield ToolCallDelta(
+            id="c1",
+            partial_json=json.dumps(
+                {"command": self.command, "user_description": "running a check"}
+            ),
+        )
         yield Usage(input_tokens=2, output_tokens=2)
 
 
@@ -353,9 +358,15 @@ class EchoAndBashModel:
             yield Usage(input_tokens=1, output_tokens=1)
             return
         yield ToolCallStart(id="c1", name=sample.TOOL_NAME)
-        yield ToolCallDelta(id="c1", partial_json=json.dumps({"message": "hi"}))
+        yield ToolCallDelta(
+            id="c1",
+            partial_json=json.dumps({"message": "hi", "user_description": "echoing the probe"}),
+        )
         yield ToolCallStart(id="c2", name="bash")
-        yield ToolCallDelta(id="c2", partial_json=json.dumps({"command": "echo hi"}))
+        yield ToolCallDelta(
+            id="c2",
+            partial_json=json.dumps({"command": "echo hi", "user_description": "running a check"}),
+        )
         yield Usage(input_tokens=2, output_tokens=2)
 
 
@@ -387,7 +398,10 @@ class CompactingModel:
             yield Usage(input_tokens=1, output_tokens=1)
             return
         yield ToolCallStart(id="c1", name="bash")
-        yield ToolCallDelta(id="c1", partial_json=json.dumps({"command": "echo hi"}))
+        yield ToolCallDelta(
+            id="c1",
+            partial_json=json.dumps({"command": "echo hi", "user_description": "running a check"}),
+        )
         yield Usage(input_tokens=2, output_tokens=2)
 
 

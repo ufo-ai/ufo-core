@@ -80,6 +80,10 @@ class PauseAndWaitInput(BaseModel):
     metadata: dict[str, JsonValue] | None = Field(
         default=None, description="State the resumed turn needs."
     )
+    user_description: str = Field(
+        description="What you are waiting on before you carry on, in plain language for the "
+        "activity timeline."
+    )
 
 
 def _require_scheduler(ctx: ToolContext) -> ScheduleStore:

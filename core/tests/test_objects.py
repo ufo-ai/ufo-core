@@ -80,6 +80,7 @@ from ufo.transcript import Conversation, transcript_key
 from ufo.workspace import ws
 
 SANDBOX_UNTOUCHED = "object verbs run against stores and must not reach the sandbox"
+OBJECT_NARRATION = "checking the workspace records"
 OWNER_CREATED_AT = datetime(2026, 7, 1, tzinfo=UTC)
 JOINER_CREATED_AT = datetime(2026, 7, 2, tzinfo=UTC)
 
@@ -181,7 +182,8 @@ def _object_tools() -> dict[str, ToolDef]:
 
 async def _text(tools: dict[str, ToolDef], tool_name: str, ctx: ToolContext, **args: object) -> str:
     tool = tools[tool_name]
-    result: ToolResult = await tool.handler(ctx, tool.input_model.model_validate(args))
+    payload = {"user_description": OBJECT_NARRATION, **args}
+    result: ToolResult = await tool.handler(ctx, tool.input_model.model_validate(payload))
     assert result.is_error is False
     block = result.content[0]
     assert isinstance(block, TextContent)
@@ -228,14 +230,22 @@ async def test_widget_crud_round_trips_through_the_verbs(db: None) -> None:
             await list_tool.handler(
                 ctx,
                 list_tool.input_model.model_validate(
-                    {"kind": sample.WIDGET_KIND, "filters": {"colour": "teal"}}
+                    {
+                        "user_description": OBJECT_NARRATION,
+                        "kind": sample.WIDGET_KIND,
+                        "filters": {"colour": "teal"},
+                    }
                 ),
             )
         with pytest.raises(ValueError, match="unknown object list order field"):
             await list_tool.handler(
                 ctx,
                 list_tool.input_model.model_validate(
-                    {"kind": sample.WIDGET_KIND, "order_by": "weight"}
+                    {
+                        "user_description": OBJECT_NARRATION,
+                        "kind": sample.WIDGET_KIND,
+                        "order_by": "weight",
+                    }
                 ),
             )
 
@@ -282,7 +292,13 @@ async def test_widget_crud_round_trips_through_the_verbs(db: None) -> None:
         with pytest.raises(UnknownObject):
             await get_tool.handler(
                 ctx,
-                get_tool.input_model.model_validate({"kind": sample.WIDGET_KIND, "name": "anvil"}),
+                get_tool.input_model.model_validate(
+                    {
+                        "user_description": OBJECT_NARRATION,
+                        "kind": sample.WIDGET_KIND,
+                        "name": "anvil",
+                    }
+                ),
             )
 
 
@@ -302,7 +318,10 @@ async def test_relic_reads_and_refuses_every_mutation(db: None) -> None:
         relic = f"kind: {sample.RELIC_KIND}\nname: {sample.RELIC_NAME}\nspec:\n  inscription: x\n"
         with pytest.raises(VerbNotSupported, match="read-only"):
             await apply_tool.handler(
-                ctx, apply_tool.input_model.model_validate({"manifest": relic})
+                ctx,
+                apply_tool.input_model.model_validate(
+                    {"user_description": OBJECT_NARRATION, "manifest": relic}
+                ),
             )
 
         delete_tool = tools["object_delete"]
@@ -310,7 +329,11 @@ async def test_relic_reads_and_refuses_every_mutation(db: None) -> None:
             await delete_tool.handler(
                 ctx,
                 delete_tool.input_model.model_validate(
-                    {"kind": sample.RELIC_KIND, "name": sample.RELIC_NAME}
+                    {
+                        "user_description": OBJECT_NARRATION,
+                        "kind": sample.RELIC_KIND,
+                        "name": sample.RELIC_NAME,
+                    }
                 ),
             )
 
@@ -326,7 +349,7 @@ async def test_widget_delete_gates_on_the_owner(db: None) -> None:
 
         delete_tool = tools["object_delete"]
         args = delete_tool.input_model.model_validate(
-            {"kind": sample.WIDGET_KIND, "name": "guarded"}
+            {"user_description": OBJECT_NARRATION, "kind": sample.WIDGET_KIND, "name": "guarded"}
         )
         with pytest.raises(OwnerRequired):
             await delete_tool.handler(_tool_context(workspace_id), args)
@@ -346,7 +369,9 @@ async def test_apply_refusals_name_their_cause(db: None) -> None:
     async def apply(manifest: str) -> None:
         await apply_tool.handler(
             _tool_context(workspace_id),
-            apply_tool.input_model.model_validate({"manifest": manifest}),
+            apply_tool.input_model.model_validate(
+                {"user_description": OBJECT_NARRATION, "manifest": manifest}
+            ),
         )
 
     with ws(workspace_id):
@@ -683,7 +708,9 @@ async def test_agent_kind_updates_model_owner_gated_and_shows_prompt_readonly(db
         assert joiner_fetched["spec"]["internet_access_allowed"] is False
 
         apply_tool = tools["object_apply"]
-        args = apply_tool.input_model.model_validate({"manifest": manifest})
+        args = apply_tool.input_model.model_validate(
+            {"user_description": OBJECT_NARRATION, "manifest": manifest}
+        )
         with pytest.raises(OwnerRequired):
             await apply_tool.handler(_tool_context(workspace_id, speaker_member_id=joiner), args)
         with pytest.raises(OwnerRequired):
@@ -691,6 +718,7 @@ async def test_agent_kind_updates_model_owner_gated_and_shows_prompt_readonly(db
 
         prompt_write = apply_tool.input_model.model_validate(
             {
+                "user_description": OBJECT_NARRATION,
                 "manifest": yaml.safe_dump(
                     {
                         "kind": AGENT_KIND,
@@ -701,7 +729,7 @@ async def test_agent_kind_updates_model_owner_gated_and_shows_prompt_readonly(db
                             "internet_access_allowed": False,
                         },
                     }
-                )
+                ),
             }
         )
         with pytest.raises(SpecValidationFailed, match="prompt"):
@@ -742,13 +770,14 @@ async def test_agent_kind_refuses_create_and_delete(db: None) -> None:
         apply_tool = tools["object_apply"]
         create = apply_tool.input_model.model_validate(
             {
+                "user_description": OBJECT_NARRATION,
                 "manifest": yaml.safe_dump(
                     {
                         "kind": AGENT_KIND,
                         "name": "second-agent",
                         "spec": {"model": "m", "internet_access_allowed": True},
                     }
-                )
+                ),
             }
         )
         with pytest.raises(VerbNotSupported, match="one agent per workspace"):
@@ -758,7 +787,9 @@ async def test_agent_kind_refuses_create_and_delete(db: None) -> None:
         with pytest.raises(VerbNotSupported, match="cannot be deleted"):
             await delete_tool.handler(
                 ctx,
-                delete_tool.input_model.model_validate({"kind": AGENT_KIND, "name": "assistant"}),
+                delete_tool.input_model.model_validate(
+                    {"user_description": OBJECT_NARRATION, "kind": AGENT_KIND, "name": "assistant"}
+                ),
             )
 
 
@@ -1091,7 +1122,10 @@ async def test_artifact_kind_refuses_apply_and_delete_removes_every_version(
         with pytest.raises(VerbNotSupported, match="share_file"):
             with agent(turn.agent_id):
                 await apply_tool.handler(
-                    ctx, apply_tool.input_model.model_validate({"manifest": manifest})
+                    ctx,
+                    apply_tool.input_model.model_validate(
+                        {"user_description": OBJECT_NARRATION, "manifest": manifest}
+                    ),
                 )
 
         deleted = json.loads(
@@ -1112,7 +1146,9 @@ async def test_artifact_kind_refuses_apply_and_delete_removes_every_version(
             with agent(turn.agent_id):
                 await delete_tool.handler(
                     ctx,
-                    delete_tool.input_model.model_validate({"kind": ARTIFACT_KIND, "name": name}),
+                    delete_tool.input_model.model_validate(
+                        {"user_description": OBJECT_NARRATION, "kind": ARTIFACT_KIND, "name": name}
+                    ),
                 )
 
 
@@ -1158,6 +1194,7 @@ async def test_artifact_with_missing_bytes_fails_loud_on_get(db: None, tmp_path:
                     ctx,
                     get_tool.input_model.model_validate(
                         {
+                            "user_description": OBJECT_NARRATION,
                             "kind": ARTIFACT_KIND,
                             "name": f"{turn.conversation_id.hex[:8]}-gone-txt",
                         }
@@ -1285,7 +1322,11 @@ async def test_conversation_transcript_keeps_member_and_agent_gates(
                     await get_tool.handler(
                         hidden,
                         get_tool.input_model.model_validate(
-                            {"kind": CONVERSATION_KIND, "name": str(private.conversation_id)}
+                            {
+                                "user_description": OBJECT_NARRATION,
+                                "kind": CONVERSATION_KIND,
+                                "name": str(private.conversation_id),
+                            }
                         ),
                     )
         assert not (workspace_dir / "transcripts").exists()
@@ -1448,7 +1489,11 @@ async def test_artifact_reads_and_mutation_resolution_stay_inside_the_agent(db: 
                 await get_tool.handler(
                     ctx,
                     get_tool.input_model.model_validate(
-                        {"kind": ARTIFACT_KIND, "name": other_name}
+                        {
+                            "user_description": OBJECT_NARRATION,
+                            "kind": ARTIFACT_KIND,
+                            "name": other_name,
+                        }
                     ),
                 )
 
@@ -1457,7 +1502,11 @@ async def test_artifact_reads_and_mutation_resolution_stay_inside_the_agent(db: 
                 await delete_tool.handler(
                     ctx,
                     delete_tool.input_model.model_validate(
-                        {"kind": ARTIFACT_KIND, "name": other_name}
+                        {
+                            "user_description": OBJECT_NARRATION,
+                            "kind": ARTIFACT_KIND,
+                            "name": other_name,
+                        }
                     ),
                 )
 

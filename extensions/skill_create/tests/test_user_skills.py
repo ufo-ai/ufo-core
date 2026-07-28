@@ -52,6 +52,8 @@ from ufo.tools.context import SpawnResult, ToolContext
 from ufo.tools.registry import ToolDef
 from ufo.workspace import ws
 
+TOOL_NARRATION = "saving the workflow"
+
 
 def _skill_md(name: str, description: str, body: str = "Follow the steps.") -> bytes:
     return f"---\nname: {name}\ndescription: {description}\n---\n{body}\n".encode()
@@ -302,7 +304,9 @@ def _skill_manifest(name: str, files: dict[str, object]) -> str:
 
 
 async def _dispatch(tool: ToolDef, ctx: ToolContext, **args: object) -> str:
-    result = await tool.handler(ctx, tool.input_model.model_validate(args))
+    result = await tool.handler(
+        ctx, tool.input_model.model_validate({"user_description": TOOL_NARRATION, **args})
+    )
     assert result.is_error is False
     return result.content[0].text
 
@@ -442,13 +446,14 @@ async def test_reapply_keeps_files_by_digest_and_refuses_unknown(db: None, tmp_p
         assert ("assets/note.md", b"inline note") in loaded[0].files
         stale = apply.input_model.model_validate(
             {
+                "user_description": TOOL_NARRATION,
                 "manifest": _skill_manifest(
                     "greet",
                     {
                         "SKILL.md": _skill_md("greet", "v3").decode(),
                         "assets/note.md": {"sha256": "0" * 64},
                     },
-                )
+                ),
             }
         )
         with pytest.raises(ValueError, match="no stored content"):
@@ -460,10 +465,18 @@ async def test_apply_refuses_shadow_and_frontmatter_mismatch(db: None, tmp_path)
     ctx = _tool_ctx(workspace_id, None, tmp_path, agent_id)
     apply = _object_tool("object_apply")
     shadow = apply.input_model.model_validate(
-        {"manifest": _skill_manifest("sandbox", {"SKILL.md": _skill_md("sandbox", "d").decode()})}
+        {
+            "user_description": TOOL_NARRATION,
+            "manifest": _skill_manifest(
+                "sandbox", {"SKILL.md": _skill_md("sandbox", "d").decode()}
+            ),
+        }
     )
     mismatch = apply.input_model.model_validate(
-        {"manifest": _skill_manifest("greet", {"SKILL.md": _skill_md("other", "d").decode()})}
+        {
+            "user_description": TOOL_NARRATION,
+            "manifest": _skill_manifest("greet", {"SKILL.md": _skill_md("other", "d").decode()}),
+        }
     )
     with ws(workspace_id), agent(agent_id):
         with pytest.raises(SkillCollidesWithCoreSkill):
@@ -482,14 +495,18 @@ async def test_apply_refuses_binary_and_missing_sources(db: None, tmp_path) -> N
     apply = _object_tool("object_apply")
     binary = apply.input_model.model_validate(
         {
+            "user_description": TOOL_NARRATION,
             "manifest": _skill_manifest(
                 "greet",
                 {"SKILL.md": {"from": "greet/SKILL.md"}, "logo.png": {"from": "greet/logo.png"}},
-            )
+            ),
         }
     )
     missing = apply.input_model.model_validate(
-        {"manifest": _skill_manifest("greet", {"SKILL.md": {"from": "greet/absent.md"}})}
+        {
+            "user_description": TOOL_NARRATION,
+            "manifest": _skill_manifest("greet", {"SKILL.md": {"from": "greet/absent.md"}}),
+        }
     )
     with ws(workspace_id), agent(agent_id):
         with pytest.raises(ValueError, match="not text"):
@@ -513,7 +530,10 @@ async def test_apply_enforces_the_cap_but_allows_a_reapply(
             manifest=_skill_manifest("one", {"SKILL.md": _skill_md("one", "1").decode()}),
         )
         over = apply.input_model.model_validate(
-            {"manifest": _skill_manifest("two", {"SKILL.md": _skill_md("two", "2").decode()})}
+            {
+                "user_description": TOOL_NARRATION,
+                "manifest": _skill_manifest("two", {"SKILL.md": _skill_md("two", "2").decode()}),
+            }
         )
         with pytest.raises(TooManyUserSkills):
             await apply.handler(ctx, over)
@@ -552,7 +572,9 @@ async def test_skill_dispatch_and_runtime_stay_inside_the_agent_boundary(
         with pytest.raises(UnknownObject):
             await get.handler(
                 second,
-                get.input_model.model_validate({"kind": SKILL_KIND, "name": "greet"}),
+                get.input_model.model_validate(
+                    {"user_description": TOOL_NARRATION, "kind": SKILL_KIND, "name": "greet"}
+                ),
             )
         await _dispatch(
             apply,

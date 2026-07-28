@@ -68,6 +68,8 @@ from ufo.tools.context import (
 )
 from ufo.tools.registry import ToolDef, ToolRegistry
 
+TOOL_NARRATION = "working through their files"
+
 pytestmark = pytest.mark.docker
 
 OVER_INMEMORY_BYTES = 25 * 1024 * 1024
@@ -366,7 +368,9 @@ async def _seed_turn_rows(turn: Turn) -> None:
 
 async def _run(tool_name: str, ctx: ToolContext, **args: object):
     tool = REGISTRY.get(tool_name)
-    return await tool.handler(ctx, tool.input_model.model_validate(args))
+    return await tool.handler(
+        ctx, tool.input_model.model_validate({"user_description": TOOL_NARRATION, **args})
+    )
 
 
 async def test_read_numbers_lines_and_appends_truncation_footer(

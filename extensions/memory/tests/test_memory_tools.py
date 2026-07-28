@@ -31,6 +31,8 @@ from ufo.subjects import member_subject
 from ufo.tools.context import SpawnResult, ToolContext, ToolResult
 from ufo.workspace import ws
 
+TOOL_NARRATION = "remembering what they told me"
+
 MEMORY_TOOLS = {tool.name: tool for tool in memory.manifest().tools}
 
 
@@ -124,7 +126,9 @@ def _tool_ctx(
 
 async def _run(name: str, ctx: ToolContext, **args: object) -> ToolResult:
     tool = MEMORY_TOOLS[name]
-    return await tool.handler(ctx, tool.input_model.model_validate(args))
+    return await tool.handler(
+        ctx, tool.input_model.model_validate({"user_description": TOOL_NARRATION, **args})
+    )
 
 
 async def test_memory_update_then_search_recalls_in_a_new_conversation(
@@ -189,7 +193,9 @@ async def test_user_prompt_submit_hook_injects_and_observes_a_recalled_fact(
                 artifact_token_secret="",
                 ext=ext,
             ),
-            memory.MemoryUpdateInput(body="the vault code is 4821"),
+            memory.MemoryUpdateInput(
+                body="the vault code is 4821", user_description=TOOL_NARRATION
+            ),
         )
         await _indexer(embed).run()
         async with workspace_tx() as connection:

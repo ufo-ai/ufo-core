@@ -121,7 +121,11 @@ async def test_bash_timeout_is_milliseconds_capped_and_converted(tmp_path: Path)
     to the carrier's seconds; an omitted timeout falls back to the default budget."""
     carrier = _RecordingCarrier()
     ctx = _bash_ctx(carrier, tmp_path)
-    await bash_handler(ctx, BashInput(command="echo hi", timeout=5000))
-    await bash_handler(ctx, BashInput(command="echo hi", timeout=9_000_000))
-    await bash_handler(ctx, BashInput(command="echo hi"))
+    await bash_handler(
+        ctx, BashInput(command="echo hi", timeout=5000, user_description="checking the box")
+    )
+    await bash_handler(
+        ctx, BashInput(command="echo hi", timeout=9_000_000, user_description="checking the box")
+    )
+    await bash_handler(ctx, BashInput(command="echo hi", user_description="checking the box"))
     assert carrier.timeouts == [5, 600, DEFAULT_EXEC_TIMEOUT_SECONDS]

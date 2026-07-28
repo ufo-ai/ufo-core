@@ -24,6 +24,8 @@ from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience
 from ufo.tools.context import SpawnResult, ToolContext
 
+TOOL_NARRATION = "working through the numbers"
+
 
 @dataclass
 class FakeSandbox:
@@ -184,11 +186,11 @@ async def test_js_repl_failed_reset_leaves_the_repl_empty(tmp_path: Path) -> Non
 async def test_xlsx_repl_discards_failed_code(tmp_path: Path) -> None:
     sandbox = FakeSandbox()
     ctx = _context(sandbox, tmp_path)
-    await repl.xlsx_repl(ctx, XlsxReplInput(code="a = 1"))
+    await repl.xlsx_repl(ctx, XlsxReplInput(user_description=TOOL_NARRATION, code="a = 1"))
     sandbox.python_result = ExecResult(stdout="", stderr="boom", exit_code=1)
-    await repl.xlsx_repl(ctx, XlsxReplInput(code="a = broken"))
+    await repl.xlsx_repl(ctx, XlsxReplInput(user_description=TOOL_NARRATION, code="a = broken"))
     sandbox.python_result = ExecResult(stdout="{}", stderr="", exit_code=0)
-    await repl.xlsx_repl(ctx, XlsxReplInput(code="b = 2"))
+    await repl.xlsx_repl(ctx, XlsxReplInput(user_description=TOOL_NARRATION, code="b = 2"))
     assert sandbox.files[repl.XLSX_REPL_PATH] == b"a = 1\nb = 2\n"
 
 
@@ -260,7 +262,9 @@ async def test_js_repl_clears_stale_emits_and_stays_text_only(tmp_path: Path) ->
 async def test_xlsx_repl_wraps_accumulated_code_with_the_result_footer(tmp_path: Path) -> None:
     sandbox = FakeSandbox(python_result=ExecResult(stdout='{"a": 1}', stderr="", exit_code=0))
     ctx = _context(sandbox, tmp_path)
-    result = await repl.xlsx_repl(ctx, XlsxReplInput(code="result = {'a': 1}"))
+    result = await repl.xlsx_repl(
+        ctx, XlsxReplInput(user_description=TOOL_NARRATION, code="result = {'a': 1}")
+    )
     run_file = sandbox.files[repl.XLSX_RUN_PATH].decode()
     assert run_file.startswith("result = {'a': 1}\n")
     assert "_json.dumps(result, default=str)" in run_file

@@ -125,7 +125,10 @@ async def test_connect_binds_a_grant_and_the_proxy_admits_and_meters_the_host(
 
     ctx = _turn_context(workspace_id, agent_id, conversation_id, member_id, turn_id=turn_id)
     result = await connect_account_handler(
-        ctx, ConnectAccountInput(provider=sample.CONNECTOR_PROVIDER)
+        ctx,
+        ConnectAccountInput(
+            provider=sample.CONNECTOR_PROVIDER, user_description="connecting their account"
+        ),
     )
     request = ConnectRequest.model_validate_json(result.content[0].text.splitlines()[1])
     async with workspace_tx() as connection:

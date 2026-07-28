@@ -39,6 +39,8 @@ from ufo.surfaces.admission import Admission, AdmissionInvoker
 from ufo.tools.context import SpawnResult, ToolContext
 from ufo.workspace import ws
 
+TOOL_NARRATION = "watching for changes"
+
 BILLED_MODEL = "claude-opus-4-8"
 
 
@@ -202,7 +204,9 @@ async def test_watch_pages_tool_binds_the_conversation(db: None) -> None:
     workspace_id, agent_id, conversation_id = await _seed()
     ctx = _tool_ctx(workspace_id, conversation_id, agent_id)
     with ws(workspace_id):
-        result = await watch_pages(ctx, WatchPagesInput(topic="orbital widget fleet"))
+        result = await watch_pages(
+            ctx, WatchPagesInput(user_description=TOOL_NARRATION, topic="orbital widget fleet")
+        )
         assert result.is_error is False
         stored = await ScopedStore(extension=NAME).get(f"{WATCH_PREFIX}orbital-widget-fleet")
     assert stored == {
@@ -219,7 +223,7 @@ async def test_matching_page_invokes_a_delivered_alert_turn_idempotently(db: Non
     with ws(workspace_id):
         await watch_pages(
             _tool_ctx(workspace_id, conversation_id, agent_id),
-            WatchPagesInput(topic="orbital widget fleet"),
+            WatchPagesInput(user_description=TOOL_NARRATION, topic="orbital widget fleet"),
         )
         await on_page_change(_hook_ctx(workspace_id, classifier, changes))
         await on_page_change(_hook_ctx(workspace_id, classifier, changes))
@@ -247,7 +251,8 @@ async def test_non_matching_page_alerts_nothing(db: None) -> None:
     classifier = ScriptedClassifier(verdict="NO")
     with ws(workspace_id):
         await watch_pages(
-            _tool_ctx(workspace_id, conversation_id, agent_id), WatchPagesInput(topic="widgets")
+            _tool_ctx(workspace_id, conversation_id, agent_id),
+            WatchPagesInput(user_description=TOOL_NARRATION, topic="widgets"),
         )
         await on_page_change(
             _hook_ctx(workspace_id, classifier, (_page("memo", "quarterly parking rota"),))
@@ -265,7 +270,8 @@ async def test_tombstones_and_watchless_batches_never_reach_the_model(db: None) 
         )
         assert classifier.requests == []
         await watch_pages(
-            _tool_ctx(workspace_id, conversation_id, agent_id), WatchPagesInput(topic="widgets")
+            _tool_ctx(workspace_id, conversation_id, agent_id),
+            WatchPagesInput(user_description=TOOL_NARRATION, topic="widgets"),
         )
         await on_page_change(
             _hook_ctx(workspace_id, classifier, (_page("gone", "", tombstone=True),))
@@ -278,14 +284,26 @@ async def test_cancel_page_watch_removes_it_and_unknown_fails_loud(db: None) -> 
     workspace_id, agent_id, conversation_id = await _seed()
     ctx = _tool_ctx(workspace_id, conversation_id, agent_id)
     with ws(workspace_id):
-        await watch_pages(ctx, WatchPagesInput(topic="widgets", name="fleet watch"))
-        listed = await list_page_watches(ctx, ListPageWatchesInput())
+        await watch_pages(
+            ctx,
+            WatchPagesInput(user_description=TOOL_NARRATION, topic="widgets", name="fleet watch"),
+        )
+        listed = await list_page_watches(
+            ctx,
+            ListPageWatchesInput(
+                user_description=TOOL_NARRATION,
+            ),
+        )
         assert "fleet-watch" in listed.content[0].text
-        cancelled = await cancel_page_watch(ctx, CancelPageWatchInput(name="fleet-watch"))
+        cancelled = await cancel_page_watch(
+            ctx, CancelPageWatchInput(user_description=TOOL_NARRATION, name="fleet-watch")
+        )
         assert "Cancelled" in cancelled.content[0].text
         assert await ScopedStore(extension=NAME).list(WATCH_PREFIX) == ()
         with pytest.raises(ValueError, match="no page watch"):
-            await cancel_page_watch(ctx, CancelPageWatchInput(name="fleet-watch"))
+            await cancel_page_watch(
+                ctx, CancelPageWatchInput(user_description=TOOL_NARRATION, name="fleet-watch")
+            )
 
 
 def test_manifest_declares_the_tools_and_the_page_change_hook() -> None:

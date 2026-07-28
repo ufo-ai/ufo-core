@@ -39,6 +39,8 @@ from ufo.sources.sync import SyncDriver
 from ufo.tools.registry import ToolDef
 from ufo.workspace import ws
 
+TOOL_NARRATION = "looking through the synced pages"
+
 OWNER_CREATED_AT = datetime(2026, 7, 1, tzinfo=UTC)
 MEMBER_CREATED_AT = datetime(2026, 7, 2, tzinfo=UTC)
 DECLARED_PROVIDERS = frozenset(CONNECTORS)
@@ -222,7 +224,9 @@ async def _tombstone(state: _Workspace, page_id: UUID) -> bool:
 
 
 async def _text(tool: ToolDef, ctx: ToolContext, **args: object) -> str:
-    result = await tool.handler(ctx, tool.input_model.model_validate(args))
+    result = await tool.handler(
+        ctx, tool.input_model.model_validate({"user_description": TOOL_NARRATION, **args})
+    )
     assert result.is_error is False
     return result.content[0].text
 
@@ -592,7 +596,9 @@ async def test_create_and_update_are_refused_naming_the_sync_driver(
     with ws(state.workspace_id), pytest.raises(VerbNotSupported, match="sync"):
         await apply_tool.handler(
             _context(state, blob),
-            apply_tool.input_model.model_validate({"manifest": manifest_text}),
+            apply_tool.input_model.model_validate(
+                {"user_description": TOOL_NARRATION, "manifest": manifest_text}
+            ),
         )
 
 
@@ -603,7 +609,9 @@ async def test_delete_tombstones_and_is_owner_gated(db: None, tmp_path: Path) ->
     with ws(state.workspace_id):
         source_id = await _seed_source(state, "asana")
         page_id = await _seed_page(state, source_id, blob)
-        args = delete_tool.input_model.model_validate({"kind": PAGE_KIND, "name": str(page_id)})
+        args = delete_tool.input_model.model_validate(
+            {"user_description": TOOL_NARRATION, "kind": PAGE_KIND, "name": str(page_id)}
+        )
         with pytest.raises(OwnerRequired):
             await delete_tool.handler(_context(state, blob, speaker_id=state.member_id), args)
         assert await _tombstone(state, page_id) in (False, 0)

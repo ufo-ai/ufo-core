@@ -29,6 +29,8 @@ from ufo.tools.context import SpawnResult, ToolContext
 from ufo.tools.registry import ToolDef
 from ufo.workspace import ws
 
+TOOL_NARRATION = "checking their saved keys"
+
 SECRET = "hunter2-super-secret-value"
 OWNER_CREATED_AT = datetime(2026, 7, 1, tzinfo=UTC)
 JOINER_CREATED_AT = datetime(2026, 7, 2, tzinfo=UTC)
@@ -119,7 +121,10 @@ def _object_tool(name: str) -> ToolDef:
 
 
 async def _text(tool: ToolDef, ctx: ToolContext, **args: object) -> str:
-    result = await tool.handler(ctx, tool.input_model.model_validate(args))
+    result = await tool.handler(
+        ctx,
+        tool.input_model.model_validate({"user_description": TOOL_NARRATION, **args}),
+    )
     assert result.is_error is False
     return result.content[0].text
 
@@ -222,13 +227,14 @@ async def test_fill_stays_the_request_credentials_path(db: None) -> None:
     apply_tool = _object_tool("object_apply")
     args = apply_tool.input_model.model_validate(
         {
+            "user_description": TOOL_NARRATION,
             "manifest": yaml.safe_dump(
                 {
                     "kind": CREDENTIAL_KIND,
                     "name": "sample-api",
                     "spec": {"slot": sample.API_SLOT},
                 }
-            )
+            ),
         }
     )
     with ws(workspace_id), pytest.raises(VerbNotSupported, match="request_credentials"):
@@ -244,7 +250,7 @@ async def test_clearing_a_slot_is_owner_gated(db: None) -> None:
         joiner = await _member(workspace_id, JOINER_CREATED_AT)
         await store.put(workspace_id, sample.API_SLOT, SECRET)
         args = delete_tool.input_model.model_validate(
-            {"kind": CREDENTIAL_KIND, "name": "sample-api"}
+            {"user_description": TOOL_NARRATION, "kind": CREDENTIAL_KIND, "name": "sample-api"}
         )
         with pytest.raises(OwnerRequired):
             await delete_tool.handler(_tool_context(workspace_id, joiner), args)

@@ -93,9 +93,9 @@ class YcIndexInput(BaseModel):
     entity: YcSearchCollection
     query: str = Field(min_length=2, max_length=500)
     max_results: int = Field(default=YC_SEARCH_MAX_RESULTS, ge=1, le=YC_SEARCH_MAX_RESULTS_LIMIT)
-    user_description: str | None = Field(
-        default=None,
-        description="Brief plain-language description shown in the activity timeline.",
+    user_description: str = Field(
+        description="Who or what you are searching the YC directory for, in plain language for the "
+        "activity timeline."
     )
 
 

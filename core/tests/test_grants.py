@@ -625,7 +625,9 @@ async def test_connect_account_handoff_is_private_memoized_and_binds_the_speaker
     )
     install_connect_flow(flow)
     ctx = _turn_context(workspace_id, agent_id, conversation_id, member_id)
-    result = await connect_account_handler(ctx, ConnectAccountInput(provider="stub"))
+    result = await connect_account_handler(
+        ctx, ConnectAccountInput(provider="stub", user_description="connecting their account")
+    )
     assert result.is_error is False
     tool_text = result.content[0].text
     assert "https://" not in tool_text
@@ -768,14 +770,18 @@ async def test_connect_handoff_replays_against_its_authorization_ttl(db: None) -
 async def test_connect_account_without_a_speaker_is_refused() -> None:
     ctx = _turn_context(uuid4(), uuid4(), uuid4(), None)
     with pytest.raises(ValueError, match="speaking member"):
-        await connect_account_handler(ctx, ConnectAccountInput(provider="stub"))
+        await connect_account_handler(
+            ctx, ConnectAccountInput(provider="stub", user_description="connecting their account")
+        )
 
 
 async def test_connect_account_without_an_installed_flow_raises() -> None:
     install_connect_flow(None)
     ctx = _turn_context(uuid4(), uuid4(), uuid4(), uuid4())
     with pytest.raises(ConnectUnavailable):
-        await connect_account_handler(ctx, ConnectAccountInput(provider="stub"))
+        await connect_account_handler(
+            ctx, ConnectAccountInput(provider="stub", user_description="connecting their account")
+        )
 
 
 async def test_the_begin_route_is_gone_and_the_callback_reports_unavailable_without_a_flow() -> (
@@ -906,7 +912,12 @@ async def test_connect_account_carries_the_shared_intent(db: None) -> None:
         )
     )
     ctx = _turn_context(workspace_id, agent_id, conversation_id, member_id)
-    result = await connect_account_handler(ctx, ConnectAccountInput(provider="stub", shared=True))
+    result = await connect_account_handler(
+        ctx,
+        ConnectAccountInput(
+            provider="stub", shared=True, user_description="connecting the team account"
+        ),
+    )
     payload = json.loads(result.content[0].text.splitlines()[-1])
     assert payload == {"provider": "stub", "shared": True}
 

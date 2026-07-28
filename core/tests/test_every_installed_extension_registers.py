@@ -52,6 +52,7 @@ from ufo.ext.loader import (
 from ufo.ext.manifest import Manifest
 from ufo.hub import InProcessHub
 from ufo.jobs import bindings_from
+from ufo.loop.engine import SKILL_LOAD_TOOL
 from ufo.loop.prompts.render import render_system_prompt
 from ufo.loop.subagents import SubagentRegistry
 from ufo.models.registry import model_registry
@@ -341,6 +342,25 @@ def test_installed_extension_registers_every_declared_point(name: str, tmp_path:
     _check_credentials(manifest, store)
     _check_onboarding(manifest, store)
     _check_prompt_sections(manifest)
+
+
+def test_every_registered_tool_takes_a_required_user_description() -> None:
+    """A surface names a running tool call by the model's own `user_description`, so every tool the
+    live registry offers must take one — the gate that keeps a new tool from landing with no
+    member-facing line. `load_skill` is exempt: the engine intercepts it and publishes a SkillLoad
+    frame naming the skill, never reading a description."""
+    tools, _ = turn_tools(
+        load_manifests(), _credential_store(), audience=conversation_audience(None)
+    )
+    assert tools
+    without: list[str] = []
+    for tool in tools:
+        if tool.name == SKILL_LOAD_TOOL:
+            continue
+        field = tool.input_model.model_fields.get("user_description")
+        if field is None or not field.is_required():
+            without.append(tool.name)
+    assert sorted(without) == []
 
 
 @pytest.mark.parametrize("pack_name", sorted(PACKS))

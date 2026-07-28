@@ -153,8 +153,9 @@ class XlsxReplInput(BaseModel):
     reset: bool | None = Field(
         default=None, description="Reset REPL state — clears all variables and loaded workbooks."
     )
-    user_description: str | None = Field(
-        default=None, description="Brief plain-language description shown in the activity timeline."
+    user_description: str = Field(
+        description="What you are working out in the spreadsheet, in plain language for the "
+        "activity timeline. Never include code."
     )
 
 

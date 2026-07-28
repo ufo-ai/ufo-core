@@ -46,6 +46,8 @@ from ufo.tools.builtins import BUILTIN_TOOLS
 from ufo.tools.context import ImageContent, SpawnResult, ToolContext, TurnCleanup
 from ufo.workspace import ws
 
+TOOL_NARRATION = "clicking through the page"
+
 
 @dataclass
 class RecordingSurface:
@@ -215,7 +217,9 @@ def _recording_context(
 
 async def _run(name: str, ctx: ToolContext, **args: object) -> object:
     tool = next(tool for tool in BROWSER_TOOLS if tool.name == name)
-    return await tool.handler(ctx, tool.input_model.model_validate(args))
+    return await tool.handler(
+        ctx, tool.input_model.model_validate({"user_description": TOOL_NARRATION, **args})
+    )
 
 
 def test_manifest_declares_the_browser_tools_and_profile() -> None:
@@ -375,6 +379,18 @@ async def test_upload_file_passes_the_workspace_paths(tmp_path: Path) -> None:
         files=["a.pdf", "b.pdf"],
     )
     assert surface.calls[-1] == ("upload_file", {"ref": "ref_9", "files": ["a.pdf", "b.pdf"]})
+
+
+async def test_tabs_close_forwards_the_tab_and_nothing_else(tmp_path: Path) -> None:
+    """The narration a member reads is the surface's to show, never a parameter the browser backend
+    is handed: closing a tab forwards the tab it targets and, with none named, an empty payload the
+    backend reads as the active tab."""
+    surface = RecordingSurface(reply={"ok": True})
+    ctx = _recording_context(surface, WritesCarrier(), tmp_path)
+    await _run("tabs_close", ctx, tab_id=2)
+    assert surface.calls[-1] == ("tabs_close", {"tab_id": 2})
+    await _run("tabs_close", ctx)
+    assert surface.calls[-1] == ("tabs_close", {})
 
 
 async def test_computer_saves_screenshot_into_the_workspace(tmp_path: Path) -> None:

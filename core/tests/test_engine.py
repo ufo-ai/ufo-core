@@ -273,7 +273,9 @@ class ToolCallingModel:
             yield Usage(input_tokens=1, output_tokens=1)
             return
         yield ToolCallStart(id="c1", name="bash")
-        yield ToolCallDelta(id="c1", partial_json='{"command": "echo hi"}')
+        yield ToolCallDelta(
+            id="c1", partial_json='{"command": "echo hi", "user_description": "running a check"}'
+        )
         yield Usage(input_tokens=2, output_tokens=2)
 
 
@@ -312,7 +314,10 @@ class SkillThenToolModel:
         yield ToolCallStart(id="s1", name="load_skill")
         yield ToolCallDelta(id="s1", partial_json=json.dumps({"name": "demo"}))
         yield ToolCallStart(id="c1", name="bash")
-        yield ToolCallDelta(id="c1", partial_json=json.dumps({"command": "echo hi"}))
+        yield ToolCallDelta(
+            id="c1",
+            partial_json=json.dumps({"command": "echo hi", "user_description": "running a check"}),
+        )
         yield Usage(input_tokens=2, output_tokens=2)
 
 
@@ -349,7 +354,9 @@ class NeverAnsweringModel:
             yield Usage(input_tokens=1, output_tokens=1)
             return
         yield ToolCallStart(id="c1", name="bash")
-        yield ToolCallDelta(id="c1", partial_json='{"command": "true"}')
+        yield ToolCallDelta(
+            id="c1", partial_json='{"command": "true", "user_description": "running a check"}'
+        )
         yield Usage(input_tokens=1, output_tokens=1)
 
 
@@ -385,7 +392,9 @@ class FinishCallingModel:
             return
         yield TextDelta(text="working on it")
         yield ToolCallStart(id="c1", name="bash")
-        yield ToolCallDelta(id="c1", partial_json='{"command": "true"}')
+        yield ToolCallDelta(
+            id="c1", partial_json='{"command": "true", "user_description": "running a check"}'
+        )
         yield Usage(input_tokens=2, output_tokens=2)
 
 
@@ -434,7 +443,9 @@ class FinishAlongsideWorkModel:
             yield Usage(input_tokens=1, output_tokens=1)
             return
         yield ToolCallStart(id="c1", name="bash")
-        yield ToolCallDelta(id="c1", partial_json='{"command": "true"}')
+        yield ToolCallDelta(
+            id="c1", partial_json='{"command": "true", "user_description": "running a check"}'
+        )
         yield ToolCallStart(id="f1", name=FINISH_TOOL)
         yield ToolCallDelta(id="f1", partial_json=json.dumps({"summary": "premature"}))
         yield Usage(input_tokens=2, output_tokens=2)
@@ -455,7 +466,9 @@ class NeverFinishingModel:
             yield Usage(input_tokens=1, output_tokens=1)
             return
         yield ToolCallStart(id="c1", name="bash")
-        yield ToolCallDelta(id="c1", partial_json='{"command": "true"}')
+        yield ToolCallDelta(
+            id="c1", partial_json='{"command": "true", "user_description": "running a check"}'
+        )
         yield Usage(input_tokens=1, output_tokens=1)
 
 
@@ -552,7 +565,12 @@ class ConnectCallingModel:
             yield Usage(input_tokens=1, output_tokens=1)
             return
         yield ToolCallStart(id="c1", name="connect_account")
-        yield ToolCallDelta(id="c1", partial_json=json.dumps({"provider": "stub"}))
+        yield ToolCallDelta(
+            id="c1",
+            partial_json=json.dumps(
+                {"provider": "stub", "user_description": "connecting their account"}
+            ),
+        )
         yield Usage(input_tokens=2, output_tokens=2)
 
 
@@ -1057,7 +1075,11 @@ async def test_multi_tool_round_publishes_skill_then_tool_activity_frames_in_ord
     activity = [frame for frame in hub.frames if isinstance(frame, SkillLoad | ToolCall)]
     assert activity == [
         SkillLoad(skill="demo"),
-        ToolCall(tool="bash", preview='{"command":"echo hi"}'),
+        ToolCall(
+            tool="bash",
+            preview='{"command":"echo hi","user_description":"running a check"}',
+            description="running a check",
+        ),
     ]
 
 
@@ -1433,6 +1455,7 @@ async def test_tool_activity_frame_carries_the_models_user_description(
 ASK_INPUT = {
     "title": "Need a decision",
     "questions": [{"question": "Ship it?", "options": [{"label": "Ship"}, {"label": "Hold"}]}],
+    "user_description": "checking whether to ship",
 }
 
 
@@ -1470,7 +1493,10 @@ class AskThenWorkModel:
             yield ToolCallDelta(id="q1", partial_json=json.dumps(ASK_INPUT))
         elif self.calls == 2:
             yield ToolCallStart(id="c1", name="bash")
-            yield ToolCallDelta(id="c1", partial_json='{"command": "echo hi"}')
+            yield ToolCallDelta(
+                id="c1",
+                partial_json='{"command": "echo hi", "user_description": "running a check"}',
+            )
         else:
             yield TextDelta(text="done without asking")
         yield Usage(input_tokens=1, output_tokens=1)
@@ -1563,6 +1589,7 @@ async def test_question_is_cleared_when_the_turn_works_on_after_asking(
 REQUEST_INPUT = {
     "reason": "Connecting Slack needs the bot token.",
     "prompts": [{"slot": "sample_api", "prompt": "Bot User OAuth Token"}],
+    "user_description": "asking for the Slack token",
 }
 
 
@@ -1679,7 +1706,11 @@ async def test_request_credentials_gates_on_owner_key_and_declared_slots(
     with pytest.raises(ValueError, match="workspace owner"):
         await request_credentials_handler(context(joiner, requests), args)
     undeclared = RequestCredentialsInput.model_validate(
-        {"reason": "r", "prompts": [{"slot": "nonesuch", "prompt": "p"}]}
+        {
+            "reason": "r",
+            "prompts": [{"slot": "nonesuch", "prompt": "p"}],
+            "user_description": "asking for a value",
+        }
     )
     with pytest.raises(ValueError, match="declares credential slot"):
         await request_credentials_handler(context(owner, requests), undeclared)

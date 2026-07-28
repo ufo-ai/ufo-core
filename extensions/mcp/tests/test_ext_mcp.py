@@ -36,6 +36,8 @@ from ufo.sdk.audience import conversation_audience
 from ufo.tools.context import ToolContext
 from ufo.workspace import init_workspace_credentials
 
+TOOL_NARRATION = "using the connected system"
+
 ENDPOINT = "http://mcp.test/mcp"
 SERVER_NAME = "docs"
 AUTH_TOKEN = "mcp-secret-0xdeadbeef"
@@ -129,8 +131,13 @@ def test_manifest_declares_the_two_dynamic_tools_and_the_server_slot() -> None:
     assert by_name["call_mcp_tool"].description == CALL_MCP_TOOL_DESCRIPTION
     assert by_name["list_mcp_tools"].untrusted is True
     assert by_name["call_mcp_tool"].untrusted is True
-    assert set(mcp.ListMcpToolsInput.model_fields) == {"server"}
-    assert set(mcp.CallMcpToolInput.model_fields) == {"server", "tool_name", "arguments"}
+    assert set(mcp.ListMcpToolsInput.model_fields) == {"server", "user_description"}
+    assert set(mcp.CallMcpToolInput.model_fields) == {
+        "server",
+        "tool_name",
+        "arguments",
+        "user_description",
+    }
     (slot,) = mcp.manifest().credentials
     assert slot.name == "mcp_servers"
     assert slot.injection is None
@@ -162,7 +169,9 @@ async def test_list_mcp_tools_discovers_and_projects_the_configured_server(
     async with _serving() as client_for:
         monkeypatch.setattr(mcp, "mcp_client", client_for)
         ctx = await _tool_context()
-        result = await mcp._list_mcp_tools(ctx, mcp.ListMcpToolsInput(server=SERVER_NAME))
+        result = await mcp._list_mcp_tools(
+            ctx, mcp.ListMcpToolsInput(user_description=TOOL_NARRATION, server=SERVER_NAME)
+        )
     assert result.is_error is False
     payload = json.loads(result.content[0].text)
     assert payload["server"] == SERVER_NAME
@@ -183,7 +192,10 @@ async def test_call_mcp_tool_parses_structured_content(
         result = await mcp._call_mcp_tool(
             ctx,
             mcp.CallMcpToolInput(
-                server=SERVER_NAME, tool_name="search", arguments={"query": "auth flow"}
+                user_description=TOOL_NARRATION,
+                server=SERVER_NAME,
+                tool_name="search",
+                arguments={"query": "auth flow"},
             ),
         )
     assert result.is_error is False
@@ -197,7 +209,13 @@ async def test_call_mcp_tool_joins_text_content_when_unstructured(
         monkeypatch.setattr(mcp, "mcp_client", client_for)
         ctx = await _tool_context()
         result = await mcp._call_mcp_tool(
-            ctx, mcp.CallMcpToolInput(server=SERVER_NAME, tool_name="two_lines", arguments={})
+            ctx,
+            mcp.CallMcpToolInput(
+                user_description=TOOL_NARRATION,
+                server=SERVER_NAME,
+                tool_name="two_lines",
+                arguments={},
+            ),
         )
     assert result.is_error is False
     assert json.loads(result.content[0].text) == {"text": "line one\ntwo"}
@@ -210,7 +228,13 @@ async def test_call_mcp_tool_sends_the_configured_bearer_token(
         monkeypatch.setattr(mcp, "mcp_client", client_for)
         ctx = await _tool_context()
         result = await mcp._call_mcp_tool(
-            ctx, mcp.CallMcpToolInput(server=SERVER_NAME, tool_name="whoami", arguments={})
+            ctx,
+            mcp.CallMcpToolInput(
+                user_description=TOOL_NARRATION,
+                server=SERVER_NAME,
+                tool_name="whoami",
+                arguments={},
+            ),
         )
     assert result.is_error is False
     assert json.loads(result.content[0].text) == {"authorization": f"Bearer {AUTH_TOKEN}"}
@@ -223,7 +247,10 @@ async def test_call_mcp_tool_surfaces_a_tool_error_as_is_error(
         monkeypatch.setattr(mcp, "mcp_client", client_for)
         ctx = await _tool_context()
         result = await mcp._call_mcp_tool(
-            ctx, mcp.CallMcpToolInput(server=SERVER_NAME, tool_name="boom", arguments={})
+            ctx,
+            mcp.CallMcpToolInput(
+                user_description=TOOL_NARRATION, server=SERVER_NAME, tool_name="boom", arguments={}
+            ),
         )
     assert result.is_error is True
     assert result.content[0].text == "no such record"
@@ -233,7 +260,10 @@ async def test_an_unconfigured_server_name_fails_loud(db: None) -> None:
     ctx = await _tool_context()
     with pytest.raises(ValueError, match="no MCP server named 'other'"):
         await mcp._call_mcp_tool(
-            ctx, mcp.CallMcpToolInput(server="other", tool_name="x", arguments={})
+            ctx,
+            mcp.CallMcpToolInput(
+                user_description=TOOL_NARRATION, server="other", tool_name="x", arguments={}
+            ),
         )
 
 
@@ -243,6 +273,7 @@ async def test_call_mcp_tool_rejects_oversized_arguments(db: None) -> None:
         await mcp._call_mcp_tool(
             ctx,
             mcp.CallMcpToolInput(
+                user_description=TOOL_NARRATION,
                 server=SERVER_NAME,
                 tool_name="search",
                 arguments={"blob": "z" * (mcp.MAX_MCP_REQUEST_BYTES + 1)},

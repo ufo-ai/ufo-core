@@ -83,7 +83,9 @@ class _CrashOnceModel:
             yield Usage(input_tokens=1, output_tokens=1)
             return
         yield ToolCallStart(id="c1", name="bash")
-        yield ToolCallDelta(id="c1", partial_json='{"command": "echo hi"}')
+        yield ToolCallDelta(
+            id="c1", partial_json='{"command": "echo hi", "user_description": "running a check"}'
+        )
         yield Usage(input_tokens=2, output_tokens=2)
 
 

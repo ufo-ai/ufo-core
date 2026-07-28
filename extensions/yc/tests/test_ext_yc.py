@@ -275,7 +275,9 @@ async def test_device_auth_starts_in_chat_and_fulfills_the_encrypted_slot(
                     ).run("start", "session")
                 assert authorization_calls == 0
         with ws(workspace_id):
-            tool_result = await yc_auth(context, YcAuthInput(action="start"))
+            tool_result = await yc_auth(
+                context, YcAuthInput(action="start", user_description="looking it up in YC")
+            )
             started = YcAuthResult.model_validate_json(tool_result.content[0].text)
         async with async_client(transport=httpx.MockTransport(auth)) as http:
             with ws(workspace_id):
@@ -407,7 +409,7 @@ def test_targeted_source_config_requires_a_bounded_shared_search() -> None:
     with pytest.raises(ValidationError):
         YcSourceConfig(collection="companies", query="robotics", max_results=5001)
     with pytest.raises(ValidationError):
-        YcIndexInput(entity="candidates", query="robotics")
+        YcIndexInput(entity="candidates", query="robotics", user_description="looking it up in YC")
 
 
 async def test_targeted_source_keeps_page_size_and_slices_the_snapshot_to_its_bound() -> None:
@@ -484,14 +486,35 @@ async def test_targeted_source_rejects_a_directory_row_shape_change() -> None:
 @pytest.mark.parametrize(
     ("input", "expected"),
     [
-        (YcReadInput(action="ask", query="What is the seed bar?"), ("agent",)),
         (
-            YcReadInput(action="search", query="infra", entity="companies"),
+            YcReadInput(
+                action="ask", query="What is the seed bar?", user_description="looking it up in YC"
+            ),
+            ("agent",),
+        ),
+        (
+            YcReadInput(
+                action="search",
+                query="infra",
+                entity="companies",
+                user_description="looking it up in YC",
+            ),
             ("search",),
         ),
-        (YcReadInput(action="skills_list"), ("skills", "list")),
-        (YcReadInput(action="skills_read", name="set-my-metrics"), ("skills", "read")),
-        (YcReadInput(action="tools_context"), ("tools", "context")),
+        (
+            YcReadInput(action="skills_list", user_description="looking it up in YC"),
+            ("skills", "list"),
+        ),
+        (
+            YcReadInput(
+                action="skills_read", name="set-my-metrics", user_description="looking it up in YC"
+            ),
+            ("skills", "read"),
+        ),
+        (
+            YcReadInput(action="tools_context", user_description="looking it up in YC"),
+            ("tools", "context"),
+        ),
     ],
 )
 async def test_read_tool_dispatches_only_read_commands(
@@ -504,11 +527,13 @@ async def test_read_tool_dispatches_only_read_commands(
 
 def test_read_input_rejects_missing_or_misplaced_arguments() -> None:
     with pytest.raises(ValueError, match="requires query"):
-        YcReadInput(action="search")
+        YcReadInput(action="search", user_description="looking it up in YC")
     with pytest.raises(ValueError, match="requires name"):
-        YcReadInput(action="skills_read")
+        YcReadInput(action="skills_read", user_description="looking it up in YC")
     with pytest.raises(ValueError, match="valid only for search"):
-        YcReadInput(action="ask", query="x", entity="companies")
+        YcReadInput(
+            action="ask", query="x", entity="companies", user_description="looking it up in YC"
+        )
 
 
 def test_device_authorization_rejects_another_verification_host() -> None:
@@ -676,7 +701,11 @@ async def test_index_tool_requires_auth_and_registers_one_idempotent_source(db: 
             with pytest.raises(CredentialSlotUnset):
                 await yc_index(
                     context,
-                    YcIndexInput(entity="companies", query="climate infrastructure"),
+                    YcIndexInput(
+                        entity="companies",
+                        query="climate infrastructure",
+                        user_description="looking it up in YC",
+                    ),
                 )
         await store.put(workspace_id, YC_CREDENTIALS_SLOT, '{"authenticated":true}')
         with ws(workspace_id):
@@ -686,6 +715,7 @@ async def test_index_tool_requires_auth_and_registers_one_idempotent_source(db: 
                     entity="companies",
                     query="  climate infrastructure  ",
                     max_results=201,
+                    user_description="looking it up in YC",
                 ),
             )
             second = await yc_index(
@@ -694,6 +724,7 @@ async def test_index_tool_requires_auth_and_registers_one_idempotent_source(db: 
                     entity="companies",
                     query="climate infrastructure",
                     max_results=201,
+                    user_description="looking it up in YC",
                 ),
             )
         assert first == second

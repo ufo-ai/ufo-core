@@ -484,14 +484,23 @@ def _contract_key(workspace_id: UUID) -> str:
 
 class GrantSeatInput(BaseModel):
     email: str = Field(description="Email of the workspace member to seat.")
+    user_description: str = Field(
+        description="Who you are giving access to, in plain language for the activity timeline."
+    )
 
 
 class RevokeSeatInput(BaseModel):
     email: str = Field(description="Email of the seated member to unseat.")
+    user_description: str = Field(
+        description="Whose access you are removing, in plain language for the activity timeline."
+    )
 
 
 class ListSeatsInput(BaseModel):
-    pass
+    user_description: str = Field(
+        description="What you are checking about the team's access, in plain language for the "
+        "activity timeline."
+    )
 
 
 class ManageBillingInput(BaseModel):
@@ -501,6 +510,10 @@ class ManageBillingInput(BaseModel):
             "card and plan the providers currently hold. portal: return a link for invoices, "
             "payment methods, and billing details."
         )
+    )
+    user_description: str = Field(
+        description="What you are doing with their billing, in plain language for the activity "
+        "timeline."
     )
 
 

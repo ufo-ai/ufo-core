@@ -47,6 +47,8 @@ from ufo.tools.context import SpawnResult, ToolContext
 from ufo.tools.registry import ToolDef
 from ufo.workspace import init_workspace_credentials, ws
 
+TOOL_NARRATION = "checking their billing"
+
 TOKEN = "sandbox-bearer-0xdecafbad"
 MODEL = "claude-opus-4-8"
 PAST_MARGIN_SECONDS = 1000
@@ -580,7 +582,9 @@ async def _run_tool(
     tool = registry[name]
     ctx = _tool_context(workspace_id, ext_by_tool[name], tmp_path, member_id, audience)
     with ws(workspace_id):
-        result = await tool.handler(ctx, tool.input_model.model_validate(args))
+        result = await tool.handler(
+            ctx, tool.input_model.model_validate({"user_description": TOOL_NARRATION, **args})
+        )
     return json.loads(result.content[0].text)
 
 
@@ -1289,7 +1293,10 @@ async def _manage_billing(
     tool, ext = _billing_tool(audience)
     ctx = _tool_context(workspace_id, ext, tmp_path, speaker, audience)
     with ws(workspace_id):
-        result = await tool.handler(ctx, tool.input_model.model_validate({"action": action}))
+        result = await tool.handler(
+            ctx,
+            tool.input_model.model_validate({"user_description": TOOL_NARRATION, "action": action}),
+        )
     return json.loads(result.content[0].text)
 
 

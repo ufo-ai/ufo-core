@@ -30,6 +30,8 @@ from ufo.tools.context import SpawnResult, ToolContext
 from ufo.tools.registry import ToolDef
 from ufo.workspace import ws
 
+TOOL_NARRATION = "checking their connected accounts"
+
 OWNER_CREATED_AT = datetime(2026, 7, 1, tzinfo=UTC)
 GRANTOR_CREATED_AT = datetime(2026, 7, 2, tzinfo=UTC)
 OTHER_CREATED_AT = datetime(2026, 7, 3, tzinfo=UTC)
@@ -159,7 +161,9 @@ def _object_tool(name: str) -> ToolDef:
 
 
 async def _text(tool: ToolDef, ctx: ToolContext, **args: object) -> str:
-    result = await tool.handler(ctx, tool.input_model.model_validate(args))
+    result = await tool.handler(
+        ctx, tool.input_model.model_validate({"user_description": TOOL_NARRATION, **args})
+    )
     assert result.is_error is False
     return result.content[0].text
 
@@ -211,13 +215,14 @@ async def test_connect_stays_the_only_create_path(db: None) -> None:
     apply_tool = _object_tool("object_apply")
     args = apply_tool.input_model.model_validate(
         {
+            "user_description": TOOL_NARRATION,
             "manifest": yaml.safe_dump(
                 {
                     "kind": CONNECTOR_KIND,
                     "name": "gmail-alice",
                     "spec": {"provider": "gmail", "account_id": "alice"},
                 }
-            )
+            ),
         }
     )
     with (
@@ -261,6 +266,7 @@ async def test_object_verbs_touch_only_the_turn_agents_binding(db: None) -> None
                 ctx,
                 apply_tool.input_model.model_validate(
                     {
+                        "user_description": TOOL_NARRATION,
                         "manifest": yaml.safe_dump(
                             {
                                 "kind": CONNECTOR_KIND,
@@ -271,7 +277,7 @@ async def test_object_verbs_touch_only_the_turn_agents_binding(db: None) -> None
                                     "shared": True,
                                 },
                             }
-                        )
+                        ),
                     }
                 ),
             )
@@ -285,7 +291,11 @@ async def test_object_verbs_touch_only_the_turn_agents_binding(db: None) -> None
             await delete_tool.handler(
                 ctx,
                 delete_tool.input_model.model_validate(
-                    {"kind": CONNECTOR_KIND, "name": "gmail-alice-example-com"}
+                    {
+                        "user_description": TOOL_NARRATION,
+                        "kind": CONNECTOR_KIND,
+                        "name": "gmail-alice-example-com",
+                    }
                 ),
             )
         survivors = await workspace_grant_summaries(workspace_id)
@@ -301,7 +311,11 @@ async def test_revoke_admits_the_grantor_and_the_owner_only(db: None) -> None:
             workspace_id, agent_id, conversation_id, grantor_id, "gmail", "alice@example.com"
         )
         args = delete_tool.input_model.model_validate(
-            {"kind": CONNECTOR_KIND, "name": "gmail-alice-example-com"}
+            {
+                "user_description": TOOL_NARRATION,
+                "kind": CONNECTOR_KIND,
+                "name": "gmail-alice-example-com",
+            }
         )
         with pytest.raises(UnknownObject):
             await delete_tool.handler(_tool_context(workspace_id, agent_id, other_id), args)
@@ -390,7 +404,10 @@ async def test_an_unrelated_member_may_not_flip_sharing_but_the_owner_may(db: No
             manifest=_share_manifest("alice@example.com", True),
         )
         args = apply_tool.input_model.model_validate(
-            {"manifest": _share_manifest("alice@example.com", False)}
+            {
+                "user_description": TOOL_NARRATION,
+                "manifest": _share_manifest("alice@example.com", False),
+            }
         )
         with pytest.raises(OwnerRequired, match="grantor or the workspace owner"):
             await apply_tool.handler(_tool_context(workspace_id, agent_id, other_id), args)
@@ -411,7 +428,10 @@ async def test_apply_still_refuses_everything_but_the_shared_flip(db: None) -> N
             workspace_id, agent_id, conversation_id, grantor_id, "gmail", "alice@example.com"
         )
         different_account = apply_tool.input_model.model_validate(
-            {"manifest": _share_manifest("bob@example.com", False)}
+            {
+                "user_description": TOOL_NARRATION,
+                "manifest": _share_manifest("bob@example.com", False),
+            }
         )
         with pytest.raises(VerbNotSupported, match="connect_account"):
             await apply_tool.handler(
@@ -419,7 +439,10 @@ async def test_apply_still_refuses_everything_but_the_shared_flip(db: None) -> N
             )
 
         create = apply_tool.input_model.model_validate(
-            {"manifest": _share_manifest("bob@example.com", False, name="gmail-bob-example-com")}
+            {
+                "user_description": TOOL_NARRATION,
+                "manifest": _share_manifest("bob@example.com", False, name="gmail-bob-example-com"),
+            }
         )
         with pytest.raises(VerbNotSupported, match="connect_account"):
             await apply_tool.handler(_tool_context(workspace_id, agent_id, grantor_id), create)
@@ -475,7 +498,13 @@ async def test_read_verbs_hide_other_members_private_connectors(db: None) -> Non
         with pytest.raises(UnknownObject):
             await get_tool.handler(
                 stranger_ctx,
-                get_tool.input_model.model_validate({"kind": CONNECTOR_KIND, "name": private_name}),
+                get_tool.input_model.model_validate(
+                    {
+                        "user_description": TOOL_NARRATION,
+                        "kind": CONNECTOR_KIND,
+                        "name": private_name,
+                    }
+                ),
             )
 
         for ctx in (
@@ -509,14 +538,21 @@ async def test_reshare_and_revoke_need_a_live_speaker(db: None) -> None:
             await apply_tool.handler(
                 speakerless,
                 apply_tool.input_model.model_validate(
-                    {"manifest": _share_manifest("alice@example.com", True)}
+                    {
+                        "user_description": TOOL_NARRATION,
+                        "manifest": _share_manifest("alice@example.com", True),
+                    }
                 ),
             )
         with pytest.raises(OwnerRequired):
             await delete_tool.handler(
                 speakerless,
                 delete_tool.input_model.model_validate(
-                    {"kind": CONNECTOR_KIND, "name": "gmail-alice-example-com"}
+                    {
+                        "user_description": TOOL_NARRATION,
+                        "kind": CONNECTOR_KIND,
+                        "name": "gmail-alice-example-com",
+                    }
                 ),
             )
         summaries = await grant_summaries()

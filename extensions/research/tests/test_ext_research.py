@@ -38,6 +38,8 @@ from ufo.search import (
 )
 from ufo.tools.context import ToolContext
 
+TOOL_NARRATION = "looking it up"
+
 SEARCH_WEB_DESCRIPTION = (
     "Searches the web for current and factual information. Returns results with titles, "
     "URLs, and content snippets. Best for news, prices, and time-sensitive data. Use "
@@ -124,7 +126,10 @@ def _tool(name: str):
 
 async def _run(name: str, provider: SearchProvider | None, **args: object):
     tool = _tool(name)
-    return await tool.handler(_context(provider), tool.input_model.model_validate(args))
+    return await tool.handler(
+        _context(provider),
+        tool.input_model.model_validate({"user_description": TOOL_NARRATION, **args}),
+    )
 
 
 def test_manifest_declares_the_tools_profiles_section_and_requires() -> None:
@@ -152,6 +157,7 @@ def test_tool_descriptions_are_the_ported_verbatim_strings_and_untrusted() -> No
         "queries",
         "recency_filter",
         "allowed_domains",
+        "user_description",
     }
     assert set(research_tools.FetchUrlInput.model_fields) == {
         "url",
@@ -281,7 +287,9 @@ def test_registers_the_research_and_deep_research_profiles() -> None:
     assert {RESEARCH_PROFILE.name, DEEP_RESEARCH_PROFILE.name} == {"research", "deep_research"}
     assert RESEARCH_PROFILE.model == DEEP_RESEARCH_PROFILE.model == RESEARCH_MODEL
     assert RESEARCH_MODEL == "claude-sonnet-4-6"
-    assert RESEARCH_PROFILE.input_model.model_validate({"objective": "size the market"}).objective
+    assert RESEARCH_PROFILE.input_model.model_validate(
+        {"user_description": TOOL_NARRATION, "objective": "size the market"}
+    ).objective
     for tool_name in ("search_web", "search_vertical", "fetch_url"):
         assert tool_name in RESEARCH_TOOL_NAMES
     assert "ask_user" not in RESEARCH_TOOL_NAMES

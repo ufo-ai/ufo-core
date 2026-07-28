@@ -161,7 +161,7 @@ def test_registry_schemas_cover_every_tool() -> None:
 async def test_bash_combines_output_and_flags_nonzero_exit(tmp_path: Path) -> None:
     sandbox = FakeSandbox(bash_result=ExecResult(stdout="out", stderr="err", exit_code=1))
     ctx = make_context(sandbox, tmp_path)
-    result = await run("bash", ctx, command="do it")
+    result = await run("bash", ctx, command="do it", user_description="running a check")
     assert result.content[0].text == "outerr\nexit code: 1"
     assert result.is_error is True
 
@@ -169,7 +169,9 @@ async def test_bash_combines_output_and_flags_nonzero_exit(tmp_path: Path) -> No
 async def test_bash_silent_failure_reports_the_exit_code(tmp_path: Path) -> None:
     sandbox = FakeSandbox(bash_result=ExecResult(stdout="", stderr="", exit_code=56))
     ctx = make_context(sandbox, tmp_path)
-    result = await run("bash", ctx, command="curl -s https://blocked.example")
+    result = await run(
+        "bash", ctx, command="curl -s https://blocked.example", user_description="fetching a page"
+    )
     assert result.content[0].text == "exit code: 56"
     assert result.is_error is True
 
@@ -177,7 +179,7 @@ async def test_bash_silent_failure_reports_the_exit_code(tmp_path: Path) -> None
 async def test_bash_zero_exit_is_not_error(tmp_path: Path) -> None:
     sandbox = FakeSandbox(bash_result=ExecResult(stdout="ok", stderr="", exit_code=0))
     ctx = make_context(sandbox, tmp_path)
-    result = await run("bash", ctx, command="echo ok")
+    result = await run("bash", ctx, command="echo ok", user_description="running a check")
     assert result.is_error is False
     assert result.content[0].text == "ok"
 
@@ -190,13 +192,14 @@ async def test_edit_requires_read_before_write(tmp_path: Path) -> None:
             ctx,
             file_path="code.py",
             edits=[{"old_string": "x = 1", "new_string": "x = 2"}],
+            user_description="tweaking the script",
         )
 
 
 async def test_share_file_without_a_secret_fails_loud_and_writes_nothing(tmp_path: Path) -> None:
     ctx = make_context(FakeSandbox(), tmp_path, artifact_secret="")
     with pytest.raises(RuntimeError, match="not configured"):
-        await run("share_file", ctx, file_path="report.txt")
+        await run("share_file", ctx, file_path="report.txt", user_description="sending the report")
     assert not (tmp_path / "artifacts").exists()
 
 
@@ -209,6 +212,7 @@ async def test_ask_user_returns_the_structured_question_and_the_end_turn_directi
         ctx,
         title="Scope",
         questions=[{"question": "Which environment?", "header": "Deploy"}],
+        user_description="checking which environment",
     )
     assert result.is_error is False
     text = result.content[0].text
@@ -231,6 +235,7 @@ async def test_ask_user_folds_confirmation_as_a_question_with_options(tmp_path: 
                 "options": [{"label": "Send"}, {"label": "Cancel"}],
             }
         ],
+        user_description="confirming the send",
     )
     payload = json.loads(result.content[0].text.split("\n", 1)[1])
     assert [option["label"] for option in payload["questions"][0]["options"]] == [
@@ -242,7 +247,7 @@ async def test_ask_user_folds_confirmation_as_a_question_with_options(tmp_path: 
 async def test_ask_user_requires_at_least_one_question(tmp_path: Path) -> None:
     ctx = make_context(FakeSandbox(), tmp_path)
     with pytest.raises(ValidationError):
-        await run("ask_user", ctx, title="Empty", questions=[])
+        await run("ask_user", ctx, title="Empty", questions=[], user_description="asking")
 
 
 async def _load_skill(ctx: ToolContext, name: str):
@@ -442,7 +447,13 @@ async def test_spawn_subagent_unknown_profile_is_an_error_naming_the_valid_profi
         audience=conversation_audience(None),
     )
     ctx = make_context(FakeSandbox(), tmp_path, spawn=subagents.spawn)
-    result = await run("spawn_subagent", ctx, profile="assistant", payload={"task": "x"})
+    result = await run(
+        "spawn_subagent",
+        ctx,
+        profile="assistant",
+        payload={"task": "x"},
+        user_description="handing off the research",
+    )
     assert result.is_error
     text = result.content[0].text
     assert "assistant" in text

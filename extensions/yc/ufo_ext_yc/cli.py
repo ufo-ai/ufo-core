@@ -85,8 +85,9 @@ class YcAuthResult(BaseModel):
 
 class YcAuthInput(BaseModel):
     action: Literal["start", "complete"]
-    user_description: str | None = Field(
-        default=None, description="Brief plain-language description shown in the activity timeline."
+    user_description: str = Field(
+        description="Which step of signing in to YC you are doing, in plain language for the "
+        "activity timeline."
     )
 
 
@@ -359,8 +360,8 @@ class YcReadInput(BaseModel):
     query: str | None = Field(default=None, max_length=10_000)
     entity: str | None = Field(default=None, max_length=64)
     name: str | None = Field(default=None, max_length=128)
-    user_description: str | None = Field(
-        default=None, description="Brief plain-language description shown in the activity timeline."
+    user_description: str = Field(
+        description="What you are looking up in YC, in plain language for the activity timeline."
     )
 
     @model_validator(mode="after")

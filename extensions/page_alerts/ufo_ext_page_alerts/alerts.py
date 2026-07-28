@@ -10,7 +10,7 @@ batch never double-alerts."""
 import re
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ufo.sdk.manifest import HookContext, HookOutcome, PageChangeBatch
 from ufo.sdk.models import Message, ModelRequest
@@ -25,14 +25,24 @@ MATCH = "MATCH"
 class WatchPagesInput(BaseModel):
     topic: str
     name: str = ""
+    user_description: str = Field(
+        description="What you will keep an eye on for them, in plain language for the activity "
+        "timeline."
+    )
 
 
 class ListPageWatchesInput(BaseModel):
-    pass
+    user_description: str = Field(
+        description="What you are checking about their alerts, in plain language for the activity "
+        "timeline."
+    )
 
 
 class CancelPageWatchInput(BaseModel):
     name: str
+    user_description: str = Field(
+        description="Which alert you are turning off, in plain language for the activity timeline."
+    )
 
 
 def _slug(raw: str) -> str:

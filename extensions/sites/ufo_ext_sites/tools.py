@@ -47,6 +47,9 @@ class WebsiteInput(BaseModel):
     project_path: str | None = Field(
         default=None, description="Project directory to build in. Defaults to the workspace root."
     )
+    user_description: str = Field(
+        description="What you are building, in plain language for the activity timeline."
+    )
 
 
 class StartServerInput(BaseModel):
@@ -57,6 +60,10 @@ class StartServerInput(BaseModel):
     )
     log_file: str | None = Field(
         default=None, description="File to capture the server's stdout/stderr."
+    )
+    user_description: str = Field(
+        description="What you are starting up so they can see it, in plain language for the "
+        "activity timeline."
     )
 
     @model_validator(mode="after")
@@ -72,6 +79,10 @@ class DeployWebsiteInput(BaseModel):
     )
     site_name: str = Field(description="A name for the served site.")
     entry_point: str = Field(description="The entry file to serve, e.g. index.html.")
+    user_description: str = Field(
+        description="Which site you are putting online, in plain language for the activity "
+        "timeline."
+    )
 
 
 class PublishWebsiteInput(BaseModel):
@@ -83,6 +94,9 @@ class PublishWebsiteInput(BaseModel):
     )
     install_command: str | None = Field(
         default=None, description="Optional command to install dependencies before serving."
+    )
+    user_description: str = Field(
+        description="Which app you are publishing, in plain language for the activity timeline."
     )
 
 

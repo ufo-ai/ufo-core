@@ -52,6 +52,8 @@ from ufo.surfaces.admission import Admission, AdmissionInvoker
 from ufo.tools.registry import ToolDef
 from ufo.workspace import ws
 
+TOOL_NARRATION = "setting up the connection"
+
 ASANA = "asana"
 ASANA_HOST = "app.asana.com"
 GREENHOUSE = "greenhouse"
@@ -230,7 +232,12 @@ def _manifest_text(
 
 async def _apply(ctx: ToolContext, manifest_text: str) -> dict[str, object]:
     tool = _TOOLS["object_apply"]
-    result = await tool.handler(ctx, tool.input_model.model_validate({"manifest": manifest_text}))
+    result = await tool.handler(
+        ctx,
+        tool.input_model.model_validate(
+            {"user_description": TOOL_NARRATION, "manifest": manifest_text}
+        ),
+    )
     assert result.is_error is False
     return json.loads(result.content[0].text)
 
@@ -294,7 +301,9 @@ async def test_owner_applies_a_binding_and_reads_it_back(db: None) -> None:
             (
                 await get_tool.handler(
                     ctx,
-                    get_tool.input_model.model_validate({"kind": SOURCE_KIND, "name": name}),
+                    get_tool.input_model.model_validate(
+                        {"user_description": TOOL_NARRATION, "kind": SOURCE_KIND, "name": name}
+                    ),
                 )
             )
             .content[0]
@@ -340,7 +349,10 @@ async def test_wrong_name_refusal_hands_back_the_derived_name(db: None) -> None:
     derived = binding_name(ASANA, "acct-one", None)
     tool = _TOOLS["object_apply"]
     args = tool.input_model.model_validate(
-        {"manifest": _manifest_text(ASANA, ("workspaces",), "my-asana")}
+        {
+            "user_description": TOOL_NARRATION,
+            "manifest": _manifest_text(ASANA, ("workspaces",), "my-asana"),
+        }
     )
     with ws(state.workspace_id), agent(state.agent_id), pytest.raises(ValueError, match=derived):
         await tool.handler(ctx, args)
@@ -357,7 +369,10 @@ async def test_unknown_provider_and_stream_refuse_with_the_valid_sets(db: None) 
             await tool.handler(
                 _context(state, None),
                 tool.input_model.model_validate(
-                    {"manifest": _manifest_text("nonesuch", ("things",), "nonesuch-x")}
+                    {
+                        "user_description": TOOL_NARRATION,
+                        "manifest": _manifest_text("nonesuch", ("things",), "nonesuch-x"),
+                    }
                 ),
             )
         with pytest.raises(ValueError, match="workspaces"):
@@ -365,9 +380,10 @@ async def test_unknown_provider_and_stream_refuse_with_the_valid_sets(db: None) 
                 _context(state, grants, brokered=(ASANA,)),
                 tool.input_model.model_validate(
                     {
+                        "user_description": TOOL_NARRATION,
                         "manifest": _manifest_text(
                             ASANA, ("nonesuch",), binding_name(ASANA, "acct-one", None)
-                        )
+                        ),
                     }
                 ),
             )
@@ -403,7 +419,10 @@ async def test_a_member_registers_a_private_source_by_default(
         fetched = yaml.safe_load(
             (
                 await get_tool.handler(
-                    ctx, get_tool.input_model.model_validate({"kind": SOURCE_KIND, "name": name})
+                    ctx,
+                    get_tool.input_model.model_validate(
+                        {"user_description": TOOL_NARRATION, "kind": SOURCE_KIND, "name": name}
+                    ),
                 )
             )
             .content[0]
@@ -511,7 +530,10 @@ async def test_stranger_applying_a_private_source_name_is_not_found(
         messages: list[str] = []
         for shared in (True, False):
             args = apply_tool.input_model.model_validate(
-                {"manifest": _manifest_text(GREENHOUSE, ("jobs",), name, shared=shared)}
+                {
+                    "user_description": TOOL_NARRATION,
+                    "manifest": _manifest_text(GREENHOUSE, ("jobs",), name, shared=shared),
+                }
             )
             with pytest.raises(UnknownObject) as raised:
                 await apply_tool.handler(stranger_ctx, args)
@@ -533,7 +555,10 @@ async def test_unsharing_is_delete_and_recreate(db: None, monkeypatch: pytest.Mo
     with ws(state.workspace_id), agent(state.agent_id):
         await _apply(ctx, _manifest_text(GREENHOUSE, ("jobs",), name, shared=True))
         args = apply_tool.input_model.model_validate(
-            {"manifest": _manifest_text(GREENHOUSE, ("jobs",), name, shared=False)}
+            {
+                "user_description": TOOL_NARRATION,
+                "manifest": _manifest_text(GREENHOUSE, ("jobs",), name, shared=False),
+            }
         )
         with pytest.raises(VerbNotSupported, match="delete"):
             await apply_tool.handler(ctx, args)
@@ -556,11 +581,15 @@ async def test_delete_is_registrar_or_owner(db: None, monkeypatch: pytest.Monkey
         with pytest.raises(UnknownObject):
             await delete_tool.handler(
                 stranger_ctx,
-                delete_tool.input_model.model_validate({"kind": SOURCE_KIND, "name": member_name}),
+                delete_tool.input_model.model_validate(
+                    {"user_description": TOOL_NARRATION, "kind": SOURCE_KIND, "name": member_name}
+                ),
             )
         await delete_tool.handler(
             member_ctx,
-            delete_tool.input_model.model_validate({"kind": SOURCE_KIND, "name": member_name}),
+            delete_tool.input_model.model_validate(
+                {"user_description": TOOL_NARRATION, "kind": SOURCE_KIND, "name": member_name}
+            ),
         )
     [row] = await _rows(state, GREENHOUSE)
     assert row["removed_at"] is not None
@@ -578,11 +607,15 @@ async def test_delete_is_registrar_or_owner(db: None, monkeypatch: pytest.Monkey
         with pytest.raises(OwnerRequired, match="registering member or the workspace owner"):
             await delete_tool.handler(
                 member_ctx,
-                delete_tool.input_model.model_validate({"kind": SOURCE_KIND, "name": boot_name}),
+                delete_tool.input_model.model_validate(
+                    {"user_description": TOOL_NARRATION, "kind": SOURCE_KIND, "name": boot_name}
+                ),
             )
         await delete_tool.handler(
             owner_ctx,
-            delete_tool.input_model.model_validate({"kind": SOURCE_KIND, "name": boot_name}),
+            delete_tool.input_model.model_validate(
+                {"user_description": TOOL_NARRATION, "kind": SOURCE_KIND, "name": boot_name}
+            ),
         )
     [row] = await _rows(state, FRESHDESK)
     assert row["removed_at"] is not None
@@ -618,7 +651,10 @@ async def test_read_verbs_hide_other_members_private_sources(
         listing = json.loads(
             (
                 await list_tool.handler(
-                    stranger_ctx, list_tool.input_model.model_validate({"kind": SOURCE_KIND})
+                    stranger_ctx,
+                    list_tool.input_model.model_validate(
+                        {"user_description": TOOL_NARRATION, "kind": SOURCE_KIND}
+                    ),
                 )
             )
             .content[0]
@@ -628,14 +664,19 @@ async def test_read_verbs_hide_other_members_private_sources(
         with pytest.raises(UnknownObject):
             await get_tool.handler(
                 stranger_ctx,
-                get_tool.input_model.model_validate({"kind": SOURCE_KIND, "name": private_name}),
+                get_tool.input_model.model_validate(
+                    {"user_description": TOOL_NARRATION, "kind": SOURCE_KIND, "name": private_name}
+                ),
             )
 
         for ctx in (member_ctx, owner_ctx):
             listing = json.loads(
                 (
                     await list_tool.handler(
-                        ctx, list_tool.input_model.model_validate({"kind": SOURCE_KIND})
+                        ctx,
+                        list_tool.input_model.model_validate(
+                            {"user_description": TOOL_NARRATION, "kind": SOURCE_KIND}
+                        ),
                     )
                 )
                 .content[0]
@@ -647,7 +688,11 @@ async def test_read_verbs_hide_other_members_private_sources(
                     await get_tool.handler(
                         ctx,
                         get_tool.input_model.model_validate(
-                            {"kind": SOURCE_KIND, "name": private_name}
+                            {
+                                "user_description": TOOL_NARRATION,
+                                "kind": SOURCE_KIND,
+                                "name": private_name,
+                            }
                         ),
                     )
                 )
@@ -667,7 +712,10 @@ async def test_registration_requires_a_speaking_member(
     name = binding_name(GREENHOUSE, DIRECT_ACCOUNT, None)
     tool = _TOOLS["object_apply"]
     args = tool.input_model.model_validate(
-        {"manifest": _manifest_text(GREENHOUSE, ("jobs",), name)}
+        {
+            "user_description": TOOL_NARRATION,
+            "manifest": _manifest_text(GREENHOUSE, ("jobs",), name),
+        }
     )
     with (
         ws(state.workspace_id),
@@ -687,7 +735,10 @@ async def test_changing_streams_is_refused_as_an_update(db: None) -> None:
     with ws(state.workspace_id), agent(state.agent_id):
         await _apply(ctx, _manifest_text(ASANA, ("workspaces",), name))
         args = tool.input_model.model_validate(
-            {"manifest": _manifest_text(ASANA, ("workspaces", "projects"), name)}
+            {
+                "user_description": TOOL_NARRATION,
+                "manifest": _manifest_text(ASANA, ("workspaces", "projects"), name),
+            }
         )
         with pytest.raises(VerbNotSupported, match="delete"):
             await tool.handler(ctx, args)
@@ -725,7 +776,9 @@ async def test_delete_marks_rows_removed_tombstones_pages_and_revives(db: None) 
             (
                 await delete_tool.handler(
                     ctx,
-                    delete_tool.input_model.model_validate({"kind": SOURCE_KIND, "name": name}),
+                    delete_tool.input_model.model_validate(
+                        {"user_description": TOOL_NARRATION, "kind": SOURCE_KIND, "name": name}
+                    ),
                 )
             )
             .content[0]
@@ -736,7 +789,10 @@ async def test_delete_marks_rows_removed_tombstones_pages_and_revives(db: None) 
         listing = json.loads(
             (
                 await list_tool.handler(
-                    ctx, list_tool.input_model.model_validate({"kind": SOURCE_KIND})
+                    ctx,
+                    list_tool.input_model.model_validate(
+                        {"user_description": TOOL_NARRATION, "kind": SOURCE_KIND}
+                    ),
                 )
             )
             .content[0]
@@ -777,7 +833,10 @@ async def test_direct_provider_requires_its_credential_then_registers(
     name = binding_name(GREENHOUSE, DIRECT_ACCOUNT, None)
     tool = _TOOLS["object_apply"]
     args = tool.input_model.model_validate(
-        {"manifest": _manifest_text(GREENHOUSE, ("jobs",), name)}
+        {
+            "user_description": TOOL_NARRATION,
+            "manifest": _manifest_text(GREENHOUSE, ("jobs",), name),
+        }
     )
     with ws(state.workspace_id), agent(state.agent_id):
         with pytest.raises(ValueError, match="request_credentials"):
@@ -795,7 +854,10 @@ async def test_missing_or_ambiguous_broker_account_refuses_with_repair(db: None)
     ctx = _context(state, grants, brokered=(ASANA,))
     tool = _TOOLS["object_apply"]
     unconnected = tool.input_model.model_validate(
-        {"manifest": _manifest_text(ASANA, ("workspaces",), "asana-x")}
+        {
+            "user_description": TOOL_NARRATION,
+            "manifest": _manifest_text(ASANA, ("workspaces",), "asana-x"),
+        }
     )
     with ws(state.workspace_id), agent(state.agent_id):
         with pytest.raises(ValueError, match="connect_account"):
@@ -825,7 +887,10 @@ async def test_open_namespace_provider_without_an_account_asks_to_connect(db: No
     ctx = _context(state, GrantStore(), brokered=(), direct_fallback=False, open_namespace=True)
     tool = _TOOLS["object_apply"]
     args = tool.input_model.model_validate(
-        {"manifest": _manifest_text(ASANA, ("workspaces",), "asana-open")}
+        {
+            "user_description": TOOL_NARRATION,
+            "manifest": _manifest_text(ASANA, ("workspaces",), "asana-open"),
+        }
     )
     with ws(state.workspace_id), agent(state.agent_id):
         with pytest.raises(ValueError, match="connect_account with provider='asana'"):
@@ -839,7 +904,10 @@ async def test_provider_with_no_broker_and_no_direct_backend_refuses(db: None) -
     ctx = _context(state, GrantStore(), brokered=(), direct_fallback=False, open_namespace=False)
     tool = _TOOLS["object_apply"]
     args = tool.input_model.model_validate(
-        {"manifest": _manifest_text(ASANA, ("workspaces",), "asana-orphan")}
+        {
+            "user_description": TOOL_NARRATION,
+            "manifest": _manifest_text(ASANA, ("workspaces",), "asana-orphan"),
+        }
     )
     with ws(state.workspace_id), agent(state.agent_id):
         with pytest.raises(ValueError, match="no direct authentication backend can sync 'asana'"):
@@ -915,9 +983,10 @@ async def test_invalid_base_url_registers_nothing(db: None) -> None:
                 _context(state, None),
                 tool.input_model.model_validate(
                     {
+                        "user_description": TOOL_NARRATION,
                         "manifest": _manifest_text(
                             FRESHDESK, ("tickets",), "freshdesk-x", base_url="https://127.0.0.1"
-                        )
+                        ),
                     }
                 ),
             )
@@ -926,9 +995,10 @@ async def test_invalid_base_url_registers_nothing(db: None) -> None:
                 _context(state, grants, brokered=(ASANA,)),
                 tool.input_model.model_validate(
                     {
+                        "user_description": TOOL_NARRATION,
                         "manifest": _manifest_text(
                             ASANA, ("workspaces",), "asana-x", base_url="https://evil.test"
-                        )
+                        ),
                     }
                 ),
             )
@@ -954,7 +1024,9 @@ async def test_source_delete_needs_a_live_speaker(
         with pytest.raises(OwnerRequired):
             await delete_tool.handler(
                 speakerless,
-                delete_tool.input_model.model_validate({"kind": SOURCE_KIND, "name": member_name}),
+                delete_tool.input_model.model_validate(
+                    {"user_description": TOOL_NARRATION, "kind": SOURCE_KIND, "name": member_name}
+                ),
             )
     [row] = await _rows(state, GREENHOUSE)
     assert row["removed_at"] is None
@@ -1085,7 +1157,9 @@ async def test_subscribe_and_unsubscribe_self_on_a_shared_source(db: None) -> No
             (
                 await get_tool.handler(
                     _context(state, None),
-                    get_tool.input_model.model_validate({"kind": SOURCE_KIND, "name": name}),
+                    get_tool.input_model.model_validate(
+                        {"user_description": TOOL_NARRATION, "kind": SOURCE_KIND, "name": name}
+                    ),
                 )
             )
             .content[0]
@@ -1122,7 +1196,10 @@ async def test_apply_may_only_toggle_the_callers_own_subscription(db: None) -> N
             await tool.handler(
                 _context(state, None),
                 tool.input_model.model_validate(
-                    {"manifest": _subscribe_manifest(name, (other,), shared=True)}
+                    {
+                        "user_description": TOOL_NARRATION,
+                        "manifest": _subscribe_manifest(name, (other,), shared=True),
+                    }
                 ),
             )
         assert await _stored_subscribers(state, name) == {}
@@ -1141,9 +1218,10 @@ async def test_cannot_subscribe_to_another_members_private_source(db: None) -> N
                 _context(state, None, speaker_id=stranger),
                 tool.input_model.model_validate(
                     {
+                        "user_description": TOOL_NARRATION,
                         "manifest": _subscribe_manifest(
                             name, (state.conversation_id.hex,), shared=False
-                        )
+                        ),
                     }
                 ),
             )

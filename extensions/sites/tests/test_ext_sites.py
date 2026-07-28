@@ -30,6 +30,8 @@ from ufo.sdk.audience import conversation_audience
 from ufo.skills.runtime import mount_skill
 from ufo.tools.context import SpawnResult, ToolContext
 
+TOOL_NARRATION = "building the site"
+
 
 @dataclass
 class FakeSandbox:
@@ -127,6 +129,7 @@ async def test_build_website_forwards_the_optional_knobs_into_the_spawn(tmp_path
     result = await _build_website(
         ctx,
         BuildWebsiteInput(
+            user_description=TOOL_NARRATION,
             objective="build a landing page",
             preload_skills=("website-building",),
             extended_context=True,
@@ -149,7 +152,9 @@ async def test_build_website_omits_the_unset_knobs(tmp_path: Path) -> None:
         return SpawnResult(turn_id=uuid4(), output=WebsiteBuildingResult(result="built"))
 
     ctx = replace(_context(FakeSandbox(), tmp_path), spawn=_capture)
-    await _build_website(ctx, BuildWebsiteInput(objective="minimal"))
+    await _build_website(
+        ctx, BuildWebsiteInput(user_description=TOOL_NARRATION, objective="minimal")
+    )
     assert captured["payload"] == {"objective": "minimal"}
 
 
@@ -200,7 +205,7 @@ def test_the_website_building_profile_names_only_meaningful_tools() -> None:
     names = set(WEBSITE_BUILDING_PROFILE.tool_names)
     assert {"deploy_website", "publish_website", "write", "share_file"} <= names
     assert WEBSITE_BUILDING_PROFILE.input_model.model_validate(
-        {"objective": "build a landing page"}
+        {"user_description": TOOL_NARRATION, "objective": "build a landing page"}
     ).objective
     assert WEBSITE_BUILDING_PROFILE.max_rounds == 100
 
@@ -211,7 +216,12 @@ async def test_website_builds_and_lists_the_output(tmp_path: Path) -> None:
     )
     ctx = _context(sandbox, tmp_path)
     result = await website(
-        ctx, WebsiteInput(run_command="npm run build", project_path="/workspace/site")
+        ctx,
+        WebsiteInput(
+            user_description=TOOL_NARRATION,
+            run_command="npm run build",
+            project_path="/workspace/site",
+        ),
     )
     payload = json.loads(result.content[0].text)
     assert payload["project_path"] == "/workspace/site"
@@ -225,7 +235,9 @@ async def test_website_build_failure_fails_loud(tmp_path: Path) -> None:
     )
     ctx = _context(sandbox, tmp_path)
     with pytest.raises(RuntimeError, match="build broke"):
-        await website(ctx, WebsiteInput(run_command="npm run build"))
+        await website(
+            ctx, WebsiteInput(user_description=TOOL_NARRATION, run_command="npm run build")
+        )
 
 
 async def test_deploy_website_serves_static_output_and_returns_the_route(tmp_path: Path) -> None:
@@ -234,7 +246,10 @@ async def test_deploy_website_serves_static_output_and_returns_the_route(tmp_pat
     result = await deploy_website(
         ctx,
         DeployWebsiteInput(
-            project_path="/workspace/dist", site_name="marketing", entry_point="index.html"
+            user_description=TOOL_NARRATION,
+            project_path="/workspace/dist",
+            site_name="marketing",
+            entry_point="index.html",
         ),
     )
     payload = json.loads(result.content[0].text)
@@ -255,7 +270,10 @@ async def test_start_server_reports_a_serve_failure_from_the_log(tmp_path: Path)
     ctx = _context(sandbox, tmp_path)
     with pytest.raises(RuntimeError, match="port in use"):
         await start_server(
-            ctx, StartServerInput(command="python3 app.py", project_path="/workspace")
+            ctx,
+            StartServerInput(
+                user_description=TOOL_NARRATION, command="python3 app.py", project_path="/workspace"
+            ),
         )
 
 
@@ -265,6 +283,7 @@ async def test_publish_website_installs_before_serving(tmp_path: Path) -> None:
     result = await publish_website(
         ctx,
         PublishWebsiteInput(
+            user_description=TOOL_NARRATION,
             project_path="/workspace/app",
             dist_path="/workspace/app/dist",
             app_name="dashboard",
@@ -278,4 +297,9 @@ async def test_publish_website_installs_before_serving(tmp_path: Path) -> None:
 
 def test_start_server_rejects_an_out_of_range_port() -> None:
     with pytest.raises(ValidationError, match="between 1 and 65535"):
-        StartServerInput(command="python3 app.py", project_path="/workspace", port=99999)
+        StartServerInput(
+            user_description=TOOL_NARRATION,
+            command="python3 app.py",
+            project_path="/workspace",
+            port=99999,
+        )
