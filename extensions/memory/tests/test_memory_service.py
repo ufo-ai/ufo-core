@@ -769,7 +769,14 @@ async def test_stale_private_payload_is_never_indexed_after_a_shared_sanitized_e
         )
 
 
-async def test_same_subject_redaction_hides_then_removes_stale_facts(db: None) -> None:
+async def test_same_subject_redaction_hides_stale_facts_and_no_page_pass_removes_them(
+    db: None,
+) -> None:
+    """Redacting a page fences its facts out of recall the moment the revision moves — and that is
+    the whole guarantee the read path needs. The page indexer, riding a cursor that derives no
+    replacement, removes no row and deletes no chunk itself: it leaves the fact due for the index
+    job, which is what withdraws the chunks. Retiring the row waits on the derivation that settles
+    the new revision."""
     workspace_id = await _workspace()
     page_id, source_id = uuid4(), uuid4()
     probe = vec((8, 1.0))
@@ -825,14 +832,17 @@ async def test_same_subject_redaction_hides_then_removes_stale_facts(db: None) -
             )
         )
         assert (
-            await store.index.lexical(
-                "polaris",
-                frozenset({SHARED_SUBJECT}),
-                OWNER_KIND_MEMORY_ITEM,
-                10,
+            len(
+                await store.index.lexical(
+                    "polaris",
+                    frozenset({SHARED_SUBJECT}),
+                    OWNER_KIND_MEMORY_ITEM,
+                    10,
+                )
             )
-            == ()
+            == 1
         )
+        assert await store.recall("acquisition codename", frozenset({SHARED_SUBJECT}), 10) == ()
     async with workspace_tx() as connection:
         assert (
             await connection.execute(
@@ -840,12 +850,16 @@ async def test_same_subject_redaction_hides_then_removes_stale_facts(db: None) -
                 .select_from(memory_item)
                 .where(memory_item.c.created_from_page_id == page_id)
             )
-        ).scalar_one() == 0
+        ).scalar_one() == 1
 
 
-async def test_stale_page_cleanup_requeues_a_fact_rebound_while_its_index_is_deleted(
+async def test_retirement_requeues_a_fact_rebound_while_its_index_is_deleted(
     db: None,
 ) -> None:
+    """Retirement deletes the superseded row and then its index scope. A derivation that rebinds the
+    identical body to the new revision in between lands on the same content-addressed id, so the
+    scope delete strips a live row's chunks — the re-created row is due again and the index job
+    restores it, leaving nothing recallable-but-unindexed."""
     workspace_id, page_id, source_id = await _workspace(), uuid4(), uuid4()
     body = "the acquisition plan has been redacted"
     probe = vec((8, 1.0))
@@ -885,33 +899,8 @@ async def test_stale_page_cleanup_requeues_a_fact_rebound_while_its_index_is_del
         )
 
     index = RebindingIndex(store.index, recommit)
-    now = datetime(2025, 1, 2, tzinfo=UTC)
     with ws(workspace_id):
-        await PageIndexer(
-            index=index,
-            embed=store.embed,
-            transaction=workspace_tx,
-            chunker=TextChunker(),
-            workspace_id=workspace_id,
-            page_states=context_for("memory", frozenset()).page_states,
-        ).apply(
-            (
-                PageChange(
-                    page_id=page_id,
-                    source_id=source_id,
-                    subject=SHARED_SUBJECT,
-                    stream="notes",
-                    title="Redacted plan",
-                    body=body,
-                    digest=new_digest,
-                    revision=new_revision,
-                    tombstone=False,
-                    created_at=now,
-                    as_of=now,
-                    changed_at=now,
-                ),
-            )
-        )
+        await replace(store, index=index).supersede_page_facts(page_id, new_revision)
         await MemoryIndexer(
             index=index,
             embed=store.embed,
@@ -940,9 +929,13 @@ async def test_stale_page_cleanup_requeues_a_fact_rebound_while_its_index_is_del
     assert row.embedding_digest is not None
 
 
-async def test_page_indexer_narrowing_removes_stale_page_facts_without_a_model(
+async def test_a_narrowed_pages_wider_fact_is_never_published_and_never_deleted(
     db: None,
 ) -> None:
+    """A page that narrows to one member strands the fact derived under the wider subject. The index
+    job is what could publish it, and it will not: the item is left unindexed, unrecallable, and
+    intact — every deployed row memory_0010 stripped of its digest reaches exactly this state, and
+    reaching it must cost no data. Retiring it belongs to the derivation that replaces it."""
     workspace_id = await _workspace()
     member_id, page_id, source_id = uuid4(), uuid4(), uuid4()
     subject = member_subject(member_id)
@@ -961,28 +954,6 @@ async def test_page_indexer_narrowing_removes_stale_page_facts_without_a_model(
         )
     )
     with ws(workspace_id):
-        await MemoryIndexer(
-            index=store.index,
-            embed=embed,
-            transaction=workspace_tx,
-            chunker=TextChunker(),
-            page_states=context_for("memory", frozenset()).page_states,
-        ).run()
-        assert (
-            len(
-                await store.index.lexical(
-                    "disclosure token", frozenset({SHARED_SUBJECT}), OWNER_KIND_MEMORY_ITEM, 10
-                )
-            )
-            == 1
-        )
-        assert (
-            await store.index.lexical(
-                "continuity token", frozenset({subject}), OWNER_KIND_MEMORY_ITEM, 10
-            )
-            == ()
-        )
-
         async with workspace_tx() as connection:
             await connection.execute(
                 sa.update(tables.page).values(subject=subject).where(tables.page.c.id == page_id)
@@ -1014,12 +985,12 @@ async def test_page_indexer_narrowing_removes_stale_page_facts_without_a_model(
                 PageChange(
                     page_id=page_id,
                     source_id=source_id,
-                    subject=SHARED_SUBJECT,
+                    subject=subject,
                     stream="messages",
                     title="Private mailbox",
                     body="the mailbox page is now private",
                     digest=PAGE_DIGEST,
-                    revision=PAGE_REVISION,
+                    revision=PAGE_REVISION + 1,
                     tombstone=False,
                     created_at=datetime(2025, 1, 1, tzinfo=UTC),
                     as_of=datetime(2025, 1, 1, tzinfo=UTC),
@@ -1034,6 +1005,7 @@ async def test_page_indexer_narrowing_removes_stale_page_facts_without_a_model(
             )
             == ()
         )
+        assert await store.recall("disclosure token", frozenset({SHARED_SUBJECT}), 10) == ()
         assert (
             len(
                 await store.index.lexical(
@@ -1055,10 +1027,17 @@ async def test_page_indexer_narrowing_removes_stale_page_facts_without_a_model(
             .mappings()
             .all()
         )
-    assert {row["body"]: row["subject"] for row in rows} == {kept_body: subject}
+    assert {row["body"]: row["subject"] for row in rows} == {
+        stale_body: SHARED_SUBJECT,
+        kept_body: subject,
+    }
 
 
-async def test_page_tombstone_removes_derived_memories_before_returning(db: None) -> None:
+async def test_page_tombstone_drops_the_pages_own_chunks_and_mirror_only(db: None) -> None:
+    """A tombstone retires what the page indexer owns — the page's chunks and its mirror row — and
+    deletes nothing else. The facts derived from that page stop being recallable the instant it
+    goes; they are the deriver's rows to retire and survive this pass, left due for the index job
+    that withdraws their chunks."""
     workspace_id = await _workspace()
     page_id, source_id = uuid4(), uuid4()
     probe = vec((9, 1.0))
@@ -1073,6 +1052,28 @@ async def test_page_tombstone_removes_derived_memories_before_returning(db: None
             created_from_page_revision=PAGE_REVISION,
         )
     )
+    live = PageChange(
+        page_id=page_id,
+        source_id=source_id,
+        subject=SHARED_SUBJECT,
+        stream="notes",
+        title="Retired page",
+        body="the retired source page names polaris",
+        digest=PAGE_DIGEST,
+        revision=PAGE_REVISION,
+        tombstone=False,
+        created_at=datetime(2025, 1, 1, tzinfo=UTC),
+        as_of=datetime(2025, 1, 1, tzinfo=UTC),
+        changed_at=datetime(2025, 1, 1, tzinfo=UTC),
+    )
+    indexer = PageIndexer(
+        index=store.index,
+        embed=embed,
+        transaction=workspace_tx,
+        chunker=TextChunker(),
+        workspace_id=workspace_id,
+        page_states=context_for("memory", frozenset()).page_states,
+    )
     with ws(workspace_id):
         await MemoryIndexer(
             index=store.index,
@@ -1081,31 +1082,19 @@ async def test_page_tombstone_removes_derived_memories_before_returning(db: None
             chunker=TextChunker(),
             page_states=context_for("memory", frozenset()).page_states,
         ).run()
+        await indexer.apply((live,))
         async with workspace_tx() as connection:
             await connection.execute(
                 sa.update(tables.page).values(tombstone=True).where(tables.page.c.id == page_id)
             )
         now = datetime(2025, 1, 2, tzinfo=UTC)
-        await PageIndexer(
-            index=store.index,
-            embed=embed,
-            transaction=workspace_tx,
-            chunker=TextChunker(),
-            workspace_id=workspace_id,
-            page_states=context_for("memory", frozenset()).page_states,
-        ).apply(
+        await indexer.apply(
             (
-                PageChange(
-                    page_id=page_id,
-                    source_id=source_id,
-                    subject=SHARED_SUBJECT,
-                    stream="notes",
-                    title="Retired page",
+                replace(
+                    live,
                     body="",
-                    digest="sha256:page",
                     revision=PAGE_REVISION + 1,
                     tombstone=True,
-                    created_at=datetime(2025, 1, 1, tzinfo=UTC),
                     as_of=now,
                     changed_at=now,
                 ),
@@ -1113,14 +1102,30 @@ async def test_page_tombstone_removes_derived_memories_before_returning(db: None
         )
         assert (
             await store.index.lexical(
-                "retired source fact",
-                frozenset({SHARED_SUBJECT}),
-                OWNER_KIND_MEMORY_ITEM,
-                10,
+                "retired source page", frozenset({SHARED_SUBJECT}), OWNER_KIND_PAGE, 10
             )
             == ()
         )
+        assert (
+            len(
+                await store.index.lexical(
+                    "retired source fact",
+                    frozenset({SHARED_SUBJECT}),
+                    OWNER_KIND_MEMORY_ITEM,
+                    10,
+                )
+            )
+            == 1
+        )
+        assert await store.recall("retired source fact", frozenset({SHARED_SUBJECT}), 10) == ()
     async with workspace_tx() as connection:
+        mirror = (
+            await connection.execute(
+                sa.select(sa.func.count())
+                .select_from(mem_page)
+                .where(mem_page.c.page_id == page_id)
+            )
+        ).scalar_one()
         count = (
             await connection.execute(
                 sa.select(sa.func.count())
@@ -1128,4 +1133,5 @@ async def test_page_tombstone_removes_derived_memories_before_returning(db: None
                 .where(memory_item.c.created_from_page_id == page_id)
             )
         ).scalar_one()
-    assert count == 0
+    assert mirror == 0
+    assert count == 1

@@ -137,7 +137,14 @@ terminal frame. A client's wait always ends — the terminal state commits on th
   the base-pinned `embed_openai` extension; turbopuffer is a drop-in index alternative. Source
   pages reach recall through the memory extension's own page-index job over the core `PageFeed`;
   every page-derived memory binds to the page's database revision, so recall drops it as soon as
-  that page changes and replay reaps or rebuilds the derivation.
+  that page changes, and the page-index pass makes the revisions the page left due again so the
+  index job withdraws their chunks — no superseded fact spends a candidate slot the fact that
+  replaced it could have taken, whether or not a replacement is ever derived. The fact derivation
+  that settles the new revision is the one writer that retires what it replaced, and it retires only
+  the revisions its own committed facts replace — so a revision that derives nothing destroys
+  nothing, and no consumer that cannot replace a fact can remove it. A page that is gone is the one
+  unconditional removal: nothing can ever replace the facts of a deleted or tombstoned page, so they
+  retire outright rather than waiting for a replacement that cannot arrive.
 - **Minimal built-in tools** — `bash`, `read`, `write`, `edit`,
   `ask_user`, `request_credentials`, `spawn_subagent`, `load_skill`, `share_file`, and the five
   object verbs (`object_list`/`get`/`explain`/`apply`/`delete`) over extension-registered kinds

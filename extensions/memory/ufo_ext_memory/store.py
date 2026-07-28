@@ -6,8 +6,8 @@ for its lexical and vector hits under the caller's subject filter, fuses them wi
 fusion (K=60), and reads the surviving items back. `search_sources` fuses the same legs over
 source-page chunks and reads the matched snippet straight off the index (a tombstoned page's chunks
 are already gone). `MemoryIndexer` is the derivation job: it atomically claims memory items whose
-`embedding_digest` is NULL, chunks and embeds each body, and stamps the digest so the row is no
-longer due. Everything reaches the database through the extension's workspace-scoped
+`embedding_digest` is NULL, chunks and embeds each body it may publish, and stamps the digest so the
+row is no longer due. Everything reaches the database through the extension's workspace-scoped
 `transaction()` and the deploy index/embed backends core threads onto its context — never a core
 internal.
 """
@@ -120,12 +120,13 @@ class MemoryInventoryItem(BaseModel):
 
     Ingestion/creation: `source_ref` is what produced it (a tool write, a synced source, a
     consolidation); `created_at` is when it was committed and `as_of` is when its source information
-    was current; `embedding_digest` NULL means it is still due for the index job (not yet
-    chunked/embedded), and `embedding_claimed_at` set means the indexer currently holds a lease on
-    it. Recall/decay: `half_life_days` is the recency half-life for its kind (None for
-    episodic/semantic, which never decay) and `decay_factor` is the live multiplier recall applies
-    to its relevance (`(confidence/10)·0.5**(age_days/half_life)` for facts, else 1.0). Lifecycle:
-    `superseded_by` non-NULL means consolidation replaced it; `subject` is its exact audience."""
+    was current; `embedding_digest` NULL means it is still due for the index job, and set means the
+    job settled that body — published as chunks, or withheld because its page moved on — while
+    `embedding_claimed_at` set means the indexer currently holds a lease on it. Recall/decay:
+    `half_life_days` is the recency half-life for its kind (None for episodic/semantic, which never
+    decay) and `decay_factor` is the live multiplier recall applies to its relevance
+    (`(confidence/10)·0.5**(age_days/half_life)` for facts, else 1.0). Lifecycle: `superseded_by`
+    non-NULL means consolidation replaced it; `subject` is its exact audience."""
 
     subject: str
     body: str
@@ -400,9 +401,10 @@ class SourceMatch:
 
 @dataclass(frozen=True)
 class MemoryStore:
-    """The memory workflow over the extension's scoped handle: commit one item, recall facts, search
-    source pages. Holds the deploy index/embed backends core threaded onto the context and the
-    workspace-scoped transaction opener; reads and writes only the extension's own `memory_item`."""
+    """The memory workflow over the extension's scoped handle: commit one item, retire what a page's
+    settled revision replaced, recall facts, search source pages. Holds the deploy index/embed
+    backends core threaded onto the context and the workspace-scoped transaction opener; reads and
+    writes only the extension's own `memory_item`."""
 
     index: IndexBackend
     embed: EmbedClient
@@ -415,7 +417,9 @@ class MemoryStore:
         row due for the index job — the sole producer of chunks and embeddings. The id is
         content-addressed over `(workspace, subject, item_class, body)`, so re-committing the same
         fact upserts its decay inputs in place rather than accumulating a duplicate recallable row;
-        the identical body leaves the existing chunks (and their digest) untouched."""
+        a re-commit that binds it to another page revision makes it due again, since whether that
+        revision may be published is the index job's question to answer, while an identical
+        re-commit at the same binding leaves the existing chunks and their digest untouched."""
         async with self.transaction() as connection:
             insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
             statement = insert(memory_item).values(
@@ -439,6 +443,14 @@ class MemoryStore:
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
+            rebound = sa.or_(
+                memory_item.c.created_from_page_id.is_distinct_from(
+                    statement.excluded.created_from_page_id
+                ),
+                memory_item.c.created_from_page_revision.is_distinct_from(
+                    statement.excluded.created_from_page_revision
+                ),
+            )
             await connection.execute(
                 statement.on_conflict_do_update(
                     index_elements=[memory_item.c.id],
@@ -452,25 +464,49 @@ class MemoryStore:
                         memory_item.c.created_from_page_revision: (
                             statement.excluded.created_from_page_revision
                         ),
+                        memory_item.c.embedding_digest: sa.case(
+                            (rebound, None), else_=memory_item.c.embedding_digest
+                        ),
                         memory_item.c.embedding_claimed_at: sa.case(
-                            (
-                                sa.or_(
-                                    memory_item.c.created_from_page_id.is_distinct_from(
-                                        statement.excluded.created_from_page_id
-                                    ),
-                                    memory_item.c.created_from_page_revision.is_distinct_from(
-                                        statement.excluded.created_from_page_revision
-                                    ),
-                                ),
-                                None,
-                            ),
-                            else_=memory_item.c.embedding_claimed_at,
+                            (rebound, None), else_=memory_item.c.embedding_claimed_at
                         ),
                         memory_item.c.as_of: statement.excluded.as_of,
                         memory_item.c.updated_at: sa.func.now(),
                     },
                 )
             )
+
+    async def supersede_page_facts(self, page_id: UUID, revision: int | None) -> None:
+        """Retire the facts an earlier state of one page left behind, dropping each deleted row's
+        index scope with it: every row created from `page_id` whose `created_from_page_revision` is
+        not `revision`, or every row created from it once the page is gone (`revision` None).
+
+        This is the only path that removes a page-derived memory, and the fact deriver is its only
+        caller — reached only for a page whose derivation committed a fact at `revision`, or a page
+        no longer there to derive one, so a fact is never removed for a revision that produced no
+        replacement. A second call over the same revision deletes nothing, so a replayed batch
+        retires each superseded row exactly once."""
+        conditions: tuple[ColumnElement[bool], ...] = (
+            memory_item.c.workspace_id == self.workspace_id,
+            memory_item.c.created_from_page_id == page_id,
+        )
+        if revision is not None:
+            conditions = (
+                *conditions,
+                memory_item.c.created_from_page_revision.is_distinct_from(revision),
+            )
+        async with self.transaction() as connection:
+            superseded = tuple(
+                (
+                    await connection.execute(
+                        sa.delete(memory_item).where(*conditions).returning(memory_item.c.id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        for memory_id in superseded:
+            await self.index.delete(IndexScope(OWNER_KIND_MEMORY_ITEM, str(memory_id)))
 
     async def recall(
         self,
@@ -575,11 +611,11 @@ class MemoryStore:
     async def _untail_leg(
         self, query: str, subjects: frozenset[str], limit: int
     ) -> tuple[Hit, ...]:
-        """A lexical leg over the un-embedded tail — memory_item rows the index job has not chunked
+        """A lexical leg over the un-embedded tail — memory_item rows the index job has not settled
         yet (`embedding_digest` NULL) — so a just-committed fact is recallable within the indexer's
         tick rather than only after it. Scored in-process by query-term count over the body (gbrain
         `lexical_score`); the scan is bounded to the newest TAIL_SCAN_MAX rows so a backlogged
-        indexer cannot unbound it. Once a row is indexed it leaves this set and the index legs serve
+        indexer cannot unbound it. Once a row is settled it leaves this set and the index legs serve
         it, so the tail never double-counts an indexed row."""
         terms = [term for term in re.split(r"\W+", query.lower()) if term]
         if not terms or not subjects:
@@ -724,7 +760,11 @@ class MemoryIndexer:
     atomically claims a batch of rows whose `embedding_digest` is NULL and whose claim is unset or
     lease-expired — stamping `embedding_claimed_at` (Postgres `FOR UPDATE SKIP LOCKED`, SQLite the
     single writer) so an overlapping tick skips them and never double-embeds — chunks and embeds
-    each body, then writes the content digest and clears the claim so the row is no longer due."""
+    each body, then writes the content digest and clears the claim so the row is no longer due. It
+    owns a row's chunks, never the row: a body it may not publish is withheld from the index and its
+    row left intact for the fact deriver, the one writer that retires a page-derived memory. Every
+    claimed row reaches a terminal digest either way, so a row nobody may read can never hold the
+    claim slots a newly committed fact needs."""
 
     index: IndexBackend
     embed: EmbedClient
@@ -773,17 +813,12 @@ class MemoryIndexer:
         return tuple(MemoryItem.model_validate(dict(row)) for row in rows)
 
     async def _index_item(self, item: MemoryItem) -> None:
-        if item.created_from_page_id is not None:
-            state = (await self.page_states((item.created_from_page_id,))).get(
-                item.created_from_page_id
-            )
-            if (
-                state is None
-                or state.subject != item.subject
-                or state.revision != item.created_from_page_revision
-            ):
-                await self._discard_stale(item)
-                return
+        if not await self._publishable(
+            item.subject, item.created_from_page_id, item.created_from_page_revision
+        ):
+            await self.index.delete(IndexScope(OWNER_KIND_MEMORY_ITEM, str(item.id)))
+            await self._settle(item)
+            return
         await chunk_embed_upsert(
             self.index,
             self.embed,
@@ -793,24 +828,47 @@ class MemoryIndexer:
             item.subject,
             item.body,
         )
-        digest = "sha256:" + hashlib.sha256(item.body.encode()).hexdigest()
-        current = (
-            {}
-            if item.created_from_page_id is None
-            else await self.page_states((item.created_from_page_id,))
-        )
-        if item.created_from_page_id is not None and (
-            (state := current.get(item.created_from_page_id)) is None
-            or state.subject != item.subject
-            or state.revision != item.created_from_page_revision
-        ):
-            await self._discard_stale(item)
-            return
         async with self.transaction() as connection:
-            updated = await connection.execute(
+            binding = (
+                await connection.execute(
+                    sa.select(
+                        memory_item.c.created_from_page_id,
+                        memory_item.c.created_from_page_revision,
+                    ).where(memory_item.c.id == item.id)
+                )
+            ).one_or_none()
+        if binding is None or not await self._publishable(
+            item.subject, binding.created_from_page_id, binding.created_from_page_revision
+        ):
+            await self.index.delete(IndexScope(OWNER_KIND_MEMORY_ITEM, str(item.id)))
+            return
+        if binding.created_from_page_revision != item.created_from_page_revision:
+            return
+        await self._settle(item)
+
+    async def _publishable(self, subject: str, page_id: UUID | None, revision: int | None) -> bool:
+        """Whether this body may be published to the index under `subject`: a page-derived row only
+        while its page is live and still carries exactly that subject and revision. Recall asks the
+        index for its candidate window first and fences page-derived rows afterwards, so a row bound
+        to a superseded revision must never occupy a candidate slot a reader could have spent on the
+        fact that replaced it — the row itself is the fact deriver's to retire."""
+        if page_id is None:
+            return True
+        state = (await self.page_states((page_id,))).get(page_id)
+        return state is not None and state.subject == subject and state.revision == revision
+
+    async def _settle(self, item: MemoryItem) -> None:
+        """Stamp the body digest and release the claim, so the row leaves the due set this job reads
+        — the terminal state of a row this run decided, whether it published the body or withheld
+        one bound to a superseded revision. Guarded by the binding the run claimed and by the claim
+        itself: a row the deriver rebound, or one whose page moved on and released the claim, stays
+        due for the run that reads it next, so a decision the page has already invalidated can never
+        be the row's terminal state."""
+        async with self.transaction() as connection:
+            await connection.execute(
                 sa.update(memory_item)
                 .values(
-                    embedding_digest=digest,
+                    embedding_digest="sha256:" + hashlib.sha256(item.body.encode()).hexdigest(),
                     embedding_claimed_at=None,
                     updated_at=sa.func.now(),
                 )
@@ -820,36 +878,9 @@ class MemoryIndexer:
                     memory_item.c.body == item.body,
                     memory_item.c.created_from_page_id == item.created_from_page_id,
                     memory_item.c.created_from_page_revision == item.created_from_page_revision,
+                    memory_item.c.embedding_claimed_at.is_not(None),
                 )
             )
-        if updated.rowcount == 0:
-            async with self.transaction() as connection:
-                current_row = (
-                    await connection.execute(
-                        sa.select(memory_item.c.subject, memory_item.c.body).where(
-                            memory_item.c.id == item.id
-                        )
-                    )
-                ).one_or_none()
-            if (
-                current_row is None
-                or current_row.subject != item.subject
-                or current_row.body != item.body
-            ):
-                await self.index.delete(IndexScope(OWNER_KIND_MEMORY_ITEM, str(item.id)))
-
-    async def _discard_stale(self, item: MemoryItem) -> None:
-        async with self.transaction() as connection:
-            deleted = await connection.execute(
-                sa.delete(memory_item).where(
-                    memory_item.c.id == item.id,
-                    memory_item.c.subject == item.subject,
-                    memory_item.c.created_from_page_id == item.created_from_page_id,
-                    memory_item.c.created_from_page_revision == item.created_from_page_revision,
-                )
-            )
-        if deleted.rowcount > 0:
-            await self.index.delete(IndexScope(OWNER_KIND_MEMORY_ITEM, str(item.id)))
 
 
 @dataclass(frozen=True)
@@ -858,9 +889,12 @@ class PageIndexer:
     source-page change into index chunks + a `mem_page` mirror row, off the write path. The core
     page-change runner owns the cursor and the batch loop and hands this one delivered batch to
     apply; the derivation stays idempotent so a replayed change re-upserts the same rows. A
-    tombstoned change drops the page's chunks and mirror row; every other change removes facts
-    derived from a different subject or page revision, then accepts the payload only while both
-    still match the core page before and after embedding."""
+    tombstoned change drops the page's chunks and mirror row; every other change accepts the
+    payload only while subject and revision still match the core page before and after embedding.
+    It never retires a `memory_item` — facts derived from a page are the fact deriver's to replace
+    and retire, on its own cursor — but it does make the facts of the revisions a page has left due
+    for the index job again, so their chunks leave recall's candidate window on a cursor no model
+    can hold."""
 
     index: IndexBackend
     embed: EmbedClient
@@ -875,7 +909,7 @@ class PageIndexer:
 
     async def _apply(self, change: PageChange) -> None:
         current = (await self.page_states((change.page_id,))).get(change.page_id)
-        await self._remove_stale_memories(change.page_id, current)
+        await self._unsettle_left_behind_facts(change.page_id, current)
         if change.tombstone:
             if current is not None:
                 return
@@ -933,29 +967,32 @@ class PageIndexer:
                     )
                 )
 
-    async def _remove_stale_memories(self, page_id: UUID, state: PageState | None) -> None:
-        conditions: tuple[ColumnElement[bool], ...] = (
+    async def _unsettle_left_behind_facts(self, page_id: UUID, state: PageState | None) -> None:
+        """Make every fact of a revision this page has left due for the index job again — each row
+        created from `page_id` that no longer carries the page's live subject and revision, and all
+        of them once the page is gone. The index job is the one writer of a memory row's chunks, so
+        withdrawing them is its decision too; clearing the digest and the claim is how a page that
+        moved on asks for that decision again, and it withholds exactly the bodies whose page no
+        longer carries their revision. Withdrawal cannot wait on a derivation: a revision that
+        derives nothing derives no replacement, and the chunks it never replaced would otherwise
+        spend recall's candidate window for as long as the rows live. The rows themselves are
+        untouched — retiring a page-derived fact stays the fact deriver's, and only where a
+        replacement committed."""
+        left_behind: tuple[ColumnElement[bool], ...] = (
             memory_item.c.workspace_id == self.workspace_id,
             memory_item.c.created_from_page_id == page_id,
         )
         if state is not None:
-            conditions = (
-                *conditions,
+            left_behind = (
+                *left_behind,
                 sa.or_(
                     memory_item.c.subject != state.subject,
-                    memory_item.c.created_from_page_revision != state.revision,
-                    memory_item.c.created_from_page_revision.is_(None),
+                    memory_item.c.created_from_page_revision.is_distinct_from(state.revision),
                 ),
             )
         async with self.transaction() as connection:
-            stale = tuple(
-                (
-                    await connection.execute(
-                        sa.delete(memory_item).where(*conditions).returning(memory_item.c.id)
-                    )
-                )
-                .scalars()
-                .all()
+            await connection.execute(
+                sa.update(memory_item)
+                .values(embedding_digest=None, embedding_claimed_at=None, updated_at=sa.func.now())
+                .where(*left_behind)
             )
-        for memory_id in stale:
-            await self.index.delete(IndexScope(OWNER_KIND_MEMORY_ITEM, str(memory_id)))

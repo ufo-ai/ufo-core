@@ -9,8 +9,9 @@ store. The seam test proves the memory extension registers two independent page_
 
 import hashlib
 import json
+import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
@@ -29,21 +30,24 @@ from ufo_ext_memory.store import (
     FACT,
     KIND_FACT,
     SEMANTIC,
+    MemoryIndexer,
     MemoryStore,
+    MemoryWrite,
+    PageIndexer,
     memory_item,
 )
 
 from ufo.accounting import Pricing
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
-from ufo.ext.context import ModelAccess, ScopedStore, context_for
+from ufo.ext.context import ModelAccess, PageState, ScopedStore, context_for
 from ufo.ext.manifest import (
     HookContext,
     HookOutcome,
     HookSpec,
     Manifest,
 )
-from ufo.indexing import OWNER_KIND_MEMORY_ITEM, Chunk
+from ufo.indexing import OWNER_KIND_MEMORY_ITEM, Chunk, Hit, IndexScope, TextChunker
 from ufo.jobs import PageChangeRunner, SandboxReaper, TurnDispatcher, core_jobs
 from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
 from ufo.models.interface import ModelClient, ModelEvent, ModelRequest, TextDelta
@@ -57,6 +61,9 @@ from ufo.workspace import ws
 
 WHEN = datetime(2026, 1, 1, tzinfo=UTC)
 AUTO_MODEL = "claude-opus-4-8"
+PAGE_BODY = "The acquisition codename is polaris and the deal closes in the third quarter."
+EDITED_PAGE_BODY = "The acquisition codename is meridian and the deal closes in the third quarter."
+LAST_PUBLISHABLE_CHECK = 2
 
 
 def vec(*axes: tuple[int, float]) -> tuple[float, ...]:
@@ -92,6 +99,70 @@ class StubModelClient:
 
 
 @dataclass
+class ScriptedModelClient:
+    """Streams one canned completion per call, in order, repeating the last — the two-phase
+    derivations a page edit drives need a different reply for the page's new revision."""
+
+    payloads: tuple[str, ...]
+    calls: int = 0
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        payload = self.payloads[min(self.calls, len(self.payloads) - 1)]
+        self.calls += 1
+        yield TextDelta(text=payload)
+        yield Usage(input_tokens=10, output_tokens=5)
+
+
+@dataclass
+class CountingIndex:
+    """A real DefaultIndex whose scope deletions are counted: retiring an already-retired fact is
+    invisible in the surviving rows, so the recorded deletions are the only witness that a replayed
+    batch retires each superseded revision exactly once."""
+
+    backend: DefaultIndex
+    deleted: list[str] = field(default_factory=list)
+
+    async def upsert(self, chunks: tuple[Chunk, ...]) -> None:
+        await self.backend.upsert(chunks)
+
+    async def delete(self, scope: IndexScope) -> None:
+        self.deleted.append(scope.owner_id)
+        await self.backend.delete(scope)
+
+    async def prune(self, scope: IndexScope, keep: frozenset[str]) -> None:
+        await self.backend.prune(scope, keep)
+
+    async def lexical(
+        self, query: str, subjects: frozenset[str], owner_kind: str, limit: int
+    ) -> tuple[Hit, ...]:
+        return await self.backend.lexical(query, subjects, owner_kind, limit)
+
+    async def vector(
+        self, embedding: tuple[float, ...], subjects: frozenset[str], owner_kind: str, limit: int
+    ) -> tuple[Hit, ...]:
+        return await self.backend.vector(embedding, subjects, owner_kind, limit)
+
+
+class MovingPage:
+    """The page-state seam under one index run, landing the page's move — and the page-index pass
+    that follows it — the instant the run's last publishability check has read the state. The run
+    then reaches its digest stamp holding a decision the page has already invalidated: the one
+    interleaving that could leave a superseded revision's chunks published for good."""
+
+    def __init__(self, move: Callable[[], Awaitable[None]]) -> None:
+        self.states = context_for("memory", frozenset()).page_states
+        self.move = move
+        self.calls = 0
+
+    async def __call__(self, page_ids: tuple[UUID, ...]) -> dict[UUID, PageState]:
+        self.calls += 1
+        read = await self.states(page_ids)
+        if self.calls == LAST_PUBLISHABLE_CHECK:
+            await self.move()
+        return read
+
+
+@dataclass
 class SupersedingModelClient:
     donor_id: UUID
 
@@ -106,7 +177,7 @@ class SupersedingModelClient:
         yield Usage(input_tokens=10, output_tokens=5)
 
 
-def _registry(client: StubModelClient) -> ModelRegistry:
+def _registry(client: ModelClient) -> ModelRegistry:
     return ModelRegistry(
         specs={
             spec.id: replace(spec, client=lambda spec, key: client, key_slot="", key_env="")
@@ -140,6 +211,22 @@ def _model(payload: str) -> ModelAccess:
             CORE_PRICING,
             StubModelClient(payload, Usage(input_tokens=10, output_tokens=5)),
         )
+    )
+
+
+def _extraction(page_id: UUID, body: str) -> str:
+    return json.dumps(
+        {
+            "facts": [
+                {
+                    "page_id": str(page_id),
+                    "notability": "high",
+                    "memory_kind": "fact",
+                    "confidence": 7,
+                    "body": body,
+                }
+            ]
+        }
     )
 
 
@@ -315,6 +402,97 @@ def _runner(
 
 def _derive_consumer(runner: PageChangeRunner) -> object:
     return next(c for c in runner.consumers() if c.discriminator == "derive_facts")
+
+
+def _scripted(store: MemoryStore, *payloads: str) -> FactDeriver:
+    return FactDeriver(
+        store=store,
+        model=ModelAccess(_Resolver(AUTO_MODEL, CORE_PRICING, ScriptedModelClient(payloads))),
+    )
+
+
+def _change(
+    page_id: UUID, source_id: UUID, subject: str, body: str, revision: int, digest: str
+) -> PageChange:
+    return PageChange(
+        page_id=page_id,
+        source_id=source_id,
+        subject=subject,
+        stream="notes",
+        title="Acquisition",
+        body=body,
+        digest=digest,
+        revision=revision,
+        tombstone=False,
+        created_at=WHEN,
+        as_of=WHEN,
+        changed_at=WHEN,
+    )
+
+
+async def _rewrite_page(page_id: UUID, digest: str) -> int:
+    """Edit the page's content the way a source sync does and read back the revision the database
+    assigned, so a test binds to the real workspace-monotonic counter rather than guessing it."""
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.page).values(digest=digest).where(tables.page.c.id == page_id)
+        )
+        return (
+            await connection.execute(
+                sa.select(tables.page.c.revision).where(tables.page.c.id == page_id)
+            )
+        ).scalar_one()
+
+
+async def _page_facts(page_id: UUID) -> dict[str, int | None]:
+    async with workspace_tx() as connection:
+        rows = (
+            (
+                await connection.execute(
+                    sa.select(memory_item.c.body, memory_item.c.created_from_page_revision).where(
+                        memory_item.c.created_from_page_id == page_id
+                    )
+                )
+            )
+            .mappings()
+            .all()
+        )
+    return {row["body"]: row["created_from_page_revision"] for row in rows}
+
+
+async def _embedding_state(page_id: UUID) -> tuple[str | None, datetime | None]:
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(memory_item.c.embedding_digest, memory_item.c.embedding_claimed_at).where(
+                    memory_item.c.created_from_page_id == page_id
+                )
+            )
+        ).one()
+    return row.embedding_digest, row.embedding_claimed_at
+
+
+async def _index_memory(store: MemoryStore, probe: tuple[float, ...]) -> None:
+    await MemoryIndexer(
+        index=store.index,
+        embed=StubEmbed(probe),
+        transaction=workspace_tx,
+        chunker=TextChunker(),
+        page_states=context_for("memory", frozenset()).page_states,
+    ).run()
+
+
+async def _index_pages(
+    store: MemoryStore, probe: tuple[float, ...], workspace_id: UUID, change: PageChange
+) -> None:
+    await PageIndexer(
+        index=store.index,
+        embed=StubEmbed(probe),
+        transaction=workspace_tx,
+        chunker=TextChunker(),
+        workspace_id=workspace_id,
+        page_states=context_for("memory", frozenset()).page_states,
+    ).apply((change,))
 
 
 # --- fact derivation ---------------------------------------------------------
@@ -505,20 +683,553 @@ async def test_fact_deriver_ignores_a_stale_private_payload_after_sanitization(
     assert rows[0].subject == SHARED_SUBJECT
 
 
-async def test_derive_facts_without_a_model_skips_but_advances_cursor(
+async def test_derive_facts_without_a_model_holds_its_cursor_instead_of_skipping(
     db: None, tmp_path: object
 ) -> None:
+    """The deriver is the one writer that retires a page-derived fact, so a batch it cannot derive
+    is a batch whose replacements do not exist: with no model wired the hook raises, the runner
+    never advances the cursor, and the next tick replays exactly those pages. A skip that advanced
+    would strand every changed page's facts behind a replacement that never comes."""
     workspace_id = await _workspace()
     blob = FilesystemBlobStore(root=tmp_path)
     await _seed_page(blob, workspace_id, "A page whose facts nobody derives without a model wired.")
     runner = _runner(blob, vec((3, 1.0)), registry=None)
-    with ws(workspace_id):
+    with ws(workspace_id), pytest.raises(RuntimeError, match="requires the model seam"):
         await runner.drive(_derive_consumer(runner))
 
     assert [row for row in await _facts(workspace_id) if row.item_class == FACT] == []
     with ws(workspace_id):
         scoped = ScopedStore(extension=memory_manifest.NAME)
-        assert isinstance(await scoped.get("page_change_cursor:derive_facts"), str)
+        assert await scoped.get("page_change_cursor:derive_facts") is None
+
+
+async def test_an_unreadable_reply_for_a_new_revision_keeps_the_prior_revisions_fact(
+    db: None, tmp_path: object
+) -> None:
+    """A reply the extraction cannot read is not "this page holds nothing": the edited page's live
+    revision is settled by nothing, so the fact bound to the revision before the edit survives
+    untouched for the tick that reads a usable reply. Removal is conditional on the replacement, so
+    a pass that derives nothing destroys nothing."""
+    workspace_id = await _workspace()
+    blob = FilesystemBlobStore(root=tmp_path)
+    page_id = await _seed_page(
+        blob, workspace_id, "The acquisition codename is polaris and the deal closes in Q3."
+    )
+    store = _store(workspace_id, vec((12, 1.0)))
+    await store.commit(
+        MemoryWrite(
+            subject=SHARED_SUBJECT,
+            body="the acquisition codename is polaris",
+            created_from_page_id=page_id,
+            created_from_page_revision=1,
+        )
+    )
+    revision = await _rewrite_page(page_id, "sha256:edited")
+    assert revision > 1
+    client = StubModelClient(
+        "I'm sorry, I can't help with that.", Usage(input_tokens=10, output_tokens=5)
+    )
+    runner = _runner(blob, vec((12, 1.0)), _registry(client))
+    with ws(workspace_id):
+        await runner.drive(_derive_consumer(runner))
+
+    assert await _page_facts(page_id) == {"the acquisition codename is polaris": 1}
+
+
+async def test_an_unreadable_reply_settles_its_group_and_lets_the_next_page_through(
+    db: None, tmp_path: object, caplog: pytest.LogCaptureFixture
+) -> None:
+    """One page whose reply the extraction cannot read must not hold the workspace: the pass records
+    the unreadable reply — naming the pages so an operator can find the poison one — settles nothing
+    for that group, and the cursor advances, so the next changed page is derived on the following
+    tick instead of every page in the workspace waiting behind a reply that will never parse."""
+    workspace_id = await _workspace()
+    blob = FilesystemBlobStore(root=tmp_path)
+    poison_id = await _seed_page(
+        blob, workspace_id, "The acquisition codename is polaris and the deal closes in Q3."
+    )
+    poisoned = _runner(
+        blob,
+        vec((17, 1.0)),
+        _registry(
+            StubModelClient(
+                "I'm sorry, I can't help with that.", Usage(input_tokens=10, output_tokens=5)
+            )
+        ),
+    )
+    with ws(workspace_id), caplog.at_level(logging.ERROR, logger="ufo_ext_memory.condenser"):
+        await poisoned.drive(_derive_consumer(poisoned))
+        cursor = await ScopedStore(extension=memory_manifest.NAME).get(
+            "page_change_cursor:derive_facts"
+        )
+    assert isinstance(cursor, str)
+    assert await _page_facts(poison_id) == {}
+    logged = [
+        record
+        for record in caplog.records
+        if record.getMessage().startswith("memory.derive_facts.unreadable_extraction")
+    ]
+    assert len(logged) == 1
+    assert str(poison_id) in logged[0].getMessage()
+    assert logged[0].exc_info is not None
+
+    healthy_id = await _seed_page(
+        blob, workspace_id, "Beatrix leads the platform team from Berlin as of this quarter."
+    )
+    healthy = _runner(
+        blob,
+        vec((17, 1.0)),
+        _registry(
+            StubModelClient(
+                _extraction(healthy_id, "Beatrix leads the platform team"),
+                Usage(input_tokens=10, output_tokens=5),
+            )
+        ),
+    )
+    with ws(workspace_id):
+        await healthy.drive(_derive_consumer(healthy))
+    assert await _page_facts(healthy_id) == {"Beatrix leads the platform team": 2}
+
+
+async def test_a_body_too_thin_to_derive_keeps_the_pages_prior_fact(db: None) -> None:
+    """A page trimmed below the extraction floor never reaches the model, so its live revision is
+    settled by nothing and the fact from the revision before the trim survives. The eligibility
+    filter and the retirement read the same committed replacement, so a page the pass skips cannot
+    lose what it has."""
+    workspace_id = await _workspace()
+    page_id, source_id = uuid4(), uuid4()
+    await _seed_page_authority(workspace_id, page_id, source_id, SHARED_SUBJECT)
+    store = _store(workspace_id, vec((18, 1.0)))
+    deriver = _scripted(store, _extraction(page_id, "the acquisition codename is polaris"))
+    with ws(workspace_id):
+        await deriver.apply(
+            (_change(page_id, source_id, SHARED_SUBJECT, PAGE_BODY, 1, "sha256:page"),)
+        )
+        assert await _page_facts(page_id) == {"the acquisition codename is polaris": 1}
+
+        revision = await _rewrite_page(page_id, "sha256:redacted")
+        await deriver.apply(
+            (_change(page_id, source_id, SHARED_SUBJECT, "redacted.", revision, "sha256:redacted"),)
+        )
+
+    assert await _page_facts(page_id) == {"the acquisition codename is polaris": 1}
+
+
+async def test_an_extraction_carrying_no_facts_keeps_the_pages_prior_fact(db: None) -> None:
+    """An extraction that returns an empty `facts` list commits no replacement, so the revision it
+    read settles nothing and the prior revision's fact stays — unrecallable until a later derivation
+    replaces it, never destroyed by the pass that could not produce its successor."""
+    workspace_id = await _workspace()
+    page_id, source_id = uuid4(), uuid4()
+    await _seed_page_authority(workspace_id, page_id, source_id, SHARED_SUBJECT)
+    store = _store(workspace_id, vec((19, 1.0)))
+    deriver = _scripted(
+        store,
+        _extraction(page_id, "the acquisition codename is polaris"),
+        json.dumps({"facts": []}),
+    )
+    with ws(workspace_id):
+        await deriver.apply(
+            (_change(page_id, source_id, SHARED_SUBJECT, PAGE_BODY, 1, "sha256:page"),)
+        )
+        assert await _page_facts(page_id) == {"the acquisition codename is polaris": 1}
+
+        revision = await _rewrite_page(page_id, "sha256:edited")
+        await deriver.apply(
+            (
+                _change(
+                    page_id, source_id, SHARED_SUBJECT, EDITED_PAGE_BODY, revision, "sha256:edited"
+                ),
+            )
+        )
+
+    assert await _page_facts(page_id) == {"the acquisition codename is polaris": 1}
+
+
+async def test_a_page_fact_outlives_its_edit_until_the_derivation_replaces_it(db: None) -> None:
+    """The delete-before-replace regression, over all three page-derived consumers. An edit fences
+    the page's fact out of recall, but nothing may remove it before the derivation for the new
+    revision commits — not the page indexer on its own cursor, not the index job re-claiming the row
+    with its embedding cleared. The moment the replacement lands, recall serves it and the row it
+    replaced is gone."""
+    workspace_id = await _workspace()
+    page_id, source_id = uuid4(), uuid4()
+    await _seed_page_authority(workspace_id, page_id, source_id, SHARED_SUBJECT)
+    probe = vec((13, 1.0))
+    store = _store(workspace_id, probe)
+    deriver = _scripted(
+        store,
+        _extraction(page_id, "the acquisition codename is polaris"),
+        _extraction(page_id, "the acquisition codename is meridian"),
+    )
+    shared = frozenset({SHARED_SUBJECT})
+    with ws(workspace_id):
+        await deriver.apply(
+            (_change(page_id, source_id, SHARED_SUBJECT, PAGE_BODY, 1, "sha256:page"),)
+        )
+        await _index_memory(store, probe)
+        assert [item.body for item in await store.recall("acquisition codename", shared, 5)] == [
+            "the acquisition codename is polaris"
+        ]
+
+        revision = await _rewrite_page(page_id, "sha256:edited")
+        edited = _change(
+            page_id, source_id, SHARED_SUBJECT, EDITED_PAGE_BODY, revision, "sha256:edited"
+        )
+        await _index_pages(store, probe, workspace_id, edited)
+        await _index_memory(store, probe)
+
+        assert await _page_facts(page_id) == {"the acquisition codename is polaris": 1}
+        assert await store.recall("acquisition codename", shared, 5) == ()
+
+        await deriver.apply((edited,))
+        await _index_memory(store, probe)
+        assert await _page_facts(page_id) == {"the acquisition codename is meridian": revision}
+        assert [item.body for item in await store.recall("acquisition codename", shared, 5)] == [
+            "the acquisition codename is meridian"
+        ]
+
+
+async def test_a_committed_replacement_retires_the_prior_revision_exactly_once(db: None) -> None:
+    """Replacement precedes removal and happens once: the pass that settles the new revision writes
+    its fact, then retires the row bound to the old one and that row's index scope — and a replay of
+    the same change retires nothing further, so the count of scope deletions stays at one."""
+    workspace_id = await _workspace()
+    page_id, source_id = uuid4(), uuid4()
+    await _seed_page_authority(workspace_id, page_id, source_id, SHARED_SUBJECT)
+    probe = vec((14, 1.0))
+    index = CountingIndex(DefaultIndex(transaction=workspace_tx))
+    store = MemoryStore(
+        index=index,
+        embed=StubEmbed(probe),
+        transaction=workspace_tx,
+        workspace_id=workspace_id,
+        page_states=context_for("memory", frozenset()).page_states,
+    )
+    deriver = _scripted(
+        store,
+        _extraction(page_id, "the acquisition codename is polaris"),
+        _extraction(page_id, "the acquisition codename is meridian"),
+    )
+    with ws(workspace_id):
+        await deriver.apply(
+            (_change(page_id, source_id, SHARED_SUBJECT, PAGE_BODY, 1, "sha256:page"),)
+        )
+        await _index_memory(store, probe)
+        retired = next(
+            item.memory_id
+            for item in await store.recall("acquisition codename", frozenset({SHARED_SUBJECT}), 5)
+        )
+        revision = await _rewrite_page(page_id, "sha256:edited")
+        edited = _change(
+            page_id, source_id, SHARED_SUBJECT, EDITED_PAGE_BODY, revision, "sha256:edited"
+        )
+        await deriver.apply((edited,))
+        assert index.deleted == [str(retired)]
+        await deriver.apply((edited,))
+
+    assert index.deleted == [str(retired)]
+    assert await _page_facts(page_id) == {"the acquisition codename is meridian": revision}
+
+
+async def test_replaying_a_settled_batch_writes_and_retires_nothing_new(db: None) -> None:
+    """Replay is idempotent across the whole pass: the content-addressed commit lands on the same
+    row and the retirement finds nothing left, so a page delivered twice settles on exactly the rows
+    the first delivery produced."""
+    workspace_id = await _workspace()
+    page_id, source_id = uuid4(), uuid4()
+    await _seed_page_authority(workspace_id, page_id, source_id, SHARED_SUBJECT)
+    probe = vec((15, 1.0))
+    store = _store(workspace_id, probe)
+    deriver = _scripted(store, _extraction(page_id, "the acquisition codename is polaris"))
+    change = _change(page_id, source_id, SHARED_SUBJECT, PAGE_BODY, 1, "sha256:page")
+    with ws(workspace_id):
+        await deriver.apply((change,))
+        await _index_memory(store, probe)
+        settled = await store.recall("acquisition codename", frozenset({SHARED_SUBJECT}), 5)
+        await deriver.apply((change,))
+        await _index_memory(store, probe)
+        replayed = await store.recall("acquisition codename", frozenset({SHARED_SUBJECT}), 5)
+
+    assert [item.memory_id for item in replayed] == [item.memory_id for item in settled]
+    assert await _page_facts(page_id) == {"the acquisition codename is polaris": 1}
+
+
+async def test_a_tombstoned_pages_facts_are_retired_by_the_derivation_that_settles_it(
+    db: None,
+) -> None:
+    """A removed page will never produce a replacement, so its facts are the one removal that waits
+    on nothing — and the deriver, which owns them, is still what performs it. The page indexer's own
+    pass over the tombstone leaves the rows alone."""
+    workspace_id = await _workspace()
+    page_id, source_id = uuid4(), uuid4()
+    await _seed_page_authority(workspace_id, page_id, source_id, SHARED_SUBJECT)
+    probe = vec((16, 1.0))
+    store = _store(workspace_id, probe)
+    deriver = _scripted(store, _extraction(page_id, "the acquisition codename is polaris"))
+    with ws(workspace_id):
+        await deriver.apply(
+            (_change(page_id, source_id, SHARED_SUBJECT, PAGE_BODY, 1, "sha256:page"),)
+        )
+        await _index_memory(store, probe)
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.page).values(tombstone=True).where(tables.page.c.id == page_id)
+            )
+        retired = replace(
+            _change(page_id, source_id, SHARED_SUBJECT, "", 2, "sha256:page"), tombstone=True
+        )
+        await _index_pages(store, probe, workspace_id, retired)
+        assert await _page_facts(page_id) == {"the acquisition codename is polaris": 1}
+
+        await deriver.apply((retired,))
+        assert await _page_facts(page_id) == {}
+        assert (
+            await store.index.lexical(
+                "acquisition codename", frozenset({SHARED_SUBJECT}), OWNER_KIND_MEMORY_ITEM, 5
+            )
+            == ()
+        )
+
+
+# --- index publication -------------------------------------------------------
+
+
+async def test_the_index_withholds_facts_bound_to_a_superseded_revision(db: None) -> None:
+    """Recall asks the index for exactly its candidate window and fences page-derived rows only
+    afterwards, so a fact bound to a revision the page has left must never occupy a slot: the index
+    job publishes the live revision's fact alone, and the superseded siblings cannot crowd it out of
+    a reader's window."""
+    workspace_id = await _workspace()
+    page_id, source_id = uuid4(), uuid4()
+    await _seed_page_authority(workspace_id, page_id, source_id, SHARED_SUBJECT)
+    probe = vec((20, 1.0))
+    store = _store(workspace_id, probe)
+    for index in range(5):
+        await store.commit(
+            MemoryWrite(
+                subject=SHARED_SUBJECT,
+                body=f"the acquisition codename polaris note {index}",
+                created_from_page_id=page_id,
+                created_from_page_revision=1,
+            )
+        )
+    revision = await _rewrite_page(page_id, "sha256:edited")
+    await store.commit(
+        MemoryWrite(
+            subject=SHARED_SUBJECT,
+            body="the acquisition codename is meridian",
+            created_from_page_id=page_id,
+            created_from_page_revision=revision,
+        )
+    )
+    shared = frozenset({SHARED_SUBJECT})
+    with ws(workspace_id):
+        await _index_memory(store, probe)
+        published = await store.index.lexical(
+            "acquisition codename", shared, OWNER_KIND_MEMORY_ITEM, 100
+        )
+        recalled = await store.recall("acquisition codename", shared, 3)
+
+    assert [hit.text for hit in published] == ["the acquisition codename is meridian"]
+    assert [item.body for item in recalled] == ["the acquisition codename is meridian"]
+    assert len(await _page_facts(page_id)) == 6
+
+
+async def test_a_withheld_fact_leaves_the_index_jobs_due_set(db: None) -> None:
+    """A fact the index job may not publish is settled, not left claimed: it stamps the digest and
+    releases the lease, so the row cannot sit in the due set forever holding the claim slots and the
+    per-tick candidate binding that a newly committed fact needs. The row itself stays — retiring it
+    is the derivation's to do."""
+    workspace_id = await _workspace()
+    page_id, source_id = uuid4(), uuid4()
+    await _seed_page_authority(workspace_id, page_id, source_id, SHARED_SUBJECT)
+    probe = vec((21, 1.0))
+    store = _store(workspace_id, probe)
+    await store.commit(
+        MemoryWrite(
+            subject=SHARED_SUBJECT,
+            body="the acquisition codename is polaris",
+            created_from_page_id=page_id,
+            created_from_page_revision=1,
+        )
+    )
+    await _rewrite_page(page_id, "sha256:edited")
+    job = next(
+        spec
+        for spec in memory_manifest.manifest().jobs
+        if spec.name == memory_manifest.MEMORY_INDEX_JOB
+    )
+    assert workspace_id in set(await job.candidates())
+
+    with ws(workspace_id):
+        await _index_memory(store, probe)
+
+    assert await _page_facts(page_id) == {"the acquisition codename is polaris": 1}
+    assert workspace_id not in set(await job.candidates())
+    digest, claimed_at = await _embedding_state(page_id)
+    assert digest is not None
+    assert claimed_at is None
+
+
+async def test_a_fact_carried_to_the_new_revision_is_published_again(db: None) -> None:
+    """A fact withheld while its revision was stale is not lost to the index: the derivation that
+    carries the same body forward rebinds it to the live revision, which makes it due again, so the
+    next index tick publishes it and recall serves it. Without that, a fact the index settled while
+    fenced would stay unrecallable for as long as the row lived."""
+    workspace_id = await _workspace()
+    page_id, source_id = uuid4(), uuid4()
+    await _seed_page_authority(workspace_id, page_id, source_id, SHARED_SUBJECT)
+    probe = vec((22, 1.0))
+    store = _store(workspace_id, probe)
+    body = "the acquisition codename is polaris"
+    await store.commit(
+        MemoryWrite(
+            subject=SHARED_SUBJECT,
+            body=body,
+            created_from_page_id=page_id,
+            created_from_page_revision=1,
+        )
+    )
+    revision = await _rewrite_page(page_id, "sha256:edited")
+    shared = frozenset({SHARED_SUBJECT})
+    with ws(workspace_id):
+        await _index_memory(store, probe)
+        assert await store.recall("acquisition codename", shared, 5) == ()
+
+        await _scripted(store, _extraction(page_id, body)).apply(
+            (_change(page_id, source_id, SHARED_SUBJECT, PAGE_BODY, revision, "sha256:edited"),)
+        )
+        digest, _claimed_at = await _embedding_state(page_id)
+        assert digest is None
+
+        await _index_memory(store, probe)
+        assert [item.body for item in await store.recall("acquisition codename", shared, 5)] == [
+            body
+        ]
+    assert await _page_facts(page_id) == {body: revision}
+
+
+async def test_a_pages_move_withdraws_the_chunks_it_published_while_current(db: None) -> None:
+    """Facts published while their revision was the page's own must not keep their chunks once the
+    page moves on. The page-index pass makes the revisions the page left due again, so the index job
+    withdraws them without waiting on a derivation — a revision that derives nothing derives no
+    replacement, and five superseded siblings would otherwise fill recall's whole candidate window
+    and leave another page's live fact unrecallable for as long as the rows lived. Every row stays
+    exactly where the derivation left it."""
+    workspace_id = await _workspace()
+    edited_page, edited_source = uuid4(), uuid4()
+    live_page, live_source = uuid4(), uuid4()
+    await _seed_page_authority(workspace_id, edited_page, edited_source, SHARED_SUBJECT)
+    await _seed_page_authority(workspace_id, live_page, live_source, SHARED_SUBJECT)
+    probe = vec((23, 1.0))
+    store = _store(workspace_id, probe)
+    live_body = "the acquisition codename is meridian and the deal closes"
+    superseded = {f"the acquisition codename polaris note {note}" for note in range(5)}
+    shared = frozenset({SHARED_SUBJECT})
+    with ws(workspace_id):
+        states = await context_for("memory", frozenset()).page_states((edited_page, live_page))
+        for body in superseded:
+            await store.commit(
+                MemoryWrite(
+                    subject=SHARED_SUBJECT,
+                    body=body,
+                    created_from_page_id=edited_page,
+                    created_from_page_revision=states[edited_page].revision,
+                )
+            )
+        await store.commit(
+            MemoryWrite(
+                subject=SHARED_SUBJECT,
+                body=live_body,
+                created_from_page_id=live_page,
+                created_from_page_revision=states[live_page].revision,
+            )
+        )
+        await _index_memory(store, probe)
+        published = await store.index.lexical(
+            "acquisition codename", shared, OWNER_KIND_MEMORY_ITEM, 100
+        )
+        assert {hit.text for hit in published} == superseded | {live_body}
+
+        revision = await _rewrite_page(edited_page, "sha256:edited")
+        await _index_pages(
+            store,
+            probe,
+            workspace_id,
+            _change(
+                edited_page,
+                edited_source,
+                SHARED_SUBJECT,
+                EDITED_PAGE_BODY,
+                revision,
+                "sha256:edited",
+            ),
+        )
+        await _index_memory(store, probe)
+
+        assert [item.body for item in await store.recall("acquisition codename", shared, 3)] == [
+            live_body
+        ]
+        withdrawn = await store.index.lexical(
+            "acquisition codename", shared, OWNER_KIND_MEMORY_ITEM, 100
+        )
+        assert {hit.text for hit in withdrawn} == {live_body}
+    assert set(await _page_facts(edited_page)) == superseded
+
+
+async def test_a_page_moving_before_the_settle_leaves_the_row_due(db: None) -> None:
+    """The index job may not settle a decision the page has already invalidated. A page moving
+    between the job's last check and its digest stamp releases the row's claim, so the stamp finds
+    no claim to release and the row stays due — the next tick withdraws the chunks the interrupted
+    run published. Without that, one interleaving leaves a superseded revision's chunks published
+    for the life of the row, exactly what the page-index pass exists to prevent."""
+    workspace_id = await _workspace()
+    page_id, source_id = uuid4(), uuid4()
+    await _seed_page_authority(workspace_id, page_id, source_id, SHARED_SUBJECT)
+    probe = vec((24, 1.0))
+    store = _store(workspace_id, probe)
+    body = "the acquisition codename is polaris"
+    shared = frozenset({SHARED_SUBJECT})
+
+    async def move() -> None:
+        revision = await _rewrite_page(page_id, "sha256:edited")
+        await _index_pages(
+            store,
+            probe,
+            workspace_id,
+            _change(
+                page_id, source_id, SHARED_SUBJECT, EDITED_PAGE_BODY, revision, "sha256:edited"
+            ),
+        )
+
+    with ws(workspace_id):
+        states = await context_for("memory", frozenset()).page_states((page_id,))
+        await store.commit(
+            MemoryWrite(
+                subject=SHARED_SUBJECT,
+                body=body,
+                created_from_page_id=page_id,
+                created_from_page_revision=states[page_id].revision,
+            )
+        )
+        await MemoryIndexer(
+            index=store.index,
+            embed=StubEmbed(probe),
+            transaction=workspace_tx,
+            chunker=TextChunker(),
+            page_states=MovingPage(move),
+        ).run()
+        digest, claimed_at = await _embedding_state(page_id)
+        assert digest is None
+        assert claimed_at is None
+
+        await _index_memory(store, probe)
+        assert (
+            await store.index.lexical("acquisition codename", shared, OWNER_KIND_MEMORY_ITEM, 10)
+            == ()
+        )
+    assert await _page_facts(page_id) == {body: states[page_id].revision}
 
 
 # --- consolidation -----------------------------------------------------------
@@ -766,3 +1477,91 @@ def test_two_page_change_hooks_sharing_a_discriminator_fail_loud(tmp_path: objec
     )
     with pytest.raises(RuntimeError, match="share the discriminator"):
         runner.consumers()
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "I'm sorry, I can't help with that.",
+        '{"facts": [{"page_id": "x", "body": "b"',
+        '{"notes": []}',
+        '{"facts": "polaris"}',
+    ],
+    ids=["no-json-object", "malformed-json", "facts-absent", "facts-not-a-list"],
+)
+async def test_no_readable_facts_list_settles_nothing_however_the_reply_is_unreadable(
+    db: None, tmp_path: object, reply: str
+) -> None:
+    """Each way a completion can carry no readable `facts` list is the same answer — not "this page
+    holds nothing". A reply with no JSON object at all, one whose object never closes, one carrying
+    no `facts` key, and one whose `facts` is not a list all leave the edited revision settled by
+    nothing, so the fact bound to the revision before the edit survives."""
+    workspace_id = await _workspace()
+    blob = FilesystemBlobStore(root=tmp_path)
+    page_id = await _seed_page(
+        blob, workspace_id, "The acquisition codename is polaris and the deal closes in Q3."
+    )
+    store = _store(workspace_id, vec((12, 1.0)))
+    await store.commit(
+        MemoryWrite(
+            subject=SHARED_SUBJECT,
+            body="the acquisition codename is polaris",
+            created_from_page_id=page_id,
+            created_from_page_revision=1,
+        )
+    )
+    assert await _rewrite_page(page_id, "sha256:edited") > 1
+    runner = _runner(
+        blob,
+        vec((12, 1.0)),
+        _registry(StubModelClient(reply, Usage(input_tokens=10, output_tokens=5))),
+    )
+    with ws(workspace_id):
+        await runner.drive(_derive_consumer(runner))
+
+    assert await _page_facts(page_id) == {"the acquisition codename is polaris": 1}
+
+
+async def test_one_pass_settles_only_the_pages_its_own_facts_replace(
+    db: None, tmp_path: object
+) -> None:
+    """The pass is per page, not per group. Two edited pages share one model call and the reply
+    restates only the first, so the first retires its prior revision and the second keeps its fact —
+    the settlement is the committed replacement's, and a page the reply passed over is untouched. A
+    regression to batch-wide retirement takes the second page's fact with the first's."""
+    workspace_id = await _workspace()
+    blob = FilesystemBlobStore(root=tmp_path)
+    restated = await _seed_page(
+        blob, workspace_id, "The acquisition codename is polaris and the deal closes in Q3."
+    )
+    passed_over = await _seed_page(
+        blob, workspace_id, "The security review is scheduled and the auditor is booked."
+    )
+    store = _store(workspace_id, vec((12, 1.0)))
+    for page_id, body in (
+        (restated, "the acquisition codename is polaris"),
+        (passed_over, "the security review is scheduled"),
+    ):
+        await store.commit(
+            MemoryWrite(
+                subject=SHARED_SUBJECT,
+                body=body,
+                created_from_page_id=page_id,
+                created_from_page_revision=1,
+            )
+        )
+    restated_revision = await _rewrite_page(restated, "sha256:restated")
+    assert await _rewrite_page(passed_over, "sha256:untouched") > 1
+    reply = _extraction(restated, "the acquisition codename is meridian")
+    runner = _runner(
+        blob,
+        vec((12, 1.0)),
+        _registry(StubModelClient(reply, Usage(input_tokens=10, output_tokens=5))),
+    )
+    with ws(workspace_id):
+        await runner.drive(_derive_consumer(runner))
+
+    assert await _page_facts(restated) == {
+        "the acquisition codename is meridian": restated_revision
+    }
+    assert await _page_facts(passed_over) == {"the security review is scheduled": 1}

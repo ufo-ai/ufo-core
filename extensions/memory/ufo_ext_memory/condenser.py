@@ -2,16 +2,19 @@
 
 `FactDeriver` is the memory extension's second `page_change` consumer — it distills each replayed
 source page into durable `fact` memory_items with one bounded metered model pass per batch, so a
-synced document becomes recallable facts, not only RAG chunks. `MemoryConsolidator` is the periodic
-job that clusters aged `fact` items by embedding cosine and collapses each cluster into one
-`semantic` summary through a bounded metered model pass, stamping `superseded_by` on the clustered
-originals — the sole producer that makes recall's `superseded_by IS NULL` drop and its
-decay-exempt `semantic` handling fire. Both meter through `ctx.model` and both are fail-soft: with
-no model wired the model pass is skipped (the deriver still advances its cursor, the consolidator
-writes nothing), mirroring gbrain's Tier-B. Every model and embed payload is bounded next to its
-call, and each model call runs before the write transaction, never holding it open."""
+synced document becomes recallable facts, not only RAG chunks, and it is the one writer that retires
+a page-derived fact — for exactly the pages whose replacement it just committed.
+`MemoryConsolidator` is the periodic job that clusters aged `fact` items by embedding cosine and
+collapses each cluster into one `semantic` summary through a bounded metered model pass, stamping
+`superseded_by` on the clustered originals — the sole producer that makes recall's
+`superseded_by IS NULL` drop and its decay-exempt `semantic` handling fire. Both meter through
+`ctx.model`; the consolidator writes nothing without one (gbrain Tier-B), while the deriver requires
+one, since a batch it cannot derive is a batch whose replacements do not exist. Every model and
+embed payload is bounded next to its call, and each model call runs before the write transaction,
+never holding it open."""
 
 import json
+import logging
 import math
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -38,6 +41,8 @@ from ufo_ext_memory.store import (
     Transaction,
     memory_item,
 )
+
+logger = logging.getLogger(__name__)
 
 MAX_PAGE_BODY_CHARS = 8_000
 MIN_PAGE_BODY_CHARS = 40
@@ -89,32 +94,45 @@ class ExtractedFact(BaseModel):
 
 @dataclass(frozen=True)
 class FactDeriver:
-    """Distill each replayed source-page change into durable `fact` memory_items, off the write
-    path. The core page-change runner owns the cursor and batch loop (a cursor independent of the
-    memory indexer's) and hands one delivered batch to `apply`; this filters out tombstones and
-    trivially short bodies, then runs one bounded metered model pass per bounded page group and
-    commits the kept facts through the store's content-addressed upsert. Once-delivery is the
-    cursor's guarantee — each changed page reaches this handler once; the content-addressed commit
-    additionally dedups an identical re-derivation onto the same row, but it is no guarantee against
-    variant wording, so a non-deterministic pass over an edited page can write a new row. Fail-soft:
-    with no model wired the batch is skipped and the runner still advances the cursor (gbrain
-    Tier-B)."""
+    """Distill each replayed source-page change into durable `fact` memory_items and retire what
+    they replace, off the write path. The core page-change runner owns the cursor and batch loop (a
+    cursor independent of the memory indexer's) and hands one delivered batch to `apply`: a page no
+    longer there is retired outright, since nothing will ever replace its facts, and every other
+    page goes through one bounded metered model pass per bounded group of substantial live pages —
+    whose committed facts are the only thing that authorizes retiring the revisions they replace.
+    Removal is conditional on the replacement's committed result, not merely later than it: a page
+    the pass leaves without a fact (a body too thin to send, an extraction carrying none, a reply it
+    could not read) keeps every fact it has, fenced out of recall by its revision until a derivation
+    supersedes it. Once-delivery is the cursor's guarantee — each changed page reaches this handler
+    once; the content-addressed commit dedups an identical re-derivation onto the same row, and the
+    retirement finds nothing left on a replay, so a replayed batch settles on the same rows."""
 
     store: MemoryStore
-    model: ModelAccess | None = None
+    model: ModelAccess
 
     async def apply(self, changes: tuple[PageChange, ...]) -> None:
+        live = await self.store.page_states(tuple(change.page_id for change in changes))
+        for change in changes:
+            if change.page_id not in live:
+                await self.store.supersede_page_facts(change.page_id, None)
         eligible = tuple(
             change
             for change in changes
-            if not change.tombstone and len(change.body) >= MIN_PAGE_BODY_CHARS
+            if change.page_id in live
+            and not change.tombstone
+            and len(change.body) >= MIN_PAGE_BODY_CHARS
         )
-        if self.model is None or not eligible:
-            return
         for group in batched(eligible, EXTRACT_PAGE_BATCH):
-            await self._derive(self.model, group)
+            for settled in await self._derive(group):
+                await self.store.supersede_page_facts(settled.page_id, settled.revision)
 
-    async def _derive(self, model: ModelAccess, pages: tuple[PageChange, ...]) -> None:
+    async def _derive(self, pages: tuple[PageChange, ...]) -> tuple[PageChange, ...]:
+        """Commit the kept facts of one bounded model pass over the pages still exactly where the
+        change found them, and return the pages a fact actually landed for — the only pages whose
+        other revisions now have a replacement to retire. A reply the extraction cannot read settles
+        nothing for the group: no page in it can be told apart from one that holds nothing, so the
+        pass records the unreadable reply and moves on, leaving every fact in place and the cursor
+        free to advance past a page one model reply could otherwise hold forever."""
         current = await self.store.page_states(tuple(page.page_id for page in pages))
         authorized = tuple(
             page
@@ -124,9 +142,20 @@ class FactDeriver:
             and state.revision == page.revision
         )
         if not authorized:
-            return
+            return ()
+        reply = await self._extract(authorized)
+        try:
+            extracted = _parse_facts(reply)
+        except ValueError:
+            logger.error(
+                "memory.derive_facts.unreadable_extraction pages=%s",
+                [str(page.page_id) for page in authorized],
+                exc_info=True,
+            )
+            return ()
         by_id = {str(page.page_id): page for page in authorized}
-        for fact in await self._extract(model, authorized):
+        settled: dict[UUID, PageChange] = {}
+        for fact in extracted:
             page = by_id.get(fact.page_id)
             if page is None or fact.notability.lower() not in EXTRACT_KEEP_NOTABILITY:
                 continue
@@ -145,10 +174,13 @@ class FactDeriver:
                     as_of=page.as_of,
                 )
             )
+            settled[page.page_id] = page
+        return tuple(settled.values())
 
-    async def _extract(
-        self, model: ModelAccess, pages: tuple[PageChange, ...]
-    ) -> tuple[ExtractedFact, ...]:
+    async def _extract(self, pages: tuple[PageChange, ...]) -> str:
+        """The one bounded metered model pass over a group, returning the raw completion its caller
+        parses — so an unreadable reply is a decision the pass makes about that group, not an
+        exception thrown through the batch."""
         payload = {
             "pages": [
                 {"page_id": str(page.page_id), "body": page.body[:MAX_PAGE_BODY_CHARS]}
@@ -156,13 +188,13 @@ class FactDeriver:
             ]
         }
         request = ModelRequest(
-            model=model.model,
+            model=self.model.model,
             system=FACT_EXTRACT_SYSTEM,
             messages=(Message(role="user", content=json.dumps(payload, separators=(",", ":"))),),
             max_tokens=FACT_EXTRACT_MAX_TOKENS,
             reasoning=FACT_EXTRACT_REASONING,
         )
-        return _parse_facts(await model.complete(request))
+        return await self.model.complete(request)
 
 
 @dataclass(frozen=True)
@@ -360,18 +392,20 @@ def _cosine(left: tuple[float, ...], right: tuple[float, ...]) -> float:
 
 def _parse_facts(text: str) -> tuple[ExtractedFact, ...]:
     """Slice the first JSON object out of the model's completion and validate its `facts` list one
-    item at a time, dropping any that fail validation — the extraction stays best-effort so one
-    malformed fact never fails the whole batch and wedges the cursor."""
+    item at a time, dropping any single item that fails validation so one malformed fact never
+    fails the whole batch. A completion carrying no readable `facts` list at all raises instead: it
+    is not the same answer as "these pages hold nothing", so the caller settles nothing for the
+    group rather than reading a settlement into a reply it could not parse."""
     start = text.find("{")
     if start < 0:
-        return ()
+        raise ValueError("fact extraction returned no JSON object")
     try:
         payload, _end = json.JSONDecoder().raw_decode(text[start:])
-    except json.JSONDecodeError:
-        return ()
+    except json.JSONDecodeError as error:
+        raise ValueError("fact extraction returned malformed JSON") from error
     raw = payload.get("facts") if isinstance(payload, dict) else None
     if not isinstance(raw, list):
-        return ()
+        raise ValueError("fact extraction returned no facts list")
     facts: list[ExtractedFact] = []
     for item in raw:
         if not isinstance(item, dict):

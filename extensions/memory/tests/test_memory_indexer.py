@@ -185,9 +185,12 @@ async def test_overlapping_index_runs_embed_each_row_once(db: None) -> None:
     assert pending == 0
 
 
-async def test_page_derived_index_write_is_deleted_when_the_page_changes_during_embed(
+async def test_page_narrowed_during_embed_withdraws_the_write_and_keeps_the_row(
     db: None,
 ) -> None:
+    """A page that narrows while the indexer embeds must not leave the wider subject's chunks
+    published — but the row itself is the fact deriver's to retire, so the indexer withdraws only
+    what it wrote and leaves the item intact and still due."""
     workspace_id = await _workspace()
     page_id = uuid4()
     embed = StubEmbed(vec((3, 1.0)))
@@ -225,14 +228,14 @@ async def test_page_derived_index_write_is_deleted_when_the_page_changes_during_
             == ()
         )
     async with workspace_tx() as connection:
-        count = (
+        row = (
             await connection.execute(
-                sa.select(sa.func.count())
-                .select_from(memory_item)
-                .where(memory_item.c.created_from_page_id == page_id)
+                sa.select(memory_item.c.embedding_digest).where(
+                    memory_item.c.created_from_page_id == page_id
+                )
             )
-        ).scalar_one()
-    assert count == 0
+        ).one()
+    assert row.embedding_digest is None
 
 
 async def test_old_indexer_cannot_delete_a_same_body_fact_rebound_to_a_new_page_revision(

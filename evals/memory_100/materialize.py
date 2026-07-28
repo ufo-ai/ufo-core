@@ -21,7 +21,7 @@ from ufo.blob import BlobStore, blob_store_for
 from ufo.config import Config, SourceConfig, SourceEntry, load_config
 from ufo.credentials import CredentialStore
 from ufo.db import dispose_db, init_db, workspace_tx
-from ufo.ext.context import context_for
+from ufo.ext.context import ScopedStore, context_for
 from ufo.ext.loader import embed_backend, index_backend, load_manifests
 from ufo.ext.manifest import Manifest
 from ufo.indexing import EmbedClient, IndexBackend, TextChunker
@@ -282,6 +282,11 @@ class Memory100Materializer:
                 raise RuntimeError("memory_100 memory index made no progress")
 
     async def _drain_page_consumers(self) -> None:
+        """Drive every page consumer the pack registers except the fact deriver, then settle the
+        deriver's cursor at the same high water. The corpus authors its own memories, so there is
+        nothing for a model pass to derive — and a materializer that called one would not be
+        reproducible. Both memory consumers must be registered: the corpus attests against the seam
+        it materializes, so a renamed consumer fails here rather than silently skipping."""
         runner = PageChangeRunner(
             manifests=self.manifests,
             pages=CorePageFeed(blob=self.blob),
@@ -290,13 +295,20 @@ class Memory100Materializer:
             blob=self.blob,
             registry=None,
         )
-        consumers = runner.consumers()
-        required = {("memory", "index_pages"), ("memory", "derive_facts")}
-        available = {(consumer.extension, consumer.discriminator) for consumer in consumers}
-        if not required <= available:
+        consumers = {
+            (consumer.extension, consumer.discriminator): consumer
+            for consumer in runner.consumers()
+        }
+        derive = ("memory", "derive_facts")
+        if not {("memory", "index_pages"), derive} <= set(consumers):
             raise RuntimeError("memory_100 expected both memory page-change consumers")
-        for consumer in consumers:
-            await runner.drive(consumer)
+        for key, consumer in consumers.items():
+            if key != derive:
+                await runner.drive(consumer)
+        store = ScopedStore(extension=memory_manifest.NAME)
+        high_water = await store.get("page_change_cursor:index_pages")
+        if high_water is not None:
+            await store.put("page_change_cursor:derive_facts", high_water)
 
 
 async def _run(config: Config, snapshot: Path, state_root: Path) -> CorpusReadiness:

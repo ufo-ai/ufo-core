@@ -325,11 +325,14 @@ async def index_pages(ctx: HookContext) -> HookOutcome:
 
 async def derive_facts(ctx: HookContext) -> HookOutcome:
     """The second `page_change` consumer: distill each replayed source-page change into durable
-    `fact` memory_items with one bounded metered model pass per batch. Rides its own cursor,
-    independent of the indexer's; fail-soft when no model is wired (the batch is skipped, the
-    cursor still advances)."""
+    `fact` memory_items with one bounded metered model pass per batch, then retire the facts each
+    committed replacement replaced. Rides its own cursor, independent of the indexer's, and is the
+    one writer that removes a page-derived fact — so with no model wired it fails loud and the
+    cursor holds, rather than advancing past pages whose replacements were never derived."""
     if not isinstance(ctx.payload, PageChangeBatch):
         return None
+    if ctx.ext.model is None:
+        raise RuntimeError("fact derivation requires the model seam; none is wired")
     await FactDeriver(store=store_for(ctx.ext), model=ctx.ext.model).apply(ctx.payload.changes)
     return None
 
