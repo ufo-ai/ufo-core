@@ -171,6 +171,7 @@ class FactDeriver:
                     confidence=fact.confidence,
                     created_from_page_id=page.page_id,
                     created_from_page_revision=page.revision,
+                    source_id=page.source_id,
                     as_of=page.as_of,
                 )
             )

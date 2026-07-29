@@ -137,15 +137,19 @@ terminal frame. A client's wait always ends — the terminal state commits on th
   tsvector + pgvector) ships as the base-pinned `index_default` extension and OpenAI embedding as
   the base-pinned `embed_openai` extension; turbopuffer is a drop-in index alternative. Source
   pages reach recall through the memory extension's own page-index job over the core `PageFeed`;
-  every page-derived memory binds to the page's database revision, so recall drops it as soon as
-  that page changes, and the page-index pass makes the revisions the page left due again so the
-  index job withdraws their chunks — no superseded fact spends a candidate slot the fact that
-  replaced it could have taken, whether or not a replacement is ever derived. The fact derivation
-  that settles the new revision is the one writer that retires what it replaced, and it retires only
-  the revisions its own committed facts replace — so a revision that derives nothing destroys
-  nothing, and no consumer that cannot replace a fact can remove it. A page that is gone is the one
-  unconditional removal: nothing can ever replace the facts of a deleted or tombstoned page, so they
-  retire outright rather than waiting for a replacement that cannot arrive.
+  every page-derived memory binds to the revision of the page it currently reads from, so recall
+  drops that derivation as soon as that page changes, and the page-index pass makes the revisions
+  the page left due again so the index job withdraws their chunks — no superseded fact spends a
+  candidate slot the fact that replaced it could have taken, whether or not a replacement is ever
+  derived. The fact derivation that settles the new revision is the one writer that retires what it
+  replaced, and it retires only the revisions its own committed facts replace — so a revision that
+  derives nothing destroys nothing, and no consumer that cannot replace a fact can remove it. A page
+  that is gone is the one unconditional retirement: nothing can ever replace what a deleted or
+  tombstoned page derived, so what it derived retires outright rather than waiting for a replacement
+  that cannot arrive. The same fact learned from two feeds is one row carrying a link per page it was
+  derived from, so a reader granted any one of those sources reaches it: retiring one page drops only
+  that page's link and re-points the row to a feed that still holds it, and the row is removed, index
+  scope and all, only when its last link is gone.
 - **Minimal built-in tools** — `bash`, `read`, `write`, `edit`,
   `ask_user`, `request_credentials`, `spawn_subagent`, `load_skill`, `share_file`, and the five
   object verbs (`object_list`/`get`/`explain`/`apply`/`delete`) over extension-registered kinds

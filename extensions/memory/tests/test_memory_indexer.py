@@ -193,6 +193,7 @@ async def test_page_narrowed_during_embed_withdraws_the_write_and_keeps_the_row(
     what it wrote and leaves the item intact and still due."""
     workspace_id = await _workspace()
     page_id = uuid4()
+    source_id = uuid4()
     embed = StubEmbed(vec((3, 1.0)))
     index = DefaultIndex(transaction=workspace_tx)
     store = MemoryStore(
@@ -208,6 +209,7 @@ async def test_page_narrowed_during_embed_withdraws_the_write_and_keeps_the_row(
             body="the stale launch codename is polaris",
             created_from_page_id=page_id,
             created_from_page_revision=1,
+            source_id=source_id,
         )
     )
     with ws(workspace_id):
@@ -216,7 +218,11 @@ async def test_page_narrowed_during_embed_withdraws_the_write_and_keeps_the_row(
             embed=embed,
             transaction=workspace_tx,
             chunker=TextChunker(),
-            page_states=ReclassifyingPage(page_id, "shared", f"member:{uuid4()}"),
+            page_states=ReclassifyingPage(
+                page_id,
+                "shared",
+                f"member:{uuid4()}",
+            ),
         ).run()
         assert (
             await index.lexical(
@@ -242,6 +248,7 @@ async def test_old_indexer_cannot_delete_a_same_body_fact_rebound_to_a_new_page_
     db: None,
 ) -> None:
     workspace_id, page_id = await _workspace(), uuid4()
+    source_id = uuid4()
     body = "the acquisition plan has been redacted"
     index = DefaultIndex(transaction=workspace_tx)
 
@@ -252,6 +259,7 @@ async def test_old_indexer_cannot_delete_a_same_body_fact_rebound_to_a_new_page_
                 body=body,
                 created_from_page_id=page_id,
                 created_from_page_revision=2,
+                source_id=source_id,
             )
         )
 
@@ -269,6 +277,7 @@ async def test_old_indexer_cannot_delete_a_same_body_fact_rebound_to_a_new_page_
             body=body,
             created_from_page_id=page_id,
             created_from_page_revision=1,
+            source_id=source_id,
         )
     )
     with ws(workspace_id):

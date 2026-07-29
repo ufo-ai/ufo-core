@@ -1,18 +1,95 @@
+import asyncio
 import json
 import os
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
-from uuid import UUID, uuid4
+from uuid import UUID, uuid4, uuid5
 
 import pytest
 import sqlalchemy as sa
 from alembic import command
 from alembic.config import Config
 from sqlalchemy.engine import make_url
+from ufo_ext_index_default import DefaultIndex
+from ufo_ext_memory.store import (
+    MEMORY_ITEM_NAMESPACE,
+    MemoryStore,
+    MemoryWrite,
+    memory_item,
+)
 
-from ufo.db import MIGRATIONS_DIR
+from ufo.db import MIGRATIONS_DIR, dispose_db, init_db, workspace_tx
+from ufo.ext.context import context_for
 from ufo.ext.loader import migration_locations
+from ufo.workspace import ws
+
+DERIVED_BODY = "the acme renewal closes on september 30"
+MANUAL_BODY = "the office wifi password rotates monthly"
+PAGELESS_BODY = "the pilot ended in march"
+UNREPLAYED_BODY = "the security review slipped a week"
+
+
+class _UnreachedEmbed:
+    """A commit derives nothing, so the store never reaches its embed backend — a call here is the
+    write path deriving state the index job owns."""
+
+    async def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
+        raise AssertionError("commit embeds nothing")
+
+
+async def _replay_derivation(
+    migration_url: str, workspace_id: UUID, page_id: UUID, source_id: UUID
+) -> list[tuple[UUID, UUID]]:
+    """Deliver the same page change twice through the real store — the at-least-once replay a
+    restarted page-change cursor performs — and read back what the derived rows carry."""
+    init_db(migration_url)
+    try:
+        with ws(workspace_id):
+            store = MemoryStore(
+                index=DefaultIndex(transaction=workspace_tx),
+                embed=_UnreachedEmbed(),
+                transaction=workspace_tx,
+                workspace_id=workspace_id,
+                page_states=context_for("memory", frozenset()).page_states,
+            )
+            for _ in range(2):
+                await store.commit(
+                    MemoryWrite(
+                        subject="shared",
+                        body=DERIVED_BODY,
+                        created_from_page_id=page_id,
+                        created_from_page_revision=1,
+                        source_id=source_id,
+                    )
+                )
+            async with workspace_tx() as connection:
+                return [
+                    (row.id, row.source_id)
+                    for row in (
+                        await connection.execute(
+                            sa.select(memory_item.c.id, memory_item.c.source_id).where(
+                                memory_item.c.created_from_page_id == page_id
+                            )
+                        )
+                    ).all()
+                ]
+    finally:
+        await dispose_db()
+
+
+def _alembic(migration_url: str) -> Config:
+    """The real migration environment over one throwaway database: core versions plus every
+    installed extension's location, so an extension revision resolves its core dependency."""
+    config = Config()
+    config.set_main_option("script_location", str(MIGRATIONS_DIR))
+    config.set_main_option(
+        "version_locations",
+        os.pathsep.join((str(MIGRATIONS_DIR / "versions"), *migration_locations())),
+    )
+    config.set_main_option("path_separator", "os")
+    config.set_main_option("sqlalchemy.url", migration_url)
+    return config
 
 
 @pytest.fixture
@@ -45,21 +122,26 @@ def migration_urls(database_url: str, tmp_path: Path) -> Iterator[tuple[str, str
 def test_page_revision_migration_invalidates_derivations_and_requests_full_replay(
     migration_urls: tuple[str, str],
 ) -> None:
+    """`memory_0010` binds derivations to a page revision and asks every page-change consumer to
+    replay; `memory_0012` records each derivation's source as a link. The id stays content-addressed
+    over `(workspace, subject, item_class, body)`, so every seeded row keeps its id across the
+    migration — nothing is re-keyed, nothing in the index is orphaned — and a page derivation that
+    resolves a complete origin gains one `memory_source` link from it. The derivations the replay
+    has not reached (`memory_0010` backfills no revision) and one whose page is gone cannot form a
+    complete origin, so their origin is cleared and they take no link rather than break the check;
+    a later replay lands on the very row the migration kept."""
     migration_url, sync_url = migration_urls
-    config = Config()
-    config.set_main_option("script_location", str(MIGRATIONS_DIR))
-    config.set_main_option(
-        "version_locations",
-        os.pathsep.join((str(MIGRATIONS_DIR / "versions"), *migration_locations())),
-    )
-    config.set_main_option("path_separator", "os")
-    config.set_main_option("sqlalchemy.url", migration_url)
+    config = _alembic(migration_url)
     command.upgrade(config, "0053")
     command.upgrade(config, "memory_0009")
 
     engine = sa.create_engine(sync_url)
-    workspace_id, source_id, page_id, later_page_id, derived_id, manual_id = (
+    workspace_id, source_id, page_id, later_page_id, manual_id, pageless_id = (
         uuid4() for _ in range(6)
+    )
+    derived_id, unreplayed_id = (
+        uuid5(MEMORY_ITEM_NAMESPACE, "\x00".join((str(workspace_id), "shared", "fact", body)))
+        for body in (DERIVED_BODY, UNREPLAYED_BODY)
     )
     now = datetime(2026, 7, 27, tzinfo=UTC)
     later = datetime(2026, 7, 28, tzinfo=UTC)
@@ -106,7 +188,11 @@ def test_page_revision_migration_invalidates_derivations_and_requests_full_repla
                 "later": later,
             },
         )
-        for item_id, page_origin in ((derived_id, page_id.hex), (manual_id, None)):
+        for item_id, body, page_origin in (
+            (derived_id, DERIVED_BODY, page_id.hex),
+            (unreplayed_id, UNREPLAYED_BODY, later_page_id.hex),
+            (manual_id, MANUAL_BODY, None),
+        ):
             connection.execute(
                 sa.text(
                     "insert into memory_item "
@@ -119,7 +205,7 @@ def test_page_revision_migration_invalidates_derivations_and_requests_full_repla
                 {
                     "id": item_id.hex,
                     "workspace_id": workspace_id.hex,
-                    "body": f"fact {item_id}",
+                    "body": body,
                     "page_origin": page_origin,
                     "now": now,
                 },
@@ -199,18 +285,189 @@ def test_page_revision_migration_invalidates_derivations_and_requests_full_repla
         "sample:pageXchangeYcursor:opaque": "untouched",
     }
 
-    command.downgrade(config, "memory_0009")
-    command.downgrade(config, "0053")
+    command.upgrade(config, "index_default_0002")
     engine = sa.create_engine(sync_url)
     with engine.connect() as connection:
-        remaining = {
-            key: json.loads(value) if value.startswith('"') else value
-            for key, value in connection.execute(
-                sa.text("select extension || ':' || key, value from ext_store")
-            ).tuples()
+        connection.execute(
+            sa.text(
+                "update memory_item set created_from_page_revision = 1, "
+                "embedding_digest = 'sha256:derived' where id = :id"
+            ),
+            {"id": derived_id.hex},
+        )
+        connection.execute(
+            sa.text(
+                "insert into memory_item "
+                "(id, workspace_id, subject, body, item_class, memory_kind, confidence, "
+                "created_from_page_id, created_from_page_revision, embedding_digest, "
+                "created_at, updated_at) values "
+                "(:id, :workspace_id, 'shared', :body, 'fact', 'fact', 5, :page_id, 1, "
+                "'sha256:pageless', :now, :now)"
+            ),
+            {
+                "id": pageless_id.hex,
+                "workspace_id": workspace_id.hex,
+                "body": PAGELESS_BODY,
+                "page_id": uuid4().hex,
+                "now": now,
+            },
+        )
+        connection.commit()
+    engine.dispose()
+
+    command.upgrade(config, "memory_0012")
+    engine = sa.create_engine(sync_url)
+    with engine.connect() as connection:
+        items = {
+            UUID(str(row.id)): (
+                None if row.created_from_page_id is None else UUID(str(row.created_from_page_id)),
+                None if row.source_id is None else UUID(str(row.source_id)),
+                row.embedding_digest,
+            )
+            for row in connection.execute(
+                sa.text(
+                    "select id, created_from_page_id, source_id, embedding_digest from memory_item"
+                )
+            ).all()
+        }
+        links = {
+            (
+                UUID(str(row.memory_item_id)),
+                UUID(str(row.source_id)),
+                UUID(str(row.page_id)),
+                row.revision,
+            )
+            for row in connection.execute(
+                sa.text("select memory_item_id, source_id, page_id, revision from memory_source")
+            ).all()
+        }
+        bodies = set(connection.execute(sa.text("select body from memory_item")).scalars())
+    engine.dispose()
+
+    assert items[derived_id] == (page_id, source_id, "sha256:derived")
+    assert items[pageless_id] == (None, None, "sha256:pageless")
+    assert items[manual_id] == (None, None, "sha256:embedding")
+    assert links == {(derived_id, source_id, page_id, 1)}
+    assert bodies == {DERIVED_BODY, UNREPLAYED_BODY, MANUAL_BODY, PAGELESS_BODY}
+
+    rebuilt = asyncio.run(_replay_derivation(migration_url, workspace_id, page_id, source_id))
+    assert rebuilt == [(derived_id, source_id)]
+
+    command.downgrade(config, "memory_0011")
+    engine = sa.create_engine(sync_url)
+    with engine.connect() as connection:
+        inspector = sa.inspect(connection)
+        columns = {column["name"] for column in inspector.get_columns("memory_item")}
+        table_present = inspector.has_table("memory_source")
+        ids = {
+            UUID(str(stored_id))
+            for stored_id in connection.execute(sa.text("select id from memory_item")).scalars()
         }
     engine.dispose()
-    assert remaining == {
-        "memory:unrelated": "value",
-        "sample:pageXchangeYcursor:opaque": "untouched",
-    }
+    assert "source_id" not in columns
+    assert table_present is False
+    assert {derived_id, unreplayed_id, manual_id, pageless_id} <= ids
+
+
+def test_source_partition_backfills_one_link_per_source_without_rekeying(
+    migration_urls: tuple[str, str],
+) -> None:
+    """The id stays content-addressed over `(workspace, subject, item_class, body)`, so a derived
+    row seeded under that id keeps it across `memory_0012` — nothing is re-keyed, so nothing in the
+    index is orphaned — and the row gains exactly one `memory_source` link from its page's source.
+    A row whose page is gone cannot form a complete origin, so its origin is cleared and it takes no
+    link rather than break the source-complete check."""
+    migration_url, sync_url = migration_urls
+    config = _alembic(migration_url)
+    command.upgrade(config, "0054")
+    command.upgrade(config, "memory_0011")
+
+    workspace_id, source_id, page_id = uuid4(), uuid4(), uuid4()
+    live_id = uuid5(
+        MEMORY_ITEM_NAMESPACE, "\x00".join((str(workspace_id), "shared", "fact", DERIVED_BODY))
+    )
+    orphan_id = uuid5(
+        MEMORY_ITEM_NAMESPACE, "\x00".join((str(workspace_id), "shared", "fact", PAGELESS_BODY))
+    )
+    now = datetime(2026, 7, 27, tzinfo=UTC)
+    engine = sa.create_engine(sync_url)
+    with engine.connect() as connection:
+        connection.execute(
+            sa.text("insert into workspace (id, created_at, updated_at) values (:id, :now, :now)"),
+            {"id": workspace_id.hex, "now": now},
+        )
+        connection.execute(
+            sa.text(
+                "insert into source "
+                "(id, workspace_id, backend, config, next_sync_at, created_at, updated_at) "
+                "values (:id, :workspace_id, 'folder', '{}', :now, :now, :now)"
+            ),
+            {"id": source_id.hex, "workspace_id": workspace_id.hex, "now": now},
+        )
+        connection.execute(
+            sa.text(
+                "insert into page "
+                "(id, workspace_id, source_id, digest, body_ref, stream, title, subject, "
+                "tombstone, created_at, updated_at) values "
+                "(:id, :workspace_id, :source_id, 'sha256:page', 'pages/page', 'notes', "
+                "'Page', 'shared', false, :now, :now)"
+            ),
+            {
+                "id": page_id.hex,
+                "workspace_id": workspace_id.hex,
+                "source_id": source_id.hex,
+                "now": now,
+            },
+        )
+        for item_id, body, origin_page in (
+            (live_id, DERIVED_BODY, page_id.hex),
+            (orphan_id, PAGELESS_BODY, uuid4().hex),
+        ):
+            connection.execute(
+                sa.text(
+                    "insert into memory_item "
+                    "(id, workspace_id, subject, body, item_class, memory_kind, confidence, "
+                    "created_from_page_id, created_from_page_revision, embedding_digest, "
+                    "created_at, updated_at) values "
+                    "(:id, :workspace_id, 'shared', :body, 'fact', 'fact', 5, :page, 1, "
+                    "'sha256:e', :now, :now)"
+                ),
+                {
+                    "id": item_id.hex,
+                    "workspace_id": workspace_id.hex,
+                    "body": body,
+                    "page": origin_page,
+                    "now": now,
+                },
+            )
+        connection.commit()
+    engine.dispose()
+
+    command.upgrade(config, "memory_0012")
+    engine = sa.create_engine(sync_url)
+    with engine.connect() as connection:
+        ids = {
+            UUID(str(stored_id))
+            for stored_id in connection.execute(sa.text("select id from memory_item")).scalars()
+        }
+        links = {
+            (UUID(str(row.memory_item_id)), UUID(str(row.source_id)))
+            for row in connection.execute(
+                sa.text("select memory_item_id, source_id from memory_source")
+            ).all()
+        }
+        orphan_origin = connection.execute(
+            sa.text(
+                "select created_from_page_id, created_from_page_revision, source_id "
+                "from memory_item where id = :id"
+            ),
+            {"id": orphan_id.hex},
+        ).one()
+    engine.dispose()
+    assert ids == {live_id, orphan_id}
+    assert links == {(live_id, source_id)}
+    assert (orphan_origin.created_from_page_id, orphan_origin.created_from_page_revision) == (
+        None,
+        None,
+    )
+    assert orphan_origin.source_id is None

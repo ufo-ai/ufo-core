@@ -91,12 +91,14 @@ async def _seed_memory(
     memory_kind: str = "fact",
     confidence: int = 5,
     source_ref: str | None = None,
+    page_origin: tuple[UUID, int, UUID] | None = None,
     embedding_digest: str | None = None,
     embedding_claimed_at: datetime | None = None,
     superseded_by: UUID | None = None,
 ) -> UUID:
     memory_id = uuid4()
     when = BASE_TIME + timedelta(minutes=minute)
+    page_id, page_revision, source_id = page_origin or (None, None, None)
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(memory_item).values(
@@ -108,6 +110,9 @@ async def _seed_memory(
                 memory_kind=memory_kind,
                 confidence=confidence,
                 source_ref=source_ref,
+                created_from_page_id=page_id,
+                created_from_page_revision=page_revision,
+                source_id=source_id,
                 embedding_digest=embedding_digest,
                 embedding_claimed_at=embedding_claimed_at,
                 superseded_by=superseded_by,
@@ -212,6 +217,34 @@ async def test_memories_list_shared_and_member_newest_first_with_state(explorer)
     assert pref["embedding_digest"] == "sha256:abc"
     assert pref["half_life_days"] == 180.0
     assert 0.0 < pref["decay_factor"] < 0.8
+
+
+async def test_page_derived_memory_carries_its_whole_origin(explorer) -> None:
+    """A derived row's origin is the page, its revision, and the source that synced it — an
+    operator reading two identical claims apart needs all three, so every one reaches the JSON."""
+    workspace_id = await _seed_workspace()
+    page_id, source_id = uuid4(), uuid4()
+    await _seed_memory(
+        workspace_id,
+        SHARED_SUBJECT,
+        "the renewal closes September 30",
+        minute=7,
+        page_origin=(page_id, 4, source_id),
+    )
+    await _seed_memory(workspace_id, SHARED_SUBJECT, "a member typed this one", minute=8)
+    token = _mint(SECRET, workspace_id, f"alex@{OPERATOR_EMAIL_DOMAIN}")
+
+    rows = {
+        row["body"]: row
+        for row in (await explorer.get("/surface/memory/api/memories", headers=_auth(token))).json()
+    }
+    derived = rows["the renewal closes September 30"]
+    assert derived["created_from_page_id"] == str(page_id)
+    assert derived["created_from_page_revision"] == 4
+    assert derived["source_id"] == str(source_id)
+    typed = rows["a member typed this one"]
+    assert typed["created_from_page_id"] is None
+    assert typed["source_id"] is None
 
 
 async def test_indexing_lease_state_round_trips(explorer) -> None:

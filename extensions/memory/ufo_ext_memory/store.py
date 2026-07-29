@@ -91,12 +91,38 @@ memory_item = sa.Table(
     sa.Column("source_ref", sa.Text, nullable=True),
     sa.Column("created_from_page_id", sa.Uuid, nullable=True),
     sa.Column("created_from_page_revision", sa.BigInteger, nullable=True),
+    sa.Column("source_id", sa.Uuid, nullable=True),
     sa.Column("as_of", sa.DateTime(timezone=True), nullable=True),
     sa.Column("embedding_digest", sa.Text, nullable=True),
     sa.Column("embedding_claimed_at", sa.DateTime(timezone=True), nullable=True),
     sa.Column("superseded_by", sa.Uuid, nullable=True),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+    sa.CheckConstraint(
+        "(created_from_page_id is null and created_from_page_revision is null "
+        "and source_id is null) or (created_from_page_id is not null "
+        "and created_from_page_revision is not null and source_id is not null)",
+        name="memory_item_page_source",
+    ),
+)
+
+memory_source = sa.Table(
+    "memory_source",
+    _metadata,
+    sa.Column("workspace_id", sa.Uuid, nullable=False),
+    sa.Column("memory_item_id", sa.Uuid, nullable=False),
+    sa.Column("source_id", sa.Uuid, nullable=False),
+    sa.Column("page_id", sa.Uuid, nullable=False),
+    sa.Column("revision", sa.BigInteger, nullable=False),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+    sa.ForeignKeyConstraint(
+        ["memory_item_id"],
+        ["memory_item.id"],
+        ondelete="CASCADE",
+        name="memory_source_memory_item_id_fkey",
+    ),
+    sa.PrimaryKeyConstraint("memory_item_id", "page_id", name="memory_source_pkey"),
 )
 
 mem_page = sa.Table(
@@ -126,7 +152,10 @@ class MemoryInventoryItem(BaseModel):
     `half_life_days` is the recency half-life for its kind (None for episodic/semantic, which never
     decay) and `decay_factor` is the live multiplier recall applies to its relevance
     (`(confidence/10)·0.5**(age_days/half_life)` for facts, else 1.0). Lifecycle: `superseded_by`
-    non-NULL means consolidation replaced it; `subject` is its exact audience."""
+    non-NULL means consolidation replaced it; `subject` is its exact audience. `source_id` is the
+    source of the derivation it currently binds to (the last to write it); `source_ids` is the full
+    set of sources that derived this one fact — the same fact learned from two feeds is one row
+    granted by either, so the operator sees every feed it came from, not only the last."""
 
     subject: str
     body: str
@@ -136,6 +165,8 @@ class MemoryInventoryItem(BaseModel):
     source_ref: str | None
     created_from_page_id: UUID | None
     created_from_page_revision: int | None
+    source_id: UUID | None
+    source_ids: tuple[UUID, ...]
     as_of: datetime | None
     embedding_digest: str | None
     embedding_claimed_at: datetime | None
@@ -171,6 +202,18 @@ async def inventory(
             .mappings()
             .all()
         )
+        links: dict[UUID, list[UUID]] = {}
+        for link in (
+            await connection.execute(
+                sa.select(memory_source.c.memory_item_id, memory_source.c.source_id)
+                .where(
+                    memory_source.c.workspace_id == workspace_id,
+                    memory_source.c.memory_item_id.in_([row["id"] for row in rows]),
+                )
+                .order_by(memory_source.c.created_at, memory_source.c.source_id)
+            )
+        ).all():
+            links.setdefault(link.memory_item_id, []).append(link.source_id)
     now = datetime.now(UTC)
     return tuple(
         MemoryInventoryItem(
@@ -182,6 +225,8 @@ async def inventory(
             source_ref=row["source_ref"],
             created_from_page_id=row["created_from_page_id"],
             created_from_page_revision=row["created_from_page_revision"],
+            source_id=row["source_id"],
+            source_ids=tuple(links.get(row["id"], ())),
             as_of=row["as_of"],
             embedding_digest=row["embedding_digest"],
             embedding_claimed_at=row["embedding_claimed_at"],
@@ -210,8 +255,8 @@ def _aware(when: datetime) -> datetime:
 
 class MemoryWrite(BaseModel):
     """What a commit records: the subject scoping visibility, the body, its class, its provenance,
-    and the recall-decay inputs — `created_from_page_id` is the synced page a derivation distilled
-    it from (the `created_from` link) and `created_from_page_revision` binds it to that page
+    and the recall-decay inputs — `created_from_page_id` and `source_id` identify the synced page
+    a derivation distilled it from, while `created_from_page_revision` binds it to that page
     version; `source_ref` is a free-form note for tool writes, `as_of` says when the source
     information was current, `memory_kind` selects the recency half-life
     (fact/preference/decision/event/task), and `confidence` (1..10) scales a fact's decayed rank."""
@@ -224,12 +269,18 @@ class MemoryWrite(BaseModel):
     source_ref: str | None = None
     created_from_page_id: UUID | None = None
     created_from_page_revision: int | None = None
+    source_id: UUID | None = None
     as_of: datetime | None = None
 
     @model_validator(mode="after")
     def page_origin_is_complete(self) -> Self:
-        if (self.created_from_page_id is None) != (self.created_from_page_revision is None):
-            raise ValueError("page-derived memory needs both page id and revision")
+        page_origin = (
+            self.created_from_page_id is not None,
+            self.created_from_page_revision is not None,
+            self.source_id is not None,
+        )
+        if any(page_origin) and not all(page_origin):
+            raise ValueError("page-derived memory needs page id, revision, and source id")
         return self
 
 
@@ -246,6 +297,7 @@ class MemoryItem(BaseModel):
     source_ref: str | None = None
     created_from_page_id: UUID | None = None
     created_from_page_revision: int | None = None
+    source_id: UUID | None = None
     embedding_digest: str | None = None
     superseded_by: UUID | None = None
 
@@ -415,20 +467,22 @@ class MemoryStore:
     async def commit(self, write: MemoryWrite) -> None:
         """Persist one memory_item with no derived state: embedding_digest stays NULL, marking the
         row due for the index job — the sole producer of chunks and embeddings. The id is
-        content-addressed over `(workspace, subject, item_class, body)`, so re-committing the same
-        fact upserts its decay inputs in place rather than accumulating a duplicate recallable row;
-        a re-commit that binds it to another page revision makes it due again, since whether that
-        revision may be published is the index job's question to answer, while an identical
-        re-commit at the same binding leaves the existing chunks and their digest untouched."""
+        content-addressed over `(workspace, subject, item_class, body)`, so the same fact learned
+        from two sources is one row, not two; each page that derived it is recorded as an additive
+        `memory_source` link, one per page, and the row's own `(page, revision, source)` records
+        the derivation it currently binds to. Re-committing upserts the decay inputs in place rather
+        than accumulating a duplicate recallable row; a re-commit that binds it to another page
+        revision makes it due again, since whether that revision may be published is the index job's
+        question to answer, while an identical re-commit at the same binding leaves the existing
+        chunks and their digest untouched."""
+        item_id = uuid5(
+            MEMORY_ITEM_NAMESPACE,
+            "\x00".join((str(self.workspace_id), write.subject, write.item_class, write.body)),
+        )
         async with self.transaction() as connection:
             insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
             statement = insert(memory_item).values(
-                id=uuid5(
-                    MEMORY_ITEM_NAMESPACE,
-                    "\x00".join(
-                        (str(self.workspace_id), write.subject, write.item_class, write.body)
-                    ),
-                ),
+                id=item_id,
                 workspace_id=self.workspace_id,
                 subject=write.subject,
                 body=write.body,
@@ -438,6 +492,7 @@ class MemoryStore:
                 source_ref=write.source_ref,
                 created_from_page_id=write.created_from_page_id,
                 created_from_page_revision=write.created_from_page_revision,
+                source_id=write.source_id,
                 as_of=write.as_of,
                 superseded_by=None,
                 created_at=sa.func.now(),
@@ -464,6 +519,7 @@ class MemoryStore:
                         memory_item.c.created_from_page_revision: (
                             statement.excluded.created_from_page_revision
                         ),
+                        memory_item.c.source_id: statement.excluded.source_id,
                         memory_item.c.embedding_digest: sa.case(
                             (rebound, None), else_=memory_item.c.embedding_digest
                         ),
@@ -475,37 +531,146 @@ class MemoryStore:
                     },
                 )
             )
-
-    async def supersede_page_facts(self, page_id: UUID, revision: int | None) -> None:
-        """Retire the facts an earlier state of one page left behind, dropping each deleted row's
-        index scope with it: every row created from `page_id` whose `created_from_page_revision` is
-        not `revision`, or every row created from it once the page is gone (`revision` None).
-
-        This is the only path that removes a page-derived memory, and the fact deriver is its only
-        caller — reached only for a page whose derivation committed a fact at `revision`, or a page
-        no longer there to derive one, so a fact is never removed for a revision that produced no
-        replacement. A second call over the same revision deletes nothing, so a replayed batch
-        retires each superseded row exactly once."""
-        conditions: tuple[ColumnElement[bool], ...] = (
-            memory_item.c.workspace_id == self.workspace_id,
-            memory_item.c.created_from_page_id == page_id,
-        )
-        if revision is not None:
-            conditions = (
-                *conditions,
-                memory_item.c.created_from_page_revision.is_distinct_from(revision),
-            )
-        async with self.transaction() as connection:
-            superseded = tuple(
-                (
-                    await connection.execute(
-                        sa.delete(memory_item).where(*conditions).returning(memory_item.c.id)
+            if write.source_id is not None:
+                link = insert(memory_source).values(
+                    workspace_id=self.workspace_id,
+                    memory_item_id=item_id,
+                    source_id=write.source_id,
+                    page_id=write.created_from_page_id,
+                    revision=write.created_from_page_revision,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+                await connection.execute(
+                    link.on_conflict_do_update(
+                        index_elements=[
+                            memory_source.c.memory_item_id,
+                            memory_source.c.page_id,
+                        ],
+                        set_={
+                            memory_source.c.source_id: link.excluded.source_id,
+                            memory_source.c.revision: link.excluded.revision,
+                            memory_source.c.updated_at: sa.func.now(),
+                        },
                     )
                 )
-                .scalars()
-                .all()
+
+    async def supersede_page_facts(self, page_id: UUID, revision: int | None) -> None:
+        """Retire what an earlier state of one page derived, by the link that page left — not by the
+        fact's row. A fact learned from several feeds is one row a reader reaches through any of its
+        `memory_source` links, keyed one per page it was derived from, so retiring one page drops
+        only that page's link and keeps the row while another page still links it; the row is
+        deleted, index scope and all, only when its last link is gone. When the dropped link was the
+        row's own primary origin — `commit` writes a row's binding and that page's link together, so
+        the page it binds to names the link — the primary re-points to a surviving link the page
+        mirror still shows live at that link's revision, falling back to the oldest surviving link
+        when none is; either way the primary lands on a link that exists, and clears its digest so
+        the index job re-checks the binding. When no surviving link is yet live in the mirror — the
+        page indexer runs on a cursor independent of this one, so its `mem_page` write can lag — the
+        primary lands on the oldest surviving link anyway, and recall fences that binding by
+        revision until the mirror catches up rather than serving a stale one.
+
+        A gone page (`revision` None) retires every link from it; a re-derived page retires only its
+        link at a stale revision, since `commit` already refreshed that page's link at the new one.
+        This is the only path that removes a page-derived memory, and the fact deriver its only
+        caller. Affected rows are locked in id order so concurrent retirements over different pages
+        of the same fact serialize on the row rather than racing its re-point; a second call over
+        the same revision finds no stale link, so a replayed batch retires each exactly once."""
+        stale: tuple[ColumnElement[bool], ...] = (
+            memory_source.c.workspace_id == self.workspace_id,
+            memory_source.c.page_id == page_id,
+        )
+        if revision is not None:
+            stale = (*stale, memory_source.c.revision.is_distinct_from(revision))
+        deleted: list[UUID] = []
+        async with self.transaction() as connection:
+            affected = sorted(
+                row.memory_item_id
+                for row in (
+                    await connection.execute(
+                        sa.select(memory_source.c.memory_item_id).where(*stale).distinct()
+                    )
+                ).all()
             )
-        for memory_id in superseded:
+            if not affected:
+                return
+            locked = (
+                sa.select(
+                    memory_item.c.id,
+                    memory_item.c.subject,
+                    memory_item.c.created_from_page_id,
+                    memory_item.c.created_from_page_revision,
+                    memory_item.c.source_id,
+                )
+                .where(memory_item.c.id.in_(affected))
+                .order_by(memory_item.c.id)
+            )
+            if connection.dialect.name == "postgresql":
+                locked = locked.with_for_update()
+            rows = (await connection.execute(locked)).all()
+            await connection.execute(sa.delete(memory_source).where(*stale))
+            survivors = (
+                await connection.execute(
+                    sa.select(
+                        memory_source.c.memory_item_id,
+                        memory_source.c.source_id,
+                        memory_source.c.page_id,
+                        memory_source.c.revision,
+                    )
+                    .where(memory_source.c.memory_item_id.in_(affected))
+                    .order_by(memory_source.c.created_at, memory_source.c.source_id)
+                )
+            ).all()
+            links_by_item: dict[UUID, list[sa.Row]] = {}
+            for link in survivors:
+                links_by_item.setdefault(link.memory_item_id, []).append(link)
+            mirror = (
+                {
+                    page.page_id: page
+                    for page in (
+                        await connection.execute(
+                            sa.select(
+                                mem_page.c.page_id, mem_page.c.subject, mem_page.c.revision
+                            ).where(
+                                mem_page.c.workspace_id == self.workspace_id,
+                                mem_page.c.page_id.in_({link.page_id for link in survivors}),
+                            )
+                        )
+                    ).all()
+                }
+                if survivors
+                else {}
+            )
+            for row in rows:
+                links = links_by_item.get(row.id, [])
+                if not links:
+                    await connection.execute(
+                        sa.delete(memory_item).where(memory_item.c.id == row.id)
+                    )
+                    deleted.append(row.id)
+                    continue
+                if any(link.page_id == row.created_from_page_id for link in links):
+                    continue
+                current = [
+                    link
+                    for link in links
+                    if (page := mirror.get(link.page_id)) is not None
+                    and page.subject == row.subject
+                    and page.revision == link.revision
+                ]
+                survivor = current[0] if current else links[0]
+                await connection.execute(
+                    sa.update(memory_item)
+                    .where(memory_item.c.id == row.id)
+                    .values(
+                        created_from_page_id=survivor.page_id,
+                        created_from_page_revision=survivor.revision,
+                        source_id=survivor.source_id,
+                        embedding_digest=None,
+                        embedding_claimed_at=None,
+                    )
+                )
+        for memory_id in deleted:
             await self.index.delete(IndexScope(OWNER_KIND_MEMORY_ITEM, str(memory_id)))
 
     async def recall(
@@ -788,6 +953,7 @@ class MemoryIndexer:
                 memory_item.c.source_ref,
                 memory_item.c.created_from_page_id,
                 memory_item.c.created_from_page_revision,
+                memory_item.c.source_id,
                 memory_item.c.embedding_digest,
                 memory_item.c.superseded_by,
             )
@@ -814,7 +980,9 @@ class MemoryIndexer:
 
     async def _index_item(self, item: MemoryItem) -> None:
         if not await self._publishable(
-            item.subject, item.created_from_page_id, item.created_from_page_revision
+            item.subject,
+            item.created_from_page_id,
+            item.created_from_page_revision,
         ):
             await self.index.delete(IndexScope(OWNER_KIND_MEMORY_ITEM, str(item.id)))
             await self._settle(item)
@@ -838,7 +1006,9 @@ class MemoryIndexer:
                 )
             ).one_or_none()
         if binding is None or not await self._publishable(
-            item.subject, binding.created_from_page_id, binding.created_from_page_revision
+            item.subject,
+            binding.created_from_page_id,
+            binding.created_from_page_revision,
         ):
             await self.index.delete(IndexScope(OWNER_KIND_MEMORY_ITEM, str(item.id)))
             return
@@ -851,7 +1021,7 @@ class MemoryIndexer:
         while its page is live and still carries exactly that subject and revision. Recall asks the
         index for its candidate window first and fences page-derived rows afterwards, so a row bound
         to a superseded revision must never occupy a candidate slot a reader could have spent on the
-        fact that replaced it — the row itself is the fact deriver's to retire."""
+        fact that replaced it; the row itself is the fact deriver's to retire."""
         if page_id is None:
             return True
         state = (await self.page_states((page_id,))).get(page_id)
@@ -878,6 +1048,7 @@ class MemoryIndexer:
                     memory_item.c.body == item.body,
                     memory_item.c.created_from_page_id == item.created_from_page_id,
                     memory_item.c.created_from_page_revision == item.created_from_page_revision,
+                    memory_item.c.source_id == item.source_id,
                     memory_item.c.embedding_claimed_at.is_not(None),
                 )
             )
@@ -890,11 +1061,11 @@ class PageIndexer:
     page-change runner owns the cursor and the batch loop and hands this one delivered batch to
     apply; the derivation stays idempotent so a replayed change re-upserts the same rows. A
     tombstoned change drops the page's chunks and mirror row; every other change accepts the
-    payload only while subject and revision still match the core page before and after embedding.
-    It never retires a `memory_item` — facts derived from a page are the fact deriver's to replace
-    and retire, on its own cursor — but it does make the facts of the revisions a page has left due
-    for the index job again, so their chunks leave recall's candidate window on a cursor no model
-    can hold."""
+    payload only while subject and revision still match the core page before and after
+    embedding. It never retires a `memory_item` — facts derived from a page are the fact deriver's
+    to replace and retire, on its own cursor — but it does make the facts of the revisions a page
+    has left due for the index job again, so their chunks leave recall's candidate window on a
+    cursor no model can hold."""
 
     index: IndexBackend
     embed: EmbedClient

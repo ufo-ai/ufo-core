@@ -591,6 +591,7 @@ async def test_links_stay_visibility_congruent_and_hidden_targets_fail_closed(
                     source_ref=None,
                     created_from_page_id=page_id,
                     created_from_page_revision=revision,
+                    source_id=source_id,
                     as_of=None,
                     embedding_digest=None,
                     superseded_by=None,

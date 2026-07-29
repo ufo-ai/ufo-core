@@ -586,13 +586,7 @@ class ExtensionContext:
         )
         async with workspace_tx() as connection:
             rows = (await connection.execute(query)).all()
-        return {
-            row.id: PageState(
-                subject=row.subject,
-                revision=row.revision,
-            )
-            for row in rows
-        }
+        return {row.id: PageState(subject=row.subject, revision=row.revision) for row in rows}
 
     async def register_source(
         self,

@@ -5,12 +5,15 @@ and hook drive it — over the deploy index/embed backends and the workspace-sco
 threads onto the context. The embed client and the DefaultIndex are real dependencies, never the
 asserted thing: every assertion reads the Recalled/SourceMatch values back."""
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
+import pytest
 import sqlalchemy as sa
+from sqlalchemy.exc import IntegrityError
 from ufo_ext_embed_openai import EMBED_DIM
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.store import (
@@ -24,8 +27,10 @@ from ufo_ext_memory.store import (
     enforce_type_diversity,
     fuse_hits,
     fuse_recall,
+    inventory,
     mem_page,
     memory_item,
+    memory_source,
     recall_subjects,
 )
 
@@ -70,6 +75,19 @@ class StubEmbed:
 class BrokenEmbed:
     async def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
         raise RuntimeError("embed provider unreachable")
+
+
+class CountingEmbed:
+    """Counts embed calls: re-embedding an unchanged body is metered model spend the idempotent
+    chunk upsert hides, so the call count is the only witness of what a re-commit costs."""
+
+    def __init__(self, vector: tuple[float, ...]) -> None:
+        self._vector = vector
+        self.calls = 0
+
+    async def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
+        self.calls += 1
+        return tuple(self._vector for _ in texts)
 
 
 class ReclassifyingPage:
@@ -188,16 +206,16 @@ async def _seed_item(
     without the derivation job in these unit tests."""
     item_id = uuid4()
     async with workspace_tx() as connection:
-        page_revision = (
-            None
+        page_authority = (
+            (None, None)
             if created_from_page_id is None
             else (
                 await connection.execute(
-                    sa.select(tables.page.c.revision).where(
+                    sa.select(tables.page.c.revision, tables.page.c.source_id).where(
                         tables.page.c.id == created_from_page_id
                     )
                 )
-            ).scalar_one()
+            ).one()
         )
         await connection.execute(
             sa.insert(memory_item).values(
@@ -208,7 +226,8 @@ async def _seed_item(
                 item_class=FACT,
                 source_ref=None,
                 created_from_page_id=created_from_page_id,
-                created_from_page_revision=page_revision,
+                created_from_page_revision=page_authority[0],
+                source_id=page_authority[1],
                 as_of=as_of,
                 embedding_digest="sha256:seeded",
                 superseded_by=None,
@@ -313,6 +332,485 @@ async def test_recommitting_a_fact_updates_in_place_not_duplicated(db: None) -> 
     hits = await store.recall("vault code", frozenset({SHARED_SUBJECT}), 10)
     assert len(hits) == 1
     assert "4821" in hits[0].body
+
+
+async def test_same_fact_from_two_sources_is_one_row_granted_by_either(db: None) -> None:
+    """The same fact learned from two feeds is one row, not two: its content id ignores the source,
+    so the second commit upserts the first row rather than minting a rival. Both feeds are kept as
+    additive `memory_source` links, so a reader granted either source reaches the one fact, and the
+    row's own `source_id` tracks the last derivation for staleness."""
+    workspace_id = await _workspace()
+    page_a, page_b = uuid4(), uuid4()
+    source_a, source_b = uuid4(), uuid4()
+    await _seed_page(workspace_id, page_a, source_a, SHARED_SUBJECT)
+    await _seed_page(workspace_id, page_b, source_b, SHARED_SUBJECT)
+    store = _store(StubEmbed(vec((0, 1.0))), workspace_id)
+    for page_id, source_id in ((page_a, source_a), (page_b, source_b)):
+        await store.commit(
+            MemoryWrite(
+                subject=SHARED_SUBJECT,
+                body="the launch date is June 12",
+                created_from_page_id=page_id,
+                created_from_page_revision=PAGE_REVISION,
+                source_id=source_id,
+            )
+        )
+
+    async with workspace_tx() as connection:
+        items = (
+            await connection.execute(
+                sa.select(
+                    memory_item.c.id,
+                    memory_item.c.created_from_page_id,
+                    memory_item.c.source_id,
+                )
+            )
+        ).all()
+        links = (
+            await connection.execute(
+                sa.select(memory_source.c.source_id, memory_source.c.page_id).where(
+                    memory_source.c.memory_item_id == items[0].id
+                )
+            )
+        ).all()
+    assert len(items) == 1
+    assert items[0].created_from_page_id == page_b
+    assert items[0].source_id == source_b
+    assert set(links) == {(source_a, page_a), (source_b, page_b)}
+
+    (provenance,) = await inventory(workspace_tx, workspace_id)
+    assert set(provenance.source_ids) == {source_a, source_b}
+
+
+async def test_deleting_one_source_keeps_a_fact_its_other_source_still_provides(db: None) -> None:
+    """A fact from two feeds is one row a reader reaches through either, so deleting one feed's page
+    must keep it while the other feed is live. Retiring the gone page drops only its link and, since
+    it was the row's primary origin, re-points the primary to the surviving feed and clears the
+    digest so the index job re-checks the new binding — the fact stays recallable through it."""
+    workspace_id = await _workspace()
+    page_a, page_b = uuid4(), uuid4()
+    source_a, source_b = uuid4(), uuid4()
+    await _seed_page(workspace_id, page_a, source_a, SHARED_SUBJECT)
+    await _seed_page(workspace_id, page_b, source_b, SHARED_SUBJECT)
+    store = _store(StubEmbed(vec((0, 1.0))), workspace_id)
+    for page_id, source_id in ((page_a, source_a), (page_b, source_b)):
+        await store.commit(
+            MemoryWrite(
+                subject=SHARED_SUBJECT,
+                body="the launch date is June 12",
+                created_from_page_id=page_id,
+                created_from_page_revision=PAGE_REVISION,
+                source_id=source_id,
+            )
+        )
+    async with workspace_tx() as connection:
+        await connection.execute(sa.delete(tables.page).where(tables.page.c.id == page_b))
+    with ws(workspace_id):
+        await store.supersede_page_facts(page_b, None)
+
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(
+                    memory_item.c.id,
+                    memory_item.c.created_from_page_id,
+                    memory_item.c.source_id,
+                    memory_item.c.embedding_digest,
+                )
+            )
+        ).one()
+        links = (
+            await connection.execute(sa.select(memory_source.c.source_id, memory_source.c.page_id))
+        ).all()
+    assert row.created_from_page_id == page_a
+    assert row.source_id == source_a
+    assert row.embedding_digest is None
+    assert set(links) == {(source_a, page_a)}
+
+    with ws(workspace_id):
+        await MemoryIndexer(
+            index=store.index,
+            embed=StubEmbed(vec((0, 1.0))),
+            transaction=workspace_tx,
+            chunker=TextChunker(),
+            page_states=context_for("memory", frozenset()).page_states,
+        ).run()
+        recalled = await store.recall("launch date", frozenset({SHARED_SUBJECT}), 10)
+    assert [item.memory_id for item in recalled] == [row.id]
+
+
+async def test_deleting_the_last_source_erases_the_fact(db: None) -> None:
+    """A single-source fact loses its only link when its page is deleted, so the row is removed and
+    its index scope with it — nothing else links it."""
+    workspace_id = await _workspace()
+    page_id, source_id = uuid4(), uuid4()
+    await _seed_page(workspace_id, page_id, source_id, SHARED_SUBJECT)
+    store = _store(StubEmbed(vec((0, 1.0))), workspace_id)
+    await store.commit(
+        MemoryWrite(
+            subject=SHARED_SUBJECT,
+            body="the retired mailbox code is helios",
+            created_from_page_id=page_id,
+            created_from_page_revision=PAGE_REVISION,
+            source_id=source_id,
+        )
+    )
+    with ws(workspace_id):
+        await MemoryIndexer(
+            index=store.index,
+            embed=StubEmbed(vec((0, 1.0))),
+            transaction=workspace_tx,
+            chunker=TextChunker(),
+            page_states=context_for("memory", frozenset()).page_states,
+        ).run()
+    async with workspace_tx() as connection:
+        await connection.execute(sa.delete(tables.page).where(tables.page.c.id == page_id))
+    with ws(workspace_id):
+        await store.supersede_page_facts(page_id, None)
+
+    async with workspace_tx() as connection:
+        rows = (
+            await connection.execute(sa.select(sa.func.count()).select_from(memory_item))
+        ).scalar_one()
+        chunks = (await connection.execute(sa.text("select count(*) from chunk"))).scalar_one()
+    assert rows == 0
+    assert chunks == 0
+
+
+async def test_retiring_a_primary_repoints_to_a_live_feed_over_an_older_stale_one(
+    db: None,
+) -> None:
+    """Re-pointing a retired primary prefers a surviving link the page mirror shows live at that
+    link's revision over a merely older link whose page it does not — so a fact bound to a deleted
+    feed lands on a feed a reader can actually recall it through, not the oldest one to hand."""
+    workspace_id = await _workspace()
+    stale_page, live_page, primary_page = uuid4(), uuid4(), uuid4()
+    stale_src, live_src, primary_src = uuid4(), uuid4(), uuid4()
+    await _seed_page(workspace_id, stale_page, stale_src, SHARED_SUBJECT)
+    await _seed_page(workspace_id, live_page, live_src, SHARED_SUBJECT)
+    await _seed_page(workspace_id, primary_page, primary_src, SHARED_SUBJECT)
+    async with workspace_tx() as connection:
+        revisions = {
+            row.id: row.revision
+            for row in (
+                await connection.execute(
+                    sa.select(tables.page.c.id, tables.page.c.revision).where(
+                        tables.page.c.id.in_((stale_page, live_page, primary_page))
+                    )
+                )
+            ).all()
+        }
+    store = _store(StubEmbed(vec((0, 1.0))), workspace_id)
+    body = "the badge reader logs every swipe"
+    for page_id, source_id in (
+        (stale_page, stale_src),
+        (live_page, live_src),
+        (primary_page, primary_src),
+    ):
+        await store.commit(
+            MemoryWrite(
+                subject=SHARED_SUBJECT,
+                body=body,
+                created_from_page_id=page_id,
+                created_from_page_revision=revisions[page_id],
+                source_id=source_id,
+            )
+        )
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(memory_source)
+            .where(memory_source.c.page_id == stale_page)
+            .values(created_at=datetime(2024, 1, 1, tzinfo=UTC))
+        )
+        await connection.execute(
+            sa.update(memory_source)
+            .where(memory_source.c.page_id == live_page)
+            .values(created_at=datetime(2025, 6, 1, tzinfo=UTC))
+        )
+        await connection.execute(
+            sa.insert(mem_page).values(
+                page_id=live_page,
+                workspace_id=workspace_id,
+                subject=SHARED_SUBJECT,
+                revision=revisions[live_page],
+                created_at=datetime(2025, 1, 1, tzinfo=UTC),
+            )
+        )
+    with ws(workspace_id):
+        await store.supersede_page_facts(primary_page, None)
+
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(memory_item.c.created_from_page_id, memory_item.c.source_id)
+            )
+        ).one()
+    assert row.created_from_page_id == live_page
+    assert row.source_id == live_src
+
+
+async def test_two_pages_of_one_source_each_keep_the_fact_they_share(db: None) -> None:
+    """A fact one source derives from two of its pages carries a link per page, not one per source,
+    so deleting one page drops only that page's link and re-points the primary to the page that
+    still holds it — a per-source link would have collapsed both pages onto one row and lost the
+    fact with the first delete."""
+    workspace_id = await _workspace()
+    source_id = uuid4()
+    page_1, page_2 = uuid4(), uuid4()
+    await _seed_page(workspace_id, page_1, source_id, SHARED_SUBJECT)
+    now = datetime(2025, 1, 1, tzinfo=UTC)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.page).values(
+                id=page_2,
+                workspace_id=workspace_id,
+                source_id=source_id,
+                digest=PAGE_DIGEST,
+                body_ref=f"pages/{page_2}",
+                stream="notes",
+                title="Page",
+                subject=SHARED_SUBJECT,
+                tombstone=False,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    store = _store(StubEmbed(vec((0, 1.0))), workspace_id)
+    body = "the vault combination is 4-19-77"
+    for page_id in (page_2, page_1):
+        await store.commit(
+            MemoryWrite(
+                subject=SHARED_SUBJECT,
+                body=body,
+                created_from_page_id=page_id,
+                created_from_page_revision=PAGE_REVISION,
+                source_id=source_id,
+            )
+        )
+    async with workspace_tx() as connection:
+        await connection.execute(sa.delete(tables.page).where(tables.page.c.id == page_1))
+    with ws(workspace_id):
+        await store.supersede_page_facts(page_1, None)
+
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(memory_item.c.created_from_page_id, memory_item.c.source_id)
+            )
+        ).one()
+        links = (
+            await connection.execute(sa.select(memory_source.c.source_id, memory_source.c.page_id))
+        ).all()
+    assert row.created_from_page_id == page_2
+    assert row.source_id == source_id
+    assert set(links) == {(source_id, page_2)}
+
+
+async def test_retiring_a_non_primary_page_leaves_the_primary_binding_untouched(db: None) -> None:
+    """Retiring a feed the fact only links to — not the one its row binds to — drops that link and
+    stops: a surviving link still backs the primary, so the row keeps its page, source, and settled
+    digest. Only losing the primary's own link forces the re-point that clears the digest, so this
+    path must leave it alone."""
+    workspace_id = await _workspace()
+    page_secondary, page_primary = uuid4(), uuid4()
+    source_secondary, source_primary = uuid4(), uuid4()
+    await _seed_page(workspace_id, page_secondary, source_secondary, SHARED_SUBJECT)
+    await _seed_page(workspace_id, page_primary, source_primary, SHARED_SUBJECT)
+    store = _store(StubEmbed(vec((0, 1.0))), workspace_id)
+    for page_id, source_id in (
+        (page_secondary, source_secondary),
+        (page_primary, source_primary),
+    ):
+        await store.commit(
+            MemoryWrite(
+                subject=SHARED_SUBJECT,
+                body="the wire transfer clears friday",
+                created_from_page_id=page_id,
+                created_from_page_revision=PAGE_REVISION,
+                source_id=source_id,
+            )
+        )
+    with ws(workspace_id):
+        await MemoryIndexer(
+            index=store.index,
+            embed=store.embed,
+            transaction=workspace_tx,
+            chunker=TextChunker(),
+            page_states=context_for("memory", frozenset()).page_states,
+        ).run()
+    async with workspace_tx() as connection:
+        settled = (await connection.execute(sa.select(memory_item.c.embedding_digest))).scalar_one()
+    assert settled is not None
+    async with workspace_tx() as connection:
+        await connection.execute(sa.delete(tables.page).where(tables.page.c.id == page_secondary))
+    with ws(workspace_id):
+        await store.supersede_page_facts(page_secondary, None)
+
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(
+                    memory_item.c.created_from_page_id,
+                    memory_item.c.source_id,
+                    memory_item.c.embedding_digest,
+                )
+            )
+        ).one()
+        links = (
+            await connection.execute(sa.select(memory_source.c.source_id, memory_source.c.page_id))
+        ).all()
+    assert row.created_from_page_id == page_primary
+    assert row.source_id == source_primary
+    assert row.embedding_digest == settled
+    assert set(links) == {(source_primary, page_primary)}
+
+
+async def test_a_revision_bump_retires_only_the_stale_source_link(db: None) -> None:
+    """A page whose new revision no longer derives a fact retires that page's stale link to it,
+    never a second feed's link to the same fact. The shared fact survives on the other feed, and
+    because the retired link was its primary origin the primary re-points to the surviving live
+    feed; the page's new-revision fact keeps its own fresh link."""
+    workspace_id = await _workspace()
+    page_a, page_b = uuid4(), uuid4()
+    source_a, source_b = uuid4(), uuid4()
+    await _seed_page(workspace_id, page_a, source_a, SHARED_SUBJECT)
+    await _seed_page(workspace_id, page_b, source_b, SHARED_SUBJECT)
+    store = _store(StubEmbed(vec((0, 1.0))), workspace_id)
+    shared = "the auditor is booked for thursday"
+    for page_id, source_id in ((page_b, source_b), (page_a, source_a)):
+        await store.commit(
+            MemoryWrite(
+                subject=SHARED_SUBJECT,
+                body=shared,
+                created_from_page_id=page_id,
+                created_from_page_revision=PAGE_REVISION,
+                source_id=source_id,
+            )
+        )
+    next_revision = PAGE_REVISION + 1
+    await store.commit(
+        MemoryWrite(
+            subject=SHARED_SUBJECT,
+            body="the ledger closes on friday",
+            created_from_page_id=page_a,
+            created_from_page_revision=next_revision,
+            source_id=source_a,
+        )
+    )
+    with ws(workspace_id):
+        await store.supersede_page_facts(page_a, next_revision)
+
+    async with workspace_tx() as connection:
+        shared_row = (
+            await connection.execute(
+                sa.select(
+                    memory_item.c.created_from_page_id,
+                    memory_item.c.created_from_page_revision,
+                    memory_item.c.source_id,
+                ).where(memory_item.c.body == shared)
+            )
+        ).one()
+        links = {
+            (row.body, row.source_id, row.page_id, row.revision)
+            for row in (
+                await connection.execute(
+                    sa.select(
+                        memory_item.c.body,
+                        memory_source.c.source_id,
+                        memory_source.c.page_id,
+                        memory_source.c.revision,
+                    ).join(memory_source, memory_source.c.memory_item_id == memory_item.c.id)
+                )
+            ).all()
+        }
+    assert (shared_row.created_from_page_id, shared_row.created_from_page_revision) == (
+        page_b,
+        PAGE_REVISION,
+    )
+    assert shared_row.source_id == source_b
+    assert links == {
+        (shared, source_b, page_b, PAGE_REVISION),
+        ("the ledger closes on friday", source_a, page_a, next_revision),
+    }
+
+
+async def test_concurrent_retirements_over_one_fact_leave_no_dangling_primary(db: None) -> None:
+    """Two feeds' pages retiring at once must not race the shared fact's re-point. The affected rows
+    are locked in id order, so one retirement fully commits before the other reads survivors; both
+    pages gone, the fact is deleted outright. Without the lock the second reads the link the first
+    is deleting, re-points the primary onto it, and leaves a row bound to a page no reader can
+    resolve — so this drives many shared facts through the race at once and asserts none dangles."""
+    workspace_id = await _workspace()
+    page_a, page_b = uuid4(), uuid4()
+    source_a, source_b = uuid4(), uuid4()
+    await _seed_page(workspace_id, page_a, source_a, SHARED_SUBJECT)
+    await _seed_page(workspace_id, page_b, source_b, SHARED_SUBJECT)
+    store = _store(StubEmbed(vec((0, 1.0))), workspace_id)
+    for index in range(24):
+        for page_id, source_id in ((page_a, source_a), (page_b, source_b)):
+            await store.commit(
+                MemoryWrite(
+                    subject=SHARED_SUBJECT,
+                    body=f"fact {index} the merger closes in march",
+                    created_from_page_id=page_id,
+                    created_from_page_revision=PAGE_REVISION,
+                    source_id=source_id,
+                )
+            )
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.delete(tables.page).where(tables.page.c.id.in_((page_a, page_b)))
+        )
+    with ws(workspace_id):
+        await asyncio.gather(
+            store.supersede_page_facts(page_a, None),
+            store.supersede_page_facts(page_b, None),
+        )
+    async with workspace_tx() as connection:
+        primaries = (
+            await connection.execute(
+                sa.select(memory_item.c.id, memory_item.c.created_from_page_id)
+            )
+        ).all()
+        live_links = {
+            (link.memory_item_id, link.page_id)
+            for link in (
+                await connection.execute(
+                    sa.select(memory_source.c.memory_item_id, memory_source.c.page_id)
+                )
+            ).all()
+        }
+    assert primaries == []
+    assert live_links == set()
+    """A page-derived row carries page, revision, and source together or not at all — the database
+    refuses a partial origin, so the page indexer's staleness sweep never has to ask whether a
+    derivation is missing one: inequality against the live page state selects every stale fact."""
+    workspace_id = await _workspace()
+    page_id, source_id = uuid4(), uuid4()
+    await _seed_page(workspace_id, page_id, source_id, SHARED_SUBJECT)
+    for revision, source in ((None, source_id), (PAGE_REVISION, None)):
+        with pytest.raises(IntegrityError, match="memory_item_page_source"):
+            async with workspace_tx() as connection:
+                await connection.execute(
+                    sa.insert(memory_item).values(
+                        id=uuid4(),
+                        workspace_id=workspace_id,
+                        subject=SHARED_SUBJECT,
+                        body="the vault code is 4821",
+                        memory_kind="fact",
+                        confidence=5,
+                        item_class=FACT,
+                        source_ref=None,
+                        created_from_page_id=page_id,
+                        created_from_page_revision=revision,
+                        source_id=source,
+                        as_of=None,
+                        embedding_digest=None,
+                        superseded_by=None,
+                        created_at=sa.func.now(),
+                        updated_at=sa.func.now(),
+                    )
+                )
 
 
 def test_fuse_recall_blends_cosine_to_break_a_rrf_tie() -> None:
@@ -665,6 +1163,7 @@ async def test_page_index_write_is_deleted_when_the_subject_changes_during_embed
 ) -> None:
     workspace_id = await _workspace()
     page_id = uuid4()
+    source_id = uuid4()
     index = DefaultIndex(transaction=workspace_tx)
     now = datetime(2025, 1, 1, tzinfo=UTC)
     with ws(workspace_id):
@@ -674,12 +1173,16 @@ async def test_page_index_write_is_deleted_when_the_subject_changes_during_embed
             transaction=workspace_tx,
             chunker=TextChunker(),
             workspace_id=workspace_id,
-            page_states=ReclassifyingPage(page_id, SHARED_SUBJECT, member_subject(uuid4())),
+            page_states=ReclassifyingPage(
+                page_id,
+                SHARED_SUBJECT,
+                member_subject(uuid4()),
+            ),
         ).apply(
             (
                 PageChange(
                     page_id=page_id,
-                    source_id=uuid4(),
+                    source_id=source_id,
                     subject=SHARED_SUBJECT,
                     stream="notes",
                     title="Stale page",
@@ -788,6 +1291,7 @@ async def test_same_subject_redaction_hides_stale_facts_and_no_page_pass_removes
             body="the retired acquisition codename is polaris",
             created_from_page_id=page_id,
             created_from_page_revision=PAGE_REVISION,
+            source_id=source_id,
         )
     )
     with ws(workspace_id):
@@ -871,6 +1375,7 @@ async def test_retirement_requeues_a_fact_rebound_while_its_index_is_deleted(
             body=body,
             created_from_page_id=page_id,
             created_from_page_revision=PAGE_REVISION,
+            source_id=source_id,
         )
     )
     with ws(workspace_id):
@@ -895,6 +1400,7 @@ async def test_retirement_requeues_a_fact_rebound_while_its_index_is_deleted(
                 body=body,
                 created_from_page_id=page_id,
                 created_from_page_revision=new_revision,
+                source_id=source_id,
             )
         )
 
@@ -951,6 +1457,7 @@ async def test_a_narrowed_pages_wider_fact_is_never_published_and_never_deleted(
             body=stale_body,
             created_from_page_id=page_id,
             created_from_page_revision=PAGE_REVISION,
+            source_id=source_id,
         )
     )
     with ws(workspace_id):
@@ -964,6 +1471,7 @@ async def test_a_narrowed_pages_wider_fact_is_never_published_and_never_deleted(
                 body=kept_body,
                 created_from_page_id=page_id,
                 created_from_page_revision=PAGE_REVISION + 1,
+                source_id=source_id,
             )
         )
         await MemoryIndexer(
@@ -1033,6 +1541,65 @@ async def test_a_narrowed_pages_wider_fact_is_never_published_and_never_deleted(
     }
 
 
+async def test_recommitting_an_unchanged_body_at_the_same_binding_never_re_embeds(
+    db: None,
+) -> None:
+    """The body, subject, and owner id are what a chunk is digested over, so re-committing an
+    identical fact at the same page binding must leave the row's chunks and digest alone: the second
+    commit changes nothing due, and the indexer finds nothing to embed. A re-commit that binds a new
+    revision is a different case — it makes the row due again, since whether that revision may be
+    published is the index job's question."""
+    workspace_id, page_id, source_id = await _workspace(), uuid4(), uuid4()
+    body = "the acme renewal closes on september 30"
+    embed = CountingEmbed(vec((12, 1.0)))
+    await _seed_page(workspace_id, page_id, source_id, SHARED_SUBJECT)
+    store = _store(embed, workspace_id)
+    indexer = MemoryIndexer(
+        index=store.index,
+        embed=embed,
+        transaction=workspace_tx,
+        chunker=TextChunker(),
+        page_states=context_for("memory", frozenset()).page_states,
+    )
+
+    async def poll() -> None:
+        await store.commit(
+            MemoryWrite(
+                subject=SHARED_SUBJECT,
+                body=body,
+                created_from_page_id=page_id,
+                created_from_page_revision=PAGE_REVISION,
+                source_id=source_id,
+            )
+        )
+        with ws(workspace_id):
+            await indexer.run()
+
+    await poll()
+    after_first = embed.calls
+    async with workspace_tx() as connection:
+        first = (
+            await connection.execute(
+                sa.select(memory_item.c.embedding_digest).where(
+                    memory_item.c.created_from_page_id == page_id
+                )
+            )
+        ).scalar_one()
+    await poll()
+    async with workspace_tx() as connection:
+        second = (
+            await connection.execute(
+                sa.select(
+                    memory_item.c.embedding_digest, memory_item.c.created_from_page_revision
+                ).where(memory_item.c.created_from_page_id == page_id)
+            )
+        ).one()
+    assert after_first == 1
+    assert first is not None
+    assert second == (first, PAGE_REVISION)
+    assert embed.calls == after_first
+
+
 async def test_page_tombstone_drops_the_pages_own_chunks_and_mirror_only(db: None) -> None:
     """A tombstone retires what the page indexer owns — the page's chunks and its mirror row — and
     deletes nothing else. The facts derived from that page stop being recallable the instant it
@@ -1050,6 +1617,7 @@ async def test_page_tombstone_drops_the_pages_own_chunks_and_mirror_only(db: Non
             body="the retired source fact is polaris",
             created_from_page_id=page_id,
             created_from_page_revision=PAGE_REVISION,
+            source_id=source_id,
         )
     )
     live = PageChange(

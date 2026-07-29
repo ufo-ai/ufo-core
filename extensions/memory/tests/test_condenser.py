@@ -35,6 +35,7 @@ from ufo_ext_memory.store import (
     MemoryWrite,
     PageIndexer,
     memory_item,
+    memory_source,
 )
 
 from ufo.accounting import Pricing
@@ -241,7 +242,7 @@ async def _workspace() -> UUID:
     return workspace_id
 
 
-async def _seed_page(blob: FilesystemBlobStore, workspace_id: UUID, body: str) -> UUID:
+async def _seed_page(blob: FilesystemBlobStore, workspace_id: UUID, body: str) -> tuple[UUID, UUID]:
     source_id, page_id = uuid4(), uuid4()
     await blob.put(f"pages/{page_id}", body.encode())
     async with workspace_tx() as connection:
@@ -270,7 +271,7 @@ async def _seed_page(blob: FilesystemBlobStore, workspace_id: UUID, body: str) -
                 updated_at=WHEN,
             )
         )
-    return page_id
+    return page_id, source_id
 
 
 async def _seed_page_authority(
@@ -316,6 +317,7 @@ async def _seed_aged_fact(
     """Insert a fact aged past MIN_OLDEST_AGE with its one already-derived chunk, so the
     consolidator's aged-fact query admits it and recall can surface it through the index legs."""
     item_id = uuid4()
+    source_id = uuid4() if created_from_page_id is not None else None
     created = datetime.now(UTC) - timedelta(hours=48)
     async with workspace_tx() as connection:
         await connection.execute(
@@ -330,6 +332,7 @@ async def _seed_aged_fact(
                 source_ref=None,
                 created_from_page_id=created_from_page_id,
                 created_from_page_revision=(1 if created_from_page_id is not None else None),
+                source_id=source_id,
                 embedding_digest="sha256:seeded",
                 superseded_by=None,
                 created_at=created,
@@ -503,7 +506,7 @@ async def test_derive_facts_writes_subject_scoped_facts_through_page_change(
 ) -> None:
     workspace_id = await _workspace()
     blob = FilesystemBlobStore(root=tmp_path)
-    page_id = await _seed_page(
+    page_id, _source_id = await _seed_page(
         blob, workspace_id, "Acme ships the widget to the whole team on friday."
     )
     payload = json.dumps(
@@ -546,7 +549,7 @@ async def test_derive_facts_rides_its_own_cursor_independent_of_the_indexer(
 ) -> None:
     workspace_id = await _workspace()
     blob = FilesystemBlobStore(root=tmp_path)
-    page_id = await _seed_page(
+    page_id, _source_id = await _seed_page(
         blob, workspace_id, "Beatrix leads the platform team from Berlin now."
     )
     payload = json.dumps(
@@ -628,6 +631,50 @@ async def test_derive_facts_is_idempotent(db: None) -> None:
     assert rows[0].body == "the office is in the old cannery building"
     assert rows[0].subject == subject
     assert rows[0].as_of.replace(tzinfo=UTC) == change.as_of
+
+
+async def test_derive_facts_binds_each_fact_to_its_pages_source(db: None) -> None:
+    """The deriver is the one production writer of `memory_item.source_id` and its `memory_source`
+    link: it stamps every fact it commits with the source of the page it read, so a reader granted
+    that source reaches the fact and one without it does not. Binding a fact to the wrong feed would
+    mis-scope the grant invisibly, so the source it writes is read straight back."""
+    workspace_id = await _workspace()
+    page_id, source_id = uuid4(), uuid4()
+    payload = json.dumps(
+        {
+            "facts": [
+                {
+                    "page_id": str(page_id),
+                    "notability": "high",
+                    "memory_kind": "fact",
+                    "confidence": 6,
+                    "body": "the acquisition codename is polaris",
+                }
+            ]
+        }
+    )
+    change = _change(page_id, source_id, SHARED_SUBJECT, PAGE_BODY, 1, "sha256:page")
+    await _seed_page_authority(workspace_id, page_id, source_id, SHARED_SUBJECT)
+    deriver = FactDeriver(store=_store(workspace_id, vec((2, 1.0))), model=_model(payload))
+    with ws(workspace_id):
+        await deriver.apply((change,))
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(memory_item.c.id, memory_item.c.source_id).where(
+                    memory_item.c.created_from_page_id == page_id
+                )
+            )
+        ).one()
+        links = (
+            await connection.execute(
+                sa.select(memory_source.c.source_id, memory_source.c.page_id).where(
+                    memory_source.c.memory_item_id == row.id
+                )
+            )
+        ).all()
+    assert row.source_id == source_id
+    assert set(links) == {(source_id, page_id)}
 
 
 async def test_fact_deriver_ignores_a_stale_private_payload_after_sanitization(
@@ -712,7 +759,7 @@ async def test_an_unreadable_reply_for_a_new_revision_keeps_the_prior_revisions_
     a pass that derives nothing destroys nothing."""
     workspace_id = await _workspace()
     blob = FilesystemBlobStore(root=tmp_path)
-    page_id = await _seed_page(
+    page_id, source_id = await _seed_page(
         blob, workspace_id, "The acquisition codename is polaris and the deal closes in Q3."
     )
     store = _store(workspace_id, vec((12, 1.0)))
@@ -722,6 +769,7 @@ async def test_an_unreadable_reply_for_a_new_revision_keeps_the_prior_revisions_
             body="the acquisition codename is polaris",
             created_from_page_id=page_id,
             created_from_page_revision=1,
+            source_id=source_id,
         )
     )
     revision = await _rewrite_page(page_id, "sha256:edited")
@@ -745,7 +793,7 @@ async def test_an_unreadable_reply_settles_its_group_and_lets_the_next_page_thro
     tick instead of every page in the workspace waiting behind a reply that will never parse."""
     workspace_id = await _workspace()
     blob = FilesystemBlobStore(root=tmp_path)
-    poison_id = await _seed_page(
+    poison_id, _source_id = await _seed_page(
         blob, workspace_id, "The acquisition codename is polaris and the deal closes in Q3."
     )
     poisoned = _runner(
@@ -773,7 +821,7 @@ async def test_an_unreadable_reply_settles_its_group_and_lets_the_next_page_thro
     assert str(poison_id) in logged[0].getMessage()
     assert logged[0].exc_info is not None
 
-    healthy_id = await _seed_page(
+    healthy_id, _source_id = await _seed_page(
         blob, workspace_id, "Beatrix leads the platform team from Berlin as of this quarter."
     )
     healthy = _runner(
@@ -1012,6 +1060,7 @@ async def test_the_index_withholds_facts_bound_to_a_superseded_revision(db: None
                 body=f"the acquisition codename polaris note {index}",
                 created_from_page_id=page_id,
                 created_from_page_revision=1,
+                source_id=source_id,
             )
         )
     revision = await _rewrite_page(page_id, "sha256:edited")
@@ -1021,6 +1070,7 @@ async def test_the_index_withholds_facts_bound_to_a_superseded_revision(db: None
             body="the acquisition codename is meridian",
             created_from_page_id=page_id,
             created_from_page_revision=revision,
+            source_id=source_id,
         )
     )
     shared = frozenset({SHARED_SUBJECT})
@@ -1052,6 +1102,7 @@ async def test_a_withheld_fact_leaves_the_index_jobs_due_set(db: None) -> None:
             body="the acquisition codename is polaris",
             created_from_page_id=page_id,
             created_from_page_revision=1,
+            source_id=source_id,
         )
     )
     await _rewrite_page(page_id, "sha256:edited")
@@ -1089,6 +1140,7 @@ async def test_a_fact_carried_to_the_new_revision_is_published_again(db: None) -
             body=body,
             created_from_page_id=page_id,
             created_from_page_revision=1,
+            source_id=source_id,
         )
     )
     revision = await _rewrite_page(page_id, "sha256:edited")
@@ -1136,6 +1188,7 @@ async def test_a_pages_move_withdraws_the_chunks_it_published_while_current(db: 
                     body=body,
                     created_from_page_id=edited_page,
                     created_from_page_revision=states[edited_page].revision,
+                    source_id=edited_source,
                 )
             )
         await store.commit(
@@ -1144,6 +1197,7 @@ async def test_a_pages_move_withdraws_the_chunks_it_published_while_current(db: 
                 body=live_body,
                 created_from_page_id=live_page,
                 created_from_page_revision=states[live_page].revision,
+                source_id=live_source,
             )
         )
         await _index_memory(store, probe)
@@ -1211,6 +1265,7 @@ async def test_a_page_moving_before_the_settle_leaves_the_row_due(db: None) -> N
                 body=body,
                 created_from_page_id=page_id,
                 created_from_page_revision=states[page_id].revision,
+                source_id=source_id,
             )
         )
         await MemoryIndexer(
@@ -1374,6 +1429,7 @@ async def test_consolidation_revalidates_donors_after_the_model_call(db: None) -
 async def _insert_fact(
     workspace_id: UUID, created_at: datetime, created_from_page_id: UUID | None = None
 ) -> None:
+    source_id = uuid4() if created_from_page_id is not None else None
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(memory_item).values(
@@ -1387,6 +1443,7 @@ async def _insert_fact(
                 source_ref=None,
                 created_from_page_id=created_from_page_id,
                 created_from_page_revision=(1 if created_from_page_id is not None else None),
+                source_id=source_id,
                 embedding_digest="sha256:seeded",
                 superseded_by=None,
                 created_at=created_at,
@@ -1498,7 +1555,7 @@ async def test_no_readable_facts_list_settles_nothing_however_the_reply_is_unrea
     nothing, so the fact bound to the revision before the edit survives."""
     workspace_id = await _workspace()
     blob = FilesystemBlobStore(root=tmp_path)
-    page_id = await _seed_page(
+    page_id, source_id = await _seed_page(
         blob, workspace_id, "The acquisition codename is polaris and the deal closes in Q3."
     )
     store = _store(workspace_id, vec((12, 1.0)))
@@ -1508,6 +1565,7 @@ async def test_no_readable_facts_list_settles_nothing_however_the_reply_is_unrea
             body="the acquisition codename is polaris",
             created_from_page_id=page_id,
             created_from_page_revision=1,
+            source_id=source_id,
         )
     )
     assert await _rewrite_page(page_id, "sha256:edited") > 1
@@ -1531,16 +1589,16 @@ async def test_one_pass_settles_only_the_pages_its_own_facts_replace(
     regression to batch-wide retirement takes the second page's fact with the first's."""
     workspace_id = await _workspace()
     blob = FilesystemBlobStore(root=tmp_path)
-    restated = await _seed_page(
+    restated, restated_source = await _seed_page(
         blob, workspace_id, "The acquisition codename is polaris and the deal closes in Q3."
     )
-    passed_over = await _seed_page(
+    passed_over, passed_over_source = await _seed_page(
         blob, workspace_id, "The security review is scheduled and the auditor is booked."
     )
     store = _store(workspace_id, vec((12, 1.0)))
-    for page_id, body in (
-        (restated, "the acquisition codename is polaris"),
-        (passed_over, "the security review is scheduled"),
+    for page_id, source_id, body in (
+        (restated, restated_source, "the acquisition codename is polaris"),
+        (passed_over, passed_over_source, "the security review is scheduled"),
     ):
         await store.commit(
             MemoryWrite(
@@ -1548,6 +1606,7 @@ async def test_one_pass_settles_only_the_pages_its_own_facts_replace(
                 body=body,
                 created_from_page_id=page_id,
                 created_from_page_revision=1,
+                source_id=source_id,
             )
         )
     restated_revision = await _rewrite_page(restated, "sha256:restated")
