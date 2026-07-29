@@ -1,13 +1,22 @@
 ---
 name: babysit-prs
-description: Shepherd open metalcraftai/ufo pull requests to merge-ready — watch CI, respond to review, resolve threads — without hacking around design gaps, working around uncertainty, or adding complexity to get green. Use to babysit a PR after pushing, or to sweep your open PRs. Never merges.
+description: Shepherd open metalcraftai/ufo pull requests to merge-ready — watch CI, respond to review, resolve threads — without hacking around design gaps, working around uncertainty, or adding complexity to get green. Use to babysit a PR after pushing, or to sweep the PRs this session opened or pushed to. Never merges.
 ---
 
 # Babysit CI and code review
 
-With no argument, sweep the PRs you authored (`gh pr list --author @me --state open`); otherwise touch only the named PRs. Read root `README.md`, `CLAUDE.md`, and `spec.md` first — `spec.md` is the design source of truth you judge a "design gap" against; also read a nested `CLAUDE.md`/`AGENTS.md` that governs a changed path before editing it. Fix each PR on its own branch, one worktree per PR; never combine fixes across PRs. Keep a per-PR note of what you tried and why it failed, and never rerun an unchanged mechanism.
+Touch only the pull requests named in the invocation. With no argument, touch only the PRs this session
+opened or pushed to; if this session has none, say so and stop — never widen to `gh pr list --author @me`,
+and never commit, reply, or resolve a thread on a PR outside that set, however broken it looks (another
+session is holding it).
 
-Between current-head passes, tell the user only material findings, blockers, decisions, or completed wait results, in the fewest words possible; omit tool narration, routine checks, the act of waiting, and unchanged status. Prefer `Two valid issues. Fixing.`
+Read root `README.md`, `CLAUDE.md`, and `spec.md` first — `spec.md` is the design source of truth you judge a "design gap" against; also read a nested `CLAUDE.md`/`AGENTS.md` that governs a changed path before editing it. Fix each PR on its own branch, one worktree per PR; never combine fixes across PRs. Keep a per-PR note of what you tried and why it failed, and never rerun an unchanged mechanism.
+
+You speak only where this file names a statement you owe: a blocker or a design decision that is the user's
+to make, why you believe a cause is external before you rerun, a push onto an approved head, a completed
+wait this file tells you to report, and the merge-ready state or truthful red at the end. Everything else
+is silent — a pass, a routine push, waiting itself, a check you are watching, a finding you fixed, an
+unchanged status, a plan for the next round. One line when you do speak: `Two valid issues. Fixing.`
 
 ## What you may and may not do
 
@@ -24,6 +33,63 @@ A push must never change what the PR does to pass a check or satisfy a reviewer.
   3. No new complexity — no abstraction, flag, alias, adapter, retry, or contract change to route around a failure. The fix stays in one shape.
 
 Deletion, inlining, and simplification that restore the existing design are always fair.
+
+## What earns a commit
+
+Three things: **behavior**, **the proof of behavior the diff leaves unpinned**, and **any finding anchored
+to a written rule** in `CLAUDE.md`, `AGENTS.md`, `spec.md`, or an existing contract — a rule-backed finding
+is a defect whatever its category, naming and prose included, and no reply clears the gate it holds.
+
+What is left is a preference with no rule behind it: wording, a name the repo does not govern, a log field,
+a test's name, a reviewer's "consider". Answer those in a reply and resolve them; a commit spends a whole
+review round, and a preference is never worth one.
+
+A prose finding therefore has exactly two ends and no third: a written rule backs it, so it is a defect and
+its sentence goes in **this** round's push; or nothing backs it, so the reply says the sentence stands and
+the thread resolves. Never a deletion promised for a later push — a thread resolves only once the pushed
+head carries the fix.
+
+When the sentence does go, it goes by **deletion** wherever the code reads without it (CLAUDE.md: no
+comments; enforce, don't document), keeping only a public API's docstring, in the fewest words that are
+true. A reworded claim is a new claim for the next round to re-litigate; the deletion, or a test that makes
+the claim true, ends the class.
+
+## One push per round, and it fixes the class
+
+A round is: collect every finding at this head → address all of them → sweep → **one** push. Never push per
+finding, and never push while a finding from the same head is **unaddressed**; each extra push re-runs a
+full review of the whole diff. Addressed covers the reply you stand behind, not only the fix — a disputed
+finding and a surfaced design gap are answered where they are and never hold the push for their round's
+committed fixes.
+
+The sweep is a review you run on yourself: read `git diff origin/main...HEAD` whole, as the reviewer will
+read it at the head you are about to create, and hold it to `.claude/skills/review-pull-request/SKILL.md` —
+the same rules, the same repo instructions, the same both-ends and new-function-new-test bars. A finding
+you catch here costs nothing; the same finding caught after the push costs a full round.
+
+Close the class rather than the line. The reviewer's line number is one example, not the inventory:
+
+- the same defect at every sibling site in the diff;
+- the surface your own fix just created — a new branch, parameter, state, event, or window is unproven
+  behavior and carries its own test **in this push**;
+- what the fix just made untrue elsewhere: a docstring, a sibling test's assumption, a gate's coverage.
+
+A next round that says *the other half of your fix has no test*, *the injection moved the hole*, or *the
+new drain stacks a second window* is the sweep you skipped, not a nitpick.
+
+## An approval is not spent on an advisory
+
+Once a head carries an `APPROVED` verdict, no advisory earns a push of its own: the findings the approval
+body names, and any thread still open on taste, are answered by reply and resolved, because a push to
+satisfy them throws the approval away and buys a fresh round for nothing.
+
+The approval body's advisory list is answered the same way, because it holds only prose no written rule backs
+— the second end above, every entry: one reply saying the sentence stands, then resolve. No entry waits on a
+later push.
+
+A push the rest of this file requires is still owed at an approved head — a red required check, a `dirty`
+merge state, a rule-backed finding, a defect the approval missed. Take that round deliberately. A thread you
+were told to leave open — a design gap you surfaced — stays open.
 
 ## Every new head resets the review
 
@@ -42,6 +108,7 @@ Claude's head-anchored verdict is the one that controls the **AI Review Gate**; 
 
 - Triage from the review **summary**, not the inline list — the review re-anchors every prior finding to each new head, including ones the last push already fixed. The summary names the genuinely new findings.
 - Fix a valid finding at the root, reply on its thread, then resolve it — but only after the pushed head contains the fix (GraphQL `resolveReviewThread`; thread ids from `pullRequest.reviewThreads`).
+- A reply is at most two sentences: what changed, and the test that holds it. Never restate the finding, thank the reviewer, narrate agreeing, or transcribe your reasoning — the evidence belongs in the code and the test, where the next reader is. Reply on the thread, never as a new PR-level comment.
 - A finding you disagree with, or a reviewer preference that is not a correctness issue or a repo rule: reply with the evidence and resolve — never churn the branch to satisfy taste, never silently leave it open.
 - A finding that exposes a design gap is not patched shut to clear the thread. Surface it.
 
@@ -65,6 +132,13 @@ Report that state; do not merge and do not arm auto-merge yourself. If auto-merg
 
 | Situation | Response |
 | --- | --- |
+| No PR named in the invocation | Only the PRs this session opened or pushed to. None → say so and stop; a wider sweep clobbers another session's branch mid-flight. |
+| `APPROVED` head whose only open findings are advisory | Reply and resolve; no push. A push here would trade a green gate for another full round. |
+| `APPROVED` head with a red check, a `dirty` merge state, or a rule-backed finding | Fix and push — the approval was never a bar to that. |
+| A round raises only wording or docstrings with no written rule behind them | Reply that the sentence stands, and resolve. Nothing is owed, so nothing is promised for a later push. |
+| A new finding lands while this head's fix is still unpushed | Fold it into that same push; one push per round. |
+| The finding names one line, one call site, one test | That line is an example, not the inventory. Fix the cause that let it exist and every sibling it already reached; an instance fix comes back as the next round's finding. |
+| Your fix adds a surface — a branch, parameter, state, event, window, column | Unproven behavior. Its test lands in the same push, or the next round files it as untested and you pay the round. |
 | Checks pending at end of turn | Background `gh pr checks <n> --watch`; circle back before claiming done. |
 | `Publish AI review status` passed but `AI Review Gate` is pending | The workflow ran fine but found no current-head Claude verdict. Inspect the reviews; never read the job result as the gate result. |
 | PR is draft and the Claude job posted no verdict | Expected — the review skill stops on drafts. Report the draft state; never mark it ready without explicit approval. |

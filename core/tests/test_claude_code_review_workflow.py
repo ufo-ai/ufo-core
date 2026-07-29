@@ -56,6 +56,7 @@ def test_claude_code_review_skill_keeps_prose_findings_out_of_the_gate() -> None
     assert "prose inaccuracy that does not change behavior" in skill
     assert "do not let it hold the verdict" in skill
     assert "When every remaining finding is advisory" in skill
+    assert "the author answers them in a reply, without a new head" in skill
     assert "For each validated issue, blocking or advisory" in skill
     assert "- Blocking findings of either kind: `gh pr review <number> --request-changes" in skill
     assert "- No blocking findings: `gh pr review <number> --approve`" in skill

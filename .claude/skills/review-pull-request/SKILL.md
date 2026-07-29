@@ -80,7 +80,7 @@ section already rejects.
 Advisory: a comment, docstring, or prose inaccuracy that does not change behavior. Publish it as an
 inline comment and do not let it hold the verdict.
 When every remaining finding is advisory, approve and name those findings in the approval body so
-the author folds them into a later push.
+the author answers them in a reply, without a new head.
 
 ## Publish the verdict
 
