@@ -8,7 +8,7 @@ admin-gated.
 """
 
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -23,7 +23,7 @@ from ufo_ext_sources.manifest import NAME, manifest
 from ufo_ext_sources.pages import PAGE_BODY_MAX_BYTES, PAGE_KIND, PageObjects, _page_timestamp
 from ufo_ext_sources.registry import CONNECTORS, binding_name
 
-from ufo.blob import FilesystemBlobStore
+from ufo.blob import BlobStore, FilesystemBlobStore
 from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.context import context_for
@@ -65,6 +65,17 @@ class _PageSource:
         self, config: ConnectorSourceConfig, cursor: str | None, auth: SourceAuth
     ) -> SyncResult:
         return SyncResult(pages=(self.page,))
+
+
+@dataclass(frozen=True)
+class _MutatingBlob:
+    inner: FilesystemBlobStore
+    mutate: Callable[[], Awaitable[None]]
+
+    async def get_stream(self, key: str) -> AsyncIterator[bytes]:
+        async for chunk in self.inner.get_stream(key):
+            yield chunk
+        await self.mutate()
 
 
 async def _workspace() -> _Workspace:
@@ -136,7 +147,7 @@ _TOOLS: dict[str, ToolDef] = {
 
 def _context(
     state: _Workspace,
-    blob: FilesystemBlobStore,
+    blob: BlobStore,
     *,
     speaker_id: UUID | None = None,
     audience: Audience | None = None,
@@ -169,7 +180,9 @@ def _context(
     )
 
 
-async def _seed_source(state: _Workspace, backend: str, *, source_id: UUID | None = None) -> UUID:
+async def _seed_source(
+    state: _Workspace, backend: str, *, source_id: UUID | None = None, granted: bool = True
+) -> UUID:
     source_id = uuid4() if source_id is None else source_id
     async with workspace_tx() as connection:
         await connection.execute(
@@ -183,6 +196,16 @@ async def _seed_source(state: _Workspace, backend: str, *, source_id: UUID | Non
                 updated_at=datetime(2026, 7, 9, tzinfo=UTC),
             )
         )
+        if granted:
+            await connection.execute(
+                sa.insert(tables.source_grant).values(
+                    workspace_id=state.workspace_id,
+                    source_id=source_id,
+                    agent_id=state.agent_id,
+                    created_at=datetime(2026, 7, 9, tzinfo=UTC),
+                    updated_at=datetime(2026, 7, 9, tzinfo=UTC),
+                )
+            )
     return source_id
 
 
@@ -414,6 +437,92 @@ async def test_pages_list_filter_order_and_read_body_through_the_verbs(
         ]
         assert fetched["created_at"] is not None
         assert fetched["updated_at"] is not None
+
+
+async def test_page_get_rechecks_source_authority_after_streaming(db: None, tmp_path: Path) -> None:
+    state = await _workspace()
+    stored = FilesystemBlobStore(root=tmp_path)
+    with ws(state.workspace_id):
+        source_id = await _seed_source(state, "asana")
+        page_id = await _seed_page(state, source_id, stored)
+
+        async def revoke() -> None:
+            async with workspace_tx() as connection:
+                await connection.execute(
+                    sa.delete(tables.source_grant).where(
+                        tables.source_grant.c.workspace_id == state.workspace_id,
+                        tables.source_grant.c.source_id == source_id,
+                        tables.source_grant.c.agent_id == state.agent_id,
+                    )
+                )
+
+        assert (
+            await PageObjects().get(
+                _context(state, _MutatingBlob(stored, revoke)),
+                str(page_id),
+            )
+            is None
+        )
+
+
+async def test_page_get_rechecks_page_identity_after_streaming(db: None, tmp_path: Path) -> None:
+    state = await _workspace()
+    stored = FilesystemBlobStore(root=tmp_path)
+    with ws(state.workspace_id):
+        source_id = await _seed_source(state, "asana")
+        page_id = await _seed_page(state, source_id, stored)
+
+        async def replace() -> None:
+            async with workspace_tx() as connection:
+                await connection.execute(
+                    sa.update(tables.page)
+                    .values(
+                        digest="sha256:replacement",
+                        body_ref=f"pages/{page_id}/replacement",
+                    )
+                    .where(tables.page.c.id == page_id)
+                )
+
+        assert (
+            await PageObjects().get(
+                _context(state, _MutatingBlob(stored, replace)),
+                str(page_id),
+            )
+            is None
+        )
+
+
+async def test_pages_list_hides_a_source_this_agent_holds_no_grant_for(
+    db: None, tmp_path: Path
+) -> None:
+    """The page listing reads through `source_pages`, so an ungranted feed's pages must not appear
+    even when they carry the exact subject the agent reads, in its own workspace, un-tombstoned —
+    the same audience the granted feed's page passes on. Only the grant separates them, and `get`
+    refuses the ungranted page too, so the listing is not merely hiding a readable row."""
+    state = await _workspace()
+    blob = FilesystemBlobStore(root=tmp_path)
+    with ws(state.workspace_id):
+        granted_source = await _seed_source(state, "asana")
+        ungranted_source = await _seed_source(state, "linear", granted=False)
+        granted = await _seed_page(state, granted_source, blob, title="Granted")
+        ungranted = await _seed_page(state, ungranted_source, blob, title="Ungranted")
+        ctx = _context(state, blob)
+
+        listing = json.loads(await _text(_TOOLS["object_list"], ctx, kind=PAGE_KIND))
+        fetched = await PageObjects().get(ctx, str(ungranted))
+        async with workspace_tx() as connection:
+            subjects = {
+                row.id: (row.subject, row.tombstone)
+                for row in (
+                    await connection.execute(
+                        sa.select(tables.page.c.id, tables.page.c.subject, tables.page.c.tombstone)
+                    )
+                ).all()
+            }
+
+    assert {row["name"] for row in listing["objects"]} == {str(granted)}
+    assert fetched is None
+    assert subjects == {granted: ("shared", False), ungranted: ("shared", False)}
 
 
 async def test_foreign_room_cannot_read_shared_source_pages(db: None, tmp_path: Path) -> None:

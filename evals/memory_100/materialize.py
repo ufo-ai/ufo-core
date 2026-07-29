@@ -156,6 +156,7 @@ class Memory100Materializer:
                     name=DEFAULT_AGENT_NAME,
                     prompt=DEFAULT_AGENT_PROMPT,
                     model=DEFAULT_AGENT_MODEL,
+                    is_main=True,
                     created_at=sa.func.now(),
                     updated_at=sa.func.now(),
                 )

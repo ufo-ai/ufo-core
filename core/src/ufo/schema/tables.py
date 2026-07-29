@@ -462,6 +462,7 @@ source = sa.Table(
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     sa.Index("source_due", "next_sync_at"),
+    sa.UniqueConstraint("workspace_id", "id", name="source_workspace_identity"),
     sa.CheckConstraint("subject = 'shared' or subject like 'member:%'", name="source_subject"),
     sa.CheckConstraint(
         "connection_id is null or owner_member_id is not null",
@@ -474,6 +475,25 @@ source = sa.Table(
     sa.ForeignKeyConstraint(
         ["workspace_id", "connection_id", "owner_member_id"],
         ["connection.workspace_id", "connection.id", "connection.owner_member_id"],
+    ),
+)
+
+source_grant = sa.Table(
+    "source_grant",
+    metadata,
+    sa.Column("workspace_id", sa.Uuid, sa.ForeignKey("workspace.id"), primary_key=True),
+    sa.Column("source_id", sa.Uuid, primary_key=True),
+    sa.Column("agent_id", sa.Uuid, primary_key=True),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+    sa.ForeignKeyConstraint(
+        ["workspace_id", "source_id"],
+        ["source.workspace_id", "source.id"],
+        ondelete="CASCADE",
+    ),
+    sa.ForeignKeyConstraint(
+        ["workspace_id", "agent_id"],
+        ["agent.workspace_id", "agent.id"],
     ),
 )
 

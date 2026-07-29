@@ -8,7 +8,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import httpx
 import pytest
@@ -114,6 +114,7 @@ def _directory_row(record_id: str) -> dict[str, str]:
 @dataclass(frozen=True)
 class _ToolCall:
     ext: ExtensionContext
+    turn: Turn
 
 
 @dataclass
@@ -138,10 +139,23 @@ class _GuidanceRunner:
 
 async def _workspace() -> UUID:
     workspace_id = uuid4()
+    agent_id = uuid5(NAMESPACE_URL, f"{workspace_id}/main")
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.workspace).values(
                 id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=agent_id,
+                workspace_id=workspace_id,
+                name="main",
+                prompt="p",
+                model="m",
+                is_main=True,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
             )
         )
     return workspace_id
@@ -693,7 +707,19 @@ async def test_index_tool_requires_auth_and_registers_one_idempotent_source(db: 
     init_workspace_credentials(store)
     context = cast(
         ToolContext,
-        _ToolCall(context_for(NAME, frozenset({YC_CREDENTIALS_SLOT}))),
+        _ToolCall(
+            context_for(NAME, frozenset({YC_CREDENTIALS_SLOT})),
+            Turn(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                conversation_id=uuid4(),
+                agent_id=uuid5(NAMESPACE_URL, f"{workspace_id}/main"),
+                seq=1,
+                status="running",
+                inbound="index YC",
+                created_at=datetime.now(UTC),
+            ),
+        ),
     )
     try:
         with ws(workspace_id):

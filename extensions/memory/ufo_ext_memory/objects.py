@@ -97,7 +97,7 @@ class MemoryObjects:
         page_ids = tuple(
             row["created_from_page_id"] for row in rows if row["created_from_page_id"] is not None
         )
-        current = await ext.page_states(page_ids)
+        current = await ext.readable_page_states(page_ids, ctx.source_reader())
         return object_page(
             tuple(
                 ObjectRow(
@@ -145,9 +145,12 @@ class MemoryObjects:
         if row is None:
             return None
         if row["created_from_page_id"] is not None:
-            state = (await ext.page_states((row["created_from_page_id"],))).get(
-                row["created_from_page_id"]
-            )
+            state = (
+                await ext.readable_page_states(
+                    (row["created_from_page_id"],),
+                    ctx.source_reader(),
+                )
+            ).get(row["created_from_page_id"])
             if (
                 state is None
                 or state.subject != row["subject"]

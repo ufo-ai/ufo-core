@@ -14,7 +14,7 @@ import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, replace
 from pathlib import Path
-from uuid import UUID, uuid4
+from uuid import UUID, uuid4, uuid5
 
 import pytest
 import sqlalchemy as sa
@@ -38,7 +38,7 @@ from evals.issue_recall.state import CorpusAttestor
 from ufo.audience import conversation_audience
 from ufo.blob import FilesystemBlobStore
 from ufo.db import apply_migrations, dispose_db, init_db, workspace_tx
-from ufo.ext.context import context_for
+from ufo.ext.context import SourceReader, context_for
 from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
 from ufo.models.interface import ModelEvent, ModelRequest, TextDelta
 from ufo.models.registry import ModelRegistry
@@ -124,6 +124,18 @@ async def seeded_workspace(issue_recall_database_url: str) -> AsyncIterator[UUID
                 id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
             )
         )
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=uuid5(workspace_id, "issue_recall/main"),
+                workspace_id=workspace_id,
+                name="main",
+                prompt="p",
+                model="m",
+                is_main=True,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
     yield workspace_id
     await dispose_db()
 
@@ -171,22 +183,35 @@ async def test_materializes_the_fixture_into_a_recallable_attested_corpus(
 
     token_refs = {page.source_ref for page in pages if page.key in FILINGS[0].related}
     with ws(readiness.workspace_id):
+        memory_context = context_for("memory", frozenset())
         store = MemoryStore(
             DefaultIndex(transaction=workspace_tx),
             TopicEmbed(),
             workspace_tx,
             readiness.workspace_id,
-            context_for("memory", frozenset()).page_states,
+            memory_context.page_states,
+            memory_context.readable_page_states,
+            memory_context.readable_source_ids,
         )
         recalled = await store.recall(
             FILINGS[0].symptom,
             recall_subjects(conversation_audience(None)),
             MAX_RECALLED_MEMORY_IDS,
+            source_reader=SourceReader(
+                agent_id=uuid5(readiness.workspace_id, "issue_recall/main"),
+                requesting_member_id=None,
+                subjects=recall_subjects(conversation_audience(None)),
+            ),
         )
         sources = await store.search_sources(
             FILINGS[0].symptom,
             recall_subjects(conversation_audience(None)),
             MAX_RECALLED_MEMORY_IDS,
+            source_reader=SourceReader(
+                agent_id=uuid5(readiness.workspace_id, "issue_recall/main"),
+                requesting_member_id=None,
+                subjects=recall_subjects(conversation_audience(None)),
+            ),
         )
         async with workspace_tx() as connection:
             subjects = (

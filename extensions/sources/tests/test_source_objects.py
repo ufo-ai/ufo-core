@@ -1471,6 +1471,86 @@ async def test_multi_stream_binding_alerts_once_per_conversation(db: None) -> No
         assert "projects: 1 added; tasks: 1 added" in turn["inbound"]
 
 
+async def _second_agent_conversation(state: _Workspace) -> tuple[UUID, UUID]:
+    """A second agent and a conversation bound to it. It registers nothing, so it holds no
+    `source_grant` and reaches no source at all."""
+    agent_id, conversation_id = uuid4(), uuid4()
+    created_at = datetime(2026, 7, 9, tzinfo=UTC)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=agent_id,
+                workspace_id=state.workspace_id,
+                name="scout",
+                prompt="p",
+                model="claude-opus-4-8",
+                is_main=False,
+                created_at=created_at,
+                updated_at=created_at,
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=conversation_id,
+                workspace_id=state.workspace_id,
+                agent_id=agent_id,
+                surface="cli",
+                queue_key=uuid4().hex,
+                member_id=state.owner_id,
+                created_at=created_at,
+                updated_at=created_at,
+            )
+        )
+    return agent_id, conversation_id
+
+
+async def test_alert_skips_a_subscriber_whose_agent_holds_no_grant(db: None, tmp_path) -> None:
+    """Subscribing is a member act on a shared source, but reading its pages is the agent's own
+    grant. A conversation bound to an agent that was never granted the changed source is alerted
+    about nothing: no turn, no change log, no page ids anywhere — while the granted subscriber in
+    the same batch is alerted in full, so the suppression is per-subscriber and not a dropped
+    batch."""
+    state = await _workspace()
+    name, source_id = await _register(state, subject=SHARED_SUBJECT, owner=state.owner_id)
+    outsider_agent_id, outsider_conversation_id = await _second_agent_conversation(state)
+    granted, outsider = state.conversation_id.hex, outsider_conversation_id.hex
+    sandboxes = _sandboxes(tmp_path)
+    with ws(state.workspace_id):
+        with agent(state.agent_id):
+            await _apply(_context(state, None), _subscribe_manifest(name, (granted,), shared=True))
+        with agent(outsider_agent_id):
+            base = _context(state, None)
+            await _apply(
+                replace(
+                    base,
+                    turn=base.turn.model_copy(
+                        update={
+                            "conversation_id": outsider_conversation_id,
+                            "agent_id": outsider_agent_id,
+                        }
+                    ),
+                ),
+                _subscribe_manifest(name, tuple(sorted((granted, outsider))), shared=True),
+            )
+        assert await _stored_subscribers(state, name) == {
+            granted: state.agent_id.hex,
+            outsider: outsider_agent_id.hex,
+        }
+
+        ext = context_for(
+            NAME, DECLARED_PROVIDERS, sandboxes=sandboxes, invoker=_admitting(state.workspace_id)
+        )
+        shipped = _change(source_id, "# asana tasks: Ship the launch list")
+        await on_page_change(HookContext(ext=ext, payload=PageChangeBatch(changes=(shipped,))))
+
+    (alerted,) = await _turns(state.conversation_id)
+    assert f"{PAGE_KIND}/{shipped.page_id}" in alerted["inbound"]
+    assert len(await _change_log(sandboxes, state.conversation_id, name)) == 1
+
+    assert await _turns(outsider_conversation_id) == []
+    assert not (sandboxes.workspace_root / str(outsider_conversation_id) / CHANGE_LOG_DIR).exists()
+
+
 async def test_alert_never_surfaces_a_member_private_page(db: None) -> None:
     """A subscription to a shared source surfaces only shared changes — a member-private page in
     the same batch is neither referenced nor counted, so its existence never leaks."""

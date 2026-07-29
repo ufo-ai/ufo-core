@@ -29,6 +29,8 @@ from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import sqlalchemy as sa
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from ufo.blob import BlobStore
 from ufo.config import SourceConfig, SourceEntry
@@ -236,32 +238,63 @@ async def register_sources(configured: tuple[SourceEntry, ...]) -> None:
     now = datetime.now(UTC)
     async with workspace_tx() as connection:
         workspace_id = (await connection.execute(sa.select(tables.workspace.c.id))).scalar_one()
+        main_agent_id = (
+            await connection.execute(
+                sa.select(tables.agent.c.id).where(
+                    tables.agent.c.workspace_id == workspace_id,
+                    tables.agent.c.is_main.is_(True),
+                )
+            )
+        ).scalar_one_or_none()
+        if main_agent_id is None:
+            raise RuntimeError("registering configured sources requires a main agent")
+        insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
         for entry in configured:
             config = entry.config.model_dump()
             source_id = source_row_id(workspace_id, entry.backend, config)
             present = (
                 await connection.execute(
-                    sa.select(tables.source.c.id).where(tables.source.c.id == source_id)
+                    sa.select(tables.source.c.id, tables.source.c.removed_at).where(
+                        tables.source.c.id == source_id
+                    )
                 )
             ).one_or_none()
-            if present is not None:
+            if present is not None and present.removed_at is not None:
                 continue
-            await connection.execute(
-                sa.insert(tables.source).values(
-                    id=source_id,
-                    workspace_id=workspace_id,
-                    backend=entry.backend,
-                    config=config,
-                    subject=SHARED_SUBJECT,
-                    owner_member_id=None,
-                    cursor=None,
-                    next_sync_at=now,
-                    claimed_by=None,
-                    claim_expires_at=None,
-                    created_at=sa.func.now(),
-                    updated_at=sa.func.now(),
+            if present is None:
+                await connection.execute(
+                    sa.insert(tables.source).values(
+                        id=source_id,
+                        workspace_id=workspace_id,
+                        backend=entry.backend,
+                        config=config,
+                        subject=SHARED_SUBJECT,
+                        owner_member_id=None,
+                        cursor=None,
+                        next_sync_at=now,
+                        claimed_by=None,
+                        claim_expires_at=None,
+                        created_at=sa.func.now(),
+                        updated_at=sa.func.now(),
+                    )
                 )
-            )
+                await connection.execute(
+                    insert(tables.source_grant)
+                    .values(
+                        workspace_id=workspace_id,
+                        source_id=source_id,
+                        agent_id=main_agent_id,
+                        created_at=sa.func.now(),
+                        updated_at=sa.func.now(),
+                    )
+                    .on_conflict_do_nothing(
+                        index_elements=[
+                            tables.source_grant.c.workspace_id,
+                            tables.source_grant.c.source_id,
+                            tables.source_grant.c.agent_id,
+                        ]
+                    )
+                )
 
 
 @dataclass(frozen=True)

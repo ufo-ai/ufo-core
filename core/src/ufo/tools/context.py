@@ -38,7 +38,7 @@ from ufo.browser import CdpProvider, FindCompleter
 from ufo.connectors import ConnectorRegistry
 from ufo.credentials import CredentialRequests
 from ufo.db import workspace_tx
-from ufo.ext.context import ExtensionContext
+from ufo.ext.context import ExtensionContext, SourceReader
 from ufo.grants import ConnectUnavailable, Grant, GrantStore
 from ufo.o11y import log
 from ufo.sandbox.session import SandboxSession
@@ -236,6 +236,18 @@ class ToolContext:
         if acting is None:
             return subjects
         return subjects | {member_subject(acting)}
+
+    def source_reader(self) -> SourceReader:
+        """Who is asking for a source's synced pages: this turn's agent, the member speaking right
+        now, and what the two may jointly read. The requester is the live speaker rather than
+        `acting_member_id`, because the main agent's owner exception is a live-work privilege — a
+        scheduled run or a subagent carries its initiator's authority everywhere else, but reaches
+        a source only through that agent's own grant."""
+        return SourceReader(
+            agent_id=self.turn.agent_id,
+            requesting_member_id=self.speaker_member_id,
+            subjects=self.read_subjects,
+        )
 
     async def speaker_is_admin(self) -> bool:
         """Whether this call's requesting member is a workspace admin. Workspace-wide acts gate on

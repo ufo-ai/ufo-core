@@ -41,7 +41,7 @@ from ufo_ext_memory.store import (
 from ufo.accounting import Pricing
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
-from ufo.ext.context import ModelAccess, PageState, ScopedStore, context_for
+from ufo.ext.context import ModelAccess, PageState, ScopedStore, SourceReader, context_for
 from ufo.ext.manifest import (
     HookContext,
     HookOutcome,
@@ -71,6 +71,10 @@ def vec(*axes: tuple[int, float]) -> tuple[float, ...]:
     for index, value in axes:
         values[index] = value
     return tuple(values)
+
+
+def _reader(subjects: frozenset[str]) -> SourceReader:
+    return SourceReader(agent_id=uuid4(), requesting_member_id=None, subjects=subjects)
 
 
 class StubEmbed:
@@ -381,13 +385,45 @@ async def _facts(workspace_id: UUID) -> list[sa.Row]:
 
 def _store(workspace_id: UUID, vector: tuple[float, ...]) -> MemoryStore:
     embed = StubEmbed(vector)
+    ext = context_for("memory", frozenset())
     return MemoryStore(
         index=DefaultIndex(transaction=workspace_tx),
         embed=embed,
         transaction=workspace_tx,
         workspace_id=workspace_id,
-        page_states=context_for("memory", frozenset()).page_states,
+        page_states=ext.page_states,
+        readable_page_states=ext.readable_page_states,
+        readable_source_ids=ext.readable_source_ids,
     )
+
+
+async def _granted_reader(workspace_id: UUID, subject: str, *source_ids: UUID) -> SourceReader:
+    """An agent holding the grant for each named source, as recall's source authority reads it: a
+    page-derived fact reaches recall only through a reader granted the feed it came from."""
+    agent_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=agent_id,
+                workspace_id=workspace_id,
+                name="reader",
+                prompt="p",
+                model="m",
+                created_at=WHEN,
+                updated_at=WHEN,
+            )
+        )
+        for source_id in source_ids:
+            await connection.execute(
+                sa.insert(tables.source_grant).values(
+                    workspace_id=workspace_id,
+                    source_id=source_id,
+                    agent_id=agent_id,
+                    created_at=WHEN,
+                    updated_at=WHEN,
+                )
+            )
+    return SourceReader(agent_id=agent_id, requesting_member_id=None, subjects=frozenset({subject}))
 
 
 def _runner(
@@ -905,6 +941,7 @@ async def test_a_page_fact_outlives_its_edit_until_the_derivation_replaces_it(db
     workspace_id = await _workspace()
     page_id, source_id = uuid4(), uuid4()
     await _seed_page_authority(workspace_id, page_id, source_id, SHARED_SUBJECT)
+    reader = await _granted_reader(workspace_id, SHARED_SUBJECT, source_id)
     probe = vec((13, 1.0))
     store = _store(workspace_id, probe)
     deriver = _scripted(
@@ -918,9 +955,10 @@ async def test_a_page_fact_outlives_its_edit_until_the_derivation_replaces_it(db
             (_change(page_id, source_id, SHARED_SUBJECT, PAGE_BODY, 1, "sha256:page"),)
         )
         await _index_memory(store, probe)
-        assert [item.body for item in await store.recall("acquisition codename", shared, 5)] == [
-            "the acquisition codename is polaris"
-        ]
+        assert [
+            item.body
+            for item in await store.recall("acquisition codename", shared, 5, source_reader=reader)
+        ] == ["the acquisition codename is polaris"]
 
         revision = await _rewrite_page(page_id, "sha256:edited")
         edited = _change(
@@ -930,14 +968,15 @@ async def test_a_page_fact_outlives_its_edit_until_the_derivation_replaces_it(db
         await _index_memory(store, probe)
 
         assert await _page_facts(page_id) == {"the acquisition codename is polaris": 1}
-        assert await store.recall("acquisition codename", shared, 5) == ()
+        assert await store.recall("acquisition codename", shared, 5, source_reader=reader) == ()
 
         await deriver.apply((edited,))
         await _index_memory(store, probe)
         assert await _page_facts(page_id) == {"the acquisition codename is meridian": revision}
-        assert [item.body for item in await store.recall("acquisition codename", shared, 5)] == [
-            "the acquisition codename is meridian"
-        ]
+        assert [
+            item.body
+            for item in await store.recall("acquisition codename", shared, 5, source_reader=reader)
+        ] == ["the acquisition codename is meridian"]
 
 
 async def test_a_committed_replacement_retires_the_prior_revision_exactly_once(db: None) -> None:
@@ -948,13 +987,17 @@ async def test_a_committed_replacement_retires_the_prior_revision_exactly_once(d
     page_id, source_id = uuid4(), uuid4()
     await _seed_page_authority(workspace_id, page_id, source_id, SHARED_SUBJECT)
     probe = vec((14, 1.0))
+    reader = await _granted_reader(workspace_id, SHARED_SUBJECT, source_id)
     index = CountingIndex(DefaultIndex(transaction=workspace_tx))
+    ext = context_for("memory", frozenset())
     store = MemoryStore(
         index=index,
         embed=StubEmbed(probe),
         transaction=workspace_tx,
         workspace_id=workspace_id,
-        page_states=context_for("memory", frozenset()).page_states,
+        page_states=ext.page_states,
+        readable_page_states=ext.readable_page_states,
+        readable_source_ids=ext.readable_source_ids,
     )
     deriver = _scripted(
         store,
@@ -968,7 +1011,12 @@ async def test_a_committed_replacement_retires_the_prior_revision_exactly_once(d
         await _index_memory(store, probe)
         retired = next(
             item.memory_id
-            for item in await store.recall("acquisition codename", frozenset({SHARED_SUBJECT}), 5)
+            for item in await store.recall(
+                "acquisition codename",
+                frozenset({SHARED_SUBJECT}),
+                5,
+                source_reader=reader,
+            )
         )
         revision = await _rewrite_page(page_id, "sha256:edited")
         edited = _change(
@@ -989,6 +1037,7 @@ async def test_replaying_a_settled_batch_writes_and_retires_nothing_new(db: None
     workspace_id = await _workspace()
     page_id, source_id = uuid4(), uuid4()
     await _seed_page_authority(workspace_id, page_id, source_id, SHARED_SUBJECT)
+    reader = await _granted_reader(workspace_id, SHARED_SUBJECT, source_id)
     probe = vec((15, 1.0))
     store = _store(workspace_id, probe)
     deriver = _scripted(store, _extraction(page_id, "the acquisition codename is polaris"))
@@ -996,11 +1045,16 @@ async def test_replaying_a_settled_batch_writes_and_retires_nothing_new(db: None
     with ws(workspace_id):
         await deriver.apply((change,))
         await _index_memory(store, probe)
-        settled = await store.recall("acquisition codename", frozenset({SHARED_SUBJECT}), 5)
+        settled = await store.recall(
+            "acquisition codename", frozenset({SHARED_SUBJECT}), 5, source_reader=reader
+        )
         await deriver.apply((change,))
         await _index_memory(store, probe)
-        replayed = await store.recall("acquisition codename", frozenset({SHARED_SUBJECT}), 5)
+        replayed = await store.recall(
+            "acquisition codename", frozenset({SHARED_SUBJECT}), 5, source_reader=reader
+        )
 
+    assert [item.body for item in settled] == ["the acquisition codename is polaris"]
     assert [item.memory_id for item in replayed] == [item.memory_id for item in settled]
     assert await _page_facts(page_id) == {"the acquisition codename is polaris": 1}
 
@@ -1076,12 +1130,13 @@ async def test_the_index_withholds_facts_bound_to_a_superseded_revision(db: None
         )
     )
     shared = frozenset({SHARED_SUBJECT})
+    reader = await _granted_reader(workspace_id, SHARED_SUBJECT, source_id)
     with ws(workspace_id):
         await _index_memory(store, probe)
         published = await store.index.lexical(
             "acquisition codename", shared, OWNER_KIND_MEMORY_ITEM, 100
         )
-        recalled = await store.recall("acquisition codename", shared, 3)
+        recalled = await store.recall("acquisition codename", shared, 3, source_reader=reader)
 
     assert [hit.text for hit in published] == ["the acquisition codename is meridian"]
     assert [item.body for item in recalled] == ["the acquisition codename is meridian"]
@@ -1147,9 +1202,10 @@ async def test_a_fact_carried_to_the_new_revision_is_published_again(db: None) -
     )
     revision = await _rewrite_page(page_id, "sha256:edited")
     shared = frozenset({SHARED_SUBJECT})
+    reader = await _granted_reader(workspace_id, SHARED_SUBJECT, source_id)
     with ws(workspace_id):
         await _index_memory(store, probe)
-        assert await store.recall("acquisition codename", shared, 5) == ()
+        assert await store.recall("acquisition codename", shared, 5, source_reader=reader) == ()
 
         await _scripted(store, _extraction(page_id, body)).apply(
             (_change(page_id, source_id, SHARED_SUBJECT, PAGE_BODY, revision, "sha256:edited"),)
@@ -1158,9 +1214,10 @@ async def test_a_fact_carried_to_the_new_revision_is_published_again(db: None) -
         assert digest is None
 
         await _index_memory(store, probe)
-        assert [item.body for item in await store.recall("acquisition codename", shared, 5)] == [
-            body
-        ]
+        assert [
+            item.body
+            for item in await store.recall("acquisition codename", shared, 5, source_reader=reader)
+        ] == [body]
     assert await _page_facts(page_id) == {body: revision}
 
 
@@ -1181,6 +1238,7 @@ async def test_a_pages_move_withdraws_the_chunks_it_published_while_current(db: 
     live_body = "the acquisition codename is meridian and the deal closes"
     superseded = {f"the acquisition codename polaris note {note}" for note in range(5)}
     shared = frozenset({SHARED_SUBJECT})
+    reader = await _granted_reader(workspace_id, SHARED_SUBJECT, edited_source, live_source)
     with ws(workspace_id):
         states = await context_for("memory", frozenset()).page_states((edited_page, live_page))
         for body in superseded:
@@ -1224,9 +1282,10 @@ async def test_a_pages_move_withdraws_the_chunks_it_published_while_current(db: 
         )
         await _index_memory(store, probe)
 
-        assert [item.body for item in await store.recall("acquisition codename", shared, 3)] == [
-            live_body
-        ]
+        assert [
+            item.body
+            for item in await store.recall("acquisition codename", shared, 3, source_reader=reader)
+        ] == [live_body]
         withdrawn = await store.index.lexical(
             "acquisition codename", shared, OWNER_KIND_MEMORY_ITEM, 100
         )
@@ -1330,7 +1389,10 @@ async def test_consolidation_supersedes_originals_and_recall_surfaces_the_summar
 
     with ws(workspace_id):
         recalled = await _store(workspace_id, probe).recall(
-            "zephyr protocol handshake", frozenset({SHARED_SUBJECT}), 10
+            "zephyr protocol handshake",
+            frozenset({SHARED_SUBJECT}),
+            10,
+            source_reader=_reader(frozenset({SHARED_SUBJECT})),
         )
     assert [item.memory_id for item in recalled] == [summary.id]
     assert recalled[0].item_class == SEMANTIC

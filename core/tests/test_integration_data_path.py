@@ -7,7 +7,7 @@ the real backend. On the sqlite param this runs against the real DefaultIndex ov
 the postgres param against real Postgres + pgvector."""
 
 from pathlib import Path
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import pytest
 import sqlalchemy as sa
@@ -27,7 +27,7 @@ from ufo.audience import conversation_audience
 from ufo.blob import FilesystemBlobStore
 from ufo.config import SourceConfig, SourceEntry
 from ufo.db import workspace_tx
-from ufo.ext.context import context_for
+from ufo.ext.context import SourceReader, context_for
 from ufo.indexing import TextChunker
 from ufo.schema import tables
 from ufo.schema.records import Usage
@@ -67,10 +67,23 @@ class StubEmbed:
 
 async def _workspace() -> UUID:
     workspace_id = uuid4()
+    agent_id = uuid5(NAMESPACE_URL, f"{workspace_id}/main")
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.workspace).values(
                 id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=agent_id,
+                workspace_id=workspace_id,
+                name="main",
+                prompt="p",
+                model="m",
+                is_main=True,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
             )
         )
     return workspace_id
@@ -181,6 +194,7 @@ async def test_folder_source_syncs_indexes_and_is_recalled(
     embed = StubEmbed(axis=1)
     index = DefaultIndex(transaction=workspace_tx)
     blob = FilesystemBlobStore(root=tmp_path / "blobs")
+    memory_context = context_for("memory", frozenset())
     postgres = database_url.startswith("postgresql")
     driver = SyncDriver(backends={FOLDER_BACKEND: FolderSource()}, blob=blob, postgres=postgres)
     page_feed = CorePageFeed(blob=blob)
@@ -190,14 +204,16 @@ async def test_folder_source_syncs_indexes_and_is_recalled(
         transaction=workspace_tx,
         chunker=TextChunker(),
         workspace_id=workspace_id,
-        page_states=context_for("memory", frozenset()).page_states,
+        page_states=memory_context.page_states,
     )
     service = MemoryStore(
         index=index,
         embed=embed,
         transaction=workspace_tx,
         workspace_id=workspace_id,
-        page_states=context_for("memory", frozenset()).page_states,
+        page_states=memory_context.page_states,
+        readable_page_states=memory_context.readable_page_states,
+        readable_source_ids=memory_context.readable_source_ids,
     )
     await register_sources(
         (SourceEntry(backend=FOLDER_BACKEND, config=SourceConfig(root=str(root))),)
@@ -217,7 +233,14 @@ async def test_folder_source_syncs_indexes_and_is_recalled(
 
     with ws(workspace_id):
         pages = await service.search_sources(
-            "incident escalation contact", frozenset({SHARED_SUBJECT}), 5
+            "incident escalation contact",
+            frozenset({SHARED_SUBJECT}),
+            5,
+            source_reader=SourceReader(
+                agent_id=uuid5(NAMESPACE_URL, f"{workspace_id}/main"),
+                requesting_member_id=None,
+                subjects=frozenset({SHARED_SUBJECT}),
+            ),
         )
     assert len(pages) == 1
     assert "on-call captain" in pages[0].text
@@ -230,12 +253,15 @@ async def test_member_fact_recall_is_isolated_from_other_members(db: None) -> No
     alice, bob = uuid4(), uuid4()
     embed = StubEmbed(axis=2)
     index = DefaultIndex(transaction=workspace_tx)
+    memory_context = context_for("memory", frozenset())
     service = MemoryStore(
         index=index,
         embed=embed,
         transaction=workspace_tx,
         workspace_id=workspace_id,
-        page_states=context_for("memory", frozenset()).page_states,
+        page_states=memory_context.page_states,
+        readable_page_states=memory_context.readable_page_states,
+        readable_source_ids=memory_context.readable_source_ids,
     )
     indexer = MemoryIndexer(
         index=index,
@@ -250,12 +276,26 @@ async def test_member_fact_recall_is_isolated_from_other_members(db: None) -> No
     with ws(workspace_id):
         await indexer.run()
         mine = await service.recall(
-            "vault combination", recall_subjects(conversation_audience(alice)), 5
+            "vault combination",
+            recall_subjects(conversation_audience(alice)),
+            5,
+            source_reader=SourceReader(
+                agent_id=uuid5(NAMESPACE_URL, f"{workspace_id}/main"),
+                requesting_member_id=alice,
+                subjects=recall_subjects(conversation_audience(alice)),
+            ),
         )
         assert len(mine) == 1 and "alice" in mine[0].body
         assert (
             await service.recall(
-                "vault combination", recall_subjects(conversation_audience(bob)), 5
+                "vault combination",
+                recall_subjects(conversation_audience(bob)),
+                5,
+                source_reader=SourceReader(
+                    agent_id=uuid5(NAMESPACE_URL, f"{workspace_id}/main"),
+                    requesting_member_id=bob,
+                    subjects=recall_subjects(conversation_audience(bob)),
+                ),
             )
             == ()
         )

@@ -254,8 +254,7 @@ async def test_user_prompt_submit_hook_injects_and_observes_a_recalled_fact(
                 payload=UserPromptSubmit(text="what is the vault code"),
             )
         )
-        assert isinstance(without_turn, InjectContext)
-        assert "the vault code is 4821" in without_turn.text
+        assert without_turn is None
 
         def fail_log(_event: str, **_fields: object) -> None:
             raise RuntimeError("collector unavailable")
@@ -274,7 +273,12 @@ async def test_recall_hook_observes_search_failure_without_denial(
 
     class BrokenStore:
         async def recall(
-            self, query: str, subjects: frozenset[str], limit: int
+            self,
+            query: str,
+            subjects: frozenset[str],
+            limit: int,
+            *,
+            source_reader: object,
         ) -> tuple[object, ...]:
             raise memory_unavailable("memory unavailable")
 
@@ -696,12 +700,26 @@ async def test_memory_search_interleaves_per_query_results(
 
     class _Store:
         async def recall(
-            self, query: str, subjects: object, limit: int, start: object, end: object
+            self,
+            query: str,
+            subjects: object,
+            limit: int,
+            start: object,
+            end: object,
+            *,
+            source_reader: object,
         ):
             return legs[query]
 
         async def search_sources(
-            self, query: str, subjects: object, limit: int, start: object, end: object
+            self,
+            query: str,
+            subjects: object,
+            limit: int,
+            start: object,
+            end: object,
+            *,
+            source_reader: object,
         ):
             return ()
 
@@ -757,3 +775,99 @@ async def test_the_memory_object_kind_is_sealed_against_a_speaking_member(
     assert str(stored["alice private roadmap"][0]) in listed_ids
     assert fetched_shared is None
     assert fetched_own is not None
+
+
+async def test_a_page_derived_memory_object_is_fenced_on_the_source_grant(
+    db: None, tmp_path: Path
+) -> None:
+    """`object_list`/`object_get kind=memory` recheck a page-derived row's source grant: an agent
+    without a grant for the source sees nothing, while the granted agent reads it in full — the
+    object surface holds the same source fence recall does, so a fact never leaks via a listing."""
+    workspace_id = await _workspace()
+    source_id, page_id, item_id = uuid4(), uuid4(), uuid4()
+    now = datetime(2026, 7, 9, tzinfo=UTC)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.source).values(
+                id=source_id,
+                workspace_id=workspace_id,
+                backend="folder",
+                config={},
+                subject="shared",
+                next_sync_at=now,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.page).values(
+                id=page_id,
+                workspace_id=workspace_id,
+                source_id=source_id,
+                digest="sha256:page",
+                body_ref=f"pages/{page_id}",
+                stream="notes",
+                title="Page",
+                subject="shared",
+                tombstone=False,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        revision = (
+            await connection.execute(
+                sa.select(tables.page.c.revision).where(tables.page.c.id == page_id)
+            )
+        ).scalar_one()
+        await connection.execute(
+            sa.insert(memory_item).values(
+                id=item_id,
+                workspace_id=workspace_id,
+                subject="shared",
+                body="the vault code is 8842",
+                item_class="fact",
+                memory_kind="fact",
+                confidence=5,
+                created_from_page_id=page_id,
+                created_from_page_revision=revision,
+                source_id=source_id,
+                embedding_digest="sha256:seeded",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    ext = _ext(DefaultIndex(transaction=workspace_tx), StubEmbed(vec((0, 1.0))))
+    ungranted = _tool_ctx(ext, None, tmp_path, workspace_id=workspace_id)
+    granted = _tool_ctx(ext, None, tmp_path, workspace_id=workspace_id)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=granted.turn.agent_id,
+                workspace_id=workspace_id,
+                name="granted",
+                prompt="p",
+                model="m",
+                is_main=False,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.source_grant).values(
+                workspace_id=workspace_id,
+                source_id=source_id,
+                agent_id=granted.turn.agent_id,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    query = ObjectListQuery(supported_fields=MEMORY_OBJECT.list_fields)
+    with ws(workspace_id):
+        ungranted_names = {row.name for row in (await MemoryObjects().list(ungranted, query)).rows}
+        granted_names = {row.name for row in (await MemoryObjects().list(granted, query)).rows}
+        ungranted_get = await MemoryObjects().get(ungranted, str(item_id))
+        granted_get = await MemoryObjects().get(granted, str(item_id))
+    assert str(item_id) not in ungranted_names
+    assert str(item_id) in granted_names
+    assert ungranted_get is None
+    assert granted_get is not None

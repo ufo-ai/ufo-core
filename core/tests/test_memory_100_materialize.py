@@ -1,6 +1,6 @@
 from collections.abc import AsyncIterator
 from pathlib import Path, PurePosixPath
-from uuid import uuid4
+from uuid import uuid4, uuid5
 
 import pytest
 import sqlalchemy as sa
@@ -22,7 +22,7 @@ from evals.memory_100.state import CorpusAttestor
 from ufo.audience import conversation_audience
 from ufo.blob import FilesystemBlobStore
 from ufo.db import apply_migrations, dispose_db, init_db, workspace_tx
-from ufo.ext.context import ScopedStore, context_for
+from ufo.ext.context import ScopedStore, SourceReader, context_for
 from ufo.schema import tables
 from ufo.sources.sync import page_id_for
 from ufo.workspace import ws
@@ -287,21 +287,45 @@ async def test_materializes_snapshot_through_real_memory_and_page_pipelines(
     }
 
     with ws(readiness.workspace_id):
+        memory_context = context_for("memory", frozenset())
         store = MemoryStore(
             index,
             embed,
             workspace_tx,
             readiness.workspace_id,
-            context_for("memory", frozenset()).page_states,
+            memory_context.page_states,
+            memory_context.readable_page_states,
+            memory_context.readable_source_ids,
         )
         alice_memory = await store.recall(
-            "alpha lantern", recall_subjects(conversation_audience(alice)), 8
+            "alpha lantern",
+            recall_subjects(conversation_audience(alice)),
+            8,
+            source_reader=SourceReader(
+                agent_id=uuid5(readiness.workspace_id, "memory_100/agent"),
+                requesting_member_id=alice,
+                subjects=recall_subjects(conversation_audience(alice)),
+            ),
         )
         bob_memory = await store.recall(
-            "alpha lantern", recall_subjects(conversation_audience(bob)), 8
+            "alpha lantern",
+            recall_subjects(conversation_audience(bob)),
+            8,
+            source_reader=SourceReader(
+                agent_id=uuid5(readiness.workspace_id, "memory_100/agent"),
+                requesting_member_id=bob,
+                subjects=recall_subjects(conversation_audience(bob)),
+            ),
         )
         shared = await store.search_sources(
-            "incident commander", recall_subjects(conversation_audience(alice)), 8
+            "incident commander",
+            recall_subjects(conversation_audience(alice)),
+            8,
+            source_reader=SourceReader(
+                agent_id=uuid5(readiness.workspace_id, "memory_100/agent"),
+                requesting_member_id=alice,
+                subjects=recall_subjects(conversation_audience(alice)),
+            ),
         )
         async with workspace_tx() as connection:
             memory_count = (

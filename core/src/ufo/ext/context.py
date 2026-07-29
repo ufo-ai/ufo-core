@@ -19,6 +19,8 @@ from uuid import UUID
 
 import sqlalchemy as sa
 from pydantic import BaseModel
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ufo.accounting import (
@@ -448,6 +450,13 @@ class SourceRecord:
 
 
 @dataclass(frozen=True)
+class SourceReader:
+    agent_id: UUID
+    requesting_member_id: UUID | None
+    subjects: frozenset[str]
+
+
+@dataclass(frozen=True)
 class PageRecord:
     """One live synced page as `ExtensionContext.source_pages` reads it: its identity, the source
     row it belongs to, browse metadata, visibility subject, content digest, and blob reference —
@@ -460,6 +469,7 @@ class PageRecord:
     record_created_at: str | None
     record_updated_at: str | None
     subject: str
+    revision: int
     digest: str
     body_ref: str
     created_at: datetime
@@ -470,6 +480,38 @@ class PageRecord:
 class PageState:
     subject: str
     revision: int
+    digest: str
+    body_ref: str
+
+
+def _source_readable(workspace_id: UUID, reader: SourceReader) -> sa.ColumnElement[bool]:
+    granted = sa.exists(
+        sa.select(1).where(
+            tables.source_grant.c.workspace_id == workspace_id,
+            tables.source_grant.c.source_id == tables.source.c.id,
+            tables.source_grant.c.agent_id == reader.agent_id,
+        )
+    )
+    main_for_member = (
+        sa.false()
+        if reader.requesting_member_id is None
+        else sa.and_(
+            tables.source.c.owner_member_id == reader.requesting_member_id,
+            sa.exists(
+                sa.select(1).where(
+                    tables.agent.c.workspace_id == workspace_id,
+                    tables.agent.c.id == reader.agent_id,
+                    tables.agent.c.is_main.is_(True),
+                )
+            ),
+        )
+    )
+    return sa.and_(
+        tables.source.c.workspace_id == workspace_id,
+        tables.source.c.removed_at.is_(None),
+        tables.source.c.subject.in_(reader.subjects),
+        sa.or_(granted, main_for_member),
+    )
 
 
 @dataclass(frozen=True)
@@ -559,6 +601,8 @@ class ExtensionContext:
             tables.page.c.id,
             tables.page.c.subject,
             tables.page.c.revision,
+            tables.page.c.digest,
+            tables.page.c.body_ref,
         ).where(
             tables.page.c.workspace_id == self.store.workspace_id,
             tables.page.c.id.in_(page_ids),
@@ -566,7 +610,58 @@ class ExtensionContext:
         )
         async with workspace_tx() as connection:
             rows = (await connection.execute(query)).all()
-        return {row.id: PageState(subject=row.subject, revision=row.revision) for row in rows}
+        return {
+            row.id: PageState(
+                subject=row.subject,
+                revision=row.revision,
+                digest=row.digest,
+                body_ref=row.body_ref,
+            )
+            for row in rows
+        }
+
+    async def readable_page_states(
+        self, page_ids: tuple[UUID, ...], reader: SourceReader
+    ) -> dict[UUID, PageState]:
+        if not page_ids:
+            return {}
+        query = (
+            sa.select(
+                tables.page.c.id,
+                tables.page.c.subject,
+                tables.page.c.revision,
+                tables.page.c.digest,
+                tables.page.c.body_ref,
+            )
+            .select_from(
+                tables.page.join(tables.source, tables.page.c.source_id == tables.source.c.id)
+            )
+            .where(
+                tables.page.c.workspace_id == self.store.workspace_id,
+                tables.page.c.id.in_(page_ids),
+                tables.page.c.tombstone.is_(False),
+                tables.page.c.subject.in_(reader.subjects),
+                _source_readable(self.store.workspace_id, reader),
+            )
+        )
+        async with workspace_tx() as connection:
+            rows = (await connection.execute(query)).all()
+        return {
+            row.id: PageState(
+                subject=row.subject,
+                revision=row.revision,
+                digest=row.digest,
+                body_ref=row.body_ref,
+            )
+            for row in rows
+        }
+
+    async def readable_source_ids(self, reader: SourceReader) -> frozenset[UUID]:
+        query = sa.select(tables.source.c.id).where(
+            _source_readable(self.store.workspace_id, reader),
+        )
+        async with workspace_tx() as connection:
+            return frozenset((await connection.execute(query)).scalars())
 
     async def register_source(
         self,
@@ -576,6 +671,7 @@ class ExtensionContext:
         subject: str,
         owner_member_id: UUID | None,
         connection_id: UUID | None = None,
+        agent_id: UUID | None = None,
     ) -> UUID:
         """Register a content-sync source for this workspace under `backend` — a `SourceBackend` an
         extension declared through its Manifest `sources` point — with `config` the backend's typed
@@ -584,8 +680,10 @@ class ExtensionContext:
         the exact member-owned connection generation behind a broker source (None for direct or
         extension-owned feeds). Brokered row identity includes that connection generation; direct
         row identity is (workspace, backend, config). Re-registering the same authority settles on
-        one row, while changing its owner or disclosure fails loud. The core sync driver polls the
-        row and lands its pages in memory; embedding stays a job."""
+        one row, while changing its owner or disclosure fails loud. `agent_id` — the main agent when
+        unnamed — is granted the source, so a feed a member adds for a second agent grants that
+        agent while still syncing once under one row. The core sync driver polls the row and lands
+        its pages in memory; embedding stays a job."""
         payload = config.model_dump(mode="json")
         source_id = source_row_id(
             self.store.workspace_id,
@@ -593,7 +691,30 @@ class ExtensionContext:
             payload,
             connection_id=connection_id,
         )
+        registered_at = datetime.now(UTC)
         async with workspace_tx() as connection:
+            target_agent_id = agent_id
+            if target_agent_id is None:
+                target_agent_id = (
+                    await connection.execute(
+                        sa.select(tables.agent.c.id).where(
+                            tables.agent.c.workspace_id == self.store.workspace_id,
+                            tables.agent.c.is_main.is_(True),
+                        )
+                    )
+                ).scalar_one_or_none()
+                if target_agent_id is None:
+                    raise RuntimeError("registering a source requires a main agent")
+            target = (
+                await connection.execute(
+                    sa.select(tables.agent.c.id).where(
+                        tables.agent.c.workspace_id == self.store.workspace_id,
+                        tables.agent.c.id == target_agent_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if target is None:
+                raise ValueError("the source target agent is outside this workspace")
             if connection_id is not None:
                 account = payload.get("account")
                 if owner_member_id is None or not isinstance(account, str):
@@ -618,6 +739,26 @@ class ExtensionContext:
                         "the source connection is not active for its workspace, provider, "
                         "account, and member owner"
                     )
+            insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
+            await connection.execute(
+                insert(tables.source)
+                .values(
+                    id=source_id,
+                    workspace_id=self.store.workspace_id,
+                    backend=backend,
+                    config=payload,
+                    subject=subject,
+                    owner_member_id=owner_member_id,
+                    connection_id=connection_id,
+                    cursor=None,
+                    next_sync_at=registered_at,
+                    claimed_by=None,
+                    claim_expires_at=None,
+                    created_at=registered_at,
+                    updated_at=registered_at,
+                )
+                .on_conflict_do_nothing(index_elements=[tables.source.c.id])
+            )
             present = (
                 await connection.execute(
                     sa.select(
@@ -626,10 +767,13 @@ class ExtensionContext:
                         tables.source.c.subject,
                         tables.source.c.owner_member_id,
                         tables.source.c.connection_id,
-                    ).where(tables.source.c.id == source_id)
+                    )
+                    .where(tables.source.c.id == source_id)
+                    .with_for_update()
                 )
-            ).one_or_none()
-            if present is not None and present.removed_at is None:
+            ).one()
+            revived = present.removed_at is not None
+            if not revived:
                 if (
                     present.subject,
                     present.owner_member_id,
@@ -643,8 +787,7 @@ class ExtensionContext:
                         "a source with this configuration is already registered under a different "
                         "owner, connection, or disclosure; delete it before changing its authority"
                     )
-                return source_id
-            if present is not None:
+            else:
                 await connection.execute(
                     sa.update(tables.source)
                     .values(
@@ -653,30 +796,30 @@ class ExtensionContext:
                         owner_member_id=owner_member_id,
                         connection_id=connection_id,
                         cursor=None,
-                        next_sync_at=datetime.now(UTC),
+                        next_sync_at=registered_at,
                         consecutive_errors=0,
                         claimed_by=None,
                         claim_expires_at=None,
-                        updated_at=sa.func.now(),
+                        created_at=registered_at,
+                        updated_at=registered_at,
                     )
                     .where(tables.source.c.id == source_id)
                 )
-                return source_id
             await connection.execute(
-                sa.insert(tables.source).values(
-                    id=source_id,
+                insert(tables.source_grant)
+                .values(
                     workspace_id=self.store.workspace_id,
-                    backend=backend,
-                    config=payload,
-                    subject=subject,
-                    owner_member_id=owner_member_id,
-                    connection_id=connection_id,
-                    cursor=None,
-                    next_sync_at=datetime.now(UTC),
-                    claimed_by=None,
-                    claim_expires_at=None,
+                    source_id=source_id,
+                    agent_id=target_agent_id,
                     created_at=sa.func.now(),
                     updated_at=sa.func.now(),
+                )
+                .on_conflict_do_nothing(
+                    index_elements=[
+                        tables.source_grant.c.workspace_id,
+                        tables.source_grant.c.source_id,
+                        tables.source_grant.c.agent_id,
+                    ]
                 )
             )
         return source_id
@@ -723,12 +866,9 @@ class ExtensionContext:
             for row in rows
         )
 
-    async def source_pages(self, subjects: frozenset[str] | None = None) -> tuple[PageRecord, ...]:
-        """This workspace's live (non-tombstoned) synced pages, optionally narrowed to a set of
-        visibility subjects — the sanctioned read over the core `page` table, scoped by workspace
-        exactly as `sources()` is. A subject-scoped caller passes its audience's readable subjects;
-        the off-turn producer that wants every page passes None. The body stays by reference in
-        each record."""
+    async def source_pages(self, reader: SourceReader) -> tuple[PageRecord, ...]:
+        """This agent's readable live synced pages, scoped by workspace, audience, and source
+        authority."""
         query = (
             sa.select(
                 tables.page.c.id,
@@ -738,6 +878,7 @@ class ExtensionContext:
                 tables.page.c.record_created_at,
                 tables.page.c.record_updated_at,
                 tables.page.c.subject,
+                tables.page.c.revision,
                 tables.page.c.digest,
                 tables.page.c.body_ref,
                 tables.page.c.created_at,
@@ -749,8 +890,12 @@ class ExtensionContext:
             )
             .order_by(tables.page.c.id)
         )
-        if subjects is not None:
-            query = query.where(tables.page.c.subject.in_(subjects))
+        query = query.select_from(
+            tables.page.join(tables.source, tables.page.c.source_id == tables.source.c.id)
+        ).where(
+            tables.page.c.subject.in_(reader.subjects),
+            _source_readable(self.store.workspace_id, reader),
+        )
         async with workspace_tx() as connection:
             rows = (await connection.execute(query)).mappings().all()
         return tuple(
@@ -762,6 +907,7 @@ class ExtensionContext:
                 record_created_at=row["record_created_at"],
                 record_updated_at=row["record_updated_at"],
                 subject=row["subject"],
+                revision=row["revision"],
                 digest=row["digest"],
                 body_ref=row["body_ref"],
                 created_at=row["created_at"],
@@ -812,6 +958,12 @@ class ExtensionContext:
             )
             if removed.rowcount == 0:
                 raise ValueError(f"no live source {source_id} in this workspace")
+            await connection.execute(
+                sa.delete(tables.source_grant).where(
+                    tables.source_grant.c.workspace_id == self.store.workspace_id,
+                    tables.source_grant.c.source_id == source_id,
+                )
+            )
             await connection.execute(
                 sa.update(tables.page)
                 .values(tombstone=True, updated_at=now)

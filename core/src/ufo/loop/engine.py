@@ -41,7 +41,7 @@ from ufo.browser import CdpProvider
 from ufo.connectors import ConnectorRegistry
 from ufo.credentials import CredentialRequests
 from ufo.db import workspace_tx
-from ufo.ext.context import ExtensionContext
+from ufo.ext.context import ExtensionContext, SourceReader
 from ufo.ext.loader import HookChain
 from ufo.ext.manifest import (
     PostToolUse,
@@ -861,7 +861,11 @@ class TurnEngine:
         try:
             async with asyncio.timeout(SCHEDULED_MEMORY_SEARCH_TIMEOUT_SECONDS):
                 matches = await self.memory.search(
-                    audience_subjects(self.audience),
+                    SourceReader(
+                        agent_id=self.turn.agent_id,
+                        requesting_member_id=None,
+                        subjects=audience_subjects(self.audience),
+                    ),
                     (self.turn.inbound,),
                 )
         except Exception as error:

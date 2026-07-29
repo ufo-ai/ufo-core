@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
 
+from ufo.ext.context import SourceReader
 from ufo.objects import ObjectRef
 
 DEFAULT_MEMORY_SEARCH_PROVIDER = "default"
@@ -28,7 +29,7 @@ class MemorySearchProvider(Protocol):
     async def search(
         self,
         queries: tuple[str, ...],
-        subjects: frozenset[str],
+        reader: SourceReader,
         start: datetime | None = None,
         end: datetime | None = None,
     ) -> tuple[MemoryMatch, ...]: ...
@@ -42,9 +43,9 @@ class MemorySearch:
 
     async def search(
         self,
-        subjects: frozenset[str],
+        reader: SourceReader,
         queries: tuple[str, ...],
         start: datetime | None = None,
         end: datetime | None = None,
     ) -> tuple[MemoryMatch, ...]:
-        return await self.provider.search(queries, subjects, start, end)
+        return await self.provider.search(queries, reader, start, end)

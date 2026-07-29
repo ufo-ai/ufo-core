@@ -46,6 +46,7 @@ from ufo.db import workspace_tx
 from ufo.ext.context import (
     ExtensionContext,
     ScopedStore,
+    SourceReader,
     TrajectoryCorpus,
     UndeclaredCredentialSlot,
     context_for,
@@ -537,13 +538,19 @@ async def test_sample_search_provider_answers_a_query_and_fetches() -> None:
 
 async def test_sample_memory_search_provider_receives_the_exact_subjects(db: None) -> None:
     workspace_id = await _workspace()
-    audience = conversation_audience(uuid4())
+    member_id = uuid4()
+    audience = conversation_audience(member_id)
+    reader = SourceReader(
+        agent_id=uuid4(),
+        requesting_member_id=member_id,
+        subjects=audience_subjects(audience),
+    )
     access = memory_search(
         (_sample_manifest(),), _credential_store(), name=sample.MEMORY_SEARCH_PROVIDER
     )
     assert access is not None
     with ws(workspace_id):
-        matches = await access.search(audience_subjects(audience), ("customer history",))
+        matches = await access.search(reader, ("customer history",))
         recorded = await ScopedStore(extension=sample.NAME).get(sample.MEMORY_SEARCH_KEY)
     assert matches[0].text == sample.SAMPLE_MEMORY_TEXT
     assert recorded == {
@@ -1458,12 +1465,27 @@ async def test_sample_source_syncs_a_page_recallable_through_memory(
     `search_sources` — proving register_source + the `sources` Manifest point + the runner + memory,
     all through public surfaces."""
     workspace_id = await _workspace()
+    agent_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=agent_id,
+                workspace_id=workspace_id,
+                name="main",
+                prompt="p",
+                model="m",
+                is_main=True,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
     manifest = _sample_manifest()
     await run_onboarding_steps((manifest,), workspace_id, _credential_store())
 
     embed = _StubEmbed(_vec((3, 1.0)))
     index = DefaultIndex(transaction=workspace_tx)
     blob = FilesystemBlobStore(root=tmp_path)
+    memory_context = context_for("memory", frozenset())
     postgres = database_url.startswith("postgresql")
     driver = SyncDriver(
         backends=_source_backends((manifest,)),
@@ -1477,14 +1499,16 @@ async def test_sample_source_syncs_a_page_recallable_through_memory(
         transaction=workspace_tx,
         chunker=TextChunker(),
         workspace_id=workspace_id,
-        page_states=context_for("memory", frozenset()).page_states,
+        page_states=memory_context.page_states,
     )
     service = MemoryStore(
         index=index,
         embed=embed,
         transaction=workspace_tx,
         workspace_id=workspace_id,
-        page_states=context_for("memory", frozenset()).page_states,
+        page_states=memory_context.page_states,
+        readable_page_states=memory_context.readable_page_states,
+        readable_source_ids=memory_context.readable_source_ids,
     )
 
     with ws(workspace_id):
@@ -1503,7 +1527,14 @@ async def test_sample_source_syncs_a_page_recallable_through_memory(
         await page_indexer.apply((await page_feed.pages_changed_since(None, 50)).changes)
     with ws(workspace_id):
         matches = await service.search_sources(
-            "migrating orbital widget fleet", frozenset({SHARED_SUBJECT}), 5
+            "migrating orbital widget fleet",
+            frozenset({SHARED_SUBJECT}),
+            5,
+            source_reader=SourceReader(
+                agent_id=agent_id,
+                requesting_member_id=None,
+                subjects=frozenset({SHARED_SUBJECT}),
+            ),
         )
     assert matches and "orbital widget" in matches[0].text
 

@@ -288,6 +288,7 @@ async def yc_index(ctx: ToolContext, args: YcIndexInput) -> ToolResult:
         ),
         subject=SHARED_SUBJECT,
         owner_member_id=None,
+        agent_id=ctx.turn.agent_id,
     )
     return ToolResult(
         content=(

@@ -33,7 +33,7 @@ from ufo.sdk.connectors import (
     StagedUpload,
     UnknownBrokerTool,
 )
-from ufo.sdk.context import AgentChange, ExtensionContext, JsonValue
+from ufo.sdk.context import AgentChange, ExtensionContext, JsonValue, SourceReader
 from ufo.sdk.http import (
     JSONResponse,
     PlainTextResponse,
@@ -987,12 +987,12 @@ class SampleMemorySearch:
     async def search(
         self,
         queries: tuple[str, ...],
-        subjects: frozenset[str],
+        reader: SourceReader,
         start: datetime | None = None,
         end: datetime | None = None,
     ) -> tuple[MemoryMatch, ...]:
         query_values: list[JsonValue] = [query for query in queries]
-        subject_values: list[JsonValue] = [subject for subject in sorted(subjects)]
+        subject_values: list[JsonValue] = [subject for subject in sorted(reader.subjects)]
         await self.ctx.store.put(
             MEMORY_SEARCH_KEY,
             {

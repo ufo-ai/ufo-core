@@ -12,7 +12,7 @@ import json
 import re
 from datetime import UTC, datetime
 from pathlib import Path
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import pytest
 import sqlalchemy as sa
@@ -97,6 +97,18 @@ async def _workspace() -> UUID:
                 id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
             )
         )
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=uuid5(NAMESPACE_URL, f"{workspace_id}/main"),
+                workspace_id=workspace_id,
+                name="main",
+                prompt="p",
+                model="claude-opus-4-8",
+                is_main=True,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
     return workspace_id
 
 
@@ -171,6 +183,15 @@ async def _seed_source(workspace_id: UUID, account: str = "acct-one") -> UUID:
                 updated_at=datetime(2026, 7, 9, tzinfo=UTC),
             )
         )
+        await connection.execute(
+            sa.insert(tables.source_grant).values(
+                workspace_id=workspace_id,
+                source_id=source_id,
+                agent_id=uuid5(NAMESPACE_URL, f"{workspace_id}/main"),
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
     return source_id
 
 
@@ -228,7 +249,7 @@ def _tool_ctx(
             id=uuid4(),
             workspace_id=workspace_id,
             conversation_id=uuid4(),
-            agent_id=uuid4(),
+            agent_id=uuid5(NAMESPACE_URL, f"{workspace_id}/main"),
             seq=1,
             status="running",
             inbound="hi",

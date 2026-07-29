@@ -15,7 +15,7 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import httpx
 import pytest
@@ -37,7 +37,7 @@ from ufo.connectors import (
 )
 from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
-from ufo.ext.context import CredentialAccess, context_for
+from ufo.ext.context import CredentialAccess, SourceReader, context_for
 from ufo.indexing import TextChunker
 from ufo.schema import tables
 from ufo.sdk.sources import (
@@ -537,10 +537,23 @@ class _StubEmbed:
 
 async def _workspace() -> UUID:
     workspace_id = uuid4()
+    agent_id = uuid5(NAMESPACE_URL, f"{workspace_id}/main")
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.workspace).values(
                 id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=agent_id,
+                workspace_id=workspace_id,
+                name="main",
+                prompt="p",
+                model="m",
+                is_main=True,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
             )
         )
     return workspace_id
@@ -591,6 +604,8 @@ async def test_asana_source_syncs_through_the_driver_into_recallable_memory(
         transaction=workspace_tx,
         workspace_id=workspace_id,
         page_states=context.page_states,
+        readable_page_states=context.readable_page_states,
+        readable_source_ids=context.readable_source_ids,
     )
 
     await driver.run()
@@ -601,5 +616,14 @@ async def test_asana_source_syncs_through_the_driver_into_recallable_memory(
     with ws(workspace_id):
         await page_indexer.apply((await page_feed.pages_changed_since(None, 50)).changes)
     with ws(workspace_id):
-        matches = await service.search_sources("Acme HQ workspace", frozenset({SHARED_SUBJECT}), 5)
+        matches = await service.search_sources(
+            "Acme HQ workspace",
+            frozenset({SHARED_SUBJECT}),
+            5,
+            source_reader=SourceReader(
+                agent_id=uuid5(NAMESPACE_URL, f"{workspace_id}/main"),
+                requesting_member_id=None,
+                subjects=frozenset({SHARED_SUBJECT}),
+            ),
+        )
     assert matches and "Acme HQ workspace" in matches[0].text

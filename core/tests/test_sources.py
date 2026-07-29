@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import ClassVar
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import pytest
 import sqlalchemy as sa
@@ -19,7 +19,12 @@ from ufo.audience import conversation_audience
 from ufo.blob import FilesystemBlobStore
 from ufo.config import SourceConfig, SourceEntry
 from ufo.db import workspace_tx
-from ufo.ext.context import ExtensionContext, ScopedStore, context_for
+from ufo.ext.context import (
+    ExtensionContext,
+    ScopedStore,
+    SourceReader,
+    context_for,
+)
 from ufo.ext.manifest import (
     HookContext,
     HookOutcome,
@@ -108,10 +113,23 @@ async def _unavailable_spawn(
 
 async def _workspace() -> UUID:
     workspace_id = uuid4()
+    agent_id = uuid5(NAMESPACE_URL, f"{workspace_id}/main")
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.workspace).values(
                 id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=agent_id,
+                workspace_id=workspace_id,
+                name="main",
+                prompt="p",
+                model="m",
+                is_main=True,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
             )
         )
     return workspace_id
@@ -149,6 +167,8 @@ def _wire(
         transaction=workspace_tx,
         workspace_id=workspace_id,
         page_states=context_for("memory", frozenset()).page_states,
+        readable_page_states=context_for("memory", frozenset()).readable_page_states,
+        readable_source_ids=context_for("memory", frozenset()).readable_source_ids,
     )
     return driver, index_pages, service
 
@@ -244,7 +264,7 @@ def _context(memory: MemoryStore, member_id: UUID | None, blob_root: Path) -> To
             id=uuid4(),
             workspace_id=uuid4(),
             conversation_id=uuid4(),
-            agent_id=uuid4(),
+            agent_id=uuid5(NAMESPACE_URL, f"{memory.workspace_id}/main"),
             seq=1,
             status="running",
             inbound="hi",
@@ -269,6 +289,18 @@ async def _search(memory: MemoryStore, member_id: UUID | None, blob_root: Path, 
             ),
         )
     return result.content[0].text
+
+
+def _reader(
+    workspace_id: UUID,
+    subjects: frozenset[str],
+    requesting_member_id: UUID | None = None,
+) -> SourceReader:
+    return SourceReader(
+        agent_id=uuid5(NAMESPACE_URL, f"{workspace_id}/main"),
+        requesting_member_id=requesting_member_id,
+        subjects=subjects,
+    )
 
 
 async def test_folder_syncs_a_page_body_to_blob_no_chunk_until_indexed(
@@ -382,6 +414,100 @@ async def test_register_source_refuses_a_live_row_with_a_different_subject(db: N
                 config,
                 subject=member_subject(uuid4()),
                 owner_member_id=uuid4(),
+            )
+
+
+async def test_registering_a_live_source_for_a_second_agent_grants_that_agent(db: None) -> None:
+    """A source syncs once however many agents read it, so adding an already-registered feed for a
+    second agent settles on the same row — and must still grant that agent, since registering
+    through an agent is what grants it. Reporting the source id while granting nothing leaves the
+    agent silently mute about the feed a member just added for it."""
+    workspace_id = await _workspace()
+    ctx = context_for("probe", frozenset())
+    config = SourceConfig(root="/shared")
+    research_id, sales_id = uuid4(), uuid4()
+    async with workspace_tx() as connection:
+        for agent_id, name in ((research_id, "research"), (sales_id, "sales")):
+            await connection.execute(
+                sa.insert(tables.agent).values(
+                    id=agent_id,
+                    workspace_id=workspace_id,
+                    name=name,
+                    prompt="p",
+                    model="m",
+                    is_main=False,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+    with ws(workspace_id):
+        first = await ctx.register_source(
+            FOLDER_BACKEND,
+            config,
+            subject=SHARED_SUBJECT,
+            owner_member_id=None,
+            agent_id=research_id,
+        )
+        second = await ctx.register_source(
+            FOLDER_BACKEND,
+            config,
+            subject=SHARED_SUBJECT,
+            owner_member_id=None,
+            agent_id=sales_id,
+        )
+        readable = {
+            agent_id: await ctx.readable_source_ids(
+                SourceReader(
+                    agent_id=agent_id,
+                    requesting_member_id=None,
+                    subjects=frozenset({SHARED_SUBJECT}),
+                )
+            )
+            for agent_id in (research_id, sales_id)
+        }
+        async with workspace_tx() as connection:
+            rows = (
+                await connection.execute(sa.select(sa.func.count()).select_from(tables.source))
+            ).scalar_one()
+    assert second == first
+    assert rows == 1
+    assert readable == {research_id: frozenset({first}), sales_id: frozenset({first})}
+
+
+async def test_register_source_refuses_an_agent_in_another_workspace(db: None) -> None:
+    """Registering a source names the agent it grants, and that agent must live in this workspace.
+    A caller passing an agent id from another workspace is refused loudly, so a source grant can
+    never cross the workspace boundary the whole model rests on."""
+    home, other = await _workspace(), await _workspace()
+    other_agent = uuid5(NAMESPACE_URL, f"{other}/main")
+    with ws(home):
+        with pytest.raises(ValueError, match="outside this workspace"):
+            await context_for("probe", frozenset()).register_source(
+                FOLDER_BACKEND,
+                SourceConfig(root="/shared"),
+                subject=SHARED_SUBJECT,
+                owner_member_id=None,
+                agent_id=other_agent,
+            )
+
+
+async def test_register_source_without_a_target_requires_a_main_agent(db: None) -> None:
+    """With no explicit agent the source binds to the workspace's main agent; a workspace that has
+    none has nothing to grant, so registration fails loudly rather than binding to no one."""
+    workspace_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.workspace).values(
+                id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
+            )
+        )
+    with ws(workspace_id):
+        with pytest.raises(RuntimeError, match="requires a main agent"):
+            await context_for("probe", frozenset()).register_source(
+                FOLDER_BACKEND,
+                SourceConfig(root="/shared"),
+                subject=SHARED_SUBJECT,
+                owner_member_id=None,
             )
 
 
@@ -535,7 +661,12 @@ async def test_edited_page_leaves_no_stale_chunk_in_search_sources(
     await _sync(driver)
     await index_pages()
     with ws(workspace_id):
-        before = await service.search_sources("launch codename", frozenset({SHARED_SUBJECT}), 8)
+        before = await service.search_sources(
+            "launch codename",
+            frozenset({SHARED_SUBJECT}),
+            8,
+            source_reader=_reader(workspace_id, frozenset({SHARED_SUBJECT})),
+        )
         assert before and "thunderbird" in before[0].text
 
     doc.write_text("the launch codename is nighthawk")
@@ -545,7 +676,10 @@ async def test_edited_page_leaves_no_stale_chunk_in_search_sources(
 
     with ws(workspace_id):
         matches = await service.search_sources(
-            "launch codename thunderbird", frozenset({SHARED_SUBJECT}), 8
+            "launch codename thunderbird",
+            frozenset({SHARED_SUBJECT}),
+            8,
+            source_reader=_reader(workspace_id, frozenset({SHARED_SUBJECT})),
         )
     assert matches and all("thunderbird" not in match.text for match in matches)
     assert "nighthawk" in matches[0].text
@@ -817,16 +951,30 @@ async def test_shared_page_scoping_excludes_a_member_only_search(
     await index_pages()
 
     with ws(workspace_id):
-        shared = await service.search_sources("expense reports due", frozenset({SHARED_SUBJECT}), 8)
+        shared = await service.search_sources(
+            "expense reports due",
+            frozenset({SHARED_SUBJECT}),
+            8,
+            source_reader=_reader(workspace_id, frozenset({SHARED_SUBJECT})),
+        )
         assert len(shared) == 1 and "expense reports" in shared[0].text
 
         member_only = await service.search_sources(
-            "expense reports due", frozenset({member_subject(uuid4())}), 8
+            "expense reports due",
+            frozenset({member_subject(uuid4())}),
+            8,
+            source_reader=_reader(workspace_id, frozenset({member_subject(uuid4())})),
         )
         assert member_only == ()
 
         with_shared = await service.search_sources(
-            "expense reports due", recall_subjects(conversation_audience(uuid4())), 8
+            "expense reports due",
+            recall_subjects(conversation_audience(uuid4())),
+            8,
+            source_reader=_reader(
+                workspace_id,
+                recall_subjects(conversation_audience(uuid4())),
+            ),
         )
         assert len(with_shared) == 1
 
@@ -867,6 +1015,15 @@ async def test_member_scoped_page_is_invisible_to_another_member(
                 updated_at=sa.func.now(),
             )
         )
+        await connection.execute(
+            sa.insert(tables.source_grant).values(
+                workspace_id=workspace_id,
+                source_id=source_id,
+                agent_id=uuid5(NAMESPACE_URL, f"{workspace_id}/main"),
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
         revision = await connection.scalar(
             sa.select(tables.page.c.revision).where(tables.page.c.id == page_id)
         )
@@ -897,15 +1054,192 @@ async def test_member_scoped_page_is_invisible_to_another_member(
 
     with ws(workspace_id):
         mine = await service.search_sources(
-            "onboarding checklist", recall_subjects(conversation_audience(alice)), 8
+            "onboarding checklist",
+            recall_subjects(conversation_audience(alice)),
+            8,
+            source_reader=_reader(
+                workspace_id,
+                recall_subjects(conversation_audience(alice)),
+                alice,
+            ),
         )
         assert len(mine) == 1 and mine[0].page_id == page_id
         assert (
             await service.search_sources(
-                "onboarding checklist", recall_subjects(conversation_audience(bob)), 8
+                "onboarding checklist",
+                recall_subjects(conversation_audience(bob)),
+                8,
+                source_reader=_reader(
+                    workspace_id,
+                    recall_subjects(conversation_audience(bob)),
+                    bob,
+                ),
             )
             == ()
         )
+
+
+@dataclass(frozen=True)
+class _Authority:
+    workspace_id: UUID
+    owner_id: UUID
+    stranger_id: UUID
+    main_agent_id: UUID
+    granted_agent_id: UUID
+    ungranted_agent_id: UUID
+    owned_source_id: UUID
+    unowned_source_id: UUID
+
+
+async def _authority() -> _Authority:
+    """A member's private source another agent registered — so that agent holds the only grant and
+    main's exact-owner exception is the sole other way in — beside an unowned shared source nobody
+    holds a grant for at all."""
+    state = _Authority(*(uuid4() for _ in range(8)))
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.workspace).values(
+                id=state.workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.member),
+            [
+                {
+                    "id": member_id,
+                    "workspace_id": state.workspace_id,
+                    "email": f"{member_id.hex}@x.test",
+                    "created_at": datetime.now(UTC),
+                    "updated_at": datetime.now(UTC),
+                }
+                for member_id in (state.owner_id, state.stranger_id)
+            ],
+        )
+        await connection.execute(
+            sa.insert(tables.agent),
+            [
+                {
+                    "id": agent_id,
+                    "workspace_id": state.workspace_id,
+                    "name": name,
+                    "prompt": "p",
+                    "model": "m",
+                    "is_main": is_main,
+                    "created_at": datetime.now(UTC),
+                    "updated_at": datetime.now(UTC),
+                }
+                for agent_id, name, is_main in (
+                    (state.main_agent_id, "ufo", True),
+                    (state.granted_agent_id, "research", False),
+                    (state.ungranted_agent_id, "scout", False),
+                )
+            ],
+        )
+        for source_id, subject, owner_member_id in (
+            (state.owned_source_id, member_subject(state.owner_id), state.owner_id),
+            (state.unowned_source_id, SHARED_SUBJECT, None),
+        ):
+            await connection.execute(
+                sa.insert(tables.source).values(
+                    id=source_id,
+                    workspace_id=state.workspace_id,
+                    backend=FOLDER_BACKEND,
+                    config={"root": f"/{source_id.hex}"},
+                    subject=subject,
+                    owner_member_id=owner_member_id,
+                    cursor=None,
+                    next_sync_at=sa.func.now(),
+                    claimed_by=None,
+                    claim_expires_at=None,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+        await connection.execute(
+            sa.insert(tables.source_grant).values(
+                workspace_id=state.workspace_id,
+                source_id=state.owned_source_id,
+                agent_id=state.granted_agent_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return state
+
+
+async def _reachable(state: _Authority, reader: SourceReader) -> frozenset[UUID]:
+    with ws(state.workspace_id):
+        return await context_for("probe", frozenset()).readable_source_ids(reader)
+
+
+def _authority_reader(
+    state: _Authority, agent_id: UUID, requesting_member_id: UUID | None
+) -> SourceReader:
+    return SourceReader(
+        agent_id=agent_id,
+        requesting_member_id=requesting_member_id,
+        subjects=frozenset({SHARED_SUBJECT, member_subject(state.owner_id)}),
+    )
+
+
+async def test_main_reads_an_owned_source_only_while_its_exact_owner_is_speaking(db: None) -> None:
+    """The exact shape of main's exception: it needs all three of the main agent, a live requesting
+    member, and that member owning the row. Drop any one and only a `source_grant` opens the
+    source — which is what carries the registering agent, speaker or not."""
+    state = await _authority()
+
+    assert await _reachable(
+        state, _authority_reader(state, state.main_agent_id, state.owner_id)
+    ) == {state.owned_source_id}
+
+    assert (
+        await _reachable(state, _authority_reader(state, state.main_agent_id, None)) == frozenset()
+    )
+    assert (
+        await _reachable(state, _authority_reader(state, state.main_agent_id, state.stranger_id))
+        == frozenset()
+    )
+    assert (
+        await _reachable(state, _authority_reader(state, state.ungranted_agent_id, state.owner_id))
+        == frozenset()
+    )
+    assert await _reachable(state, _authority_reader(state, state.granted_agent_id, None)) == {
+        state.owned_source_id
+    }
+
+
+async def test_a_turn_with_no_live_speaker_never_inherits_the_owner_exception(db: None) -> None:
+    """A scheduled run and a subagent both act with their initiator's authority and neither has a
+    speaker, so both reach `source_reader` as one shape: `acting_member_id` is the owner while
+    `requesting_member_id` is None. The exception is the live speaker's alone, so the main agent
+    reaches nothing on either."""
+    state = await _authority()
+    for on_behalf_of_member_id in (state.owner_id, state.stranger_id):
+        ctx = ToolContext(
+            sandbox=None,
+            blob=None,
+            turn=Turn(
+                id=uuid4(),
+                workspace_id=state.workspace_id,
+                conversation_id=uuid4(),
+                agent_id=state.main_agent_id,
+                seq=1,
+                status="running",
+                inbound="summarise what changed",
+                created_at=datetime(2026, 7, 27, tzinfo=UTC),
+                on_behalf_of_member_id=on_behalf_of_member_id,
+            ),
+            agent=Agent(prompt="p", model="claude-opus-4-8"),
+            spawn=_unavailable_spawn,
+            speaker_member_id=None,
+            audience=conversation_audience(None),
+            on_behalf_of_member_id=on_behalf_of_member_id,
+            artifact_token_secret="",
+        )
+        assert ctx.acting_member_id == on_behalf_of_member_id
+        assert member_subject(on_behalf_of_member_id) in ctx.read_subjects
+        assert ctx.source_reader().requesting_member_id is None
+        assert await _reachable(state, ctx.source_reader()) == frozenset()
 
 
 async def test_a_failing_source_is_isolated_and_released(

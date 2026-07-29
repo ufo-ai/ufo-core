@@ -32,7 +32,7 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from ufo.sdk.authproxy import DIRECT_ACCOUNT
 from ufo.sdk.connectors import ConnectorRegistry
-from ufo.sdk.context import CredentialSlotUnset, ExtensionContext
+from ufo.sdk.context import CredentialSlotUnset, ExtensionContext, SourceReader
 from ufo.sdk.manifest import HookContext, HookOutcome, PageChangeBatch
 from ufo.sdk.objects import (
     AdminRequired,
@@ -462,6 +462,7 @@ class SourceObjects(MemberOwnedObjects[SourceSpec, ObjectOwner]):
                 subject=subject,
                 owner_member_id=ctx.speaker_member_id,
                 connection_id=resolved_account.connection_id,
+                agent_id=ctx.turn.agent_id,
             )
 
     async def _delete_owned(self, ctx: ToolContext, name: str, owner: ObjectOwner) -> None:
@@ -554,7 +555,8 @@ async def on_page_change(ctx: HookContext) -> HookOutcome:
     into that conversation's own workspace — a delta runs to a full batch of pages, so counts are
     what the agent reads to decide and the file is what it reads to drill in. Only shared changes
     are surfaced — a page private to some member is never referenced, counted, logged, or cause to
-    alert, so its existence never leaks to a subscriber who cannot read it. Idempotency-keyed on
+    alert, so its existence never leaks to a subscriber who cannot read it, and a subscriber whose
+    agent holds no grant for the changed source is alerted about nothing. Idempotency-keyed on
     binding + conversation + latest change, so a replayed batch never double-alerts; a changed row
     no binding claims alerts nothing."""
     match ctx.payload:
@@ -580,14 +582,31 @@ async def on_page_change(ctx: HookContext) -> HookOutcome:
         shared = [change for change in binding_changes if change.subject == SHARED_SUBJECT]
         if not shared:
             continue
-        latest = max(change.changed_at for change in shared).isoformat()
         for conversation, agent in subscribers.items():
+            agent_id = UUID(agent)
+            readable = await ctx.ext.readable_source_ids(
+                SourceReader(
+                    agent_id=agent_id,
+                    requesting_member_id=None,
+                    subjects=frozenset({SHARED_SUBJECT}),
+                )
+            )
+            authorized = [change for change in shared if change.source_id in readable]
+            if not authorized:
+                continue
+            latest = max(change.changed_at for change in authorized).isoformat()
             conversation_id = UUID(conversation)
-            path = await _write_change_log(ctx.ext, conversation_id, binding, latest, shared)
+            path = await _write_change_log(
+                ctx.ext,
+                conversation_id,
+                binding,
+                latest,
+                authorized,
+            )
             await ctx.ext.invoke(
                 conversation_id,
-                UUID(agent),
-                _alert_message(binding, shared, path),
+                agent_id,
+                _alert_message(binding, authorized, path),
                 idempotency_key=f"source-sub:{binding.name}:{conversation}:{latest}",
             )
     return None

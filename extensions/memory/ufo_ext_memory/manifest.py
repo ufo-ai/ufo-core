@@ -23,7 +23,7 @@ from uuid import UUID
 import sqlalchemy as sa
 from pydantic import BaseModel, ConfigDict, Field
 
-from ufo.sdk.context import ExtensionContext
+from ufo.sdk.context import ExtensionContext, SourceReader
 from ufo.sdk.index import TextChunker
 from ufo.sdk.jobs import JobSpec, owner_candidates
 from ufo.sdk.manifest import (
@@ -166,19 +166,37 @@ class MemorySearchService:
     async def search(
         self,
         queries: tuple[str, ...],
-        subjects: frozenset[str],
+        reader: SourceReader,
         start: datetime | None = None,
         end: datetime | None = None,
     ) -> tuple[MemoryMatch, ...]:
         if not 1 <= len(queries) <= MAX_MEMORY_QUERIES:
             raise ValueError(f"memory search requires 1-{MAX_MEMORY_QUERIES} queries")
         store = store_for(self.ctx)
+        subjects = reader.subjects
         recall_batch = asyncio.gather(
-            *(store.recall(query, subjects, MEMORY_SEARCH_LIMIT, start, end) for query in queries)
+            *(
+                store.recall(
+                    query,
+                    subjects,
+                    MEMORY_SEARCH_LIMIT,
+                    start,
+                    end,
+                    source_reader=reader,
+                )
+                for query in queries
+            )
         )
         source_batch = asyncio.gather(
             *(
-                store.search_sources(query, subjects, MEMORY_SEARCH_LIMIT, start, end)
+                store.search_sources(
+                    query,
+                    subjects,
+                    MEMORY_SEARCH_LIMIT,
+                    start,
+                    end,
+                    source_reader=reader,
+                )
                 for query in queries
             )
         )
@@ -234,7 +252,12 @@ async def memory_search_handler(ctx: ToolContext, args: MemorySearchInput) -> To
         raise RuntimeError("memory_search dispatched without its ExtensionContext")
     start = _date_bound(args.start_date, end=False)
     end = _date_bound(args.end_date, end=True)
-    matches = await MemorySearchService(ctx.ext).search(args.queries, ctx.read_subjects, start, end)
+    matches = await MemorySearchService(ctx.ext).search(
+        args.queries,
+        ctx.source_reader(),
+        start,
+        end,
+    )
     if not matches:
         return ToolResult(content=(TextContent(text="No matching memory."),))
     return ToolResult(
@@ -266,12 +289,24 @@ async def recall_hook(ctx: HookContext) -> HookOutcome:
     on any failure or empty result rather than ever failing the turn."""
     if not isinstance(ctx.payload, UserPromptSubmit):
         return None
+    if ctx.turn is None:
+        return None
     subjects = recall_subjects(ctx.audience)
+    reader = SourceReader(
+        agent_id=ctx.turn.agent_id,
+        requesting_member_id=None,
+        subjects=subjects,
+    )
     recalled: tuple[Recalled, ...] = ()
     error_class: str | None = None
     try:
         async with asyncio.timeout(RECALL_SOFT_TIMEOUT_SECONDS):
-            recalled = await store_for(ctx.ext).recall(ctx.payload.text, subjects, RECALL_LIMIT)
+            recalled = await store_for(ctx.ext).recall(
+                ctx.payload.text,
+                subjects,
+                RECALL_LIMIT,
+                source_reader=reader,
+            )
     except Exception as error:
         error_class = type(error).__name__[:MAX_RECALL_ERROR_CLASS_CHARS]
         logger.warning("memory.recall_hook.degraded", exc_info=True)
@@ -384,11 +419,10 @@ def manifest() -> Manifest:
                 name="memory_search",
                 description=(
                     "Search memory for facts, notes, and synced source documents, over the "
-                    "conversation member's memory and shared memory. In a shared channel (no "
-                    "conversation member) only shared memory is searched — a member's private "
-                    "memory and privately-registered sources are searchable only in that member's "
-                    "own conversation, so don't claim to have searched private memory in a "
-                    "channel. Pass up to "
+                    "shared audience plus the exact member making this request. An explicit "
+                    "member request may search that member's private memory and sources even in a "
+                    "shared conversation; never treat that access as ambient for other members. "
+                    "Pass up to "
                     f"{MAX_MEMORY_QUERIES} distinct queries — they run in parallel and their "
                     "results are merged and deduplicated. Optionally restrict to items written "
                     "in a window with start_date/end_date (ISO-8601, e.g. 2026-01-31). Returns "

@@ -31,7 +31,7 @@ from ufo.credentials import (
     open_credential_request,
 )
 from ufo.db import workspace_tx
-from ufo.ext.context import context_for
+from ufo.ext.context import SourceReader, context_for
 from ufo.ext.loader import BoundHook, HookChain
 from ufo.ext.manifest import (
     Deny,
@@ -179,11 +179,11 @@ class StaticMemorySearch:
     async def search(
         self,
         queries: tuple[str, ...],
-        subjects: frozenset[str],
+        reader: SourceReader,
         start: datetime | None = None,
         end: datetime | None = None,
     ) -> tuple[MemoryMatch, ...]:
-        self.subject_sets.append(subjects)
+        self.subject_sets.append(reader.subjects)
         return (
             MemoryMatch(
                 kind="fact",

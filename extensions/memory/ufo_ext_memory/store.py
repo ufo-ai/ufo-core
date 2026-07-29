@@ -35,7 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from sqlalchemy.sql.elements import ColumnElement
 
 from ufo.sdk.audience import Audience, audience_subjects
-from ufo.sdk.context import ExtensionContext, PageState
+from ufo.sdk.context import ExtensionContext, PageState, SourceReader
 from ufo.sdk.index import (
     OWNER_KIND_MEMORY_ITEM,
     OWNER_KIND_PAGE,
@@ -52,6 +52,7 @@ RRF_K = 60
 RRF_WEIGHT = 0.7
 COSINE_WEIGHT = 0.3
 TAIL_SCAN_MAX = 200
+RECALL_CANDIDATE_POOL = 200
 MEMORY_ITEM_NAMESPACE = UUID("32492d08-3cb7-59ac-8962-b2e384f024fc")
 DUE_BATCH_MAX_ITEMS = 200
 EMBED_CLAIM_LEASE_SECONDS = 300
@@ -80,6 +81,11 @@ KIND_FACT: MemoryKind = "fact"
 
 Transaction = Callable[[], AbstractAsyncContextManager[AsyncConnection]]
 PageStates = Callable[[tuple[UUID, ...]], Awaitable[dict[UUID, PageState]]]
+ReadablePageStates = Callable[
+    [tuple[UUID, ...], SourceReader],
+    Awaitable[dict[UUID, PageState]],
+]
+ReadableSourceIds = Callable[[SourceReader], Awaitable[frozenset[UUID]]]
 
 _metadata = sa.MetaData()
 memory_item = sa.Table(
@@ -142,6 +148,17 @@ mem_page = sa.Table(
 
 def recall_subjects(audience: Audience) -> frozenset[str]:
     return audience_subjects(audience)
+
+
+def _granted_link(source_ids: frozenset[UUID]) -> ColumnElement[bool]:
+    """The grant fence over the source link set: a page-derived row is readable when the reader
+    holds a grant for any one of the sources that derived it, not only the source of its current
+    primary binding — a fact learned from two feeds is reached through either. Correlates to
+    `memory_item.c.id`, so it composes into a read as an `EXISTS` predicate."""
+    return sa.exists().where(
+        memory_source.c.memory_item_id == memory_item.c.id,
+        memory_source.c.source_id.in_(source_ids),
+    )
 
 
 class MemoryInventoryItem(BaseModel):
@@ -467,6 +484,8 @@ class MemoryStore:
     transaction: Transaction
     workspace_id: UUID
     page_states: PageStates
+    readable_page_states: ReadablePageStates | None = None
+    readable_source_ids: ReadableSourceIds | None = None
 
     async def commit(self, write: MemoryWrite) -> None:
         """Persist one memory_item with no derived state: embedding_digest stays NULL, marking the
@@ -684,17 +703,29 @@ class MemoryStore:
         limit: int,
         start: datetime | None = None,
         end: datetime | None = None,
+        *,
+        source_reader: SourceReader,
     ) -> tuple[Recalled, ...]:
         """Fuse the index legs with the cosine re-score blend and a lexical leg over the un-embedded
         tail, read the surviving items back, then rank by recency decay (fact half-lives), cap
         per-class diversity, and rewrite episodic hits to topic pointers. The tail leg makes a
         just-committed fact recallable before the index job derives its chunks. An optional
         half-open `[start, end)` bound on `created_at` restricts recall to a window; the index never
-        sees the bound, so the filter lands in the row read-back alongside the superseded drop."""
-        lexical, vector = await self._legs(query, subjects, OWNER_KIND_MEMORY_ITEM, limit)
-        tail = await self._untail_leg(query, subjects, limit)
+        sees the bound, so the filter lands in the row read-back alongside the superseded drop and
+        the source-grant fence — a page-derived row survives only for a reader holding one of its
+        source links. The index legs fetch a bounded candidate pool rather than just `limit`, so the
+        fence has higher-ranked-but-ungranted rows to discard without starving the `limit` granted
+        rows a reader may see; it is a row filter, not an index partition."""
+        source_ids = await self._source_ids(source_reader)
+        pool = max(limit, RECALL_CANDIDATE_POOL)
+        lexical, vector = await self._legs(query, subjects, OWNER_KIND_MEMORY_ITEM, pool)
+        tail = await self._untail_leg(query, subjects, pool, source_ids)
         enriched = await self._enrich(
-            fuse_recall(lexical, vector, tail, limit), subjects, start, end
+            fuse_recall(lexical, vector, tail, pool),
+            subjects,
+            source_ids,
+            start,
+            end,
         )
         now = datetime.now(UTC)
         ranked = tuple(
@@ -714,14 +745,21 @@ class MemoryStore:
         limit: int,
         start: datetime | None = None,
         end: datetime | None = None,
+        *,
+        source_reader: SourceReader,
     ) -> tuple[SourceMatch, ...]:
         """Search synced source pages the same way recall searches facts: fuse the two index legs
         under the subject filter over the page owner kind, then read each surviving page back from
-        the `mem_page` mirror — carrying its subject and dropping any outside the optional
+        the `mem_page` mirror — fenced on the reader's grant for the page's source, carrying its
+        subject, and dropping any outside the optional
         `[start, end)` `created_at` window. The mirror's subject and revision must still match the
         core page, so a changed or removed document cannot disclose stale chunks while its
         page-index job catches up."""
-        fused = fuse_hits(*await self._legs(query, subjects, OWNER_KIND_PAGE, limit), limit)
+        pool = max(limit, RECALL_CANDIDATE_POOL)
+        fused = fuse_hits(
+            *await self._legs(query, subjects, OWNER_KIND_PAGE, pool),
+            pool,
+        )
         if not fused:
             return ()
         ids = [UUID(hit.owner_id) for hit in fused]
@@ -750,8 +788,8 @@ class MemoryStore:
                 .all()
             )
         by_id = {row["page_id"]: row for row in rows}
-        current = await self.page_states(tuple(by_id))
-        return tuple(
+        current = await self._readable_states(tuple(by_id), source_reader)
+        matches = tuple(
             SourceMatch(
                 page_id=UUID(hit.owner_id),
                 subject=by_id[UUID(hit.owner_id)]["subject"],
@@ -766,9 +804,22 @@ class MemoryStore:
             and state.revision == by_id[UUID(hit.owner_id)]["revision"]
             and state.subject in subjects
         )
+        return matches[:limit]
+
+    async def _source_ids(
+        self,
+        source_reader: SourceReader,
+    ) -> frozenset[UUID]:
+        if self.readable_source_ids is None:
+            raise RuntimeError("source-derived memory reads require source grant authority")
+        return await self.readable_source_ids(source_reader)
 
     async def _legs(
-        self, query: str, subjects: frozenset[str], owner_kind: str, limit: int
+        self,
+        query: str,
+        subjects: frozenset[str],
+        owner_kind: str,
+        limit: int,
     ) -> tuple[tuple[Hit, ...], tuple[Hit, ...]]:
         embedding = await self._embed_query(query)
         lexical = await self.index.lexical(query, subjects, owner_kind, limit)
@@ -778,7 +829,11 @@ class MemoryStore:
         return lexical, vector
 
     async def _untail_leg(
-        self, query: str, subjects: frozenset[str], limit: int
+        self,
+        query: str,
+        subjects: frozenset[str],
+        limit: int,
+        source_ids: frozenset[UUID],
     ) -> tuple[Hit, ...]:
         """A lexical leg over the un-embedded tail — memory_item rows the index job has not settled
         yet (`embedding_digest` NULL) — so a just-committed fact is recallable within the indexer's
@@ -789,16 +844,24 @@ class MemoryStore:
         terms = [term for term in re.split(r"\W+", query.lower()) if term]
         if not terms or not subjects:
             return ()
+        authority: ColumnElement[bool] = memory_item.c.source_id.is_(None)
+        if source_ids:
+            authority = sa.or_(authority, _granted_link(source_ids))
         async with self.transaction() as connection:
             rows = (
                 (
                     await connection.execute(
-                        sa.select(memory_item.c.id, memory_item.c.subject, memory_item.c.body)
+                        sa.select(
+                            memory_item.c.id,
+                            memory_item.c.subject,
+                            memory_item.c.body,
+                        )
                         .where(
                             memory_item.c.workspace_id == self.workspace_id,
                             memory_item.c.subject.in_(subjects),
                             memory_item.c.embedding_digest.is_(None),
                             memory_item.c.superseded_by.is_(None),
+                            authority,
                         )
                         .order_by(memory_item.c.created_at.desc())
                         .limit(TAIL_SCAN_MAX)
@@ -836,11 +899,15 @@ class MemoryStore:
         self,
         fused: tuple[Fused, ...],
         subjects: frozenset[str],
+        source_ids: frozenset[UUID],
         start: datetime | None,
         end: datetime | None,
     ) -> tuple[Recalled, ...]:
-        """Read the surviving (non-superseded) items back in fused order; a superseded item — or one
-        outside the `[start, end)` `created_at` window — drops out here rather than being served."""
+        """Read the surviving (non-superseded) items back in fused order, fenced on the source
+        grant: a page-derived row survives only when the reader holds one of its source links, a
+        member-written row (no source) always. A superseded item — or one outside the
+        `[start, end)` `created_at` window, or one whose page has moved off its bound revision —
+        drops out here rather than being served."""
         if not fused:
             return ()
         ids = [UUID(hit.owner_id) for hit in fused]
@@ -849,6 +916,7 @@ class MemoryStore:
             memory_item.c.workspace_id == self.workspace_id,
             memory_item.c.subject.in_(subjects),
             memory_item.c.superseded_by.is_(None),
+            sa.or_(memory_item.c.source_id.is_(None), _granted_link(source_ids)),
         ]
         if start is not None:
             conditions.append(memory_item.c.created_at >= start)
@@ -908,6 +976,15 @@ class MemoryStore:
             )
         )
 
+    async def _readable_states(
+        self, page_ids: tuple[UUID, ...], source_reader: SourceReader
+    ) -> dict[UUID, PageState]:
+        if not page_ids:
+            return {}
+        if self.readable_page_states is None:
+            raise RuntimeError("source-derived memory reads require source grant authority")
+        return await self.readable_page_states(page_ids, source_reader)
+
 
 def store_for(ext: ExtensionContext) -> MemoryStore:
     """Build the memory workflow over a scoped context, failing loud when the deploy index/embed
@@ -920,6 +997,8 @@ def store_for(ext: ExtensionContext) -> MemoryStore:
         transaction=ext.transaction,
         workspace_id=ext.store.workspace_id,
         page_states=ext.page_states,
+        readable_page_states=ext.readable_page_states,
+        readable_source_ids=ext.readable_source_ids,
     )
 
 

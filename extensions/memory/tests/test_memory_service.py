@@ -35,7 +35,7 @@ from ufo_ext_memory.store import (
 )
 
 from ufo.db import workspace_tx
-from ufo.ext.context import PageState, context_for
+from ufo.ext.context import PageState, SourceReader, context_for
 from ufo.indexing import (
     OWNER_KIND_MEMORY_ITEM,
     OWNER_KIND_PAGE,
@@ -103,6 +103,8 @@ class ReclassifyingPage:
             self.page_id: PageState(
                 subject=self.before if self.calls == 1 else self.after,
                 revision=PAGE_REVISION,
+                digest=PAGE_DIGEST,
+                body_ref=f"pages/{self.page_id}",
             )
         }
 
@@ -134,11 +136,7 @@ class RebindingIndex:
         return await self.backend.lexical(query, subjects, owner_kind, limit)
 
     async def vector(
-        self,
-        embedding: tuple[float, ...],
-        subjects: frozenset[str],
-        owner_kind: str,
-        limit: int,
+        self, embedding: tuple[float, ...], subjects: frozenset[str], owner_kind: str, limit: int
     ) -> tuple[Hit, ...]:
         return await self.backend.vector(embedding, subjects, owner_kind, limit)
 
@@ -187,13 +185,66 @@ async def _seed_page(workspace_id: UUID, page_id: UUID, source_id: UUID, subject
 
 
 def _store(embed: object, workspace_id: UUID) -> MemoryStore:
+    ext = context_for("memory", frozenset())
+
+    async def readable(page_ids: tuple[UUID, ...], reader: SourceReader) -> dict[UUID, PageState]:
+        return await ext.page_states(page_ids)
+
+    async def readable_ids(reader: SourceReader) -> frozenset[UUID]:
+        async with workspace_tx() as connection:
+            return frozenset(
+                (
+                    await connection.execute(
+                        sa.select(tables.source.c.id).where(
+                            tables.source.c.workspace_id == workspace_id,
+                            tables.source.c.removed_at.is_(None),
+                        )
+                    )
+                ).scalars()
+            )
+
     return MemoryStore(
         index=DefaultIndex(transaction=workspace_tx),
         embed=embed,
         transaction=workspace_tx,
         workspace_id=workspace_id,
-        page_states=context_for("memory", frozenset()).page_states,
+        page_states=ext.page_states,
+        readable_page_states=readable,
+        readable_source_ids=readable_ids,
     )
+
+
+def _reader(subjects: frozenset[str]) -> SourceReader:
+    return SourceReader(agent_id=uuid4(), requesting_member_id=None, subjects=subjects)
+
+
+async def _granted_reader(workspace_id: UUID, subject: str, *source_ids: UUID) -> SourceReader:
+    """An agent holding the grant for each named source: a page-derived fact reaches recall only
+    through a reader granted the feed it came from."""
+    agent_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=agent_id,
+                workspace_id=workspace_id,
+                name="reader",
+                prompt="p",
+                model="m",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        for source_id in source_ids:
+            await connection.execute(
+                sa.insert(tables.source_grant).values(
+                    workspace_id=workspace_id,
+                    source_id=source_id,
+                    agent_id=agent_id,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+    return SourceReader(agent_id=agent_id, requesting_member_id=None, subjects=frozenset({subject}))
 
 
 async def _seed_item(
@@ -238,8 +289,26 @@ async def _seed_item(
                 updated_at=sa.func.now(),
             )
         )
+        if created_from_page_id is not None:
+            await connection.execute(
+                sa.insert(memory_source).values(
+                    workspace_id=workspace_id,
+                    memory_item_id=item_id,
+                    source_id=page_authority[1],
+                    page_id=created_from_page_id,
+                    revision=page_authority[0],
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
     chunk = Chunk(
-        "d-" + item_id.hex, OWNER_KIND_MEMORY_ITEM, str(item_id), subject, 0, body, vector
+        "d-" + item_id.hex,
+        OWNER_KIND_MEMORY_ITEM,
+        str(item_id),
+        subject,
+        0,
+        body,
+        vector,
     )
     with ws(workspace_id):
         await DefaultIndex(transaction=workspace_tx).upsert((chunk,))
@@ -251,7 +320,15 @@ async def _seed_page_chunk(
 ) -> UUID:
     page_id, source_id = uuid4(), uuid4()
     await _seed_page(workspace_id, page_id, source_id, subject)
-    chunk = Chunk("p-" + page_id.hex, OWNER_KIND_PAGE, str(page_id), subject, 0, body, vector)
+    chunk = Chunk(
+        "p-" + page_id.hex,
+        OWNER_KIND_PAGE,
+        str(page_id),
+        subject,
+        0,
+        body,
+        vector,
+    )
     with ws(workspace_id):
         await DefaultIndex(transaction=workspace_tx).upsert((chunk,))
     async with workspace_tx() as connection:
@@ -332,7 +409,12 @@ async def test_recommitting_a_fact_updates_in_place_not_duplicated(db: None) -> 
             chunker=TextChunker(),
             page_states=context_for("memory", frozenset()).page_states,
         ).run()
-    hits = await store.recall("vault code", frozenset({SHARED_SUBJECT}), 10)
+    hits = await store.recall(
+        "vault code",
+        frozenset({SHARED_SUBJECT}),
+        10,
+        source_reader=_reader(frozenset({SHARED_SUBJECT})),
+    )
     assert len(hits) == 1
     assert "4821" in hits[0].body
 
@@ -430,6 +512,7 @@ async def test_deleting_one_source_keeps_a_fact_its_other_source_still_provides(
     assert row.embedding_digest is None
     assert set(links) == {(source_a, page_a)}
 
+    reader = _reader(frozenset({SHARED_SUBJECT}))
     with ws(workspace_id):
         await MemoryIndexer(
             index=store.index,
@@ -438,7 +521,9 @@ async def test_deleting_one_source_keeps_a_fact_its_other_source_still_provides(
             chunker=TextChunker(),
             page_states=context_for("memory", frozenset()).page_states,
         ).run()
-        recalled = await store.recall("launch date", frozenset({SHARED_SUBJECT}), 10)
+        recalled = await store.recall(
+            "launch date", frozenset({SHARED_SUBJECT}), 10, source_reader=reader
+        )
     assert [item.memory_id for item in recalled] == [row.id]
 
 
@@ -858,7 +943,10 @@ async def test_recall_blend_promotes_the_semantically_closer_fact(db: None) -> N
         created_at=when,
     )
     recalled = await _store(StubEmbed(vec((0, 1.0))), workspace_id).recall(
-        "budget review notes", frozenset({SHARED_SUBJECT}), 10
+        "budget review notes",
+        frozenset({SHARED_SUBJECT}),
+        10,
+        source_reader=_reader(frozenset({SHARED_SUBJECT})),
     )
     assert [item.memory_id for item in recalled] == [close, far]
 
@@ -873,7 +961,12 @@ async def test_fresh_fact_recalls_before_indexing_then_via_the_index(db: None) -
     store = _store(embed, workspace_id)
     await store.commit(MemoryWrite(subject=SHARED_SUBJECT, body="the safe combination is 1234"))
 
-    before = await store.recall("safe combination", frozenset({SHARED_SUBJECT}), 10)
+    before = await store.recall(
+        "safe combination",
+        frozenset({SHARED_SUBJECT}),
+        10,
+        source_reader=_reader(frozenset({SHARED_SUBJECT})),
+    )
     assert len(before) == 1
     assert "1234" in before[0].body
 
@@ -885,7 +978,12 @@ async def test_fresh_fact_recalls_before_indexing_then_via_the_index(db: None) -
             chunker=TextChunker(),
             page_states=context_for("memory", frozenset()).page_states,
         ).run()
-    after = await store.recall("safe combination", frozenset({SHARED_SUBJECT}), 10)
+    after = await store.recall(
+        "safe combination",
+        frozenset({SHARED_SUBJECT}),
+        10,
+        source_reader=_reader(frozenset({SHARED_SUBJECT})),
+    )
     assert len(after) == 1
     assert "1234" in after[0].body
 
@@ -897,8 +995,21 @@ async def test_untail_leg_respects_subject_scoping(db: None) -> None:
     alice, bob = uuid4(), uuid4()
     store = _store(StubEmbed(vec((0, 1.0))), workspace_id)
     await store.commit(MemoryWrite(subject=member_subject(alice), body="alices locker code is 77"))
-    assert await store.recall("locker code", recall_subjects(conversation_audience(bob)), 10) == ()
-    mine = await store.recall("locker code", recall_subjects(conversation_audience(alice)), 10)
+    assert (
+        await store.recall(
+            "locker code",
+            recall_subjects(conversation_audience(bob)),
+            10,
+            source_reader=_reader(frozenset({SHARED_SUBJECT})),
+        )
+        == ()
+    )
+    mine = await store.recall(
+        "locker code",
+        recall_subjects(conversation_audience(alice)),
+        10,
+        source_reader=_reader(frozenset({SHARED_SUBJECT})),
+    )
     assert len(mine) == 1 and "77" in mine[0].body
 
 
@@ -910,12 +1021,18 @@ async def test_recall_returns_items_scoped_to_subject(db: None) -> None:
     await _seed_item(workspace_id, SHARED_SUBJECT, "the office wifi password is maple", probe)
 
     mine = await _store(StubEmbed(probe), workspace_id).recall(
-        "seat and wifi", recall_subjects(conversation_audience(member)), 10
+        "seat and wifi",
+        recall_subjects(conversation_audience(member)),
+        10,
+        source_reader=_reader(frozenset({SHARED_SUBJECT})),
     )
     assert {item.subject for item in mine} == {member_subject(member), SHARED_SUBJECT}
 
     theirs = await _store(StubEmbed(probe), workspace_id).recall(
-        "seat and wifi", recall_subjects(conversation_audience(uuid4())), 10
+        "seat and wifi",
+        recall_subjects(conversation_audience(uuid4())),
+        10,
+        source_reader=_reader(frozenset({SHARED_SUBJECT})),
     )
     assert [item.subject for item in theirs] == [SHARED_SUBJECT]
 
@@ -941,7 +1058,10 @@ async def test_page_derived_recall_rechecks_the_current_page_subject(db: None) -
         )
     with ws(workspace_id):
         recalled = await _store(StubEmbed(probe), workspace_id).recall(
-            "acquisition codename", frozenset({SHARED_SUBJECT}), 10
+            "acquisition codename",
+            frozenset({SHARED_SUBJECT}),
+            10,
+            source_reader=_reader(frozenset({SHARED_SUBJECT})),
         )
     assert recalled == ()
 
@@ -957,7 +1077,10 @@ async def test_recall_skips_a_superseded_item(db: None) -> None:
             .where(memory_item.c.id == stale)
         )
     empty = await _store(StubEmbed(probe), workspace_id).recall(
-        "release ship date", frozenset({SHARED_SUBJECT}), 10
+        "release ship date",
+        frozenset({SHARED_SUBJECT}),
+        10,
+        source_reader=_reader(frozenset({SHARED_SUBJECT})),
     )
     assert empty == ()
 
@@ -966,7 +1089,10 @@ async def test_recall_degrades_to_lexical_when_embed_fails(db: None) -> None:
     workspace_id = await _workspace()
     await _seed_item(workspace_id, SHARED_SUBJECT, "the mascot is named zoltar", vec((3, 1.0)))
     hits = await _store(BrokenEmbed(), workspace_id).recall(
-        "zoltar", frozenset({SHARED_SUBJECT}), 10
+        "zoltar",
+        frozenset({SHARED_SUBJECT}),
+        10,
+        source_reader=_reader(frozenset({SHARED_SUBJECT})),
     )
     assert len(hits) == 1
     assert "zoltar" in hits[0].body
@@ -987,12 +1113,174 @@ async def test_pages_and_facts_do_not_crowd_each_others_candidate_window(db: Non
     store = _store(StubEmbed(probe), workspace_id)
     subjects = frozenset({SHARED_SUBJECT})
     with ws(workspace_id):
-        facts = await store.recall("quarterly report", subjects, 2)
-        pages = await store.search_sources("quarterly report", subjects, 2)
+        facts = await store.recall(
+            "quarterly report", subjects, 2, source_reader=_reader(frozenset({SHARED_SUBJECT}))
+        )
+        pages = await store.search_sources(
+            "quarterly report",
+            subjects,
+            2,
+            source_reader=_reader(subjects),
+        )
 
     assert {item.memory_id for item in facts} == {fact_a, fact_b}
     assert len(pages) == 2
     assert all("quarterly report" in page.text for page in pages)
+
+
+async def test_source_grants_filter_before_recall_ranking(db: None) -> None:
+    workspace_id = await _workspace()
+    agent_id = uuid4()
+    strong = vec((4, 1.0))
+    weak = vec((5, 1.0))
+    ungranted_page = await _seed_page_chunk(
+        workspace_id,
+        SHARED_SUBJECT,
+        "quarterly forecast " * 20 + "ungranted",
+        strong,
+    )
+    granted_page = await _seed_page_chunk(
+        workspace_id,
+        SHARED_SUBJECT,
+        "quarterly forecast granted",
+        weak,
+    )
+    ungranted_fact = await _seed_item(
+        workspace_id,
+        SHARED_SUBJECT,
+        "quarterly forecast " * 20 + "ungranted fact",
+        strong,
+        created_from_page_id=ungranted_page,
+    )
+    granted_fact = await _seed_item(
+        workspace_id,
+        SHARED_SUBJECT,
+        "quarterly forecast granted fact",
+        weak,
+        created_from_page_id=granted_page,
+    )
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=agent_id,
+                workspace_id=workspace_id,
+                name="research",
+                prompt="p",
+                model="m",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        granted_source = (
+            await connection.execute(
+                sa.select(tables.page.c.source_id).where(tables.page.c.id == granted_page)
+            )
+        ).scalar_one()
+        await connection.execute(
+            sa.insert(tables.source_grant).values(
+                workspace_id=workspace_id,
+                source_id=granted_source,
+                agent_id=agent_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    ext = context_for("memory", frozenset())
+    store = MemoryStore(
+        index=DefaultIndex(transaction=workspace_tx),
+        embed=StubEmbed(strong),
+        transaction=workspace_tx,
+        workspace_id=workspace_id,
+        page_states=ext.page_states,
+        readable_page_states=ext.readable_page_states,
+        readable_source_ids=ext.readable_source_ids,
+    )
+    subjects = frozenset({SHARED_SUBJECT})
+    reader = SourceReader(agent_id=agent_id, requesting_member_id=None, subjects=subjects)
+    with ws(workspace_id):
+        pages = await store.search_sources(
+            "quarterly forecast",
+            subjects,
+            1,
+            source_reader=reader,
+        )
+        facts = await store.recall(
+            "quarterly forecast",
+            subjects,
+            1,
+            source_reader=reader,
+        )
+    assert [page.page_id for page in pages] == [granted_page]
+    assert [fact.memory_id for fact in facts] == [granted_fact]
+    assert ungranted_page not in {page.page_id for page in pages}
+    assert ungranted_fact not in {fact.memory_id for fact in facts}
+
+
+async def test_a_fact_from_two_feeds_is_recalled_through_a_non_primary_granted_source(
+    db: None,
+) -> None:
+    """One fact derived from two feeds is one row with a link per source, primary bound to the feed
+    that wrote it last. A reader granted only the *other* source still recalls it — the grant fence
+    reads the link set, not the row's current binding. A binding-only fence would have denied it,
+    the exact case spec.md says a grant on any one source must reach."""
+    workspace_id = await _workspace()
+    page_a, page_b = uuid4(), uuid4()
+    source_a, source_b = uuid4(), uuid4()
+    await _seed_page(workspace_id, page_a, source_a, SHARED_SUBJECT)
+    await _seed_page(workspace_id, page_b, source_b, SHARED_SUBJECT)
+    async with workspace_tx() as connection:
+        revisions = {
+            row.id: row.revision
+            for row in (
+                await connection.execute(
+                    sa.select(tables.page.c.id, tables.page.c.revision).where(
+                        tables.page.c.id.in_((page_a, page_b))
+                    )
+                )
+            ).all()
+        }
+    ext = context_for("memory", frozenset())
+    store = MemoryStore(
+        index=DefaultIndex(transaction=workspace_tx),
+        embed=StubEmbed(vec((0, 1.0))),
+        transaction=workspace_tx,
+        workspace_id=workspace_id,
+        page_states=ext.page_states,
+        readable_page_states=ext.readable_page_states,
+        readable_source_ids=ext.readable_source_ids,
+    )
+    body = "the vault code is 8842"
+    for page_id, source_id in ((page_a, source_a), (page_b, source_b)):
+        await store.commit(
+            MemoryWrite(
+                subject=SHARED_SUBJECT,
+                body=body,
+                created_from_page_id=page_id,
+                created_from_page_revision=revisions[page_id],
+                source_id=source_id,
+            )
+        )
+    with ws(workspace_id):
+        await MemoryIndexer(
+            index=store.index,
+            embed=store.embed,
+            transaction=workspace_tx,
+            chunker=TextChunker(),
+            page_states=ext.page_states,
+        ).run()
+    async with workspace_tx() as connection:
+        primary = (
+            await connection.execute(
+                sa.select(memory_item.c.source_id).where(memory_item.c.body == body)
+            )
+        ).scalar_one()
+    assert primary == source_b
+    reader = await _granted_reader(workspace_id, SHARED_SUBJECT, source_a)
+    with ws(workspace_id):
+        recalled = await store.recall(
+            "vault code", frozenset({SHARED_SUBJECT}), 10, source_reader=reader
+        )
+    assert [str(fact.body) for fact in recalled] == [body]
 
 
 async def test_source_search_rechecks_the_current_page_subject(db: None) -> None:
@@ -1009,7 +1297,10 @@ async def test_source_search_rechecks_the_current_page_subject(db: None) -> None
         )
     with ws(workspace_id):
         pages = await _store(StubEmbed(probe), workspace_id).search_sources(
-            "quarterly forecast", frozenset({SHARED_SUBJECT}), 10
+            "quarterly forecast",
+            frozenset({SHARED_SUBJECT}),
+            10,
+            source_reader=_reader(frozenset({SHARED_SUBJECT})),
         )
     assert pages == ()
 
@@ -1067,7 +1358,10 @@ async def test_recall_reorders_by_information_age(db: None) -> None:
         as_of=datetime.now(UTC),
     )
     recalled = await _store(StubEmbed(probe), workspace_id).recall(
-        "budget review", frozenset({SHARED_SUBJECT}), 10
+        "budget review",
+        frozenset({SHARED_SUBJECT}),
+        10,
+        source_reader=_reader(frozenset({SHARED_SUBJECT})),
     )
     assert [item.memory_id for item in recalled] == [new, old]
 
@@ -1092,14 +1386,27 @@ async def test_recall_filters_to_the_created_at_window(db: None) -> None:
     store = _store(StubEmbed(probe), workspace_id)
     subjects = frozenset({SHARED_SUBJECT})
 
-    since = await store.recall("alpha", subjects, 8, start=datetime(2024, 1, 1, tzinfo=UTC))
-    before = await store.recall("alpha", subjects, 8, end=datetime(2021, 1, 1, tzinfo=UTC))
+    since = await store.recall(
+        "alpha",
+        subjects,
+        8,
+        start=datetime(2024, 1, 1, tzinfo=UTC),
+        source_reader=_reader(frozenset({SHARED_SUBJECT})),
+    )
+    before = await store.recall(
+        "alpha",
+        subjects,
+        8,
+        end=datetime(2021, 1, 1, tzinfo=UTC),
+        source_reader=_reader(frozenset({SHARED_SUBJECT})),
+    )
     span = await store.recall(
         "alpha",
         subjects,
         8,
         start=datetime(2019, 1, 1, tzinfo=UTC),
         end=datetime(2026, 1, 1, tzinfo=UTC),
+        source_reader=_reader(frozenset({SHARED_SUBJECT})),
     )
 
     assert {item.memory_id for item in since} == {new}
@@ -1311,7 +1618,15 @@ async def test_same_subject_redaction_hides_stale_facts_and_no_page_pass_removes
                 .values(digest="sha256:redacted")
                 .where(tables.page.c.id == page_id)
             )
-        assert await store.recall("acquisition codename", frozenset({SHARED_SUBJECT}), 10) == ()
+        assert (
+            await store.recall(
+                "acquisition codename",
+                frozenset({SHARED_SUBJECT}),
+                10,
+                source_reader=_reader(frozenset({SHARED_SUBJECT})),
+            )
+            == ()
+        )
         now = datetime(2025, 1, 2, tzinfo=UTC)
         await PageIndexer(
             index=store.index,
@@ -1349,7 +1664,15 @@ async def test_same_subject_redaction_hides_stale_facts_and_no_page_pass_removes
             )
             == 1
         )
-        assert await store.recall("acquisition codename", frozenset({SHARED_SUBJECT}), 10) == ()
+        assert (
+            await store.recall(
+                "acquisition codename",
+                frozenset({SHARED_SUBJECT}),
+                10,
+                source_reader=_reader(frozenset({SHARED_SUBJECT})),
+            )
+            == ()
+        )
     async with workspace_tx() as connection:
         assert (
             await connection.execute(
@@ -1488,7 +1811,17 @@ async def test_a_revision_rebind_with_an_unchanged_body_is_not_re_embedded(db: N
         embeds_before = embed.calls
         await _run()
         assert embed.calls == embeds_before
-        assert len(await store.recall("quarterly revenue", frozenset({SHARED_SUBJECT}), 10)) == 1
+        assert (
+            len(
+                await store.recall(
+                    "quarterly revenue",
+                    frozenset({SHARED_SUBJECT}),
+                    10,
+                    source_reader=_reader(frozenset({SHARED_SUBJECT})),
+                )
+            )
+            == 1
+        )
     async with workspace_tx() as connection:
         row = (
             await connection.execute(
@@ -1532,7 +1865,17 @@ async def test_a_stale_revision_is_withdrawn_even_though_its_chunks_still_exist(
     )
     with ws(workspace_id):
         await _run()
-        assert len(await store.recall("merger", frozenset({SHARED_SUBJECT}), 10)) == 1
+        assert (
+            len(
+                await store.recall(
+                    "merger",
+                    frozenset({SHARED_SUBJECT}),
+                    10,
+                    source_reader=_reader(frozenset({SHARED_SUBJECT})),
+                )
+            )
+            == 1
+        )
     async with workspace_tx() as connection:
         item_id = (
             await connection.execute(
@@ -1553,7 +1896,15 @@ async def test_a_stale_revision_is_withdrawn_even_though_its_chunks_still_exist(
         )
     with ws(workspace_id):
         await _run()
-        assert await store.recall("merger", frozenset({SHARED_SUBJECT}), 10) == ()
+        assert (
+            await store.recall(
+                "merger",
+                frozenset({SHARED_SUBJECT}),
+                10,
+                source_reader=_reader(frozenset({SHARED_SUBJECT})),
+            )
+            == ()
+        )
         assert not await store.index.has_chunks(scope)
 
 
@@ -1635,7 +1986,15 @@ async def test_a_narrowed_pages_wider_fact_is_never_published_and_never_deleted(
             )
             == ()
         )
-        assert await store.recall("disclosure token", frozenset({SHARED_SUBJECT}), 10) == ()
+        assert (
+            await store.recall(
+                "disclosure token",
+                frozenset({SHARED_SUBJECT}),
+                10,
+                source_reader=_reader(frozenset({SHARED_SUBJECT})),
+            )
+            == ()
+        )
         assert (
             len(
                 await store.index.lexical(
@@ -1807,7 +2166,15 @@ async def test_page_tombstone_drops_the_pages_own_chunks_and_mirror_only(db: Non
             )
             == 1
         )
-        assert await store.recall("retired source fact", frozenset({SHARED_SUBJECT}), 10) == ()
+        assert (
+            await store.recall(
+                "retired source fact",
+                frozenset({SHARED_SUBJECT}),
+                10,
+                source_reader=_reader(frozenset({SHARED_SUBJECT})),
+            )
+            == ()
+        )
     async with workspace_tx() as connection:
         mirror = (
             await connection.execute(

@@ -374,6 +374,12 @@ class GrantStore:
             now = datetime.now(UTC)
             if source_ids:
                 await connection.execute(
+                    sa.delete(tables.source_grant).where(
+                        tables.source_grant.c.workspace_id == self.workspace_id,
+                        tables.source_grant.c.source_id.in_(source_ids),
+                    )
+                )
+                await connection.execute(
                     sa.update(tables.source)
                     .values(
                         connection_id=None,

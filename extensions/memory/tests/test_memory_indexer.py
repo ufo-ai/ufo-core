@@ -22,13 +22,17 @@ from ufo_ext_memory.store import (
 )
 
 from ufo.db import workspace_tx
-from ufo.ext.context import PageState, context_for
+from ufo.ext.context import PageState, SourceReader, context_for
 from ufo.indexing import OWNER_KIND_MEMORY_ITEM, TextChunker
 from ufo.jobs import CORE_EXTENSION, JobRunner, bindings_from
 from ufo.schema import tables
 from ufo.sdk.audience import conversation_audience
-from ufo.subjects import member_subject
+from ufo.subjects import SHARED_SUBJECT, member_subject
 from ufo.workspace import ws
+
+
+def _reader(subjects: frozenset[str]) -> SourceReader:
+    return SourceReader(agent_id=uuid4(), requesting_member_id=None, subjects=subjects)
 
 
 def vec(*axes: tuple[int, float]) -> tuple[float, ...]:
@@ -94,6 +98,8 @@ class ReclassifyingPage:
             self.page_id: PageState(
                 subject=self.before if self.calls == 1 else self.after,
                 revision=self.before_revision if self.calls == 1 else self.after_revision,
+                digest="sha256:test",
+                body_ref=f"pages/{self.page_id}",
             )
         }
 
@@ -111,12 +117,15 @@ async def _workspace() -> UUID:
 
 def _wire(embed: object, workspace_id: UUID) -> tuple[MemoryStore, MemoryIndexer]:
     index = DefaultIndex(transaction=workspace_tx)
+    ext = context_for("memory", frozenset())
     store = MemoryStore(
         index=index,
         embed=embed,
         transaction=workspace_tx,
         workspace_id=workspace_id,
-        page_states=context_for("memory", frozenset()).page_states,
+        page_states=ext.page_states,
+        readable_page_states=ext.readable_page_states,
+        readable_source_ids=ext.readable_source_ids,
     )
     indexer = MemoryIndexer(
         index=index,
@@ -322,8 +331,12 @@ async def test_committed_fact_recalls_after_indexing(db: None) -> None:
     await store.commit(MemoryWrite(subject="shared", body="the mascot is named zoltar"))
     with ws(workspace_id):
         await indexer.run()
-
-    hits = await store.recall("zoltar mascot", frozenset({"shared"}), 5)
+        hits = await store.recall(
+            "zoltar mascot",
+            frozenset({"shared"}),
+            5,
+            source_reader=_reader(frozenset({SHARED_SUBJECT})),
+        )
     assert len(hits) == 1
     assert "zoltar" in hits[0].body
 
@@ -338,9 +351,21 @@ async def test_member_memory_is_invisible_to_another_member(db: None) -> None:
     )
     with ws(workspace_id):
         await indexer.run()
-
-    assert await store.recall("window seat", recall_subjects(conversation_audience(bob)), 5) == ()
-    mine = await store.recall("window seat", recall_subjects(conversation_audience(alice)), 5)
+        assert (
+            await store.recall(
+                "window seat",
+                recall_subjects(conversation_audience(bob)),
+                5,
+                source_reader=_reader(frozenset({SHARED_SUBJECT})),
+            )
+            == ()
+        )
+        mine = await store.recall(
+            "window seat",
+            recall_subjects(conversation_audience(alice)),
+            5,
+            source_reader=_reader(frozenset({SHARED_SUBJECT})),
+        )
     assert len(mine) == 1 and "alice" in mine[0].body
 
 

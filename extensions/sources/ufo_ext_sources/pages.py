@@ -4,7 +4,8 @@ A page is one document the core sync driver landed from a registered `source` â€
 `page` row the driver owns, so names are the row id (`<uuid>`), id-shaped exactly as the grammar
 admits. The kind is the read-and-forget surface over those rows: list and get read browse metadata
 through the sanctioned `ExtensionContext.source_pages` accessor and get reads the body through the
-turn's blob capability, scoped to the caller's own visibility subjects; delete tombstones one page
+turn's blob capability, scoped to the caller's visibility subjects and the reading agent's grant for
+the page's source; delete tombstones one page
 through `forget_page` so the existing page-change pipeline reaps its derived index state. Pages are
 produced by the sync driver, never authored, so create and update raise `VerbNotSupported`; delete
 is admin-gated.
@@ -87,6 +88,7 @@ class _Page:
     record_created_at: str | None
     record_updated_at: str | None
     subject: str
+    revision: int
     digest: str
     body_ref: str
     created_at: datetime
@@ -176,6 +178,21 @@ class PageObjects:
             if len(content) <= PAGE_BODY_MAX_BYTES or error.reason != "unexpected end of data":
                 raise
             body = bounded[: error.start].decode("utf-8")
+        current = (
+            await _require_ext(ctx).readable_page_states((page.id,), ctx.source_reader())
+        ).get(page.id)
+        if current is None or (
+            current.subject,
+            current.revision,
+            current.digest,
+            current.body_ref,
+        ) != (
+            page.subject,
+            page.revision,
+            page.digest,
+            page.body_ref,
+        ):
+            return None
         return ObjectDetail(
             spec=page.spec(body, len(content) > PAGE_BODY_MAX_BYTES),
             created_at=page.created_at,
@@ -240,13 +257,14 @@ class PageObjects:
                 record_created_at=record.record_created_at,
                 record_updated_at=record.record_updated_at,
                 subject=record.subject,
+                revision=record.revision,
                 digest=record.digest,
                 body_ref=record.body_ref,
                 created_at=record.created_at,
                 updated_at=record.updated_at,
                 source_name=source_names.get(record.source_id),
             )
-            for record in await ext.source_pages(ctx.read_subjects)
+            for record in await ext.source_pages(ctx.source_reader())
         )
 
 
