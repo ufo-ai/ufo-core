@@ -47,6 +47,7 @@ PORTAL_PATH = "/surface/web"
 PORTAL_FILE = Path(__file__).parent / "static" / "portal.html"
 PORTAL_HTML = PORTAL_FILE.read_text()
 CONTEXT_TAG = re.compile(r"\A\s*<context>.*?</context>\s*", re.S)
+TOKEN_SHAPE = re.compile(r"[A-Za-z0-9._-]+")
 
 
 async def resolve_workspace(request: Request, _auth: SurfaceAuth) -> UUID | Response | None:
@@ -101,12 +102,16 @@ async def open_session(ctx: SurfaceContext, request: Request) -> Response:
     form token whenever it is what scoped the request; behind a cookie that still resolves the form
     goes unread and the new bearer lands unverified, which changes nothing, because the cookie is
     verified again on every request that follows (`resolve_workspace`, then `_authenticate`) and one
-    that verifies against nothing authenticates nobody. The cookie is `lax`, not `strict`, because
-    arrival IS a cross-site navigation (the gateway's signed-in card posts here) and the redirected
-    GET must already carry it."""
+    that verifies against nothing authenticates nobody. The shape check is transport, not
+    authentication: a pasted value outside the bearer alphabet cannot ride a Set-Cookie header
+    (control characters and non-latin-1 raise inside the cookie writer), so it answers 400 before a
+    header is built. The cookie is `lax`, not `strict`, because arrival IS a cross-site navigation
+    (the gateway's signed-in card posts here) and the redirected GET must already carry it."""
     posted = (await request.form()).get(TOKEN_FIELD, "")
     if not isinstance(posted, str) or not posted.strip():
         return JSONResponse({"error": "token form field is required"}, status_code=400)
+    if not TOKEN_SHAPE.fullmatch(posted.strip()):
+        return JSONResponse({"error": "malformed token"}, status_code=400)
     response = RedirectResponse(str(request.url), status_code=303)
     set_session_cookie(response, SESSION_COOKIE, posted.strip(), samesite="lax")
     return response

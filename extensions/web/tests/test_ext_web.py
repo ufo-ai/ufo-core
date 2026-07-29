@@ -748,6 +748,25 @@ async def test_portal_serves_without_a_session_and_posted_token_opens_one(
     assert "Domain" not in cookie
 
 
+@pytest.mark.parametrize("pasted", ["tok\rnl", "tok\x00x", "tok日", "tok x"])
+async def test_a_token_that_cannot_ride_a_cookie_answers_400(
+    web: tuple[AsyncClient, UUID, UUID], pasted: str
+) -> None:
+    """A pasted value outside the bearer alphabet is refused before a Set-Cookie header is built —
+    control characters and non-latin-1 raise inside the cookie writer, so without the shape check
+    this exact request was a 500. The live cookie is what routes the request to the handler (a
+    form-only garbage token dies at identify with 401)."""
+    client, workspace_id, _agent_id = web
+    session = mint_token(TOKEN_SECRET, str(workspace_id), "owner@example.com", timedelta(hours=1))
+    refused = await client.post(
+        "/surface/web",
+        data={"token": pasted},
+        headers={"cookie": f"{SESSION_COOKIE}={session}"},
+    )
+    assert refused.status_code == 400
+    assert "set-cookie" not in refused.headers
+
+
 async def test_an_unverified_bearer_authenticates_nobody(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:

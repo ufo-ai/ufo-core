@@ -350,6 +350,14 @@ async function boot() {
     document.getElementById('token-card').style.display = 'block';
     return;
   }
+  if (!res.ok) {
+    const failed = document.createElement('div');
+    failed.className = 'empty';
+    failed.style.gridColumn = '1 / -1';
+    failed.textContent = 'error ' + res.status + ' — reload to retry';
+    document.body.replaceChildren(failed);
+    return;
+  }
   const payload = await res.json();
   agents = payload.agents;
   nav.hidden = false;
