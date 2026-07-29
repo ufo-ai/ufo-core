@@ -101,7 +101,7 @@ async def test_attempt_cap_exhausts(store: OnboardStore) -> None:
             await workflow.verify(claim, "000000")
     exhausted = await store.live_claim("ufo", "sess-1")
     assert exhausted is not None
-    with pytest.raises(ClaimError, match="too many attempts"):
+    with pytest.raises(ClaimError, match="Too many attempts"):
         await workflow.verify(exhausted, sender.last_code("me@acme.com"))
     assert await store.live_claim("ufo", "sess-1") is None
 
@@ -126,7 +126,7 @@ async def test_failed_email_leaves_no_active_claim(store: OnboardStore) -> None:
     workflow = ClaimWorkflow(
         store=store, email_policy=WorkEmailPolicy(), email_sender=FailingSender()
     )
-    with pytest.raises(ClaimError, match="could not send"):
+    with pytest.raises(ClaimError, match="Could not send"):
         await workflow.start("me@acme.com", "ufo", "sess-1")
     assert await store.live_claim("ufo", "sess-1") is None
 

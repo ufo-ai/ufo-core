@@ -55,7 +55,7 @@ paths — every other request passes through to what the host serves:
   one-liner); any other agent lands on the one site at the prod apex — proxied on the site's own
   host, a redirect (query intact) from any other.
 - `POST /waitlist -d email=…` — the one join, reached from either renderer: a curl user types the
-  command the card prints, a browser clicks any craft (or the page's `join waitlist` hail, the
+  command the card prints, a browser clicks any craft (or the page's `Join Waitlist` hail, the
   keyboard route) and the panel posts the same form encoding, rendering the returned ack
   verbatim. Records the email in a per-apex D1 database, idempotent, with a
   positional ack; D1 tracks the confirmation's queued and sent states, so a duplicate repairs a

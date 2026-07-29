@@ -149,6 +149,30 @@ test("a click on the backdrop releases you", async () => {
   await page.close();
 });
 
+test("the panel copy is the fixed join: Title Case label, terminal prompt, join verb", async () => {
+  const page = await open();
+  assert.equal((await page.textContent("#hail")).trim(), "Join Waitlist");
+  await page.click("#hail");
+  assert.equal((await page.textContent("#join .head")).trim(), "Join Waitlist");
+  assert.equal(await page.getAttribute("#panel", "aria-label"), "Join Waitlist");
+  assert.equal(await page.getAttribute("#email", "placeholder"), "email@work.com");
+  assert.equal((await page.textContent("#join .prompt")).trim(), ">");
+  // The prompt is plain terminal text: the panel's own color, no glow.
+  const prompt = await page.locator("#join .prompt").evaluate((el) => ({
+    shadow: getComputedStyle(el).textShadow,
+    panelColor: getComputedStyle(el).color === getComputedStyle(el.closest(".panel")).color,
+  }));
+  assert.deepEqual(prompt, { shadow: "none", panelColor: true });
+  // The entry's insertion caret carries no color of its own.
+  const caret = await page.locator("#email").evaluate((el) => ({
+    caret: getComputedStyle(el).caretColor,
+    color: getComputedStyle(el).color,
+  }));
+  assert.ok(caret.caret === "auto" || caret.caret === caret.color, caret.caret);
+  assert.equal((await page.textContent("#go")).trim(), "join");
+  await page.close();
+});
+
 test("the join posts to the worker and renders its ack verbatim", async () => {
   const page = await open();
   const before = queued.length;
@@ -160,7 +184,7 @@ test("the join posts to the worker and renders its ack verbatim", async () => {
   );
   assert.match(
     (await page.textContent("#ack")).trim(),
-    /^#\d+ on the waitlist\. we will email you when access opens\.$/,
+    /^#\d+ on the waitlist\. We will email you when access opens\.$/,
   );
   assert.equal(await page.locator("#email").isDisabled(), true);
   assert.equal(queued.length, before + 1);
@@ -194,7 +218,7 @@ test("an address the browser allows but the worker refuses can be corrected", as
     document.getElementById("ack").textContent.includes("not accepted"),
   );
   assert.equal(posted, 1);
-  assert.equal(await page.textContent("#ack"), "that email address was not accepted.");
+  assert.equal(await page.textContent("#ack"), "That email address was not accepted.");
   assert.equal(await page.locator("#ack").evaluate((el) => el.classList.contains("bad")), true);
   // Nothing was logged, so the field stays open and the second try succeeds.
   assert.equal(await page.locator("#email").isDisabled(), false);
@@ -219,7 +243,7 @@ test("a body that dies after its headers hands the button back", async () => {
   await page.waitForFunction(() => !document.getElementById("go").disabled, {
     timeout: 3000,
   });
-  assert.equal(await page.textContent("#ack"), "request failed. try again.");
+  assert.equal(await page.textContent("#ack"), "Request failed. Try again.");
   assert.equal(await page.locator("#email").isDisabled(), false);
   await page.close();
 });
@@ -270,7 +294,7 @@ async function ackAfter(page, address) {
   await page.waitForFunction(
     (was) => {
       const now = document.getElementById("ack").textContent;
-      return now.length > 0 && now !== was && now !== "joining…";
+      return now.length > 0 && now !== was && now !== "Joining…";
     },
     before,
     { timeout: 5000 },

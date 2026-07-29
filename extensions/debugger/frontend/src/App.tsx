@@ -21,7 +21,7 @@ export function App() {
   return (
     <>
       <header>
-        <h1 onClick={() => navigate({ c: null, t: null })}>u f o · session debugger</h1>
+        <h1 onClick={() => navigate({ c: null, t: null })}>ufo · session debugger</h1>
         <form
           onSubmit={(event) => {
             event.preventDefault();

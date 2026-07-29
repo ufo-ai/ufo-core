@@ -154,7 +154,7 @@ def test_a_granted_domain_is_identified_without_a_third_prompt(
         signed_in = client.post("/v1/onboard/ufo", headers=headers, content=sender.sent[email])
 
     assert "enter your invite" not in signed_in.text
-    assert f"signed in: {email}" in signed_in.text
+    assert f"Signed in: {email}" in signed_in.text
     assert asyncio.run(_claim_invite_id(gateway_postgres, email)) is not None
 
 
@@ -171,7 +171,7 @@ def test_the_gate_ends_the_session_on_every_refusal(
         ungranted = _walk(client, "no-grant", "founder@ungrantedco.io", sender)
         assert "ungrantedco.io has no invite." in ungranted
         assert (
-            "join the waitlist: curl https://flyingobject.ai/waitlist"
+            "Join the waitlist: curl https://flyingobject.ai/waitlist"
             " -d email=founder@ungrantedco.io" in ungranted
         )
         assert "exit\t0" in ungranted
@@ -179,16 +179,16 @@ def test_the_gate_ends_the_session_on_every_refusal(
 
         expired = _walk(client, "expired-grant", "founder@expiredco.io", sender)
         assert re.search(
-            r"the invite for expiredco\.io expired \d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC\.", expired
+            r"The invite for expiredco\.io expired \d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC\.", expired
         )
-        assert "reply to your invite email for a new one." in expired
+        assert "Reply to your invite email for a new one." in expired
         assert "exit\t0" in expired
 
         asyncio.run(_grant(gateway_postgres, 10, "founder@burnedco.io"))
         asyncio.run(_burn_grant(gateway_postgres, "burnedco.io"))
         burned = _walk(client, "burned-grant", "founder@burnedco.io", sender)
-        assert "the invite for burnedco.io was already used." in burned
-        assert "contact us if you cannot sign in." in burned
+        assert "The invite for burnedco.io was already used." in burned
+        assert "Contact us if you cannot sign in." in burned
         assert "exit\t0" in burned
 
 
@@ -249,9 +249,9 @@ def test_http_onboarding_bounds_public_inputs(
         channel = client.post(f"/v1/onboard/{'c' * 65}", headers=headers)
         session = client.post("/v1/onboard/ufo", headers={**headers, "x-ufo-session": "s" * 129})
         body = client.post("/v1/onboard/ufo", headers=headers, content="b" * 4097)
-    assert "channel is too long" in channel.text
-    assert "session is too long" in session.text
-    assert "request body is too large" in body.text
+    assert "Channel is too long" in channel.text
+    assert "Session is too long" in session.text
+    assert "Request body is too large" in body.text
 
 
 def test_http_onboarding_hides_internal_errors(
@@ -267,7 +267,7 @@ def test_http_onboarding_hides_internal_errors(
         response = client.post(
             "/v1/onboard/ufo", headers={"x-ufo-session": "session", "x-ufo-installed": "1"}
         )
-    assert "onboarding failed" in response.text
+    assert "Onboarding failed" in response.text
     assert "database-password" not in response.text
 
 
@@ -283,9 +283,9 @@ def test_http_onboarding_joins_and_returns_a_surface_verified_token(
     headers = {"x-ufo-session": "http-flow", "x-ufo-installed": "1"}
     with TestClient(gateway_app()) as client:
         opening = client.post("/v1/onboard/ufo", headers=headers, content="")
-        assert "enter your work email" in opening.text
+        assert "Enter your work email" in opening.text
         asked = client.post("/v1/onboard/ufo", headers=headers, content=email)
-        assert "enter the code" in asked.text
+        assert "Enter the code" in asked.text
         signed_in = client.post("/v1/onboard/ufo", headers=headers, content=sender.sent[email])
     directives = dict(line.split("\t", 1) for line in signed_in.text.splitlines() if "\t" in line)
     assert verify_token(directives["token"], workspace_id) == email
@@ -326,7 +326,7 @@ def test_signup_completes_and_delivery_runs_while_slack_is_unreachable(
         client.post("/v1/onboard/ufo", headers=headers, content="")
         client.post("/v1/onboard/ufo", headers=headers, content=email)
         signed_in = client.post("/v1/onboard/ufo", headers=headers, content=sender.sent[email])
-        assert f"signed in: {email}" in signed_in.text
+        assert f"Signed in: {email}" in signed_in.text
         row = _await_attempted_delivery(gateway_postgres, email)
     assert row["state"] == "pending"
     assert row["channel_name"] == "ext-slackco-flyingobject"
@@ -381,7 +381,7 @@ def test_http_onboarding_refuses_an_ambiguous_domain(
     with TestClient(gateway_app()) as client:
         client.post("/v1/onboard/ufo", headers=headers, content=email)
         response = client.post("/v1/onboard/ufo", headers=headers, content=sender.sent[email])
-    assert "onboarding failed" in response.text
+    assert "Onboarding failed" in response.text
     assert uuid.uuid5(uuid.NAMESPACE_DNS, domain) not in asyncio.run(
         _workspace_ids(gateway_postgres)
     )
@@ -395,6 +395,43 @@ BANNED_METAPHOR = re.compile(
     re.IGNORECASE,
 )
 COPY_VERBS = frozenset({"say", "ask", "choose"})
+
+# Standard typography: a sentence never opens lowercase unless it opens with a literal — a
+# command, an address, a header name. Lines split into sentences first so every sentence is
+# anchored, and glyph-only tokens (check marks, prompts, art) are skipped so the word behind
+# them is inspected.
+LITERAL_START = re.compile(r"^(?:curl|ufo|x-ufo-|\S*[.@]\S+)")
+SENTENCE_END = re.compile(r"[.?!]\s+")
+
+
+def _assert_standard_case(copy: str) -> None:
+    for line in copy.splitlines():
+        for sentence in SENTENCE_END.split(line):
+            words = [word for word in sentence.split() if any(ch.isalnum() for ch in word)]
+            if not words or LITERAL_START.match(words[0]):
+                continue
+            first_alnum = next(ch for ch in words[0] if ch.isalnum())
+            assert not first_alnum.islower(), (words[0], line)
+
+
+def test_the_case_gate_anchors_every_sentence_and_sees_past_glyphs() -> None:
+    for styled in (
+        "Done. try again.",
+        "Sent! check your inbox.",
+        "✓ installed ufo",
+        "> type ufo to continue.",
+        "✓installed ufo",
+        "(optional) set your name.",
+    ):
+        with pytest.raises(AssertionError):
+            _assert_standard_case(styled)
+    for plain in (
+        "✓ Installed ufo (/x/bin/ufo)",
+        "#3 on the waitlist. We will email you when access opens.",
+        "gmail.com is not a work email domain.",
+        "curl -fsSL https://flyingobject.ai/ufo | sh",
+    ):
+        _assert_standard_case(plain)
 
 
 def _member_copy(payload: str) -> list[str]:
@@ -411,9 +448,9 @@ def _member_copy(payload: str) -> list[str]:
 def test_every_word_a_member_reads_carries_no_ufo_metaphor(
     gateway_postgres: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Every rendered onboarding screen — the opening, both prompts, a rejected address, a wrong
-    code, the signed-in cap, and all three invite refusals — plus the two emails, the sign-in page,
-    and the served terminal client."""
+    """Every rendered onboarding screen — the missing-header refusal, the opening, both prompts, a
+    rejected address, a wrong code, the signed-in cap, and all three invite refusals — plus the two
+    emails, the sign-in page, and the served terminal client."""
     _configure(monkeypatch, tmp_path, gateway_postgres)
     sender = RecordingSender()
     monkeypatch.setattr(gateway, "email_sender_from_env", lambda: sender)
@@ -425,6 +462,7 @@ def test_every_word_a_member_reads_carries_no_ufo_metaphor(
     headers = {"x-ufo-session": "lexicon", "x-ufo-installed": "1"}
     screens: list[str] = []
     with TestClient(gateway_app()) as client:
+        screens += _member_copy(client.post("/v1/onboard/ufo", content="").text)
         screens += _member_copy(client.post("/v1/onboard/ufo", headers=headers, content="").text)
         screens += _member_copy(
             client.post("/v1/onboard/ufo", headers=headers, content="me@gmail.com").text
@@ -444,14 +482,28 @@ def test_every_word_a_member_reads_carries_no_ufo_metaphor(
             screens += _member_copy(_walk(client, session, refused, sender))
     code_subject, code_body = verification_email("042042", LEXICON_EXPIRES_AT, LEXICON_CODE_TTL)
     invite_subject, invite_body = invite_email(email, LEXICON_EXPIRES_AT, "flyingobject.ai")
-    screens += [
-        code_subject,
-        code_body,
-        invite_subject,
-        invite_body,
-        LOGIN_PAGE,
-        gateway.STAMPED_SCRIPT,
-    ]
+    screens += [code_subject, code_body, invite_subject, invite_body]
     assert len(screens) > 15
     for copy in screens:
         assert BANNED_METAPHOR.search(copy) is None, copy
+        _assert_standard_case(copy)
+    for source in (LOGIN_PAGE, gateway.STAMPED_SCRIPT):
+        assert BANNED_METAPHOR.search(source) is None, source
+
+
+# Every line the terminal client itself speaks — `say` and `die` string literals in the served
+# script, shell expansions blanked so only the fixed words are judged. The capture stops at any
+# quote so two literals on one line are judged separately, and the count of captures must equal
+# the count of quoted `say `/`die ` openings, so a line the extraction drops is a failure, not
+# a silent pass.
+CLIENT_SPEECH = re.compile(r"\b(?:say|die) (['\"])([^'\"]*)\1")
+CLIENT_SPEECH_OPENING = re.compile(r"\b(?:say|die) ['\"]")
+SHELL_EXPANSION = re.compile(r"\$\{[^}]*\}|\$\([^)]*\)|\$\w+|\$\*")
+
+
+def test_the_served_client_speaks_standard_typography() -> None:
+    spoken = CLIENT_SPEECH.findall(gateway.STAMPED_SCRIPT)
+    assert len(spoken) == len(CLIENT_SPEECH_OPENING.findall(gateway.STAMPED_SCRIPT))
+    assert len(spoken) > 10
+    for _, raw in spoken:
+        _assert_standard_case(SHELL_EXPANSION.sub(" ", raw))

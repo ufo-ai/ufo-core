@@ -44,10 +44,10 @@ function card(host, total, workspaces) {
 
   ${workspaces} workspace${workspaces === 1 ? "" : "s"}. ${total} on the waitlist.
 
-  join the waitlist:
-    curl https://${host}/waitlist -d email=you@yourco.com
+  Join the waitlist:
+    curl https://${host}/waitlist -d email=email@work.com
 
-  already invited?
+  Already invited?
     curl -fsSL https://${host}/ufo | sh
 
 `;
@@ -55,15 +55,15 @@ function card(host, total, workspaces) {
 
 function usage(host) {
   return `
-  join the waitlist:
-    curl https://${host}/waitlist -d email=you@yourco.com
+  Join the waitlist:
+    curl https://${host}/waitlist -d email=email@work.com
 
 `;
 }
 
 function ack(position) {
   return `
-  #${position} on the waitlist. we will email you when access opens.
+  #${position} on the waitlist. We will email you when access opens.
 
 `;
 }

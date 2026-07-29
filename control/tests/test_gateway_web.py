@@ -41,7 +41,7 @@ TOKEN_SECRET = "web-token-secret"
 WORKSPACE_URL = "https://app.testing.flyingobject.ai"
 
 EXIT_IS_TERMINAL = """  else if (directive.verb === 'exit') {
-    if (arg !== '0') line('failed — reload to retry', 'error');
+    if (arg !== '0') line('Failed — reload to retry.', 'error');
     finished = true;
     promptRow.style.display = 'none';
   }"""
@@ -84,12 +84,12 @@ def test_parse_directives_round_trips_the_wire_escaping() -> None:
     payload = render(
         directive("say", "tab\there"),
         directive("say", "line\nbreak and back\\slash"),
-        directive("ask", "enter your work email:"),
+        directive("ask", "Enter your work email:"),
     )
     assert parse_directives(payload) == [
         {"verb": "say", "fields": ["tab\there"]},
         {"verb": "say", "fields": ["line\nbreak and back\\slash"]},
-        {"verb": "ask", "fields": ["enter your work email:"]},
+        {"verb": "ask", "fields": ["Enter your work email:"]},
     ]
 
 
@@ -100,6 +100,25 @@ def test_login_page_is_self_contained_and_targets_the_web_wire() -> None:
     assert "//cdn" not in LOGIN_PAGE
     assert "https://" not in LOGIN_PAGE
     assert "/v1/onboard/web" in LOGIN_PAGE
+
+
+def test_login_page_member_copy_is_the_fixed_copy() -> None:
+    """Every string the sign-in page shows a member, pinned — the page is source, so the rendered
+    sweep in test_every_word_a_member_reads_carries_no_ufo_metaphor cannot judge its typography."""
+    for copy in (
+        "<title>ufo</title>",
+        "<header>ufo</header>",
+        "<h1>Sign in</h1>",
+        "Use your work email.",
+        ">Continue</button>",
+        "<h1>Signed in</h1>",
+        "From your terminal:",
+        ">Session debugger</button>",
+        "'Network error — retrying…'",
+        "'Error ' + res.status + ' — try again.'",
+        "'Failed — reload to retry.'",
+    ):
+        assert copy in LOGIN_PAGE, copy
 
 
 def test_login_page_hands_the_token_off_by_post_after_the_whole_batch() -> None:
@@ -159,15 +178,15 @@ def test_web_channel_walks_email_then_code_to_the_signed_in_card(
     session = str(uuid.uuid4())
     with TestClient(gateway_app()) as client:
         opening = _advance(client, session, "")
-        assert "enter your work email:" in _fields(opening, "ask")
+        assert "Enter your work email:" in _fields(opening, "ask")
         assert not any(d["verb"] == "install" for d in opening)
 
         coded = _advance(client, session, email)
-        assert "enter the code:" in _fields(coded, "ask")
+        assert "Enter the code:" in _fields(coded, "ask")
 
         signed_in = _advance(client, session, sender.sent[email])
 
-    assert _fields(signed_in, "say") == [f"signed in: {email}"]
+    assert _fields(signed_in, "say") == [f"Signed in: {email}"]
     (token,) = _fields(signed_in, "token")
     (workspace,) = _fields(signed_in, "workspace")
     workspace_id = UUID(str(uuid5(NAMESPACE_DNS, "webco.io")))
@@ -231,13 +250,13 @@ def test_web_and_terminal_sessions_never_share_a_claim(
     with TestClient(gateway_app()) as client:
         _advance(client, session, "")
         coded = _advance(client, session, "pilot@twochannel.io")
-        assert "enter the code:" in _fields(coded, "ask")
+        assert "Enter the code:" in _fields(coded, "ask")
         terminal = client.post(
             "/v1/onboard/ufo",
             headers={"x-ufo-session": session, "x-ufo-installed": "1"},
             content="",
         )
-        assert "enter your work email:" in terminal.text
+        assert "Enter your work email:" in terminal.text
 
 
 def test_debugger_directive_lands_only_for_the_operator_domain(

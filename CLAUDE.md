@@ -50,9 +50,18 @@ replies — states what happened, what is true, or what to do next. No UFO metap
 named ufo and that is the whole joke. No greeting, reassurance, exclamation, or restatement of what
 the member just did. A line the member cannot act on and did not ask for does not ship.
 
-**The ASCII craft is the mark and stays.** It is drawn, not said — the rule above governs words, and
-the landing fleet is live data (one craft per workspace). The curl card and the landing page keep it,
-each held there by a test; strip decoration around it, never it.
+**Default typography, zero styling.** Copy makes no typographic statement: sentences take standard
+capitalization and end punctuation (one ending in a URL, path, or address drops the period);
+headings and labels are cased normally — Title Case or sentence case, one convention per surface —
+never lowercase-as-aesthetic (`Join Waitlist`); placeholder values are neutral (`email@work.com`).
+Commands, addresses, and header names render verbatim (`curl`, `gmail.com`, `x-ufo-session`) even
+at sentence start; the landing panel's `>` prompt and `join` verb are terminal chrome fixed by
+test, not labels. Letter-spacing spelled in spaces (`u f o`) and decorative punctuation do not
+ship — visual character lives in CSS and the drawn craft, never in the characters of the words.
+
+**The ASCII craft is the mark and stays.** It is drawn, not said — the metaphor ban governs words,
+and the landing fleet is live data (one craft per workspace). The curl card and the landing page
+keep it, each held there by a test; strip decoration around it, never it.
 
 ## Skills
 

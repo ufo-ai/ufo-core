@@ -58,17 +58,17 @@ class ClaimWorkflow:
         except Exception as exc:
             await self.store.delete_claim(claim.claim_id)
             logger.exception("onboard.email.send_failed domain=%s surface=%s", domain, surface)
-            raise ClaimError("could not send the verification email; please try again") from exc
+            raise ClaimError("Could not send the verification email. Try again.") from exc
         return domain
 
     async def verify(self, claim: OnboardClaim, code: str) -> None:
         if claim.attempts >= self.max_attempts:
             await self.store.delete_claim(claim.claim_id)
-            raise ClaimError("too many attempts; start onboarding again")
+            raise ClaimError("Too many attempts. Start onboarding again.")
         if datetime.now(UTC) >= claim.expires_at:
             await self.store.delete_claim(claim.claim_id)
-            raise ClaimError("verification code expired; start onboarding again")
+            raise ClaimError("The verification code expired. Start onboarding again.")
         await self.store.record_attempt(claim.claim_id, claim.attempts + 1)
         if not hmac.compare_digest(claim.code_hash, hash_code(code)):
-            raise ClaimError("verification code is incorrect")
+            raise ClaimError("The verification code is incorrect.")
         await self.store.mark_verified(claim.claim_id)

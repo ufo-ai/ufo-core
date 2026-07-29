@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- terminal interface: curl https://flyingobject.ai -->
+<!-- Terminal interface: curl https://flyingobject.ai -->
 <html lang="en">
 <head>
 <meta charset="utf-8" />
@@ -75,12 +75,11 @@
   .panel::backdrop{background:#000000cc}
   .panel .head{margin:0 0 14px; color:var(--gray); letter-spacing:.08em}
   .panel .field{display:flex; align-items:center; gap:.6ch; margin:0}
-  .panel .caret{color:var(--gold); text-shadow:0 0 10px var(--gold)}
   .panel input{
     flex:1; min-width:0;
     padding:6px 0;
     background:none; border:0; border-bottom:1px solid var(--gray);
-    font:inherit; color:var(--ice); caret-color:var(--gold);
+    font:inherit; color:var(--ice);
   }
   .panel input::placeholder{color:var(--gray)}
   .panel input:focus{outline:none; border-bottom-color:var(--gold)}
@@ -103,25 +102,25 @@
 </head>
 <body>
   <div id="sky" aria-hidden="true"></div>
-  <button id="hail" class="hail" type="button">join waitlist</button>
-  <dialog id="panel" class="panel" aria-label="join waitlist">
+  <button id="hail" class="hail" type="button">Join Waitlist</button>
+  <dialog id="panel" class="panel" aria-label="Join Waitlist">
     <form id="join" action="/waitlist" method="post">
-      <p class="head">join waitlist</p>
+      <p class="head">Join Waitlist</p>
       <p class="field">
-        <span class="caret" aria-hidden="true">&gt;</span>
+        <span class="prompt" aria-hidden="true">&gt;</span>
         <input id="email" name="email" type="email" required maxlength="254"
-               placeholder="you@yourco.com" autocomplete="email" spellcheck="false"
-               aria-label="your email" />
+               placeholder="email@work.com" autocomplete="email" spellcheck="false"
+               aria-label="Email address" />
       </p>
       <button id="go" class="go" type="submit">join</button>
       <p id="ack" class="ack" role="status"></p>
     </form>
   </dialog>
-  <span hidden aria-hidden="true">terminal interface: curl https://flyingobject.ai</span>
+  <span hidden aria-hidden="true">Terminal interface: curl https://flyingobject.ai</span>
 
 <script>
 "use strict";
-console.info("terminal interface: curl https://flyingobject.ai");
+console.info("Terminal interface: curl https://flyingobject.ai");
 /* ═══════════════════════════════════════════════════════════════════════
    ufo morph — JavaScript port of the Python renderer, flown as a fleet:
    one craft aloft per workspace (the worker substitutes the count below).
@@ -634,7 +633,7 @@ function report(message, bad){
 join.addEventListener('submit', async e => {
   e.preventDefault();
   go.disabled = true;
-  report('joining…');
+  report('Joining…');
   // One try encloses the whole turn — reading the body can fail after the headers land, and
   // every path out of here either ends on an ack or hands the button back.
   try {
@@ -644,14 +643,14 @@ join.addEventListener('submit', async e => {
       body: new URLSearchParams({email: email.value}),
     });
     if(!reply.ok){
-      report('that email address was not accepted.', true);
+      report('That email address was not accepted.', true);
       go.disabled = false;
       return;
     }
     report((await reply.text()).trim());
     email.disabled = true;    // the entry is recorded; there is nothing left to send
   } catch {
-    report('request failed. try again.', true);
+    report('Request failed. Try again.', true);
     go.disabled = false;
   }
 });

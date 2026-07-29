@@ -469,7 +469,7 @@ secret_send() { # prompt privately for each requested secret and post it out-of-
     SS_SLOT=${SS_LINE%%"$TAB"*}
     SS_PROMPT=${SS_LINE#*"$TAB"}
     if ! (: < /dev/tty) 2> /dev/null; then
-      say "run ufo in a terminal to enter: $SS_PROMPT"
+      say "Run ufo in a terminal to enter: $SS_PROMPT"
       continue
     fi
     printf '%s%s%s (hidden): ' "$MAGENTA" "$SS_PROMPT" "$RESET" > /dev/tty
@@ -480,7 +480,7 @@ secret_send() { # prompt privately for each requested secret and post it out-of-
     STTY_SAVED=''
     printf '\n' > /dev/tty
     if [ -z "$SS_VALUE" ]; then
-      say "${DIM}skipped $SS_SLOT${RESET}"
+      say "${DIM}Skipped $SS_SLOT${RESET}"
       continue
     fi
     SS_REPLY=$(printf '%s' "$SS_VALUE" | curl -sS --max-time 30 \
@@ -491,7 +491,7 @@ secret_send() { # prompt privately for each requested secret and post it out-of-
     SS_VALUE=''
     case "$SS_REPLY" in
       say"$TAB"*) say "${DIM}${SS_REPLY#say"$TAB"}${RESET}" ;;
-      *) say "${DIM}no confirmation - ask the assistant to check${RESET}" ;;
+      *) say "${DIM}No confirmation — ask the assistant to check.${RESET}" ;;
     esac
   done
 }
@@ -561,7 +561,7 @@ add_to_path() {
     *":$HOME/.local/bin:"*)
       mkdir -p "$HOME/.local/bin"
       ln -sf "$BIN" "$HOME/.local/bin/ufo"
-      say "${DIM}✓ linked ufo into ~/.local/bin${RESET}"
+      say "${DIM}✓ Linked ufo into ~/.local/bin${RESET}"
       return 0
       ;;
   esac
@@ -575,16 +575,16 @@ add_to_path() {
   fi
   mkdir -p "$(dirname "$profile")"
   printf '\n# added by ufo installer\n%s\n' "$line" >> "$profile"
-  say "${DIM}✓ added ufo to PATH in $profile${RESET}"
-  say "${DIM}  for this shell:${RESET} export PATH=\"$UFO_HOME/bin:\$PATH\""
+  say "${DIM}✓ Added ufo to PATH in $profile${RESET}"
+  say "${DIM}  For this shell:${RESET} export PATH=\"$UFO_HOME/bin:\$PATH\""
 }
 
 do_install() {
   mkdir -p "$UFO_HOME/bin"
-  curl -fsSL "$UFO_URL/ufo" -o "$BIN.tmp" || die "could not fetch $UFO_URL/ufo"
+  curl -fsSL "$UFO_URL/ufo" -o "$BIN.tmp" || die "Could not fetch $UFO_URL/ufo"
   mv "$BIN.tmp" "$BIN"
   chmod +x "$BIN"
-  say "${DIM}✓ ufo installed ($BIN)${RESET}"
+  say "${DIM}✓ Installed ufo ($BIN)${RESET}"
   add_to_path
 }
 
@@ -791,7 +791,7 @@ turn() {
   wait "$CURL" || true
   spin_stop
   if [ "$GOT" = 0 ]; then
-    die "no response from $UFO_URL"
+    die "No response from $UFO_URL"
   fi
   STATUS=''
   if [ "$FX" = 1 ]; then
@@ -820,7 +820,7 @@ main() {
   case "${1:-}" in
     logout)
       rm -f "$CREDENTIALS" "$SESSION" "$WORKSPACE"
-      say 'signed out.'
+      say 'Signed out.'
       exit 0
       ;;
     login)
@@ -855,7 +855,7 @@ main() {
           dyn_erase
           if [ "$TTY" = 1 ]; then
             say ''
-            say "${DIM}type ${RESET}${BOLD}ufo${RESET}${DIM} to continue.${RESET}"
+            say "${DIM}Type ${RESET}${BOLD}ufo${RESET}${DIM} to continue.${RESET}"
           fi
           exit 0
         fi
@@ -866,7 +866,7 @@ main() {
           dyn_erase
           if [ "$TTY" = 1 ]; then
             say ''
-            say "${DIM}type ${RESET}${BOLD}ufo${RESET}${DIM} to continue.${RESET}"
+            say "${DIM}Type ${RESET}${BOLD}ufo${RESET}${DIM} to continue.${RESET}"
           fi
           exit 0
         fi
@@ -878,7 +878,7 @@ main() {
         ;;
       sendfile)
         if [ "$FILE_PATH" != - ] && [ ! -f "$FILE_PATH" ]; then
-          die "no such file: $FILE_PATH"
+          die "No such file: $FILE_PATH"
         fi
         SEND_FILE=$FILE_PATH
         SEND_CMD=$CMD

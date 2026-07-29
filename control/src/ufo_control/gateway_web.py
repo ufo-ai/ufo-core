@@ -83,7 +83,7 @@ LOGIN_PAGE = r"""<!doctype html>
 </style>
 </head>
 <body>
-<header>u f o</header>
+<header>ufo</header>
 <main>
   <section class="card" id="board">
     <h1>Sign in</h1>
@@ -109,7 +109,7 @@ LOGIN_PAGE = r"""<!doctype html>
     <pre id="curl-line"></pre>
     <form id="debugger-row" method="post">
       <input type="hidden" name="token" id="debugger-token">
-      <button type="submit">Session debugger →</button>
+      <button type="submit">Session debugger</button>
     </form>
   </section>
 </main>
@@ -175,7 +175,7 @@ function handle(directive) {
   else if (directive.verb === 'workspace') workspace = arg;
   else if (directive.verb === 'debugger') debuggerUrl = arg;
   else if (directive.verb === 'exit') {
-    if (arg !== '0') line('failed — reload to retry', 'error');
+    if (arg !== '0') line('Failed — reload to retry.', 'error');
     finished = true;
     promptRow.style.display = 'none';
   }
@@ -188,12 +188,12 @@ async function advance(body) {
     res = await fetch('/v1/onboard/web',
       { method: 'POST', headers: { 'x-ufo-session': session }, body: body || '' });
   } catch (err) {
-    line('network error — retrying…', 'error');
+    line('Network error — retrying…', 'error');
     setTimeout(() => advance(body), 5000);
     return;
   }
   if (!res.ok) {
-    line('error ' + res.status + ' — try again', 'error');
+    line('Error ' + res.status + ' — try again.', 'error');
     if (lastPrompt && !finished) prompt(lastPrompt);
     else go.disabled = false;
     return;

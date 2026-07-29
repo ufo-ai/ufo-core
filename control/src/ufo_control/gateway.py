@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 WORKSPACE_BASE_URL_ENV = "UFO_WORKSPACE_BASE_URL"
 INVITE_REQUIRED_ENV = "UFO_INVITE_REQUIRED"
 DEBUG_SURFACE_PATH = "/surface/debug"
-FIRST_MOVE_PROMPT = "what first?"
+FIRST_MOVE_PROMPT = "What first?"
 BILLING_CHOICE = "Set up billing"
 TOUR_CHOICE = "Show me what you can do"
 SCRIPT_URL_DEFAULT = 'UFO_URL="${UFO_URL:-https://flyingobject.ai}"'
@@ -95,19 +95,19 @@ class Onboarding:
         if not body:
             return render(
                 install,
-                directive("say", "u f o · flyingobject.ai"),
-                directive("ask", "enter your work email:"),
+                directive("say", "ufo · flyingobject.ai"),
+                directive("ask", "Enter your work email:"),
             )
         try:
             await self.claims.start(body, channel, session)
         except (WorkEmailError, ClaimError, ValueError) as error:
             return render(
-                install, directive("say", str(error)), directive("ask", "enter your work email:")
+                install, directive("say", str(error)), directive("ask", "Enter your work email:")
             )
         return render(
             install,
-            directive("say", f"we emailed a code to {body.strip().lower()}"),
-            directive("ask", "enter the code:"),
+            directive("say", f"We emailed a code to {body.strip().lower()}"),
+            directive("ask", "Enter the code:"),
         )
 
     async def _verify_code(self, claim: OnboardClaim, body: str, install: bytes) -> bytes:
@@ -115,7 +115,7 @@ class Onboarding:
             await self.claims.verify(claim, body)
         except ClaimError as error:
             return render(
-                install, directive("say", str(error)), directive("ask", "enter the code:")
+                install, directive("say", str(error)), directive("ask", "Enter the code:")
             )
         return await self._resolve(claim, install)
 
@@ -144,15 +144,15 @@ class Onboarding:
                 expired = expires_at.astimezone(UTC).strftime("%Y-%m-%d %H:%M")
                 return render(
                     install,
-                    directive("say", f"the invite for {domain} expired {expired} UTC."),
-                    directive("say", "reply to your invite email for a new one."),
+                    directive("say", f"The invite for {domain} expired {expired} UTC."),
+                    directive("say", "Reply to your invite email for a new one."),
                     directive("exit", "0"),
                 )
             case InviteConsumed():
                 return render(
                     install,
-                    directive("say", f"the invite for {domain} was already used."),
-                    directive("say", "contact us if you cannot sign in."),
+                    directive("say", f"The invite for {domain} was already used."),
+                    directive("say", "Contact us if you cannot sign in."),
                     directive("exit", "0"),
                 )
             case _:
@@ -161,7 +161,7 @@ class Onboarding:
                     directive("say", f"{domain} has no invite."),
                     directive(
                         "say",
-                        "join the waitlist: "
+                        "Join the waitlist: "
                         f"curl https://{self.apex_host}/waitlist -d email={claim.email}",
                     ),
                     directive("exit", "0"),
@@ -188,7 +188,7 @@ class Onboarding:
             directive("debugger", f"{self.workspaces.workspace_url}{DEBUG_SURFACE_PATH}")
             if operator
             else b"",
-            directive("say", f"signed in: {claim.email}"),
+            directive("say", f"Signed in: {claim.email}"),
             directive("choose", FIRST_MOVE_PROMPT, BILLING_CHOICE, TOUR_CHOICE)
             if ensured.admin and claim.surface != WEB_CHANNEL
             else directive("ask", PROMPT),
@@ -244,7 +244,7 @@ async def _request_body(request: Request) -> str:
     async for chunk in request.stream():
         body.extend(chunk[: MAX_BODY_BYTES + 1 - len(body)])
         if len(body) > MAX_BODY_BYTES:
-            raise _RequestInputError("request body is too large")
+            raise _RequestInputError("Request body is too large.")
     return bytes(body).decode("utf-8", "replace").strip()
 
 
@@ -336,14 +336,14 @@ def gateway_app() -> FastAPI:
             return JSONResponse({"error": "x-ufo-session header is required"}, status_code=400)
         try:
             if len(session.encode()) > MAX_SESSION_BYTES:
-                raise _RequestInputError("session is too long")
+                raise _RequestInputError("Session is too long.")
             body = await _request_body(request)
             payload = await state.onboarding.advance(WEB_CHANNEL, session, body, b"")
         except _RequestInputError as error:
             payload = render(directive("say", str(error)), directive("exit", "1"))
         except Exception:
             logger.exception("onboard.failed channel=%s", WEB_CHANNEL)
-            payload = render(directive("say", "onboarding failed"), directive("exit", "1"))
+            payload = render(directive("say", "Onboarding failed."), directive("exit", "1"))
         return JSONResponse({"directives": parse_directives(payload)})
 
     @app.post("/v1/onboard/{channel}")
@@ -355,23 +355,25 @@ def gateway_app() -> FastAPI:
             return PlainTextResponse(
                 render(
                     install,
-                    directive("say", "x-ufo-session header is required"),
+                    directive("say", "x-ufo-session header is required."),
                     directive("exit", "1"),
                 ),
                 media_type="text/plain",
             )
         try:
             if len(channel.encode()) > MAX_CHANNEL_BYTES:
-                raise _RequestInputError("channel is too long")
+                raise _RequestInputError("Channel is too long.")
             if len(session.encode()) > MAX_SESSION_BYTES:
-                raise _RequestInputError("session is too long")
+                raise _RequestInputError("Session is too long.")
             body = await _request_body(request)
             payload = await state.onboarding.advance(channel, session, body, install)
         except _RequestInputError as error:
             payload = render(install, directive("say", str(error)), directive("exit", "1"))
         except Exception:
             logger.exception("onboard.failed channel=%s", channel)
-            payload = render(install, directive("say", "onboarding failed"), directive("exit", "1"))
+            payload = render(
+                install, directive("say", "Onboarding failed."), directive("exit", "1")
+            )
         return PlainTextResponse(payload, media_type="text/plain")
 
     return app

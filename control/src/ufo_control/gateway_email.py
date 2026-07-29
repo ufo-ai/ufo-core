@@ -121,7 +121,7 @@ def normalize_email(email: str) -> tuple[str, str]:
     candidate = email.strip().lower()
     match = EMAIL_PATTERN.match(candidate)
     if match is None:
-        raise WorkEmailError("email address is malformed")
+        raise WorkEmailError("The email address is malformed.")
     return candidate, match.group(1)
 
 
@@ -132,7 +132,7 @@ class WorkEmailPolicy:
     def validate(self, email: str) -> str:
         _, domain = normalize_email(email)
         if domain in self.denylist:
-            raise WorkEmailError(f"{domain} is not a work email domain")
+            raise WorkEmailError(f"{domain} is not a work email domain.")
         return domain
 
 

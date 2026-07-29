@@ -36,7 +36,7 @@ test("curl landing renders the card with live counts and https commands", async 
   assert.match(body, /◉ ◉ ◉/);
   assert.match(body, /flyingobject\.ai/);
   assert.match(body, /0 workspaces\. 0 on the waitlist\./);
-  assert.match(body, /join the waitlist:/);
+  assert.match(body, /Join the waitlist:/);
   assert.match(body, /curl https:\/\/flyingobject\.ai\/waitlist -d email=/);
   assert.match(body, /curl -fsSL https:\/\/flyingobject\.ai\/ufo \| sh/);
 });
@@ -57,7 +57,7 @@ test("browser landing over plain http is bounced to https with its query intact"
 test("browser landing hides the terminal hint from sight", () => {
   assert.match(
     LANDING_PAGE,
-    /^<!doctype html>\n<!-- terminal interface: curl https:\/\/flyingobject\.ai -->/,
+    /^<!doctype html>\n<!-- Terminal interface: curl https:\/\/flyingobject\.ai -->/,
   );
   assert.match(
     LANDING_PAGE,
@@ -65,12 +65,12 @@ test("browser landing hides the terminal hint from sight", () => {
   );
   assert.match(
     LANDING_PAGE,
-    /<span hidden aria-hidden="true">terminal interface: curl https:\/\/flyingobject\.ai<\/span>/,
+    /<span hidden aria-hidden="true">Terminal interface: curl https:\/\/flyingobject\.ai<\/span>/,
   );
   assert.doesNotMatch(LANDING_PAGE, /terminal-hint/);
   assert.match(
     LANDING_PAGE,
-    /console\.info\("terminal interface: curl https:\/\/flyingobject\.ai"\);/,
+    /console\.info\("Terminal interface: curl https:\/\/flyingobject\.ai"\);/,
   );
 });
 
@@ -122,7 +122,7 @@ test("signup is positional, idempotent, and normalizes the email", async () => {
     body: "email=You@YourCo.com",
   });
   assert.equal(first.status, 200);
-  assert.match(await first.text(), /#1 on the waitlist\. we will email you when access opens\./);
+  assert.match(await first.text(), /#1 on the waitlist\. We will email you when access opens\./);
   const second = await request("https://flyingobject.ai/waitlist", {
     method: "POST",
     body: "email=second@co.com&junk=1",
@@ -444,6 +444,43 @@ const BANNED_LEXICON =
 const BANNED_METAPHOR =
   /\bbeam\w*|\btransmit\w*|\bsignals?\b|\bsaucers?\b|\bmothership\b|\bcraft\b|\bfleets?\b|\babduct\w*|\b(un)?identified\b|\bidentification\b|\bobjects?\b/i;
 
+// Standard typography: a sentence never opens lowercase unless it opens with a literal —
+// a command, an address, a header name. Lines split into sentences first so every sentence is
+// anchored, and glyph-only tokens (✓, ›, art) are skipped so the word behind them is inspected.
+function assertStandardCase(surface) {
+  for (const line of surface.split("\n")) {
+    for (const sentence of line.split(/[.?!]\s+/)) {
+      const opener = sentence.split(/\s+/).find((word) => /[a-z0-9]/i.test(word));
+      if (!opener || /^(?:curl|ufo|x-ufo-|\S*[.@]\S+)/.test(opener)) continue;
+      const firstAlnum = opener.match(/[a-z0-9]/i)[0];
+      assert.ok(
+        !/[a-z]/.test(firstAlnum),
+        `lowercase sentence start "${opener}" in "${line.trim()}"`,
+      );
+    }
+  }
+}
+
+test("the case gate anchors every sentence and sees past glyphs", () => {
+  for (const styled of [
+    "Done. try again.",
+    "Sent! check your inbox.",
+    "✓ installed ufo",
+    "› type ufo to continue.",
+    "✓installed ufo",
+    "(optional) set your name.",
+  ]) {
+    assert.throws(() => assertStandardCase(styled), undefined, styled);
+  }
+  for (const plain of [
+    "✓ Installed ufo (/x/bin/ufo)",
+    "#1 on the waitlist. We will email you when access opens.",
+    "curl -fsSL https://flyingobject.ai/ufo | sh",
+  ]) {
+    assertStandardCase(plain);
+  }
+});
+
 test("member-facing surfaces carry no banned lexicon and no ufo metaphor", async () => {
   const card = await (await request("https://flyingobject.ai/")).text();
   const usage = await (await request("https://flyingobject.ai/waitlist")).text();
@@ -485,5 +522,6 @@ test("member-facing surfaces carry no banned lexicon and no ufo metaphor", async
   for (const surface of [card, usage, ack, sent[0].subject, sent[0].text]) {
     assert.doesNotMatch(surface, BANNED_LEXICON);
     assert.doesNotMatch(surface, BANNED_METAPHOR);
+    assertStandardCase(surface);
   }
 });
