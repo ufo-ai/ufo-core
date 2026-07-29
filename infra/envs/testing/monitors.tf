@@ -58,3 +58,92 @@ resource "datadog_monitor" "db_tx_unavailable" {
 
   tags = ["env:testing", "managed-by:terraform"]
 }
+
+# The database's own health, from CloudWatch. These answer capacity questions — is the instance
+# running out of something — which is a different question from whether a turn reached it, and a
+# slower one: a point lands well after the minute it describes, so none of these can catch an
+# incident as it happens. `db_tx_unavailable` above is the one that fires within a turn's lifetime.
+#
+# That lag is also why each carries `evaluation_delay`, at Datadog's stated minimum for a backfilled
+# source: the end of an undelayed window is always empty, and a monitor that never gets a full
+# window skips its evaluation rather than failing it, which reads exactly like a quiet one.
+
+# A burstable class earns CPU credits at a fixed rate and spends them above its baseline share, and
+# RDS configures `db.t4g` for Unlimited mode: a balance at zero does not throttle the instance, it
+# keeps bursting on surplus. AWS bills that surplus only once it passes what the class can earn in a
+# day, so the charge trails an empty balance by a wide margin — which is what makes it the alert and
+# the balance the graph. An hour of it is an instance too small for the fleet, presenting as a bill
+# rather than as latency.
+resource "datadog_monitor" "db_cpu_surplus_charged" {
+  name    = "ufo testing database is bursting past its baseline"
+  type    = "query alert"
+  query   = "min(last_1h):avg:aws.rds.cpusurplus_credits_charged{dbinstanceidentifier:${module.platform.db_instance_identifier}} > 0"
+  message = "The database has spent its earned CPU credits and has been paying for surplus burst for an hour straight. Unlimited mode bills this rather than throttling, so nothing will slow down to tell you: find what is burning CPU, or raise the instance class. @ops@flyingobject.ai @slack-alerts"
+
+  monitor_thresholds {
+    critical = 0
+  }
+
+  evaluation_delay = 900
+
+  tags = ["env:testing", "managed-by:terraform"]
+}
+
+# 4 GiB of RAM. Postgres refuses connections before it refuses queries, so this is upstream of the
+# symptom rather than the symptom.
+resource "datadog_monitor" "db_memory_low" {
+  name    = "ufo testing database is low on memory"
+  type    = "query alert"
+  query   = "min(last_15m):avg:aws.rds.freeable_memory{dbinstanceidentifier:${module.platform.db_instance_identifier}} < 209715200"
+  message = "Freeable memory on the database is under 200 MB. Postgres starts refusing connections before it starts refusing queries. @ops@flyingobject.ai @slack-alerts"
+
+  monitor_thresholds {
+    critical = 209715200
+    warning  = 419430400
+  }
+
+  evaluation_delay = 900
+
+  tags = ["env:testing", "managed-by:terraform"]
+}
+
+# Autoscaling grows the disk whenever free space falls under 10% of the allocation, so the floor
+# that catches it not keeping up sits under that trigger and moves with the allocation:
+# `total_storage_space` is the allocation. Both sides submit a point a minute, so every bucket in
+# the window has a value to divide.
+resource "datadog_monitor" "db_storage_low" {
+  name    = "ufo testing database is low on storage"
+  type    = "query alert"
+  query   = "min(last_30m):avg:aws.rds.free_storage_space{dbinstanceidentifier:${module.platform.db_instance_identifier}} / avg:aws.rds.total_storage_space{dbinstanceidentifier:${module.platform.db_instance_identifier}} < 0.05"
+  message = "Free storage on the database is under 5% of its allocation — past the point where autoscaling should have grown the disk. Check whether it has reached `rds_max_allocated_storage`. @ops@flyingobject.ai @slack-alerts"
+
+  monitor_thresholds {
+    critical = 0.05
+    warning  = 0.08
+  }
+
+  evaluation_delay = 900
+
+  tags = ["env:testing", "managed-by:terraform"]
+}
+
+# Pool-less serve dials per transaction, so a runaway is a connection storm rather than a slow
+# climb. Measured over three hours of real traffic the instance sits at 15-33 connections; RDS's
+# formula puts the ceiling near 450 for 4 GiB. Critical at 150 is four times the observed peak and a
+# third of the ceiling — far enough above normal to mean something is wrong, far enough below the
+# limit to arrive before Postgres starts refusing.
+resource "datadog_monitor" "db_connections_high" {
+  name    = "ufo testing database is holding too many connections"
+  type    = "query alert"
+  query   = "avg(last_15m):avg:aws.rds.database_connections{dbinstanceidentifier:${module.platform.db_instance_identifier}} > 150"
+  message = "The database is holding far more connections than this fleet opens in normal traffic. Serve dials per transaction, so this is churn outpacing teardown rather than a busy hour. @ops@flyingobject.ai @slack-alerts"
+
+  monitor_thresholds {
+    critical = 150
+    warning  = 100
+  }
+
+  evaluation_delay = 900
+
+  tags = ["env:testing", "managed-by:terraform"]
+}

@@ -10,9 +10,9 @@
 # too, distinguished by the `dbinstanceidentifier` tag rather than by which root created this.
 # `gates.py` holds the one-root rule.
 #
-# CloudWatch polling lands metrics roughly every ten minutes. That is a capacity signal, not an
-# incident one — a connect that fails in sixty seconds is over long before a point arrives, which
-# is what `ufo.db_tx_unavailable_total` is for.
+# CloudWatch keeps a point every one to five minutes depending on the metric — the credit metrics
+# are five-minute only — and Datadog collects RDS in batches, so the newest minutes of any window
+# are still empty.
 
 # Datadog's own AWS account, the principal the role below trusts. Site-specific — this is us5's,
 # the site `monitors.tf` pins its api_url to. A wrong value fails as sts:AssumeRole denied with no

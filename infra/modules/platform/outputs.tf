@@ -108,3 +108,8 @@ output "api_keys_secret_arn" {
 output "hostname" {
   value = var.hostname
 }
+
+output "db_instance_identifier" {
+  description = "The RDS instance's own identifier, which is how CloudWatch tags every metric it reports for the database."
+  value       = module.rds.db_instance_identifier
+}
