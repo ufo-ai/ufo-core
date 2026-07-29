@@ -46,6 +46,21 @@ lenses is yours to confirm when you synthesize: a file is finished when every le
 it, so a later review of this pull request never has to reopen it for a concern already visible at
 this head. State the per-file rule in each agent's instructions.
 
+### Write each finding to be the last one on its subject
+
+Every round costs the author a full review cycle, so what one finding leaves unsaid the next round
+bills for.
+
+- **Name the class, not the instance.** A finding covers every case of itself visible at this head.
+  When the code names several — a docstring's causes, an enum's members, a table's rows, two call
+  sites of one helper — and the diff answers one, the finding names them all in the one comment.
+- **Name what the fix must preserve.** A finding asking for something deleted, replaced, or moved
+  states what the replacement still has to cover and where the surviving statement lives. A fix
+  that satisfies the finding and breaks what the finding did not mention is the finding's defect.
+- **Close new code the round it appears.** Code a follow-up commit introduces has never been
+  reviewed: every lens reports on it now, to the same closure a first review gives. A mechanism
+  audited one aspect per round is one finding spread over three.
+
 On a `follow_up` round, give each agent the findings and replies from step 6 and bound its work to
 two things: verify each earlier finding is actually fixed at this head, and audit what the new
 commits changed. Step 6 returns `anchor_sha`, the head the newest earlier finding anchored to: when
@@ -63,6 +78,15 @@ resolve, and never re-publish one it does.
 Validate every returned finding against the exact diff and surrounding code. Keep the findings that
 are grounded there; drop the rest. Run a focused test only when it is necessary to prove or disprove
 a finding. Whether a kept finding blocks the merge is decided below, after validation, never here.
+
+Two further drops on a follow-up round. With `anchor_sha` set, drop a new finding on a file no
+commit in `<anchor_sha>..<head sha>` touched: the earlier round saw that content and published
+nothing, and raising it now buys a round for code this pull request is done with. The range bounds
+new work only — an earlier finding this head does not resolve is verified and re-published
+wherever its file sits. Drop a finding that restores what an earlier round's finding removed, or
+that reverses a disposition an earlier round settled — that is the review contradicting itself,
+and it costs the author two rounds to arrive back where the diff already was. Publish it only by
+stating which earlier finding was wrong and why.
 
 ### Blocking and advisory findings
 
@@ -118,3 +142,7 @@ Finish only after GitHub records the verdict as a decisive review or the exact s
 | Only wording, comment, or docstring issues remain | Approve and list them as advisory. Requesting changes for prose costs the author a full review round. |
 | A structural or design finding fits neither blocking bucket | It is blocking only with a written rule quoted from `CLAUDE.md`, `AGENTS.md`, `spec.md`, or an existing local contract. Without one it is a preference: drop it. |
 | A follow-up review is about to re-audit a file an earlier round already flagged | Verify that earlier finding at this head instead. Audit the file afresh only where the new commits touched it. |
+| The code names several cases and the diff answers one | Name every uncovered case in the one comment. A finding that covers the instance and not the class returns as its own round. |
+| A finding asks for a deletion, a replacement, or a move | Say what the replacement must still cover. A rewrite that satisfies the wording and drops the cover is a round you bought. |
+| A follow-up commit introduced a mechanism that did not exist before | Nothing has reviewed it. Close every lens on it this round rather than one aspect per round. |
+| A new finding lands on a file no commit in the `anchor_sha` range touched | Drop it. It was visible to the earlier round, which published nothing on it. An earlier finding on that file is verified and re-published as usual. |

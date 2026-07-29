@@ -89,6 +89,52 @@ def test_claude_code_review_skill_verifies_prior_rounds_instead_of_re_deriving()
     assert skill.index("prior_findings.py") < skill.index("## Review")
 
 
+def test_claude_code_review_skill_spends_one_round_per_subject() -> None:
+    prose = " ".join(SKILL.read_text().split())
+
+    assert "### Write each finding to be the last one on its subject" in prose
+    assert "what one finding leaves unsaid the next round bills for" in prose
+    assert "**Name the class, not the instance.**" in prose
+    assert "the finding names them all in the one comment" in prose
+    assert "**Name what the fix must preserve.**" in prose
+    assert "breaks what the finding did not mention is the finding's defect" in prose
+    assert "**Close new code the round it appears.**" in prose
+    assert "one finding spread over three" in prose
+    assert prose.index("### Write each finding to be the last one on its subject") < prose.index(
+        "On a `follow_up` round"
+    )
+
+    for gotcha in (
+        "The code names several cases and the diff answers one",
+        "A finding asks for a deletion, a replacement, or a move",
+        "A follow-up commit introduced a mechanism that did not exist before",
+        "A new finding lands on a file no commit in the `anchor_sha` range touched",
+    ):
+        assert gotcha in prose
+
+
+def test_claude_code_review_skill_drops_findings_that_buy_a_round() -> None:
+    prose = " ".join(SKILL.read_text().split())
+
+    assert "Two further drops on a follow-up round" in prose
+    assert "drop a new finding on a file no commit in `<anchor_sha>..<head sha>` touched" in prose
+    assert "raising it now buys a round for code this pull request is done with" in prose
+    assert "The range bounds new work only" in prose
+    assert (
+        "an earlier finding this head does not resolve is verified and re-published wherever its "
+        "file sits" in prose
+    )
+    assert "An earlier finding on that file is verified and re-published as usual" in prose
+    assert "Drop a finding that restores what an earlier round's finding removed" in prose
+    assert "reverses a disposition an earlier round settled" in prose
+    assert "stating which earlier finding was wrong and why" in prose
+    assert (
+        prose.index("Validate every returned finding")
+        < prose.index("Two further drops on a follow-up round")
+        < prose.index("### Blocking and advisory findings")
+    )
+
+
 def test_every_round_the_script_emits_has_an_instruction_in_the_skill() -> None:
     skill = SKILL.read_text()
     claude = prior.comment({"id": 1, "user": {"login": "claude[bot]"}, "path": "a.py", "body": ""})
