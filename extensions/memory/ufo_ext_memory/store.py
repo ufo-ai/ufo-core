@@ -6,8 +6,12 @@ for its lexical and vector hits under the caller's subject filter, fuses them wi
 fusion (K=60), and reads the surviving items back. `search_sources` fuses the same legs over
 source-page chunks and reads the matched snippet straight off the index (a tombstoned page's chunks
 are already gone). `MemoryIndexer` is the derivation job: it atomically claims memory items whose
-`embedding_digest` is NULL, chunks and embeds each body it may publish, and stamps the digest so the
-row is no longer due. Everything reaches the database through the extension's workspace-scoped
+`embedding_digest` is NULL, chunks and embeds each body whose chunks the index does not already
+hold, and stamps the digest so the row is no longer due. A claimed publishable body the index still
+holds — an identical re-commit that only rebound the row's page revision, or a lease-expired retry —
+settles without paying the embed again (the id is content-addressed over the body, so held chunks
+are that body's); a body whose chunks were withdrawn is not held and is re-embedded.
+Everything reaches the database through the extension's workspace-scoped
 `transaction()` and the deploy index/embed backends core threads onto its context — never a core
 internal.
 """
@@ -925,8 +929,9 @@ class MemoryIndexer:
     atomically claims a batch of rows whose `embedding_digest` is NULL and whose claim is unset or
     lease-expired — stamping `embedding_claimed_at` (Postgres `FOR UPDATE SKIP LOCKED`, SQLite the
     single writer) so an overlapping tick skips them and never double-embeds — chunks and embeds
-    each body, then writes the content digest and clears the claim so the row is no longer due. It
-    owns a row's chunks, never the row: a body it may not publish is withheld from the index and its
+    each body whose chunks the index does not already hold, then writes the content digest and
+    clears the claim so the row is no longer due. It owns a row's chunks, never the row: a body it
+    may not publish is withheld from the index and its
     row left intact for the fact deriver, the one writer that retires a page-derived memory. Every
     claimed row reaches a terminal digest either way, so a row nobody may read can never hold the
     claim slots a newly committed fact needs."""
@@ -987,15 +992,16 @@ class MemoryIndexer:
             await self.index.delete(IndexScope(OWNER_KIND_MEMORY_ITEM, str(item.id)))
             await self._settle(item)
             return
-        await chunk_embed_upsert(
-            self.index,
-            self.embed,
-            self.chunker,
-            OWNER_KIND_MEMORY_ITEM,
-            str(item.id),
-            item.subject,
-            item.body,
-        )
+        if not await self.index.has_chunks(IndexScope(OWNER_KIND_MEMORY_ITEM, str(item.id))):
+            await chunk_embed_upsert(
+                self.index,
+                self.embed,
+                self.chunker,
+                OWNER_KIND_MEMORY_ITEM,
+                str(item.id),
+                item.subject,
+                item.body,
+            )
         async with self.transaction() as connection:
             binding = (
                 await connection.execute(

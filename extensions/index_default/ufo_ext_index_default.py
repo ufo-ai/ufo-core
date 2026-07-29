@@ -97,6 +97,9 @@ VECTOR_PG = sa.text(
     """
 )
 DELETE_PG = sa.text("delete from chunk where owner_kind = :owner_kind and owner_id = :owner_id")
+HAS_CHUNKS = sa.text(
+    "select 1 from chunk where owner_kind = :owner_kind and owner_id = :owner_id limit 1"
+)
 PRUNE_PG = sa.text(
     "delete from chunk where owner_kind = :owner_kind and owner_id = :owner_id "
     "and chunk_digest <> all(:keep)"
@@ -212,6 +215,11 @@ class DefaultIndex:
                 return
             await connection.execute(DELETE_FTS_SCOPE, params)
             await connection.execute(DELETE_SQLITE, params)
+
+    async def has_chunks(self, scope: IndexScope) -> bool:
+        params = {"owner_kind": scope.owner_kind, "owner_id": scope.owner_id}
+        async with self.transaction() as connection:
+            return (await connection.execute(HAS_CHUNKS, params)).first() is not None
 
     async def prune(self, scope: IndexScope, keep: frozenset[str]) -> None:
         if not keep:

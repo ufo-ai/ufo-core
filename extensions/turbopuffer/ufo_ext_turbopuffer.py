@@ -163,6 +163,14 @@ class TurbopufferIndex:
             )
             response.raise_for_status()
 
+    async def has_chunks(self, scope: IndexScope) -> bool:
+        body = {"rank_by": ["id", "asc"], "top_k": 1, "filters": scope_filters(scope, None)}
+        response = await self.api.post(self._path("/query"), json=body, headers=await self._auth())
+        if response.status_code == httpx.codes.NOT_FOUND:
+            return False
+        response.raise_for_status()
+        return bool(response.json().get("rows"))
+
     async def lexical(
         self, query: str, subjects: frozenset[str], owner_kind: str, limit: int
     ) -> tuple[Hit, ...]:

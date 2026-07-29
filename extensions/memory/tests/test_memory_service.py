@@ -125,6 +125,9 @@ class RebindingIndex:
     async def prune(self, scope: IndexScope, keep: frozenset[str]) -> None:
         await self.backend.prune(scope, keep)
 
+    async def has_chunks(self, scope: IndexScope) -> bool:
+        return await self.backend.has_chunks(scope)
+
     async def lexical(
         self, query: str, subjects: frozenset[str], owner_kind: str, limit: int
     ) -> tuple[Hit, ...]:
@@ -1433,6 +1436,125 @@ async def test_retirement_requeues_a_fact_rebound_while_its_index_is_deleted(
         ).one()
     assert row.created_from_page_revision == new_revision
     assert row.embedding_digest is not None
+
+
+async def test_a_revision_rebind_with_an_unchanged_body_is_not_re_embedded(db: None) -> None:
+    """A feed that re-emits identical content under a new revision rebinds the fact to that
+    revision, making it due again — but the body is unchanged, and the item id is content-addressed
+    over the body, so its chunks already sit in the index. The job re-checks publishability and
+    settles the row without paying the embed a second time."""
+    workspace_id, page_id, source_id = await _workspace(), uuid4(), uuid4()
+    body = "the quarterly revenue target is four million"
+    embed = CountingEmbed(vec((8, 1.0)))
+    await _seed_page(workspace_id, page_id, source_id, SHARED_SUBJECT)
+    store = _store(embed, workspace_id)
+
+    def _run() -> Awaitable[None]:
+        return MemoryIndexer(
+            index=store.index,
+            embed=embed,
+            transaction=workspace_tx,
+            chunker=TextChunker(),
+            page_states=context_for("memory", frozenset()).page_states,
+        ).run()
+
+    await store.commit(
+        MemoryWrite(
+            subject=SHARED_SUBJECT,
+            body=body,
+            created_from_page_id=page_id,
+            created_from_page_revision=PAGE_REVISION,
+            source_id=source_id,
+        )
+    )
+    with ws(workspace_id):
+        await _run()
+    assert embed.calls == 1
+
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.page).values(digest="sha256:rev2").where(tables.page.c.id == page_id)
+        )
+    await store.commit(
+        MemoryWrite(
+            subject=SHARED_SUBJECT,
+            body=body,
+            created_from_page_id=page_id,
+            created_from_page_revision=PAGE_REVISION + 1,
+            source_id=source_id,
+        )
+    )
+    with ws(workspace_id):
+        embeds_before = embed.calls
+        await _run()
+        assert embed.calls == embeds_before
+        assert len(await store.recall("quarterly revenue", frozenset({SHARED_SUBJECT}), 10)) == 1
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(
+                    memory_item.c.embedding_digest, memory_item.c.created_from_page_revision
+                ).where(memory_item.c.created_from_page_id == page_id)
+            )
+        ).one()
+    assert row.embedding_digest is not None
+    assert row.created_from_page_revision == PAGE_REVISION + 1
+
+
+async def test_a_stale_revision_is_withdrawn_even_though_its_chunks_still_exist(db: None) -> None:
+    """The re-embed skip must never keep a stale body alive. A page that moves on without
+    re-deriving a fact leaves the fact's chunks in the index, but the job withdraws them because
+    the fact is no longer publishable — the publishability gate runs ahead of the has-chunks skip,
+    so a row due for a stale revision loses its chunks rather than keeping them."""
+    workspace_id, page_id, source_id = await _workspace(), uuid4(), uuid4()
+    body = "the merger closes in march"
+    embed = CountingEmbed(vec((8, 1.0)))
+    await _seed_page(workspace_id, page_id, source_id, SHARED_SUBJECT)
+    store = _store(embed, workspace_id)
+
+    def _run() -> Awaitable[None]:
+        return MemoryIndexer(
+            index=store.index,
+            embed=embed,
+            transaction=workspace_tx,
+            chunker=TextChunker(),
+            page_states=context_for("memory", frozenset()).page_states,
+        ).run()
+
+    await store.commit(
+        MemoryWrite(
+            subject=SHARED_SUBJECT,
+            body=body,
+            created_from_page_id=page_id,
+            created_from_page_revision=PAGE_REVISION,
+            source_id=source_id,
+        )
+    )
+    with ws(workspace_id):
+        await _run()
+        assert len(await store.recall("merger", frozenset({SHARED_SUBJECT}), 10)) == 1
+    async with workspace_tx() as connection:
+        item_id = (
+            await connection.execute(
+                sa.select(memory_item.c.id).where(memory_item.c.created_from_page_id == page_id)
+            )
+        ).scalar_one()
+    scope = IndexScope(OWNER_KIND_MEMORY_ITEM, str(item_id))
+    with ws(workspace_id):
+        assert await store.index.has_chunks(scope)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.page).values(digest="sha256:moved").where(tables.page.c.id == page_id)
+        )
+        await connection.execute(
+            sa.update(memory_item)
+            .values(embedding_digest=None, embedding_claimed_at=None)
+            .where(memory_item.c.id == item_id)
+        )
+    with ws(workspace_id):
+        await _run()
+        assert await store.recall("merger", frozenset({SHARED_SUBJECT}), 10) == ()
+        assert not await store.index.has_chunks(scope)
 
 
 async def test_a_narrowed_pages_wider_fact_is_never_published_and_never_deleted(

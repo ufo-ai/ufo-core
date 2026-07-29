@@ -132,6 +132,9 @@ class CountingIndex:
     async def prune(self, scope: IndexScope, keep: frozenset[str]) -> None:
         await self.backend.prune(scope, keep)
 
+    async def has_chunks(self, scope: IndexScope) -> bool:
+        return await self.backend.has_chunks(scope)
+
     async def lexical(
         self, query: str, subjects: frozenset[str], owner_kind: str, limit: int
     ) -> tuple[Hit, ...]:

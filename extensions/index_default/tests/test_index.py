@@ -161,6 +161,19 @@ async def test_delete_removes_only_its_scope(ambient_workspace: None, database_u
     assert [hit.chunk_digest for hit in vector] == ["keep"]
 
 
+async def test_has_chunks_reports_only_a_scope_that_holds_a_chunk(
+    ambient_workspace: None, database_url: str
+) -> None:
+    backend = DefaultIndex(transaction=workspace_tx)
+    await backend.upsert(
+        (Chunk("only", "memory_item", "owner", SUBJECT, 0, "apple", vec((0, 1.0))),)
+    )
+    assert await backend.has_chunks(IndexScope("memory_item", "owner"))
+    assert not await backend.has_chunks(IndexScope("memory_item", "empty-owner"))
+    await backend.delete(IndexScope("memory_item", "owner"))
+    assert not await backend.has_chunks(IndexScope("memory_item", "owner"))
+
+
 async def test_prune_drops_the_scopes_chunks_outside_the_keep_set(
     ambient_workspace: None, database_url: str
 ) -> None:

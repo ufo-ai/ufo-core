@@ -191,6 +191,47 @@ async def test_delete_enumerates_a_scope_then_posts_id_deletes(db: None) -> None
     assert delete_body == {"deletes": [tpuf.turbopuffer_id(d1)]}
 
 
+async def test_has_chunks_queries_the_scope_for_a_single_row(db: None) -> None:
+    workspace_id = await _workspace()
+    row = {
+        "id": tpuf.turbopuffer_id(_digest("a")),
+        "owner_kind": OWNER_KIND,
+        "owner_id": "m1",
+        "subject": SHARED,
+        "ordinal": 0,
+        "text": "x",
+    }
+    transport, seen = _recorder([row])
+    index = tpuf.TurbopufferIndex(credentials=await _access(workspace_id), api=_api(transport))
+    with ws(workspace_id):
+        assert await index.has_chunks(IndexScope(OWNER_KIND, "m1"))
+    request, body = seen[0]
+    assert request.url.path.endswith("/query")
+    assert body["top_k"] == 1
+    assert body["filters"] == [
+        "And",
+        [["owner_kind", "Eq", OWNER_KIND], ["owner_id", "Eq", "m1"]],
+    ]
+
+
+async def test_has_chunks_is_false_for_an_empty_scope_or_missing_namespace(db: None) -> None:
+    workspace_id = await _workspace()
+    transport, _ = _recorder([])
+    index = tpuf.TurbopufferIndex(credentials=await _access(workspace_id), api=_api(transport))
+    with ws(workspace_id):
+        assert not await index.has_chunks(IndexScope(OWNER_KIND, "m1"))
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"error": "namespace not found"})
+
+    missing = tpuf.TurbopufferIndex(
+        credentials=await _access(workspace_id),
+        api=_api(httpx.MockTransport(handle)),
+    )
+    with ws(workspace_id):
+        assert not await missing.has_chunks(IndexScope(OWNER_KIND, "m1"))
+
+
 async def test_query_on_a_missing_namespace_returns_no_hits(db: None) -> None:
     workspace_id = await _workspace()
 

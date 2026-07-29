@@ -503,6 +503,9 @@ class SampleIndex:
         for digest in [digest for digest, chunk in self.chunks.items() if _in_scope(chunk, scope)]:
             del self.chunks[digest]
 
+    async def has_chunks(self, scope: IndexScope) -> bool:
+        return any(_in_scope(chunk, scope) for chunk in self.chunks.values())
+
     async def prune(self, scope: IndexScope, keep: frozenset[str]) -> None:
         for digest in [
             digest
