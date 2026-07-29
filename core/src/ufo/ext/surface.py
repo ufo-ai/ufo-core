@@ -198,6 +198,16 @@ LIST_CONVERSATIONS_LIMIT = 200
 LIST_TURNS_LIMIT = 500
 
 
+class AgentSummary(BaseModel):
+    """One workspace agent as a surface lists it — the read a surface whose member picks an agent
+    (the web portal's switcher) filters through its own audience authority."""
+
+    id: UUID
+    name: str
+    main: bool
+    model: str
+
+
 class ConversationSummary(BaseModel):
     """One conversation as a read view lists it: identity and keying, the owning member's email,
     and its activity aggregates — deliberately spanning every surface in the workspace (the
@@ -564,14 +574,17 @@ class SurfaceContext:
             found = (await connection.execute(self._conversation_lookup(queue_key))).one_or_none()
         return None if found is None else found.id
 
-    async def conversation_for(self, queue_key: str, audience: Audience) -> UUID:
+    async def conversation_for(
+        self, queue_key: str, audience: Audience, agent_id: UUID | None = None
+    ) -> UUID:
         """Get-or-create the conversation this surface keys by `queue_key`, outside any admission
         transaction; a lost creation race re-reads the surviving row. A new conversation binds
-        permanently to the surface's agent — the surface's installation binding when one exists,
-        else the workspace's main agent — and admission derives every turn's agent from that
-        binding. A shared conversation is narrowed when the surface learns its exact member or
-        room; an audience is never widened, and a room becoming externally shared seals as
-        foreign."""
+        permanently to the surface's agent — an explicit `agent_id` when the surface's member
+        picks the agent (the web portal, after its own audience check), else the surface's
+        installation binding when one exists, else the workspace's main agent — and admission
+        derives every turn's agent from that binding. A shared conversation is narrowed when the
+        surface learns its exact member or room; an audience is never widened, and a room becoming
+        externally shared seals as foreign."""
         audience = parse_audience(audience)
         member_id = audience_member(audience)
         async with workspace_tx() as connection:
@@ -595,7 +608,20 @@ class SurfaceContext:
                 return await self.conversation_for(queue_key, audience)
             return found.id
         conversation_id = uuid4()
-        agent_id = await self._surface_agent()
+        if agent_id is None:
+            agent_id = await self._surface_agent()
+        else:
+            async with workspace_tx() as connection:
+                known = (
+                    await connection.execute(
+                        sa.select(tables.agent.c.id).where(
+                            tables.agent.c.workspace_id == self.workspace_id,
+                            tables.agent.c.id == agent_id,
+                        )
+                    )
+                ).one_or_none()
+            if known is None:
+                raise ValueError(f"agent {agent_id} is not an agent of this workspace")
         try:
             async with workspace_tx() as connection:
                 await connection.execute(
@@ -749,6 +775,27 @@ class SurfaceContext:
         sandbox mounts it already present. The bytes never buffer whole — the surface hands an async
         chunk iterator (a streamed download) straight to the blob store."""
         await self.blob.put_stream(workspace_key(conversation_id, rel), chunks)
+
+    async def list_agents(self) -> tuple[AgentSummary, ...]:
+        """Every agent of this workspace, main first then by name — the read a surface whose
+        member picks an agent filters through its own audience authority before showing."""
+        async with workspace_tx() as connection:
+            rows = (
+                await connection.execute(
+                    sa.select(
+                        tables.agent.c.id,
+                        tables.agent.c.name,
+                        tables.agent.c.is_main,
+                        tables.agent.c.model,
+                    )
+                    .where(tables.agent.c.workspace_id == self.workspace_id)
+                    .order_by(tables.agent.c.is_main.desc(), tables.agent.c.name)
+                )
+            ).all()
+        return tuple(
+            AgentSummary(id=row.id, name=row.name, main=row.is_main, model=row.model)
+            for row in rows
+        )
 
     async def list_conversations(
         self, limit: int = LIST_CONVERSATIONS_LIMIT

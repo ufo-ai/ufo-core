@@ -21,6 +21,9 @@ from ufo.ext.surface import (
     Admitted as Admitted,
 )
 from ufo.ext.surface import (
+    AgentSummary as AgentSummary,
+)
+from ufo.ext.surface import (
     ConversationSummary as ConversationSummary,
 )
 from ufo.ext.surface import (

@@ -373,10 +373,18 @@ allocation, delivery registration, and enqueue recovery remain one implementatio
 | Surface | Home | Delivery | Identity | Conversation key |
 |---|---|---|---|---|
 | CLI | core | live (hub tail) | member token | session (private) |
-| Web | `extensions/web` | live (hub tail) | web session → member (adopted from CLI) | session (private) |
+| Web | `extensions/web` | live (hub tail) | web session → member (adopted from CLI) | agent/email (private; one conversation per member per selected agent) |
 | Slackbot | `extensions/slack` | durable (writeback) | Slack user → member (linked; a Slack-confirmed same-domain email joins as new) | channel:thread_ts; public = shared, private channel/MPIM = room, DM = member, Slack Connect = foreign |
 | Debug | `extensions/debugger` | live (hub tail) | gateway bearer whose email domain is `OPERATOR_EMAIL_DOMAIN`; `?ws=` re-scopes to any workspace | — (read-only; admits nothing) |
 | Memory explorer | `extensions/memory` | live (page + JSON read) | gateway bearer whose email domain is `OPERATOR_EMAIL_DOMAIN`; `?ws=` re-scopes to any workspace | — (read-only; admits nothing) |
+
+The web surface is the member portal and its own audience authority: it lists and admits exactly
+the agents whose web audience holds the signed-in member — grants kept in the web extension's own
+store, granted and revoked in chat (`grant_web_access`/`revoke_web_access`, admin-only, applying
+to the conversation's agent) — while a workspace admin reaches and administers every agent. An
+out-of-audience agent is not-found on every portal route, the spend rollup answers a workspace
+admin only (the workspace's financial state, not a member's own), and the signed bearer enters as
+a session cookie through one POST (the gateway's signed-in card), never a URL.
 
 The debug and memory-explorer surfaces are the operator-audience surfaces — the `ufoctl`-verbs
 audience, not a member action. They share one operator web session (`ufo.sdk.operator`, one

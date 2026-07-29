@@ -72,6 +72,7 @@ LOGIN_PAGE = r"""<!doctype html>
   a.button { display: inline-block; padding: 10px 18px; border-radius: 8px; background: CanvasText;
              color: Canvas; font-weight: 600; text-decoration: none; }
   #home { display: none; }
+  #portal-row { margin-top: 14px; }
   #debugger-row { display: none; margin-top: 14px; }
   code { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace;
          background: color-mix(in srgb, CanvasText 8%, transparent);
@@ -100,6 +101,10 @@ LOGIN_PAGE = r"""<!doctype html>
   <section class="card" id="home">
     <h1>Signed in</h1>
     <div class="hint"><code id="member-email"></code> · <code id="workspace-url"></code></div>
+    <form id="portal-row" method="post">
+      <input type="hidden" name="token" id="portal-token">
+      <button type="submit">Open your workspace →</button>
+    </form>
     <div class="hint" style="margin-top:10px">From your terminal:</div>
     <pre id="curl-line"></pre>
     <form id="debugger-row" method="post">
@@ -148,6 +153,9 @@ function complete() {
   promptRow.style.display = 'none';
   document.getElementById('member-email').textContent = email || '';
   document.getElementById('workspace-url').textContent = workspace;
+  const portal = document.getElementById('portal-row');
+  portal.action = workspace + '/surface/web';
+  document.getElementById('portal-token').value = token;
   document.getElementById('curl-line').textContent =
     'curl -fsSL ' + location.origin + '/ufo | sh';
   if (debuggerUrl) {

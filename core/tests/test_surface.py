@@ -502,6 +502,77 @@ async def test_conversation_audience_only_narrows(db: None, tmp_path: Path) -> N
     assert await current_audience() == foreign
 
 
+async def test_list_agents_orders_main_first_then_name(db: None, tmp_path) -> None:
+    workspace_id, agent_id, _ = await _seed()
+    await _seed()
+    second = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=second,
+                workspace_id=workspace_id,
+                name="helpdesk",
+                prompt="be helpful",
+                model="claude-sonnet-5",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+    listed = await context.list_agents()
+    assert [(agent.name, agent.main) for agent in listed] == [
+        ("assistant", True),
+        ("helpdesk", False),
+    ]
+    assert listed[0].id == agent_id
+    assert listed[0].model == "claude-opus-4-8"
+    assert listed[1].id == second
+    assert listed[1].model == "claude-sonnet-5"
+
+
+async def test_conversation_for_binds_an_explicit_agent(db: None, tmp_path) -> None:
+    workspace_id, _, _ = await _seed()
+    second = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=second,
+                workspace_id=workspace_id,
+                name="helpdesk",
+                prompt="be helpful",
+                model="claude-sonnet-5",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+    conversation_id = await context.conversation_for(
+        f"{second}/bee@example.com", SHARED_AUDIENCE, agent_id=second
+    )
+    async with workspace_tx() as connection:
+        bound = (
+            await connection.execute(
+                sa.select(tables.conversation.c.agent_id).where(
+                    tables.conversation.c.id == conversation_id
+                )
+            )
+        ).scalar_one()
+    assert bound == second
+    assert (
+        await context.conversation_for(f"{second}/bee@example.com", SHARED_AUDIENCE)
+        == conversation_id
+    )
+
+
+async def test_conversation_for_refuses_a_foreign_agent(db: None, tmp_path) -> None:
+    workspace_id, _, _ = await _seed()
+    _, foreign_agent, _ = await _seed()
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+    with pytest.raises(ValueError, match="not an agent of this workspace"):
+        await context.conversation_for("stray-key", SHARED_AUDIENCE, agent_id=foreign_agent)
+    assert await context.find_conversation("stray-key") is None
+
+
 async def test_admitted_context_round_trips_to_the_loaded_turn(db: None, tmp_path) -> None:
     """Both ends of the turn.context column: the surface admits its ambient TurnContext, and the
     queue loader — the engine's one read path — validates the same record back off the row, with

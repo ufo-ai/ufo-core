@@ -13,9 +13,11 @@ core. Every addition to `core/` must name why extensions cannot express it.
 **Every member action happens in chat.** Connecting an account, granting access, approving a
 change — a member expresses it in natural conversation and the agent drives it (a tool it calls,
 surfacing any link in its reply); never a slash-command, keyword, or bespoke end-user HTTP
-endpoint. The only endpoints are the chat transport itself and unavoidable third-party plumbing
-(e.g. an OAuth callback). The speaker gates the granting act; subsequent use is the wire's job.
-(`ufoctl` CLI verbs are the operator surface — a different audience, not member actions.)
+endpoint. The only endpoints are the chat transport itself, authenticated **read projections** of
+object, status, usage, and audit data (a portal page reads directly; mutations stay chat-only),
+and unavoidable third-party plumbing (e.g. an OAuth callback). The speaker gates the granting
+act; subsequent use is the wire's job. (`ufoctl` CLI verbs are the operator surface — a
+different audience, not member actions.)
 
 ## One shape
 

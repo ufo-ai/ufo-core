@@ -1,19 +1,24 @@
-"""The web chat surface on the core surface seam, in its live mode: a self-contained chat page,
-cookie-authenticated turn admission, an SSE tail of the turn's live frames, and a spend view.
+"""The web portal on the core surface seam, in its live mode: the authenticated shell around the
+member's agents — an agent switcher over the surface's own audience, per-agent chat with
+cookie-authenticated turn admission, an SSE tail of each turn's live frames, read projections
+(agents, transcripts), and a spend view.
 
-The `ufo_session` cookie carries the signed HMAC member bearer `ufoctl init` mints (the
-`ufo.sdk.bearer` codec over `{ws, email, exp}`). The shared fleet scopes each request to the
-workspace the bearer claims (`resolve_workspace`), and the handler re-verifies it for its email —
-that email is the web `surface_identity`, resolved to (or created as) a member the first time they
-speak. Admission is the shared durable queue every surface admits onto, so the same agent answers
-everywhere; web admits without writeback and delivers by tailing the hub over SSE in its own stream
-route, never through the writeback poller. Everything web-specific lives here, reaching core only
-through the privileged `SurfaceContext` (admit, identity, tail, spend) — the SDK surface a CI gate
-pins."""
+The `ufo_session` cookie carries the signed HMAC member bearer the gateway or `ufoctl init` mints
+(the `ufo.sdk.bearer` codec over `{ws, email, exp}`), landed by the one POST that opens a session
+— the bearer never rides a URL. The shared fleet scopes each request to the workspace the bearer
+claims (`resolve_workspace`), and the handler re-verifies it for its email — that email is the web
+`surface_identity`, resolved to (or created as) a member the first time they speak, and the axis
+the web audience (`ufo_ext_web.audience`) grants on. Admission is the shared durable queue every
+surface admits onto; each conversation binds permanently to the agent the member selected, web
+admits without writeback and delivers by tailing the hub over SSE in its own stream route, never
+through the writeback poller. Everything web-specific lives here, reaching core only through the
+privileged `SurfaceContext` — the SDK surface a CI gate pins."""
 
 import html
 import json
+import re
 from collections.abc import AsyncIterator
+from pathlib import Path
 from uuid import UUID
 
 from ufo.sdk.accounting import MICRO_USD_PER_USD, SpendReport, SubjectTotal
@@ -22,28 +27,52 @@ from ufo.sdk.bearer import verify_token, workspace_claim
 from ufo.sdk.http import (
     HTMLResponse,
     JSONResponse,
+    RedirectResponse,
     Request,
     Response,
     StreamingResponse,
     set_session_cookie,
 )
 from ufo.sdk.hub import CostTick, LiveFrame, Parked, SkillLoad, Terminal, ToolCall
+from ufo.sdk.models import Message, TextBlock
 from ufo.sdk.surfaces import ConnectRequestInvalid, SurfaceAuth, SurfaceContext, SurfaceRoute
+from ufo_ext_web.audience import WebAudience, web_audience, web_extension
 
 SURFACE_WEB = "web"
 SESSION_COOKIE = "ufo_session"
+TOKEN_FIELD = "token"
 MAX_INBOUND_CHARS = 200_000
 SPEND_WINDOW_DEFAULT_SECONDS = 86_400
+PORTAL_PATH = "/surface/web"
+PORTAL_FILE = Path(__file__).parent / "static" / "portal.html"
+PORTAL_HTML = PORTAL_FILE.read_text()
+CONTEXT_TAG = re.compile(r"\A\s*<context>.*?</context>\s*", re.S)
 
 
-async def resolve_workspace(request: Request, _auth: SurfaceAuth) -> UUID | None:
+async def resolve_workspace(request: Request, _auth: SurfaceAuth) -> UUID | Response | None:
     """The `SurfaceSpec.identify` the shared fleet calls to scope a request before its handler runs:
     the workspace the bearer claims, or None to reject. The bearer rides the `ufo_session` cookie,
-    or the `?token=` query param the landing page carries before any cookie is set (`chat_page`
-    binds it into the cookie for the requests that follow). The handler re-verifies the same bearer
-    for the member email — workspace here, identity there."""
-    token = request.cookies.get(SESSION_COOKIE, "") or request.query_params.get("token", "")
-    return workspace_claim(token) if token else None
+    or — for the one POST that opens a session — the form body (`open_session` binds it into the
+    cookie for the requests that follow); never a query parameter, so it stays out of URLs, access
+    logs, and browser history. Each fallback keys on the previous credential failing to RESOLVE,
+    not merely being absent, so a member whose cookie outlived its bearer's expiry recovers by
+    posting a fresh token instead of being locked behind the stale cookie. An unresolved GET of
+    the portal page itself is the one pre-binding response: the same static shell serves, showing
+    its token form because `api/agents` answers 401. The handler re-verifies the same bearer for
+    the member email — workspace here, identity there."""
+    cookie = request.cookies.get(SESSION_COOKIE, "")
+    workspace = workspace_claim(cookie) if cookie else None
+    if workspace is None and request.method == "POST":
+        posted = (await request.form()).get(TOKEN_FIELD, "")
+        if isinstance(posted, str) and posted.strip():
+            workspace = workspace_claim(posted.strip())
+    if (
+        workspace is None
+        and request.method == "GET"
+        and request.url.path.rstrip("/") == PORTAL_PATH
+    ):
+        return HTMLResponse(PORTAL_HTML)
+    return workspace
 
 
 async def _authenticate(ctx: SurfaceContext, request: Request) -> tuple[UUID, str] | None:
@@ -60,36 +89,134 @@ async def _authenticate(ctx: SurfaceContext, request: Request) -> tuple[UUID, st
     return None if member_id is None else (member_id, email)
 
 
-async def chat_page(ctx: SurfaceContext, request: Request) -> Response:
-    """Serve the chat page. A `?token=` binds the session cookie so a member can open the surface
-    with the token from `ufoctl init`; without it the browser's existing cookie authenticates."""
-    response = HTMLResponse(CHAT_PAGE)
-    token = request.query_params.get("token", "")
-    if token:
-        set_session_cookie(response, SESSION_COOKIE, token, samesite="strict")
+async def portal_page(ctx: SurfaceContext, request: Request) -> Response:
+    """Serve the portal shell. The page itself decides between its token form (no session yet) and
+    the signed-in shell by asking `api/agents` — the server serves one page either way."""
+    return HTMLResponse(PORTAL_HTML)
+
+
+async def open_session(ctx: SurfaceContext, request: Request) -> Response:
+    """Open a session: land the POSTed bearer as the session cookie and redirect into the portal.
+    The token crosses only in the form body — never a URL. The identify resolver has verified this
+    form token whenever it is what scoped the request; behind a cookie that still resolves the form
+    goes unread and the new bearer lands unverified, which changes nothing, because the cookie is
+    verified again on every request that follows (`resolve_workspace`, then `_authenticate`) and one
+    that verifies against nothing authenticates nobody. The cookie is `lax`, not `strict`, because
+    arrival IS a cross-site navigation (the gateway's signed-in card posts here) and the redirected
+    GET must already carry it."""
+    posted = (await request.form()).get(TOKEN_FIELD, "")
+    if not isinstance(posted, str) or not posted.strip():
+        return JSONResponse({"error": "token form field is required"}, status_code=400)
+    response = RedirectResponse(str(request.url), status_code=303)
+    set_session_cookie(response, SESSION_COOKIE, posted.strip(), samesite="lax")
     return response
 
 
-async def chat(ctx: SurfaceContext, request: Request) -> Response:
+def _agent_param(request: Request) -> UUID | None:
+    try:
+        return UUID(request.path_params["agent_id"])
+    except ValueError:
+        return None
+
+
+def _conversation_key(agent_id: UUID, email: str) -> str:
+    return f"{agent_id}/{email}"
+
+
+async def _audience_for(
+    ctx: SurfaceContext, request: Request
+) -> tuple[UUID, str, WebAudience] | Response:
     auth = await _authenticate(ctx, request)
     if auth is None:
         return Response("missing or unknown session cookie", status_code=401)
     member_id, email = auth
+    return member_id, email, await web_audience(ctx, web_extension(), email)
+
+
+async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
+    """The portal's first read: the signed-in member and the agents their web audience holds —
+    every agent for a workspace admin, exactly the granted set for everyone else."""
+    resolved = await _audience_for(ctx, request)
+    if isinstance(resolved, Response):
+        return resolved
+    _member_id, email, audience = resolved
+    return JSONResponse(
+        {
+            "member": {"email": email, "admin": audience.admin},
+            "agents": [
+                {"id": str(agent.id), "name": agent.name, "main": agent.main, "model": agent.model}
+                for agent in audience.agents
+            ],
+        }
+    )
+
+
+async def chat(ctx: SurfaceContext, request: Request) -> Response:
+    resolved = await _audience_for(ctx, request)
+    if isinstance(resolved, Response):
+        return resolved
+    member_id, email, audience = resolved
+    agent_id = _agent_param(request)
+    if agent_id is None or not audience.allows(agent_id):
+        return Response("no such agent", status_code=404)
     inbound = (await request.body()).decode()
     if not inbound.strip():
         return Response("empty message", status_code=400)
     if len(inbound) > MAX_INBOUND_CHARS:
         return Response(f"message exceeds {MAX_INBOUND_CHARS} characters", status_code=413)
-    conversation_id = await ctx.conversation_for(email, conversation_audience(member_id))
+    conversation_id = await ctx.conversation_for(
+        _conversation_key(agent_id, email), conversation_audience(member_id), agent_id=agent_id
+    )
     admitted = await ctx.admit(conversation_id, inbound, speaker_member_id=member_id)
     return JSONResponse({"turn_id": str(admitted.turn_id)})
 
 
+def _rendered_text(message: Message) -> str:
+    match message.content:
+        case str() as text:
+            rendered = text
+        case blocks:
+            rendered = "\n".join(
+                block.text for block in blocks if isinstance(block, TextBlock) and block.text
+            )
+    if message.role == "user":
+        rendered = CONTEXT_TAG.sub("", rendered, count=1)
+    return rendered.strip()
+
+
+async def transcript(ctx: SurfaceContext, request: Request) -> Response:
+    """The member's exchange with one agent as the portal renders it on load: text only, the
+    engine's `<context>` framing stripped, tool traffic elided — a projection of the durable
+    transcript, never a second store."""
+    resolved = await _audience_for(ctx, request)
+    if isinstance(resolved, Response):
+        return resolved
+    _member_id, email, audience = resolved
+    agent_id = _agent_param(request)
+    if agent_id is None or not audience.allows(agent_id):
+        return Response("no such agent", status_code=404)
+    conversation_id = await ctx.find_conversation(_conversation_key(agent_id, email))
+    if conversation_id is None:
+        return JSONResponse({"messages": []})
+    recorded = await ctx.read_transcript(conversation_id)
+    if recorded is None:
+        return JSONResponse({"messages": []})
+    rendered = [
+        {"role": message.role, "text": text}
+        for message in recorded.messages
+        if (text := _rendered_text(message))
+    ]
+    return JSONResponse({"messages": rendered})
+
+
 async def stream(ctx: SurfaceContext, request: Request) -> Response:
-    auth = await _authenticate(ctx, request)
-    if auth is None:
-        return Response("missing or unknown session cookie", status_code=401)
-    member_id, _email = auth
+    """Tail one turn's live frames. Gated like every portal route: the turn must belong to the
+    member AND its agent must still be in their web audience, so a revocation ends streaming
+    access alongside chat and transcript — an out-of-audience agent's turn is not-found."""
+    resolved = await _audience_for(ctx, request)
+    if isinstance(resolved, Response):
+        return resolved
+    member_id, _email, audience = resolved
     try:
         turn_id = UUID(request.path_params["turn_id"])
     except ValueError:
@@ -99,6 +226,9 @@ async def stream(ctx: SurfaceContext, request: Request) -> Response:
         return Response("no such turn", status_code=404)
     if owner != member_id:
         return Response("turn belongs to another member", status_code=403)
+    detail = await ctx.turn_detail(turn_id)
+    if detail is None or not audience.allows(detail.turn.agent_id):
+        return Response("no such turn", status_code=404)
     since = request.headers.get("last-event-id", "")
     return StreamingResponse(
         _events(ctx, turn_id, member_id, since), media_type="text/event-stream"
@@ -126,11 +256,17 @@ async def _events(
 
 
 async def spend(ctx: SurfaceContext, request: Request) -> Response:
-    """Render the workspace spend rollup over a window — the same sums `ufoctl spend` prints, for
-    any authenticated member of the workspace."""
-    auth = await _authenticate(ctx, request)
-    if auth is None:
-        return Response("missing or unknown session cookie", status_code=401)
+    """Render the workspace spend rollup over a window — the same sums `ufoctl spend` prints, for a
+    workspace admin. The rollup is the workspace's financial state, not a member's own: it names
+    every agent and every member's burn, so a non-admin is not-found here for the same reason an
+    out-of-audience agent is not-found on every other portal route, and the footer offers the link
+    only to an admin."""
+    resolved = await _audience_for(ctx, request)
+    if isinstance(resolved, Response):
+        return resolved
+    _member_id, _email, audience = resolved
+    if not audience.admin:
+        return Response("no such page", status_code=404)
     window = int(request.query_params.get("window_seconds", SPEND_WINDOW_DEFAULT_SECONDS))
     report = await ctx.spend_rollup(window)
     return HTMLResponse(_spend_page(report))
@@ -192,166 +328,11 @@ def _spend_page(report: SpendReport) -> str:
 
 
 ROUTES = (
-    SurfaceRoute(method="GET", path="", handler=chat_page),
-    SurfaceRoute(method="POST", path="chat", handler=chat),
+    SurfaceRoute(method="GET", path="", handler=portal_page),
+    SurfaceRoute(method="POST", path="", handler=open_session),
+    SurfaceRoute(method="GET", path="api/agents", handler=agents_index),
+    SurfaceRoute(method="POST", path="agents/{agent_id}/chat", handler=chat),
+    SurfaceRoute(method="GET", path="agents/{agent_id}/transcript", handler=transcript),
     SurfaceRoute(method="GET", path="turns/{turn_id}/stream", handler=stream),
     SurfaceRoute(method="GET", path="spend", handler=spend),
 )
-
-
-CHAT_PAGE = """\
-<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ufo</title>
-<style>
-  :root { color-scheme: light dark; }
-  * { box-sizing: border-box; }
-  body { margin: 0; font: 15px/1.5 system-ui, sans-serif; display: flex; flex-direction: column;
-         height: 100vh; background: Canvas; color: CanvasText; }
-  header { padding: 12px 16px; font-weight: 600;
-           border-bottom: 1px solid color-mix(in srgb, CanvasText 15%, transparent); }
-  #log { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column;
-         gap: 10px; }
-  .bubble { max-width: 70ch; padding: 8px 12px; border-radius: 12px; white-space: pre-wrap;
-            word-wrap: break-word; }
-  .me { align-self: flex-end; background: color-mix(in srgb, CanvasText 12%, transparent); }
-  .agent { align-self: flex-start; background: color-mix(in srgb, CanvasText 6%, transparent); }
-  .meta { font-size: 12px; opacity: 0.6; margin-top: 4px; }
-  form { display: flex; gap: 8px; padding: 12px 16px;
-         border-top: 1px solid color-mix(in srgb, CanvasText 15%, transparent); }
-  #msg { flex: 1; padding: 10px 12px; border-radius: 8px; border: 1px solid
-         color-mix(in srgb, CanvasText 25%, transparent); background: Field; color: FieldText; }
-  button { padding: 10px 18px; border: 0; border-radius: 8px; background: CanvasText; color: Canvas;
-           font-weight: 600; cursor: pointer; }
-  button:disabled { opacity: 0.4; cursor: default; }
-</style>
-</head>
-<body>
-<header>ufo</header>
-<div id="log"></div>
-<form id="composer">
-  <input id="msg" autocomplete="off" placeholder="Message the agent…" autofocus>
-  <button type="submit">Send</button>
-</form>
-<script>
-const log = document.getElementById('log');
-const input = document.getElementById('msg');
-const form = document.getElementById('composer');
-const button = form.querySelector('button');
-
-function bubble(cls, text) {
-  const el = document.createElement('div');
-  el.className = 'bubble ' + cls;
-  el.textContent = text;
-  log.appendChild(el);
-  log.scrollTop = log.scrollHeight;
-  return el;
-}
-
-form.addEventListener('submit', async (event) => {
-  event.preventDefault();
-  const text = input.value.trim();
-  if (!text) return;
-  input.value = '';
-  button.disabled = true;
-  bubble('me', text);
-  const reply = bubble('agent', '');
-  let res;
-  try {
-    res = await fetch('/surface/web/chat',
-      { method: 'POST', body: text, credentials: 'same-origin' });
-  } catch (err) {
-    reply.textContent = '(network error)';
-    button.disabled = false;
-    return;
-  }
-  if (!res.ok) {
-    reply.textContent = '(error ' + res.status + ')';
-    button.disabled = false;
-    return;
-  }
-  const turnId = (await res.json()).turn_id;
-  const source = new EventSource('/surface/web/turns/' + turnId + '/stream');
-  let streamed = false;
-  let meter = null;
-  let activity = null;
-  function note(text) {
-    if (!activity) {
-      activity = document.createElement('div');
-      activity.className = 'meta';
-      reply.appendChild(activity);
-    }
-    activity.textContent = text;
-    log.scrollTop = log.scrollHeight;
-  }
-  source.onmessage = (event) => {
-    streamed = true;
-    reply.textContent += JSON.parse(event.data).text;
-    log.scrollTop = log.scrollHeight;
-  };
-  source.addEventListener('tool', (event) => {
-    const frame = JSON.parse(event.data);
-    const detail = frame.description || frame.preview;
-    note('running ' + frame.tool + (detail ? ': ' + detail : ''));
-  });
-  source.addEventListener('skill', (event) => {
-    note('loading skill: ' + JSON.parse(event.data).skill);
-  });
-  source.addEventListener('cost', (event) => {
-    const frame = JSON.parse(event.data);
-    if (!meter) {
-      meter = document.createElement('div');
-      meter.className = 'meta';
-      reply.appendChild(meter);
-    }
-    meter.textContent = frame.tokens + ' tok · $' + (frame.cost_micro_usd / 1e6).toFixed(6);
-    log.scrollTop = log.scrollHeight;
-  });
-  source.addEventListener('connect', (event) => {
-    const link = document.createElement('a');
-    link.href = JSON.parse(event.data).url;
-    link.target = '_blank';
-    link.rel = 'noopener';
-    link.textContent = 'Connect account';
-    reply.appendChild(link);
-    log.scrollTop = log.scrollHeight;
-  });
-  source.addEventListener('connect_error', (event) => {
-    note(JSON.parse(event.data).message);
-  });
-  source.addEventListener('terminal', (event) => {
-    const frame = JSON.parse(event.data);
-    if (frame.status === 'done') {
-      if (frame.text && !streamed) {
-        reply.insertBefore(document.createTextNode(frame.text), reply.firstChild);
-      }
-      const meta = document.createElement('div');
-      meta.className = 'meta';
-      meta.textContent = frame.model + ' · ' + frame.tokens + ' tok · $'
-        + (frame.cost_micro_usd / 1e6).toFixed(6);
-      reply.appendChild(meta);
-    } else {
-      const detail = frame.text
-        || '(' + frame.status + (frame.error_class ? ': ' + frame.error_class : '') + ')';
-      reply.textContent += (reply.textContent ? '\\n' : '') + detail;
-    }
-    source.close();
-    button.disabled = false;
-    input.focus();
-  });
-  source.addEventListener('parked', (event) => {
-    const frame = JSON.parse(event.data);
-    reply.textContent += (reply.textContent ? '\\n' : '') + frame.message;
-    source.close();
-    button.disabled = false;
-    input.focus();
-  });
-  source.onerror = () => { source.close(); button.disabled = false; };
-});
-</script>
-</body>
-</html>
-"""
