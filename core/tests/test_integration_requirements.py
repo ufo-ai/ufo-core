@@ -8,6 +8,7 @@ from ufo_testsupport.plugin import (
 def test_an_unavailable_dependency_fails_the_required_gate_and_is_optional_elsewhere(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.delenv(INTEGRATION_REQUIRED_ENV, raising=False)
     assert integration_dependency_available(True, "Docker executable is not available")
     assert not integration_dependency_available(False, "Docker executable is not available")
 
