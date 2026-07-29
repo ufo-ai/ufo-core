@@ -44,7 +44,6 @@ from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import (
     WORKSPACE_DIR,
     ExecResult,
-    MountSpec,
     ProxyEndpoint,
     SandboxSession,
     SandboxSpec,
@@ -276,7 +275,7 @@ async def _sandbox(workspace_root: Path) -> SandboxSession:
         SandboxSpec(
             conversation_id=uuid4(),
             image_ref="unused",
-            mount=MountSpec(kind="filesystem", host_path=str(workspace_root)),
+            workspace_host_path=str(workspace_root),
             proxy=ProxyEndpoint(port=1, ca_cert="test-ca"),
             run_token="run-token",
         )
@@ -1053,7 +1052,7 @@ async def test_decoded_bytes_are_never_written_straight_to_their_shared_path(
         SandboxSpec(
             conversation_id=uuid4(),
             image_ref="unused",
-            mount=MountSpec(kind="filesystem", host_path=str(workspace)),
+            workspace_host_path=str(workspace),
             proxy=ProxyEndpoint(port=1, ca_cert="test-ca"),
             run_token="run-token",
         )

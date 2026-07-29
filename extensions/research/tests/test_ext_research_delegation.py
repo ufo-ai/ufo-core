@@ -22,7 +22,6 @@ from ufo.blob import FilesystemBlobStore
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import (
     ExecResult,
-    MountSpec,
     ProxyEndpoint,
     SandboxSession,
     SandboxSpec,
@@ -186,7 +185,7 @@ async def test_a_real_shell_reads_hostile_paths_literally(tmp_path: Path) -> Non
         SandboxSpec(
             conversation_id=uuid4(),
             image_ref="ufo-sandbox:latest",
-            mount=MountSpec(kind="filesystem", host_path=str(workspace)),
+            workspace_host_path=str(workspace),
             proxy=ProxyEndpoint(port=9999, ca_cert="CA-PEM-BYTES"),
             run_token="run-token-abc",
         )

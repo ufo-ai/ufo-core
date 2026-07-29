@@ -25,6 +25,9 @@ from ufo_ext_memory.store import memory_item
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.hub import InProcessHub
+from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
+from ufo.sandbox.local import LocalCarrier
+from ufo.sandbox.session import ProxyEndpoint
 from ufo.schema import tables
 from ufo.sdk.surfaces import OPERATOR_EMAIL_DOMAIN
 from ufo.serve import _mount_shared_surfaces
@@ -64,7 +67,22 @@ async def explorer(
     blob = FilesystemBlobStore(root=tmp_path)
     app = FastAPI()
     _mount_shared_surfaces(
-        app, (memory_manifest(),), None, blob, InProcessHub(), _StubDbos(), "", None
+        app,
+        (memory_manifest(),),
+        None,
+        blob,
+        ConversationSandbox(
+            carrier=LocalCarrier(),
+            backend="local",
+            off_cluster=False,
+            image_ref=SANDBOX_IMAGE_REF,
+            proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
+            workspace_root=tmp_path / "workspaces",
+        ),
+        InProcessHub(),
+        _StubDbos(),
+        "",
+        None,
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="https://fleet") as client:
         yield client

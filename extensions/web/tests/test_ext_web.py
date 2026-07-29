@@ -33,13 +33,9 @@ from ufo.loop.subagents import SubagentRegistry
 from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
 from ufo.models.interface import ModelEvent, ModelRequest, TextDelta
 from ufo.models.registry import ModelRegistry
-from ufo.sandbox.session import (
-    ExecResult,
-    ProxyEndpoint,
-    RunTokenCodec,
-    SandboxHandle,
-    SandboxSpec,
-)
+from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
+from ufo.sandbox.local import LocalCarrier
+from ufo.sandbox.session import ProxyEndpoint, RunTokenCodec
 from ufo.schema import tables
 from ufo.schema.records import ConnectRequest, TerminalFrame, Usage
 from ufo.sdk.audience import conversation_audience
@@ -85,21 +81,6 @@ STANDIN_REGISTRY = ModelRegistry(
     pricing=CORE_PRICING,
     auto_model="claude-opus-4-8",
 )
-
-
-@dataclass(frozen=True)
-class StandInCarrier:
-    async def create(self, spec: SandboxSpec) -> SandboxHandle:
-        return SandboxHandle(conversation_id=spec.conversation_id, container_id="test")
-
-    async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None: ...
-
-    async def exec(
-        self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
-    ) -> ExecResult:
-        return ExecResult(stdout="", stderr="", exit_code=0)
-
-    async def destroy(self, handle: SandboxHandle) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -175,24 +156,29 @@ async def _grant_web_access(workspace_id: UUID, agent_id: UUID, email: str) -> N
 @pytest.fixture(scope="session")
 def dbos_runtime(
     dbos_launched: Config,
-) -> Iterator[tuple[Config, GatingHub, FilesystemBlobStore]]:
+) -> Iterator[tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox]]:
     config = dbos_launched
     hub = GatingHub(InProcessHub(), STREAM_GATE)
     blob = FilesystemBlobStore(root=config.blob.root)
-    proxy = ProxyEndpoint(port=0, ca_cert="test-ca")
+    sandboxes = ConversationSandbox(
+        carrier=LocalCarrier(),
+        backend="local",
+        off_cluster=False,
+        image_ref=SANDBOX_IMAGE_REF,
+        proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
+        workspace_root=config.blob.root.parent / "workspaces",
+    )
     dbos_client = DBOSClient(system_database_url=config.database.system_url)
     loop_queue.reset_runtime()
     loop_queue.init_runtime(
         loop_queue.Runtime(
             config=config,
             blob=blob,
-            workspace_fs=None,
+            sandboxes=sandboxes,
             hub=hub,
-            carrier=StandInCarrier(),
             cdp_provider=None,
             search_provider=None,
             connectors=ConnectorRegistry(entries={}),
-            proxy=proxy,
             run_tokens=RunTokenCodec(b"web-test-run-token-secret"),
             dbos=dbos_client,
             subagents=SubagentRegistry(()),
@@ -206,7 +192,7 @@ def dbos_runtime(
             artifact_token_secret=SECRET,
         )
     )
-    yield config, hub, blob
+    yield config, hub, blob, sandboxes
     dbos_client.destroy()
     loop_queue.reset_runtime()
 
@@ -214,10 +200,10 @@ def dbos_runtime(
 @pytest.fixture
 async def web(
     db: None,
-    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
     monkeypatch: pytest.MonkeyPatch,
 ) -> AsyncIterator[tuple[AsyncClient, UUID, UUID]]:
-    config, hub, blob = dbos_runtime
+    config, hub, blob, sandboxes = dbos_runtime
     STREAM_GATE.reset()
     monkeypatch.setenv("UFO_TOKEN_SECRET", TOKEN_SECRET)
     monkeypatch.setattr(
@@ -226,7 +212,9 @@ async def web(
     dbos_client = DBOSClient(system_database_url=config.database.system_url)
     workspace_id, agent_id = await _seed_workspace()
     app = FastAPI()
-    _mount_shared_surfaces(app, (web_manifest(),), None, blob, hub, dbos_client, "", None)
+    _mount_shared_surfaces(
+        app, (web_manifest(),), None, blob, sandboxes, hub, dbos_client, "", None
+    )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="https://web") as client:
         yield client, workspace_id, agent_id
     dbos_client.destroy()

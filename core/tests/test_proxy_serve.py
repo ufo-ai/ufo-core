@@ -2,7 +2,7 @@ import asyncio
 import os
 import signal
 from pathlib import Path
-from types import MethodType, SimpleNamespace
+from types import SimpleNamespace
 
 import pytest
 from cryptography.fernet import Fernet
@@ -194,17 +194,15 @@ def test_bundle_baked_config_satisfies_the_proxy(monkeypatch: pytest.MonkeyPatch
     assert _credential_store(config, injecting_slots(manifests)) is not None
 
 
-async def test_proxy_serve_wires_workspace_credential_refresh(
+async def test_proxy_serve_wires_run_tokens_from_the_env_secret(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """The shared proxy authenticates every CONNECT against the run token, so its codec must be
+    built from the same signing secret serve encodes with — sourced from env at serve time."""
     captured: dict[str, object] = {}
 
     class StopServe(Exception):
         pass
-
-    class WorkspaceFs:
-        async def refresh(self, token: str) -> object:
-            return token
 
     class Proxy:
         def __init__(self, **kwargs: object) -> None:
@@ -213,19 +211,14 @@ async def test_proxy_serve_wires_workspace_credential_refresh(
         async def start(self, **kwargs: object) -> None:
             raise StopServe
 
-    workspace_fs = WorkspaceFs()
     monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setattr(proxy_serve_module, "init_db", lambda dsn: None)
-    monkeypatch.setattr(proxy_serve_module, "sandbox_fs_minter", lambda blob: workspace_fs)
     monkeypatch.setattr(proxy_serve_module, "EgressProxy", Proxy)
 
     with pytest.raises(StopServe):
         await _proxy_serve(_config(), ()).serve()
 
-    refresh = captured["workspace_credentials"]
-    assert isinstance(refresh, MethodType)
-    assert refresh.__self__ is workspace_fs
     assert captured["run_tokens"] == RunTokenCodec(b"proxy-serve-test-run-token-secret")
 
 
@@ -256,7 +249,6 @@ async def test_proxy_serve_resolves_keyed_slots_per_workspace(
     monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setattr(proxy_serve_module, "init_db", lambda dsn: None)
-    monkeypatch.setattr(proxy_serve_module, "sandbox_fs_minter", lambda blob: None)
     monkeypatch.setattr(proxy_serve_module, "EgressProxy", Proxy)
     monkeypatch.setattr(proxy_serve_module, "PerAgentRules", rules)
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
@@ -303,7 +295,6 @@ async def test_proxy_serve_drains_connections_on_shutdown(
     monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setattr(proxy_serve_module, "init_db", lambda dsn: None)
-    monkeypatch.setattr(proxy_serve_module, "sandbox_fs_minter", lambda blob: None)
     monkeypatch.setattr(proxy_serve_module, "EgressProxy", Proxy)
 
     await _proxy_serve(config, (), shutdown).serve()
@@ -334,7 +325,6 @@ async def test_proxy_serve_sigterm_wakes_the_idle_loop(
     monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setattr(proxy_serve_module, "init_db", lambda dsn: None)
-    monkeypatch.setattr(proxy_serve_module, "sandbox_fs_minter", lambda blob: None)
     monkeypatch.setattr(proxy_serve_module, "EgressProxy", Proxy)
 
     serving = asyncio.create_task(_proxy_serve(config, ()).serve())
@@ -344,3 +334,54 @@ async def test_proxy_serve_sigterm_wakes_the_idle_loop(
     await asyncio.wait_for(serving, timeout=5)
 
     assert captured == [600]
+
+
+async def test_proxy_serve_base_admits_the_s3_artifact_store_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The standalone proxy is prod's only egress arbiter, so the artifact host must land in its
+    static base exactly as it does in serve's in-process twin — without it, every hosted share_file
+    PUT is refused at CONNECT while the local proxy stays green."""
+    captured: dict[str, object] = {}
+
+    class StopServe(Exception):
+        pass
+
+    class Proxy:
+        def __init__(self, **kwargs: object) -> None: ...
+
+        async def start(self, **kwargs: object) -> None:
+            raise StopServe
+
+    def rules(**kwargs: object) -> object:
+        captured.update(kwargs)
+        return SimpleNamespace(resolve=None, turn_live=None)
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "proxy-serve-test")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "proxy-serve-test")
+    monkeypatch.delenv("AWS_PROFILE", raising=False)
+    monkeypatch.setattr(proxy_serve_module, "init_db", lambda dsn: None)
+    monkeypatch.setattr(proxy_serve_module, "EgressProxy", Proxy)
+    monkeypatch.setattr(proxy_serve_module, "PerAgentRules", rules)
+    config = _config().model_copy(
+        update={"blob": BlobConfig(backend="s3", bucket="ufo-blobs", region="us-east-1")}
+    )
+    server = ProxyServe(
+        config=config,
+        manifests=(),
+        owner_dsn="postgresql://owner@db/ufo",
+        ca_cert="CA",
+        ca_key="KEY",
+        credentials=None,
+        pricing=CORE_PRICING,
+        shutdown=asyncio.Event(),
+    )
+
+    with pytest.raises(StopServe):
+        await server.serve()
+
+    base = captured["base"]
+    assert isinstance(base, tuple)
+    assert ScopeRule(allowed_hosts=frozenset({"ufo-blobs.s3.amazonaws.com"})) in base

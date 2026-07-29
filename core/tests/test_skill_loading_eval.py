@@ -1,7 +1,7 @@
-"""The skill_loading verdict is a pure decision over observed mounts and turn status; the watched
-mount key must agree with the layout `mount_skill` writes; and every catalog case must name a
-skill the assistant pack carries — a typo'd or uncarried `expected` would silently exclude
-forever, and forbidding a child's own parent would fail every correct load."""
+"""The skill_loading verdict is a pure decision over observed mounts and turn status; the watcher
+derives its watched path from the same runtime constants `mount_skill` writes through; and every
+catalog case must name a skill the assistant pack carries — a typo'd or uncarried `expected` would
+silently exclude forever, and forbidding a child's own parent would fail every correct load."""
 
 from dataclasses import dataclass
 from uuid import UUID, uuid4
@@ -11,17 +11,14 @@ from evals.skill_loading.runner import (
     SkillLoadCase,
     SkillLoadingSuite,
     SkillLoadObservation,
-    _mount_key,
     skill_load_verdict,
     skill_loading_task,
 )
 from ufo.ext.context import Trajectory
 from ufo.ext.loader import load_manifests, skill_registry
 from ufo.governance import prompt_digest
-from ufo.sandbox.session import WORKSPACE_DIR
 from ufo.schema.records import TurnStatus
 from ufo.sdk.models import Message, TextBlock, ToolResultBlock, ToolUseBlock
-from ufo.skills.runtime import CORE_SKILL_REGISTRY, SKILL_MD
 
 CASE = SkillLoadCase(
     "workbook", "Build a workbook.", expected="office-xlsx", forbidden=("office-pptx",)
@@ -95,23 +92,6 @@ def test_deadline_without_mount_fails() -> None:
     passed, reason = skill_load_verdict(CASE, _observed(status="running"))
     assert not passed
     assert "did not load" in reason
-
-
-def test_mount_key_matches_the_runtime_mount_layout() -> None:
-    skill = CORE_SKILL_REGISTRY.named("delegation")
-    conversation_id = uuid4()
-    mounted_path = f"{skill.mount_root()}/{SKILL_MD}".removeprefix(f"{WORKSPACE_DIR}/")
-    assert (
-        _mount_key(conversation_id, skill.name)
-        == f"conversations/{conversation_id}/workspace/{mounted_path}"
-    )
-
-
-def test_child_skill_mount_key_nests_under_its_parent() -> None:
-    conversation_id = uuid4()
-    assert _mount_key(conversation_id, "website-building/webapp").endswith(
-        ".skills/website-building/webapp/SKILL.md"
-    )
 
 
 def test_task_pins_the_cases() -> None:

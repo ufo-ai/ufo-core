@@ -17,6 +17,9 @@ from ufo.ext.loader import load_manifests
 from ufo.ext.manifest import Manifest
 from ufo.ext.surface import SurfaceAuth, SurfaceContext, SurfaceRoute, SurfaceSpec
 from ufo.hub import InProcessHub
+from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
+from ufo.sandbox.local import LocalCarrier
+from ufo.sandbox.session import ProxyEndpoint
 from ufo.schema import tables
 from ufo.serve import _mount_shared_surfaces
 from ufo.workspace import ws
@@ -70,6 +73,14 @@ def _app(tmp_path: Path) -> FastAPI:
         (Manifest(name="probe_ext", version="0", surfaces=(surface,)),),
         None,
         blob_store_for(BlobConfig(backend="filesystem", root=tmp_path)),
+        ConversationSandbox(
+            carrier=LocalCarrier(),
+            backend="local",
+            off_cluster=False,
+            image_ref=SANDBOX_IMAGE_REF,
+            proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
+            workspace_root=tmp_path / "workspaces",
+        ),
         InProcessHub(),
         NoAdmission(),
         "",
@@ -90,6 +101,14 @@ def _challenge_app(tmp_path: Path) -> FastAPI:
         (Manifest(name="probe_ext", version="0", surfaces=(surface,)),),
         None,
         blob_store_for(BlobConfig(backend="filesystem", root=tmp_path)),
+        ConversationSandbox(
+            carrier=LocalCarrier(),
+            backend="local",
+            off_cluster=False,
+            image_ref=SANDBOX_IMAGE_REF,
+            proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
+            workspace_root=tmp_path / "workspaces",
+        ),
         InProcessHub(),
         NoAdmission(),
         "",

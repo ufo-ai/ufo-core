@@ -32,7 +32,7 @@ services: SQLite + filesystem blobs + in-process hub.
 - `sandbox/local.py` (core default carrier: temp-dir workspace + subprocess), `extensions/{docker,e2b}`
   (carrier extensions, create-or-attach, async waits), `sandbox/build_template.py` (one image
   definition rendering both the Docker Dockerfile and the E2B template so they can't drift; the
-  `sbx`/`sbxfs`/`sbxcred` binaries live in `core/.../sandbox/image/`), reaper job, `jobs.py` runner.
+  `sbx`/`sbxfs` binaries live in `core/.../sandbox/image/`), `jobs.py` runner.
 - `sandbox/proxy/`: sole egress route (container network default-deny), sentinel swap, ScopeRule /
   InjectionRule derivation (grants only — manifests arrive U3), MeterRule stub.
 - `tools/registry.py`, `tools/context.py`, builtins `bash read write edit`.

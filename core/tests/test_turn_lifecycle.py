@@ -2,7 +2,7 @@ import asyncio
 import json
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID, uuid4
@@ -48,14 +48,13 @@ from ufo.models.interface import (
     ToolResultBlock,
 )
 from ufo.models.registry import ModelRegistry
-from ufo.sandbox.session import (
-    ExecResult,
-    ProxyEndpoint,
-    RunToken,
-    RunTokenCodec,
-    SandboxHandle,
-    SandboxSpec,
+from ufo.sandbox.conversation import (
+    SANDBOX_IMAGE_REF,
+    UNSIGNED_RUN_TOKEN,
+    ConversationSandbox,
 )
+from ufo.sandbox.local import LocalCarrier
+from ufo.sandbox.session import ProxyEndpoint, RunTokenCodec
 from ufo.schema import tables
 from ufo.schema.records import TerminalFrame, Turn, Usage
 from ufo.surfaces import hub_tail
@@ -318,46 +317,14 @@ STANDIN_REGISTRY = ModelRegistry(
 )
 
 
-@dataclass(frozen=True)
-class StandInCarrier:
-    """Stands in for the Docker carrier through the full queue path: create-or-attach returns a
-    handle, and exec is never reached because StandInModel makes no tool calls."""
-
-    writes: list[tuple[str, bytes]] = field(default_factory=list)
-
-    async def create(self, spec: SandboxSpec) -> SandboxHandle:
-        proxy = f"http://{spec.run_token}:@proxy"
-        return SandboxHandle(
-            conversation_id=spec.conversation_id,
-            container_id="test",
-            run_token=spec.run_token,
-            egress_env={
-                "HTTP_PROXY": proxy,
-                "HTTPS_PROXY": proxy,
-                "http_proxy": proxy,
-                "https_proxy": proxy,
-            },
-        )
-
-    async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None:
-        self.writes.append((path, content))
-
-    async def exec(
-        self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
-    ) -> ExecResult:
-        return ExecResult(stdout="", stderr="", exit_code=0)
-
-    async def destroy(self, handle: SandboxHandle) -> None: ...
-
-
 @pytest.fixture(scope="session")
 def dbos_runtime(
     dbos_launched: Config,
+    tmp_path_factory: pytest.TempPathFactory,
 ) -> Iterator[tuple[Config, GatingHub, FilesystemBlobStore]]:
     config = dbos_launched
     hub = GatingHub(InProcessHub(), STREAM_GATE)
     blob = FilesystemBlobStore(root=config.blob.root)
-    proxy = ProxyEndpoint(port=0, ca_cert="test-ca")
     dbos_client = DBOSClient(system_database_url=config.database.system_url)
     embed = embed_backend((STUB_BACKENDS,), None, None)
     index = index_backend((STUB_BACKENDS,), None, None)
@@ -366,13 +333,18 @@ def dbos_runtime(
         loop_queue.Runtime(
             config=config,
             blob=blob,
-            workspace_fs=None,
+            sandboxes=ConversationSandbox(
+                carrier=LocalCarrier(),
+                backend="local",
+                off_cluster=False,
+                image_ref=SANDBOX_IMAGE_REF,
+                proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
+                workspace_root=tmp_path_factory.mktemp("workspaces"),
+            ),
             hub=hub,
-            carrier=StandInCarrier(),
             cdp_provider=None,
             search_provider=None,
             connectors=ConnectorRegistry(entries={}),
-            proxy=proxy,
             run_tokens=RunTokenCodec(b"turn-lifecycle-test-secret"),
             dbos=dbos_client,
             subagents=SubagentRegistry(
@@ -552,19 +524,28 @@ async def _turn_row(turn_id: str) -> tuple[str, UUID]:
     return row.status, row.conversation_id
 
 
-async def test_workspace_mount_source_is_absolute_for_a_relative_blob_root(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+async def test_workspace_host_path_is_absolute_for_a_relative_workspace_root(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A relative blob root — the default config's `./blobs` — must still yield an absolute bind
-    mount source: Docker reads a relative `-v` source as a named volume, not a host directory, so a
-    turn would otherwise fail at container create under the shipped default config."""
+    """A relative workspace root — the default config's `./workspaces` — must still hand the
+    carrier an absolute host path: Docker reads a relative `-v` source as a named volume, not a
+    host directory, so a turn would otherwise fail at container create under the shipped default
+    config."""
     monkeypatch.chdir(tmp_path)
-    blob = FilesystemBlobStore(root=Path("blobs"))
-    mount = await loop_queue._workspace_mount(
-        blob, None, uuid4(), RunToken(workspace_id=uuid4(), turn_id=uuid4()), fresh_sandbox=True
+    seed = await _bootstrap()
+    sandboxes = ConversationSandbox(
+        carrier=LocalCarrier(),
+        backend="local",
+        off_cluster=False,
+        image_ref=SANDBOX_IMAGE_REF,
+        proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
+        workspace_root=Path("workspaces"),
     )
-    assert Path(mount.host_path).is_absolute()
-    assert await asyncio.to_thread(Path(mount.host_path).is_dir)
+    with ws(seed.workspace_id):
+        handle = await sandboxes.open(seed.conversation_id, UNSIGNED_RUN_TOKEN, {})
+    assert handle.workspace_host_path is not None
+    assert Path(handle.workspace_host_path).is_absolute()
+    assert await asyncio.to_thread(Path(handle.workspace_host_path).is_dir)
 
 
 async def test_turn_round_trip_bills_and_persists(surface: Turns) -> None:
@@ -977,6 +958,7 @@ async def test_eval_settle_deadline_cancels_the_turn_before_the_runner_advances(
         "be brief",
         blob,
         runtime.dbos,
+        runtime.sandboxes.workspace_root,
         poll_interval_seconds=0.05,
         workflow_wait_seconds=EVAL_OVERDUE_DEADLINE_SECONDS,
     )
@@ -1325,22 +1307,31 @@ async def test_subagent_extended_context_lifts_the_round_ceiling(surface: Turns)
 
 
 async def test_subagent_preload_skills_mounts_and_injects_the_skill(surface: Turns) -> None:
-    """A subagent whose payload carries `preload_skills` starts with the skill mounted into its
-    sandbox and its instructions already in the system prompt — no `load_skill` round needed."""
+    """A subagent whose payload carries `preload_skills` starts with the skill written into its
+    workspace and its instructions already in the system prompt — no `load_skill` round needed."""
     runtime = loop_queue._runtime
     assert runtime is not None
-    assert isinstance(runtime.carrier, StandInCarrier)
     skill = runtime.skills.named("sandbox")
-    runtime.carrier.writes.clear()
     SEEN_SYSTEM_PROMPTS.clear()
     seed = await _bootstrap()
     parent = await surface.admit(seed, "spawn-preload")
     _, terminal = await surface.consume(seed, parent)
     assert terminal["status"] == "done"
     assert await _child_echo(parent) == 5
-    mounted = dict(runtime.carrier.writes)
-    skill_md = next(path for path in mounted if path.endswith(f"/.skills/{skill.name}/SKILL.md"))
-    assert mounted[skill_md] == skill.raw_skill_md.encode()
+    async with workspace_tx() as connection:
+        child_conversation = (
+            await connection.execute(
+                sa.select(tables.turn.c.conversation_id).where(
+                    tables.turn.c.parent_turn_id == UUID(parent)
+                )
+            )
+        ).scalar_one()
+    skill_md = (
+        runtime.sandboxes.workspace_root
+        / str(child_conversation)
+        / f".skills/{skill.name}/SKILL.md"
+    )
+    assert await asyncio.to_thread(skill_md.read_bytes) == skill.raw_skill_md.encode()
     assert any(skill.instructions in system for system in SEEN_SYSTEM_PROMPTS)
 
 

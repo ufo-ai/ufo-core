@@ -17,16 +17,15 @@ import asyncio
 import os
 import sys
 import tempfile
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
-from ufo.blob import BlobStore
 from ufo.sandbox.session import (
     NO_PROXY_HOSTS,
     SENTINEL_MODEL_KEY,
     WORKSPACE_DIR,
     ExecResult,
-    MountSpec,
     SandboxHandle,
     SandboxSpec,
 )
@@ -35,6 +34,7 @@ LOCAL_CONTAINER_ID = "local"
 LOCAL_PROXY_HOST = "127.0.0.1"
 CA_FILENAME = "egress-ca.pem"
 EXEC_TIMEOUT_CODE = 124
+READ_CHUNK_BYTES = 1024 * 1024
 SANDBOX_BINARIES = ("sbx", "sbxfs")
 
 
@@ -59,7 +59,7 @@ class LocalCarrier:
     _scratch: Path = field(default_factory=_provision_scratch)
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
-        root = _root(spec.mount)
+        root = Path(spec.workspace_host_path)
         await asyncio.to_thread(root.mkdir, parents=True, exist_ok=True)
         ca_path = self._scratch / CA_FILENAME
         await asyncio.to_thread(ca_path.write_bytes, spec.proxy.ca_cert.encode())
@@ -67,7 +67,7 @@ class LocalCarrier:
         return SandboxHandle(
             conversation_id=spec.conversation_id,
             container_id=LOCAL_CONTAINER_ID,
-            mount=spec.mount,
+            workspace_host_path=spec.workspace_host_path,
             run_token=spec.run_token,
             egress_env={
                 **os.environ,
@@ -91,13 +91,34 @@ class LocalCarrier:
             },
         )
 
+    async def attach(self, spec: SandboxSpec) -> SandboxHandle | None:
+        """The read-only shape of `create`: the same handle over the same host directory, minus the
+        directory's creation — a browse of a conversation that never grew a workspace answers empty
+        through the reads, never by making one. Commands are host subprocesses, so the handle still
+        carries the scratch PATH the `sbxfs` reads run under."""
+        if not await asyncio.to_thread(Path(spec.workspace_host_path).is_dir):
+            return None
+        return SandboxHandle(
+            conversation_id=spec.conversation_id,
+            container_id=LOCAL_CONTAINER_ID,
+            workspace_host_path=spec.workspace_host_path,
+            run_token=spec.run_token,
+            egress_env={
+                **os.environ,
+                "HOME": str(self._scratch / "home"),
+                "PATH": (
+                    f"{self._scratch / 'bin'}:{Path(sys.executable).parent}:{os.environ['PATH']}"
+                ),
+            },
+        )
+
     async def exec(
         self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
     ) -> ExecResult:
         """Run one command as a host subprocess in the workspace. The `/workspace` paths the tools
         pass are logical, so each argv element is rewritten to the host workspace directory before
         the subprocess sees it, and the command inherits the turn's egress environment."""
-        root = _root(handle.mount)
+        root = _root(handle)
         rewritten = tuple(arg.replace(WORKSPACE_DIR, str(root)) for arg in argv)
         process = await asyncio.create_subprocess_exec(
             *rewritten,
@@ -126,15 +147,15 @@ class LocalCarrier:
         await asyncio.to_thread(target.parent.mkdir, parents=True, exist_ok=True)
         await asyncio.to_thread(target.write_bytes, content)
 
-    async def export(self, handle: SandboxHandle, path: str, blob: BlobStore, key: str) -> None:
-        """The workspace is a host directory, so the produced file already lives under it — hand its
-        path to the blob store, which streams it in without the host process holding it whole,
-        the large-attachment path distinct from the bounded read."""
-        await blob.put_file(key, _host_path(handle, path))
-
-    async def destroy(self, handle: SandboxHandle) -> None:
-        """The workspace is the durable bind mount and the egress env lives on each turn's handle,
-        so there is no per-conversation state to reclaim."""
+    async def read(self, handle: SandboxHandle, path: str) -> AsyncIterator[bytes]:
+        """The workspace is a host directory, so the copy-out is a chunked host read under it — off
+        the loop, since the filesystem has no async API."""
+        source = await asyncio.to_thread(_host_path(handle, path).open, "rb")
+        try:
+            while chunk := await asyncio.to_thread(source.read, READ_CHUNK_BYTES):
+                yield chunk
+        finally:
+            await asyncio.to_thread(source.close)
 
     async def host(self, handle: SandboxHandle, port: int) -> str:
         """The local carrier runs commands as host subprocesses, not a network-addressable sandbox,
@@ -147,13 +168,13 @@ class LocalCarrier:
         )
 
 
-def _root(mount: MountSpec | None) -> Path:
-    if mount is None or mount.host_path is None:
-        raise RuntimeError("the local carrier requires a filesystem workspace mount")
-    return Path(mount.host_path)
+def _root(handle: SandboxHandle) -> Path:
+    if handle.workspace_host_path is None:
+        raise RuntimeError("the local carrier serves /workspace from a host directory; none is set")
+    return Path(handle.workspace_host_path)
 
 
 def _host_path(handle: SandboxHandle, path: str) -> Path:
-    """The host location of a logical `/workspace` path — the workspace is a host directory, so a
-    copy-in writes here and a copy-out reads here."""
-    return _root(handle.mount) / PurePosixPath(path).relative_to(WORKSPACE_DIR)
+    """The host location of a logical `/workspace` path — the workspace is a host directory, so
+    every copy-in and copy-out lands here."""
+    return _root(handle) / PurePosixPath(path).relative_to(WORKSPACE_DIR)

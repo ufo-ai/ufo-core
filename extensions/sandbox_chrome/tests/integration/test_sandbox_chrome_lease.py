@@ -32,7 +32,6 @@ from ufo_testsupport.plugin import integration_dependency_available
 
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import (
-    MountSpec,
     ProxyEndpoint,
     SandboxHandle,
     SandboxSession,
@@ -133,7 +132,7 @@ async def _turn_sandbox(tmp_path: Path, browser: str) -> SandboxSession:
         SandboxSpec(
             conversation_id=uuid4(),
             image_ref="ufo-sandbox:latest",
-            mount=MountSpec(kind="filesystem", host_path=str(tmp_path / "workspace")),
+            workspace_host_path=str(tmp_path / "workspace"),
             proxy=ProxyEndpoint(port=UNREACHABLE_PROXY_PORT, ca_cert="CA-PEM-BYTES"),
             run_token="run-token-abc",
             env={"PATH": f"{shim}:{os.environ['PATH']}"},

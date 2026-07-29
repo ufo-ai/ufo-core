@@ -50,13 +50,11 @@ class DatabaseConfig(BaseModel):
 
 
 class BlobConfig(BaseModel):
-    """The blob store — transcripts, compaction records, sandbox workspaces, shared artifacts.
-    `endpoint_url`/`region` are the host-reachable S3 the serve process talks to. To mount a
-    conversation's `workspace/` prefix into its sandbox over s3fs, the S3 backend additionally
-    needs `sts_role_arn` (the role the mint assumes), `s3_url` (the sandbox-reachable S3 endpoint
-    s3fs dials — may differ from `endpoint_url`), `sts_endpoint` (AWS or a MinIO STS endpoint), and
-    `path_style` (MinIO addressing); their absence is caught loud at the mount seam, not here, so a
-    blob-only S3 deploy (transcripts/artifacts, no sandbox mount) needs only `bucket`."""
+    """The blob store — transcripts, compaction records, shared artifacts. Never a conversation's
+    workspace: that lives in the sandbox, which holds no credential for this store.
+    `endpoint_url`/`region` are the S3 the serve process talks to; leaving `endpoint_url` unset
+    selects AWS and its virtual-hosted addressing, setting it selects an S3-compatible endpoint and
+    path addressing — the same choice a presigned artifact PUT is signed under."""
 
     model_config = ConfigDict(extra="forbid")
     backend: Literal["filesystem", "s3"]
@@ -64,10 +62,6 @@ class BlobConfig(BaseModel):
     bucket: str | None = None
     endpoint_url: str | None = None
     region: str | None = None
-    s3_url: str | None = None
-    sts_role_arn: str | None = None
-    sts_endpoint: str | None = None
-    path_style: bool = False
 
     @model_validator(mode="after")
     def _backend_complete(self) -> "BlobConfig":
@@ -143,6 +137,11 @@ class SandboxConfig(BaseModel):
     carrier registers. Each carrier sources its own parameters (template, keys); core config knows
     only the selected name.
 
+    `workspace_root` holds one directory per conversation, which an in-cluster carrier serves
+    `/workspace` from — the Docker carrier's bind-mount source, the local carrier's cwd. An
+    off-cluster carrier (E2B) cannot see the host filesystem and serves `/workspace` from its own
+    sandbox disk, so the setting does not reach it.
+
     `proxy_port` is the stable port the egress proxy binds. `proxy_public_url` is the externally
     reachable base a remote sandbox carrier such as E2B dials; local carriers leave it unset and
     reach the process-local proxy directly. `serve` fails loud when a remote carrier has no public
@@ -150,6 +149,7 @@ class SandboxConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     backend: str = "local"
+    workspace_root: Path = Path("./workspaces")
     proxy_port: int = DEFAULT_PROXY_PORT
     proxy_public_url: str | None = None
 

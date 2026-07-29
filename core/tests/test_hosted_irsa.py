@@ -173,11 +173,9 @@ def test_hosted_proxy_has_resource_bounds() -> None:
     assert 'limits: {cpu: "2", memory: 768Mi}' in PROXY_DEPLOYMENT
 
 
-def test_hosted_proxy_mints_scoped_sandbox_credentials() -> None:
+def test_hosted_proxy_runs_under_its_irsa_identity() -> None:
     assert "serviceAccountName: ufo-sandbox-proxy" in PROXY_DEPLOYMENT
     assert "eks.amazonaws.com/role-arn: ${proxy_role_arn}" in HOSTED_TEMPLATE.read_text()
-    assert "name: UFO_SANDBOX_FS_TOKEN_SECRET" in PROXY_DEPLOYMENT
-    assert "secretKeyRef: {name: ufo-serve, key: UFO_SANDBOX_FS_TOKEN_SECRET}" in PROXY_DEPLOYMENT
 
 
 def test_hosted_proxy_and_serve_share_the_rendered_config() -> None:

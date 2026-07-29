@@ -32,7 +32,6 @@ import json
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from pathlib import PurePosixPath
 from typing import Literal, Protocol
 from uuid import UUID, uuid4
 
@@ -68,6 +67,11 @@ from ufo.grants import (
 )
 from ufo.hub import LiveFrame
 from ufo.o11y import log
+from ufo.sandbox.conversation import (
+    WORKSPACE_WRITE_MAX_BYTES,
+    ConversationSandbox,
+    WorkspaceFile,
+)
 from ufo.schema import tables
 from ufo.schema.records import (
     WRITEBACK_CLAIMED,
@@ -93,7 +97,6 @@ from ufo.transcript import (
 )
 from ufo.workspace import ws, ws_current
 
-WORKSPACE_SEGMENT = "workspace"
 OPERATOR_EMAIL_DOMAIN = "metalcraft.ai"
 
 
@@ -145,17 +148,6 @@ WRITEBACK_CLAIM_BATCH = 16
 WRITEBACK_WORKSPACE_BATCH = 16
 WRITEBACK_WORKSPACE_CONCURRENCY = 4
 WRITEBACK_WORKSPACE_IN_FLIGHT = WRITEBACK_WORKSPACE_BATCH * 2
-
-
-def workspace_key(conversation_id: UUID, rel: str) -> str:
-    """The blob key of a file inside the conversation's `workspace/` subtree — a sibling of the
-    transcript under `conversations/<id>/`, the same subtree the sandbox bind-mounts. The relative
-    path is scoped so a surface-supplied name can neither escape the subtree nor reach the
-    transcript above it."""
-    parts = [part for part in PurePosixPath(rel).parts if part not in ("", ".", "/")]
-    if not parts or ".." in parts or rel.startswith("/"):
-        raise ValueError(f"workspace path {rel!r} is not a relative path inside the workspace")
-    return f"conversations/{conversation_id}/{WORKSPACE_SEGMENT}/{'/'.join(parts)}"
 
 
 @dataclass(frozen=True)
@@ -254,15 +246,6 @@ class TurnDetail(BaseModel):
     children: tuple[Turn, ...]
 
 
-class WorkspaceFile(BaseModel):
-    """One file in a conversation's `workspace/` subtree, as the file browser lists it — the
-    relative path inside the subtree, never the blob key."""
-
-    path: str
-    size_bytes: int
-    modified_at: datetime
-
-
 def _fulfilled_marker_key(workspace_id: UUID, sealed: str, slot: str) -> str:
     """The blob marker one fulfilled prompt leaves, keyed by the seal's digest and the slot — the
     render gate reads it per prompt, so a stored slot stops prompting while its siblings keep
@@ -344,6 +327,7 @@ class SurfaceContext:
     workspace_id: UUID
     surface: str
     blob: BlobStore
+    _sandboxes: ConversationSandbox
     _admitter: MemberAdmitter
     _tailer: TurnTailer
     _credentials: CredentialStore | None
@@ -771,10 +755,19 @@ class SurfaceContext:
     async def write_workspace_file(
         self, conversation_id: UUID, rel: str, chunks: AsyncIterator[bytes]
     ) -> None:
-        """Stream a file into the conversation's workspace subtree before its turn runs, so the
-        sandbox mounts it already present. The bytes never buffer whole — the surface hands an async
-        chunk iterator (a streamed download) straight to the blob store."""
-        await self.blob.put_stream(workspace_key(conversation_id, rel), chunks)
+        """Land a file in the conversation's `/workspace` before its turn runs, so the agent's file
+        tools find it already present. The workspace lives in the sandbox, so the write goes through
+        the carrier, which takes the whole body at once — bounded while it accumulates, so a stream
+        with no cap of its own is refused at the limit instead of first sitting whole in memory."""
+        body = bytearray()
+        async for chunk in chunks:
+            body += chunk
+            if len(body) > WORKSPACE_WRITE_MAX_BYTES:
+                raise ValueError(
+                    f"{rel} exceeds the {WORKSPACE_WRITE_MAX_BYTES}-byte limit for a "
+                    "workspace write"
+                )
+        await self._sandboxes.write(conversation_id, rel, bytes(body))
 
     async def list_agents(self) -> tuple[AgentSummary, ...]:
         """Every agent of this workspace, main first then by name — the read a surface whose
@@ -953,33 +946,23 @@ class SurfaceContext:
         return await read_compaction_record(self.blob, conversation_id, index)
 
     async def list_workspace_files(self, conversation_id: UUID) -> tuple[WorkspaceFile, ...]:
-        """Every file in the conversation's `workspace/` subtree — the sandbox's working files —
-        as subtree-relative paths, sorted, bounded by the blob store's list cap."""
+        """Every file in the conversation's `/workspace` — the sandbox's own live state, listed in
+        the container — as workspace-relative paths, sorted, bounded by the in-container walk's cap.
+        Empty for a conversation that is not this workspace's or has no sandbox yet."""
         if not await self._owned_conversation(conversation_id):
             return ()
-        prefix = f"conversations/{conversation_id}/{WORKSPACE_SEGMENT}/"
-        entries = await self.blob.list(prefix)
-        return tuple(
-            WorkspaceFile(
-                path=entry.key.removeprefix(prefix),
-                size_bytes=entry.size_bytes,
-                modified_at=entry.modified_at,
-            )
-            for entry in entries
-        )
+        return await self._sandboxes.entries(conversation_id)
 
     async def read_workspace_file(
         self, conversation_id: UUID, rel: str
     ) -> AsyncIterator[bytes] | None:
-        """Stream one workspace file's bytes, or None when the conversation is not this
-        workspace's or the path names nothing. The path is validated by `workspace_key`, so it can
-        neither escape the subtree nor reach the transcript above it."""
+        """Stream one workspace file's bytes out of the live sandbox, or None when the
+        conversation is not this workspace's, has no sandbox, or the path names nothing. The path
+        is workspace-scoped in the session, so it escapes neither the workspace nor the
+        container."""
         if not await self._owned_conversation(conversation_id):
             return None
-        key = workspace_key(conversation_id, rel)
-        if not await self.blob.exists(key):
-            return None
-        return self.blob.get_stream(key)
+        return await self._sandboxes.read(conversation_id, rel)
 
     async def installation(self, peer_surface: str) -> str | None:
         """The workspace's installation identity on a peer surface (e.g. Slack's `team:<id>`), or

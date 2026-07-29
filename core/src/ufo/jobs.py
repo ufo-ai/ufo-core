@@ -37,12 +37,11 @@ from ufo.ext.manifest import HookContext, HookSpec, JobSpec, Manifest, PageChang
 from ufo.indexing import EmbedClient, IndexBackend
 from ufo.models.registry import ModelRegistry
 from ufo.o11y import log, log_error, warn
-from ufo.sandbox.session import Carrier, SandboxHandle, sandbox_handle_id
+from ufo.sandbox.conversation import ConversationSandbox
 from ufo.scheduling import ScheduleInvoker
 from ufo.schema import tables
 from ufo.schema.records import (
     DBOS_APP_VERSION,
-    NON_TERMINAL_STATUSES,
     PARKED,
     TURN_QUEUE_NAME,
     TURN_WORKFLOW_NAME,
@@ -74,9 +73,6 @@ TURN_DISPATCH_JOB = "turn_dispatch"
 TURN_DISPATCH_SCHEDULE = "0 * * * * *"
 TURN_DISPATCH_GRACE_SECONDS = 300
 TURN_DISPATCH_BATCH_TURNS = 100
-SANDBOX_REAP_JOB = "sandbox_reap"
-SANDBOX_REAP_SCHEDULE = "0 */10 * * * *"
-SANDBOX_IDLE_TTL_SECONDS = 1800
 PAGE_CHANGE_JOB = "page_change"
 PAGE_CHANGE_SCHEDULE = "0 * * * * *"
 PAGE_CHANGE_CURSOR_KEY = "page_change_cursor"
@@ -276,130 +272,6 @@ class TurnDispatcher:
         )
 
 
-@dataclass(frozen=True)
-class SandboxReaper:
-    """Reclaim the disposable container behind each idle conversation. The workspace is the truth
-    and the container is cache (§Sandboxing): a conversation whose most recent turn settled longer
-    ago than the idle TTL, with no turn still in flight, has its sandbox destroyed through the
-    carrier seam — the next turn recreates it from the same durable workspace and notices only
-    latency. A batch-at-interval sweep, never fired by a turn it reclaims; the carrier's destroy is
-    idempotent, so a container already gone is a no-op, and a still-idle conversation re-selected on
-    the next sweep costs one such no-op.
-
-    The durable source of truth is the conversation's `sandbox_handle` (`<backend>:<id>`), not an
-    in-process map, so the reaper reclaims a sandbox this or any PRIOR process created: it reaps by
-    conversation identity plus the stored id, then clears the row so a reaped sandbox is never
-    resumed into a dead (docker) or released (e2b pause) id — the next turn creates fresh. A handle
-    another backend wrote (a deploy that switched carriers) is not this carrier's to reap and is
-    skipped.
-
-    `run` operates on the bound workspace alone: the dispatcher names the candidate workspaces
-    through `candidate_workspaces` and binds each, so the in-flight re-check and the row clear are
-    scoped exactly as that workspace's turn would scope them. `candidate_workspaces` is the one
-    `owner_tx` read (the RLS-bypass path) naming only the workspaces holding an idle sandbox, so a
-    workspace with none is never bound. On a per-tenant deploy `owner_tx` resolves to the single
-    workspace, unchanged."""
-
-    carrier: Carrier
-    backend: str
-
-    async def run(self) -> None:
-        for conversation_id, stored in await self._idle_sandboxes():
-            container_id = sandbox_handle_id(self.backend, stored)
-            if container_id is None:
-                continue
-            if await self._now_active(conversation_id):
-                continue
-            await self.carrier.destroy(
-                SandboxHandle(conversation_id=conversation_id, container_id=container_id)
-            )
-            await self._clear(conversation_id)
-
-    async def candidate_workspaces(self) -> tuple[UUID, ...]:
-        """The workspaces holding a conversation whose sandbox is idle past the TTL — one distinct
-        `workspace_id` per such workspace, read in one `owner_tx` (RLS bypass). Anti-joins driven
-        from the handle-carrying conversations (a partial index names them), each probing that
-        conversation's turns by index — the sweep's cost follows the live sandboxes, never the
-        settled turn history. A workspace with no idle sandbox is never bound, so no transaction
-        runs against it on the sweep."""
-        cutoff = datetime.now(UTC) - timedelta(seconds=SANDBOX_IDLE_TTL_SECONDS)
-        async with owner_tx() as connection:
-            rows = (
-                await connection.execute(
-                    sa.select(tables.conversation.c.workspace_id)
-                    .where(
-                        tables.conversation.c.sandbox_handle.is_not(None),
-                        ~self._active_since(cutoff),
-                    )
-                    .distinct()
-                )
-            ).all()
-        return tuple(row.workspace_id for row in rows)
-
-    async def _clear(self, conversation_id: UUID) -> None:
-        async with workspace_tx() as connection:
-            await connection.execute(
-                sa.update(tables.conversation)
-                .values(sandbox_handle=None)
-                .where(tables.conversation.c.id == conversation_id)
-            )
-
-    async def _now_active(self, conversation_id: UUID) -> bool:
-        """A fresh point check immediately before destroy: has the conversation admitted an
-        in-flight turn since the idle snapshot? The snapshot and the out-of-band carrier `destroy`
-        don't share a transaction, so a turn admitted between them would otherwise have its
-        just-created sandbox reaped mid-run, degrading that turn's tool calls. This re-check shrinks
-        the window to the check-to-destroy gap; the negligible residual self-heals — the next turn's
-        create-or-attach rebuilds the container from the durable workspace."""
-        async with workspace_tx() as connection:
-            found = (
-                await connection.execute(
-                    sa.select(tables.turn.c.id)
-                    .where(
-                        tables.turn.c.conversation_id == conversation_id,
-                        tables.turn.c.status.in_(NON_TERMINAL_STATUSES),
-                    )
-                    .limit(1)
-                )
-            ).first()
-        return found is not None
-
-    async def _idle_sandboxes(self) -> tuple[tuple[UUID, str], ...]:
-        """The bound workspace's conversations carrying a persisted sandbox handle with no turn in
-        flight and none touched within the TTL — the durable handle, not an in-process map, is the
-        set the reaper reclaims from, so a sandbox a prior process created is in scope, and a
-        handle whose turns are all gone is an orphan reclaimed the same way. Read through RLS, so
-        the sweep sees only the workspace the dispatcher bound."""
-        cutoff = datetime.now(UTC) - timedelta(seconds=SANDBOX_IDLE_TTL_SECONDS)
-        async with workspace_tx() as connection:
-            rows = (
-                await connection.execute(
-                    sa.select(
-                        tables.conversation.c.id,
-                        tables.conversation.c.sandbox_handle,
-                    ).where(
-                        tables.conversation.c.sandbox_handle.is_not(None),
-                        ~self._active_since(cutoff),
-                    )
-                )
-            ).all()
-        return tuple((row.id, row.sandbox_handle) for row in rows)
-
-    def _active_since(self, cutoff: datetime) -> sa.ColumnElement[bool]:
-        """The conversation has a turn in flight or one touched at or after `cutoff` — the busy
-        signal both the fleet-wide candidate read and the bound workspace's sweep negate, probing
-        each candidate conversation's turns through the `(conversation_id, updated_at)` index."""
-        return sa.exists(
-            sa.select(tables.turn.c.id).where(
-                tables.turn.c.conversation_id == tables.conversation.c.id,
-                sa.or_(
-                    tables.turn.c.status.in_(NON_TERMINAL_STATUSES),
-                    tables.turn.c.updated_at >= cutoff,
-                ),
-            )
-        )
-
-
 def _page_beyond_cursor(revision: int, page_id: UUID, cursor: object) -> bool:
     """Whether a page at `(revision, page_id)` lies past a `page_change` cursor."""
     if cursor is None:
@@ -461,6 +333,7 @@ class PageChangeRunner:
     index: IndexBackend | None = None
     embed: EmbedClient | None = None
     blob: BlobStore | None = None
+    sandboxes: ConversationSandbox | None = None
     registry: ModelRegistry | None = None
 
     def consumers(self) -> tuple[PageChangeConsumer, ...]:
@@ -591,6 +464,7 @@ class PageChangeRunner:
             self.embed,
             self.pages,
             self.blob,
+            self.sandboxes,
             invoker,
             self.registry,
         )
@@ -599,28 +473,24 @@ class PageChangeRunner:
 def core_jobs(
     sync_driver: SyncDriver,
     turn_dispatcher: TurnDispatcher,
-    reaper: SandboxReaper,
     page_change_runner: PageChangeRunner,
 ) -> tuple[JobSpec, ...]:
     """The jobs a deploy always runs, before any extension's — all core because the source pipeline,
-    spend enforcement, sandbox lifecycle, and the page-change fan-out are core. The sync driver
-    polls each source and lands its pages; the page-change runner contributes one
-    `page_change:<ext>:<hook>` job per registered consumer, each replaying those pages to that
-    consumer's hook off its own cursor as its own workflow (the memory page indexer and fact
-    deriver among them); the turn dispatcher recovers queued outbox rows and re-admits parked turns
-    their caps now allow; the sandbox
-    reaper destroys the disposable container behind each idle conversation through the carrier seam.
-    None fires on its own writes. (Memory-item indexing stays the memory extension's own job; page
-    derivation is a page_change hook this runner drives.)"""
+    spend enforcement, and the page-change fan-out are core. The sync driver polls each source and
+    lands its pages; the page-change runner contributes one `page_change:<ext>:<hook>` job per
+    registered consumer, each replaying those pages to that consumer's hook off its own cursor as
+    its own workflow (the memory page indexer and fact deriver among them); the turn dispatcher
+    recovers queued outbox rows and re-admits parked turns their caps now allow. None fires on its
+    own writes. (Memory-item indexing stays the memory extension's own job; page derivation is a
+    page_change hook this runner drives. Reclaiming a container is the carrier's own business, never
+    core's — the workspace lives inside the sandbox, so only a carrier knows whether dropping its
+    container takes the workspace with it.)"""
 
     async def _sync_sources(context: ExtensionContext) -> None:
         await sync_driver.run()
 
     async def _dispatch_turns(context: ExtensionContext) -> None:
         await turn_dispatcher.run()
-
-    async def _reap_sandboxes(context: ExtensionContext) -> None:
-        await reaper.run()
 
     def _drive_consumer(
         consumer: PageChangeConsumer,
@@ -658,12 +528,6 @@ def core_jobs(
             schedule=TURN_DISPATCH_SCHEDULE,
             handler=_dispatch_turns,
             candidates=turn_dispatcher.candidate_workspaces,
-        ),
-        JobSpec(
-            name=SANDBOX_REAP_JOB,
-            schedule=SANDBOX_REAP_SCHEDULE,
-            handler=_reap_sandboxes,
-            candidates=reaper.candidate_workspaces,
         ),
     )
 
@@ -721,6 +585,7 @@ class JobRunner:
     embed: EmbedClient | None = None
     pages: PageFeed | None = None
     blob: BlobStore | None = None
+    sandboxes: ConversationSandbox | None = None
     registry: ModelRegistry | None = None
 
     def launch(self) -> None:
@@ -787,6 +652,7 @@ class JobRunner:
                 self.embed,
                 self.pages,
                 self.blob,
+                self.sandboxes,
                 invoker,
                 self.registry,
                 schedule_invoker=invoker,

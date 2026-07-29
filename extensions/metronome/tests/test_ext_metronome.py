@@ -65,9 +65,6 @@ class _UntouchedCarrier:
     ) -> ExecResult:
         raise AssertionError("a seat tool must not touch the sandbox")
 
-    async def destroy(self, handle: SandboxHandle) -> None:
-        raise AssertionError("a seat tool must not touch the sandbox")
-
 
 async def _unavailable_spawn(
     profile: str, payload: dict[str, object], background: bool = False

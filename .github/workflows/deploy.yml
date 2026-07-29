@@ -137,8 +137,8 @@ jobs:
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "1.14.9"
-          # The mount gate reads role/bucket via $(terraform output -raw …); the wrapper corrupts
-          # captured stdout, and nothing here consumes its step outputs.
+          # Later steps read outputs via $(terraform output -raw …); the wrapper corrupts captured
+          # stdout, and nothing here consumes its step outputs.
           terraform_wrapper: false
 
       - name: Terraform init
@@ -171,21 +171,6 @@ jobs:
           NAMESPACE="$(terraform -chdir="$TF_DIR" output -raw system_namespace)"
           kubectl --namespace "$NAMESPACE" rollout status deployment/ufo-sandbox-proxy --timeout=15m
           kubectl --namespace "$NAMESPACE" rollout status deployment/ufo-serve --timeout=15m
-
-      # Mount gate: the published template + this environment's IAM and bucket must serve a live
-      # workspace mount — mint, s3fs mount, write/list/read/chmod/delete — or the deploy goes red
-      # instead of surfacing later as a wedged agent.
-      - name: Gate sandbox workspace mount
-        if: github.event_name != 'pull_request'
-        env:
-          E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
-        run: |
-          UFO_EGRESS_CA_CERT="$(terraform -chdir="$TF_DIR" output -raw sandbox_proxy_ca_cert)" \
-            UFO_SANDBOX_FS_TOKEN_SECRET="$(terraform -chdir="$TF_DIR" output -raw sandbox_fs_token)" \
-            uv run python sandbox/mount_gate.py \
-            --bucket "$(terraform -chdir="$TF_DIR" output -raw blob_bucket)" \
-            --region "$AWS_REGION" \
-            --proxy-url "$(terraform -chdir="$TF_DIR" output -raw sandbox_proxy_url)"
 
       - name: Gate sandbox egress proxy TLS
         if: github.event_name != 'pull_request'

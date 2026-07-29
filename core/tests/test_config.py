@@ -25,6 +25,7 @@ def test_load_config_with_defaults(tmp_path: Path) -> None:
     assert config.serve.request_shutdown_seconds == 30
     assert config.serve.graceful_shutdown_seconds == 0
     assert config.models.anthropic_api_key_env == "ANTHROPIC_API_KEY"
+    assert config.sandbox.workspace_root == Path("./workspaces")
     assert config.o11y.otlp_endpoint is None
 
 
@@ -68,36 +69,19 @@ def test_s3_backend_requires_bucket(tmp_path: Path) -> None:
         load_config(path)
 
 
-def test_s3_backend_without_sts_parses_for_a_blob_only_deploy(tmp_path: Path) -> None:
-    """A bucket alone is a complete s3 blob store — transcripts and artifacts need no STS. The
-    sandbox-fs credential (`sts_role_arn`/`s3_url`) is enforced loud at the mount seam, not at
-    load (see test_sandbox_fs.test_workspace_mount_on_s3_without_a_minter_fails_loud), so a
-    blob-only deploy that never mounts a workspace is not forced to carry mount config."""
-    path = tmp_path / "ufo.toml"
-    path.write_text(
-        VALID.replace('backend = "filesystem"\nroot = "./blobs"', 'backend = "s3"\nbucket = "b"')
-    )
-    config = load_config(path)
-    assert config.blob.bucket == "b"
-    assert config.blob.sts_role_arn is None
-
-
-def test_s3_backend_complete_parses(tmp_path: Path) -> None:
+def test_s3_backend_parses(tmp_path: Path) -> None:
     path = tmp_path / "ufo.toml"
     path.write_text(
         VALID.replace(
             'backend = "filesystem"\nroot = "./blobs"',
-            'backend = "s3"\nbucket = "b"\ns3_url = "https://s3.example:9000"\n'
-            'sts_role_arn = "arn:aws:iam::0:role/sbxfs"\nsts_endpoint = "https://sts.example:9000"\n'
-            'region = "us-west-2"\npath_style = true',
+            'backend = "s3"\nbucket = "b"\nendpoint_url = "https://s3.example:9000"\n'
+            'region = "us-west-2"',
         )
     )
     config = load_config(path)
-    assert config.blob.sts_role_arn == "arn:aws:iam::0:role/sbxfs"
-    assert config.blob.s3_url == "https://s3.example:9000"
-    assert config.blob.sts_endpoint == "https://sts.example:9000"
+    assert config.blob.bucket == "b"
+    assert config.blob.endpoint_url == "https://s3.example:9000"
     assert config.blob.region == "us-west-2"
-    assert config.blob.path_style is True
 
 
 def test_config_path_from_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -33,9 +33,12 @@ root = "/data/blobs"
 backend = "in_process"
 
 # The built-in `local` carrier ships in every pack (the `docker` carrier is a separate extension not
-# in the assistant pack). Local means in-process sandboxes with the egress proxy embedded in serve.
+# in the assistant pack). Local means in-process sandboxes with the egress proxy embedded in serve;
+# each conversation's /workspace is a directory under workspace_root, on the same durable volume as
+# the blobs.
 [sandbox]
 backend = "local"
+workspace_root = "/data/workspaces"
 
 # A non-bind placeholder host: the assistant pack's connectors gate on a publicly-reachable base
 # for OAuth redirects (which don't resolve locally anyway). Members still reach serve on

@@ -11,6 +11,7 @@ advances over a still-running predecessor."""
 from __future__ import annotations
 
 import asyncio
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -24,7 +25,6 @@ from ufo.blob import BlobNotFound, BlobStore
 from ufo.cancellation import cancel_one_turn
 from ufo.db import workspace_tx
 from ufo.ext.context import Trajectory
-from ufo.ext.surface import workspace_key
 from ufo.governance import prompt_digest
 from ufo.schema import tables
 from ufo.schema.records import PENDING
@@ -139,6 +139,7 @@ class WorkspaceDriver:
     agent_prompt: str
     blob: BlobStore
     dbos: DBOSClient
+    workspace_root: Path
     agent_model: str = "eval"
     poll_interval_seconds: float = POLL_INTERVAL_SECONDS
     workflow_wait_seconds: float = WORKFLOW_WAIT_SECONDS
@@ -224,11 +225,20 @@ class WorkspaceDriver:
                 transcript_key(conversation_id), encode(Conversation(seq=1, messages=messages))
             )
         for item in workspace_files:
-            await self.blob.put(workspace_key(conversation_id, item.path), item.content)
+            target = self.workspace_path(conversation_id, item.path)
+            await asyncio.to_thread(target.parent.mkdir, parents=True, exist_ok=True)
+            await asyncio.to_thread(target.write_bytes, item.content)
         return conversation_id
 
     async def stage(self, conversation_id: UUID, path: str, source: Path) -> None:
-        await self.blob.put_file(workspace_key(conversation_id, path), source)
+        target = self.workspace_path(conversation_id, path)
+        await asyncio.to_thread(target.parent.mkdir, parents=True, exist_ok=True)
+        await asyncio.to_thread(shutil.copyfile, source, target)
+
+    def workspace_path(self, conversation_id: UUID, rel: str) -> Path:
+        """The host location of a conversation workspace file — the directory serve's local
+        carrier serves `/workspace` from, which the eval process shares a filesystem with."""
+        return self.workspace_root / str(conversation_id) / rel
 
     async def settle(self, conversation_id: UUID, turn_id: UUID) -> Trajectory | None:
         async with workspace_tx() as connection:

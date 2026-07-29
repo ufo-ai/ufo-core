@@ -107,8 +107,6 @@ locals {
     backend = "s3"
     bucket = "${module.platform.blob_bucket}"
     region = "${var.region}"
-    s3_url = "https://s3.${var.region}.amazonaws.com"
-    sts_role_arn = "${module.platform.sandbox_fs_role_arn}"
 
     [hub]
     backend = "redis"
@@ -137,7 +135,6 @@ resource "kubernetes_secret_v1" "ufo_serve" {
     UFO_CONTROL_SERVE_DSN       = module.platform.serve_dsn
     UFO_CREDENTIAL_KEY          = module.platform.serve_credential_key
     UFO_ARTIFACT_TOKEN_SECRET   = module.platform.serve_artifact_token
-    UFO_SANDBOX_FS_TOKEN_SECRET = module.platform.sandbox_fs_token
   }
   depends_on = [kubernetes_namespace_v1.ufo_system]
 }

@@ -10,26 +10,12 @@ output "ecr_repository_urls" {
   value = module.platform.ecr_repository_urls
 }
 
-output "blob_bucket" {
-  value = module.platform.blob_bucket
-}
-
-output "sandbox_fs_role_arn" {
-  description = "Assumed by the sandbox proxy to mint scoped mount credentials."
-  value       = module.platform.sandbox_fs_role_arn
-}
-
 output "sandbox_proxy_url" {
   value = "https://sandbox-proxy.${module.platform.hostname}"
 }
 
 output "sandbox_proxy_ca_cert" {
   value = module.platform.egress_ca_cert
-}
-
-output "sandbox_fs_token" {
-  value     = module.platform.sandbox_fs_token
-  sensitive = true
 }
 
 output "api_keys_secret_arn" {

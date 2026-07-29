@@ -3,8 +3,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
-from types import MethodType, SimpleNamespace
-from typing import cast
+from types import SimpleNamespace
 
 import pytest
 from cryptography.fernet import Fernet
@@ -12,12 +11,13 @@ from fastapi import FastAPI
 
 from ufo import serve
 from ufo.bearer import UFO_TOKEN_SECRET_ENV
+from ufo.blob import FilesystemBlobStore, S3BlobStore
 from ufo.config import BlobConfig, Config, DatabaseConfig, SandboxConfig
 from ufo.credentials import CredentialStore
 from ufo.ext.manifest import CredentialSlot, InjectionTarget, Manifest
 from ufo.models.catalog import CORE_PRICING
 from ufo.proxy_serve import OWNER_DSN_ENV, model_rule_base
-from ufo.sandbox.fs_creds import SandboxFsCredentialMinter
+from ufo.sandbox.proxy.rules import ScopeRule
 from ufo.sandbox.session import EGRESS_CA_CERT_ENV, RunTokenCodec
 
 CA_PEM = "-----BEGIN CERTIFICATE-----\nshared\n-----END CERTIFICATE-----\n"
@@ -76,6 +76,10 @@ def _local_config() -> Config:
     )
 
 
+def _blob() -> FilesystemBlobStore:
+    return FilesystemBlobStore(root=Path("/tmp/blobs"))
+
+
 def test_launch_jobs_reuses_the_boot_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     manifests = (Manifest(name="jobs", version="1"),)
     registry = object()
@@ -89,7 +93,7 @@ def test_launch_jobs_reuses_the_boot_runtime(monkeypatch: pytest.MonkeyPatch) ->
         embed=object(),
         blob=object(),
         registry=registry,
-        carrier=object(),
+        sandboxes=object(),
     )
 
     def page_change_runner(**kwargs: object) -> object:
@@ -246,7 +250,7 @@ def test_hosted_proxy_endpoint_is_built_from_config_and_the_shared_ca(
     endpoint carriers thread into every sandbox from config — the stable port and public
     dial-back base — plus the shared CA cert from env, a plain value object with no bound socket."""
     monkeypatch.setenv(EGRESS_CA_CERT_ENV, CA_PEM)
-    endpoint = serve._proxy_endpoint(_hosted_config(), (), None, CORE_PRICING, RUN_TOKENS)
+    endpoint = serve._proxy_endpoint(_hosted_config(), (), None, CORE_PRICING, RUN_TOKENS, _blob())
     assert (endpoint.port, endpoint.ca_cert, endpoint.public_url) == (
         9443,
         CA_PEM,
@@ -259,7 +263,7 @@ def test_hosted_proxy_endpoint_fails_loud_without_the_shared_ca(
 ) -> None:
     monkeypatch.delenv(EGRESS_CA_CERT_ENV, raising=False)
     with pytest.raises(RuntimeError, match=EGRESS_CA_CERT_ENV):
-        serve._proxy_endpoint(_hosted_config(), (), None, CORE_PRICING, RUN_TOKENS)
+        serve._proxy_endpoint(_hosted_config(), (), None, CORE_PRICING, RUN_TOKENS, _blob())
 
 
 def test_local_proxy_mints_an_ephemeral_ca_and_needs_no_shared_ca_env(
@@ -271,50 +275,10 @@ def test_local_proxy_mints_an_ephemeral_ca_and_needs_no_shared_ca_env(
     monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv(EGRESS_CA_CERT_ENV, raising=False)
-    endpoint = serve._proxy_endpoint(_local_config(), (), None, CORE_PRICING, RUN_TOKENS)
+    endpoint = serve._proxy_endpoint(_local_config(), (), None, CORE_PRICING, RUN_TOKENS, _blob())
     assert endpoint.public_url is None
     assert endpoint.port != 0
     assert endpoint.ca_cert.startswith(LEAF_PEM_PREFIX)
-
-
-def test_local_proxy_wires_workspace_credential_refresh(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    captured: dict[str, object] = {}
-
-    async def generate_ca() -> tuple[str, str]:
-        return "CERT", "KEY"
-
-    class Proxy:
-        def __init__(self, **kwargs: object) -> None:
-            captured.update(kwargs)
-
-        async def start(self, port: int) -> object:
-            return SimpleNamespace(port=port, ca_cert="CERT", public_url=None)
-
-    class WorkspaceFs:
-        async def refresh(self, token: str) -> object:
-            return token
-
-    workspace_fs = WorkspaceFs()
-    monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.setattr(serve, "generate_ca", generate_ca)
-    monkeypatch.setattr(serve, "EgressProxy", Proxy)
-
-    serve._proxy_endpoint(
-        _local_config(),
-        (),
-        None,
-        CORE_PRICING,
-        RUN_TOKENS,
-        cast(SandboxFsCredentialMinter, workspace_fs),
-    )
-
-    refresh = captured["workspace_credentials"]
-    assert isinstance(refresh, MethodType)
-    assert refresh.__self__ is workspace_fs
-    assert captured["run_tokens"] is RUN_TOKENS
 
 
 def test_shared_owner_dsn_from_env_pins_the_async_driver(
@@ -382,10 +346,46 @@ def test_the_local_proxy_resolves_keyed_slots_per_workspace(
     monkeypatch.setattr(serve, "PerAgentRules", rules)
     credentials = CredentialStore(fernet=Fernet(Fernet.generate_key()))
     config = _local_config()
-    serve._proxy_endpoint(config, (manifest,), credentials, CORE_PRICING, RUN_TOKENS)
+    serve._proxy_endpoint(config, (manifest,), credentials, CORE_PRICING, RUN_TOKENS, _blob())
     assert captured["credentials"] is credentials
     assert captured["slots"] == (slot,)
     assert captured["base"] == model_rule_base(config)
+
+
+def test_the_local_proxy_base_admits_the_s3_artifact_store_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A deploy whose artifacts live in S3 admits that bucket's host in the static base, so the
+    sandbox's presigned PUT is not refused at CONNECT — the base is where it belongs, since it is a
+    deploy-wide fact and not a per-turn one."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "serve-test")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "serve-test")
+    monkeypatch.delenv("AWS_PROFILE", raising=False)
+    captured: dict[str, object] = {}
+
+    async def generate_ca() -> tuple[str, str]:
+        return "CERT", "KEY"
+
+    class Proxy:
+        def __init__(self, **kwargs: object) -> None: ...
+
+        async def start(self, port: int) -> object:
+            return SimpleNamespace(port=port, ca_cert="CERT", public_url=None)
+
+    def rules(**kwargs: object) -> object:
+        captured.update(kwargs)
+        return SimpleNamespace(resolve=None, turn_live=None)
+
+    monkeypatch.setattr(serve, "generate_ca", generate_ca)
+    monkeypatch.setattr(serve, "EgressProxy", Proxy)
+    monkeypatch.setattr(serve, "PerAgentRules", rules)
+    store = S3BlobStore(bucket="ufo-blobs", region="us-east-1")
+
+    serve._proxy_endpoint(_local_config(), (), None, CORE_PRICING, RUN_TOKENS, store)
+
+    assert ScopeRule(allowed_hosts=frozenset({"ufo-blobs.s3.amazonaws.com"})) in captured["base"]
 
 
 def test_reserved_host_prefixes_guard_fails_loud_on_a_gateway_route() -> None:

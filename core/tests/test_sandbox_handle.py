@@ -1,17 +1,20 @@
 """The core seam that keeps a durable per-conversation sandbox handle on the conversation row.
 
-`_open_sandbox` reads the row's stored handle, seeds the carrier's resume path from it, and persists
-the returned `<backend>:<id>` — so a serve restart resumes the same sandbox and the reaper reclaims
-one a prior process created. Persist-on-create is proven against the real local carrier; the
-resume-read (the id core seeds and the write it skips when nothing changed) is asserted through the
-conversation row, with a stand-in carrier recording the spec core built for it."""
+`_open_sandbox` opens the turn's sandbox through `ConversationSandbox`: the row's stored handle
+seeds the carrier's resume path, and the returned `<backend>:<id>` is persisted — so a serve
+restart resumes the same sandbox. Persist-on-create is proven against the real local carrier; the
+resume-read and the env exports the turn derives are asserted through the conversation row and the
+spec a stand-in carrier records."""
 
+import asyncio
 import base64
+import json
 import logging
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 from uuid import UUID, uuid4
 
 import pytest
@@ -19,7 +22,6 @@ import sqlalchemy as sa
 from cryptography.fernet import Fernet
 
 from ufo.agent_scope import agent
-from ufo.blob import FilesystemBlobStore, S3BlobStore
 from ufo.connectors import CliCredential, ForwardedResponse
 from ufo.credentials import CredentialStore, HostChoice
 from ufo.db import workspace_tx
@@ -32,9 +34,15 @@ from ufo.loop.queue import (
     _grant_cli_env,
     _open_sandbox,
 )
-from ufo.sandbox.fs_creds import SandboxFsCredentialMinter
+from ufo.sandbox.conversation import (
+    SANDBOX_IMAGE_REF,
+    WORKSPACE_WRITE_MAX_BYTES,
+    ConversationSandbox,
+)
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import (
+    Carrier,
+    ExecResult,
     ProxyEndpoint,
     RunToken,
     RunTokenCodec,
@@ -110,6 +118,17 @@ def _turn(workspace_id: UUID, conversation_id: UUID) -> Turn:
     )
 
 
+def _sandboxes(carrier: Carrier, backend: str, tmp_path: Path) -> ConversationSandbox:
+    return ConversationSandbox(
+        carrier=carrier,
+        backend=backend,
+        off_cluster=backend == "e2b",
+        image_ref=SANDBOX_IMAGE_REF,
+        proxy=PROXY,
+        workspace_root=tmp_path / "workspaces",
+    )
+
+
 @dataclass
 class _ResumeRecordingCarrier:
     """Stands in for the carrier to record the SandboxSpec core builds — so the resume_id core
@@ -124,176 +143,63 @@ class _ResumeRecordingCarrier:
         self.specs.append(spec)
         return SandboxHandle(conversation_id=spec.conversation_id, container_id=self.container_id)
 
-    async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None: ...
-
-    async def exec(self, *args: object, **kwargs: object) -> object:
+    async def exec(
+        self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
+    ) -> ExecResult:
         raise AssertionError("open_sandbox never execs")
 
-    async def export(self, *args: object, **kwargs: object) -> None:
-        raise AssertionError("open_sandbox never exports")
+    async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None:
+        raise AssertionError("open_sandbox never writes")
 
-    async def destroy(self, *args: object, **kwargs: object) -> None:
-        raise AssertionError("open_sandbox never destroys")
+    def read(self, handle: SandboxHandle, path: str) -> AsyncIterator[bytes]:
+        raise AssertionError("open_sandbox never reads")
+
+    async def host(self, handle: SandboxHandle, port: int) -> str:
+        raise AssertionError("open_sandbox never resolves a host")
 
 
 async def test_open_sandbox_persists_the_backend_prefixed_handle(db: None, tmp_path: Path) -> None:
     """A fresh create against the real local carrier persists `<backend>:<id>` on the row — the
-    durable pointer the reaper and the next process read."""
+    durable pointer the next process resumes from — and roots the sandbox's workspace under this
+    conversation's own directory."""
     workspace_id, conversation_id = await _conversation()
-    blob = FilesystemBlobStore(root=tmp_path)
 
-    handle = await _open_sandbox(
-        LocalCarrier(),
-        "local",
-        blob,
-        None,
-        PROXY,
-        RUN_TOKENS,
-        _turn(workspace_id, conversation_id),
-        None,
-        {},
-        None,
-        (),
-    )
+    with ws(workspace_id):
+        handle = await _open_sandbox(
+            _sandboxes(LocalCarrier(), "local", tmp_path),
+            RUN_TOKENS,
+            _turn(workspace_id, conversation_id),
+            None,
+            {},
+            None,
+            (),
+        )
 
     assert handle.container_id == "local"
+    assert handle.workspace_host_path == str(
+        (tmp_path / "workspaces" / str(conversation_id)).resolve()
+    )
     assert await _stored_handle(conversation_id) == "local:local"
 
 
 async def test_open_sandbox_resumes_from_the_stored_handle_without_rewriting(
     db: None, tmp_path: Path
 ) -> None:
-    """A row that already holds this backend's handle seeds the carrier's resume_id and, since the
-    returned id is unchanged, costs no write — resume, not a fresh create."""
+    """A row that already holds this backend's handle seeds the carrier's resume_id — resume, not a
+    fresh create — under the turn's signed run token."""
     workspace_id, conversation_id = await _conversation(handle="e2b:sbx-1")
     carrier = _ResumeRecordingCarrier(container_id="sbx-1")
-    blob = FilesystemBlobStore(root=tmp_path)
     turn = _turn(workspace_id, conversation_id)
 
-    await _open_sandbox(
-        carrier,
-        "e2b",
-        blob,
-        None,
-        PROXY,
-        RUN_TOKENS,
-        turn,
-        None,
-        {},
-        None,
-        (),
-    )
+    with ws(workspace_id):
+        await _open_sandbox(
+            _sandboxes(carrier, "e2b", tmp_path), RUN_TOKENS, turn, None, {}, None, ()
+        )
 
     assert carrier.specs[0].resume_id == "sbx-1"
     basic = "Basic " + base64.b64encode(f"{carrier.specs[0].run_token}:".encode()).decode()
     assert RUN_TOKENS.from_proxy_auth(basic) == RunToken(workspace_id, turn.id)
     assert await _stored_handle(conversation_id) == "e2b:sbx-1"
-
-
-@dataclass(frozen=True)
-class _MarkerRecordingS3BlobStore(S3BlobStore):
-    """The S3 store with its network put recorded: the marker write is asserted as
-    `_open_sandbox`'s own act, keyed off the stored handle it read."""
-
-    marker_puts: list[str] = field(default_factory=list, compare=False)
-
-    async def put(self, key: str, data: bytes) -> None:
-        self.marker_puts.append(key)
-
-
-class _NeverSts:
-    async def assume_role(self, **kwargs: object) -> object:
-        raise AssertionError("open_sandbox never redeems credentials")
-
-
-async def test_open_sandbox_writes_the_workspace_marker_only_on_first_create(db: None) -> None:
-    """`fresh_sandbox` is wired from the stored handle: the first create (no row handle) writes the
-    workspace directory marker, and the resume (row handle present) skips it — the prefix invariant
-    rides sandbox creation, never the per-turn path."""
-    workspace_id, conversation_id = await _conversation()
-    carrier = _ResumeRecordingCarrier(container_id="sbx-9")
-    blob = _MarkerRecordingS3BlobStore(bucket="ufo-blobs")
-    minter = SandboxFsCredentialMinter(
-        sts=_NeverSts(),
-        role_arn="arn:aws:iam::0:role/sbxfs",
-        bucket="ufo-blobs",
-        s3_url="https://s3.example:9000",
-        region="us-east-1",
-        path_style=False,
-        token_secret=b"mount-secret",
-    )
-
-    await _open_sandbox(
-        carrier,
-        "e2b",
-        blob,
-        minter,
-        PROXY,
-        RUN_TOKENS,
-        _turn(workspace_id, conversation_id),
-        None,
-        {},
-        None,
-        (),
-    )
-
-    assert carrier.specs[0].resume_id is None
-    assert blob.marker_puts == [f"conversations/{conversation_id}/workspace/"]
-
-    await _open_sandbox(
-        carrier,
-        "e2b",
-        blob,
-        minter,
-        PROXY,
-        RUN_TOKENS,
-        _turn(workspace_id, conversation_id),
-        None,
-        {},
-        None,
-        (),
-    )
-
-    assert carrier.specs[1].resume_id == "sbx-9"
-    assert blob.marker_puts == [f"conversations/{conversation_id}/workspace/"]
-
-
-async def test_open_sandbox_writes_the_marker_when_taking_over_a_foreign_backend_handle(
-    db: None,
-) -> None:
-    """The other path to `resume_id is None`: a stored handle another backend wrote is ignored and
-    the sandbox is created fresh — on the S3 backend that fresh create must also write the marker
-    (idempotent when a prior backend's mount already did)."""
-    workspace_id, conversation_id = await _conversation(handle="local:elsewhere")
-    carrier = _ResumeRecordingCarrier(container_id="sbx-2")
-    blob = _MarkerRecordingS3BlobStore(bucket="ufo-blobs")
-    minter = SandboxFsCredentialMinter(
-        sts=_NeverSts(),
-        role_arn="arn:aws:iam::0:role/sbxfs",
-        bucket="ufo-blobs",
-        s3_url="https://s3.example:9000",
-        region="us-east-1",
-        path_style=False,
-        token_secret=b"mount-secret",
-    )
-
-    await _open_sandbox(
-        carrier,
-        "e2b",
-        blob,
-        minter,
-        PROXY,
-        RUN_TOKENS,
-        _turn(workspace_id, conversation_id),
-        None,
-        {},
-        None,
-        (),
-    )
-
-    assert carrier.specs[0].resume_id is None
-    assert blob.marker_puts == [f"conversations/{conversation_id}/workspace/"]
-    assert await _stored_handle(conversation_id) == "e2b:sbx-2"
 
 
 async def test_open_sandbox_ignores_a_handle_another_backend_wrote_and_overwrites_it(
@@ -303,21 +209,17 @@ async def test_open_sandbox_ignores_a_handle_another_backend_wrote_and_overwrite
     fresh) and the fresh id overwrites the row under this backend's prefix."""
     workspace_id, conversation_id = await _conversation(handle="docker:cid-1")
     carrier = _ResumeRecordingCarrier(container_id="sbx-9")
-    blob = FilesystemBlobStore(root=tmp_path)
 
-    await _open_sandbox(
-        carrier,
-        "e2b",
-        blob,
-        None,
-        PROXY,
-        RUN_TOKENS,
-        _turn(workspace_id, conversation_id),
-        None,
-        {},
-        None,
-        (),
-    )
+    with ws(workspace_id):
+        await _open_sandbox(
+            _sandboxes(carrier, "e2b", tmp_path),
+            RUN_TOKENS,
+            _turn(workspace_id, conversation_id),
+            None,
+            {},
+            None,
+            (),
+        )
 
     assert carrier.specs[0].resume_id is None
     assert await _stored_handle(conversation_id) == "e2b:sbx-9"
@@ -376,18 +278,13 @@ async def test_open_sandbox_exports_the_acting_members_grant_sentinels(
     workspace_id, conversation_id = await _conversation()
     agent_id, member_id = await _seed_grant(workspace_id, conversation_id, shared=False)
     carrier = _ResumeRecordingCarrier(container_id="sbx-1")
-    blob = FilesystemBlobStore(root=tmp_path)
     turn = _turn(workspace_id, conversation_id).model_copy(
         update={"agent_id": agent_id, "speaker_member_id": member_id}
     )
 
     with ws(workspace_id), agent(agent_id):
         await _open_sandbox(
-            carrier,
-            "e2b",
-            blob,
-            None,
-            PROXY,
+            _sandboxes(carrier, "e2b", tmp_path),
             RUN_TOKENS,
             turn,
             GrantStore(),
@@ -453,16 +350,11 @@ async def test_open_sandbox_exports_nothing_for_a_foreign_private_grant(
     workspace_id, conversation_id = await _conversation()
     agent_id, _ = await _seed_grant(workspace_id, conversation_id, shared=False)
     carrier = _ResumeRecordingCarrier(container_id="sbx-1")
-    blob = FilesystemBlobStore(root=tmp_path)
     turn = _turn(workspace_id, conversation_id).model_copy(update={"agent_id": agent_id})
 
     with ws(workspace_id), agent(agent_id):
         await _open_sandbox(
-            carrier,
-            "e2b",
-            blob,
-            None,
-            PROXY,
+            _sandboxes(carrier, "e2b", tmp_path),
             RUN_TOKENS,
             turn,
             GrantStore(),
@@ -490,18 +382,13 @@ async def test_open_sandbox_exports_the_private_sentinel_over_the_shared_one(
             shared=True,
         )
     carrier = _ResumeRecordingCarrier(container_id="sbx-1")
-    blob = FilesystemBlobStore(root=tmp_path)
     turn = _turn(workspace_id, conversation_id).model_copy(
         update={"agent_id": agent_id, "speaker_member_id": member_id}
     )
 
     with ws(workspace_id), agent(agent_id):
         await _open_sandbox(
-            carrier,
-            "e2b",
-            blob,
-            None,
-            PROXY,
+            _sandboxes(carrier, "e2b", tmp_path),
             RUN_TOKENS,
             turn,
             GrantStore(),
@@ -547,18 +434,13 @@ async def test_open_sandbox_exports_nothing_when_the_shared_tier_is_ambiguous(
             )
         )
     carrier = _ResumeRecordingCarrier(container_id="sbx-1")
-    blob = FilesystemBlobStore(root=tmp_path)
     turn = _turn(workspace_id, conversation_id).model_copy(
         update={"agent_id": agent_id, "speaker_member_id": other_member}
     )
 
     with ws(workspace_id), agent(agent_id):
         await _open_sandbox(
-            carrier,
-            "e2b",
-            blob,
-            None,
-            PROXY,
+            _sandboxes(carrier, "e2b", tmp_path),
             RUN_TOKENS,
             turn,
             GrantStore(),
@@ -589,18 +471,13 @@ async def test_open_sandbox_exports_nothing_when_the_account_is_ambiguous(
             shared=False,
         )
     carrier = _ResumeRecordingCarrier(container_id="sbx-1")
-    blob = FilesystemBlobStore(root=tmp_path)
     turn = _turn(workspace_id, conversation_id).model_copy(
         update={"agent_id": agent_id, "speaker_member_id": member_id}
     )
 
     with ws(workspace_id), agent(agent_id):
         await _open_sandbox(
-            carrier,
-            "e2b",
-            blob,
-            None,
-            PROXY,
+            _sandboxes(carrier, "e2b", tmp_path),
             RUN_TOKENS,
             turn,
             GrantStore(),
@@ -658,19 +535,16 @@ async def test_open_sandbox_exports_keyed_provider_sentinels_not_secrets(
     await store.put(workspace_id, "datadog_api_host", "api.us5.datadoghq.com")
     carrier = _ResumeRecordingCarrier(container_id="sbx-1")
 
-    await _open_sandbox(
-        carrier,
-        "e2b",
-        FilesystemBlobStore(root=tmp_path),
-        None,
-        PROXY,
-        RUN_TOKENS,
-        _turn(workspace_id, conversation_id),
-        None,
-        {},
-        store,
-        DATADOG_SLOTS,
-    )
+    with ws(workspace_id):
+        await _open_sandbox(
+            _sandboxes(carrier, "e2b", tmp_path),
+            RUN_TOKENS,
+            _turn(workspace_id, conversation_id),
+            None,
+            {},
+            store,
+            DATADOG_SLOTS,
+        )
 
     assert carrier.specs[0].env == {
         **GIT_PROXY_AUTH_ENV,
@@ -690,19 +564,16 @@ async def test_open_sandbox_exports_nothing_for_an_unfilled_keyed_slot(
     await store.put(workspace_id, "datadog_api_key", "dd-api-real")
     carrier = _ResumeRecordingCarrier(container_id="sbx-1")
 
-    await _open_sandbox(
-        carrier,
-        "e2b",
-        FilesystemBlobStore(root=tmp_path),
-        None,
-        PROXY,
-        RUN_TOKENS,
-        _turn(workspace_id, conversation_id),
-        None,
-        {},
-        store,
-        DATADOG_SLOTS,
-    )
+    with ws(workspace_id):
+        await _open_sandbox(
+            _sandboxes(carrier, "e2b", tmp_path),
+            RUN_TOKENS,
+            _turn(workspace_id, conversation_id),
+            None,
+            {},
+            store,
+            DATADOG_SLOTS,
+        )
 
     assert carrier.specs[0].env == {
         **GIT_PROXY_AUTH_ENV,
@@ -725,13 +596,9 @@ async def test_open_sandbox_withholds_and_warns_on_a_selection_the_row_does_not_
     await store.put(workspace_id, "datadog_api_host", "169.254.169.254")
     carrier = _ResumeRecordingCarrier(container_id="sbx-1")
 
-    with caplog.at_level(logging.WARNING, logger="ufo"):
+    with caplog.at_level(logging.WARNING, logger="ufo"), ws(workspace_id):
         await _open_sandbox(
-            carrier,
-            "e2b",
-            FilesystemBlobStore(root=tmp_path),
-            None,
-            PROXY,
+            _sandboxes(carrier, "e2b", tmp_path),
             RUN_TOKENS,
             _turn(workspace_id, conversation_id),
             None,
@@ -758,8 +625,7 @@ async def test_open_sandbox_survives_a_keyed_slot_whose_source_raises(
     provider runs, and the slot's env is simply absent rather than present and unusable.
 
     Isolating here matters as much as at the proxy, because this call is on the path of every
-    sandbox open — an escaping fault would fail every turn in the workspace, which is the failure
-    this whole change exists to remove rather than relocate."""
+    sandbox open — an escaping fault would fail every turn in the workspace."""
     workspace_id, conversation_id = await _conversation()
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
     await store.put(workspace_id, "datadog_api_key", "dd-api-real")
@@ -779,13 +645,9 @@ async def test_open_sandbox_survives_a_keyed_slot_whose_source_raises(
     )
     carrier = _ResumeRecordingCarrier(container_id="sbx-1")
 
-    with caplog.at_level(logging.WARNING, logger="ufo"):
+    with caplog.at_level(logging.WARNING, logger="ufo"), ws(workspace_id):
         await _open_sandbox(
-            carrier,
-            "e2b",
-            FilesystemBlobStore(root=tmp_path),
-            None,
-            PROXY,
+            _sandboxes(carrier, "e2b", tmp_path),
             RUN_TOKENS,
             _turn(workspace_id, conversation_id),
             None,
@@ -815,10 +677,12 @@ async def test_open_sandbox_configures_git_to_authenticate_to_the_proxy(
     `http.proxyAuthMethod=basic`, so git presents the token on the first CONNECT."""
     workspace_id, conversation_id = await _conversation()
     carrier = _ResumeRecordingCarrier(container_id="sbx-1")
-    blob = FilesystemBlobStore(root=tmp_path)
     turn = _turn(workspace_id, conversation_id)
 
-    await _open_sandbox(carrier, "e2b", blob, None, PROXY, RUN_TOKENS, turn, None, {}, None, ())
+    with ws(workspace_id):
+        await _open_sandbox(
+            _sandboxes(carrier, "e2b", tmp_path), RUN_TOKENS, turn, None, {}, None, ()
+        )
 
     assert carrier.specs[0].env == {
         "GIT_CONFIG_COUNT": "1",
@@ -854,19 +718,16 @@ async def test_open_sandbox_configures_git_to_present_the_credential_sentinel(
     await store.put(workspace_id, "github_git_token", "ghp-real")
     carrier = _ResumeRecordingCarrier(container_id="sbx-1")
 
-    await _open_sandbox(
-        carrier,
-        "e2b",
-        FilesystemBlobStore(root=tmp_path),
-        None,
-        PROXY,
-        RUN_TOKENS,
-        _turn(workspace_id, conversation_id),
-        None,
-        {},
-        store,
-        GIT_SLOTS,
-    )
+    with ws(workspace_id):
+        await _open_sandbox(
+            _sandboxes(carrier, "e2b", tmp_path),
+            RUN_TOKENS,
+            _turn(workspace_id, conversation_id),
+            None,
+            {},
+            store,
+            GIT_SLOTS,
+        )
 
     assert carrier.specs[0].env == {
         "GIT_CONFIG_COUNT": "2",
@@ -887,19 +748,16 @@ async def test_open_sandbox_configures_no_extraheader_without_a_git_credential(
     workspace_id, conversation_id = await _conversation()
     carrier = _ResumeRecordingCarrier(container_id="sbx-1")
 
-    await _open_sandbox(
-        carrier,
-        "e2b",
-        FilesystemBlobStore(root=tmp_path),
-        None,
-        PROXY,
-        RUN_TOKENS,
-        _turn(workspace_id, conversation_id),
-        None,
-        {},
-        CredentialStore(fernet=Fernet(Fernet.generate_key())),
-        GIT_SLOTS,
-    )
+    with ws(workspace_id):
+        await _open_sandbox(
+            _sandboxes(carrier, "e2b", tmp_path),
+            RUN_TOKENS,
+            _turn(workspace_id, conversation_id),
+            None,
+            {},
+            CredentialStore(fernet=Fernet(Fernet.generate_key())),
+            GIT_SLOTS,
+        )
 
     assert carrier.specs[0].env == GIT_PROXY_AUTH_ENV
 
@@ -940,13 +798,9 @@ async def test_open_sandbox_configures_no_git_host_the_declaration_does_not_offe
     await store.put(workspace_id, "github_git_host", "github.evil.test")
     carrier = _ResumeRecordingCarrier(container_id="sbx-1")
 
-    with caplog.at_level(logging.WARNING, logger="ufo"):
+    with caplog.at_level(logging.WARNING, logger="ufo"), ws(workspace_id):
         await _open_sandbox(
-            carrier,
-            "e2b",
-            FilesystemBlobStore(root=tmp_path),
-            None,
-            PROXY,
+            _sandboxes(carrier, "e2b", tmp_path),
             RUN_TOKENS,
             _turn(workspace_id, conversation_id),
             None,
@@ -992,19 +846,16 @@ async def test_open_sandbox_exports_a_keyed_sentinel_from_a_source_without_minti
     slots = (replace(DATADOG_SLOTS[0], source=source), DATADOG_SLOTS[2])
     carrier = _ResumeRecordingCarrier(container_id="sbx-1")
 
-    await _open_sandbox(
-        carrier,
-        "e2b",
-        FilesystemBlobStore(root=tmp_path),
-        None,
-        PROXY,
-        RUN_TOKENS,
-        _turn(workspace_id, conversation_id),
-        None,
-        {},
-        store,
-        slots,
-    )
+    with ws(workspace_id):
+        await _open_sandbox(
+            _sandboxes(carrier, "e2b", tmp_path),
+            RUN_TOKENS,
+            _turn(workspace_id, conversation_id),
+            None,
+            {},
+            store,
+            slots,
+        )
 
     assert carrier.specs[0].env["DD_API_KEY"] == "SENTINEL_DD_API"
     assert source.mints == 0
@@ -1021,19 +872,164 @@ async def test_open_sandbox_configures_git_from_a_source_without_minting(
     slots = (replace(GIT_SLOTS[0], source=source),)
     carrier = _ResumeRecordingCarrier(container_id="sbx-1")
 
-    await _open_sandbox(
-        carrier,
-        "e2b",
-        FilesystemBlobStore(root=tmp_path),
-        None,
-        PROXY,
-        RUN_TOKENS,
-        _turn(workspace_id, conversation_id),
-        None,
-        {},
-        CredentialStore(fernet=Fernet(Fernet.generate_key())),
-        slots,
-    )
+    with ws(workspace_id):
+        await _open_sandbox(
+            _sandboxes(carrier, "e2b", tmp_path),
+            RUN_TOKENS,
+            _turn(workspace_id, conversation_id),
+            None,
+            {},
+            CredentialStore(fernet=Fernet(Fernet.generate_key())),
+            slots,
+        )
 
     assert carrier.specs[0].env["GIT_CONFIG_VALUE_1"] == "Authorization: SENTINEL_GIT"
     assert source.mints == 0
+
+
+@dataclass
+class _UniqueIdCarrier:
+    """Stands in for a provider that mints a fresh sandbox per create (e2b's shape): each create
+    returns a new id unless the spec resumes one, and attach answers only what a resume names —
+    what the claim logic under test arbitrates over. Every assertion is on core's persistence and
+    convergence, never this stand-in's own behavior."""
+
+    created: int = 0
+
+    async def create(self, spec: SandboxSpec) -> SandboxHandle:
+        if spec.resume_id is not None:
+            return SandboxHandle(conversation_id=spec.conversation_id, container_id=spec.resume_id)
+        self.created += 1
+        return SandboxHandle(
+            conversation_id=spec.conversation_id, container_id=f"sbx-{self.created}"
+        )
+
+    async def attach(self, spec: SandboxSpec) -> SandboxHandle | None:
+        if spec.resume_id is None:
+            return None
+        return SandboxHandle(conversation_id=spec.conversation_id, container_id=spec.resume_id)
+
+    async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None: ...
+
+    async def exec(self, *args: object, **kwargs: object) -> object:
+        raise AssertionError("these opens never exec")
+
+    def read(self, *args: object, **kwargs: object) -> AsyncIterator[bytes]:
+        raise AssertionError("these opens never read")
+
+    async def host(self, handle: SandboxHandle, port: int) -> str:
+        raise AssertionError("these opens never route")
+
+
+def _conversation_sandboxes(carrier: object, tmp_path: Path, backend: str) -> ConversationSandbox:
+    return ConversationSandbox(
+        carrier=cast(Carrier, carrier),
+        backend=backend,
+        off_cluster=False,
+        image_ref=SANDBOX_IMAGE_REF,
+        proxy=PROXY,
+        workspace_root=tmp_path / "workspaces",
+    )
+
+
+async def test_concurrent_first_opens_converge_on_one_persisted_sandbox(
+    db: None, tmp_path: Path
+) -> None:
+    """Nothing serializes an off-turn open against a turn's own, so two first opens can both create
+    on a provider that mints per call. The compare-and-swap persist arbitrates: exactly one id lands
+    on the row, and the loser adopts it — both callers end on the persisted sandbox, so nothing is
+    ever written into a sandbox no row references."""
+    workspace_id, conversation_id = await _conversation()
+    carrier = _UniqueIdCarrier()
+    sandboxes = _conversation_sandboxes(carrier, tmp_path, "e2b")
+
+    with ws(workspace_id):
+        first, second = await asyncio.gather(
+            sandboxes.open(conversation_id, "run-a", {}),
+            sandboxes.open(conversation_id, "run-b", {}),
+        )
+        stored = await _stored_handle(conversation_id)
+
+    assert stored is not None
+    assert first.container_id == second.container_id == stored.removeprefix("e2b:")
+
+
+async def test_a_read_never_creates_and_answers_absent_for_a_gone_sandbox(
+    db: None, tmp_path: Path
+) -> None:
+    """The read path must not answer by provisioning: a conversation whose stored handle names a
+    workspace directory the carrier no longer serves reads as absent, and one whose handle another
+    backend wrote reads as absent too — in both cases the row keeps exactly the handle it had."""
+    workspace_id, conversation_id = await _conversation(handle="local:local")
+    sandboxes = _conversation_sandboxes(LocalCarrier(), tmp_path, "local")
+
+    with ws(workspace_id):
+        assert await sandboxes.existing(conversation_id) is None
+        assert await _stored_handle(conversation_id) == "local:local"
+
+    workspace_id, conversation_id = await _conversation(handle="e2b:sbx-9")
+    with ws(workspace_id):
+        assert await sandboxes.existing(conversation_id) is None
+        assert await _stored_handle(conversation_id) == "e2b:sbx-9"
+
+
+async def test_workspace_write_refuses_a_body_over_the_cap(db: None, tmp_path: Path) -> None:
+    """The off-turn copy-in crosses whole, so the bound is what keeps a producer with no cap of its
+    own from sizing this process's memory — refused before any sandbox opens, leaving no handle."""
+    workspace_id, conversation_id = await _conversation()
+    sandboxes = _conversation_sandboxes(LocalCarrier(), tmp_path, "local")
+    oversized = b"x" * (WORKSPACE_WRITE_MAX_BYTES + 1)
+
+    with ws(workspace_id):
+        with pytest.raises(ValueError, match="byte limit"):
+            await sandboxes.write(conversation_id, "big.bin", oversized)
+        assert await _stored_handle(conversation_id) is None
+
+
+async def test_workspace_listing_warns_when_the_walk_truncates(
+    db: None, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A capped walk must not read as complete: the truncation is named in the log, so an operator
+    browsing a huge workspace knows the listing is a prefix."""
+    workspace_id, conversation_id = await _conversation()
+    sandboxes = _conversation_sandboxes(_TruncatingCarrier(), tmp_path, "local")
+
+    with ws(workspace_id):
+        await sandboxes.open(conversation_id, "run-a", {})
+        with caplog.at_level(logging.WARNING, logger="ufo"):
+            entries = await sandboxes.entries(conversation_id)
+
+    assert [entry.path for entry in entries] == ["a.txt"]
+    assert any("workspace.listing_truncated" in record.message for record in caplog.records)
+
+
+@dataclass
+class _TruncatingCarrier:
+    """Answers the sbxfs glob with a truncated listing — the fake stands in for the container walk
+    alone; the warn asserted is core's own."""
+
+    async def create(self, spec: SandboxSpec) -> SandboxHandle:
+        return SandboxHandle(
+            conversation_id=spec.conversation_id,
+            container_id="local",
+            workspace_host_path=spec.workspace_host_path,
+        )
+
+    async def attach(self, spec: SandboxSpec) -> SandboxHandle | None:
+        return await self.create(spec)
+
+    async def exec(self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int) -> object:
+        listing = {
+            "files": [{"path": "/workspace/a.txt", "size": 2, "modified": 1700000000.0}],
+            "count": 1,
+            "truncated": True,
+        }
+        return ExecResult(stdout=json.dumps(listing), stderr="", exit_code=0)
+
+    async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None: ...
+
+    def read(self, *args: object, **kwargs: object) -> AsyncIterator[bytes]:
+        raise AssertionError("the listing never reads")
+
+    async def host(self, handle: SandboxHandle, port: int) -> str:
+        raise AssertionError("the listing never routes")

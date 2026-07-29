@@ -29,13 +29,8 @@ output "system_namespace" {
 }
 
 output "blob_bucket" {
-  description = "The single S3 bucket backing core's [blob] backend (blobs + sandbox mounts)."
+  description = "The single S3 bucket backing core's [blob] backend (transcripts + artifacts)."
   value       = aws_s3_bucket.blob.id
-}
-
-output "sandbox_fs_role_arn" {
-  description = "STS role the sandbox proxy assumes to mint per-conversation mount credentials."
-  value       = aws_iam_role.sandbox_fs.arn
 }
 
 output "sandbox_proxy_certificate_arn" {
@@ -78,11 +73,6 @@ output "serve_credential_key" {
 
 output "serve_artifact_token" {
   value     = random_password.serve_artifact_token.result
-  sensitive = true
-}
-
-output "sandbox_fs_token" {
-  value     = random_password.sandbox_fs_token.result
   sensitive = true
 }
 

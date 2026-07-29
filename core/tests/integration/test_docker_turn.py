@@ -37,11 +37,7 @@ from ufo.models.interface import (
     ToolResultBlock,
     Usage,
 )
-from ufo.sandbox.session import (
-    MountSpec,
-    SandboxHandle,
-    SandboxSession,
-)
+from ufo.sandbox.session import SandboxHandle, SandboxSession
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.tools.builtins import BUILTIN_TOOLS
@@ -51,15 +47,6 @@ from ufo.tools.registry import ToolRegistry
 pytestmark = pytest.mark.docker
 
 MARKER = "sandbox-lives-42"
-
-
-@dataclass(frozen=True)
-class _StubMemory:
-    async def recall(self, query: str, subjects: frozenset[str], limit: int) -> tuple:
-        return ()
-
-    async def commit(self, write: object) -> None:
-        return None
 
 
 async def _unavailable_spawn(
@@ -105,7 +92,7 @@ def live_container(sandbox_container: tuple[str, Path]) -> SandboxHandle:
     return SandboxHandle(
         conversation_id=uuid4(),
         container_id=container,
-        mount=MountSpec(kind="filesystem", host_path=str(workspace)),
+        workspace_host_path=str(workspace),
     )
 
 

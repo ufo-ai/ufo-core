@@ -33,17 +33,14 @@ from ufo.jobs import (
     CORE_EXTENSION,
     PAGE_CHANGE_CURSOR_KEY,
     PAGE_CHANGE_JOB,
-    SANDBOX_REAP_JOB,
     TURN_DISPATCH_JOB,
     JobRunner,
     PageChangeConsumer,
     PageChangeRunner,
-    SandboxReaper,
     TurnDispatcher,
     bindings_from,
     core_jobs,
 )
-from ufo.sandbox.local import LocalCarrier
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.sources.sync import (
@@ -1645,7 +1642,7 @@ async def test_stream_skipped_records_a_skip_not_a_failure_and_never_tombstones(
     assert len(active) == 2  # the held page and the healthy sibling's page, both synced
 
 
-def test_source_sync_turn_dispatch_and_sandbox_reap_register_as_core_jobs(
+def test_source_sync_and_turn_dispatch_register_as_core_jobs(
     database_url: str, tmp_path: Path
 ) -> None:
     driver = SyncDriver(
@@ -1660,18 +1657,12 @@ def test_source_sync_turn_dispatch_and_sandbox_reap_register_as_core_jobs(
     specs = core_jobs(
         driver,
         TurnDispatcher(client=None),
-        SandboxReaper(carrier=LocalCarrier(), backend="local"),
         runner,
     )
-    assert [spec.name for spec in specs] == [
-        SOURCE_SYNC_JOB,
-        TURN_DISPATCH_JOB,
-        SANDBOX_REAP_JOB,
-    ]
+    assert [spec.name for spec in specs] == [SOURCE_SYNC_JOB, TURN_DISPATCH_JOB]
     assert all(spec.schedule is not None for spec in specs)
     keys = {binding.key for binding in bindings_from((), specs)}
     assert keys == {
         f"{CORE_EXTENSION}:{SOURCE_SYNC_JOB}",
         f"{CORE_EXTENSION}:{TURN_DISPATCH_JOB}",
-        f"{CORE_EXTENSION}:{SANDBOX_REAP_JOB}",
     }

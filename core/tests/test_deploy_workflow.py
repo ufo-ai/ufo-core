@@ -296,20 +296,19 @@ def test_plans_run_only_for_selected_deployment_inputs() -> None:
         assert job["if"] == "needs.changes.outputs.deploy == 'true'"
 
 
-def test_mount_gate_exercises_the_refreshing_credential_endpoint() -> None:
+def test_proxy_gate_dials_the_rolled_proxy_with_the_shared_ca() -> None:
     jobs = _workflow(WORKFLOWS / "deploy.yml")["jobs"]
     assert isinstance(jobs, dict)
     rollout = jobs["rollout"]
     assert isinstance(rollout, dict)
     steps = rollout["steps"]
     assert isinstance(steps, list)
-    gate = next(step for step in steps if step.get("name") == "Gate sandbox workspace mount")
+    gate = next(step for step in steps if step.get("name") == "Gate sandbox egress proxy TLS")
     script = gate["run"]
     assert isinstance(script, str)
     assert "output -raw sandbox_proxy_ca_cert" in script
-    assert "output -raw sandbox_fs_token" in script
     assert "output -raw sandbox_proxy_url" in script
-    assert "--role-arn" not in script
+    assert "sandbox/proxy_gate.py" in script
 
 
 def test_hosted_namespaces_hold_rollouts_until_nlb_targets_are_ready() -> None:
@@ -352,14 +351,14 @@ def test_sandbox_proxy_nlb_routes_across_all_enabled_zones() -> None:
         assert cross_zone, environment
 
 
-def test_runtime_rollout_drains_before_mount_gate() -> None:
+def test_runtime_rollout_drains_before_the_proxy_gate() -> None:
     rollout = _workflow(WORKFLOWS / "deploy.yml")["jobs"]["rollout"]
     assert isinstance(rollout, dict)
     steps = rollout["steps"]
     assert isinstance(steps, list)
     names = [step.get("name") for step in steps if isinstance(step, dict)]
     wait = names.index("Wait for runtime rollout")
-    assert names.index("Terraform apply") < wait < names.index("Gate sandbox workspace mount")
+    assert names.index("Terraform apply") < wait < names.index("Gate sandbox egress proxy TLS")
     step = steps[wait]
     assert isinstance(step, dict)
     script = step["run"]

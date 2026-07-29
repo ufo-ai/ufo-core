@@ -207,20 +207,18 @@ manifests — sandbox internet, a credential slot, a connector, or a model provi
 scoping, injection, and metering rules. Declare, don't open. The enterprise k8s layer later ships
 its apiserver-rewrite / token-mint module through this same rewriter seam.
 
-The working directory mounts
-from the blob store — a bind mount on the filesystem backend, the sandbox-fs design on S3 — and the
-invariant holds on every backend: the sandbox reaches only the conversation's `workspace/` subtree;
-transcripts and compaction records live above it, framework-only. The workspace is the truth and
-the container is disposable cache — carriers create-or-attach, and a reaper reclaims idle
-containers. On S3, a dedicated unprivileged s3fs daemon refreshes through its ECS metadata
-interface: a local relay forwards its opaque mount token to the sandbox proxy over the carrier's
-isolated bridge or TLS route, which mints a one-hour STS session with an inline policy for that
-conversation's `workspace/` prefix. The signed token names the current turn; every refresh checks
-that the turn remains live, so one turn can outlive any STS session while an ended turn cannot mint
-another. The token and redeemed credentials never enter an agent process.
-Carrier interface:
-`create / exec / mount / route / destroy` — a local temp-dir carrier is core's default; Docker and
-E2B implement it as extensions on the `carriers` point.
+`/workspace` is the carrier's own storage and the only copy of a conversation's files: a host
+directory an in-cluster carrier bind-mounts (local, Docker), the sandbox's own disk off-cluster
+(E2B, whose provider suspends an idle sandbox and keeps it indefinitely). A tool reaches only
+`/workspace`; transcripts, compaction records, and artifacts live in the blob store, which the
+sandbox holds no credential for — sharing a file is the sandbox PUTting it to a single-key
+presigned URL serve mints, bound to the size and sha256 an in-container preflight measured, so S3
+itself refuses any other body. Everything that touches workspace files goes through the carrier —
+a turn's tools, a surface landing an inbound attachment, a job appending a change log, the
+operator's file browser — and reclaiming a container is the carrier's own business: the Docker
+carrier stops its idle containers and any later touch starts one again (the bind mount and the
+container persist), and nothing may reclaim a container whose disk is the workspace. Carrier interface: `create / attach / exec / write / read / host` — a local
+carrier is core's default; Docker and E2B implement it as extensions on the `carriers` point.
 
 ## Extension system
 
@@ -511,15 +509,15 @@ extension involved is the Redis hub.
 | Turns, queues, jobs | DBOS coordinates through Postgres: any instance pulls. Each process's DBOS executor id is its instance id, so in-flight work is attributable to a heartbeat: the executor-recovery sweep re-dispatches workflows whose executor has no fresh `runtime_instance` row, and never touches a live peer's — recovering a live workflow would double-execute it. |
 | Live deltas | Shared hub required (Redis hub extension); terminal frames stay durable in Postgres. |
 | Blobs | S3 backend required; the filesystem backend is single-instance-only. |
-| Sandboxes | Per-instance disposable cache over durable workspace state; any instance recreates the container on demand. |
+| Sandboxes | Per-conversation, resumed across instances from the durable `sandbox_handle`; an in-cluster carrier needs its workspace root on storage every instance reaches. |
 | Surfaces, webhooks | Stateless behind a load balancer; sessions and idempotency live in Postgres. |
 
 Two invariants make this safe, and they hold even single-instance:
 
 - **At most one running turn per conversation** — the DBOS queue serializes on the conversation
   key; the transcript's monotonic seq depends on it.
-- **The workspace is the truth, the container is cache** — a sandbox may be destroyed and
-  recreated between turns from the blob store without a turn noticing beyond latency.
+- **The workspace lives in the sandbox** — the conversation row's `sandbox_handle` names the one
+  container holding it, so any instance resumes exactly that sandbox and none may destroy one.
 
 Misconfiguration fails loud at boot: the shared owner DSN must be set and no surface may claim a
 reserved onboarding route. Instances heartbeat a `runtime_instance` row so the fleet tracks its live
@@ -528,7 +526,7 @@ executors; a peer that stops heartbeating has its in-flight turns recovered by t
 ### Roles — the split that's already paid for
 
 An instance logically comprises four roles: **surfaces** (HTTP in, streams out), **workers** (turn
-workflows), **jobs** (sync, derivation, reaping), **proxy** (sandbox egress). Core runs all four in
+workflows), **jobs** (sync, derivation), **proxy** (sandbox egress). Core runs all four in
 every instance and defines no per-role deployment — mapping processes now would be speculation.
 What core does fix is the seam that makes the eventual split free: **roles share nothing in
 memory** — cross-role communication is only Postgres/DBOS queues, the blob store, the hub, and the

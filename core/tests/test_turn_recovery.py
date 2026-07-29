@@ -14,6 +14,7 @@ import subprocess
 import sys
 import time
 from collections.abc import AsyncIterator
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -43,13 +44,9 @@ from ufo.models.interface import (
     ToolResultBlock,
 )
 from ufo.models.registry import ModelRegistry
-from ufo.sandbox.session import (
-    ExecResult,
-    ProxyEndpoint,
-    RunTokenCodec,
-    SandboxHandle,
-    SandboxSpec,
-)
+from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
+from ufo.sandbox.local import LocalCarrier
+from ufo.sandbox.session import ProxyEndpoint, RunTokenCodec
 from ufo.schema import tables
 from ufo.schema.records import TerminalFrame, Usage
 
@@ -61,11 +58,15 @@ class _WorkerCrash(BaseException):
     never finalizes the workflow — it stays PENDING and recoverable, like a killed worker."""
 
 
+HITS_LOG = "hits.log"
+
+
 @dataclass(frozen=True)
 class _CrashOnceModel:
-    """Round one calls bash; round two crashes once, then answers on recovery. The crash flag is a
-    shared one-cell list so the recovered run (a fresh client instance) sees the crash already
-    happened and answers instead of crashing again."""
+    """Round one calls bash to append a line into the workspace — the real side effect the test
+    counts to prove the recorded step is replayed, never re-run; round two crashes once, then
+    answers on recovery. The crash flag is a shared one-cell list so the recovered run (a fresh
+    client instance) sees the crash already happened and answers instead of crashing again."""
 
     crashed: list[bool]
 
@@ -84,44 +85,15 @@ class _CrashOnceModel:
             return
         yield ToolCallStart(id="c1", name="bash")
         yield ToolCallDelta(
-            id="c1", partial_json='{"command": "echo hi", "user_description": "running a check"}'
+            id="c1",
+            partial_json=json.dumps(
+                {"command": f"echo hi >> {HITS_LOG}", "user_description": "running a check"}
+            ),
         )
         yield Usage(input_tokens=2, output_tokens=2)
 
 
-@dataclass(frozen=True)
-class _CountingCarrier:
-    """Records every exec so the test can prove the round-one bash call runs exactly once across the
-    crash and the recovery."""
-
-    execs: list[tuple[str, ...]]
-
-    async def create(self, spec: SandboxSpec) -> SandboxHandle:
-        proxy_url = f"http://{spec.run_token}:@sandbox-proxy.test"
-        return SandboxHandle(
-            conversation_id=spec.conversation_id,
-            container_id="test",
-            run_token=spec.run_token,
-            egress_env={
-                "HTTP_PROXY": proxy_url,
-                "HTTPS_PROXY": proxy_url,
-                "http_proxy": proxy_url,
-                "https_proxy": proxy_url,
-            },
-        )
-
-    async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None: ...
-
-    async def exec(
-        self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
-    ) -> ExecResult:
-        self.execs.append(tuple(argv))
-        return ExecResult(stdout="hi\n", stderr="", exit_code=0)
-
-    async def destroy(self, handle: SandboxHandle) -> None: ...
-
-
-async def _seed_turn(model: str = "claude-opus-4-8") -> tuple[UUID, UUID]:
+async def _seed_turn(model: str = "claude-opus-4-8") -> tuple[UUID, UUID, UUID]:
     workspace_id, member_id, agent_id, conversation_id, turn_id = (uuid4() for _ in range(5))
     async with workspace_tx() as connection:
         await connection.execute(
@@ -175,21 +147,26 @@ async def _seed_turn(model: str = "claude-opus-4-8") -> tuple[UUID, UUID]:
                 updated_at=sa.func.now(),
             )
         )
-    return workspace_id, turn_id
+    return workspace_id, conversation_id, turn_id
 
 
-def _install_runtime(config: Config, registry: ModelRegistry, carrier: _CountingCarrier) -> None:
+def _install_runtime(config: Config, registry: ModelRegistry, workspace_root: Path) -> None:
     loop_queue.init_runtime(
         loop_queue.Runtime(
             config=config,
             blob=FilesystemBlobStore(root=config.blob.root),
-            workspace_fs=None,
+            sandboxes=ConversationSandbox(
+                carrier=LocalCarrier(),
+                backend="local",
+                off_cluster=False,
+                image_ref=SANDBOX_IMAGE_REF,
+                proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
+                workspace_root=workspace_root,
+            ),
             hub=InProcessHub(),
-            carrier=carrier,
             cdp_provider=None,
             search_provider=None,
             connectors=ConnectorRegistry(entries={}),
-            proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
             run_tokens=RunTokenCodec(b"turn-recovery-test-secret"),
             dbos=DBOSClient(system_database_url=config.database.system_url),
             subagents=SubagentRegistry(()),
@@ -227,9 +204,14 @@ async def _await_terminal(turn_id: UUID) -> TerminalFrame:
 
 @pytest.mark.serial
 async def test_crash_mid_turn_recovers_without_re_executing_completed_work(
-    db: None, dbos_launched: Config
+    db: None, dbos_launched: Config, tmp_path: Path
 ) -> None:
-    execs: list[tuple[str, ...]] = []
+    """The bash side effect lands exactly once across the crash and the recovery: the recorded
+    round-one step replays from `operation_outputs`, never re-runs. The direct in-loop workflow
+    call makes DBOS install its process-shared thread pool as this test loop's default executor;
+    pytest-asyncio shuts the loop's default executor down at test end, which would kill that
+    shared pool and leave every later queued workflow in this process PENDING forever — so the
+    finally hands the loop a sacrificial executor to shut down instead."""
     crashed = [False]
     registry = ModelRegistry(
         specs={
@@ -244,17 +226,18 @@ async def test_crash_mid_turn_recovers_without_re_executing_completed_work(
         pricing=CORE_PRICING,
         auto_model="claude-opus-4-8",
     )
-    workspace_id, turn_id = await _seed_turn()
+    workspace_id, conversation_id, turn_id = await _seed_turn()
+    hits = tmp_path / "workspaces" / str(conversation_id) / HITS_LOG
 
     saved = loop_queue._runtime
     loop_queue.reset_runtime()
-    _install_runtime(dbos_launched, registry, _CountingCarrier(execs))
+    _install_runtime(dbos_launched, registry, tmp_path / "workspaces")
     try:
         with SetWorkflowID(str(turn_id)):
             with pytest.raises(_WorkerCrash):
                 await loop_queue.turn_workflow(str(workspace_id), str(turn_id))
 
-        assert execs == [("bash", "-lc", "echo hi")]
+        assert (await asyncio.to_thread(hits.read_text)) == "hi\n"
         assert crashed[0] is True
 
         DBOS._recover_pending_workflows(["local"])
@@ -262,7 +245,7 @@ async def test_crash_mid_turn_recovers_without_re_executing_completed_work(
 
         assert terminal.status == "done"
         assert terminal.text == "recovered"
-        assert execs == [("bash", "-lc", "echo hi")]
+        assert (await asyncio.to_thread(hits.read_text)) == "hi\n"
         assert terminal.tokens == 6
         async with workspace_tx() as connection:
             rows = (
@@ -272,6 +255,7 @@ async def test_crash_mid_turn_recovers_without_re_executing_completed_work(
             ).all()
         assert [int(row.amount) for row in rows] == [6]
     finally:
+        asyncio.get_running_loop().set_default_executor(ThreadPoolExecutor(max_workers=1))
         loop_queue._runtime.dbos.destroy()
         loop_queue.reset_runtime()
         if saved is not None:

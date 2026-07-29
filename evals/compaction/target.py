@@ -2,7 +2,9 @@
 compacts with, and the materializer that swaps a full-scale fixture window in as a conversation's
 durable transcript so a probe turn loads it and crosses the boundary for real."""
 
+import asyncio
 from dataclasses import dataclass
+from pathlib import Path
 from uuid import UUID
 
 from ufo.blob import BlobStore
@@ -28,6 +30,7 @@ class CompactionTarget:
     client: ModelClient
     model: str
     blob: BlobStore
+    workspace_root: Path
     context_window: int = DEFAULT_CONTEXT_WINDOW_TOKENS
 
     @property
@@ -58,5 +61,8 @@ class CompactionTarget:
         for path, body in files.items():
             if not path.startswith(WORKSPACE_PREFIX):
                 raise ValueError(f"offloaded file {path!r} is outside the workspace")
-            key = f"conversations/{conversation_id}/workspace/{path.removeprefix(WORKSPACE_PREFIX)}"
-            await self.blob.put(key, body.encode())
+            target = (
+                self.workspace_root / str(conversation_id) / path.removeprefix(WORKSPACE_PREFIX)
+            )
+            await asyncio.to_thread(target.parent.mkdir, parents=True, exist_ok=True)
+            await asyncio.to_thread(target.write_text, body)

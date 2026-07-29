@@ -1,9 +1,11 @@
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
 
+from ufo.blob import FilesystemBlobStore, S3BlobStore
 from ufo.connectors import CliCredential, ForwardedResponse
 from ufo.ext.loader import connector_clis
 from ufo.ext.manifest import ConnectorProvider, Manifest
@@ -20,6 +22,7 @@ from ufo.sandbox.proxy.rules import (
     MeterRule,
     ScopeRule,
     connector_transfer_hosts,
+    derive_artifact_store_rules,
     derive_cli_rules,
     derive_grant_rules,
     derive_manifest_rules,
@@ -38,6 +41,36 @@ def test_manifest_derives_public_internet_only_when_declared() -> None:
     open_ = Manifest(name="open", version="0", sandbox_internet=True)
     assert derive_manifest_rules((closed,)) == ()
     assert derive_manifest_rules((closed, open_)) == (InternetRule(),)
+
+
+async def test_artifact_store_rules_scope_the_s3_host_exactly_and_meter_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sharing a file is the sandbox PUTting it to a presigned URL, so the store's host must be
+    admitted by an exact scope: an agent narrowed off the public internet still shares files, and
+    only an exactly-scoped host is tunnelled opaquely, which a query-signed request needs. Nothing
+    is injected — the URL carries its own authority."""
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "rules-test")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "rules-test")
+    monkeypatch.delenv("AWS_PROFILE", raising=False)
+    store = S3BlobStore(bucket="ufo-blobs", region="us-west-2")
+    host = await store.put_host()
+
+    rules = await derive_artifact_store_rules(store)
+
+    assert host == "ufo-blobs.s3.us-west-2.amazonaws.com"
+    assert rules == (
+        ScopeRule(allowed_hosts=frozenset({host})),
+        MeterRule(host=host, dimension=REQUEST_METER_DIMENSION),
+    )
+
+
+async def test_artifact_store_rules_admit_nothing_for_the_filesystem_backend(
+    tmp_path: Path,
+) -> None:
+    """No URL to sign and no host to reach: a share on the filesystem backend streams out through
+    the carrier, so it opens no egress at all."""
+    assert await derive_artifact_store_rules(FilesystemBlobStore(root=tmp_path)) == ()
 
 
 def test_unknown_model_has_no_host() -> None:

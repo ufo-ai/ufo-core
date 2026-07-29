@@ -64,7 +64,6 @@ from ufo.indexing import EmbedClient, IndexBackend
 from ufo.jobs import (
     JobRunner,
     PageChangeRunner,
-    SandboxReaper,
     TurnDispatcher,
     bindings_from,
     core_jobs,
@@ -84,9 +83,13 @@ from ufo.runtime_instance import (
     Heartbeat,
     record_fleet_seat,
 )
-from ufo.sandbox.fs_creds import SandboxFsCredentialMinter, sandbox_fs_minter
+from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.sandbox.local import LocalCarrier
-from ufo.sandbox.proxy.rules import connector_transfer_hosts, derive_manifest_rules
+from ufo.sandbox.proxy.rules import (
+    connector_transfer_hosts,
+    derive_artifact_store_rules,
+    derive_manifest_rules,
+)
 from ufo.sandbox.proxy.server import EgressProxy, PerAgentRules, generate_ca
 from ufo.sandbox.session import EGRESS_CA_CERT_ENV, Carrier, ProxyEndpoint, RunTokenCodec
 from ufo.schema.records import DBOS_APP_NAME, DBOS_APP_VERSION, DBOS_MAX_EXECUTOR_THREADS
@@ -156,26 +159,30 @@ def run() -> None:
     artifact_secret = os.environ.get(config.artifacts.token_secret_env, "")
     hub = _select_hub(config, manifests)
     dbos_client = DBOSClient(system_database_url=config.database.system_url)
-    carrier = _select_carrier(config, manifests)
+    carrier, carrier_off_cluster = _select_carrier(config, manifests)
     registry = model_registry(config, manifests)
     embed = embed_backend(manifests, config.memory.embed_backend, credentials)
     index = index_backend(manifests, config.memory.index_backend, credentials)
     memory = memory_search(manifests, credentials, index, embed)
     connectors = _connector_registry(config, manifests, credentials)
-    workspace_fs = sandbox_fs_minter(config.blob)
     run_tokens = RunTokenCodec.from_env()
     runtime = Runtime(
         config=config,
         blob=blob,
-        workspace_fs=workspace_fs,
+        sandboxes=ConversationSandbox(
+            carrier=carrier,
+            backend=config.sandbox.backend,
+            off_cluster=carrier_off_cluster,
+            image_ref=SANDBOX_IMAGE_REF,
+            proxy=_proxy_endpoint(
+                config, manifests, credentials, registry.pricing, run_tokens, blob
+            ),
+            workspace_root=config.sandbox.workspace_root,
+        ),
         hub=hub,
-        carrier=carrier,
         cdp_provider=_select_cdp_provider(config, manifests, credentials),
         search_provider=_select_search_provider(config, manifests, credentials),
         connectors=connectors,
-        proxy=_proxy_endpoint(
-            config, manifests, credentials, registry.pricing, run_tokens, workspace_fs
-        ),
         run_tokens=run_tokens,
         dbos=dbos_client,
         subagents=SubagentRegistry((*CORE_SUBAGENT_PROFILES, *turn_subagents(manifests))),
@@ -243,6 +250,7 @@ def run() -> None:
         manifests,
         credentials,
         blob,
+        runtime.sandboxes,
         hub,
         dbos_client,
         artifact_secret,
@@ -301,8 +309,8 @@ def _launch_jobs(
     sync_driver: SyncDriver,
     page_feed: CorePageFeed,
 ) -> None:
-    """Register this workspace's jobs — core's own (the source sync driver, the turn dispatcher
-    that recovers queued turns and re-admits parked turns, and the sandbox reaper) plus every
+    """Register this workspace's jobs — core's own (the source sync driver and the turn dispatcher
+    that recovers queued turns and re-admits parked turns) plus every
     installed extension's (the memory extension's memory-index and page-index jobs among them) — as
     DBOS schedules and one-shot enqueues, after
     launch so the system store is live. Registration is the synchronous DBOS API (off the loop, at
@@ -320,6 +328,7 @@ def _launch_jobs(
         index=runtime.index,
         embed=runtime.embed,
         blob=runtime.blob,
+        sandboxes=runtime.sandboxes,
         registry=runtime.registry,
     )
     bindings = bindings_from(
@@ -327,7 +336,6 @@ def _launch_jobs(
         core_jobs(
             sync_driver,
             TurnDispatcher(client=runtime.dbos),
-            SandboxReaper(carrier=runtime.carrier, backend=runtime.config.sandbox.backend),
             page_change_runner,
         ),
     )
@@ -338,16 +346,17 @@ def _launch_jobs(
         embed=runtime.embed,
         pages=page_feed,
         blob=runtime.blob,
+        sandboxes=runtime.sandboxes,
         registry=runtime.registry,
     ).launch()
 
 
-def _select_carrier(config: Config, manifests: tuple[Manifest, ...]) -> Carrier:
+def _select_carrier(config: Config, manifests: tuple[Manifest, ...]) -> tuple[Carrier, bool]:
     """The one sandbox backend this process runs, chosen by `[sandbox] backend`: core's default
     `local` carrier plus every carrier an extension contributes via its `carriers` Manifest point
     (`docker`, `e2b`, a remote runner). An extension name that collides with the built-in or another
     extension fails loud, and a backend name no carrier registers fails loud — so the selected name
-    resolves to exactly one factory, built once here and held as `Runtime.carrier`. A remote
+    resolves to exactly one factory, built once here and held on `Runtime.sandboxes`. A remote
     backend with no `[sandbox] proxy_public_url` fails loud too: its sandbox could reach neither the
     process-local proxy nor a metered egress route, so
     it would run open — never a silent default."""
@@ -382,7 +391,7 @@ def _select_carrier(config: Config, manifests: tuple[Manifest, ...]) -> Carrier:
                 "[sandbox] proxy_public_url must be an HTTPS URL so its run token is encrypted "
                 "in transit"
             )
-    return factory()
+    return factory(), config.sandbox.backend in off_cluster
 
 
 def _source_backends(manifests: tuple[Manifest, ...]) -> dict[str, SourceBackend]:
@@ -748,6 +757,7 @@ def _mount_shared_surfaces(
     manifests: tuple[Manifest, ...],
     credentials: CredentialStore | None,
     blob: BlobStore,
+    sandboxes: ConversationSandbox,
     hub: Hub,
     dbos_client: DBOSClient,
     artifact_secret: str,
@@ -775,6 +785,7 @@ def _mount_shared_surfaces(
             workspace_id=workspace_id,
             surface=surface,
             blob=blob,
+            _sandboxes=sandboxes,
             _admitter=MemberAdmission(admission=admission, workspace_id=workspace_id),
             _tailer=tailer,
             _credentials=credentials,
@@ -860,7 +871,7 @@ def _proxy_endpoint(
     credentials: CredentialStore | None,
     pricing: Pricing,
     run_tokens: RunTokenCodec,
-    workspace_fs: SandboxFsCredentialMinter | None = None,
+    blob: BlobStore,
 ) -> ProxyEndpoint:
     """The egress proxy endpoint the carrier threads into every sandbox, in the shape this deploy
     takes. With `[sandbox] proxy_public_url` set (hosted, multi-node) the proxy runs as a standalone
@@ -871,9 +882,7 @@ def _proxy_endpoint(
     in-process, minting its own ephemeral CA — no shared trust material to source, no separate
     service to run alongside."""
     if config.sandbox.proxy_public_url is None:
-        return _local_egress_proxy(
-            config, manifests, credentials, pricing, run_tokens, workspace_fs
-        )
+        return _local_egress_proxy(config, manifests, credentials, pricing, run_tokens, blob)
     ca_cert = os.environ.get(EGRESS_CA_CERT_ENV)
     if not ca_cert:
         raise RuntimeError(
@@ -893,7 +902,7 @@ def _local_egress_proxy(
     credentials: CredentialStore | None,
     pricing: Pricing,
     run_tokens: RunTokenCodec,
-    workspace_fs: SandboxFsCredentialMinter | None,
+    blob: BlobStore,
 ) -> ProxyEndpoint:
     """The single-node sandbox's sole route out, run in-process on its own event loop — a
     standalone network service, not part of the turn loop, that outlives every turn for the
@@ -902,19 +911,19 @@ def _local_egress_proxy(
     `workspace_tx`, binding each request's own workspace, and authorizes each keyed-host CONNECT
     against the turn's live status. It binds `proxy_port` and carries no `public_url`: a local
     carrier forms a process-local address from the port alone."""
-    resolver = PerAgentRules(
-        base=model_rule_base(config),
-        grants=GrantStore() if credentials is not None else None,
-        credentials=credentials,
-        slots=injecting_slots(manifests),
-        internet=derive_manifest_rules(manifests),
-        transfer_hosts=connector_transfer_hosts(manifests),
-        clis=connector_clis(manifests),
-    )
     loop = asyncio.new_event_loop()
     threading.Thread(target=loop.run_forever, daemon=True).start()
 
     async def _boot() -> ProxyEndpoint:
+        resolver = PerAgentRules(
+            base=(*model_rule_base(config), *await derive_artifact_store_rules(blob)),
+            grants=GrantStore() if credentials is not None else None,
+            credentials=credentials,
+            slots=injecting_slots(manifests),
+            internet=derive_manifest_rules(manifests),
+            transfer_hosts=connector_transfer_hosts(manifests),
+            clis=connector_clis(manifests),
+        )
         ca_cert, ca_key = await generate_ca()
         return await EgressProxy(
             resolve=resolver.resolve,
@@ -923,7 +932,6 @@ def _local_egress_proxy(
             ca_key=ca_key,
             run_tokens=run_tokens,
             pricing=pricing,
-            workspace_credentials=None if workspace_fs is None else workspace_fs.refresh,
         ).start(port=config.sandbox.proxy_port)
 
     return asyncio.run_coroutine_threadsafe(_boot(), loop).result(PROXY_STARTUP_TIMEOUT_SECONDS)

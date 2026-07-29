@@ -32,13 +32,15 @@ from ufo_ext_sources.tools import (
 )
 
 from ufo.agent_scope import agent
-from ufo.blob import FilesystemBlobStore
 from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.context import JsonValue, context_for
 from ufo.ext.loader import turn_tools
 from ufo.grants import GrantStore
 from ufo.objects import UnknownObject
+from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
+from ufo.sandbox.local import LocalCarrier
+from ufo.sandbox.session import ProxyEndpoint
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience
@@ -1489,13 +1491,27 @@ async def test_alert_never_surfaces_a_member_private_page(db: None) -> None:
         assert str(private.page_id) not in turn["inbound"]
 
 
-async def _change_log(blob: FilesystemBlobStore, conversation_id: UUID, name: str) -> list[dict]:
-    """Every line of the one change log written for this binding, read back out of the blob store
-    at the key the sandbox mounts as `/workspace`."""
-    entries = await blob.list(f"conversations/{conversation_id}/workspace/{CHANGE_LOG_DIR}/{name}/")
-    assert len(entries) == 1, [entry.key for entry in entries]
-    body = (await blob.get(entries[0].key)).decode()
-    return [json.loads(line) for line in body.splitlines()]
+def _sandboxes(tmp_path) -> ConversationSandbox:
+    """The real workspace seam under the change log: a `ConversationSandbox` over the local
+    carrier, so the log lands as bytes at `tmp_path/workspaces/<conversation>/<rel>`."""
+    return ConversationSandbox(
+        carrier=LocalCarrier(),
+        backend="local",
+        off_cluster=False,
+        image_ref=SANDBOX_IMAGE_REF,
+        proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
+        workspace_root=tmp_path / "workspaces",
+    )
+
+
+async def _change_log(
+    sandboxes: ConversationSandbox, conversation_id: UUID, name: str
+) -> list[dict]:
+    """Every line of the one change log written for this binding, read back off the host directory
+    the carrier serves as `/workspace`."""
+    log_dir = sandboxes.workspace_root / str(conversation_id) / CHANGE_LOG_DIR / name
+    (entry,) = sorted(log_dir.iterdir())
+    return [json.loads(line) for line in entry.read_text().splitlines()]
 
 
 async def test_alert_counts_by_stream_and_never_truncates(db: None, tmp_path) -> None:
@@ -1507,7 +1523,7 @@ async def test_alert_counts_by_stream_and_never_truncates(db: None, tmp_path) ->
     _, projects_id = await _register(
         state, subject=SHARED_SUBJECT, owner=state.owner_id, stream="projects"
     )
-    blob = FilesystemBlobStore(root=tmp_path / "blobs")
+    sandboxes = _sandboxes(tmp_path)
     caller = state.conversation_id.hex
     with ws(state.workspace_id):
         await _apply(
@@ -1522,7 +1538,7 @@ async def test_alert_counts_by_stream_and_never_truncates(db: None, tmp_path) ->
             ),
         )
         ext = context_for(
-            NAME, DECLARED_PROVIDERS, blob=blob, invoker=_admitting(state.workspace_id)
+            NAME, DECLARED_PROVIDERS, sandboxes=sandboxes, invoker=_admitting(state.workspace_id)
         )
         changes = (
             *(_change(tasks_id, f"# task {n}", stream="tasks") for n in range(3)),
@@ -1542,7 +1558,7 @@ async def test_alert_counts_by_stream_and_never_truncates(db: None, tmp_path) ->
         assert "more" not in turn["inbound"]
         assert not any(str(change.page_id) in turn["inbound"] for change in changes)
 
-        logged = await _change_log(blob, state.conversation_id, name)
+        logged = await _change_log(sandboxes, state.conversation_id, name)
         assert f"/workspace/{CHANGE_LOG_DIR}/{name}/" in turn["inbound"]
         assert {entry["page"] for entry in logged} == {
             f"{PAGE_KIND}/{change.page_id}" for change in changes
@@ -1560,19 +1576,19 @@ async def test_change_log_replay_rewrites_rather_than_appends(db: None, tmp_path
     replayed batch overwrites one file instead of appending its pages a second time."""
     state = await _workspace()
     name, source_id = await _register(state, subject=SHARED_SUBJECT, owner=state.owner_id)
-    blob = FilesystemBlobStore(root=tmp_path / "blobs")
+    sandboxes = _sandboxes(tmp_path)
     caller = state.conversation_id.hex
     with ws(state.workspace_id):
         await _apply(_context(state, None), _subscribe_manifest(name, (caller,), shared=True))
         ext = context_for(
-            NAME, DECLARED_PROVIDERS, blob=blob, invoker=_admitting(state.workspace_id)
+            NAME, DECLARED_PROVIDERS, sandboxes=sandboxes, invoker=_admitting(state.workspace_id)
         )
         batch = PageChangeBatch(changes=tuple(_change(source_id, f"# task {n}") for n in range(6)))
         await on_page_change(HookContext(ext=ext, payload=batch))
         await on_page_change(HookContext(ext=ext, payload=batch))
 
         assert len(await _turns(state.conversation_id)) == 1
-        logged = await _change_log(blob, state.conversation_id, name)
+        logged = await _change_log(sandboxes, state.conversation_id, name)
         assert len(logged) == 6
 
 
@@ -1581,12 +1597,12 @@ async def test_change_log_omits_a_member_private_page(db: None, tmp_path) -> Non
     written to a file a subscriber who cannot read it will open."""
     state = await _workspace()
     name, source_id = await _register(state, subject=SHARED_SUBJECT, owner=state.owner_id)
-    blob = FilesystemBlobStore(root=tmp_path / "blobs")
+    sandboxes = _sandboxes(tmp_path)
     caller = state.conversation_id.hex
     with ws(state.workspace_id):
         await _apply(_context(state, None), _subscribe_manifest(name, (caller,), shared=True))
         ext = context_for(
-            NAME, DECLARED_PROVIDERS, blob=blob, invoker=_admitting(state.workspace_id)
+            NAME, DECLARED_PROVIDERS, sandboxes=sandboxes, invoker=_admitting(state.workspace_id)
         )
         shared = tuple(_change(source_id, f"# task {n}") for n in range(6))
         private = _change(source_id, "# secret", subject=member_subject(state.member_id))
@@ -1594,7 +1610,7 @@ async def test_change_log_omits_a_member_private_page(db: None, tmp_path) -> Non
             HookContext(ext=ext, payload=PageChangeBatch(changes=(*shared, private)))
         )
 
-        logged = await _change_log(blob, state.conversation_id, name)
+        logged = await _change_log(sandboxes, state.conversation_id, name)
         assert {entry["page"] for entry in logged} == {
             f"{PAGE_KIND}/{change.page_id}" for change in shared
         }
@@ -1607,12 +1623,12 @@ async def test_change_log_failure_propagates_rather_than_degrading(db: None, tmp
     a delta whose detail was dropped."""
     state = await _workspace()
     name, source_id = await _register(state, subject=SHARED_SUBJECT, owner=state.owner_id)
-    blob = FilesystemBlobStore(root=tmp_path / "blobs")
+    sandboxes = _sandboxes(tmp_path)
     caller = state.conversation_id.hex
     with ws(state.workspace_id):
         await _apply(_context(state, None), _subscribe_manifest(name, (caller,), shared=True))
         ext = context_for(
-            NAME, DECLARED_PROVIDERS, blob=blob, invoker=_admitting(state.workspace_id)
+            NAME, DECLARED_PROVIDERS, sandboxes=sandboxes, invoker=_admitting(state.workspace_id)
         )
         async with workspace_tx() as connection:
             await connection.execute(
@@ -1627,8 +1643,8 @@ async def test_change_log_failure_propagates_rather_than_degrading(db: None, tmp
         assert await _turns(state.conversation_id) == []
 
 
-async def test_alert_degrades_to_counts_when_no_blob_is_wired(db: None) -> None:
-    """No blob store means no change log; the alert still reports what changed and names the
+async def test_alert_degrades_to_counts_when_no_sandbox_is_wired(db: None) -> None:
+    """No workspace seam means no change log; the alert still reports what changed and names the
     object_list route rather than losing the turn to plumbing."""
     state = await _workspace()
     name, source_id = await _register(state, subject=SHARED_SUBJECT, owner=state.owner_id)

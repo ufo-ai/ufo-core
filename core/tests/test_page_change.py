@@ -29,14 +29,12 @@ from ufo.jobs import (
     PAGE_CHANGE_CURSOR_KEY,
     PAGE_CHANGE_JOB,
     PageChangeRunner,
-    SandboxReaper,
     TurnDispatcher,
     bindings_from,
     core_jobs,
 )
 from ufo.models.catalog import CORE_PRICING
 from ufo.models.registry import ModelRegistry
-from ufo.sandbox.local import LocalCarrier
 from ufo.schema import tables
 from ufo.sources.sync import CorePageFeed, FolderSource, SyncDriver
 from ufo.subjects import SHARED_SUBJECT
@@ -168,7 +166,6 @@ def test_each_page_change_consumer_registers_as_its_own_job(tmp_path: object) ->
     specs = core_jobs(
         SyncDriver(backends={"folder": FolderSource()}, blob=blob, postgres=False),
         TurnDispatcher(client=None),
-        SandboxReaper(carrier=LocalCarrier(), backend="local"),
         runner,
     )
     page_change = [spec.name for spec in specs if spec.name.startswith(f"{PAGE_CHANGE_JOB}:")]

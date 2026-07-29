@@ -106,6 +106,7 @@ def _lab(
         client=ScriptedSummaryModel(summary),
         model="claude-opus-4-8",
         blob=FilesystemBlobStore(root=blob_root),
+        workspace_root=blob_root / "workspaces",
         context_window=context_window,
     )
 
@@ -462,11 +463,10 @@ async def test_behavior_probes_grade_answers_and_reread_trajectories(
     assert stored.seq == 1
     assert stored.messages == case.messages
     reference_fact = next(fact for fact in case.facts if fact.kind == "reference")
-    key = (
-        f"conversations/{conversation_id}/workspace/"
-        f"{reference_fact.path.removeprefix('/workspace/')}"
+    materialized = (
+        lab.workspace_root / str(conversation_id) / reference_fact.path.removeprefix("/workspace/")
     )
-    assert (await lab.blob.get(key)).decode() == reference_fact.body
+    assert materialized.read_text() == reference_fact.body
 
 
 async def test_behavior_probes_fail_when_compaction_never_fired(

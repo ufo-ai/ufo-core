@@ -39,7 +39,6 @@ from ufo.loop.subagents import subagent_system_prompt
 from ufo.objects import UnknownObject
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import (
-    MountSpec,
     ProxyEndpoint,
     SandboxSession,
     SandboxSpec,
@@ -344,7 +343,7 @@ async def _local_session(tmp_path) -> SandboxSession:
         SandboxSpec(
             conversation_id=uuid4(),
             image_ref="ufo-sandbox:latest",
-            mount=MountSpec(kind="filesystem", host_path=str(tmp_path / "workspace")),
+            workspace_host_path=str(tmp_path / "workspace"),
             proxy=ProxyEndpoint(port=9999, ca_cert="CA-PEM"),
             run_token="run-token",
         )

@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from uuid import UUID
@@ -12,7 +11,7 @@ from dbos import DBOS, DBOSClient, EnqueueOptions, Queue
 
 from ufo.agent_scope import agent
 from ufo.audience import Audience, parse_audience
-from ufo.blob import BlobStore, FilesystemBlobStore, S3BlobStore
+from ufo.blob import BlobStore
 from ufo.browser import CdpProvider
 from ufo.config import Config
 from ufo.connectors import CliCredential, ConnectorRegistry
@@ -49,24 +48,12 @@ from ufo.loop.transcript import Transcript
 from ufo.memory import MemorySearch
 from ufo.models.registry import ModelRegistry
 from ufo.o11y import log, warn
-from ufo.sandbox.fs_creds import (
-    SandboxFsCredentialMinter,
-    ensure_workspace_marker,
-    workspace_key_prefix,
-)
+from ufo.sandbox.conversation import ConversationSandbox
 from ufo.sandbox.session import (
-    SANDBOX_GID,
-    SANDBOX_UID,
-    Carrier,
-    MountSpec,
-    ProxyEndpoint,
     RunToken,
     RunTokenCodec,
     SandboxHandle,
     SandboxSession,
-    SandboxSpec,
-    format_sandbox_handle,
-    sandbox_handle_id,
 )
 from ufo.schema import tables
 from ufo.schema.records import (
@@ -85,7 +72,6 @@ from ufo.tools.context import Spawn
 from ufo.tools.registry import ToolRegistry
 from ufo.workspace import ws
 
-SANDBOX_IMAGE_REF = "ufo-sandbox:latest"
 GIT_PROXY_AUTH_CONFIG = (("http.proxyAuthMethod", "basic"),)
 TURN_QUEUE_POLL_SECONDS = 0.1
 FAILED_TERMINAL_RETRY_SECONDS = 1.0
@@ -102,13 +88,11 @@ TURN_QUEUE = Queue(
 class Runtime:
     config: Config
     blob: BlobStore
-    workspace_fs: SandboxFsCredentialMinter | None
+    sandboxes: ConversationSandbox
     hub: Hub
-    carrier: Carrier
     cdp_provider: CdpProvider | None
     search_provider: SearchProvider | None
     connectors: ConnectorRegistry
-    proxy: ProxyEndpoint
     run_tokens: RunTokenCodec
     dbos: DBOSClient
     subagents: SubagentRegistry
@@ -307,11 +291,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
         grants = GrantStore() if runtime.credentials is not None else None
         clis = connector_clis(runtime.manifests)
         handle = await _open_sandbox(
-            runtime.carrier,
-            runtime.config.sandbox.backend,
-            runtime.blob,
-            runtime.workspace_fs,
-            runtime.proxy,
+            runtime.sandboxes,
             runtime.run_tokens,
             turn,
             grants,
@@ -319,7 +299,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             runtime.credentials,
             injecting_slots(runtime.manifests),
         )
-        sandbox = SandboxSession(carrier=runtime.carrier, handle=handle)
+        sandbox = SandboxSession(carrier=runtime.sandboxes.carrier, handle=handle)
         sandbox_authorizer = SandboxAuthorizer(
             sandbox=sandbox,
             run_tokens=runtime.run_tokens,
@@ -500,11 +480,7 @@ async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, Audience]:
 
 
 async def _open_sandbox(
-    carrier: Carrier,
-    backend: str,
-    blob: BlobStore,
-    workspace_fs: SandboxFsCredentialMinter | None,
-    proxy: ProxyEndpoint,
+    sandboxes: ConversationSandbox,
     run_tokens: RunTokenCodec,
     turn: Turn,
     grants: GrantStore | None,
@@ -512,13 +488,8 @@ async def _open_sandbox(
     credentials: CredentialStore | None,
     slots: tuple[CredentialSlot, ...],
 ) -> SandboxHandle:
-    """Create-or-resume the conversation's sandbox and keep its durable handle on the conversation
-    row. A prior process's handle survives there, so a fresh serve reattaches the same sandbox from
-    the stored id (seeded into `resume_id`) rather than stranding it; a row with no handle — or one
-    another backend wrote — creates fresh. The returned handle's id is written back as
-    `<backend>:<id>` only when it differs from what the row already holds, so a resume (same id)
-    costs no write and a fresh create (or an overwrite of a reaped id) persists once — the reaper
-    and the next process read this same column.
+    """Open the conversation's sandbox for this turn, under the turn's signed run token and the env
+    its credentials derive.
 
     git is the one sandbox client that will not present the run token unprompted: its default
     `http.proxyAuthMethod=anyauth` waits for a `407` challenge the proxy never sends, so its CONNECT
@@ -527,35 +498,21 @@ async def _open_sandbox(
     whether or not it holds a grant or a key. A workspace holding a git credential adds that host's
     extraheader to the same config, so `git clone` and `git push` authenticate off the sentinel the
     proxy swaps."""
-    stored = await _stored_sandbox_handle(turn.conversation_id, turn.workspace_id)
-    resume_id = None if stored is None else sandbox_handle_id(backend, stored)
     run = RunToken(workspace_id=turn.workspace_id, turn_id=turn.id)
-    handle = await carrier.create(
-        SandboxSpec(
-            conversation_id=turn.conversation_id,
-            image_ref=SANDBOX_IMAGE_REF,
-            mount=await _workspace_mount(
-                blob, workspace_fs, turn.conversation_id, run, fresh_sandbox=resume_id is None
+    return await sandboxes.open(
+        turn.conversation_id,
+        run_tokens.encode(run),
+        {
+            **_git_config_env(
+                (
+                    *GIT_PROXY_AUTH_CONFIG,
+                    *await _git_credential_config(credentials, slots, turn.workspace_id),
+                )
             ),
-            proxy=proxy,
-            run_token=run_tokens.encode(run),
-            resume_id=resume_id,
-            env={
-                **_git_config_env(
-                    (
-                        *GIT_PROXY_AUTH_CONFIG,
-                        *await _git_credential_config(credentials, slots, turn.workspace_id),
-                    )
-                ),
-                **await _grant_cli_env(grants, clis, None, turn.id),
-                **await _keyed_provider_env(credentials, slots, turn.workspace_id),
-            },
-        )
+            **await _grant_cli_env(grants, clis, None, turn.id),
+            **await _keyed_provider_env(credentials, slots, turn.workspace_id),
+        },
     )
-    persisted = format_sandbox_handle(backend, handle.container_id)
-    if persisted != stored:
-        await _persist_sandbox_handle(turn.conversation_id, turn.workspace_id, persisted)
-    return handle
 
 
 def _git_config_env(settings: tuple[tuple[str, str], ...]) -> dict[str, str]:
@@ -714,83 +671,3 @@ async def _grant_cli_env(
         if accounts:
             env[cli.env] = grant_sentinel(accounts[0])
     return env
-
-
-async def _stored_sandbox_handle(conversation_id: UUID, workspace_id: UUID) -> str | None:
-    async with workspace_tx() as connection:
-        return (
-            await connection.execute(
-                sa.select(tables.conversation.c.sandbox_handle).where(
-                    tables.conversation.c.id == conversation_id,
-                    tables.conversation.c.workspace_id == workspace_id,
-                )
-            )
-        ).scalar_one()
-
-
-async def _persist_sandbox_handle(conversation_id: UUID, workspace_id: UUID, handle: str) -> None:
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.update(tables.conversation)
-            .values(sandbox_handle=handle)
-            .where(
-                tables.conversation.c.id == conversation_id,
-                tables.conversation.c.workspace_id == workspace_id,
-            )
-        )
-
-
-async def _workspace_mount(
-    blob: BlobStore,
-    workspace_fs: SandboxFsCredentialMinter | None,
-    conversation_id: UUID,
-    run: RunToken,
-    fresh_sandbox: bool,
-) -> MountSpec:
-    """The workspace is only the conversation's `workspace/` subtree — a sibling of the transcript
-    under `conversations/<id>/`, never the transcript itself. The filesystem backend reaches it as a
-    host bind mount; the S3 backend mounts it over s3fs with an STS credential scoped to the
-    `workspace/` prefix. Neither backend lets the sandbox reach the transcript above it.
-
-    filesystem: a host-path carrier (the core `local` carrier's cwd, the Docker carrier's bind
-    mount) reaches the subtree as an absolute host path — Docker reads a relative `-v` source as a
-    named volume, not a host directory, and a relative blob root (the default `./blobs`) would fail
-    at container create. A container runs as the non-root `sandbox` user, so the mount must be owned
-    by it or the file tools cannot write: serve creates the dir under its own uid, and when it runs
-    as root (the bundle default) it holds CAP_CHOWN and hands the dir to the sandbox user. Off root
-    — dev, where the mount is not uid-enforced — the chown is skipped.
-
-    s3: issue an opaque turn-bound token for `conversations/<id>/workspace/*` and carry it, with the
-    prefix and sandbox-reachable endpoint, into the MountSpec. The dedicated s3fs daemon redeems it
-    through the sandbox proxy initially and whenever its short-lived credential nears expiry."""
-    match blob:
-        case FilesystemBlobStore():
-            host_path = (blob.root / "conversations" / str(conversation_id) / "workspace").resolve()
-            await asyncio.to_thread(host_path.mkdir, parents=True, exist_ok=True)
-            if os.geteuid() == 0:
-                await asyncio.to_thread(os.chown, host_path, SANDBOX_UID, SANDBOX_GID)
-            return MountSpec(kind="filesystem", host_path=str(host_path))
-        case S3BlobStore():
-            if workspace_fs is None:
-                raise RuntimeError(
-                    "the s3 blob backend requires the sandbox-fs credential minter "
-                    "(set blob.sts_role_arn, blob.s3_url)"
-                )
-            # The directory marker is this backend's form of the filesystem branch's mkdir.
-            # Only a conversation's first sandbox can face an empty prefix — the marker outlives
-            # every later mount — so a resume skips the write.
-            if fresh_sandbox:
-                await ensure_workspace_marker(blob, conversation_id)
-            return MountSpec(
-                kind="s3",
-                bucket=workspace_fs.bucket,
-                key_prefix=workspace_key_prefix(conversation_id),
-                credential_token=workspace_fs.issue(conversation_id, run),
-                s3_url=workspace_fs.s3_url,
-                region=workspace_fs.region,
-                path_style=workspace_fs.path_style,
-            )
-        case _:
-            raise RuntimeError(
-                f"unsupported blob backend for the sandbox workspace: {type(blob).__name__}"
-            )

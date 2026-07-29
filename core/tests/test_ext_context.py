@@ -19,9 +19,10 @@ from ufo.ext.context import (
 from ufo.ext.surface import (
     SurfaceInstallationConflict,
     UndeclaredSurface,
-    workspace_key,
 )
-from ufo.sandbox.fs_creds import workspace_key_prefix
+from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
+from ufo.sandbox.local import LocalCarrier
+from ufo.sandbox.session import ProxyEndpoint
 from ufo.schema import tables
 from ufo.sources.sync import CorePageFeed
 from ufo.subjects import SHARED_SUBJECT, member_subject
@@ -439,27 +440,39 @@ async def _conversation(workspace_id: UUID) -> UUID:
     return conversation_id
 
 
-def _files(blob: FilesystemBlobStore) -> ConversationFiles:
-    context = context_for("sample", frozenset(), blob=blob)
+def _sandboxes(root: Path) -> ConversationSandbox:
+    return ConversationSandbox(
+        carrier=LocalCarrier(),
+        backend="local",
+        off_cluster=False,
+        image_ref=SANDBOX_IMAGE_REF,
+        proxy=ProxyEndpoint(port=1, ca_cert="test-ca"),
+        workspace_root=root,
+    )
+
+
+def _files(sandboxes: ConversationSandbox) -> ConversationFiles:
+    context = context_for("sample", frozenset(), sandboxes=sandboxes)
     assert context.files is not None
     return context.files
 
 
-async def test_conversation_files_write_lands_under_the_mounted_prefix(
+async def test_conversation_files_write_lands_in_the_conversation_workspace(
     db: None, tmp_path: Path
 ) -> None:
     """What an off-turn handler writes is what the agent's next turn sees: the returned path is the
-    container path, and the key it landed at is inside the one prefix the sandbox mounts."""
+    container path, and the bytes land in the conversation's workspace directory the carrier
+    serves."""
     workspace_id = await _workspace()
-    blob = FilesystemBlobStore(root=tmp_path)
+    root = tmp_path / "workspaces"
     with ws(workspace_id):
         conversation_id = await _conversation(workspace_id)
-        path = await _files(blob).write(conversation_id, ".sources/acme/now.jsonl", b"{}\n")
+        path = await _files(_sandboxes(root)).write(
+            conversation_id, ".sources/acme/now.jsonl", b"{}\n"
+        )
 
     assert path == "/workspace/.sources/acme/now.jsonl"
-    key = workspace_key(conversation_id, ".sources/acme/now.jsonl")
-    assert key.startswith(f"{workspace_key_prefix(conversation_id)}/")
-    assert await blob.get(key) == b"{}\n"
+    assert (root / str(conversation_id) / ".sources/acme/now.jsonl").read_bytes() == b"{}\n"
 
 
 @pytest.mark.parametrize("rel", ["../messages.json.lz4", "/etc/passwd", "a/../../escape"])
@@ -467,11 +480,10 @@ async def test_conversation_files_refuse_a_path_outside_the_workspace(
     db: None, tmp_path: Path, rel: str
 ) -> None:
     workspace_id = await _workspace()
-    blob = FilesystemBlobStore(root=tmp_path)
     with ws(workspace_id):
         conversation_id = await _conversation(workspace_id)
         with pytest.raises(ValueError):
-            await _files(blob).write(conversation_id, rel, b"x")
+            await _files(_sandboxes(tmp_path / "workspaces")).write(conversation_id, rel, b"x")
 
 
 async def test_conversation_files_refuse_another_workspaces_conversation(
@@ -479,32 +491,32 @@ async def test_conversation_files_refuse_another_workspaces_conversation(
 ) -> None:
     """The conversation is resolved through `workspace_tx`, so one tenant's handler cannot write a
     file into another tenant's agent workspace even holding its id."""
-    blob = FilesystemBlobStore(root=tmp_path)
+    root = tmp_path / "workspaces"
     other = await _workspace()
     with ws(other):
         foreign = await _conversation(other)
     with ws(await _workspace()):
         with pytest.raises(ValueError):
-            await _files(blob).write(foreign, "note.txt", b"x")
-    assert not await blob.exists(workspace_key(foreign, "note.txt"))
+            await _files(_sandboxes(root)).write(foreign, "note.txt", b"x")
+    assert not (root / str(foreign) / "note.txt").exists()
 
 
 async def test_conversation_files_prune_keeps_the_newest(db: None, tmp_path: Path) -> None:
     """An unattended writer is bounded: prune keeps the newest `keep` entries under the prefix and
     drops the rest, and never reaches a sibling directory."""
     workspace_id = await _workspace()
-    blob = FilesystemBlobStore(root=tmp_path)
+    root = tmp_path / "workspaces"
     with ws(workspace_id):
         conversation_id = await _conversation(workspace_id)
-        files = _files(blob)
+        files = _files(_sandboxes(root))
         for minute in range(5):
             await files.write(conversation_id, f"log/2026-07-26T00:0{minute}.jsonl", b"{}\n")
         await files.write(conversation_id, "log-sibling/keep.jsonl", b"{}\n")
         await files.prune(conversation_id, "log", keep=2)
 
-    remaining = await blob.list(f"{workspace_key_prefix(conversation_id)}/log/")
-    assert [entry.key.rsplit("/", 1)[-1] for entry in remaining] == [
+    log_dir = root / str(conversation_id) / "log"
+    assert sorted(entry.name for entry in log_dir.iterdir()) == [
         "2026-07-26T00:03.jsonl",
         "2026-07-26T00:04.jsonl",
     ]
-    assert await blob.exists(workspace_key(conversation_id, "log-sibling/keep.jsonl"))
+    assert (root / str(conversation_id) / "log-sibling/keep.jsonl").exists()

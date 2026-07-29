@@ -20,6 +20,9 @@ from ufo.ext.manifest import SubagentProfile
 from ufo.ext.surface import SurfaceContext
 from ufo.hub import InProcessHub
 from ufo.loop.subagents import SubagentRegistry, Subagents
+from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
+from ufo.sandbox.local import LocalCarrier
+from ufo.sandbox.session import ProxyEndpoint
 from ufo.scheduling import ScheduledTask
 from ufo.schema import tables
 from ufo.schema.records import Turn
@@ -65,6 +68,14 @@ def _context(workspace_id: UUID, surface: str) -> SurfaceContext:
         workspace_id=workspace_id,
         surface=surface,
         blob=FilesystemBlobStore(root=Path()),
+        _sandboxes=ConversationSandbox(
+            carrier=LocalCarrier(),
+            backend="local",
+            off_cluster=False,
+            image_ref=SANDBOX_IMAGE_REF,
+            proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
+            workspace_root=Path("workspaces"),
+        ),
         _admitter=MemberAdmission(
             workspace_id=workspace_id,
             admission=Admission(dbos=_StubDbos(), durable_surfaces=frozenset()),

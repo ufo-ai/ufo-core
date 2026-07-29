@@ -95,7 +95,6 @@ from ufo.sdk.objects import (
 )
 from ufo.sdk.sandbox import (
     WORKSPACE_DIR,
-    BlobStore,
     CarrierSpec,
     ExecResult,
     SandboxHandle,
@@ -1008,9 +1007,9 @@ class SampleCarrier:
     manifest-contributed carrier to choose. It implements the whole Carrier protocol without a real
     container: `exec` echoes the argv it received (so a selection test can prove the carrier it got
     is this one), `write` keeps the bytes it was handed under their path (so a test reads back what
-    core copied in), `export` copies the requested path into the blob store, and create/destroy are
-    inert. It proves the `carriers` seam — that core selects an extension's carrier — never a real
-    sandbox; the Docker and e2b carriers keep that proof."""
+    core copied in), `read` streams those bytes back, and `create` is inert. It proves the
+    `carriers` seam — that core selects an extension's carrier — never a real sandbox; the Docker
+    and e2b carriers keep that proof."""
 
     def __init__(self) -> None:
         self.written: dict[str, bytes] = {}
@@ -1022,6 +1021,15 @@ class SampleCarrier:
             run_token=spec.run_token,
         )
 
+    async def attach(self, spec: SandboxSpec) -> SandboxHandle | None:
+        if spec.resume_id is None:
+            return None
+        return SandboxHandle(
+            conversation_id=spec.conversation_id,
+            container_id=spec.resume_id,
+            run_token=spec.run_token,
+        )
+
     async def exec(
         self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
     ) -> ExecResult:
@@ -1030,11 +1038,10 @@ class SampleCarrier:
     async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None:
         self.written[path] = content
 
-    async def export(self, handle: SandboxHandle, path: str, blob: BlobStore, key: str) -> None:
-        await blob.put(key, path.encode())
-
-    async def destroy(self, handle: SandboxHandle) -> None:
-        return None
+    async def read(self, handle: SandboxHandle, path: str) -> AsyncIterator[bytes]:
+        if path not in self.written:
+            raise FileNotFoundError(path)
+        yield self.written[path]
 
     async def host(self, handle: SandboxHandle, port: int) -> str:
         return f"{CARRIER_CONTAINER}:{port}"

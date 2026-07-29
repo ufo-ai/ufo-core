@@ -36,9 +36,6 @@ class _UntouchedCarrier:
     ) -> ExecResult:
         raise AssertionError
 
-    async def destroy(self, handle: SandboxHandle) -> None:
-        raise AssertionError
-
 
 async def _unavailable_spawn(
     profile: str,

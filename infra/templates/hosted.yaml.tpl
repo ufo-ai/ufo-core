@@ -197,9 +197,6 @@ spec:
             - name: UFO_TOKEN_SECRET
               valueFrom:
                 secretKeyRef: {name: ufo-platform-secrets, key: UFO_TOKEN_SECRET}
-            - name: UFO_SANDBOX_FS_TOKEN_SECRET
-              valueFrom:
-                secretKeyRef: {name: ufo-serve, key: UFO_SANDBOX_FS_TOKEN_SECRET}
             # The stable platform CA the proxy signs every per-host sandbox leaf from.
             - name: UFO_EGRESS_CA_CERT
               valueFrom:
@@ -326,9 +323,6 @@ spec:
             - name: UFO_ARTIFACT_TOKEN_SECRET
               valueFrom:
                 secretKeyRef: {name: ufo-serve, key: UFO_ARTIFACT_TOKEN_SECRET}
-            - name: UFO_SANDBOX_FS_TOKEN_SECRET
-              valueFrom:
-                secretKeyRef: {name: ufo-serve, key: UFO_SANDBOX_FS_TOKEN_SECRET}
             # The RLS-bypassing owner DSN owner_tx enumerates every workspace through for the
             # fleet-wide job sweeps — the same secret the migrate Job + shared proxy open. Without it
             # owner_tx falls back to the RLS-subject engine and the enumeration reads an unset

@@ -1,9 +1,13 @@
 import asyncio
+from base64 import b64encode
 from collections.abc import AsyncIterator
+from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
+from httpx import AsyncClient
 
 from ufo import blob
 from ufo.blob import (
@@ -79,20 +83,6 @@ async def test_filesystem_put_file_streams_from_disk(tmp_path: Path) -> None:
     store = FilesystemBlobStore(root=tmp_path / "blobs")
     await store.put_file("artifacts/x/artifact.bin", source)
     assert await store.get("artifacts/x/artifact.bin") == payload
-
-
-async def test_filesystem_copy_duplicates_bytes(tmp_path: Path) -> None:
-    store = FilesystemBlobStore(root=tmp_path)
-    payload = bytes(range(256)) * 64
-    await store.put("workspace/report.bin", payload)
-    await store.copy("workspace/report.bin", "artifacts/x/report.bin")
-    assert await store.get("artifacts/x/report.bin") == payload
-    assert await store.get("workspace/report.bin") == payload
-
-
-async def test_filesystem_copy_missing_source_raises(tmp_path: Path) -> None:
-    with pytest.raises(BlobNotFound):
-        await FilesystemBlobStore(root=tmp_path).copy("absent", "artifacts/x/y")
 
 
 async def test_filesystem_delete_removes_and_absent_is_a_noop(tmp_path: Path) -> None:
@@ -195,32 +185,53 @@ async def test_s3_put_file_empty(s3_store: S3BlobStore, tmp_path: Path) -> None:
     assert await s3_store.get("artifacts/z/empty.bin") == b""
 
 
-async def test_s3_copy_within_bucket(s3_store: S3BlobStore) -> None:
-    await s3_store.put("workspace/report.pdf", b"report-bytes")
-    await s3_store.copy("workspace/report.pdf", "artifacts/abc/report.pdf")
-    assert await s3_store.get("artifacts/abc/report.pdf") == b"report-bytes"
+async def test_s3_presigned_put_accepts_only_the_measured_bytes(s3_store: S3BlobStore) -> None:
+    """The URL serve hands the sandbox is authority to store one measured file under one key, and
+    nothing else: the signed content length and sha256 make S3 reject a body of another size and a
+    body of another content, so the sandbox cannot substitute what it uploads and serve has nothing
+    left to verify. Run against real object storage — this is a property of the signature and of
+    the server, not of our code."""
+    payload = bytes(range(256)) * 64
+    checksum = b64encode(sha256(payload).digest()).decode()
+    url = await s3_store.presigned_put("artifacts/abc/report.bin", len(payload), checksum, 300)
+    headers = {"x-amz-checksum-sha256": checksum}
+
+    async with AsyncClient() as client:
+        accepted = await client.put(url, content=payload, headers=headers)
+        tampered = await client.put(url, content=b"z" * len(payload), headers=headers)
+        resized = await client.put(url, content=payload + b"more", headers=headers)
+
+    assert accepted.status_code == 200
+    assert tampered.status_code == 400
+    assert "XAmzContentChecksumMismatch" in tampered.text
+    assert resized.status_code == 403
+    assert "SignatureDoesNotMatch" in resized.text
+    assert await s3_store.get("artifacts/abc/report.bin") == payload
 
 
-async def test_s3_copy_missing_source_raises(s3_store: S3BlobStore) -> None:
-    with pytest.raises(BlobNotFound):
-        await s3_store.copy("absent", "artifacts/x/y")
-
-
-async def test_s3_copy_multipart_within_bucket(
-    s3_store: S3BlobStore, monkeypatch: pytest.MonkeyPatch
+async def test_s3_put_host_is_the_hostname_a_presigned_url_resolves_to(
+    s3_store: S3BlobStore,
 ) -> None:
-    """Above the single-copy ceiling the copy walks server-side UploadPartCopy ranges and completes
-    the multipart. The ceiling and part size are dropped to 5 MiB so a small object exercises the
-    path without a multi-gigabyte object; minio, like S3, still requires every part but the last to
-    be at least 5 MiB, so the two exact-5 MiB parts are valid."""
-    part = 5 * 1024 * 1024
-    monkeypatch.setattr(blob, "S3_SINGLE_COPY_MAX_BYTES", part)
-    monkeypatch.setattr(blob, "S3_COPY_PART_BYTES", part)
-    payload = bytes(range(256)) * (part // 128)
-    assert len(payload) > part
-    await s3_store.put("workspace/big.bin", payload)
-    await s3_store.copy("workspace/big.bin", "artifacts/big/big.bin")
-    assert await s3_store.get("artifacts/big/big.bin") == payload
+    """The proxy admits `put_host()` exactly, so a URL that resolves anywhere else is refused at
+    CONNECT. Reading the host off a signed URL is what keeps the rule and the URL from drifting
+    apart over addressing style or region — and it must be the bare hostname, since the proxy's
+    CONNECT parser splits the port off before matching; this fixture's endpoint carries one, so it
+    proves the port never leaks into the rule."""
+    url = await s3_store.presigned_put("artifacts/abc/host.bin", 1, "x" * 44, 60)
+    host = await s3_store.put_host()
+    assert urlsplit(url).hostname == host
+    assert ":" not in host
+
+
+async def test_s3_presigned_put_signs_v4_with_both_measurements(s3_store: S3BlobStore) -> None:
+    """Left to botocore's defaults a presigned S3 URL is SigV2, which the deploy's temporary
+    credentials cannot authorize; and without both measurements in the signed headers the sandbox
+    could upload anything under the key. Assert the query, not the client's reported config — the
+    client reports `s3v4` either way."""
+    url = await s3_store.presigned_put("artifacts/abc/signed.bin", 7, "y" * 44, 60)
+    query = parse_qs(urlsplit(url).query)
+    assert query["X-Amz-Algorithm"] == ["AWS4-HMAC-SHA256"]
+    assert query["X-Amz-SignedHeaders"] == ["content-length;host;x-amz-checksum-sha256"]
 
 
 async def test_s3_client_is_built_once_per_loop() -> None:

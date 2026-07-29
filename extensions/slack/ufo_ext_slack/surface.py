@@ -92,9 +92,9 @@ from ufo.sdk.audience import (
 from ufo.sdk.http import JSONResponse, Request, Response
 from ufo.sdk.hub import Parked, SkillLoad, Terminal, TextDelta, ToolCall
 from ufo.sdk.o11y import log
-from ufo.sdk.sandbox import BlobStore
 from ufo.sdk.surfaces import (
     AskUserInput,
+    BlobStore,
     ConnectRequest,
     ConnectRequestInvalid,
     CredentialRequestInvalid,

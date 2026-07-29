@@ -1,7 +1,9 @@
 """The debug surface end to end through the shared-fleet mount: the `identify` gate (operator
 domain, `?ws=` re-scoping, forged/missing bearers), the cookie bind, and every read route against
-real rows and blobs — the same seam the operator hits, no runtime engine needed because the
-surface admits nothing and a completed turn tails from its durable terminal row."""
+real rows, blobs, and a real conversation sandbox — the same seam the operator hits, no runtime
+engine needed because the surface admits nothing and a completed turn tails from its durable
+terminal row. The files tab reads the live sandbox workspace through the carrier, so its proof
+seeds files by writing through the same `ConversationSandbox`."""
 
 import base64
 import hashlib
@@ -23,6 +25,9 @@ from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.hub import InProcessHub
 from ufo.models.interface import Message, TextBlock, ToolResultBlock, ToolUseBlock
+from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
+from ufo.sandbox.local import LocalCarrier
+from ufo.sandbox.session import ProxyEndpoint
 from ufo.schema import tables
 from ufo.schema.records import TerminalFrame
 from ufo.sdk.surfaces import OPERATOR_EMAIL_DOMAIN
@@ -35,6 +40,7 @@ from ufo.transcript import (
     encode,
     transcript_key,
 )
+from ufo.workspace import ws
 
 SECRET = "debug-token-secret"
 
@@ -60,15 +66,23 @@ def _mint(secret: str, workspace_id: UUID, email: str) -> str:
 @pytest.fixture
 async def debug(
     db: None, tmp_path, monkeypatch: pytest.MonkeyPatch
-) -> AsyncIterator[tuple[AsyncClient, FilesystemBlobStore]]:
+) -> AsyncIterator[tuple[AsyncClient, FilesystemBlobStore, ConversationSandbox]]:
     monkeypatch.setenv("UFO_TOKEN_SECRET", SECRET)
-    blob = FilesystemBlobStore(root=tmp_path)
+    blob = FilesystemBlobStore(root=tmp_path / "blobs")
+    sandboxes = ConversationSandbox(
+        carrier=LocalCarrier(),
+        backend="local",
+        off_cluster=False,
+        image_ref=SANDBOX_IMAGE_REF,
+        proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
+        workspace_root=tmp_path / "workspaces",
+    )
     app = FastAPI()
     _mount_shared_surfaces(
-        app, (debugger_manifest(),), None, blob, InProcessHub(), _StubDbos(), "", None
+        app, (debugger_manifest(),), None, blob, sandboxes, InProcessHub(), _StubDbos(), "", None
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="https://fleet") as client:
-        yield client, blob
+        yield client, blob, sandboxes
 
 
 async def _seed_workspace() -> tuple[UUID, UUID]:
@@ -159,7 +173,7 @@ def _auth(token: str) -> dict[str, str]:
 
 
 async def test_identify_gates_on_the_operator_domain(debug) -> None:
-    client, _ = debug
+    client, _, _ = debug
     workspace_id, _ = await _seed_workspace()
     operator = _mint(SECRET, workspace_id, f"alex@{OPERATOR_EMAIL_DOMAIN}")
     member = _mint(SECRET, workspace_id, "member@acme.com")
@@ -176,7 +190,7 @@ async def test_identify_gates_on_the_operator_domain(debug) -> None:
 
 
 async def test_ws_param_rescopes_to_any_workspace_by_uuid_or_domain(debug) -> None:
-    client, _ = debug
+    client, _, _ = debug
     operator_workspace, _ = await _seed_workspace()
     target_workspace, target_agent = await _seed_workspace()
     conversation_id = await _seed_conversation(target_workspace)
@@ -199,7 +213,7 @@ async def test_ws_param_rescopes_to_any_workspace_by_uuid_or_domain(debug) -> No
 
 
 async def test_posted_token_binds_the_cookie_and_redirects(debug) -> None:
-    client, _ = debug
+    client, _, _ = debug
     workspace_id, _ = await _seed_workspace()
     token = _mint(SECRET, workspace_id, f"alex@{OPERATOR_EMAIL_DOMAIN}")
     response = await client.post(
@@ -224,7 +238,7 @@ async def test_posted_token_binds_the_cookie_and_redirects(debug) -> None:
 async def test_query_tokens_are_never_accepted(debug) -> None:
     """The bearer never rides a URL: a `?token=` query neither authenticates a read nor binds a
     session, so access logs and histories cannot capture a working credential."""
-    client, _ = debug
+    client, _, _ = debug
     workspace_id, _ = await _seed_workspace()
     token = _mint(SECRET, workspace_id, f"alex@{OPERATOR_EMAIL_DOMAIN}")
     read = await client.get("/surface/debug/api/workspace", params={"token": token})
@@ -236,7 +250,7 @@ async def test_query_tokens_are_never_accepted(debug) -> None:
 
 
 async def test_app_page_serves_the_built_app_and_fails_loud_unbuilt(debug, monkeypatch) -> None:
-    client, _ = debug
+    client, _, _ = debug
     workspace_id, _ = await _seed_workspace()
     token = _mint(SECRET, workspace_id, f"alex@{OPERATOR_EMAIL_DOMAIN}")
     monkeypatch.setattr(debugger_surface, "APP_HTML", "<!doctype html><title>debug</title>")
@@ -249,7 +263,7 @@ async def test_app_page_serves_the_built_app_and_fails_loud_unbuilt(debug, monke
 
 
 async def test_workspace_meta_carries_the_slack_team(debug) -> None:
-    client, _ = debug
+    client, _, _ = debug
     workspace_id, agent_id = await _seed_workspace()
     async with workspace_tx() as connection:
         await connection.execute(
@@ -268,7 +282,7 @@ async def test_workspace_meta_carries_the_slack_team(debug) -> None:
 
 
 async def test_turns_and_detail_read_terminal_ledger_and_children(debug) -> None:
-    client, _ = debug
+    client, _, _ = debug
     workspace_id, agent_id = await _seed_workspace()
     conversation_id = await _seed_conversation(workspace_id)
     parent = await _seed_turn(workspace_id, conversation_id, agent_id, 1)
@@ -311,8 +325,8 @@ async def test_turns_and_detail_read_terminal_ledger_and_children(debug) -> None
     assert malformed.status_code == 404
 
 
-async def test_transcript_compactions_and_files_read_the_blobs(debug) -> None:
-    client, blob = debug
+async def test_transcript_compactions_and_files_read_the_blobs_and_the_sandbox(debug) -> None:
+    client, blob, sandboxes = debug
     workspace_id, _ = await _seed_workspace()
     conversation_id = await _seed_conversation(workspace_id)
     stored = Conversation(
@@ -339,7 +353,8 @@ async def test_transcript_compactions_and_files_read_the_blobs(debug) -> None:
             compaction_key(conversation_id, 1, half),
             lz4.frame.compress(payload.model_dump_json().encode()),
         )
-    await blob.put(f"conversations/{conversation_id}/workspace/report/out.txt", b"hello world")
+    with ws(workspace_id):
+        await sandboxes.write(conversation_id, "report/out.txt", b"hello world")
     token = _mint(SECRET, workspace_id, f"alex@{OPERATOR_EMAIL_DOMAIN}")
 
     transcript = await client.get(
@@ -392,7 +407,7 @@ async def test_transcript_compactions_and_files_read_the_blobs(debug) -> None:
 
 
 async def test_stream_tails_a_completed_turn_from_its_durable_terminal(debug) -> None:
-    client, _ = debug
+    client, _, _ = debug
     workspace_id, agent_id = await _seed_workspace()
     conversation_id = await _seed_conversation(workspace_id)
     turn_id = await _seed_turn(workspace_id, conversation_id, agent_id, 1)

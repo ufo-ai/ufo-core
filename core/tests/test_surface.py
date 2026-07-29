@@ -46,12 +46,14 @@ from ufo.ext.surface import (
     SurfaceSpec,
     Writeback,
     WritebackPoller,
-    workspace_key,
     writeback_workspaces,
 )
 from ufo.hub import InProcessHub
 from ufo.loop.queue import _load_turn
 from ufo.models.interface import Message, TextBlock, ToolResultBlock, ToolUseBlock
+from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
+from ufo.sandbox.local import LocalCarrier
+from ufo.sandbox.session import ProxyEndpoint
 from ufo.schema import tables
 from ufo.schema.records import WRITEBACK_PENDING, TerminalFrame, TurnContext
 from ufo.surfaces.admission import Admission, MemberAdmission
@@ -64,6 +66,7 @@ from ufo.transcript import (
     encode,
     transcript_key,
 )
+from ufo.workspace import ws
 
 SURFACE = "test_surface"
 
@@ -178,12 +181,29 @@ async def _seed(*, member_email: str | None = None) -> tuple[UUID, UUID, UUID | 
     return workspace_id, agent_id, member_id
 
 
-def _context(workspace_id: UUID, dbos: StubDbos, blob: FilesystemBlobStore) -> SurfaceContext:
+def _sandboxes(root: Path) -> ConversationSandbox:
+    return ConversationSandbox(
+        carrier=LocalCarrier(),
+        backend="local",
+        off_cluster=False,
+        image_ref=SANDBOX_IMAGE_REF,
+        proxy=ProxyEndpoint(port=1, ca_cert="test-ca"),
+        workspace_root=root,
+    )
+
+
+def _context(
+    workspace_id: UUID,
+    dbos: StubDbos,
+    blob: FilesystemBlobStore,
+    sandboxes: ConversationSandbox | None = None,
+) -> SurfaceContext:
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
     return SurfaceContext(
         workspace_id=workspace_id,
         surface=SURFACE,
         blob=blob,
+        _sandboxes=sandboxes if sandboxes is not None else _sandboxes(blob.root / "workspaces"),
         _admitter=MemberAdmission(
             workspace_id=workspace_id,
             admission=Admission(dbos=dbos, durable_surfaces=frozenset({SURFACE})),
@@ -317,16 +337,6 @@ def _fleet_poller(
         context_for=lambda workspace_id, _name: contexts[workspace_id],
         candidates=writeback_workspaces(),
     )
-
-
-def test_workspace_key_scopes_under_the_conversation_workspace() -> None:
-    cid = uuid4()
-    assert workspace_key(cid, "slack-inbox/a.txt") == (
-        f"conversations/{cid}/workspace/slack-inbox/a.txt"
-    )
-    for bad in ("../escape", "/etc/passwd", "a/../../b", ""):
-        with pytest.raises(ValueError):
-            workspace_key(cid, bad)
 
 
 def test_surface_delivery_error_rejects_negative_retry_delay() -> None:
@@ -614,19 +624,54 @@ async def test_link_member_provisions_a_surface_identity(db: None, tmp_path) -> 
     assert await context.link_member("UNOBODY", "nobody@example.com") is None
 
 
-async def test_write_workspace_file_streams_into_the_workspace_subtree(db: None, tmp_path) -> None:
+async def test_write_workspace_file_streams_into_the_conversation_workspace(
+    db: None, tmp_path
+) -> None:
+    """The buffered chunks land through the carrier in the conversation's own workspace directory —
+    the same `/workspace` the agent's file tools read on its next turn."""
     workspace_id, _, _ = await _seed()
-    blob = FilesystemBlobStore(root=tmp_path)
-    context = _context(workspace_id, StubDbos(), blob)
-    conversation_id = uuid4()
+    root = tmp_path / "workspaces"
+    context = _context(
+        workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path), _sandboxes(root)
+    )
 
     async def _chunks():
         yield b"hello "
         yield b"world"
 
-    await context.write_workspace_file(conversation_id, "slack-inbox/note.txt", _chunks())
-    stored = await blob.get(workspace_key(conversation_id, "slack-inbox/note.txt"))
-    assert stored == b"hello world"
+    with ws(workspace_id):
+        conversation_id = await _conversation_row(workspace_id, queue_key="inbox")
+        await context.write_workspace_file(conversation_id, "slack-inbox/note.txt", _chunks())
+    landed = root / str(conversation_id) / "slack-inbox/note.txt"
+    assert landed.read_bytes() == b"hello world"
+
+
+async def test_write_workspace_file_refuses_an_uncapped_stream_while_it_accumulates(
+    db: None, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bound trips inside the accumulation loop, so a stream with no cap of its own is refused
+    at the limit instead of first sitting whole in this process — and nothing lands."""
+    monkeypatch.setattr(surface_module, "WORKSPACE_WRITE_MAX_BYTES", 8)
+    workspace_id, _, _ = await _seed()
+    root = tmp_path / "workspaces"
+    context = _context(
+        workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path), _sandboxes(root)
+    )
+    consumed = 0
+
+    async def _unbounded():
+        nonlocal consumed
+        while True:
+            consumed += 1
+            yield b"xxxx"
+
+    with ws(workspace_id):
+        conversation_id = await _conversation_row(workspace_id, queue_key="inbox")
+        with pytest.raises(ValueError, match="byte limit"):
+            await context.write_workspace_file(conversation_id, "big.bin", _unbounded())
+
+    assert consumed <= 4
+    assert not (root / str(conversation_id) / "big.bin").exists()
 
 
 async def test_join_member_creates_a_same_domain_member_and_links(db: None, tmp_path) -> None:
@@ -1483,31 +1528,37 @@ async def test_compaction_records_list_and_read_back(db: None, tmp_path) -> None
 async def test_workspace_files_list_and_stream_scoped_to_the_conversation(
     db: None, tmp_path
 ) -> None:
+    """List and read are live sandbox reads through the carrier: what a write landed comes back,
+    an absent path is None, an escaping path raises, and another workspace's context sees
+    nothing."""
     workspace_id, _, _ = await _seed()
     blob = FilesystemBlobStore(root=tmp_path)
-    context = _context(workspace_id, StubDbos(), blob)
-    conversation_id = await _conversation_row(workspace_id, queue_key="busy")
+    sandboxes = _sandboxes(tmp_path / "workspaces")
+    context = _context(workspace_id, StubDbos(), blob, sandboxes)
 
     async def _chunks() -> AsyncIterator[bytes]:
         yield b"hello "
         yield b"world"
 
-    await context.write_workspace_file(conversation_id, "report/out.txt", _chunks())
-    files = await context.list_workspace_files(conversation_id)
-    assert [entry.path for entry in files] == ["report/out.txt"]
-    assert files[0].size_bytes == 11
+    with ws(workspace_id):
+        conversation_id = await _conversation_row(workspace_id, queue_key="busy")
+        await context.write_workspace_file(conversation_id, "report/out.txt", _chunks())
+        files = await context.list_workspace_files(conversation_id)
+        assert [entry.path for entry in files] == ["report/out.txt"]
+        assert files[0].size_bytes == 11
 
-    stream = await context.read_workspace_file(conversation_id, "report/out.txt")
-    assert stream is not None
-    body = b"".join([chunk async for chunk in stream])
-    assert body == b"hello world"
-    assert await context.read_workspace_file(conversation_id, "report/absent.txt") is None
-    with pytest.raises(ValueError):
-        await context.read_workspace_file(conversation_id, "../messages.json.lz4")
+        stream = await context.read_workspace_file(conversation_id, "report/out.txt")
+        assert stream is not None
+        body = b"".join([chunk async for chunk in stream])
+        assert body == b"hello world"
+        assert await context.read_workspace_file(conversation_id, "report/absent.txt") is None
+        with pytest.raises(ValueError):
+            await context.read_workspace_file(conversation_id, "../messages.json.lz4")
     foreign_workspace, _, _ = await _seed()
-    foreign_context = _context(foreign_workspace, StubDbos(), blob)
-    assert await foreign_context.list_workspace_files(conversation_id) == ()
-    assert await foreign_context.read_workspace_file(conversation_id, "report/out.txt") is None
+    foreign_context = _context(foreign_workspace, StubDbos(), blob, sandboxes)
+    with ws(foreign_workspace):
+        assert await foreign_context.list_workspace_files(conversation_id) == ()
+        assert await foreign_context.read_workspace_file(conversation_id, "report/out.txt") is None
 
 
 async def test_installation_reads_the_peer_surface_identity(db: None, tmp_path) -> None:

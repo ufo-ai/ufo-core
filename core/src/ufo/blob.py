@@ -8,10 +8,12 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from aiobotocore.client import AioBaseClient
 from aiobotocore.session import get_session
+from botocore.config import Config
 from botocore.exceptions import ClientError
 
 from ufo.config import BlobConfig
@@ -20,9 +22,9 @@ from ufo.o11y import log
 MISSING_KEY_CODES = ("404", "NoSuchKey", "NotFound")
 BLOB_STREAM_CHUNK_BYTES = 1024 * 1024
 S3_MULTIPART_PART_BYTES = 8 * 1024 * 1024
-S3_SINGLE_COPY_MAX_BYTES = 5 * 1024 * 1024 * 1024
-S3_COPY_PART_BYTES = 1024 * 1024 * 1024
 BLOB_LIST_MAX_KEYS = 10_000
+S3_VIRTUAL_CONFIG = Config(signature_version="s3v4", s3={"addressing_style": "virtual"})
+S3_PATH_CONFIG = Config(signature_version="s3v4", s3={"addressing_style": "path"})
 
 
 class BlobNotFound(KeyError):
@@ -41,7 +43,10 @@ class BlobEntry:
 class BlobStore(Protocol):
     """Async byte storage keyed by slash-separated string keys. `get_stream`/`put_stream` move a
     payload in bounded chunks so an arbitrary-large blob (a shared attachment, an inbound file)
-    crosses without a whole-file buffer; `get`/`put` are the whole-bytes shorthands."""
+    crosses without a whole-file buffer; `get`/`put` are the whole-bytes shorthands. Writing an
+    artifact is the one op with two shapes and so is not a member here: on S3 serve mints a
+    presigned PUT and the sandbox uploads to it directly, on the filesystem backend the bytes
+    stream through `put_stream`."""
 
     async def put(self, key: str, data: bytes) -> None: ...
 
@@ -62,17 +67,10 @@ class BlobStore(Protocol):
 
     async def put_stream(self, key: str, chunks: AsyncIterator[bytes]) -> None: ...
 
-    async def copy(self, src_key: str, dst_key: str) -> None:
-        """Duplicate a stored object to another key within the same store — the bytes never cross
-        the calling process. The workspace-file share path: a produced file already in the
-        conversation's workspace prefix is promoted into the artifact prefix of the same store,
-        server-side on S3 (`s3:CopyObject`) with no read-through-the-pod."""
-        ...
-
     async def list(self, prefix: str) -> tuple[BlobEntry, ...]:
         """Every stored object under a key prefix, sorted by key, capped at `BLOB_LIST_MAX_KEYS`
-        entries — the bounded enumeration a read view (a conversation's workspace files, its
-        compaction records) walks; never a whole-store scan, so the prefix is required."""
+        entries — the bounded enumeration a read view (a conversation's compaction records) walks;
+        never a whole-store scan, so the prefix is required."""
         ...
 
 
@@ -140,16 +138,6 @@ class FilesystemBlobStore:
             await asyncio.to_thread(handle.close)
             await asyncio.to_thread(temp.unlink, missing_ok=True)
             raise
-
-    async def copy(self, src_key: str, dst_key: str) -> None:
-        source = self._resolve(src_key)
-        if not await asyncio.to_thread(source.is_file):
-            raise BlobNotFound(src_key)
-        path = self._resolve(dst_key)
-        await asyncio.to_thread(path.parent.mkdir, parents=True, exist_ok=True)
-        temp = path.with_name(f"{path.name}.{uuid4().hex}.tmp")
-        await asyncio.to_thread(shutil.copyfile, source, temp)
-        await asyncio.to_thread(temp.replace, path)
 
     async def list(self, prefix: str) -> tuple[BlobEntry, ...]:
         if not prefix:
@@ -330,43 +318,44 @@ class S3BlobStore:
                 await client.abort_multipart_upload(Bucket=self.bucket, Key=key, UploadId=upload_id)
             raise
 
-    async def copy(self, src_key: str, dst_key: str) -> None:
-        source = {"Bucket": self.bucket, "Key": src_key}
+    async def presigned_put(
+        self, key: str, size_bytes: int, checksum_sha256: str, ttl_seconds: int
+    ) -> str:
+        """A URL the sandbox can PUT `key` to itself, valid only for exactly these bytes. Signing
+        `ContentLength` and `ChecksumSHA256` (base64, the header the PUT must carry) puts both in
+        `X-Amz-SignedHeaders`, so S3 answers `SignatureDoesNotMatch` for a body of another length
+        and `XAmzContentChecksumMismatch` for other content: the URL is authority to store one
+        measured file under one key until it expires, not write access to the key. That is what lets
+        an untrusted sandbox hold it, and what makes the size serve records the size S3 accepted,
+        with nothing left to re-verify afterwards.
+
+        The content type is deliberately unsigned — a signed header the client must reproduce
+        byte-identically buys nothing here, since the media type serve records comes from the
+        filename."""
         client = await self._client()
-        try:
-            head = await client.head_object(Bucket=self.bucket, Key=src_key)
-        except ClientError as error:
-            if _is_missing_key(error):
-                raise BlobNotFound(src_key) from error
-            raise
-        size = head["ContentLength"]
-        if size <= S3_SINGLE_COPY_MAX_BYTES:
-            await client.copy_object(CopySource=source, Bucket=self.bucket, Key=dst_key)
-            return
-        created = await client.create_multipart_upload(Bucket=self.bucket, Key=dst_key)
-        upload_id = created["UploadId"]
-        try:
-            parts: list[dict[str, object]] = []
-            for number, offset in enumerate(range(0, size, S3_COPY_PART_BYTES), start=1):
-                last = min(offset + S3_COPY_PART_BYTES, size) - 1
-                copied = await client.upload_part_copy(
-                    Bucket=self.bucket,
-                    Key=dst_key,
-                    PartNumber=number,
-                    UploadId=upload_id,
-                    CopySource=source,
-                    CopySourceRange=f"bytes={offset}-{last}",
-                )
-                parts.append({"ETag": copied["CopyPartResult"]["ETag"], "PartNumber": number})
-            await client.complete_multipart_upload(
-                Bucket=self.bucket,
-                Key=dst_key,
-                UploadId=upload_id,
-                MultipartUpload={"Parts": parts},
-            )
-        except BaseException:
-            await client.abort_multipart_upload(Bucket=self.bucket, Key=dst_key, UploadId=upload_id)
-            raise
+        return await client.generate_presigned_url(
+            "put_object",
+            Params={
+                "Bucket": self.bucket,
+                "Key": key,
+                "ContentLength": size_bytes,
+                "ChecksumSHA256": checksum_sha256,
+            },
+            ExpiresIn=ttl_seconds,
+        )
+
+    async def put_host(self) -> str:
+        """The host a presigned URL resolves to — what the egress proxy admits so the sandbox can
+        reach it. Read off the client that does the signing rather than recomposed from config, so
+        the rule and the URL cannot disagree about region or addressing: virtual-hosted addressing
+        (AWS) puts the bucket in front of the endpoint host, path addressing (an S3-compatible
+        endpoint) does not. The bare hostname, never `host:port` — the proxy admits by the hostname
+        its CONNECT parser extracts, and a port-carrying rule would match nothing."""
+        client = await self._client()
+        hostname = urlsplit(client.meta.endpoint_url).hostname
+        if hostname is None:
+            raise RuntimeError(f"the S3 client's endpoint has no hostname: {self.bucket}")
+        return hostname if self.endpoint_url is not None else f"{self.bucket}.{hostname}"
 
     async def list(self, prefix: str) -> tuple[BlobEntry, ...]:
         if not prefix:
@@ -388,13 +377,23 @@ class S3BlobStore:
         return tuple(entries[:BLOB_LIST_MAX_KEYS])
 
     async def _client(self) -> AioBaseClient:
+        """The store's one client per event loop. Its signing config is pinned rather than left to
+        botocore's defaults: unpinned, `generate_presigned_url` emits SigV2 for a bucket in a
+        legacy-global region and resolves a virtual host that differs from the client's own
+        endpoint, so a presigned artifact PUT would be both unsignable by the deploy's temporary
+        credentials and unreachable through the exact host the proxy admits."""
         loop = asyncio.get_running_loop()
         client = self._clients.get(loop)
         if client is not None:
             return client
         created = (
             await get_session()
-            .create_client("s3", endpoint_url=self.endpoint_url, region_name=self.region)
+            .create_client(
+                "s3",
+                endpoint_url=self.endpoint_url,
+                region_name=self.region,
+                config=S3_PATH_CONFIG if self.endpoint_url is not None else S3_VIRTUAL_CONFIG,
+            )
             .__aenter__()
         )
         client = self._clients.setdefault(loop, created)

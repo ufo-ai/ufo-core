@@ -79,7 +79,6 @@ from ufo.objects import (
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import (
     ExecResult,
-    MountSpec,
     ProxyEndpoint,
     SandboxHandle,
     SandboxSession,
@@ -108,9 +107,6 @@ class _UntouchedCarrier:
     async def exec(
         self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
     ) -> ExecResult:
-        raise AssertionError(SANDBOX_UNTOUCHED)
-
-    async def destroy(self, handle: SandboxHandle) -> None:
         raise AssertionError(SANDBOX_UNTOUCHED)
 
 
@@ -1144,7 +1140,7 @@ async def _workspace_context(
         SandboxSpec(
             conversation_id=turn.conversation_id,
             image_ref="ufo-sandbox:latest",
-            mount=MountSpec(kind="filesystem", host_path=str(workspace_dir)),
+            workspace_host_path=str(workspace_dir),
             proxy=ProxyEndpoint(port=9999, ca_cert="CA-PEM"),
             run_token="run-token",
         )

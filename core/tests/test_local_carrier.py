@@ -3,9 +3,9 @@
 The local carrier has no fake to stand in for — it runs the host's own shell, so these drive it
 end to end: create the workspace, exec a command that writes into it, rewrite the logical
 `/workspace` path, carry the egress environment, reach a service on the sandbox's own loopback,
-stream a file out, and confine export to the workspace. The last test proves the payoff — the
-sbxfs-backed file tools run through the default carrier with only a Python interpreter present, no
-container."""
+stream a file out in bounded chunks, and confine that read to the workspace. The last test proves
+the payoff — the sbxfs-backed file tools run through the default carrier with only a Python
+interpreter present, no container."""
 
 import asyncio
 import json
@@ -15,11 +15,14 @@ from uuid import uuid4
 
 import pytest
 
-from ufo.blob import FilesystemBlobStore
-from ufo.sandbox.local import EXEC_TIMEOUT_CODE, LOCAL_CONTAINER_ID, LocalCarrier
+from ufo.sandbox.local import (
+    EXEC_TIMEOUT_CODE,
+    LOCAL_CONTAINER_ID,
+    READ_CHUNK_BYTES,
+    LocalCarrier,
+)
 from ufo.sandbox.session import (
     SENTINEL_MODEL_KEY,
-    MountSpec,
     ProxyEndpoint,
     SandboxSession,
     SandboxSpec,
@@ -37,13 +40,13 @@ def _spec(workspace: Path) -> SandboxSpec:
     return SandboxSpec(
         conversation_id=uuid4(),
         image_ref="ufo-sandbox:latest",
-        mount=MountSpec(kind="filesystem", host_path=str(workspace)),
+        workspace_host_path=str(workspace),
         proxy=ProxyEndpoint(port=PROXY_PORT, ca_cert="CA-PEM-BYTES"),
         run_token=RUN_TOKEN,
     )
 
 
-async def test_create_exec_export_and_destroy_in_a_temp_dir(tmp_path: Path) -> None:
+async def test_create_exec_and_read_in_a_temp_dir(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     carrier = LocalCarrier()
     handle = await carrier.create(_spec(workspace))
@@ -56,11 +59,32 @@ async def test_create_exec_export_and_destroy_in_a_temp_dir(tmp_path: Path) -> N
     assert result.stdout == "done"
     assert (workspace / "out.txt").read_text() == "hi\n"
 
-    blob = FilesystemBlobStore(root=tmp_path / "blobs")
-    await carrier.export(handle, "/workspace/out.txt", blob, "exports/out.txt")
-    assert await blob.get("exports/out.txt") == b"hi\n"
+    out = [chunk async for chunk in carrier.read(handle, "/workspace/out.txt")]
+    assert b"".join(out) == b"hi\n"
 
-    await carrier.destroy(handle)
+
+async def test_read_streams_a_large_file_in_bounded_chunks(tmp_path: Path) -> None:
+    """A workspace read streams through the carrier in bounded chunks, so an arbitrarily large
+    produced file crosses without a whole-file buffer forming here."""
+    workspace = tmp_path / "workspace"
+    carrier = LocalCarrier()
+    handle = await carrier.create(_spec(workspace))
+    payload = bytes(range(256)) * (READ_CHUNK_BYTES // 128)
+    (workspace / "big.bin").write_bytes(payload)
+
+    chunks = [chunk async for chunk in carrier.read(handle, "/workspace/big.bin")]
+
+    assert len(chunks) > 1
+    assert max(len(chunk) for chunk in chunks) <= READ_CHUNK_BYTES
+    assert b"".join(chunks) == payload
+
+
+async def test_read_of_an_absent_file_raises(tmp_path: Path) -> None:
+    carrier = LocalCarrier()
+    handle = await carrier.create(_spec(tmp_path / "workspace"))
+
+    with pytest.raises(FileNotFoundError):
+        [chunk async for chunk in carrier.read(handle, "/workspace/absent.bin")]
 
 
 async def test_exec_rewrites_the_logical_workspace_path(tmp_path: Path) -> None:
@@ -131,13 +155,12 @@ async def test_exec_maps_a_timeout_to_the_timeout_code(tmp_path: Path) -> None:
     assert result.exit_code == EXEC_TIMEOUT_CODE
 
 
-async def test_export_confines_to_the_workspace(tmp_path: Path) -> None:
+async def test_read_confines_to_the_workspace(tmp_path: Path) -> None:
     carrier = LocalCarrier()
     handle = await carrier.create(_spec(tmp_path / "workspace"))
-    blob = FilesystemBlobStore(root=tmp_path / "blobs")
 
     with pytest.raises(ValueError):
-        await carrier.export(handle, "/etc/passwd", blob, "leak")
+        [chunk async for chunk in carrier.read(handle, "/etc/passwd")]
 
 
 async def test_file_tools_run_through_sbxfs_locally(tmp_path: Path) -> None:

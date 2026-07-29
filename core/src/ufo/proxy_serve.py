@@ -14,6 +14,7 @@ from dataclasses import dataclass
 
 from cryptography.fernet import Fernet
 
+from ufo.blob import blob_store_for
 from ufo.config import Config, load_config
 from ufo.credentials import CredentialStore
 from ufo.db import init_db
@@ -23,11 +24,11 @@ from ufo.grants import GrantStore
 from ufo.models.pricing import Pricing
 from ufo.models.registry import model_registry
 from ufo.o11y import init_o11y, log
-from ufo.sandbox.fs_creds import sandbox_fs_minter
 from ufo.sandbox.proxy.rules import (
     Rule,
     ScopeRule,
     connector_transfer_hosts,
+    derive_artifact_store_rules,
     derive_manifest_rules,
     derive_model_rules,
 )
@@ -152,8 +153,9 @@ class ProxyServe:
         for shutdown_signal in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(shutdown_signal, self.shutdown.set)
         init_db(self.owner_dsn)
+        artifacts = await derive_artifact_store_rules(blob_store_for(self.config.blob))
         resolver = PerAgentRules(
-            base=model_rule_base(self.config),
+            base=(*model_rule_base(self.config), *artifacts),
             grants=GrantStore(),
             credentials=self.credentials,
             slots=injecting_slots(self.manifests),
@@ -161,7 +163,6 @@ class ProxyServe:
             transfer_hosts=connector_transfer_hosts(self.manifests),
             clis=connector_clis(self.manifests),
         )
-        workspace_fs = sandbox_fs_minter(self.config.blob)
         proxy = EgressProxy(
             resolve=resolver.resolve,
             authorize=resolver.turn_live,
@@ -169,7 +170,6 @@ class ProxyServe:
             ca_key=self.ca_key,
             run_tokens=RunTokenCodec.from_env(),
             pricing=self.pricing,
-            workspace_credentials=None if workspace_fs is None else workspace_fs.refresh,
         )
         await proxy.start(
             port=self.config.sandbox.proxy_port, public_url=self.config.sandbox.proxy_public_url

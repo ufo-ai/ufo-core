@@ -34,11 +34,11 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from ufo.blob import FilesystemBlobStore
 from ufo.credentials import CredentialStore, HostChoice
 from ufo.db import workspace_tx
 from ufo.ext.manifest import CredentialSlot, InjectionTarget
 from ufo.loop.queue import _open_sandbox
+from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.proxy.rules import (
     ANTHROPIC_HOST,
@@ -553,15 +553,18 @@ async def test_a_real_sandbox_process_reaches_a_keyed_host_with_sentinels_only(
         inbound="hi",
         created_at=datetime(2026, 7, 25, tzinfo=UTC),
     )
-    carrier = LocalCarrier()
+    sandboxes = ConversationSandbox(
+        carrier=LocalCarrier(),
+        backend="local",
+        off_cluster=False,
+        image_ref=SANDBOX_IMAGE_REF,
+        proxy=endpoint,
+        workspace_root=tmp_path / "workspaces",
+    )
     try:
         with ws(workspace_id):
             handle = await _open_sandbox(
-                carrier,
-                "local",
-                FilesystemBlobStore(root=tmp_path / "blob"),
-                None,
-                endpoint,
+                sandboxes,
                 RUN_TOKENS,
                 turn,
                 None,
@@ -575,7 +578,7 @@ async def test_a_real_sandbox_process_reaches_a_keyed_host_with_sentinels_only(
                 "DD_HOST": KEYED_HOST,
             }
             assert not [v for v in handle.egress_env.values() if "dd-api-real" in str(v)]
-            fetched = await carrier.exec(
+            fetched = await sandboxes.carrier.exec(
                 handle,
                 (
                     "bash",

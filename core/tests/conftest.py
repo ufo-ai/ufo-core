@@ -81,10 +81,10 @@ def sandbox_image() -> str:
 
 @pytest.fixture
 def sandbox_container(sandbox_image: str, tmp_path: Path) -> Iterator[tuple[str, Path]]:
-    """A live container over a host-bind-mounted /workspace, set up exactly as prod: the mount is
-    chowned to the sandbox uid (prod's `_workspace_mount` does the same with `os.chown` when serve
-    runs as root) and the container then runs as the image's default non-root user. The chown runs
-    in a throwaway `--user 0` container, so the test needs no host root.
+    """A live container over a host-bind-mounted /workspace, set up exactly as prod: the host dir is
+    chowned to the sandbox uid (prod's `ConversationSandbox.open` does the same with `os.chown` when
+    serve runs as root) and the container then runs as the image's default non-root user. The chown
+    runs in a throwaway `--user 0` container, so the test needs no host root.
 
     `--entrypoint` is what makes the chown run at all: the image declares a shell-form ENTRYPOINT,
     which discards every argument `docker run` appends. Passing `chown` as a bare argument silently
@@ -112,7 +112,17 @@ def sandbox_container(sandbox_image: str, tmp_path: Path) -> Iterator[tuple[str,
         timeout=CONTAINER_OP_TIMEOUT_S,
     )
     started = docker_or_fail(
-        ["docker", "run", "-d", "--rm", "-v", f"{workspace}:/workspace", sandbox_image],
+        [
+            "docker",
+            "run",
+            "-d",
+            "--rm",
+            "--add-host",
+            "host.docker.internal:host-gateway",
+            "-v",
+            f"{workspace}:/workspace",
+            sandbox_image,
+        ],
         timeout=CONTAINER_OP_TIMEOUT_S,
     )
     container = started.stdout.strip()

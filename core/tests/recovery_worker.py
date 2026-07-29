@@ -44,13 +44,9 @@ from ufo.models.interface import (
 )
 from ufo.models.registry import ModelRegistry
 from ufo.runtime_instance import ExecutorRecovery, Heartbeat
-from ufo.sandbox.session import (
-    ExecResult,
-    ProxyEndpoint,
-    RunTokenCodec,
-    SandboxHandle,
-    SandboxSpec,
-)
+from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
+from ufo.sandbox.local import LocalCarrier
+from ufo.sandbox.session import ProxyEndpoint, RunTokenCodec
 from ufo.schema import tables
 from ufo.schema.records import (
     DBOS_APP_NAME,
@@ -165,32 +161,6 @@ class _AnswerModel:
 
 
 @dataclass(frozen=True)
-class _EchoCarrier:
-    async def create(self, spec: SandboxSpec) -> SandboxHandle:
-        proxy_url = f"http://{spec.run_token}:@sandbox-proxy.test"
-        return SandboxHandle(
-            conversation_id=spec.conversation_id,
-            container_id="test",
-            run_token=spec.run_token,
-            egress_env={
-                "HTTP_PROXY": proxy_url,
-                "HTTPS_PROXY": proxy_url,
-                "http_proxy": proxy_url,
-                "https_proxy": proxy_url,
-            },
-        )
-
-    async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None: ...
-
-    async def exec(
-        self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
-    ) -> ExecResult:
-        return ExecResult(stdout="hi\n", stderr="", exit_code=0)
-
-    async def destroy(self, handle: SandboxHandle) -> None: ...
-
-
-@dataclass(frozen=True)
 class _StubEmbed:
     async def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
         return tuple(() for _ in texts)
@@ -239,13 +209,18 @@ def _install_runtime(env: _Env, model: _CrashModel | _AnswerModel) -> None:
         loop_queue.Runtime(
             config=config,
             blob=FilesystemBlobStore(root=config.blob.root),
-            workspace_fs=None,
+            sandboxes=ConversationSandbox(
+                carrier=LocalCarrier(),
+                backend="local",
+                off_cluster=False,
+                image_ref=SANDBOX_IMAGE_REF,
+                proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
+                workspace_root=env.blob_root.with_name("workspaces"),
+            ),
             hub=InProcessHub(),
-            carrier=_EchoCarrier(),
             cdp_provider=None,
             search_provider=None,
             connectors=ConnectorRegistry(entries={}),
-            proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
             run_tokens=RunTokenCodec(b"recovery-worker-test-secret"),
             dbos=DBOSClient(system_database_url=env.system_url),
             subagents=SubagentRegistry(()),

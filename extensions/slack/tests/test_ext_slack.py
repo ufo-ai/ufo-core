@@ -2,7 +2,8 @@
 rendering as pure functions, then the real handlers through mounted ingest and the core writeback
 poller — inbound files streamed into the workspace, the reply posted as a Block Kit message, and a
 shared file streamed to Slack's chunked external-upload API. Slack's HTTP is a MockTransport (a
-dependency stand-in); every assertion reads the durable rows and blobs core wrote, or the exact
+dependency stand-in); every assertion reads the durable rows and blobs core wrote, the workspace
+files the real local-carrier sandbox landed under `workspace_root/<conversation>/`, or the exact
 requests the handlers emitted."""
 
 import asyncio
@@ -16,6 +17,7 @@ import time
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from urllib.parse import parse_qs, urlencode
 from uuid import UUID, uuid4
 
@@ -31,7 +33,7 @@ from ufo_ext_slack.manifest import manifest as slack_manifest
 
 import ufo.surfaces.hub_tail as hub_tail
 from ufo.artifact_token import verify_artifact_token
-from ufo.blob import BlobNotFound, FilesystemBlobStore
+from ufo.blob import FilesystemBlobStore
 from ufo.credentials import (
     CredentialRequestState,
     CredentialSlotUnset,
@@ -40,11 +42,7 @@ from ufo.credentials import (
 )
 from ufo.db import current_workspace, workspace_tx
 from ufo.ext.loader import turn_tools
-from ufo.ext.surface import (
-    OPERATOR_EMAIL_DOMAIN,
-    WRITEBACK_DELIVERED,
-    workspace_key,
-)
+from ufo.ext.surface import OPERATOR_EMAIL_DOMAIN, WRITEBACK_DELIVERED
 from ufo.grants import ConnectFlow, GrantStore, OAuthAccount, install_connect_flow
 from ufo.hub import (
     CostTick,
@@ -57,6 +55,9 @@ from ufo.hub import (
     ToolCall,
 )
 from ufo.loop.queue import _load_turn
+from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
+from ufo.sandbox.local import LocalCarrier
+from ufo.sandbox.session import ProxyEndpoint
 from ufo.schema import tables
 from ufo.schema.records import (
     WRITEBACK_PENDING,
@@ -258,6 +259,23 @@ def _patch_httpx(monkeypatch: pytest.MonkeyPatch, transport: httpx.MockTransport
     monkeypatch.setattr(slack.httpx, "AsyncClient", factory)
 
 
+def _sandboxes(tmp_path) -> ConversationSandbox:
+    """The real workspace seam under the surface: a `ConversationSandbox` over the local carrier,
+    so an inbound attachment lands as bytes at `tmp_path/workspaces/<conversation>/<rel>`."""
+    return ConversationSandbox(
+        carrier=LocalCarrier(),
+        backend="local",
+        off_cluster=False,
+        image_ref=SANDBOX_IMAGE_REF,
+        proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
+        workspace_root=tmp_path / "workspaces",
+    )
+
+
+def _workspace_file(tmp_path, conversation_id: UUID, rel: str) -> Path:
+    return tmp_path / "workspaces" / str(conversation_id) / rel
+
+
 async def _store(workspace_id: UUID) -> CredentialStore:
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
     await store.put(workspace_id, slack.SLACK_BOT_TOKEN_SLOT, BOT_TOKEN)
@@ -360,6 +378,7 @@ async def _mount_transport(
         (slack_manifest(),),
         store,
         blob,
+        _sandboxes(tmp_path),
         hub or InProcessHub(),
         StubDbos(),
         ARTIFACT_SECRET,
@@ -431,6 +450,7 @@ async def test_manifest_workspace_verifies_with_its_own_signing_slot(
         (slack_manifest(),),
         store,
         blob,
+        _sandboxes(tmp_path),
         InProcessHub(),
         StubDbos(),
         ARTIFACT_SECRET,
@@ -700,6 +720,7 @@ async def test_shared_handshake_echoes_without_binding_a_workspace(
         (slack_manifest(),),
         store,
         blob,
+        _sandboxes(tmp_path),
         InProcessHub(),
         StubDbos(),
         ARTIFACT_SECRET,
@@ -762,6 +783,7 @@ async def test_oauth_callback_installs_the_workspace(db: None, tmp_path, monkeyp
         (slack_manifest(),),
         store,
         blob,
+        _sandboxes(tmp_path),
         InProcessHub(),
         StubDbos(),
         ARTIFACT_SECRET,
@@ -815,6 +837,7 @@ async def test_oauth_callback_declined_carries_no_workspace_and_reflects_no_erro
         (slack_manifest(),),
         store,
         blob,
+        _sandboxes(tmp_path),
         InProcessHub(),
         StubDbos(),
         ARTIFACT_SECRET,
@@ -846,6 +869,7 @@ async def test_oauth_callback_refuses_a_team_bound_elsewhere(
         (slack_manifest(),),
         store,
         blob,
+        _sandboxes(tmp_path),
         InProcessHub(),
         StubDbos(),
         ARTIFACT_SECRET,
@@ -875,6 +899,7 @@ async def test_oauth_callback_refuses_a_tampered_state(db: None, tmp_path, monke
         (slack_manifest(),),
         store,
         blob,
+        _sandboxes(tmp_path),
         InProcessHub(),
         StubDbos(),
         ARTIFACT_SECRET,
@@ -914,6 +939,7 @@ async def test_oauth_callback_reports_a_rejected_code(db: None, tmp_path, monkey
         (slack_manifest(),),
         store,
         blob,
+        _sandboxes(tmp_path),
         InProcessHub(),
         StubDbos(),
         ARTIFACT_SECRET,
@@ -945,6 +971,7 @@ async def test_shared_oauth_callback_binds_the_sealed_workspace(
         (slack_manifest(),),
         store,
         blob,
+        _sandboxes(tmp_path),
         InProcessHub(),
         StubDbos(),
         ARTIFACT_SECRET,
@@ -2011,7 +2038,7 @@ async def test_unlinked_dm_fails_loud_when_the_sender_read_is_unavailable(
 
 async def test_inbound_file_streams_into_the_workspace(db: None, tmp_path, monkeypatch) -> None:
     workspace_id, _ = await _seed()
-    _, client, blob = await _mount(monkeypatch, workspace_id, tmp_path, [])
+    _, client, _ = await _mount(monkeypatch, workspace_id, tmp_path, [])
     file = {
         "id": "F9",
         "name": "data.csv",
@@ -2039,15 +2066,15 @@ async def test_inbound_file_streams_into_the_workspace(db: None, tmp_path, monke
                 )
             )
         ).scalar_one()
-    stored = await blob.get(workspace_key(conversation_id, f"{slack.SLACK_INBOX_DIR}/data.csv"))
-    assert stored == b"INBOUND-BYTES"
+    landed = _workspace_file(tmp_path, conversation_id, f"{slack.SLACK_INBOX_DIR}/data.csv")
+    assert landed.read_bytes() == b"INBOUND-BYTES"
 
 
 async def test_file_share_subtype_is_a_member_message_whose_file_lands(
     db: None, tmp_path, monkeypatch
 ) -> None:
     workspace_id, _ = await _seed()
-    _, client, blob = await _mount(monkeypatch, workspace_id, tmp_path, [])
+    _, client, _ = await _mount(monkeypatch, workspace_id, tmp_path, [])
     file = {
         "id": "F7",
         "name": "notes.txt",
@@ -2095,8 +2122,8 @@ async def test_file_share_subtype_is_a_member_message_whose_file_lands(
                 )
             )
         ).scalar_one()
-    stored = await blob.get(workspace_key(conversation_id, f"{slack.SLACK_INBOX_DIR}/notes.txt"))
-    assert stored == b"INBOUND-BYTES"
+    landed = _workspace_file(tmp_path, conversation_id, f"{slack.SLACK_INBOX_DIR}/notes.txt")
+    assert landed.read_bytes() == b"INBOUND-BYTES"
     assert f"{slack.SLACK_INBOX_DIR}/notes.txt" in inbound
 
 
@@ -2256,6 +2283,7 @@ async def test_shared_slack_rejects_an_unknown_installation_without_binding(
         (slack_manifest(),),
         store,
         blob,
+        _sandboxes(tmp_path),
         InProcessHub(),
         StubDbos(),
         ARTIFACT_SECRET,
@@ -2321,6 +2349,7 @@ async def test_shared_slack_routes_two_installations_without_crossing_state(
         (slack_manifest(),),
         store,
         blob,
+        _sandboxes(tmp_path),
         InProcessHub(),
         StubDbos(),
         ARTIFACT_SECRET,
@@ -2899,7 +2928,7 @@ async def test_inbound_oversize_file_is_skipped_and_reported(
             )
         return httpx.Response(404, json={"ok": False, "error": "not_mocked"})
 
-    _, client, blob = await _mount_transport(
+    _, client, _ = await _mount_transport(
         monkeypatch, workspace_id, tmp_path, httpx.MockTransport(handler)
     )
     files = [
@@ -2947,12 +2976,10 @@ async def test_inbound_oversize_file_is_skipped_and_reported(
             )
         ).scalar_one()
 
-    assert (
-        await blob.get(workspace_key(conversation_id, f"{slack.SLACK_INBOX_DIR}/small.txt"))
-        == b"small"
-    )
-    with pytest.raises(BlobNotFound):
-        await blob.get(workspace_key(conversation_id, f"{slack.SLACK_INBOX_DIR}/big.bin"))
+    small = _workspace_file(tmp_path, conversation_id, f"{slack.SLACK_INBOX_DIR}/small.txt")
+    big = _workspace_file(tmp_path, conversation_id, f"{slack.SLACK_INBOX_DIR}/big.bin")
+    assert small.read_bytes() == b"small"
+    assert not big.exists()
     assert f"{slack.SLACK_INBOX_DIR}/small.txt" in inbound
     assert "Skipped files" in inbound
     assert "big.bin" in inbound
@@ -4917,6 +4944,7 @@ async def test_shared_interactive_routes_by_registered_team(
         (slack_manifest(),),
         store,
         blob,
+        _sandboxes(tmp_path),
         InProcessHub(),
         StubDbos(),
         ARTIFACT_SECRET,

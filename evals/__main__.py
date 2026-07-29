@@ -515,6 +515,7 @@ async def _run(
                 agent_prompt,
                 blob,
                 dbos,
+                config.sandbox.workspace_root,
                 agent_model,
                 workflow_wait_seconds=workflow_wait_seconds,
             )
@@ -545,6 +546,7 @@ async def _run(
                         client=await registry.client_for(resolved_model),
                         model=resolved_model,
                         blob=blob,
+                        workspace_root=config.sandbox.workspace_root,
                         context_window=registry.spec(resolved_model).context_window,
                     )
                 target = InProcessTarget(

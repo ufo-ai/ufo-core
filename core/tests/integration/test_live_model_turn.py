@@ -2,8 +2,8 @@
 lifecycle tests can't give. The model client is the real `AnthropicClient` (not monkeypatched), so
 a turn admitted through `MemberAdmission` runs on the DBOS worker against the live API, and the
 durable turn row, the priced ledger row, and the streamed frames are asserted from what the real
-call produced. Gated on `ANTHROPIC_API_KEY`; the carrier is the StandIn (this proves the model path,
-not the sandbox).
+call produced. Gated on `ANTHROPIC_API_KEY`; the sandbox is the local carrier over a tmp workspace
+root (this proves the model path, not a container — test_docker_turn proves that).
 
 Runs only where the key is set (skips with a clear reason otherwise), and serially — it shares the
 process-singleton DBOS executor with the rest of the suite."""
@@ -12,6 +12,7 @@ import asyncio
 import os
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
@@ -22,16 +23,15 @@ from ufo.blob import FilesystemBlobStore
 from ufo.config import Config
 from ufo.connectors import ConnectorRegistry
 from ufo.db import workspace_tx
+from ufo.ext.loader import skill_registry
 from ufo.hub import Hub, InProcessHub, Terminal, TextDelta
 from ufo.loop import queue as loop_queue
 from ufo.loop.subagents import SubagentRegistry
-from ufo.sandbox.session import (
-    ExecResult,
-    ProxyEndpoint,
-    RunTokenCodec,
-    SandboxHandle,
-    SandboxSpec,
-)
+from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
+from ufo.models.registry import ModelRegistry
+from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
+from ufo.sandbox.local import LocalCarrier
+from ufo.sandbox.session import ProxyEndpoint, RunTokenCodec
 from ufo.schema import tables
 from ufo.surfaces.admission import Admission, MemberAdmission
 from ufo.surfaces.hub_tail import tail_frames
@@ -47,33 +47,6 @@ LIVE_PROMPT = "Reply with exactly the single word: pong. Do not use any tools."
 
 
 @dataclass(frozen=True)
-class _StubMemory:
-    async def recall(self, query: str, subjects: frozenset[str], limit: int) -> tuple:
-        return ()
-
-    async def commit(self, write: object) -> None:
-        return None
-
-
-@dataclass(frozen=True)
-class _StandInCarrier:
-    """A live model turn that answers in text touches no sandbox; create returns a handle and exec
-    is never reached. The real DockerCarrier is proven end to end in test_docker_turn."""
-
-    async def create(self, spec: SandboxSpec) -> SandboxHandle:
-        return SandboxHandle(conversation_id=spec.conversation_id, container_id="live-model")
-
-    async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None: ...
-
-    async def exec(
-        self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
-    ) -> ExecResult:
-        return ExecResult(stdout="", stderr="", exit_code=0)
-
-    async def destroy(self, handle: SandboxHandle) -> None: ...
-
-
-@dataclass(frozen=True)
 class Seed:
     workspace_id: UUID
     member_id: UUID
@@ -83,7 +56,7 @@ class Seed:
 
 @pytest.fixture
 async def live_runtime(
-    db: None, dbos_launched: Config
+    db: None, dbos_launched: Config, tmp_path: Path
 ) -> AsyncIterator[tuple[Hub, FilesystemBlobStore]]:
     config = dbos_launched
     hub = InProcessHub()
@@ -94,18 +67,29 @@ async def live_runtime(
         loop_queue.Runtime(
             config=config,
             blob=blob,
-            workspace_fs=None,
+            sandboxes=ConversationSandbox(
+                carrier=LocalCarrier(),
+                backend="local",
+                off_cluster=False,
+                image_ref=SANDBOX_IMAGE_REF,
+                proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
+                workspace_root=tmp_path / "workspaces",
+            ),
             hub=hub,
-            carrier=_StandInCarrier(),
             cdp_provider=None,
             search_provider=None,
             connectors=ConnectorRegistry(entries={}),
-            proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
             run_tokens=RunTokenCodec(b"live-model-test-secret"),
             dbos=runtime_dbos,
             subagents=SubagentRegistry(()),
             subagent_grants={},
             manifests=(),
+            registry=ModelRegistry(
+                specs={spec.id: spec for spec in CORE_MODEL_SPECS},
+                pricing=CORE_PRICING,
+                auto_model=LIVE_MODEL,
+            ),
+            skills=skill_registry(()),
             credentials=None,
             index=None,
             embed=None,

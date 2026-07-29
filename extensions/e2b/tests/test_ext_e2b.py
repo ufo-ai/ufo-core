@@ -23,7 +23,11 @@ from uuid import UUID, uuid4
 import httpcore
 import pytest
 import ufo_ext_e2b as e2b_ext
-from e2b.exceptions import SandboxNotFoundException, TimeoutException
+from e2b.exceptions import (
+    FileNotFoundException,
+    SandboxNotFoundException,
+    TimeoutException,
+)
 from e2b.sandbox.commands.command_handle import CommandExitException
 from ufo_ext_e2b import (
     CA_INSTALL_TIMEOUT_SECONDS,
@@ -34,6 +38,7 @@ from ufo_ext_e2b import (
     E2B_API_KEY_ENV,
     E2B_LIFECYCLE,
     E2B_TEMPLATE_NAME,
+    ENSURE_WORKSPACE_COMMAND,
     EXEC_LEASE_MARGIN_SECONDS,
     EXEC_TIMEOUT_CODE,
     INSTALL_CA_COMMAND,
@@ -42,26 +47,19 @@ from ufo_ext_e2b import (
     SANDBOX_LEASE_SECONDS,
     SENTINEL_MODEL_KEY,
     SYSTEM_CA_BUNDLE,
+    WORKSPACE_ENSURE_TIMEOUT_SECONDS,
     E2BCarrier,
     build_e2b_carrier,
 )
 
-from ufo.blob import FilesystemBlobStore
 from ufo.config import BlobConfig, Config, DatabaseConfig, SandboxConfig
 from ufo.sandbox.session import (
     NO_PROXY_HOSTS,
     WORKSPACE_DIR,
     ExecResult,
-    MountSpec,
     ProxyEndpoint,
     SandboxHandle,
     SandboxSpec,
-)
-from ufo.sdk.sandbox import (
-    SANDBOX_FS_TOKEN_STAGING_PATH,
-    install_token_command,
-    mount_health_check,
-    prepare_token_staging_command,
 )
 from ufo.serve import _select_carrier
 from ufo.tools.builtins import MAX_BASH_TIMEOUT_MS
@@ -152,20 +150,42 @@ class _Commands:
 
 
 @dataclass
+class _Stream:
+    """The SDK's streamed reader, standing in only for the transport: it counts its own closes, so
+    the carrier's release of an open connection is asserted rather than assumed."""
+
+    chunks: tuple[bytes, ...]
+    files: "_Files"
+    served: int = 0
+
+    def __aiter__(self) -> "_Stream":
+        return self
+
+    async def __anext__(self) -> bytes:
+        if self.served >= len(self.chunks):
+            raise StopAsyncIteration
+        self.served += 1
+        return self.chunks[self.served - 1]
+
+    async def aclose(self) -> None:
+        self.files.closed += 1
+
+
+@dataclass
 class _Files:
-    made_dirs: list[str] = field(default_factory=list)
     written: list[tuple[str, str | bytes]] = field(default_factory=list)
     write_users: list[str | None] = field(default_factory=list)
-    reads: list[str] = field(default_factory=list)
+    reads: list[tuple[str, str]] = field(default_factory=list)
+    chunks: tuple[bytes, ...] = ()
+    closed: int = 0
+    missing: bool = False
     raises: Exception | None = None
 
-    async def read(self, path: str, format: str) -> bytes:
-        self.reads.append(path)
-        return b""
-
-    async def make_dir(self, path: str, *, user: str | None = None) -> bool:
-        self.made_dirs.append(path)
-        return True
+    async def read(self, path: str, format: str) -> _Stream:
+        if self.missing:
+            raise FileNotFoundException(f"{path} not found")
+        self.reads.append((path, format))
+        return _Stream(chunks=self.chunks, files=self)
 
     async def write(self, path: str, data: str | bytes, *, user: str | None = None) -> object:
         if self.raises is not None:
@@ -268,115 +288,10 @@ def _spec(conversation: UUID) -> SandboxSpec:
     return SandboxSpec(
         conversation_id=conversation,
         image_ref="ufo-sandbox:latest",
-        mount=MountSpec(kind="filesystem", host_path="/tmp/ws"),
+        workspace_host_path="/tmp/ws",
         proxy=ProxyEndpoint(port=8080, ca_cert="ca-pem", public_url=PROXY_PUBLIC_URL),
         run_token="run-token",
     )
-
-
-_S3_TOKEN = "signed-conversation-token"
-
-
-def _s3_spec(conversation: UUID) -> SandboxSpec:
-    return SandboxSpec(
-        conversation_id=conversation,
-        image_ref="ufo-sandbox:latest",
-        mount=MountSpec(
-            kind="s3",
-            bucket="ufo-blobs",
-            key_prefix=f"conversations/{conversation}/workspace",
-            credential_token=_S3_TOKEN,
-            s3_url="https://minio:9000",
-            region="us-east-1",
-            path_style=True,
-        ),
-        proxy=ProxyEndpoint(port=8080, ca_cert="ca-pem", public_url=PROXY_PUBLIC_URL),
-        run_token="run-token",
-    )
-
-
-async def test_create_mounts_the_s3_workspace_prefix_over_s3fs() -> None:
-    """The carrier writes a private endpoint token and mounts through an unprivileged s3fs."""
-    sdk = _Sdk(command_fail_counts={"mountpoint": 1})
-    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk)
-    conversation = uuid4()
-
-    handle = await carrier.create(_s3_spec(conversation))
-
-    sandbox = sdk.sandboxes["sbx-1"]
-    assert sandbox.files.written == [
-        (CA_STAGING_PATH, "ca-pem"),
-        (SANDBOX_FS_TOKEN_STAGING_PATH, _S3_TOKEN),
-    ]
-    assert sandbox.files.write_users == ["root", "root"]
-    commands = [cmd for cmd, _, _ in sandbox.commands.runs]
-    assert commands[0] == INSTALL_CA_COMMAND
-    assert commands[1] == prepare_token_staging_command()
-    assert commands[2] == install_token_command()
-    assert commands[3] == mount_health_check(WORKSPACE_DIR)
-    assert "chmod 666 /dev/fuse" in commands[4]
-    assert commands[5].startswith(f"mkdir -p {WORKSPACE_DIR} && chown nobody")
-    assert commands[6] == mount_health_check(WORKSPACE_DIR)
-    assert "sbxcred https://sandbox-proxy.test/sandbox-fs-credentials" in commands[5]
-    assert "-o ecs" in commands[5]
-    assert f"s3fs ufo-blobs:/conversations/{conversation}/workspace {WORKSPACE_DIR}" in commands[5]
-    assert "-o url=https://minio:9000" in commands[5]
-    assert "-o use_path_request_style" in commands[5]
-    assert "runuser -u nobody -- sh -c" in commands[5]
-    assert sandbox.commands.users == ["root", "root", "root", "root", "root", "root", "root"]
-    # The mount steps carry no egress env — s3fs reaches S3 directly, never through the proxy.
-    assert sandbox.commands.envs == [None, None, None, None, None, None, None]
-    assert handle.mount is not None and handle.mount.kind == "s3"
-
-
-async def test_create_rejects_a_mount_that_disconnects_after_s3fs_returns() -> None:
-    sdk = _Sdk(command_fail_counts={"mountpoint": 2})
-    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk)
-
-    with pytest.raises(RuntimeError, match="mount failed its health check"):
-        await carrier.create(_s3_spec(uuid4()))
-
-
-async def test_create_skips_the_s3_mount_when_already_healthy() -> None:
-    """Idempotent-if-healthy: a subagent's create over a live mount health-checks and returns
-    without remounting, so it never yanks the mount out from under an in-flight dispatch."""
-    sdk = _Sdk()
-    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk)
-
-    await carrier.create(_s3_spec(uuid4()))
-
-    sandbox = sdk.sandboxes["sbx-1"]
-    assert sandbox.files.written == [
-        (CA_STAGING_PATH, "ca-pem"),
-        (SANDBOX_FS_TOKEN_STAGING_PATH, _S3_TOKEN),
-    ]
-    assert sandbox.files.write_users == ["root", "root"]
-    assert [cmd for cmd, _, _ in sandbox.commands.runs] == [
-        INSTALL_CA_COMMAND,
-        prepare_token_staging_command(),
-        install_token_command(),
-        mount_health_check(WORKSPACE_DIR),
-    ]
-
-
-async def test_create_remounts_when_the_health_probe_times_out() -> None:
-    """A wedged FUSE mount hangs the probe rather than failing it; the carrier reads the timeout
-    as unhealthy and rebuilds the mount from its durable S3 workspace."""
-    sdk = _Sdk(command_timeout_counts={"mountpoint": 1})
-    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk)
-    conversation = uuid4()
-
-    await carrier.create(_s3_spec(conversation))
-
-    sandbox = sdk.sandboxes["sbx-1"]
-    assert (SANDBOX_FS_TOKEN_STAGING_PATH, _S3_TOKEN) in sandbox.files.written
-    commands = [cmd for cmd, _, _ in sandbox.commands.runs]
-    assert commands[0] == INSTALL_CA_COMMAND
-    assert commands[1] == prepare_token_staging_command()
-    assert commands[2] == install_token_command()
-    assert commands[3] == mount_health_check(WORKSPACE_DIR)
-    assert "umount -l" in commands[4]
-    assert f"s3fs ufo-blobs:/conversations/{conversation}/workspace {WORKSPACE_DIR}" in commands[5]
 
 
 async def test_create_opens_a_sandbox_on_the_template_and_returns_its_handle() -> None:
@@ -393,7 +308,8 @@ async def test_create_opens_a_sandbox_on_the_template_and_returns_its_handle() -
     assert created["api_key"] == "key-1"
     assert created["lifecycle"] == E2B_LIFECYCLE
     assert created["metadata"] == {CONVERSATION_METADATA_KEY: str(conversation)}
-    assert WORKSPACE_DIR in sdk.sandboxes["sbx-1"].files.made_dirs
+    runs = sdk.sandboxes["sbx-1"].commands.runs
+    assert (ENSURE_WORKSPACE_COMMAND, None, WORKSPACE_ENSURE_TIMEOUT_SECONDS) in runs
     assert handle.traffic_token == "traffic-tok"
 
 
@@ -421,7 +337,10 @@ async def test_create_retries_system_trust_after_an_update_failure() -> None:
     await carrier.create(spec)
 
     commands = [command for command, _, _ in sdk.sandboxes["sbx-1"].commands.runs]
-    assert commands == [INSTALL_CA_COMMAND, INSTALL_CA_COMMAND]
+    assert [command for command in commands if command == INSTALL_CA_COMMAND] == [
+        INSTALL_CA_COMMAND,
+        INSTALL_CA_COMMAND,
+    ]
 
 
 def test_ca_install_command_removes_a_target_after_a_failed_bundle_update(
@@ -496,7 +415,7 @@ async def test_create_without_a_reachable_proxy_url_fails_loud() -> None:
     spec = SandboxSpec(
         conversation_id=uuid4(),
         image_ref="ufo-sandbox:latest",
-        mount=MountSpec(kind="filesystem", host_path="/tmp/ws"),
+        workspace_host_path="/tmp/ws",
         proxy=ProxyEndpoint(port=8080, ca_cert="ca-pem"),
         run_token="run-token",
     )
@@ -510,7 +429,7 @@ async def test_create_with_a_plaintext_proxy_url_fails_loud() -> None:
     spec = SandboxSpec(
         conversation_id=uuid4(),
         image_ref="ufo-sandbox:latest",
-        mount=MountSpec(kind="filesystem", host_path="/tmp/ws"),
+        workspace_host_path="/tmp/ws",
         proxy=ProxyEndpoint(
             port=8080,
             ca_cert="ca-pem",
@@ -544,7 +463,8 @@ async def test_second_create_for_the_conversation_resumes_rather_than_recreates(
     assert len(sdk.created) == 1
     assert sdk.connected == ["sbx-1"]
     assert handle.container_id == "sbx-1"
-    assert [command for command, _, _ in sdk.sandboxes["sbx-1"].commands.runs] == [
+    commands = [command for command, _, _ in sdk.sandboxes["sbx-1"].commands.runs]
+    assert [command for command in commands if command == INSTALL_CA_COMMAND] == [
         INSTALL_CA_COMMAND,
         INSTALL_CA_COMMAND,
     ]
@@ -566,30 +486,13 @@ async def test_create_resumes_a_prior_process_sandbox_and_exec_works() -> None:
     assert len(sdk.created) == 1
     assert sdk.connected == [opened.container_id]
     assert resumed.container_id == opened.container_id
-    assert [command for command, _, _ in sdk.sandboxes["sbx-1"].commands.runs[:2]] == [
+    commands = [command for command, _, _ in sdk.sandboxes["sbx-1"].commands.runs]
+    assert [command for command in commands if command == INSTALL_CA_COMMAND] == [
         INSTALL_CA_COMMAND,
         INSTALL_CA_COMMAND,
     ]
     result = await restarted.exec(resumed, ("bash", "-lc", "echo hi"), 60)
     assert result.exit_code == 0
-
-
-async def test_destroy_connects_to_a_prior_process_sandbox_to_pause_it() -> None:
-    """The reaper reclaims a sandbox a prior process created by passing the stored id: a fresh
-    carrier holds no live sandbox, so destroy reconnects that id and pauses it — idle reclaim
-    reaches across a restart, not only sandboxes this process opened."""
-    sdk = _Sdk()
-    opener = E2BCarrier(api_key="k", template="t", sdk=sdk)
-    conversation = uuid4()
-    opened = await opener.create(_spec(conversation))
-
-    reaper_carrier = E2BCarrier(api_key="k", template="t", sdk=sdk)
-    await reaper_carrier.destroy(
-        SandboxHandle(conversation_id=conversation, container_id=opened.container_id)
-    )
-
-    assert sdk.connected == [opened.container_id]
-    assert sdk.sandboxes[opened.container_id].paused == 1
 
 
 async def test_exec_runs_the_joined_command_in_the_workspace_and_maps_the_result() -> None:
@@ -900,72 +803,6 @@ async def test_a_stored_sandbox_the_provider_no_longer_has_opens_a_fresh_one(
     assert sdk.created[0]["metadata"] == {CONVERSATION_METADATA_KEY: str(conversation)}
 
 
-async def test_export_copies_the_file_server_side_from_the_workspace_prefix(
-    tmp_path: Path,
-) -> None:
-    """export promotes the produced file with a blob-store copy from the workspace S3 prefix to the
-    artifact key — it never reads the bytes back out through the sandbox SDK."""
-    sdk = _Sdk()
-    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk)
-    conversation = uuid4()
-    handle = await carrier.create(_s3_spec(conversation))
-    key_prefix = f"conversations/{conversation}/workspace"
-    blob = FilesystemBlobStore(root=tmp_path)
-    await blob.put(f"{key_prefix}/out.txt", b"produced-bytes")
-
-    await carrier.export(handle, f"{WORKSPACE_DIR}/out.txt", blob, "artifacts/abc/out.txt")
-
-    assert await blob.get("artifacts/abc/out.txt") == b"produced-bytes"
-    assert sdk.sandboxes["sbx-1"].files.reads == []
-
-
-async def test_export_without_an_s3_mount_fails_loud(tmp_path: Path) -> None:
-    """A filesystem-mount handle has no S3 prefix to copy from, so export refuses it rather than
-    fall back to a read-through-the-pod."""
-    sdk = _Sdk()
-    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk)
-    handle = await carrier.create(_spec(uuid4()))
-    blob = FilesystemBlobStore(root=tmp_path)
-
-    with pytest.raises(RuntimeError, match="s3 workspace mount"):
-        await carrier.export(handle, f"{WORKSPACE_DIR}/out.txt", blob, "artifacts/abc/out.txt")
-
-
-async def test_destroy_pauses_the_sandbox() -> None:
-    sdk = _Sdk()
-    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk)
-    handle = await carrier.create(_spec(uuid4()))
-
-    await carrier.destroy(handle)
-
-    assert sdk.sandboxes["sbx-1"].paused == 1
-
-
-async def test_destroy_on_a_conversation_never_created_is_a_no_op() -> None:
-    """The idle reaper reaps by conversation identity with no container id; a conversation this
-    process never held is a no-op that neither connects nor raises."""
-    sdk = _Sdk()
-    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk)
-
-    await carrier.destroy(SandboxHandle(conversation_id=uuid4(), container_id=""))
-
-    assert sdk.connected == []
-    assert sdk.sandboxes == {}
-
-
-async def test_destroy_on_an_already_gone_sandbox_is_a_no_op() -> None:
-    """The reaper retries a stored handle whose sandbox the provider no longer has (killed out of
-    band, or reaped by a concurrent process) every sweep unless destroy absorbs the reconnect's
-    SandboxNotFoundException as the no-op its own contract promises — otherwise the raise stops the
-    reaper from ever clearing the durable handle."""
-    sdk = _Sdk()
-    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk)
-
-    await carrier.destroy(SandboxHandle(conversation_id=uuid4(), container_id="gone-1"))
-
-    assert sdk.connected == ["gone-1"]
-
-
 def _clear_e2b_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(E2B_API_KEY_ENV, raising=False)
 
@@ -999,8 +836,9 @@ def test_config_backend_e2b_resolves_the_extension_contributed_carrier(
         blob=BlobConfig(backend="filesystem", root=Path("blobs")),
         sandbox=SandboxConfig(backend="e2b", proxy_public_url=PROXY_PUBLIC_URL),
     )
-    carrier = _select_carrier(config, (e2b_ext.manifest(),))
+    carrier, off_cluster = _select_carrier(config, (e2b_ext.manifest(),))
     assert isinstance(carrier, E2BCarrier)
+    assert off_cluster
     assert carrier.template == E2B_TEMPLATE_NAME
 
 
@@ -1071,3 +909,167 @@ async def test_spec_env_joins_the_exec_env() -> None:
     envs = sdk.sandboxes["sbx-1"].commands.envs[-1]
     assert envs is not None
     assert envs["GH_TOKEN"] == "UFO_SENTINEL_GRANT_acct-1"
+
+
+async def test_create_provisions_ca_then_workspace_as_root_on_every_branch() -> None:
+    """is ensured as root after the CA lands, on the fresh, resumed, and reconnected
+    paths alike — the first process to touch a sandbox is not always the one that created it, and
+    the sandbox user can neither create nor own a directory under root's ."""
+    sdk = _Sdk()
+    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk)
+    conversation = uuid4()
+    await carrier.create(_spec(conversation))
+    await carrier.create(_spec(conversation))
+    other = E2BCarrier(api_key="k", template="t", sdk=sdk)
+    spec = replace(_spec(conversation), resume_id="sbx-1")
+    await other.create(spec)
+
+    runs = sdk.sandboxes["sbx-1"].commands.runs
+    users = sdk.sandboxes["sbx-1"].commands.users
+    ensured = [index for index, run in enumerate(runs) if run[0] == ENSURE_WORKSPACE_COMMAND]
+    assert len(ensured) == 3
+    assert all(users[index] == "root" for index in ensured)
+
+
+async def test_create_fails_loud_when_the_workspace_setup_fails() -> None:
+    sdk = _Sdk(command_fail_counts={"chown": 1})
+    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk)
+
+    with pytest.raises(RuntimeError, match="workspace setup"):
+        await carrier.create(_spec(uuid4()))
+
+
+async def test_read_streams_through_the_filesystem_api_and_closes_the_reader() -> None:
+    """The copy-out asks the provider to stream the body, so a large produced file crosses in
+    bounded pieces; the reader holds an open connection with no finalizer to release it, so it is
+    closed even when the consumer stops after the first chunk."""
+    sdk = _Sdk()
+    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk)
+    handle = await carrier.create(_spec(uuid4()))
+    files = sdk.sandboxes["sbx-1"].files
+    files.chunks = (b"produced-", b"bytes")
+
+    whole = [chunk async for chunk in carrier.read(handle, f"{WORKSPACE_DIR}/out.txt")]
+
+    assert whole == [b"produced-", b"bytes"]
+    assert files.reads == [(f"{WORKSPACE_DIR}/out.txt", "stream")]
+    assert files.closed == 1
+
+    partial = carrier.read(handle, f"{WORKSPACE_DIR}/out.txt")
+    assert await partial.__anext__() == b"produced-"
+    await partial.aclose()
+
+    assert files.closed == 2
+
+
+async def test_read_of_an_absent_file_raises_file_not_found() -> None:
+    sdk = _Sdk()
+    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk)
+    handle = await carrier.create(_spec(uuid4()))
+    sdk.sandboxes["sbx-1"].files.missing = True
+
+    with pytest.raises(FileNotFoundError):
+        [chunk async for chunk in carrier.read(handle, f"{WORKSPACE_DIR}/out.txt")]
+
+
+async def test_create_evicts_expired_leases_without_touching_the_provider() -> None:
+    """The lease map must not grow by one SDK object per conversation forever: a lease whose
+    provider clock ran out is already paused provider-side, so a later create sheds it as pure
+    bookkeeping — no pause, no kill, no reconnect for the evicted conversation — and its next
+    touch reconnects from the durable handle exactly as a fresh process would."""
+    sdk = _Sdk()
+    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk, clock=sdk.clock)
+    settled, fresh = uuid4(), uuid4()
+    await carrier.create(_spec(settled))
+    assert settled in carrier._live
+
+    sdk.clock.now += SANDBOX_LEASE_SECONDS + 1.0
+    await carrier.create(_spec(fresh))
+
+    assert settled not in carrier._live
+    assert fresh in carrier._live
+    assert sdk.connected == []
+
+    handle = SandboxHandle(conversation_id=settled, container_id="sbx-1", run_token="turn-a")
+    await carrier.exec(handle, ("bash", "-lc", "true"), 30)
+    assert sdk.connected == ["sbx-1"]
+
+
+async def test_attach_resumes_the_stored_sandbox_for_a_read() -> None:
+    """The read path: attach answers the sandbox the stored handle names — always the provider's
+    own answer through the connect that leases it, never the in-process cache's — with no egress
+    env, since a read runs nothing that leaves the box."""
+    sdk = _Sdk()
+    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk)
+    conversation = uuid4()
+    await carrier.create(_spec(conversation))
+    reader = E2BCarrier(api_key="k", template="t", sdk=sdk)
+
+    attached = await reader.attach(replace(_spec(conversation), resume_id="sbx-1"))
+
+    assert attached is not None
+    assert attached.container_id == "sbx-1"
+    assert attached.egress_env == {}
+    assert sdk.connected[-1] == "sbx-1"
+
+
+async def test_attach_answers_absent_for_a_lost_or_never_opened_sandbox() -> None:
+    """A read never provisions: no stored id, or an id the provider no longer has, answers None —
+    and no fresh sandbox is created for it."""
+    sdk = _Sdk()
+    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk)
+
+    assert await carrier.attach(_spec(uuid4())) is None
+    assert await carrier.attach(replace(_spec(uuid4()), resume_id="sbx-gone")) is None
+    assert sdk.created == []
+
+
+async def test_create_prefers_the_named_resume_id_over_its_own_live_cache() -> None:
+    """The row is the arbiter of concurrent opens: a caller retrying with the persisted winner's id
+    must converge on that sandbox even when this process's cache still holds its own losing one —
+    a cache-first read would hand the loser back and carry its id over the winner's row."""
+    sdk = _Sdk()
+    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk)
+    conversation = uuid4()
+    loser = await carrier.create(_spec(conversation))
+    winner = await E2BCarrier(api_key="k", template="t", sdk=sdk).create(_spec(conversation))
+    assert loser.container_id != winner.container_id
+
+    adopted = await carrier.create(replace(_spec(conversation), resume_id=winner.container_id))
+
+    assert adopted.container_id == winner.container_id
+    assert sdk.connected[-1] == winner.container_id
+
+
+async def test_attach_answers_absent_for_a_sandbox_the_cache_outlived() -> None:
+    """A cached lease can outlive its sandbox — a kill, a provider fault — and a read that answered
+    present off the cache would raise where absence was promised. Attach asks the provider every
+    time, sheds the dead cache entry, and answers None."""
+    sdk = _Sdk()
+    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk)
+    conversation = uuid4()
+    opened = await carrier.create(_spec(conversation))
+    assert conversation in carrier._live
+    del sdk.sandboxes[opened.container_id]
+
+    attached = await carrier.attach(replace(_spec(conversation), resume_id=opened.container_id))
+
+    assert attached is None
+    assert conversation not in carrier._live
+
+
+async def test_a_lease_renewal_on_a_lost_sandbox_sheds_the_lease_and_raises() -> None:
+    """`_sandbox`'s reconnect can meet a sandbox the provider no longer has; the lease is dropped so
+    the next call reattaches from durable state instead of trusting a deadline the provider
+    abandoned, and the loss surfaces rather than reading as a transport fault."""
+    sdk = _Sdk()
+    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk, clock=sdk.clock)
+    conversation = uuid4()
+    handle = await carrier.create(_spec(conversation))
+    sdk.clock.now += SANDBOX_LEASE_SECONDS + 1
+    del sdk.sandboxes[handle.container_id]
+
+    with pytest.raises(SandboxNotFoundException):
+        await carrier.exec(handle, ("bash", "-lc", "true"), 30)
+
+    assert conversation not in carrier._live

@@ -13,10 +13,6 @@ from sandbox.build_template import (
     NPM_PACKAGES,
     PIP_PACKAGES,
     RUNTIME_USER,
-    S3FS_BUILD_COMMAND,
-    S3FS_BUILD_TOOLCHAIN,
-    S3FS_COMMIT,
-    S3FS_VERSION_MARKER,
     SANDBOX_ENV,
     SANDBOX_SCRIPTS,
     SANDBOX_TEMPLATE_READY_COMMAND,
@@ -31,7 +27,7 @@ EXPECTED_APT = (
     "curl",
     "jq",
     "ripgrep",
-    "util-linux",
+    "media-types",
     "poppler-utils",
     "chromium",
     "libreoffice-writer",
@@ -103,7 +99,6 @@ def test_ready_probe_checks_every_baked_entrypoint() -> None:
         "node",
         "sbx",
         "sbxfs",
-        "sbxcred",
         "rg",
         "pdftotext",
         "pdftoppm",
@@ -111,19 +106,11 @@ def test_ready_probe_checks_every_baked_entrypoint() -> None:
         "gh",
     ):
         assert f"command -v {tool}" in SANDBOX_TEMPLATE_READY_COMMAND
-    assert "test -x /usr/sbin/runuser" in SANDBOX_TEMPLATE_READY_COMMAND
     assert "chromium" in SANDBOX_TEMPLATE_READY_COMMAND
 
 
-def test_ready_probe_pins_the_s3fs_build() -> None:
-    """`command -v` would pass on a distro s3fs — every packaged build segfaults on the null path
-    libfuse hands file-handle requests for unlinked-while-open files, so the probe demands the
-    pinned commit's version string at every sandbox boot."""
-    assert f"s3fs --version | grep -q {S3FS_VERSION_MARKER}" in SANDBOX_TEMPLATE_READY_COMMAND
-
-
-def test_scripts_include_the_credential_relay() -> None:
-    assert tuple(name for name, _ in SANDBOX_SCRIPTS) == ("sbx", "sbxfs", "sbxcred")
+def test_scripts_are_the_exec_and_workspace_helpers() -> None:
+    assert tuple(name for name, _ in SANDBOX_SCRIPTS) == ("sbx", "sbxfs")
 
 
 def test_rendered_dockerfile_carries_the_full_install_sequence() -> None:
@@ -142,12 +129,13 @@ def test_rendered_dockerfile_carries_the_full_install_sequence() -> None:
         assert package in dockerfile
     assert "/usr/local/bin/sbx" in dockerfile
     assert "/usr/local/bin/sbxfs" in dockerfile
-    assert "/usr/local/bin/sbxcred" in dockerfile
+    assert "s3fs" not in dockerfile
+    assert "sbxcred" not in dockerfile
 
 
 def test_rendered_dockerfile_runs_as_the_non_root_user() -> None:
     """A sandbox that ran as root after sudo is stripped would be a regression; the render must end
-    switched to the non-root runtime user, and serve chowns the workspace to that user's uid."""
+    switched to the non-root runtime user, and the carrier chowns the workspace to that user."""
     dockerfile = pod_dockerfile()
     assert f"USER {RUNTIME_USER}" in dockerfile
     assert dockerfile.rstrip().rfind(f"USER {RUNTIME_USER}") > dockerfile.rfind("USER root")
@@ -171,22 +159,4 @@ def test_gh_installs_from_the_official_cli_repo() -> None:
 def test_gh_install_is_covered_by_the_drift_digest(monkeypatch) -> None:
     before = build_definition_digest()
     monkeypatch.setattr(build_template, "GH_INSTALL_COMMAND", "changed")
-    assert build_definition_digest() != before
-
-
-def test_s3fs_builds_from_the_pinned_null_path_fix_commit() -> None:
-    """No packaged s3fs survives the null-path file-handle requests libfuse delivers for files
-    unlinked while open (s3fs-fuse#2903 — the segfault that dropped a live /workspace mid-turn);
-    the image builds the first upstream commit that serves them by pseudo fd, and the marker the
-    ready probe greps is that commit's version string."""
-    assert S3FS_COMMIT in S3FS_BUILD_COMMAND
-    assert "github.com/s3fs-fuse/s3fs-fuse" in S3FS_BUILD_COMMAND
-    assert S3FS_VERSION_MARKER == f"commit:{S3FS_COMMIT[:7]}"
-    assert f"apt-get purge -y {S3FS_BUILD_TOOLCHAIN} && apt-get autoremove -y" in S3FS_BUILD_COMMAND
-    assert S3FS_BUILD_COMMAND in pod_dockerfile()
-
-
-def test_s3fs_build_is_covered_by_the_drift_digest(monkeypatch) -> None:
-    before = build_definition_digest()
-    monkeypatch.setattr(build_template, "S3FS_BUILD_COMMAND", "changed")
     assert build_definition_digest() != before

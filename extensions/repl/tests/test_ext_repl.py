@@ -15,7 +15,6 @@ from ufo.ext.loader import skill_registry
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import (
     ExecResult,
-    MountSpec,
     ProxyEndpoint,
     SandboxSession,
     SandboxSpec,
@@ -278,7 +277,7 @@ async def test_js_repl_emits_images_through_the_real_local_carrier(tmp_path: Pat
         SandboxSpec(
             conversation_id=uuid4(),
             image_ref="ufo-sandbox:latest",
-            mount=MountSpec(kind="filesystem", host_path=str(tmp_path / "workspace")),
+            workspace_host_path=str(tmp_path / "workspace"),
             proxy=ProxyEndpoint(port=9999, ca_cert="CA-PEM-BYTES"),
             run_token="run-token-abc",
         )
@@ -305,7 +304,6 @@ async def test_js_repl_emits_images_through_the_real_local_carrier(tmp_path: Pat
     )
     assert resolved.is_error is False
     assert "/node_modules/npm/" in json.loads(resolved.content[0].text)["stdout"]
-    await carrier.destroy(handle)
 
 
 async def test_global_modules_link_resolves_a_package_only_in_a_secondary_root(
@@ -316,7 +314,7 @@ async def test_global_modules_link_resolves_a_package_only_in_a_secondary_root(
         SandboxSpec(
             conversation_id=uuid4(),
             image_ref="ufo-sandbox:latest",
-            mount=MountSpec(kind="filesystem", host_path=str(tmp_path / "workspace")),
+            workspace_host_path=str(tmp_path / "workspace"),
             proxy=ProxyEndpoint(port=9999, ca_cert="CA-PEM-BYTES"),
             run_token="run-token-abc",
         )
@@ -341,7 +339,6 @@ async def test_global_modules_link_resolves_a_package_only_in_a_secondary_root(
     result = await repl.js_repl(ctx, JsReplInput(code=code, user_description="d"))
     assert result.is_error is False
     assert json.loads(result.content[0].text)["stdout"] == "from-solo from-primary\n"
-    await carrier.destroy(handle)
 
 
 async def test_js_repl_raises_when_global_module_linking_fails(tmp_path: Path) -> None:

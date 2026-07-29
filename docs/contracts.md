@@ -49,15 +49,12 @@ adds `turn.parent_turn_id` + `turn.subagent_profile` and the `subagent` conversa
 relaxes `conversation.member_id` for shared surfaces, U7 adds ledger attribution + price-digest
 audit columns.
 
-## blob.py (U2 remainder)
+## blob.py
 
-```python
-class BlobStore(Protocol):        # put/get/exists landed U1
-    def workspace_mount(self, conversation_id: UUID) -> MountSpec: ...   # reaches ONLY .../workspace/
-```
-Key layout still to land: `conversations/<cid>/workspace/**` (U2), `artifacts/<digest>` (U5).
-`conversations/<cid>/compactions/<n>/{before,after}.json.lz4` (U5) has landed. `MountSpec`: bind
-mount on filesystem, sandbox-fs cred scoped to the `workspace/` prefix on S3.
+Transcripts, compaction records, and shared artifacts — never a conversation's workspace, which
+lives in its sandbox. Key layout: `artifacts/<uuid>/<name>` (U5),
+`conversations/<cid>/compactions/<n>/{before,after}.json.lz4` (U5). On S3 a shared file lands by a
+presigned PUT the sandbox performs, bound to the preflighted size and sha256.
 
 ## hub.py (later-unit remainder)
 
@@ -108,15 +105,18 @@ context; omission is common authority unless the turn carries `on_behalf_of_memb
 ```python
 class Carrier(Protocol):
     async def create(self, spec: SandboxSpec) -> SandboxHandle: ...      # create-or-attach
+    async def attach(self, spec: SandboxSpec) -> SandboxHandle | None: ...  # attach-only (reads)
     async def exec(self, h: SandboxHandle, argv: tuple[str, ...], *, timeout_s: int) -> ExecResult: ...
     async def write(self, h: SandboxHandle, path: str, content: bytes) -> None: ...  # copy-in
-    async def route(self, h: SandboxHandle, port: int) -> str: ...       # serving URL
-    async def destroy(self, h: SandboxHandle) -> None: ...
-class SandboxSpec(BaseModel):  conversation_id: UUID; image_digest: str; mount: MountSpec
-                               proxy: ProxyEndpoint; run_token: str
+    async def read(self, h: SandboxHandle, path: str) -> AsyncIterator[bytes]: ...   # copy-out
+    async def host(self, h: SandboxHandle, port: int) -> str: ...        # serving URL
+class SandboxSpec:  conversation_id: UUID; image_ref: str; workspace_host_path: str
+                    proxy: ProxyEndpoint; run_token: str; resume_id: str | None
 ```
-Docker implements in core; a reaper job reclaims idle containers. Proxy rules (module-private in
-`sandbox/proxy/`, no public register API):
+`/workspace` is the carrier's own storage and the only copy of a conversation's files; the docker
+carrier stops its own idle containers and any later touch restarts one, and nothing reclaims an
+off-cluster sandbox — its provider suspends it. Proxy rules (module-private in `sandbox/proxy/`,
+no public register API):
 
 ```python
 def derive_rules(manifests: tuple[Manifest, ...], grants: tuple[Grant, ...],
@@ -218,7 +218,8 @@ extension may touch; a CI gate fails any `extensions/` import outside `ufo.sdk`.
 - At most one running turn per conversation; every awaited turn ends in a committed terminal frame.
 - A live turn absorbs every speaker's inbound FIFO and emits one terminal reply and writeback.
 - A conversation persists one exact audience; foreign rooms cannot read workspace-shared subjects.
-- The sandbox reaches only `conversations/<cid>/workspace/`; the container is disposable cache.
+- A tool reaches only `/workspace`; transcripts and compactions live in a blob store the sandbox
+  holds no credential for.
 - Sandbox commands carry signed `(workspace, turn, acting member)` authority; descendants inherit
   their launch environment, while unbound commands carry common authority.
 - Extensions import `ufo.sdk` only; credentials resolve only for declared slots.

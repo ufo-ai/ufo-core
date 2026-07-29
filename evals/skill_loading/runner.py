@@ -28,9 +28,7 @@ from evals.harness.target import (
     capability_output,
     trajectory_snapshot,
 )
-from ufo.blob import BlobStore
 from ufo.db import workspace_tx
-from ufo.ext.surface import workspace_key
 from ufo.sandbox.session import WORKSPACE_DIR
 from ufo.schema import tables
 from ufo.schema.records import TurnStatus
@@ -143,9 +141,6 @@ class SkillLoadRunTarget(Protocol):
     def outcome(self) -> TurnControl: ...
 
     @property
-    def blob(self) -> BlobStore | None: ...
-
-    @property
     def loadable_skills(self) -> frozenset[str] | None: ...
 
 
@@ -176,17 +171,12 @@ class SkillLoadingSuite:
 
     async def run(self, target: CapabilityTarget, slots: asyncio.Semaphore) -> EvalReport:
         run_target = cast(SkillLoadRunTarget, target)
-        blob = run_target.blob
-        if blob is None:
-            raise RuntimeError("the skill_loading suite requires the workspace blob store")
         loadable = run_target.loadable_skills
         if loadable is None:
             raise RuntimeError("the skill_loading suite requires the pack's loadable-skill set")
         results = await gather_cases(
             slots,
-            tuple(
-                partial(self._gated_case, case, run_target, blob, loadable) for case in self.cases
-            ),
+            tuple(partial(self._gated_case, case, run_target, loadable) for case in self.cases),
         )
         return EvalReport(
             name="skill_loading", suite="skill_loading", digest=self.digest, cases=results
@@ -196,7 +186,6 @@ class SkillLoadingSuite:
         self,
         case: SkillLoadCase,
         target: SkillLoadRunTarget,
-        blob: BlobStore,
         loadable: frozenset[str],
     ) -> EvalCaseResult:
         if case.expected not in loadable:
@@ -207,11 +196,9 @@ class SkillLoadingSuite:
                 evidence=self._evidence(case, None, None),
                 excluded=True,
             )
-        return await self._case(case, target, blob)
+        return await self._case(case, target)
 
-    async def _case(
-        self, case: SkillLoadCase, target: SkillLoadRunTarget, blob: BlobStore
-    ) -> EvalCaseResult:
+    async def _case(self, case: SkillLoadCase, target: SkillLoadRunTarget) -> EvalCaseResult:
         conversation_id = await target.conversations.open(
             case.name, workspace_files=case.workspace_files
         )
@@ -226,7 +213,7 @@ class SkillLoadingSuite:
                 reason=f"invoke raised: {type(error).__name__}: {error}",
                 evidence=self._evidence(case, None, conversation_id),
             )
-        observation = await self._observe(case, target, blob, conversation_id, turn_id)
+        observation = await self._observe(case, target, conversation_id, turn_id)
         passed, reason = skill_load_verdict(case, observation)
         evidence = self._evidence(case, observation, conversation_id)
         evidence["attempts"] = [
@@ -239,11 +226,10 @@ class SkillLoadingSuite:
         self,
         case: SkillLoadCase,
         target: SkillLoadRunTarget,
-        blob: BlobStore,
         conversation_id: UUID,
         turn_id: UUID,
     ) -> SkillLoadObservation:
-        """Poll the watched mount keys and the turn row until a watched skill mounts, the turn
+        """Poll the watched mount paths and the turn row until a watched skill mounts, the turn
         reaches its own terminal, or the deadline fires — then end the turn if it still runs.
         Status reads before mounts, so a terminal status guarantees the mount set is final."""
         watch = (case.expected, *case.forbidden)
@@ -257,7 +243,12 @@ class SkillLoadingSuite:
                     )
                 ).scalar_one_or_none()
             mounted = tuple(
-                [name for name in watch if await blob.exists(_mount_key(conversation_id, name))]
+                name
+                for name in watch
+                if target.conversations.workspace_path(
+                    conversation_id,
+                    f"{SKILLS_MOUNT_DIR}/{name}/{SKILL_MD}".removeprefix(f"{WORKSPACE_DIR}/"),
+                ).exists()
             )
             elapsed = clock() - started
             terminal = status in TERMINAL_STATUSES
@@ -328,10 +319,3 @@ class SkillLoadingSuite:
         ]
         attempt["trajectory"] = snapshot.model_dump(mode="json")
         return attempt
-
-
-def _mount_key(conversation_id: UUID, skill: str) -> str:
-    """The blob key of a mounted skill's `SKILL.md` — derived from the same runtime constants
-    `mount_skill` writes through, so the watcher and the mounter cannot disagree."""
-    rel = f"{SKILLS_MOUNT_DIR}/{skill}/{SKILL_MD}".removeprefix(f"{WORKSPACE_DIR}/")
-    return workspace_key(conversation_id, rel)

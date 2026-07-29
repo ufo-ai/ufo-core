@@ -629,8 +629,6 @@ class RecordingCarrier:
             raise self.write_error
         self.writes.append((path, content))
 
-    async def destroy(self, handle: SandboxHandle) -> None: ...
-
 
 ADMITTED_AT = datetime(2026, 7, 9, 18, 32, tzinfo=UTC)
 

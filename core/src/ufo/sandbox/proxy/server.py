@@ -1,14 +1,10 @@
-"""The sandbox proxy: scoped egress plus the root-owned workspace credential endpoint.
+"""The sandbox proxy: scoped egress for every agent process.
 
 Agent processes reach the network solely through this proxy (their HTTP(S)_PROXY). The rule set is
 resolved from the deployment-signed run token in the `Proxy-Authorization` header — the turn,
 hence the turn's agent and acting member — so a sandbox sees only its own agent's egress: the
 workspace's model and credential rules plus that agent's OAuth grants. An unsigned, unknown, or
 ended run reaches no host.
-
-The same listener serves s3fs's ECS metadata fetch. Its unguessable signed path token resolves one
-conversation and mints a short-lived STS credential whose inline policy reaches only that
-conversation's workspace prefix. The local relay forwards the token from the private mount file.
 
 Default-deny is a CONNECT the proxy refuses: ScopeRule admits exact model and grant hosts.
 InternetRule admits a live turn's globally routable IPv4 after resolving and pinning DNS;
@@ -64,11 +60,6 @@ from ufo.grants import GrantStore
 from ufo.models.catalog import CORE_PRICING
 from ufo.models.pricing import Pricing
 from ufo.o11y import emit_metric, log, log_error
-from ufo.sandbox.fs_creds import (
-    SANDBOX_FS_CREDENTIAL_PATH,
-    InvalidSandboxFsToken,
-    SandboxFsCredentials,
-)
 from ufo.sandbox.proxy.rules import (
     ANTHROPIC_HOST,
     OPENAI_HOST,
@@ -115,7 +106,6 @@ EGRESS_AUTHORIZATION_UNAVAILABLE = "egress authorization unavailable"
 
 RuleResolver = Callable[["RunToken | None"], Awaitable[tuple[Rule, ...]]]
 TurnAuthorizer = Callable[["RunToken"], Awaitable[bool]]
-WorkspaceCredentials = Callable[[str, TurnAuthorizer], Awaitable[SandboxFsCredentials]]
 PublicAddressResolver = Callable[[str, int], Awaitable[str]]
 
 
@@ -294,7 +284,6 @@ class EgressProxy:
     run_tokens: RunTokenCodec
     resolve_public: PublicAddressResolver | None = None
     pricing: Pricing = CORE_PRICING
-    workspace_credentials: WorkspaceCredentials | None = None
     _server: asyncio.Server | None = field(default=None, init=False)
     _workdir: tempfile.TemporaryDirectory | None = field(default=None, init=False)
     _contexts: dict[str, ssl.SSLContext] = field(default_factory=dict, init=False)
@@ -369,7 +358,7 @@ class EgressProxy:
             self._workdir = None
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        """One client connection: dispatch an s3fs credential fetch or proxy CONNECT."""
+        """One client connection: refuse anything that is not a proxy CONNECT, then tunnel it."""
         if self._server is None or not self._server.is_serving():
             writer.close()
             return
@@ -397,9 +386,6 @@ class EgressProxy:
                     await _respond(writer, 400, "malformed proxy request line")
                     return
                 method, target, _ = parts
-                if method == "GET":
-                    await self._serve_workspace_credentials(writer, target)
-                    return
                 if method != "CONNECT":
                     await _respond(writer, 405, "only CONNECT is proxied")
                     return
@@ -478,35 +464,6 @@ class EgressProxy:
                     self._workspace_connections[workspace_connection] = workspace_connections
             self._active_connections -= 1
             self._connection_tasks.discard(task)
-
-    async def _serve_workspace_credentials(self, writer: asyncio.StreamWriter, target: str) -> None:
-        if self.workspace_credentials is None or not target.startswith(SANDBOX_FS_CREDENTIAL_PATH):
-            await _respond(writer, 404, "not found")
-            return
-        token = target.removeprefix(SANDBOX_FS_CREDENTIAL_PATH)
-        if not token or "/" in token:
-            await _respond(writer, 404, "not found")
-            return
-        try:
-            credentials = await self.workspace_credentials(token, self.authorize)
-        except InvalidSandboxFsToken:
-            await _respond(writer, 403, "invalid sandbox-fs token")
-            return
-        except Exception as error:
-            log("sandbox_fs.refresh_failed", error_class=type(error).__name__)
-            await _respond(writer, 502, "credential mint failed")
-            return
-        body = credentials.ecs_json()
-        try:
-            writer.write(
-                b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: "
-                + str(len(body)).encode()
-                + b"\r\nconnection: close\r\n\r\n"
-                + body
-            )
-            await writer.drain()
-        except OSError:
-            pass
 
     async def _turn_authorized(self, run: RunToken) -> bool:
         """The turn-liveness gate, whose fault is recorded here and raised on. Both authorization

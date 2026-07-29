@@ -56,6 +56,9 @@ from ufo.loop.engine import SKILL_LOAD_TOOL
 from ufo.loop.prompts.render import render_system_prompt
 from ufo.loop.subagents import SubagentRegistry
 from ufo.models.registry import model_registry
+from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
+from ufo.sandbox.local import LocalCarrier
+from ufo.sandbox.session import ProxyEndpoint
 from ufo.serve import (
     _connect_flow,
     _mount_ext_routes,
@@ -229,6 +232,14 @@ def _check_surfaces(manifest: Manifest, store: CredentialStore, tmp_path: Path) 
         (manifest,),
         store,
         FilesystemBlobStore(root=tmp_path),
+        ConversationSandbox(
+            carrier=LocalCarrier(),
+            backend="local",
+            off_cluster=False,
+            image_ref=SANDBOX_IMAGE_REF,
+            proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
+            workspace_root=tmp_path / "workspaces",
+        ),
         InProcessHub(),
         _StubDbos(),
         "",

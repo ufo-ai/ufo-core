@@ -150,8 +150,6 @@ class StubCarrier:
     ) -> ExecResult:
         return ExecResult(stdout="", stderr="", exit_code=0)
 
-    async def destroy(self, handle: SandboxHandle) -> None: ...
-
 
 async def _unavailable_spawn(
     profile: str, payload: dict[str, object], background: bool = False

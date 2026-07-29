@@ -1,4 +1,5 @@
 import base64
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -118,10 +119,7 @@ class _RecordingCarrier:
         self.timeouts.append(timeout_s)
         return ExecResult(stdout="", stderr="", exit_code=0)
 
-    async def export(self, handle: SandboxHandle, path: str, blob: object, key: str) -> None:
-        raise NotImplementedError
-
-    async def destroy(self, handle: SandboxHandle) -> None:
+    def read(self, handle: SandboxHandle, path: str) -> AsyncIterator[bytes]:
         raise NotImplementedError
 
 

@@ -16,6 +16,9 @@ from ufo.db import workspace_tx
 from ufo.ext.context import context_for
 from ufo.ext.surface import SurfaceContext
 from ufo.hub import InProcessHub
+from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
+from ufo.sandbox.local import LocalCarrier
+from ufo.sandbox.session import ProxyEndpoint
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience
@@ -104,6 +107,14 @@ def _surface(workspace_id: UUID, tmp_path) -> SurfaceContext:
         workspace_id=workspace_id,
         surface=SURFACE_WEB,
         blob=FilesystemBlobStore(root=tmp_path),
+        _sandboxes=ConversationSandbox(
+            carrier=LocalCarrier(),
+            backend="local",
+            off_cluster=False,
+            image_ref=SANDBOX_IMAGE_REF,
+            proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
+            workspace_root=tmp_path / "workspaces",
+        ),
         _admitter=MemberAdmission(
             workspace_id=workspace_id,
             admission=Admission(dbos=None, durable_surfaces=frozenset()),

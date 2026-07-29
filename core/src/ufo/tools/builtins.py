@@ -9,10 +9,11 @@ container and only a bounded JSON result crosses back — the host never pulls a
 loop on it. `read` records every path it returns so `edit`/`write` can refuse to touch a file the
 turn has not read — the guard that keeps a blind string-replace from clobbering content the model
 never saw. `glob` and `grep` run the in-sandbox `sbxfs` matcher and ripgrep, so file discovery and
-content search happen in the container and a bounded result crosses back. `share_file` streams a
-produced workspace file straight out of the mount into the blob
-store under `artifacts/<uuid>/` and returns a TTL-token URL core's artifact route serves — the only
-path that hands a file back outside the sandbox, with no read cap and no whole-file buffer.
+content search happen in the container and a bounded result crosses back. `share_file` lands a
+produced workspace file in the blob store under `artifacts/<uuid>/` — on S3 the sandbox uploads it
+itself to a presigned PUT bound to the size and sha256 a preflight measured — and returns a
+TTL-token URL core's artifact route serves: the only path that hands a file back outside the
+sandbox, with no read cap and no whole-file buffer.
 `spawn_subagent` delegates a typed subtask to a child turn through `ctx.spawn`. `ask_user` is
 chat-native: it
 structures a question or confirmation the agent poses in its reply, whose answer rides the member's
@@ -30,6 +31,7 @@ spawned."""
 import json
 import mimetypes
 import shlex
+from base64 import b64encode
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
 from typing import Any, Literal
@@ -45,6 +47,7 @@ from ufo.artifact_token import (
     mint_artifact_token,
 )
 from ufo.artifacts import artifact_object_names
+from ufo.blob import FilesystemBlobStore, S3BlobStore
 from ufo.db import workspace_tx
 from ufo.grants import installed_connect_flow
 from ufo.sandbox.session import WORKSPACE_DIR, workspace_path
@@ -63,6 +66,10 @@ from ufo.tools.registry import ToolDef
 GREP_HEAD_LIMIT = 100
 ARTIFACT_FALLBACK_NAME = "download"
 SHARE_PREFLIGHT_TIMEOUT_SECONDS = 300
+SHA256_DIGEST_PREFIX = "sha256:"
+ARTIFACT_PUT_MAX_BYTES = 5 * 1024 * 1024 * 1024
+ARTIFACT_PUT_TTL_SECONDS = 900
+ARTIFACT_PUT_TIMEOUT_SECONDS = 900
 
 SHARE_PREFLIGHT_PROG = """
 import hashlib, json, sys
@@ -469,15 +476,54 @@ async def grep_handler(ctx: ToolContext, args: GrepInput) -> ToolResult:
     return ToolResult(content=(TextContent(text=json.dumps(result)),))
 
 
+async def _store_artifact(
+    ctx: ToolContext, scoped: str, key: str, size_bytes: int, digest: str
+) -> None:
+    """Put the preflighted file under `key`, by the one route the store offers.
+
+    S3: serve mints a presigned PUT bound to `size_bytes` and `digest`, and the sandbox uploads to
+    it over the egress proxy — the bytes go sandbox → S3 and never cross this process, and S3
+    refuses any body that is not the measured one, so a file still being written between the
+    preflight and the upload fails loudly instead of landing as a self-consistent lie. The URL is an
+    argv element of one `curl`, which is what the sandbox already does to stage a connector's file
+    inputs; binding it to those measurements is what makes holding it worth nothing beyond this one
+    upload. A non-2xx carries S3's own error document on stdout, so a failure names its cause.
+
+    Filesystem: there is no URL to sign, so the bytes stream out of the container through the
+    carrier and into the store in bounded chunks."""
+    match ctx.blob:
+        case S3BlobStore():
+            if size_bytes > ARTIFACT_PUT_MAX_BYTES:
+                raise ValueError(
+                    f"{scoped} is {size_bytes} bytes; a shared file is capped at "
+                    f"{ARTIFACT_PUT_MAX_BYTES} bytes"
+                )
+            checksum = b64encode(bytes.fromhex(digest.removeprefix(SHA256_DIGEST_PREFIX))).decode()
+            url = await ctx.blob.presigned_put(key, size_bytes, checksum, ARTIFACT_PUT_TTL_SECONDS)
+            put = await ctx.sandbox.bash(
+                f"curl -sS --fail-with-body -T {shlex.quote(scoped)} "
+                f"-H {shlex.quote(f'x-amz-checksum-sha256: {checksum}')} "
+                f"--url {shlex.quote(url)}",
+                timeout_s=ARTIFACT_PUT_TIMEOUT_SECONDS,
+            )
+            if put.exit_code != 0:
+                detail = put.stdout.strip() or put.stderr.strip()
+                raise RuntimeError(detail or f"uploading {scoped} to the artifact store failed")
+        case FilesystemBlobStore():
+            await ctx.blob.put_stream(key, ctx.sandbox.read_file(scoped))
+        case _:
+            raise RuntimeError(f"unsupported artifact store: {type(ctx.blob).__name__}")
+
+
 async def share_file_handler(ctx: ToolContext, args: ShareFileInput) -> ToolResult:
-    """Stream a produced workspace file into the artifact store under `artifacts/<uuid>/<name>`,
-    record it as a shared_artifact of this turn, and mint a TTL download token core's artifact route
+    """Land a produced workspace file in the artifact store under `artifacts/<uuid>/<name>`, record
+    it as a shared_artifact of this turn, and mint a TTL download token core's artifact route
     serves — the only path a produced file leaves the sandbox. A preflight in the container streams
-    the file to derive its size and sha256 without loading it whole; the carrier then copies it out
-    of the workspace mount into the blob store the same way, so any file type and size shares
-    without a read cap or a whole-file host buffer. The shared_artifact record is what an async
-    surface (Slack) reads to upload the file into the turn's posted reply; `subject` is an optional
-    caption — absent, the file renders under its plain name."""
+    the file to derive its size and sha256 without loading it whole, and the upload is then bound to
+    those two measurements, so nothing crosses on the sandbox's word and no whole-file buffer ever
+    forms in this process. The shared_artifact record is what an async surface (Slack) reads to
+    upload the file into the turn's posted reply; `subject` is an optional caption — absent, the
+    file renders under its plain name."""
     if not ctx.artifact_token_secret:
         raise RuntimeError("artifact sharing is not configured (no artifact token secret set)")
     scoped = workspace_path(args.file_path)
@@ -498,7 +544,7 @@ async def share_file_handler(ctx: ToolContext, args: ShareFileInput) -> ToolResu
     ):
         safe_name += source_suffix
     key = f"{ARTIFACT_KEY_PREFIX}{uuid4()}/{safe_name}"
-    await ctx.sandbox.export_file(args.file_path, ctx.blob, key)
+    await _store_artifact(ctx, scoped, key, int(stat["size"]), str(stat["digest"]))
     media_type = mimetypes.guess_type(safe_name)[0] or "application/octet-stream"
     shared_at = datetime.now(UTC)
     async with workspace_tx() as connection:
@@ -767,9 +813,9 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         description=(
             "Send a file to the user as a downloadable link. The ONLY way to make a produced file "
             "visible outside the sandbox — the user CANNOT see a workspace file until this is "
-            "called. The file must be under the /workspace directory. Any file type and size works "
-            "(reports, code, csv, json, images, PDFs, large archives); it is streamed out, never "
-            "read whole into memory. `name` sets the download name — include the file extension "
+            "called. The file must be under the /workspace directory. Any file type works "
+            "(reports, code, csv, json, images, PDFs, archives) up to 5 GiB; it is streamed out, "
+            "never read whole into memory. `name` sets the download name — include the extension "
             "(e.g. 'report.xlsx') so the recipient gets an openable file; any directory "
             "components in it are stripped. `subject` is an optional caption shown when a chat "
             "surface posts the file. Supports version history: use the same `name` parameter "

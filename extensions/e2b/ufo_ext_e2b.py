@@ -3,23 +3,19 @@
 Docker is core's default carrier; this extension registers `e2b` on the `carriers` Manifest point,
 so a deploy that sets `[sandbox] backend = "e2b"` runs its sandboxes on E2B without core naming the
 provider. Every provider call is awaited on the SDK's async client, so a turn's sandbox I/O never
-occupies a thread or the loop while it waits. `create` opens a fresh sandbox
-on the deploy's template, resumes the conversation's in-process one, or — when this process holds
-none — reconnects the sandbox a prior process left, from the id core seeds on `spec.resume_id` off
-the conversation's durable handle; `exec` runs a command through `commands.run`; `export` promotes a
-produced file into the artifact store with a server-side copy inside the bucket; `destroy` pauses
-the sandbox so its next turn resumes cheaply. The container stays a disposable cache over the
-durable workspace.
+occupies a thread or the loop while it waits. `create` opens a fresh sandbox on the deploy's
+template, resumes the conversation's in-process one, or — when this process holds none — reconnects
+the sandbox a prior process left, from the id core seeds on `spec.resume_id` off the conversation's
+durable handle; `exec` runs a command through `commands.run`; `read` streams a produced file out
+through the filesystem API. `/workspace` is the sandbox's own disk and the only copy of the
+conversation's files: the provider pauses an idle sandbox and keeps it indefinitely, and nothing
+here can drop one — a paused sandbox costs nothing, and reclaiming it would delete the workspace.
 
 A remote sandbox runs off-cluster, so it reaches the egress proxy at the proxy's externally-
 reachable public URL (not a host-local address): every command runs with `HTTP(S)_PROXY` dialing
 that URL, the turn's run token as the proxy basic-auth username so each metered request keys to the
 turn, the model sentinels the proxy swaps for the real key on the wire, and the proxy CA written
-into the sandbox so it terminates TLS the sandbox trusts. The s3fs mount step runs without that env
-— it refreshes a prefix-scoped credential through the proxy's credential endpoint, then talks to S3
-directly. The reaper reclaims a sandbox a prior process created by reconnecting the stored id and
-pausing it — the conversation's durable `sandbox_handle` is the map, so idle reclaim is a policy
-this repo owns rather than the provider's timeout.
+into the sandbox so it terminates TLS the sandbox trusts.
 
 What the provider's clock does — measured against the live service 2026-07-28 on SDK 2.30.0, with
 the wider matrix on 2.35.0; transcripts in #826. None of it is inferable from the SDK's types, and
@@ -47,40 +43,28 @@ every lease decision below turns on it:
 import os
 import shlex
 import time
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
-from pathlib import PurePosixPath
 from typing import Protocol, cast
 from urllib.parse import urlsplit
 from uuid import UUID
 
 from e2b import AsyncSandbox as E2BSdkSandbox
-from e2b.exceptions import SandboxNotFoundException, TimeoutException
+from e2b.exceptions import FileNotFoundException, SandboxNotFoundException, TimeoutException
 from e2b.sandbox.commands.command_handle import CommandExitException
 from e2b.sandbox.sandbox_api import SandboxLifecycle
 
 from ufo.sdk.manifest import Manifest
 from ufo.sdk.o11y import log
 from ufo.sdk.sandbox import (
-    MOUNT_HEALTH_CHECK_TIMEOUT_SECONDS,
-    MOUNT_TIMEOUT_SECONDS,
     NO_PROXY_HOSTS,
-    SANDBOX_FS_CREDENTIAL_PATH,
-    SANDBOX_FS_TOKEN_STAGING_PATH,
     SENTINEL_MODEL_KEY,
     WORKSPACE_DIR,
-    BlobStore,
     CarrierSpec,
     ExecResult,
-    MountSpec,
     ProxyEndpoint,
     SandboxHandle,
     SandboxSpec,
-    install_token_command,
-    mount_health_check,
-    mount_scripts,
-    prepare_token_staging_command,
-    s3fs_command,
 )
 
 CARRIER_NAME = "e2b"
@@ -102,6 +86,11 @@ CA_STAGING_PATH = "/root/.ufo-egress-ca.pem"
 CA_SANDBOX_PATH = "/usr/local/share/ca-certificates/ufo-egress-ca.crt"
 SYSTEM_CA_BUNDLE = "/etc/ssl/certs/ca-certificates.crt"
 CA_INSTALL_TIMEOUT_SECONDS = 30
+SANDBOX_USER = "user"
+WORKSPACE_ENSURE_TIMEOUT_SECONDS = 30
+ENSURE_WORKSPACE_COMMAND = (
+    f"mkdir -p {WORKSPACE_DIR} && chown {SANDBOX_USER}:{SANDBOX_USER} {WORKSPACE_DIR}"
+)
 INSTALL_CA_COMMAND = (
     f"cmp -s {CA_STAGING_PATH} {CA_SANDBOX_PATH} || {{ "
     f"install -m 0644 {CA_STAGING_PATH} {CA_SANDBOX_PATH} && "
@@ -147,6 +136,10 @@ def _egress_env(proxy: ProxyEndpoint, run_token: str) -> dict[str, str]:
     }
 
 
+def _live_id(lease: "_Lease | None") -> str | None:
+    return None if lease is None else lease.sandbox.sandbox_id
+
+
 class E2BCommandResult(Protocol):
     stdout: str
     stderr: str
@@ -168,10 +161,19 @@ class E2BCommands(Protocol):
     ) -> E2BCommandResult: ...
 
 
-class E2BFiles(Protocol):
-    async def make_dir(self, path: str, *, user: str | None = None) -> bool: ...
+class E2BFileStream(Protocol):
+    """The SDK's streamed-read reader: an async byte iterator over an open connection, released
+    only by an awaited close."""
 
+    def __aiter__(self) -> AsyncIterator[bytes]: ...
+
+    async def aclose(self) -> None: ...
+
+
+class E2BFiles(Protocol):
     async def write(self, path: str, data: str | bytes, *, user: str | None = None) -> object: ...
+
+    async def read(self, path: str, format: str) -> E2BFileStream: ...
 
 
 class E2BSandbox(Protocol):
@@ -179,8 +181,6 @@ class E2BSandbox(Protocol):
     traffic_access_token: str | None
     commands: E2BCommands
     files: E2BFiles
-
-    async def pause(self, **opts: object) -> bool: ...
 
     def get_host(self, port: int) -> str: ...
 
@@ -230,27 +230,77 @@ class E2BCarrier:
     _live: dict[UUID, _Lease] = field(default_factory=dict)
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
+        """Open the conversation's sandbox: the one `spec.resume_id` names, else the one this
+        process holds, else a fresh one. The named id outranks the in-process cache because the row
+        is the arbiter of concurrent opens — a caller retrying with the persisted winner must
+        converge on it, and a cache-first read would hand back this process's losing sandbox and
+        carry its id over the winner's row; the cache serves only the caller that names nothing,
+        the one this process opened moments ago, before any id was persisted. A named id the
+        provider no longer has means that sandbox and its workspace are gone — an explicit kill, or
+        a provider fault — so a fresh one opens in its place and the loss is named in the log;
+        refusing instead would wedge every later turn of the conversation on a sandbox nothing can
+        bring back."""
         egress_env = _egress_env(spec.proxy, spec.run_token)
-        public_url = cast(str, spec.proxy.public_url)
+        self._evict_expired()
         live = self._live.get(spec.conversation_id)
-        resume_id = live.sandbox.sandbox_id if live is not None else spec.resume_id
+        resume_id = spec.resume_id if spec.resume_id is not None else _live_id(live)
         opened = self.clock()
         sandbox = await self._resume_or_open(spec, resume_id)
         self._live[spec.conversation_id] = _Lease(sandbox, opened + SANDBOX_LEASE_SECONDS)
         await self._install_ca(sandbox, spec.proxy.ca_cert)
-        await self._mount_s3(
-            sandbox,
-            spec.mount,
-            f"{public_url.rstrip('/')}{SANDBOX_FS_CREDENTIAL_PATH.rstrip('/')}",
-        )
+        await self._ensure_workspace(sandbox)
         return SandboxHandle(
             conversation_id=spec.conversation_id,
             container_id=sandbox.sandbox_id,
-            mount=spec.mount,
             traffic_token=sandbox.traffic_access_token,
             run_token=spec.run_token,
             egress_env={**egress_env, **spec.env},
         )
+
+    async def attach(self, spec: SandboxSpec) -> SandboxHandle | None:
+        """The sandbox `spec.resume_id` names — resumed if the provider paused it — or None when
+        there is no id or the provider no longer has it. Always the provider's own answer, never the
+        in-process cache's: a cached lease can outlive its sandbox, and a read that answered present
+        off it would raise where absence was promised. Never a fresh sandbox either — a read of a
+        conversation whose sandbox is gone answers absent rather than opening an empty one and
+        persisting its id over the stored handle. No egress env — a read runs `sbxfs` and `cat`,
+        nothing that leaves the box."""
+        resume_id = (
+            spec.resume_id
+            if spec.resume_id is not None
+            else _live_id(self._live.get(spec.conversation_id))
+        )
+        if resume_id is None:
+            return None
+        opened = self.clock()
+        try:
+            sandbox = await self.sdk.connect(
+                resume_id, timeout=SANDBOX_LEASE_SECONDS, api_key=self.api_key
+            )
+        except SandboxNotFoundException:
+            self._live.pop(spec.conversation_id, None)
+            return None
+        self._live[spec.conversation_id] = _Lease(sandbox, opened + SANDBOX_LEASE_SECONDS)
+        return SandboxHandle(
+            conversation_id=spec.conversation_id,
+            container_id=sandbox.sandbox_id,
+            traffic_token=sandbox.traffic_access_token,
+            run_token=spec.run_token,
+        )
+
+    def _evict_expired(self) -> None:
+        """Drop the leases whose provider clock has run out. An expired lease's sandbox is already
+        paused provider-side — the lease IS the provider timeout — so this destroys nothing: it
+        sheds the bookkeeping, which otherwise grows by one live SDK object per conversation for
+        the process's life now that no reaper drives a removal. A later touch of an evicted
+        conversation reconnects from its durable handle exactly as a fresh process would."""
+        now = self.clock()
+        for conversation_id in [
+            conversation_id
+            for conversation_id, lease in self._live.items()
+            if lease.expires_at <= now
+        ]:
+            del self._live[conversation_id]
 
     async def _resume_or_open(self, spec: SandboxSpec, resume_id: str | None) -> E2BSandbox:
         """Resume the conversation's sandbox, or open one on the deploy's template. `connect` both
@@ -270,15 +320,13 @@ class E2BCarrier:
                     conversation_id=str(spec.conversation_id),
                     sandbox_id=resume_id,
                 )
-        sandbox = await self.sdk.create(
+        return await self.sdk.create(
             template=self.template,
             timeout=SANDBOX_LEASE_SECONDS,
             metadata={CONVERSATION_METADATA_KEY: str(spec.conversation_id)},
             lifecycle=E2B_LIFECYCLE,
             api_key=self.api_key,
         )
-        await sandbox.files.make_dir(WORKSPACE_DIR)
-        return sandbox
 
     async def _install_ca(self, sandbox: E2BSandbox, ca_cert: str) -> None:
         await sandbox.files.write(CA_STAGING_PATH, ca_cert, user="root")
@@ -290,62 +338,18 @@ class E2BCarrier:
             detail = (error.stderr or error.stdout or "").strip()
             raise RuntimeError(f"sandbox CA install failed: {detail}") from error
 
-    async def _mount_s3(self, sandbox: E2BSandbox, mount: MountSpec, credential_url: str) -> None:
-        """Bring the conversation's workspace S3 prefix up at /workspace over s3fs. Runs on every
-        create/resume and skips a mount the health probe passes, so a shared sandbox never remounts
-        under an in-flight dispatch. Writes the private endpoint token, then runs mount
-        orchestration as root. The s3fs daemon drops to its
-        dedicated user, refreshes scoped credentials through the local relay, and reaches S3
-        directly; neither path carries the agent's egress env."""
-        if mount.kind != "s3":
-            return
-        if (
-            mount.credential_token is None
-            or mount.bucket is None
-            or mount.key_prefix is None
-            or mount.s3_url is None
-            or mount.region is None
-        ):
-            raise RuntimeError("s3 workspace mount is missing its credential token or endpoint")
-        await sandbox.commands.run(
-            prepare_token_staging_command(), user="root", timeout=MOUNT_TIMEOUT_SECONDS
-        )
-        await sandbox.files.write(
-            SANDBOX_FS_TOKEN_STAGING_PATH, mount.credential_token, user="root"
-        )
-        await sandbox.commands.run(
-            install_token_command(), user="root", timeout=MOUNT_TIMEOUT_SECONDS
-        )
-        if await self._mount_healthy(sandbox):
-            return
-        s3fs = s3fs_command(
-            mount.bucket,
-            mount.key_prefix,
-            WORKSPACE_DIR,
-            mount.s3_url,
-            mount.region,
-            mount.path_style,
-        )
-        prepare, mount_cmd = mount_scripts(WORKSPACE_DIR, s3fs, credential_url)
-        try:
-            await sandbox.commands.run(prepare, user="root", timeout=MOUNT_TIMEOUT_SECONDS)
-            await sandbox.commands.run(mount_cmd, user="root", timeout=MOUNT_TIMEOUT_SECONDS)
-        except CommandExitException as error:
-            detail = (error.stderr or error.stdout or "").strip()
-            raise RuntimeError(f"sandbox-fs mount failed: {detail}") from error
-        if not await self._mount_healthy(sandbox):
-            raise RuntimeError("sandbox-fs mount failed its health check")
-
-    async def _mount_healthy(self, sandbox: E2BSandbox) -> bool:
+    async def _ensure_workspace(self, sandbox: E2BSandbox) -> None:
+        """Guarantee `/workspace` exists and is the sandbox user's, on every create-or-attach path
+        — fresh, resumed, and reconnected alike, because the first process to touch a sandbox is not
+        always the one that created it. Root, since `/` is root-owned and the sandbox user could
+        neither create the directory nor own it."""
         try:
             await sandbox.commands.run(
-                mount_health_check(WORKSPACE_DIR),
-                user="root",
-                timeout=MOUNT_HEALTH_CHECK_TIMEOUT_SECONDS,
+                ENSURE_WORKSPACE_COMMAND, user="root", timeout=WORKSPACE_ENSURE_TIMEOUT_SECONDS
             )
-            return True
-        except (CommandExitException, TimeoutException):
-            return False
+        except CommandExitException as error:
+            detail = (error.stderr or error.stdout or "").strip()
+            raise RuntimeError(f"sandbox workspace setup failed: {detail}") from error
 
     async def exec(
         self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
@@ -397,19 +401,25 @@ class E2BCarrier:
             self._drop(handle.conversation_id, "write")
             raise
 
-    async def export(self, handle: SandboxHandle, path: str, blob: BlobStore, key: str) -> None:
-        """Promote a produced workspace file into the artifact store with a server-side copy inside
-        the bucket — the bytes never leave S3, so nothing reads back through the remote pod. The
-        file is already flushed to the workspace S3 prefix by the time export runs: a prior tool
-        wrote and closed it through s3fs and `share_file`'s preflight has already streamed it — the
-        same flush assumption docker's s3 export makes. `handle.mount` carries the `key_prefix`
-        create set from `spec.mount`, so the source object is `<key_prefix>/<rel>` in the same
-        bucket as the store."""
-        mount = handle.mount
-        if mount is None or mount.kind != "s3" or mount.key_prefix is None:
-            raise RuntimeError("e2b export requires an s3 workspace mount")
-        rel = PurePosixPath(path).relative_to(WORKSPACE_DIR)
-        await blob.copy(f"{mount.key_prefix}/{rel}", key)
+    async def read(self, handle: SandboxHandle, path: str) -> AsyncIterator[bytes]:
+        """Stream a workspace file out through the sandbox's filesystem API, which serves the body
+        as its own chunked response — so an arbitrarily large produced file crosses in bounded
+        pieces and never sits whole in this process. The reader holds an open connection with no
+        finalizer that can release it, so it is closed on every exit path, including a consumer
+        that stops mid-file."""
+        sandbox = await self._sandbox(handle, self.idle_seconds)
+        try:
+            stream = await sandbox.files.read(path, format="stream")
+        except FileNotFoundException as error:
+            raise FileNotFoundError(str(error)) from error
+        except Exception:
+            self._drop(handle.conversation_id, "read")
+            raise
+        try:
+            async for chunk in stream:
+                yield chunk
+        finally:
+            await stream.aclose()
 
     async def host(self, handle: SandboxHandle, port: int) -> str:
         """The sandbox's public per-port host: e2b routes an in-sandbox port over a per-port
@@ -420,26 +430,6 @@ class E2BCarrier:
         worthless if the container pauses before the dial."""
         sandbox = await self._sandbox(handle, self.idle_seconds)
         return sandbox.get_host(port)
-
-    async def destroy(self, handle: SandboxHandle) -> None:
-        """Pause and drop the conversation's sandbox. The reaper passes the stored id, so a sandbox
-        this process still holds is paused directly, and one it never held (a prior process created
-        it) is reconnected from `handle.container_id` and paused too — the durable handle lets idle
-        reclaim reach a sandbox this process could not otherwise address. An empty id (the seam's
-        no-container reap) connects to nothing and is a no-op that never raises. A sandbox a
-        concurrent process already killed raises SandboxNotFoundException on reconnect — also a
-        no-op, since nothing is left to pause."""
-        lease = self._live.pop(handle.conversation_id, None)
-        sandbox = lease.sandbox if lease is not None else None
-        if sandbox is None and handle.container_id:
-            try:
-                sandbox = await self.sdk.connect(
-                    handle.container_id, timeout=self.idle_seconds, api_key=self.api_key
-                )
-            except SandboxNotFoundException:
-                return
-        if sandbox is not None:
-            await sandbox.pause(api_key=self.api_key)
 
     async def _sandbox(self, handle: SandboxHandle, needed_seconds: int) -> E2BSandbox:
         """The conversation's sandbox, leased past the work about to run on it. Every caller states
@@ -460,7 +450,13 @@ class E2BCarrier:
             return lease.sandbox
         self._live.pop(handle.conversation_id, None)
         span = max(SANDBOX_LEASE_SECONDS, needed_seconds)
-        sandbox = await self.sdk.connect(handle.container_id, timeout=span, api_key=self.api_key)
+        try:
+            sandbox = await self.sdk.connect(
+                handle.container_id, timeout=span, api_key=self.api_key
+            )
+        except SandboxNotFoundException:
+            self._drop(handle.conversation_id, "connect")
+            raise
         self._live[handle.conversation_id] = _Lease(sandbox, renewed + span)
         log(
             "sandbox.e2b.leased",

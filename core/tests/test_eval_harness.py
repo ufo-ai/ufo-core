@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import partial
 from json import dumps, loads
+from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 from urllib.parse import parse_qs, urlparse
@@ -124,7 +125,6 @@ from ufo.blob import FilesystemBlobStore, S3BlobStore
 from ufo.config import BlobConfig, Config, DatabaseConfig
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, ModelAccess, Trajectory, context_for
-from ufo.ext.surface import workspace_key
 from ufo.governance import Governance, prompt_digest
 from ufo.loop.transcript import Transcript
 from ufo.models.catalog import CORE_PRICING
@@ -509,6 +509,7 @@ class StubWorker:
     child_artifact: tuple[str, bytes] | None = None
     child_turn_id: UUID = field(default_factory=uuid4)
     expected_reference: tuple[str, bytes] | None = None
+    workspace_root: Path | None = None
     expected_head: tuple[Message, ...] = ()
     seq: int = 1
     idempotency_keys: list[str] = field(default_factory=list)
@@ -523,7 +524,8 @@ class StubWorker:
         self.idempotency_keys.append(idempotency_key)
         if self.expected_reference is not None:
             path, content = self.expected_reference
-            assert await self.blob.get(workspace_key(conversation_id, path)) == content
+            assert self.workspace_root is not None
+            assert (self.workspace_root / str(conversation_id) / path).read_bytes() == content
         if self.expected_head:
             seeded = decode(await self.blob.get(transcript_key(conversation_id)))
             assert seeded.messages == self.expected_head
@@ -1056,7 +1058,9 @@ async def test_a_case_carrying_undelivered_rounds_seeds_them_before_the_turn_run
     target = InProcessTarget(
         ctx=_context(blob, worker),
         agent_id=agent_id,
-        conversations=WorkspaceDriver(workspace_id, agent_id, PROMPT, blob, UNCALLED_DBOS),
+        conversations=WorkspaceDriver(
+            workspace_id, agent_id, PROMPT, blob, UNCALLED_DBOS, tmp_path / "workspaces"
+        ),
         outcome=CorpusOutcome(_context(blob, worker)),
         blob=blob,
     )
@@ -1884,12 +1888,15 @@ async def test_target_stages_case_references_before_admission(db: None, tmp_path
         workspace_id,
         _research_transcript(),
         expected_reference=("references/inputs/forecast.csv", source.read_bytes()),
+        workspace_root=tmp_path / "workspaces",
     )
     ctx = _context(blob, worker)
     target = InProcessTarget(
         ctx=ctx,
         agent_id=agent_id,
-        conversations=WorkspaceDriver(workspace_id, agent_id, PROMPT, blob, UNCALLED_DBOS),
+        conversations=WorkspaceDriver(
+            workspace_id, agent_id, PROMPT, blob, UNCALLED_DBOS, tmp_path / "workspaces"
+        ),
         outcome=CorpusOutcome(ctx),
     )
 
@@ -2719,7 +2726,9 @@ async def test_in_process_target_opens_a_member_bound_eval_conversation(db: None
     target = InProcessTarget(
         ctx=ctx,
         agent_id=agent_id,
-        conversations=WorkspaceDriver(workspace_id, agent_id, PROMPT, blob, UNCALLED_DBOS),
+        conversations=WorkspaceDriver(
+            workspace_id, agent_id, PROMPT, blob, UNCALLED_DBOS, tmp_path / "workspaces"
+        ),
         outcome=CorpusOutcome(ctx),
     )
     case = CapabilityCase(
@@ -2752,7 +2761,9 @@ async def test_in_process_target_records_a_terminal_turn_without_a_workflow(
     agent_id = await _seed_agent(workspace_id)
     blob = FilesystemBlobStore(root=tmp_path)
     worker = StubWorker(blob, workspace_id, None, status="cancelled")
-    driver = WorkspaceDriver(workspace_id, agent_id, PROMPT, blob, UNCALLED_DBOS)
+    driver = WorkspaceDriver(
+        workspace_id, agent_id, PROMPT, blob, UNCALLED_DBOS, tmp_path / "workspaces"
+    )
     target = InProcessTarget(
         ctx=_context(blob, worker),
         agent_id=agent_id,
@@ -2798,6 +2809,7 @@ async def test_workspace_driver_waits_when_a_queued_workflow_does_not_exist(
         PROMPT,
         blob,
         cast(DBOSClient, MissingDbos(requested)),
+        tmp_path / "workspaces",
         poll_interval_seconds=0.001,
         workflow_wait_seconds=1,
     )
@@ -2867,6 +2879,7 @@ async def test_workspace_driver_deadline_cancels_a_running_turn(db: None, tmp_pa
         PROMPT,
         FilesystemBlobStore(root=tmp_path),
         cast(DBOSClient, dbos),
+        tmp_path / "workspaces",
         poll_interval_seconds=0.001,
         workflow_wait_seconds=0.05,
     )
@@ -2902,7 +2915,12 @@ async def test_workspace_driver_cancel_terminalizes_only_the_turn(db: None, tmp_
     )
     dbos = CancellingDbos()
     driver = WorkspaceDriver(
-        workspace_id, agent_id, PROMPT, FilesystemBlobStore(root=tmp_path), cast(DBOSClient, dbos)
+        workspace_id,
+        agent_id,
+        PROMPT,
+        FilesystemBlobStore(root=tmp_path),
+        cast(DBOSClient, dbos),
+        tmp_path / "workspaces",
     )
 
     with ws(workspace_id):
@@ -2942,6 +2960,7 @@ async def test_workspace_driver_deadline_race_settles_the_turns_own_terminal(
         PROMPT,
         blob,
         cast(DBOSClient, dbos),
+        tmp_path / "workspaces",
         poll_interval_seconds=0.001,
     )
 
@@ -2968,6 +2987,7 @@ async def test_workspace_driver_rejects_an_unknown_member_key(db: None, tmp_path
         PROMPT,
         FilesystemBlobStore(root=tmp_path),
         UNCALLED_DBOS,
+        tmp_path / "workspaces",
     )
 
     with (
@@ -2981,7 +3001,9 @@ async def test_workspace_driver_seeds_case_history_and_files(db: None, tmp_path)
     workspace_id = await _workspace()
     agent_id = await _seed_agent(workspace_id)
     blob = FilesystemBlobStore(root=tmp_path)
-    driver = WorkspaceDriver(workspace_id, agent_id, PROMPT, blob, UNCALLED_DBOS)
+    driver = WorkspaceDriver(
+        workspace_id, agent_id, PROMPT, blob, UNCALLED_DBOS, tmp_path / "workspaces"
+    )
     case = CapabilityCase(
         "seeded",
         "continue",
@@ -2995,7 +3017,7 @@ async def test_workspace_driver_seeds_case_history_and_files(db: None, tmp_path)
             case.name, case.member_key, case.workspace_files, case.prior_messages
         )
         transcript = decode(await blob.get(transcript_key(conversation_id)))
-        image = await blob.get(workspace_key(conversation_id, "hle/image.png"))
+        image = (tmp_path / "workspaces" / str(conversation_id) / "hle/image.png").read_bytes()
         async with workspace_tx() as connection:
             seqs = (
                 (
@@ -3029,7 +3051,9 @@ async def test_workspace_driver_seeds_an_undelivered_round_behind_the_case_messa
     workspace_id = await _workspace()
     agent_id = await _seed_agent(workspace_id)
     blob = FilesystemBlobStore(root=tmp_path)
-    driver = WorkspaceDriver(workspace_id, agent_id, PROMPT, blob, UNCALLED_DBOS)
+    driver = WorkspaceDriver(
+        workspace_id, agent_id, PROMPT, blob, UNCALLED_DBOS, tmp_path / "workspaces"
+    )
     case = CapabilityCase(
         "interrupted",
         "who owns the account?",
@@ -3119,7 +3143,13 @@ async def test_workspace_driver_reads_a_terminal_transcript_at_the_turn_sequence
         )
     blob = FilesystemBlobStore(root=tmp_path)
     driver = WorkspaceDriver(
-        workspace_id, agent_id, PROMPT, blob, UNCALLED_DBOS, poll_interval_seconds=10
+        workspace_id,
+        agent_id,
+        PROMPT,
+        blob,
+        UNCALLED_DBOS,
+        tmp_path / "workspaces",
+        poll_interval_seconds=10,
     )
     with ws(workspace_id):
         missing = await driver.settle(conversation_id, turn_id)

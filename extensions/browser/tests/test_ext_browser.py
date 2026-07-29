@@ -185,9 +185,6 @@ class WritesCarrier:
     ) -> ExecResult:
         return ExecResult(stdout="", stderr="", exit_code=0)
 
-    async def destroy(self, handle: SandboxHandle) -> None:
-        raise AssertionError("browser tools do not destroy containers")
-
 
 @dataclass
 class FileCarrier:
@@ -217,9 +214,6 @@ class FileCarrier:
             if command.startswith("base64"):
                 return ExecResult(stdout=base64.b64encode(content).decode(), stderr="", exit_code=0)
         return ExecResult(stdout="", stderr="no such file", exit_code=1)
-
-    async def destroy(self, handle: SandboxHandle) -> None:
-        raise AssertionError("browser tools do not destroy containers")
 
 
 @dataclass

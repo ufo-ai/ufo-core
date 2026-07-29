@@ -49,11 +49,10 @@ from ufo.ext.manifest import (
     Manifest,
 )
 from ufo.indexing import OWNER_KIND_MEMORY_ITEM, Chunk, Hit, IndexScope, TextChunker
-from ufo.jobs import PageChangeRunner, SandboxReaper, TurnDispatcher, core_jobs
+from ufo.jobs import PageChangeRunner, TurnDispatcher, core_jobs
 from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
 from ufo.models.interface import ModelClient, ModelEvent, ModelRequest, TextDelta
 from ufo.models.registry import ModelRegistry
-from ufo.sandbox.local import LocalCarrier
 from ufo.schema import tables
 from ufo.schema.records import Usage
 from ufo.sources.sync import CorePageFeed, FolderSource, PageChange, SyncDriver
@@ -1499,7 +1498,6 @@ def test_memory_registers_two_independent_page_change_consumers(tmp_path: object
     specs = core_jobs(
         SyncDriver(backends={"folder": FolderSource()}, blob=blob, postgres=False),
         TurnDispatcher(client=None),
-        SandboxReaper(carrier=LocalCarrier(), backend="local"),
         runner,
     )
     page_change = {spec.name for spec in specs if spec.name.startswith("page_change:")}

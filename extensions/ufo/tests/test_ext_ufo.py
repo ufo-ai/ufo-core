@@ -43,13 +43,9 @@ from ufo.loop.subagents import SubagentRegistry
 from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
 from ufo.models.interface import ModelEvent, ModelRequest, TextDelta
 from ufo.models.registry import ModelRegistry
-from ufo.sandbox.session import (
-    ExecResult,
-    ProxyEndpoint,
-    RunTokenCodec,
-    SandboxHandle,
-    SandboxSpec,
-)
+from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
+from ufo.sandbox.local import LocalCarrier
+from ufo.sandbox.session import ProxyEndpoint, RunTokenCodec
 from ufo.schema import tables
 from ufo.schema.records import CredentialPrompt, CredentialRequest, TerminalFrame, Usage
 from ufo.sdk.bearer import verify_token, workspace_claim
@@ -318,21 +314,6 @@ STANDIN_REGISTRY = ModelRegistry(
 
 
 @dataclass(frozen=True)
-class StandInCarrier:
-    async def create(self, spec: SandboxSpec) -> SandboxHandle:
-        return SandboxHandle(conversation_id=spec.conversation_id, container_id="test")
-
-    async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None: ...
-
-    async def exec(
-        self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
-    ) -> ExecResult:
-        return ExecResult(stdout="", stderr="", exit_code=0)
-
-    async def destroy(self, handle: SandboxHandle) -> None: ...
-
-
-@dataclass(frozen=True)
 class StubEmbed:
     async def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
         return tuple(() for _ in texts)
@@ -391,23 +372,31 @@ async def _seed_member(workspace_id: UUID, email: str) -> UUID:
 
 
 @pytest.fixture(scope="session")
-def runtime(dbos_launched: Config) -> Iterator[tuple[Config, InProcessHub, FilesystemBlobStore]]:
+def runtime(
+    dbos_launched: Config,
+) -> Iterator[tuple[Config, InProcessHub, FilesystemBlobStore, ConversationSandbox]]:
     config = dbos_launched
     hub = InProcessHub()
     blob = FilesystemBlobStore(root=config.blob.root)
+    sandboxes = ConversationSandbox(
+        carrier=LocalCarrier(),
+        backend="local",
+        off_cluster=False,
+        image_ref=SANDBOX_IMAGE_REF,
+        proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
+        workspace_root=config.blob.root.parent / "workspaces",
+    )
     dbos_client = DBOSClient(system_database_url=config.database.system_url)
     loop_queue.reset_runtime()
     loop_queue.init_runtime(
         loop_queue.Runtime(
             config=config,
             blob=blob,
-            workspace_fs=None,
+            sandboxes=sandboxes,
             hub=hub,
-            carrier=StandInCarrier(),
             cdp_provider=None,
             search_provider=None,
             connectors=ConnectorRegistry(entries={}),
-            proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
             run_tokens=RunTokenCodec(b"ufo-test-run-token-secret"),
             dbos=dbos_client,
             subagents=SubagentRegistry(()),
@@ -421,7 +410,7 @@ def runtime(dbos_launched: Config) -> Iterator[tuple[Config, InProcessHub, Files
             artifact_token_secret=SECRET,
         )
     )
-    yield config, hub, blob
+    yield config, hub, blob, sandboxes
     dbos_client.destroy()
     loop_queue.reset_runtime()
 
@@ -429,15 +418,17 @@ def runtime(dbos_launched: Config) -> Iterator[tuple[Config, InProcessHub, Files
 @pytest.fixture
 async def ufo(
     db: None,
-    runtime: tuple[Config, InProcessHub, FilesystemBlobStore],
+    runtime: tuple[Config, InProcessHub, FilesystemBlobStore, ConversationSandbox],
     monkeypatch: pytest.MonkeyPatch,
 ) -> AsyncIterator[tuple[AsyncClient, UUID]]:
-    config, hub, blob = runtime
+    config, hub, blob, sandboxes = runtime
     monkeypatch.setenv("UFO_TOKEN_SECRET", SECRET)
     dbos_client = DBOSClient(system_database_url=config.database.system_url)
     workspace_id = await _seed_workspace()
     app = FastAPI()
-    _mount_shared_surfaces(app, (ufo_manifest(),), None, blob, hub, dbos_client, "", None)
+    _mount_shared_surfaces(
+        app, (ufo_manifest(),), None, blob, sandboxes, hub, dbos_client, "", None
+    )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://ufo") as client:
         yield client, workspace_id
     dbos_client.destroy()
@@ -446,16 +437,18 @@ async def ufo(
 @pytest.fixture
 async def shared_ufo(
     db: None,
-    runtime: tuple[Config, InProcessHub, FilesystemBlobStore],
+    runtime: tuple[Config, InProcessHub, FilesystemBlobStore, ConversationSandbox],
     monkeypatch: pytest.MonkeyPatch,
 ) -> AsyncIterator[AsyncClient]:
     """The ufo surface on the shared fleet: mounted with no boot-pinned workspace, so every request
     scopes itself from its bearer through `_mount_shared_surfaces`. One app, every workspace."""
-    config, hub, blob = runtime
+    config, hub, blob, sandboxes = runtime
     monkeypatch.setenv("UFO_TOKEN_SECRET", SECRET)
     dbos_client = DBOSClient(system_database_url=config.database.system_url)
     app = FastAPI()
-    _mount_shared_surfaces(app, (ufo_manifest(),), None, blob, hub, dbos_client, "", None)
+    _mount_shared_surfaces(
+        app, (ufo_manifest(),), None, blob, sandboxes, hub, dbos_client, "", None
+    )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://fleet") as client:
         yield client
     dbos_client.destroy()
@@ -688,14 +681,14 @@ async def test_email_matching_no_member_gets_an_unlinked_conversation(
 
 async def test_secret_fulfillment_lands_in_the_store_never_the_transcript(
     db: None,
-    runtime: tuple[Config, InProcessHub, FilesystemBlobStore],
+    runtime: tuple[Config, InProcessHub, FilesystemBlobStore, ConversationSandbox],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The other end of the `secret` directive: the shell POSTs each privately-entered value with
     the sealed request, the surface verifies the seal and writes the encrypted slot, and no turn is
     admitted — the secret never becomes a message. Only the member the request was sealed for may
     fulfill it, only for slots it named, under the size bound."""
-    config, hub, blob = runtime
+    config, hub, blob, sandboxes = runtime
     monkeypatch.setenv("UFO_TOKEN_SECRET", SECRET)
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
     dbos_client = DBOSClient(system_database_url=config.database.system_url)
@@ -711,7 +704,9 @@ async def test_secret_fulfillment_lands_in_the_store_never_the_transcript(
         ),
     )
     app = FastAPI()
-    _mount_shared_surfaces(app, (ufo_manifest(),), store, blob, hub, dbos_client, "", None)
+    _mount_shared_surfaces(
+        app, (ufo_manifest(),), store, blob, sandboxes, hub, dbos_client, "", None
+    )
     token = _mint(SECRET, workspace_id, "owner@example.com", _future())
     foreign = _mint(SECRET, workspace_id, "late@example.com", _future())
     try:

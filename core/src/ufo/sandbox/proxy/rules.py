@@ -10,6 +10,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from uuid import UUID
 
+from ufo.blob import BlobStore, S3BlobStore
 from ufo.connectors import CliCredential, RequestForwarder
 from ufo.credentials import (
     CredentialStore,
@@ -115,6 +116,25 @@ def derive_model_rules(model: str, real_key: str) -> tuple[Rule, ...]:
 def derive_manifest_rules(manifests: tuple[Manifest, ...]) -> tuple[InternetRule, ...]:
     """A deploy with an extension that needs sandbox internet admits its live turns."""
     return (InternetRule(),) if any(manifest.sandbox_internet for manifest in manifests) else ()
+
+
+async def derive_artifact_store_rules(blob: BlobStore) -> tuple[Rule, ...]:
+    """A deploy whose artifact store is S3 admits that store's own host and meters every request to
+    it: sharing a file is the sandbox PUTting it to a presigned URL serve minted, so without this
+    the only path a produced file leaves the sandbox is refused at CONNECT. Exact scope, not the
+    public-internet rule — an agent narrowed off the internet still shares files, and only an
+    exactly-scoped host is tunnelled opaquely, which a query-signed request must be to survive.
+    Nothing is injected: the URL carries its own authority, bounded to one key and one measured
+    body. The filesystem backend has no host, and no share reaches the network there."""
+    match blob:
+        case S3BlobStore():
+            host = await blob.put_host()
+            return (
+                ScopeRule(allowed_hosts=frozenset({host})),
+                MeterRule(host=host, dimension=REQUEST_METER_DIMENSION),
+            )
+        case _:
+            return ()
 
 
 async def derive_credential_rules(

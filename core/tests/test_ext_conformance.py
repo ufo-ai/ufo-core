@@ -62,7 +62,7 @@ from ufo.ext.loader import (
     turn_tools,
 )
 from ufo.ext.manifest import AuthProxySpec, CarrierSpec, Manifest
-from ufo.ext.surface import WRITEBACK_DELIVERED, workspace_key
+from ufo.ext.surface import WRITEBACK_DELIVERED
 from ufo.governance import prompt_digest
 from ufo.grants import GrantStore
 from ufo.hub import InProcessHub
@@ -74,8 +74,15 @@ from ufo.loop.transcript import Transcript
 from ufo.models.interface import Message, ModelRequest, TextDelta
 from ufo.models.registry import model_registry
 from ufo.onboarding import run_onboarding_steps
+from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.sandbox.local import LocalCarrier
-from ufo.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
+from ufo.sandbox.session import (
+    ExecResult,
+    ProxyEndpoint,
+    SandboxHandle,
+    SandboxSession,
+    SandboxSpec,
+)
 from ufo.schema import tables
 from ufo.schema.records import WRITEBACK_PENDING, Agent, Turn, Usage
 from ufo.search import FetchRequest, SearchQuery
@@ -204,14 +211,22 @@ class _UntouchedCarrier:
     ) -> ExecResult:
         raise AssertionError(SANDBOX_UNTOUCHED)
 
-    async def destroy(self, handle: SandboxHandle) -> None:
-        raise AssertionError(SANDBOX_UNTOUCHED)
-
 
 async def _unavailable_spawn(
     profile: str, payload: dict[str, object], background: bool = False
 ) -> SpawnResult:
     raise AssertionError("the sample tool must not spawn a subagent")
+
+
+def _sandboxes(root: Path) -> ConversationSandbox:
+    return ConversationSandbox(
+        carrier=LocalCarrier(),
+        backend="local",
+        off_cluster=False,
+        image_ref=SANDBOX_IMAGE_REF,
+        proxy=ProxyEndpoint(port=1, ca_cert="test-ca"),
+        workspace_root=root,
+    )
 
 
 def _tool_context(workspace_id: UUID, ext: ExtensionContext, tmp_path: Path) -> ToolContext:
@@ -574,7 +589,9 @@ def _carrier_config(backend: str) -> Config:
 
 
 def test_config_backend_defaults_to_the_built_in_local_carrier() -> None:
-    assert isinstance(_select_carrier(_carrier_config("local"), ()), LocalCarrier)
+    carrier, off_cluster = _select_carrier(_carrier_config("local"), ())
+    assert isinstance(carrier, LocalCarrier)
+    assert off_cluster is False
 
 
 def test_config_backend_selects_a_manifest_contributed_carrier() -> None:
@@ -582,8 +599,9 @@ def test_config_backend_selects_a_manifest_contributed_carrier() -> None:
     `[sandbox] backend` naming it `serve` builds exactly that carrier — a deploy swaps the sandbox
     backend to an extension's without core naming it."""
     manifest = _sample_manifest()
-    carrier = _select_carrier(_carrier_config(sample.CARRIER_NAME), (manifest,))
+    carrier, off_cluster = _select_carrier(_carrier_config(sample.CARRIER_NAME), (manifest,))
     assert isinstance(carrier, sample.SampleCarrier)
+    assert off_cluster is False
 
 
 async def test_a_workspace_write_reaches_the_manifest_contributed_carrier() -> None:
@@ -592,7 +610,7 @@ async def test_a_workspace_write_reaches_the_manifest_contributed_carrier() -> N
     in — never through `exec`, whose command line is what a provider rejects once a payload is
     large. The size limit itself is the real carriers' proof; this is the dispatch."""
     manifest = _sample_manifest()
-    carrier = _select_carrier(_carrier_config(sample.CARRIER_NAME), (manifest,))
+    carrier, _ = _select_carrier(_carrier_config(sample.CARRIER_NAME), (manifest,))
     assert isinstance(carrier, sample.SampleCarrier)
     handle = SandboxHandle(conversation_id=uuid4(), container_id="test")
 
@@ -1055,8 +1073,11 @@ async def test_job_reads_trajectories_and_opens_a_governed_proposal(
     await _seed_note(workspace_id)
     manifest = _sample_manifest()
     blob = FilesystemBlobStore(root=tmp_path)
+    workspace_root = tmp_path / "workspaces"
     agent_id = await _seed_trajectory(workspace_id, blob)
-    runner = JobRunner(bindings=bindings_from((manifest,), ()), blob=blob)
+    runner = JobRunner(
+        bindings=bindings_from((manifest,), ()), blob=blob, sandboxes=_sandboxes(workspace_root)
+    )
     with ws(workspace_id):
         for workspace_id in await runner.candidates(f"{manifest.name}:{sample.JOB_NAME}"):
             await runner.fire(f"{manifest.name}:{sample.JOB_NAME}", workspace_id)
@@ -1067,8 +1088,8 @@ async def test_job_reads_trajectories_and_opens_a_governed_proposal(
         assert await scoped.get(sample.JOB_WORKSPACE_KEY) == {
             "path": f"/workspace/{sample.JOB_WORKSPACE_REL}"
         }
-        landed = await blob.get(workspace_key(conversation_id, sample.JOB_WORKSPACE_REL))
-        assert landed.decode() == sample.JOB_WORKSPACE_BODY
+        landed = workspace_root / str(conversation_id) / sample.JOB_WORKSPACE_REL
+        assert landed.read_text() == sample.JOB_WORKSPACE_BODY
 
     async with workspace_tx() as connection:
         proposal = (
@@ -1214,6 +1235,7 @@ async def test_sample_surface_admits_links_streams_and_delivers(
     workspace_id, member_id, email = await _surface_workspace()
     manifest = _sample_manifest()
     blob = FilesystemBlobStore(root=tmp_path)
+    workspace_root = tmp_path / "workspaces"
     dbos = _StubDbos()
     app = FastAPI()
     _mount_shared_surfaces(
@@ -1221,6 +1243,7 @@ async def test_sample_surface_admits_links_streams_and_delivers(
         (manifest,),
         _credential_store(),
         blob,
+        _sandboxes(workspace_root),
         InProcessHub(),
         dbos,
         "",
@@ -1274,8 +1297,8 @@ async def test_sample_surface_admits_links_streams_and_delivers(
     assert "note!" in turn.inbound or turn.inbound == "hello"
     assert linked.member_id == member_id
     assert writeback_status == WRITEBACK_PENDING
-    inbound = await blob.get(workspace_key(conversation_id, sample.SURFACE_INBOX_REL))
-    assert inbound == b"note!"
+    inbound = workspace_root / str(conversation_id) / sample.SURFACE_INBOX_REL
+    assert inbound.read_bytes() == b"note!"
 
     await blob.put("artifacts/z/out.txt", b"shared-bytes")
     async with workspace_tx() as connection:
@@ -1343,6 +1366,7 @@ async def test_sample_surface_live_admit_tails_and_stays_off_writeback(
         (manifest,),
         _credential_store(),
         blob,
+        _sandboxes(tmp_path / "workspaces"),
         InProcessHub(),
         dbos,
         "",

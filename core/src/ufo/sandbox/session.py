@@ -3,19 +3,19 @@
 Everything downstream (tools, engine) depends only on this module; the Docker carrier and the
 egress proxy implement against it. A deploy swaps the carrier (E2B, remote) without touching a
 tool. The invariant the session exists to hold: a tool reaches only the conversation's
-`workspace/` subtree, never the transcript or compaction records above it."""
+`/workspace`, never the transcript or compaction records, which live in the blob store the sandbox
+holds no credential for."""
 
 import base64
 import json
 import os
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import Protocol
 from uuid import UUID
 
 from ufo.bearer import UFO_TOKEN_SECRET_ENV
-from ufo.blob import BlobStore
 from ufo.token_signing import SignedTokenError, sign_token, verify_token
 
 WORKSPACE_DIR = "/workspace"
@@ -79,28 +79,6 @@ class RunTokenCodec:
             raise ValueError("invalid signed run token") from error
 
 
-@dataclass(frozen=True)
-class MountSpec:
-    """How the conversation's `workspace/` subtree reaches the container, one field set per `kind`:
-
-    - `filesystem`: the carrier bind-mounts the host directory at `host_path` into `/workspace`.
-    - `s3`: the carrier mounts the `bucket`/`key_prefix` S3 prefix over s3fs at `/workspace`,
-      redeeming the mount-user-only `credential_token` through the sandbox proxy and reaching S3 at
-      `s3_url` (`region`, `path_style` shape the s3fs request).
-
-    Either way the container sees only the conversation's `workspace/`, never the transcript above
-    it — the bind mount is a sibling directory, the S3 credential is scoped to `workspace/*`."""
-
-    kind: str
-    host_path: str | None = None
-    bucket: str | None = None
-    key_prefix: str | None = None
-    credential_token: str | None = None
-    s3_url: str | None = None
-    region: str | None = None
-    path_style: bool = False
-
-
 EGRESS_CA_CERT_ENV = "UFO_EGRESS_CA_CERT"
 EGRESS_CA_KEY_ENV = "UFO_EGRESS_CA_KEY"
 
@@ -121,7 +99,12 @@ class ProxyEndpoint:
 
 @dataclass(frozen=True)
 class SandboxSpec:
-    """`resume_id` is the sandbox id a prior process persisted on the conversation row: when this
+    """`workspace_host_path` is the host directory an in-cluster carrier serves `/workspace` from —
+    the Docker carrier's bind-mount source, the local carrier's cwd. An off-cluster carrier (e2b)
+    cannot see the host filesystem and serves `/workspace` from its own sandbox disk, so it ignores
+    the field.
+
+    `resume_id` is the sandbox id a prior process persisted on the conversation row: when this
     process holds no live sandbox for the conversation, the carrier resumes that id rather than
     opening a fresh sandbox, so a serve restart reattaches instead of stranding it. None means
     create fresh (no stored handle, or one another backend wrote). A carrier that resumes by
@@ -129,7 +112,7 @@ class SandboxSpec:
 
     conversation_id: UUID
     image_ref: str
-    mount: MountSpec
+    workspace_host_path: str
     proxy: ProxyEndpoint
     run_token: str
     resume_id: str | None = None
@@ -139,16 +122,15 @@ class SandboxSpec:
 @dataclass(frozen=True)
 class SandboxHandle:
     """An opaque reference to a created-or-attached container; the carrier reads it, not tools. It
-    carries the workspace `mount` so the carrier can stream a produced file straight out of the
-    mount on `export` without a whole-file read across the boundary, the `traffic_token` a
-    carrier that gates its public per-port host behind one (e2b) sets at create so a caller dialing
-    `host` carries it as a connection header, and the base `run_token` plus `egress_env` a scoped
-    session rewrites for each exec. A container shared across turns never pins either one's
-    authority."""
+    carries `workspace_host_path` so a host-path carrier can rewrite a logical `/workspace` path to
+    where it actually serves it, the `traffic_token` a carrier that gates its public per-port host
+    behind one (e2b) sets at create so a caller dialing `host` carries it as a connection header,
+    and the base `run_token` plus `egress_env` a scoped session rewrites for each exec. A container
+    shared across turns never pins either one's authority."""
 
     conversation_id: UUID
     container_id: str
-    mount: MountSpec | None = None
+    workspace_host_path: str | None = None
     traffic_token: str | None = None
     run_token: str | None = None
     egress_env: Mapping[str, str] = field(default_factory=dict)
@@ -157,16 +139,10 @@ class SandboxHandle:
 SANDBOX_HANDLE_SEP = ":"
 
 
-def format_sandbox_handle(backend: str, container_id: str) -> str:
-    """The durable `<backend>:<id>` a conversation row carries so a later process resumes the same
-    sandbox from the id and the reaper reclaims one a prior process created. The backend prefix is
-    load-bearing: a deploy that switched carriers must not resume or reap another backend's id."""
-    return f"{backend}{SANDBOX_HANDLE_SEP}{container_id}"
-
-
 def sandbox_handle_id(backend: str, value: str) -> str | None:
-    """The sandbox id inside a stored handle when it belongs to `backend`, else None — a handle
-    another backend wrote is not this carrier's to resume or reap."""
+    """The sandbox id inside a stored `<backend>:<id>` handle when it belongs to `backend`, else
+    None — a handle another backend wrote is not this carrier's to resume. The backend prefix is
+    load-bearing: a deploy that switched carriers must not resume another backend's id."""
     prefix = f"{backend}{SANDBOX_HANDLE_SEP}"
     return value[len(prefix) :] if value.startswith(prefix) else None
 
@@ -179,11 +155,21 @@ class ExecResult:
 
 
 class Carrier(Protocol):
-    """Create-or-attach a per-conversation container, run commands in it, reclaim it. The container
-    is disposable cache over the durable workspace — destroy and recreate between turns costs
-    latency, never state."""
+    """Create-or-attach a per-conversation container and reach its `/workspace`: run commands in it,
+    write bytes in, stream bytes out. `/workspace` is the carrier's own storage and the only copy of
+    a conversation's files, so nothing here reclaims a container — whether one can be dropped
+    without taking the workspace with it is knowledge only a carrier holds, and the carrier that can
+    reclaims its own."""
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle: ...
+
+    async def attach(self, spec: SandboxSpec) -> SandboxHandle | None:
+        """The sandbox `spec.resume_id` names when it is reachable, else None — never a fresh one.
+        The read seam: a browse of a conversation's files must not answer by provisioning, so a
+        container the carrier reclaimed or a sandbox its provider lost reads as absent rather than
+        resurrected. The returned handle carries no egress env — a read runs no command that leaves
+        the box."""
+        ...
 
     async def exec(
         self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
@@ -191,20 +177,18 @@ class Carrier(Protocol):
 
     async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None:
         """Write `content` to the absolute workspace `path`, creating parent directories — the
-        copy-in that pairs with `export`'s copy-out. Each carrier supplies its own (e2b uploads
+        copy-in that pairs with `read`'s copy-out. Each carrier supplies its own (e2b uploads
         through its filesystem API, docker streams over a real stdin), because bytes must never ride
         `exec`'s argv: a carrier whose command API takes a shell string has to inline them, which
         the provider rejects once they are large — exactly when a caller offloads a large result."""
         ...
 
-    async def export(self, handle: SandboxHandle, path: str, blob: BlobStore, key: str) -> None:
-        """Stream a workspace file straight into `blob` under `key`, never buffering it whole in the
-        host process — the large-attachment path that must not hit the bounded in-memory read. Each
-        carrier supplies its own copy-out (the Docker carrier reads its bind mount; a remote carrier
-        streams from its own API)."""
+    def read(self, handle: SandboxHandle, path: str) -> AsyncIterator[bytes]:
+        """Stream the workspace file at `path` out of the container in bounded chunks, never
+        buffering it whole in the host process — the copy-out that pairs with `write`. Each carrier
+        supplies its own (e2b streams from its filesystem API, docker over a real stdout, the local
+        carrier off the host directory). Raises FileNotFoundError for a path holding no file."""
         ...
-
-    async def destroy(self, handle: SandboxHandle) -> None: ...
 
     async def host(self, handle: SandboxHandle, port: int) -> str:
         """The externally-reachable `host` (optionally `host:port`) a caller outside the sandbox
@@ -268,7 +252,7 @@ class SandboxSession:
             handle=SandboxHandle(
                 conversation_id=self.handle.conversation_id,
                 container_id=self.handle.container_id,
-                mount=self.handle.mount,
+                workspace_host_path=self.handle.workspace_host_path,
                 traffic_token=self.handle.traffic_token,
                 run_token=run_token,
                 egress_env={**authorized, **env},
@@ -345,8 +329,10 @@ class SandboxSession:
             raise ValueError(failure)
         return parsed
 
-    async def export_file(self, path: str, blob: BlobStore, key: str) -> None:
-        await self.carrier.export(self.handle, workspace_path(path), blob, key)
+    def read_file(self, path: str) -> AsyncIterator[bytes]:
+        """The workspace file's bytes in bounded chunks — how a produced file leaves the container
+        without the host process ever holding it whole."""
+        return self.carrier.read(self.handle, workspace_path(path))
 
     async def host(self, port: int) -> str:
         """The externally-reachable host for an in-sandbox `port`, from the carrier's own

@@ -1,7 +1,8 @@
 """End-to-end proof of the sbxfs-backed file tools against a real container: the built sandbox
-image, the real `sbxfs` CLI on PATH, real ripgrep/poppler, and — for `share_file` — a real host
-bind mount the carrier streams out of. These are Docker-gated like test_sandbox_session; nothing
-here asserts a fake."""
+image, the real `sbxfs` CLI on PATH, real ripgrep/poppler, and — for `share_file` — both stores it
+can land an artifact in, the filesystem one it streams out of the container into and the S3 one the
+container uploads to itself. These are Docker-gated like test_sandbox_session; nothing here asserts
+a fake."""
 
 import asyncio
 import base64
@@ -10,6 +11,7 @@ import json
 import struct
 import zlib
 from collections.abc import AsyncIterator, Iterator
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -18,7 +20,7 @@ from uuid import uuid4
 import pytest
 import sqlalchemy as sa
 from pydantic import BaseModel
-from ufo_ext_docker import DockerCarrier, _docker
+from ufo_ext_docker import DockerCarrier
 
 from ufo.artifact_token import verify_artifact_token
 from ufo.audience import conversation_audience
@@ -36,28 +38,17 @@ from ufo.loop.engine import (
     TurnEngine,
 )
 from ufo.loop.prompts.render import rendered_prompt
-from ufo.loop.queue import _workspace_mount
 from ufo.loop.transcript import Transcript
 from ufo.models.interface import ModelEvent, ModelRequest, ToolUseBlock
-from ufo.sandbox.fs_creds import (
-    AwsStsClient,
-    SandboxFsCredentialMinter,
-    workspace_key_prefix,
-)
-from ufo.sandbox.fs_mount import SANDBOX_FS_RELAY_SECRET_PATH, SANDBOX_FS_TOKEN_PATH
-from ufo.sandbox.proxy.rules import Rule
-from ufo.sandbox.proxy.server import EgressProxy, generate_ca
 from ufo.sandbox.session import (
-    MountSpec,
     ProxyEndpoint,
-    RunToken,
-    RunTokenCodec,
     SandboxHandle,
     SandboxSession,
     SandboxSpec,
 )
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn, Usage
+from ufo.tools import builtins
 from ufo.tools.builtins import BUILTIN_TOOLS
 from ufo.tools.context import (
     ImageContent,
@@ -136,13 +127,13 @@ def file_ctx(
 ) -> Iterator[tuple[ToolContext, Path]]:
     """A tool context over a live container whose /workspace is a host bind mount, set up exactly as
     prod. So the tools write as the real sandbox user against a real carrier and a real bind mount
-    the export streams out of — no `--user` override, no stand-in. Input files are created through
-    the sandbox (as the agent would) so they too are sandbox-owned."""
+    the file reads stream out of — no `--user` override, no stand-in. Input files are created
+    through the sandbox (as the agent would) so they too are sandbox-owned."""
     container, workspace = sandbox_container
     handle = SandboxHandle(
         conversation_id=uuid4(),
         container_id=container,
-        mount=MountSpec(kind="filesystem", host_path=str(workspace)),
+        workspace_host_path=str(workspace),
     )
     turn = Turn(
         id=uuid4(),
@@ -167,106 +158,6 @@ def file_ctx(
     yield ctx, workspace
 
 
-async def test_s3_mount_runs_s3fs_as_nobody_without_exposing_relay_secret(
-    sandbox_image: str, s3_store: S3BlobStore
-) -> None:
-    conversation_id = uuid4()
-    assert s3_store.endpoint_url is not None
-    assert s3_store.region is not None
-
-    async def resolve(_: RunToken | None) -> tuple[Rule, ...]:
-        return ()
-
-    async def authorize(_: RunToken) -> bool:
-        return True
-
-    parsed_s3_url = urlsplit(s3_store.endpoint_url)
-    assert parsed_s3_url.port is not None
-    sandbox_s3_url = f"http://host.docker.internal:{parsed_s3_url.port}"
-    minter = SandboxFsCredentialMinter(
-        sts=AwsStsClient(endpoint_url=s3_store.endpoint_url, region=s3_store.region),
-        role_arn="arn:aws:iam::0:role/sbxfs",
-        bucket=s3_store.bucket,
-        s3_url=sandbox_s3_url,
-        region=s3_store.region,
-        path_style=True,
-        token_secret=b"integration-secret",
-    )
-    ca_cert, ca_key = await generate_ca()
-    run = RunToken(workspace_id=uuid4(), turn_id=uuid4())
-    proxy = EgressProxy(
-        resolve=resolve,
-        authorize=authorize,
-        ca_cert=ca_cert,
-        ca_key=ca_key,
-        run_tokens=RunTokenCodec(b"file-tools-test-run-token-secret"),
-        workspace_credentials=minter.refresh,
-    )
-    endpoint = await proxy.start()
-    carrier = DockerCarrier()
-    handle: SandboxHandle | None = None
-    try:
-        handle = await carrier.create(
-            SandboxSpec(
-                conversation_id=conversation_id,
-                image_ref=sandbox_image,
-                mount=await _workspace_mount(
-                    s3_store, minter, conversation_id, run, fresh_sandbox=True
-                ),
-                proxy=endpoint,
-                run_token="integration-run",
-            )
-        )
-
-        process = await carrier.exec(handle, ("ps", "-o", "user=", "-C", "s3fs"), 30)
-        assert process.exit_code == 0
-        assert process.stdout.strip() == "nobody"
-
-        code, secret, _ = await _docker(
-            "exec",
-            "-i",
-            "-u",
-            "root",
-            handle.container_id,
-            "cat",
-            SANDBOX_FS_RELAY_SECRET_PATH,
-        )
-        assert code == 0
-        process_args = await carrier.exec(
-            handle,
-            (
-                "sh",
-                "-c",
-                "for pid in $(pgrep -x s3fs) "
-                "$(pgrep -f '[s]bxcred'); "
-                "do tr '\\0' ' ' < /proc/$pid/cmdline; printf '\\n'; done",
-            ),
-            30,
-        )
-        assert process_args.exit_code == 0
-        assert "s3fs" in process_args.stdout
-        assert "sbxcred" in process_args.stdout
-        assert secret.decode().strip() not in process_args.stdout
-
-        written = await carrier.exec(
-            handle,
-            ("sh", "-c", "printf mounted > /workspace/proof.txt && cat /workspace/proof.txt"),
-            30,
-        )
-        assert written.exit_code == 0
-        assert written.stdout == "mounted"
-        assert (
-            await s3_store.get(f"{workspace_key_prefix(conversation_id)}/proof.txt") == b"mounted"
-        )
-
-        token_read = await carrier.exec(handle, ("cat", SANDBOX_FS_TOKEN_PATH), 30)
-        assert token_read.exit_code != 0
-    finally:
-        if handle is not None:
-            await carrier.destroy(handle)
-        await proxy.stop()
-
-
 async def test_cancelled_docker_create_removes_its_real_container_and_network(
     sandbox_image: str,
     tmp_path: Path,
@@ -285,7 +176,7 @@ async def test_cancelled_docker_create_removes_its_real_container_and_network(
             SandboxSpec(
                 conversation_id=conversation,
                 image_ref=sandbox_image,
-                mount=MountSpec(kind="filesystem", host_path=str(tmp_path)),
+                workspace_host_path=str(tmp_path),
                 proxy=ProxyEndpoint(port=8080, ca_cert="ca-pem"),
                 run_token="integration-run",
             )
@@ -611,6 +502,64 @@ async def test_share_file_text_preflight_and_download_url(
     assert await ctx.blob.get(claims.blob_key) == body
 
 
+async def test_share_file_uploads_from_inside_the_sandbox_on_the_s3_backend(
+    file_ctx: tuple[ToolContext, Path],
+    s3_store: S3BlobStore,
+    db: None,
+) -> None:
+    """The property the presigned PUT exists for: the bytes go sandbox → S3 and never cross this
+    process. Proven by handing the tool a store signed against an endpoint only the container can
+    resolve, so serve itself cannot reach the bucket at all — if the object lands, the sandbox put
+    it there. Read back through the host-reachable store over the same bucket, byte-exact, at the
+    size the tool reported."""
+    ctx, _ = file_ctx
+    await _seed_turn_rows(ctx.turn)
+    assert s3_store.endpoint_url is not None
+    sandbox_store = S3BlobStore(
+        bucket=s3_store.bucket,
+        endpoint_url=f"http://host.docker.internal:{urlsplit(s3_store.endpoint_url).port}",
+        region=s3_store.region,
+    )
+    payload = bytes(range(256)) * 8192
+    await ctx.sandbox.write_file("figures.bin", payload)
+
+    result = await _run("share_file", replace(ctx, blob=sandbox_store), file_path="figures.bin")
+
+    shared = json.loads(result.content[0].text)
+    assert shared["size_bytes"] == len(payload)
+    token = shared["url"].split("token=", 1)[1]
+    claims = verify_artifact_token(token, ARTIFACT_SECRET, datetime.now(UTC))
+    assert await s3_store.get(claims.blob_key) == payload
+
+
+async def test_share_file_refuses_a_file_over_the_artifact_cap(
+    file_ctx: tuple[ToolContext, Path],
+    s3_store: S3BlobStore,
+    db: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A single presigned PUT cannot carry more than S3 accepts in one request, so the preflight
+    size is the bound — checked before anything is minted, so an over-cap share records no artifact
+    rather than half-uploading one."""
+    ctx, _ = file_ctx
+    await _seed_turn_rows(ctx.turn)
+    monkeypatch.setattr(builtins, "ARTIFACT_PUT_MAX_BYTES", 8)
+    await ctx.sandbox.write_file("oversize.bin", b"nine byte")
+
+    with pytest.raises(ValueError, match="capped at 8 bytes"):
+        await _run("share_file", replace(ctx, blob=s3_store), file_path="oversize.bin")
+
+    async with workspace_tx() as connection:
+        rows = (
+            await connection.execute(
+                sa.select(tables.shared_artifact.c.blob_key).where(
+                    tables.shared_artifact.c.workspace_id == ctx.turn.workspace_id
+                )
+            )
+        ).all()
+    assert rows == []
+
+
 async def test_share_file_confines_a_traversal_name(
     file_ctx: tuple[ToolContext, Path],
     db: None,
@@ -924,3 +873,22 @@ async def test_a_read_over_the_cap_offloads_without_losing_the_file_it_read(
     windowed = await _run("read", ctx, file_path="wide.log", offset=1_400, limit=1)
     assert lines[-1] in windowed.content[0].text
     assert len(windowed.content[0].text) < TOOL_RESULT_PREVIEW_CHARS
+
+
+async def test_carrier_read_streams_container_bytes_byte_exact(
+    file_ctx: tuple[ToolContext, Path],
+) -> None:
+    """The copy-out against a real container: bytes written through the carrier come back through
+    `read` byte-exact in bounded chunks, and an absent path raises rather than reading empty."""
+    ctx, _ = file_ctx
+    payload = bytes(range(256)) * 4096
+    await ctx.sandbox.write_file("big.bin", payload)
+    carrier = ctx.sandbox.carrier
+    handle = ctx.sandbox.handle
+
+    chunks = [chunk async for chunk in carrier.read(handle, "/workspace/big.bin")]
+
+    assert len(chunks) > 1
+    assert b"".join(chunks) == payload
+    with pytest.raises(FileNotFoundError):
+        [chunk async for chunk in carrier.read(handle, "/workspace/absent.bin")]

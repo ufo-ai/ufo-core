@@ -1,9 +1,12 @@
 """The Docker carrier extension: a per-conversation container reached only through the egress proxy.
 
 Core's default is the local carrier; a deploy that sets `[sandbox] backend = "docker"` runs its
-sandboxes as sibling containers. Create-or-attach keeps the container a disposable cache over
-the durable workspace — a killed container is recreated on the next turn from the same bind-mounted
-`workspace/` subtree, and the turn notices only latency. Every command runs through `docker exec`
+sandboxes as sibling containers. `/workspace` is a host bind mount, so this carrier reclaims its
+own idle containers by stopping them on each create — memory is the contended resource, and a
+stopped container with its workspace persists for any later touch to start again, so a
+conversation whose turn was merely quiet survives its own reclaim at the cost of one restart. Core
+reclaims nothing, because for a carrier whose `/workspace` lives inside its sandbox the container
+*is* the workspace. Every command runs through `docker exec`
 under its turn's egress env: HTTP(S)_PROXY points at the egress proxy running on the host, reached
 at `host.docker.internal`, and carries the turn's run token as its basic-auth username so the proxy
 attributes each metered request to the turn; the proxy refuses any host its rules do not allow and
@@ -12,53 +15,38 @@ The env is per-exec, never baked into the container — a container outlives its
 later turn must not run under an earlier turn's token."""
 
 import asyncio
-import shlex
-from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
-from urllib.parse import urlsplit
+import time
+from collections import Counter
+from collections.abc import AsyncIterator, Callable
+from dataclasses import dataclass, field
 from uuid import UUID
 
 from ufo.sdk.manifest import Manifest
 from ufo.sdk.sandbox import (
-    MOUNT_HEALTH_CHECK_TIMEOUT_SECONDS,
-    MOUNT_TIMEOUT_SECONDS,
     NO_PROXY_HOSTS,
-    SANDBOX_FS_CREDENTIAL_PATH,
-    SANDBOX_FS_TOKEN_STAGING_PATH,
     SENTINEL_MODEL_KEY,
     WORKSPACE_DIR,
-    BlobStore,
     CarrierSpec,
     ExecResult,
-    MountSpec,
     SandboxHandle,
     SandboxSpec,
-    install_token_command,
-    mount_health_check,
-    mount_scripts,
-    prepare_token_staging_command,
-    s3fs_command,
 )
 
 CARRIER_NAME = "docker"
 CONTAINER_NAME_PREFIX = "ufo-sbx-"
 CREATE_TIMEOUT_SECONDS = 120
 WRITE_TIMEOUT_SECONDS = 30
+READ_CHUNK_BYTES = 1024 * 1024
+IDLE_RECLAIM_SECONDS = 1800
+NAME_CONFLICT_MARKER = "is already in use"
+NOT_RUNNING_MARKER = "is not running"
+NETWORK_EXISTS_MARKER = "already exists"
+STOP_TIMEOUT_SECONDS = 30
+START_TIMEOUT_SECONDS = 30
 DEFAULT_NETWORK = "ufo-sandbox"
 HOST_GATEWAY_NAME = "host.docker.internal"
 HOST_GATEWAY_MAPPING = f"{HOST_GATEWAY_NAME}:host-gateway"
 DROP_NET_RAW_ARGS = ("--cap-drop", "NET_RAW")
-# s3fs mounts the workspace prefix over FUSE, which needs the fuse device plus CAP_SYS_ADMIN and an
-# unconfined apparmor profile to mount inside the container. Added only for an s3 mount — a
-# filesystem bind mount (local dev) needs no FUSE and keeps the tighter default isolation.
-FUSE_RUN_ARGS = (
-    "--device",
-    "/dev/fuse",
-    "--cap-add",
-    "SYS_ADMIN",
-    "--security-opt",
-    "apparmor=unconfined",
-)
 
 
 async def _docker(*argv: str, stdin: bytes = b"", timeout_s: int = 60) -> tuple[int, bytes, bytes]:
@@ -81,12 +69,23 @@ async def _docker(*argv: str, stdin: bytes = b"", timeout_s: int = 60) -> tuple[
 @dataclass(frozen=True)
 class DockerCarrier:
     network: str = DEFAULT_NETWORK
+    clock: Callable[[], float] = time.monotonic
+    _touched: dict[UUID, float] = field(default_factory=dict)
+    _inflight: Counter[UUID] = field(default_factory=Counter)
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         """Create-or-attach the conversation's container. The egress env is never baked into the
         container — a container outliving its first turn must not pin that turn's run token — it
         rides the returned handle and every exec carries it, so each turn's commands run under its
-        own token and sentinel entries."""
+        own token and sentinel entries.
+
+        The daemon arbitrates concurrent creates for one conversation: both race `docker run` under
+        the same deterministic name, the loser's run answers a name conflict, and the loser attaches
+        to the winner's container — nothing here holds a lock, and no second container ever exists.
+        The CA installs on every path out, not only the fresh run: a container outliving a serve
+        restart still trusts the dead process's proxy CA, and the local proxy mints a fresh one per
+        process, so every request from a reused container would fail TLS until the new CA lands."""
+        await self._reclaim_idle(spec.conversation_id)
         name = f"{CONTAINER_NAME_PREFIX}{spec.conversation_id}"
         proxy_url = f"http://{spec.run_token}:@{HOST_GATEWAY_NAME}:{spec.proxy.port}"
         egress_env = {
@@ -102,21 +101,31 @@ class DockerCarrier:
         }
         running = await self._running_id(name)
         if running is not None:
-            handle = SandboxHandle(
+            await self._install_ca(running, spec.proxy.ca_cert)
+            return SandboxHandle(
                 conversation_id=spec.conversation_id,
                 container_id=running,
-                mount=spec.mount,
+                workspace_host_path=spec.workspace_host_path,
                 run_token=spec.run_token,
                 egress_env=egress_env,
             )
-            await self._mount_s3(handle, spec.mount, self._credential_url(spec))
-            return handle
+        stopped = await self._stopped_id(name)
+        if stopped is not None and await self._revive(spec.conversation_id, stopped):
+            await self._install_ca(stopped, spec.proxy.ca_cert)
+            return SandboxHandle(
+                conversation_id=spec.conversation_id,
+                container_id=stopped,
+                workspace_host_path=spec.workspace_host_path,
+                run_token=spec.run_token,
+                egress_env=egress_env,
+            )
+        if stopped is not None:
+            await _docker("rm", "-f", stopped)
         network = self._network_name(spec.conversation_id)
         await self._ensure_network(network)
         argv = [
             "run",
             "-d",
-            "--rm",
             "--name",
             name,
             "--network",
@@ -124,51 +133,171 @@ class DockerCarrier:
             "--add-host",
             HOST_GATEWAY_MAPPING,
             *DROP_NET_RAW_ARGS,
-            *(FUSE_RUN_ARGS if spec.mount.kind == "s3" else ()),
+            "-v",
+            f"{spec.workspace_host_path}:{WORKSPACE_DIR}",
+            spec.image_ref,
+            "sleep",
+            "infinity",
         ]
-        if spec.mount.kind == "filesystem" and spec.mount.host_path is not None:
-            argv += ["-v", f"{spec.mount.host_path}:/workspace"]
-        argv += [spec.image_ref, "sleep", "infinity"]
         container_id: str | None = None
         try:
             code, stdout, stderr = await _docker(*argv, timeout_s=CREATE_TIMEOUT_SECONDS)
             if code != 0:
-                raise RuntimeError(f"docker run failed: {stderr.decode().strip()}")
+                detail = stderr.decode().strip()
+                if NAME_CONFLICT_MARKER in detail:
+                    winner = await self._running_id(name)
+                    if winner is not None:
+                        await self._install_ca(winner, spec.proxy.ca_cert)
+                        return SandboxHandle(
+                            conversation_id=spec.conversation_id,
+                            container_id=winner,
+                            workspace_host_path=spec.workspace_host_path,
+                            run_token=spec.run_token,
+                            egress_env=egress_env,
+                        )
+                raise RuntimeError(f"docker run failed: {detail}")
             container_id = stdout.decode().strip()
             await self._install_ca(container_id, spec.proxy.ca_cert)
-            handle = SandboxHandle(
+            return SandboxHandle(
                 conversation_id=spec.conversation_id,
                 container_id=container_id,
-                mount=spec.mount,
+                workspace_host_path=spec.workspace_host_path,
                 run_token=spec.run_token,
                 egress_env=egress_env,
             )
-            await self._mount_s3(handle, spec.mount, self._credential_url(spec))
-            return handle
         except BaseException:
             if container_id is not None:
                 await _docker("rm", "-f", container_id)
             await _docker("network", "rm", network)
             raise
 
+    async def attach(self, spec: SandboxSpec) -> SandboxHandle | None:
+        """The conversation's container when one exists — started again if reclaim stopped it, the
+        same shape as resuming a provider-paused sandbox — else None, never a fresh one. No egress
+        env: a read runs `sbxfs` and `cat`, nothing that leaves the box."""
+        name = f"{CONTAINER_NAME_PREFIX}{spec.conversation_id}"
+        running = await self._running_id(name)
+        if running is None:
+            stopped = await self._stopped_id(name)
+            if stopped is None or not await self._revive(spec.conversation_id, stopped):
+                return None
+            running = stopped
+        return SandboxHandle(
+            conversation_id=spec.conversation_id,
+            container_id=running,
+            workspace_host_path=spec.workspace_host_path,
+            run_token=spec.run_token,
+        )
+
+    async def _reclaim_idle(self, opening: UUID) -> None:
+        """Stop the containers not touched for `IDLE_RECLAIM_SECONDS`, adopting any this process
+        does not know.
+
+        A stop, never a removal: the carrier has no view of turn liveness, so a conversation whose
+        turn is merely quiet — long reasoning, a round of subagent orchestration — must survive its
+        own reclaim. Stopping frees the memory an idle container holds (the contended resource)
+        while the container and its bind-mounted workspace persist, and every later touch — the
+        next create, a mid-turn exec/write/read, a browse — starts it again and continues. The
+        worst a wrong reclaim can cost is one restart, never a failed tool call.
+
+        A create is the trigger rather than an interval because the unit of idleness here is a
+        container on this host, not a workspace — the shape a scheduled job fans out over. It is a
+        safe trigger: the conversation being opened is touched before anything else, so this never
+        fires on its own work. A running `ufo-sbx-*` container this process has no touch for — left
+        by a process that restarted — is adopted at the current clock and stopped one idle span
+        later; one already stopped needs nothing. Concurrent creates race this scan, so each
+        candidate's staleness is re-checked after every await (a touch that landed meanwhile wins),
+        the synchronous delete before the stop is the reservation that makes the stop
+        exactly-once, and a failed stop puts the stale entry back so the next create retries it
+        instead of granting a fresh idle span."""
+        self._touched[opening] = self.clock()
+        code, stdout, stderr = await _docker(
+            "ps", "--filter", f"name=^{CONTAINER_NAME_PREFIX}", "--format", "{{.Names}}"
+        )
+        if code != 0:
+            raise RuntimeError(f"docker ps failed: {stderr.decode().strip()}")
+        for name in stdout.decode().split():
+            try:
+                conversation_id = UUID(name.removeprefix(CONTAINER_NAME_PREFIX))
+            except ValueError:
+                continue
+            self._touched.setdefault(conversation_id, self.clock())
+        stale = [
+            conversation_id
+            for conversation_id, touched in self._touched.items()
+            if not self._inflight[conversation_id]
+            and self.clock() - touched >= IDLE_RECLAIM_SECONDS
+        ]
+        for conversation_id in stale:
+            container_id = await self._running_id(f"{CONTAINER_NAME_PREFIX}{conversation_id}")
+            touched = self._touched.get(conversation_id)
+            if (
+                touched is None
+                or self._inflight[conversation_id]
+                or self.clock() - touched < IDLE_RECLAIM_SECONDS
+            ):
+                continue
+            del self._touched[conversation_id]
+            if container_id is not None:
+                code, _, _ = await _docker("stop", container_id, timeout_s=STOP_TIMEOUT_SECONDS)
+                if code != 0:
+                    self._touched.setdefault(conversation_id, touched)
+                    continue
+                network = self._network_name(conversation_id)
+                await _docker("network", "disconnect", network, container_id)
+                await _docker("network", "rm", network)
+
     async def exec(
         self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
     ) -> ExecResult:
-        env_args = tuple(
-            arg for name, value in handle.egress_env.items() for arg in ("--env", f"{name}={value}")
-        )
-        code, stdout, stderr = await _docker(
-            "exec", *env_args, handle.container_id, *argv, timeout_s=timeout_s
-        )
-        return ExecResult(
-            stdout=stdout.decode(errors="replace"),
-            stderr=stderr.decode(errors="replace"),
-            exit_code=code,
-        )
+        """A call in flight pins its container: the in-flight count parks the conversation outside
+        reclaim's reach for exactly the call's duration, whatever that duration is, and the
+        completion stamp then grants a full idle span after it — so a container is stoppable only
+        when genuinely between calls."""
+        self._inflight[handle.conversation_id] += 1
+        self._touched[handle.conversation_id] = self.clock()
+        try:
+            env_args = tuple(
+                arg
+                for name, value in handle.egress_env.items()
+                for arg in ("--env", f"{name}={value}")
+            )
+            code, stdout, stderr = await _docker(
+                "exec", *env_args, handle.container_id, *argv, timeout_s=timeout_s
+            )
+            if code != 0 and NOT_RUNNING_MARKER in stderr.decode(errors="replace"):
+                if await self._revive(handle.conversation_id, handle.container_id):
+                    code, stdout, stderr = await _docker(
+                        "exec", *env_args, handle.container_id, *argv, timeout_s=timeout_s
+                    )
+            return ExecResult(
+                stdout=stdout.decode(errors="replace"),
+                stderr=stderr.decode(errors="replace"),
+                exit_code=code,
+            )
+        finally:
+            self._inflight[handle.conversation_id] -= 1
+            self._touched[handle.conversation_id] = self.clock()
 
     async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None:
         """`docker exec -i` gives the container a real stdin, so the bytes stream in over it and
         never enter the command line."""
+        self._inflight[handle.conversation_id] += 1
+        self._touched[handle.conversation_id] = self.clock()
+        try:
+            code, stderr = await self._write_started(handle, path, content)
+            if code != 0 and NOT_RUNNING_MARKER in stderr.decode(errors="replace"):
+                if await self._revive(handle.conversation_id, handle.container_id):
+                    code, stderr = await self._write_started(handle, path, content)
+            if code != 0:
+                raise OSError(stderr.decode(errors="replace").strip() or f"write failed: {path}")
+        finally:
+            self._inflight[handle.conversation_id] -= 1
+            self._touched[handle.conversation_id] = self.clock()
+
+    async def _write_started(
+        self, handle: SandboxHandle, path: str, content: bytes
+    ) -> tuple[int, bytes]:
         code, _, stderr = await _docker(
             "exec",
             "-i",
@@ -181,130 +310,67 @@ class DockerCarrier:
             stdin=content,
             timeout_s=WRITE_TIMEOUT_SECONDS,
         )
-        if code != 0:
-            raise OSError(stderr.decode(errors="replace").strip() or f"write failed: {path}")
+        return code, stderr
 
-    async def export(self, handle: SandboxHandle, path: str, blob: BlobStore, key: str) -> None:
-        """Copy a produced workspace file to `key` without the host process ever holding the bytes
-        whole — the large-attachment path, distinct from the bounded read. A filesystem bind mount
-        already has the file at `host_path/<rel>`, streamed in by the blob store. An s3 mount wrote
-        it through s3fs to `<key_prefix>/<rel>` in the same bucket, so it copies server-side within
-        the store — the bytes never leave S3."""
-        mount = handle.mount
-        if mount is None:
-            raise RuntimeError("docker export requires a workspace mount")
-        rel = PurePosixPath(path).relative_to(WORKSPACE_DIR)
-        if mount.kind == "s3":
-            if mount.key_prefix is None:
-                raise RuntimeError("s3 workspace mount is missing its key prefix")
-            await blob.copy(f"{mount.key_prefix}/{rel}", key)
-            return
-        if mount.kind != "filesystem" or mount.host_path is None:
-            raise RuntimeError("docker export requires a filesystem or s3 workspace mount")
-        await blob.put_file(key, Path(mount.host_path) / rel)
+    async def read(self, handle: SandboxHandle, path: str) -> AsyncIterator[bytes]:
+        """`docker exec` gives the container a real stdout, so the bytes stream out over it in
+        bounded chunks and the host process never holds the file whole. `cat` is run through the
+        container rather than off the bind mount so a caller reads what the sandbox sees, whatever
+        the carrier's storage happens to be. A missing file leaves stdout empty and exits non-zero,
+        which the drain surfaces as FileNotFoundError rather than a silent empty read. A stopped
+        container fails before the first byte, so a revive-and-restream never repeats a chunk."""
+        self._inflight[handle.conversation_id] += 1
+        self._touched[handle.conversation_id] = self.clock()
+        try:
+            chunks, detail = self._read_started(handle, path)
+            async for chunk in chunks:
+                yield chunk
+            if detail and NOT_RUNNING_MARKER in detail[0]:
+                if await self._revive(handle.conversation_id, handle.container_id):
+                    chunks, detail = self._read_started(handle, path)
+                    async for chunk in chunks:
+                        yield chunk
+            if detail:
+                raise FileNotFoundError(detail[0] or f"cannot read {path}")
+        finally:
+            self._inflight[handle.conversation_id] -= 1
+            self._touched[handle.conversation_id] = self.clock()
 
-    async def _mount_s3(self, handle: SandboxHandle, mount: MountSpec, credential_url: str) -> None:
-        """Bring the conversation's workspace S3 prefix up at /workspace over s3fs. Idempotent:
-        skips a mount the health probe passes, so a later turn attaching to a live container never
-        remounts under an in-flight dispatch. Writes the private endpoint token, then runs mount
-        orchestration as root. The s3fs daemon drops to its dedicated user, refreshes scoped
-        credentials through the local relay, and talks directly to S3; neither path carries the
-        agent's egress environment."""
-        if mount.kind != "s3":
-            return
-        if (
-            mount.credential_token is None
-            or mount.bucket is None
-            or mount.key_prefix is None
-            or mount.s3_url is None
-            or mount.region is None
-        ):
-            raise RuntimeError("s3 workspace mount is missing its credential token or endpoint")
-        token = mount.credential_token.encode()
-        staging = shlex.quote(SANDBOX_FS_TOKEN_STAGING_PATH)
-        write = (
-            f"{prepare_token_staging_command()} && umask 077 && cat > {staging} "
-            f"&& {install_token_command()}"
-        )
-        code, _, stderr = await _docker(
-            "exec", "-i", "-u", "root", handle.container_id, "sh", "-c", write, stdin=token
-        )
-        if code != 0:
-            raise RuntimeError(f"sandbox-fs token write failed: {stderr.decode().strip()}")
-        if await self._mount_healthy(handle):
-            return
-        s3fs = s3fs_command(
-            mount.bucket,
-            mount.key_prefix,
-            WORKSPACE_DIR,
-            mount.s3_url,
-            mount.region,
-            mount.path_style,
-        )
-        prepare, mount_cmd = mount_scripts(WORKSPACE_DIR, s3fs, credential_url)
-        code, _, stderr = await _docker(
-            "exec",
-            "-i",
-            "-u",
-            "root",
-            handle.container_id,
-            "sh",
-            "-c",
-            prepare,
-            timeout_s=MOUNT_TIMEOUT_SECONDS,
-        )
-        if code != 0:
-            raise RuntimeError(f"sandbox-fs mount prepare failed: {stderr.decode().strip()}")
-        code, _, stderr = await _docker(
-            "exec",
-            "-i",
-            "-u",
-            "root",
-            handle.container_id,
-            "sh",
-            "-c",
-            mount_cmd,
-            timeout_s=MOUNT_TIMEOUT_SECONDS,
-        )
-        if code != 0:
-            raise RuntimeError(f"sandbox-fs mount failed: {stderr.decode().strip()}")
-        if not await self._mount_healthy(handle):
-            raise RuntimeError("sandbox-fs mount failed its health check")
+    def _read_started(
+        self, handle: SandboxHandle, path: str
+    ) -> tuple[AsyncIterator[bytes], list[str]]:
+        """One `cat` attempt: the chunk stream, and a failure list one error lands in after the
+        stream is drained — empty on success. Split so `read` can revive a stopped container and
+        re-stream without an async generator ever crossing its own retry."""
+        failure: list[str] = []
 
-    def _credential_url(self, spec: SandboxSpec) -> str:
-        if spec.proxy.public_url is not None:
-            parsed = urlsplit(spec.proxy.public_url)
-            if parsed.scheme != "https" or parsed.hostname is None:
-                raise RuntimeError(
-                    "the docker carrier requires an HTTPS [sandbox] proxy_public_url so mount "
-                    "credentials are encrypted in transit"
-                )
-            return f"{spec.proxy.public_url.rstrip('/')}{SANDBOX_FS_CREDENTIAL_PATH.rstrip('/')}"
-        return (
-            f"http://{HOST_GATEWAY_NAME}:{spec.proxy.port}{SANDBOX_FS_CREDENTIAL_PATH.rstrip('/')}"
-        )
+        async def stream() -> AsyncIterator[bytes]:
+            process = await asyncio.create_subprocess_exec(
+                "docker",
+                "exec",
+                handle.container_id,
+                "cat",
+                path,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout = process.stdout
+            stderr = process.stderr
+            if stdout is None or stderr is None:
+                raise RuntimeError("docker exec opened no pipes")
+            try:
+                while chunk := await stdout.read(READ_CHUNK_BYTES):
+                    yield chunk
+                detail = (await stderr.read()).decode(errors="replace").strip()
+            finally:
+                if process.returncode is None:
+                    process.kill()
+                await process.wait()
+            if process.returncode != 0:
+                failure.append(detail)
 
-    async def _mount_healthy(self, handle: SandboxHandle) -> bool:
-        code, _, _ = await _docker(
-            "exec",
-            "-i",
-            "-u",
-            "root",
-            handle.container_id,
-            "sh",
-            "-c",
-            mount_health_check(WORKSPACE_DIR),
-            timeout_s=MOUNT_HEALTH_CHECK_TIMEOUT_SECONDS,
-        )
-        return code == 0
-
-    async def destroy(self, handle: SandboxHandle) -> None:
-        """Reap by the conversation's container name, the same key `create` derives — the durable
-        identity a reaper holds, not the ephemeral id a live handle also carries. `rm -f` on a name
-        that no longer exists is a no-op, so destroying an already-gone or never-created sandbox
-        never raises."""
-        await _docker("rm", "-f", f"{CONTAINER_NAME_PREFIX}{handle.conversation_id}")
-        await _docker("network", "rm", self._network_name(handle.conversation_id))
+        return stream(), failure
 
     async def host(self, handle: SandboxHandle, port: int) -> str:
         """The docker carrier publishes no per-port host, so an in-sandbox service (a browser's CDP
@@ -314,6 +380,33 @@ class DockerCarrier:
             "the docker carrier exposes no external per-port host; reach an in-sandbox service "
             "through a remote carrier (e2b)"
         )
+
+    async def _revive(self, conversation_id: UUID, container_id: str) -> bool:
+        """Start a container reclaim stopped, reporting whether it runs again — the recovery every
+        touch of a stopped container shares: the next create, a mid-turn exec/write/read whose
+        container was stopped underneath it, a browse. Reclaim released the conversation's network
+        with the stop (bridge subnets are the host's finite resource — the daemon's default pools
+        hold ~30), so the revive re-ensures it and reconnects before starting; a connect answering
+        already-connected is the state it was after. False (a container removed or corrupted out of
+        band) leaves the caller's own failure to surface."""
+        network = self._network_name(conversation_id)
+        await self._ensure_network(network)
+        code, _, stderr = await _docker("network", "connect", network, container_id)
+        if code != 0 and NETWORK_EXISTS_MARKER not in stderr.decode():
+            return False
+        code, _, _ = await _docker("start", container_id, timeout_s=START_TIMEOUT_SECONDS)
+        return code == 0
+
+    async def _stopped_id(self, name: str) -> str | None:
+        """The id of `name`'s exited container, else None — what reclaim leaves behind, and what a
+        later open starts again."""
+        code, stdout, stderr = await _docker(
+            "ps", "-aq", "--filter", f"name=^{name}$", "--filter", "status=exited"
+        )
+        if code != 0:
+            raise RuntimeError(f"docker ps failed: {stderr.decode().strip()}")
+        found = stdout.decode().strip()
+        return found or None
 
     async def _running_id(self, name: str) -> str | None:
         """A genuine no-match is exit 0 with empty stdout — `docker ps` only returns non-zero when
@@ -332,13 +425,16 @@ class DockerCarrier:
         return f"{self.network}-{conversation_id.hex}"
 
     async def _ensure_network(self, network: str) -> None:
+        """Idempotent under the same race the container name is: two creates for one conversation
+        both miss the ls and both run `network create`; the daemon arbitrates the name, and the
+        loser's already-exists answer is the success it was after."""
         code, stdout, stderr = await _docker("network", "ls", "-q", "--filter", f"name=^{network}$")
         if code != 0:
             raise RuntimeError(f"docker network ls failed: {stderr.decode().strip()}")
         if stdout.strip():
             return
         code, _, stderr = await _docker("network", "create", network)
-        if code != 0:
+        if code != 0 and NETWORK_EXISTS_MARKER not in stderr.decode():
             raise RuntimeError(f"docker network create failed: {stderr.decode().strip()}")
 
     async def _install_ca(self, container_id: str, ca_cert: str) -> None:

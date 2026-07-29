@@ -423,8 +423,6 @@ class RecordingCarrier:
         self.calls.append(argv)
         return self.result
 
-    async def destroy(self, handle: SandboxHandle) -> None: ...
-
 
 async def _unavailable_spawn(
     profile: str, payload: dict[str, object], background: bool = False

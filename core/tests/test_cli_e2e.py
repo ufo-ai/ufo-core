@@ -46,13 +46,9 @@ from ufo.loop.subagents import SubagentRegistry
 from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
 from ufo.models.interface import ModelEvent, ModelRequest, TextDelta
 from ufo.models.registry import ModelRegistry
-from ufo.sandbox.session import (
-    ExecResult,
-    ProxyEndpoint,
-    RunTokenCodec,
-    SandboxHandle,
-    SandboxSpec,
-)
+from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
+from ufo.sandbox.local import LocalCarrier
+from ufo.sandbox.session import ProxyEndpoint, RunTokenCodec
 from ufo.schema import tables
 from ufo.schema.records import DEFAULT_AGENT_NAME, Usage
 from ufo.serve import _mount_shared_surfaces
@@ -382,23 +378,6 @@ STANDIN_REGISTRY = ModelRegistry(
 )
 
 
-class StandInCarrier:
-    """Stands in for the Docker carrier: create-or-attach returns a handle, exec is never reached
-    because the StandIn model makes no tool calls."""
-
-    async def create(self, spec: SandboxSpec) -> SandboxHandle:
-        return SandboxHandle(conversation_id=spec.conversation_id, container_id="test")
-
-    async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None: ...
-
-    async def exec(
-        self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
-    ) -> ExecResult:
-        return ExecResult(stdout="", stderr="", exit_code=0)
-
-    async def destroy(self, handle: SandboxHandle) -> None: ...
-
-
 class StubEmbed:
     async def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
         return tuple(() for _ in texts)
@@ -489,18 +468,24 @@ def chat_server(
     hub = InProcessHub()
     blob = FilesystemBlobStore(root=config.blob.root)
     dbos_client = DBOSClient(system_database_url=config.database.system_url)
+    sandboxes = ConversationSandbox(
+        carrier=LocalCarrier(),
+        backend="local",
+        off_cluster=False,
+        image_ref=SANDBOX_IMAGE_REF,
+        proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
+        workspace_root=tmp_path / "workspaces",
+    )
     loop_queue.reset_runtime()
     loop_queue.init_runtime(
         loop_queue.Runtime(
             config=config,
             blob=blob,
-            workspace_fs=None,
+            sandboxes=sandboxes,
             hub=hub,
-            carrier=StandInCarrier(),
             cdp_provider=None,
             search_provider=None,
             connectors=ConnectorRegistry(entries={}),
-            proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
             run_tokens=RunTokenCodec(TOKEN_SECRET.encode()),
             dbos=dbos_client,
             subagents=SubagentRegistry(()),
@@ -517,7 +502,9 @@ def chat_server(
 
     port = _free_port()
     app = FastAPI()
-    _mount_shared_surfaces(app, (ufo_manifest(),), None, blob, hub, dbos_client, "", None)
+    _mount_shared_surfaces(
+        app, (ufo_manifest(),), None, blob, sandboxes, hub, dbos_client, "", None
+    )
     server = _ThreadedServer(app, port)
     server.start()
 
