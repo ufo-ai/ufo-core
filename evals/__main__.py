@@ -77,6 +77,7 @@ from evals.jobbench.runner import (
 from evals.mcp_atlas_100.runner import load_mcp_atlas_task
 from evals.mcp_atlas_100.target import McpAtlasTarget
 from evals.memory_100.runner import Memory100Run, load_memory_100
+from evals.onboarding_help import ONBOARDING_HELP_PACKS
 from evals.reconstruct import RunReconstruction, write_reconstruction
 from evals.registry import TASKS, selected_run_tasks
 from evals.skill_loading.catalog import CASES as SKILL_LOADING_CASES
@@ -386,6 +387,13 @@ def main(argv: list[str] | None = None) -> None:
     ):
         parser.error(
             f"cos_workflows requires [pack] name in {COS_WORKFLOWS_PACKS}, "
+            f"found {config.pack.name!r}"
+        )
+    if any(task.name == "onboarding_help" for task in tasks) and (
+        config.pack.name not in ONBOARDING_HELP_PACKS
+    ):
+        parser.error(
+            f"onboarding_help requires [pack] name in {ONBOARDING_HELP_PACKS}, "
             f"found {config.pack.name!r}"
         )
     workspace_id = args.workspace

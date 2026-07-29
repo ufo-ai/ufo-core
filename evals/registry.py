@@ -12,6 +12,7 @@ from evals import (
     document_visual,
     memory_hygiene,
     object_tools,
+    onboarding_help,
     pdf_build,
     response_register,
     scenario_smoke,
@@ -80,6 +81,7 @@ TASKS: tuple[EvalTask, ...] = (
     capability_task("yc_recall", yc_recall.CASES),
     capability_task("yc_workflows", yc_workflows.CASES),
     capability_task("cos_workflows", cos_workflows.CASES),
+    capability_task("onboarding_help", onboarding_help.CASES, judge_model=SEMANTIC_JUDGE_MODEL),
 )
 
 

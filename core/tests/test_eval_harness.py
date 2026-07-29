@@ -198,6 +198,22 @@ def test_cos_workflows_refuses_to_run_outside_the_chief_of_staff_pack(
     assert "cos_workflows requires [pack] name in ('chief_of_staff',)" in capsys.readouterr().err
 
 
+def test_onboarding_help_refuses_to_run_outside_the_hosted_pack(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The corpus ships with `assistant_hosted` alone, so anywhere else every case would grade a
+    skill that cannot load — a suite of exclusions reported as a score."""
+    monkeypatch.setattr(
+        "evals.__main__.load_config",
+        lambda: SimpleNamespace(pack=SimpleNamespace(name="assistant")),
+    )
+    with pytest.raises(SystemExit):
+        eval_main(["--only", "onboarding_help", "--out", str(tmp_path)])
+    assert (
+        "onboarding_help requires [pack] name in ('assistant_hosted',)" in capsys.readouterr().err
+    )
+
+
 def test_registry_pins_judge_and_simulator_models_by_workload() -> None:
     tasks = {task.name: task for task in TASKS}
 
@@ -219,6 +235,8 @@ def test_registry_pins_judge_and_simulator_models_by_workload() -> None:
     assert tasks["response_register"].simulator_model is None
     assert tasks["closing_message"].judge_model == SEMANTIC_JUDGE_MODEL
     assert tasks["closing_message"].simulator_model is None
+    assert tasks["onboarding_help"].judge_model == SEMANTIC_JUDGE_MODEL
+    assert tasks["onboarding_help"].simulator_model is None
     assert all(
         task.judge_model is None and task.simulator_model is None
         for name, task in tasks.items()
@@ -233,6 +251,7 @@ def test_registry_pins_judge_and_simulator_models_by_workload() -> None:
             "document_visual",
             "response_register",
             "closing_message",
+            "onboarding_help",
         }
     )
 

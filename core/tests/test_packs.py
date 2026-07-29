@@ -19,9 +19,11 @@ import ufo_pack_gdpval_eval as gdpval
 import ufo_pack_yc.manifest as yc
 
 import ufo.ext.loader as loader
-from ufo.ext.loader import discovered_packs, load_manifests
+from ufo.ext.loader import discovered_packs, load_manifests, skill_registry
 from ufo.ext.manifest import Pack
-from ufo.skills.runtime import parse_skill
+from ufo.skills.runtime import CORE_SKILL_REGISTRY, parse_skill
+
+SKILL_DESCRIPTION_MAX_WORDS = 50
 
 
 def test_assistant_pack_is_discovered_with_its_bundle() -> None:
@@ -77,10 +79,13 @@ def test_activating_the_assistant_eval_pack_swaps_real_brokers_for_the_environme
     assert not assistant_eval.REAL_BROKERS & set(names)
 
 
-def test_assistant_hosted_pack_is_discovered_with_its_bundle() -> None:
+def test_assistant_hosted_pack_is_discovered_with_its_bundle_and_skills() -> None:
     packs = discovered_packs()
     assert assistant_hosted.NAME in packs
     assert packs[assistant_hosted.NAME].extensions == assistant_hosted.EXTENSIONS
+    assert {skill.path.name for skill in packs[assistant_hosted.NAME].skills} == set(
+        assistant_hosted.SKILL_NAMES
+    )
 
 
 def test_yc_pack_is_discovered_with_its_bundle_and_skills() -> None:
@@ -91,9 +96,37 @@ def test_yc_pack_is_discovered_with_its_bundle_and_skills() -> None:
 
 def test_activating_the_assistant_hosted_pack_makes_exactly_its_bundle_active() -> None:
     """The hosted variant narrows to its managed-infra bundle (Turbopuffer, Slack, Redis, E2B on top
-    of the assistant capabilities) in declared order, followed by the pack's own manifest."""
-    names = [manifest.name for manifest in load_manifests(assistant_hosted.NAME)]
-    assert names == [*assistant_hosted.EXTENSIONS, assistant_hosted.NAME]
+    of the assistant capabilities) in declared order, followed by the pack's own manifest carrying
+    its onboarding-help corpus."""
+    manifests = load_manifests(assistant_hosted.NAME)
+    assert [manifest.name for manifest in manifests] == [
+        *assistant_hosted.EXTENSIONS,
+        assistant_hosted.NAME,
+    ]
+    own = manifests[-1]
+    parsed = {parse_skill(spec.path).name for spec in own.skills}
+    assert parsed == set(assistant_hosted.SKILL_NAMES)
+
+
+def test_the_hosted_onboarding_corpus_ships_its_reference_files() -> None:
+    """The corpus routes to one reference file per question, so a bundle that shipped only SKILL.md
+    would answer every onboarding question from a table of contents pointing at nothing."""
+    packs = discovered_packs()
+    corpus = next(
+        skill
+        for skill in packs[assistant_hosted.NAME].skills
+        if skill.path.name == "customer-onboarding-help"
+    )
+    references = {path.name for path in (corpus.path / "references").iterdir()}
+    assert references == {
+        "billing-and-seats.md",
+        "capabilities.md",
+        "getting-started.md",
+        "internal-only.md",
+        "not-yet.md",
+        "slack-install.md",
+        "troubleshooting.md",
+    }
 
 
 def test_chief_of_staff_pack_is_discovered_with_its_bundle() -> None:
@@ -157,6 +190,23 @@ def test_no_pack_selected_leaves_the_unnarrowed_extension_set() -> None:
     active = {manifest.name for manifest in load_manifests()}
     assert set(assistant.EXTENSIONS) <= active
     assert assistant.NAME not in active
+
+
+def test_every_shipped_skill_description_stays_a_routing_trigger() -> None:
+    """A description rides in the skill index of every turn, so its length is a standing tax on
+    every workspace the pack serves — CLAUDE.md caps it at 50 words. Enforced here rather than
+    reviewed, because the cap is exactly the kind a growing description passes unnoticed."""
+    described = {
+        skill.name: len(skill.description.split())
+        for pack in discovered_packs()
+        for skill in skill_registry(load_manifests(pack)).by_name.values()
+    } | {
+        skill.name: len(skill.description.split()) for skill in CORE_SKILL_REGISTRY.by_name.values()
+    }
+    over = {name: words for name, words in described.items() if words > SKILL_DESCRIPTION_MAX_WORDS}
+
+    assert described, "no skills discovered — the cap would be vacuous"
+    assert not over, f"skill descriptions over {SKILL_DESCRIPTION_MAX_WORDS} words: {over}"
 
 
 def test_unknown_pack_name_fails_loud() -> None:

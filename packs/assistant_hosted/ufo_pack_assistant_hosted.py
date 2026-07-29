@@ -14,10 +14,15 @@ live-frame hub, the E2B sandbox carrier, and a Browserbase-hosted Chrome per bro
 browserbase cdp provider, in place of Chrome inside the conversation's own sandbox). Memory still
 retrieves through OpenAI embeddings
 (Turbopuffer is the index seam, embeddings are separate). A workspace admin connects Slack in chat
-— the slack extension's setup tools drive it. It bundles only extensions and adds no
-pack-level skills or onboarding of its own — each capability rides its own extension's manifest."""
+— the slack extension's setup tools drive it. Beyond its extensions it carries one pack-level
+skill, `customer-onboarding-help`: a curated, read-only corpus of this deploy's own onboarding facts
+(signup and invitations, the Slack install, billing and seats, what is not available yet, and what
+must never be disclosed) so a hosted workspace can be answered from shipped content rather than from
+memory a customer's workspace does not have."""
 
-from ufo.sdk.manifest import Pack
+from pathlib import Path
+
+from ufo.sdk.manifest import Pack, SkillSpec
 
 NAME = "assistant_hosted"
 VERSION = "0.1.0"
@@ -51,7 +56,14 @@ EXTENSIONS = (
     "embed_openai",
     "metronome",
 )
+SKILLS_DIR = Path(__file__).parent / "skills"
+SKILL_NAMES = ("customer-onboarding-help",)
 
 
 def pack() -> Pack:
-    return Pack(name=NAME, version=VERSION, extensions=EXTENSIONS)
+    return Pack(
+        name=NAME,
+        version=VERSION,
+        extensions=EXTENSIONS,
+        skills=tuple(SkillSpec(path=SKILLS_DIR / name) for name in SKILL_NAMES),
+    )

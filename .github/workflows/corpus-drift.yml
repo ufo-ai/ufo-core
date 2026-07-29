@@ -1,0 +1,98 @@
+name: Corpus drift
+
+# The hosted onboarding corpus states this deploy's own facts to paying customers, in prose, from a
+# package the code it describes never touches. core/tests/test_onboarding_corpus_claims.py pins every
+# claim a pattern can hold; this sweep reads the rest — the customer-facing wording, the
+# troubleshooting remedies, the states and refusals a customer actually sees — against the code that
+# produces them, daily. Never merges: a correction is a proposal for review.
+on:
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: corpus-drift
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - run: uv sync
+
+      - run: |
+          git config user.name corpus-drift
+          git config user.email corpus-drift@users.noreply.github.com
+
+      - name: Ensure label
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh label create corpus-drift -R "$GITHUB_REPOSITORY" --force --color 1D76DB \
+            --description 'filed by the onboarding-corpus drift sweep'
+
+      - name: Verify the corpus against the code
+        uses: anthropics/claude-code-action@v1
+        env:
+          CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1'
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          allowed_bots: github-actions
+          show_full_output: true
+          prompt: |
+            You are the onboarding-corpus drift sweep. The corpus is
+            `packs/assistant_hosted/skills/customer-onboarding-help/` — the only product facts the
+            agent may state to a hosted customer. Your job is to find sentences that are no longer
+            true and correct them. It has drifted before within hours of being written, because the
+            code it describes lives in other packages.
+
+            1. Read every file in the corpus. For each customer-facing claim, verify it against the
+               code that produces it, not against another document: signup, invitations and their
+               refusals in `control/src/ufo_control/` (`gateway.py`, `gateway_claim.py`,
+               `gateway_invite.py`, `gateway_slack_connect.py`); the Slack install states, their
+               hints and the shared channel in `extensions/slack/`; billing, plan activation, seats
+               and overage in `extensions/metronome/`; memory scopes and the foreign-room seal in
+               `core/src/ufo/audience.py` and the memory extension; connectors, credentials, sources
+               and scheduling in their own extensions. Check `git log -20 --oneline` for what moved
+               since the corpus was last touched, and read those diffs.
+            2. A claim is drifted only when you can name the code that contradicts it. Quote the file
+               and line in your write-up. "Probably stale" is not a finding; verify or drop it.
+            3. Judge these too, since each is a way the corpus misleads without being false: a
+               mechanism the corpus describes that no longer exists; a customer-visible message whose
+               wording changed; something in `references/not-yet.md` that now ships (over-cautious is
+               still wrong); a claim that belongs to another skill and is now a second, diverging
+               source of truth; a fact stated with a number the code no longer uses.
+            4. Fix what you can prove. Branch `corpus-drift/<slug>`, correct the corpus, and where
+               the new claim can be pinned by a pattern, add a `Claim` row to
+               `core/tests/test_onboarding_corpus_claims.py` so the next change to that mechanism
+               fails CI instead of reaching a customer. Run
+               `uv run pytest core/tests/test_onboarding_corpus_claims.py core/tests/test_packs.py
+               core/tests/test_skills.py core/tests/test_onboarding_help_eval.py`,
+               `uv run ruff check`, `uv run ruff format --check`, and `uv run python gates.py`.
+               Open one PR naming each corrected claim and the code that proves it, ending
+               `Fingerprint: corpus-drift/<slug>`.
+            5. Dedup before acting: skip a finding when
+               `gh pr list --state all --search "corpus-drift"` or
+               `gh issue list --state all --label corpus-drift` already covers it. A closed unmerged
+               correction is a human verdict — never refile it.
+            6. At most one PR per run. For drift you are confident about but cannot correct safely —
+               a claim whose right answer is a product decision, or one that needs a mechanism built
+               — file one issue instead (`gh issue create --label corpus-drift`, same fingerprint
+               line). If the corpus is accurate, say which claims you verified against which code
+               and do nothing.
+
+            Never merge anything.
+          claude_args: |
+            --allowedTools "Task,TodoWrite,Read,Grep,Glob,Edit,Write,Bash(git:*),Bash(uv run:*),Bash(jq:*),Bash(gh issue view:*),Bash(gh issue list:*),Bash(gh issue create:*),Bash(gh pr create:*),Bash(gh pr list:*),Bash(gh pr view:*)"
