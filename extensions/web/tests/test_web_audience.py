@@ -7,7 +7,13 @@ from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
-from ufo_ext_web.audience import WEB_ACCESS_TOOLS, WebAccessInput, web_audience
+from ufo_ext_web.audience import (
+    WEB_ACCESS_TOOLS,
+    WebAccessInput,
+    granted_emails,
+    web_audience,
+    web_extension,
+)
 from ufo_ext_web.manifest import NAME
 from ufo_ext_web.surface import SURFACE_WEB
 
@@ -124,6 +130,31 @@ def _surface(workspace_id: UUID, tmp_path) -> SurfaceContext:
         _artifact_token_secret="",
         _public_base_url=None,
     )
+
+
+async def test_granted_emails_groups_per_agent_and_sorts(db: None, tmp_path) -> None:
+    """The administration view's read over the grant rows: grants group under their agent, emails
+    sort within a group, and one agent's grants never bleed into another's."""
+    workspace_id, main_agent, second_agent = await _seed()
+    admin_id = await _member(workspace_id, ADMIN_EMAIL, admin=True)
+    await _member(workspace_id, MEMBER_EMAIL)
+    await _member(workspace_id, "zed@example.com")
+    with ws(workspace_id):
+        for agent_id, email in (
+            (second_agent, "zed@example.com"),
+            (second_agent, MEMBER_EMAIL),
+            (main_agent, "zed@example.com"),
+        ):
+            granted = await GRANT.handler(
+                _tool_ctx(workspace_id, agent_id, admin_id),
+                WebAccessInput(email=email, user_description="granting access"),
+            )
+            assert not granted.is_error
+        grants = await granted_emails(web_extension().store)
+    assert grants == {
+        second_agent: (MEMBER_EMAIL, "zed@example.com"),
+        main_agent: ("zed@example.com",),
+    }
 
 
 async def test_admin_grant_and_revoke_shape_the_member_audience(db: None, tmp_path) -> None:

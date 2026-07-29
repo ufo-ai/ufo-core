@@ -536,8 +536,33 @@ async def test_list_agents_orders_main_first_then_name(db: None, tmp_path) -> No
     ]
     assert listed[0].id == agent_id
     assert listed[0].model == "claude-opus-4-8"
+    assert listed[0].internet_access_allowed
     assert listed[1].id == second
     assert listed[1].model == "claude-sonnet-5"
+
+
+async def test_list_installations_orders_by_surface(db: None, tmp_path) -> None:
+    workspace_id, agent_id, _ = await _seed()
+    async with workspace_tx() as connection:
+        for surface, installation_id in (("slack", "team:T123"), ("chime", "room:R9")):
+            await connection.execute(
+                sa.insert(tables.surface_installation).values(
+                    workspace_id=workspace_id,
+                    surface=surface,
+                    installation_id=installation_id,
+                    agent_id=agent_id,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+    listed = await context.list_installations()
+    assert [(entry.surface, entry.agent_id) for entry in listed] == [
+        ("chime", agent_id),
+        ("slack", agent_id),
+    ]
+    other = _context(uuid4(), StubDbos(), FilesystemBlobStore(root=tmp_path))
+    assert await other.list_installations() == ()
 
 
 async def test_conversation_for_binds_an_explicit_agent(db: None, tmp_path) -> None:

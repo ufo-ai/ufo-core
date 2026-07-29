@@ -28,6 +28,14 @@
   nav footer { padding: 12px 16px; display: flex; flex-direction: column; gap: 4px;
                border-top: 1px solid color-mix(in srgb, CanvasText 15%, transparent); }
   nav footer a { color: inherit; }
+  nav footer button { border: 0; background: none; color: inherit; padding: 0; text-align: left;
+                      font: inherit; text-decoration: underline; }
+  .admin-view { padding: 16px; overflow-y: auto; display: flex; flex-direction: column;
+                gap: 18px; }
+  .admin-view h2 { margin: 0; font-size: 14px; }
+  .admin-view table { border-collapse: collapse; }
+  .admin-view th, .admin-view td { text-align: left; padding: 4px 14px 4px 0; vertical-align: top;
+        border-bottom: 1px solid color-mix(in srgb, CanvasText 12%, transparent); }
   main { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
   #agent-head { padding: 12px 16px; display: flex; gap: 10px; align-items: baseline;
                 border-bottom: 1px solid color-mix(in srgb, CanvasText 15%, transparent); }
@@ -94,6 +102,7 @@
   <footer class="mono">
     <span class="email" id="member-email"></span>
     <a id="spend" href="/surface/web/spend" hidden>spend</a>
+    <button id="admin" type="button" hidden>administration</button>
   </footer>
 </nav>
 
@@ -145,6 +154,83 @@ function emptyState(text) {
   log.appendChild(el);
 }
 
+function cell(text) {
+  const el = document.createElement('td');
+  el.textContent = text;
+  return el;
+}
+
+function row(...texts) {
+  const el = document.createElement('tr');
+  texts.forEach((text) => el.appendChild(cell(text)));
+  return el;
+}
+
+function table(headers, rows) {
+  const el = document.createElement('table');
+  const heading = document.createElement('tr');
+  headers.forEach((header) => {
+    const cellEl = document.createElement('th');
+    cellEl.textContent = header;
+    heading.appendChild(cellEl);
+  });
+  el.appendChild(heading);
+  rows.forEach((entry) => el.appendChild(entry));
+  return el;
+}
+
+async function showAdmin() {
+  selected = null;
+  location.hash = '#/admin';
+  for (const item of list.children) item.firstChild.setAttribute('aria-current', 'false');
+  const view = document.createElement('div');
+  view.className = 'admin-view';
+  main.replaceChildren(view);
+  let res;
+  try {
+    res = await fetch(BASE + '/api/admin', { credentials: 'same-origin' });
+  } catch (err) {
+    view.textContent = 'network error — try again';
+    return;
+  }
+  if (!res.ok) {
+    view.textContent = 'error ' + res.status + ' — reload to retry';
+    return;
+  }
+  const payload = await res.json();
+  const agentsTitle = document.createElement('h2');
+  agentsTitle.textContent = 'Agents';
+  view.appendChild(agentsTitle);
+  view.appendChild(table(
+    ['agent', 'model', 'public internet', 'surfaces', 'web audience'],
+    payload.agents.map((agent) => row(
+      agent.name + (agent.main ? ' ·' : ''),
+      agent.model,
+      agent.internet_access_allowed ? 'allowed' : 'blocked',
+      agent.installations.join(', ') || '—',
+      agent.web_audience.concat('admins').join(', ')
+    ))
+  ));
+  const membersTitle = document.createElement('h2');
+  const seats = payload.seats;
+  const gated = seats.limit !== null || seats.included !== null;
+  membersTitle.textContent = 'Members'
+    + (gated ? '' : ' · seats ungated')
+    + (seats.limit !== null ? ' · ' + seats.limit + ' seat limit' : '')
+    + (seats.included !== null ? ' · ' + seats.included + ' included' : '');
+  view.appendChild(membersTitle);
+  view.appendChild(table(
+    gated ? ['member', 'role', 'seat'] : ['member', 'role'],
+    payload.members.map((member) => gated
+      ? row(member.email, member.admin ? 'admin' : 'member', member.seated ? 'seated' : '—')
+      : row(member.email, member.admin ? 'admin' : 'member'))
+  ));
+}
+
+function restoreChatPane() {
+  main.replaceChildren(head, log, composer);
+}
+
 function agentFromHash() {
   const match = location.hash.match(/^#\/agents\/([0-9a-f-]{36})$/);
   return match && agents.find((agent) => agent.id === match[1]);
@@ -154,6 +240,9 @@ function renderSidebar(member) {
   document.getElementById('member-email').textContent =
     member.email + (member.admin ? ' · admin' : '');
   document.getElementById('spend').hidden = !member.admin;
+  const admin = document.getElementById('admin');
+  admin.hidden = !member.admin;
+  admin.addEventListener('click', showAdmin);
   list.replaceChildren(...agents.map((agent) => {
     const item = document.createElement('li');
     const button = document.createElement('button');
@@ -189,6 +278,7 @@ function renderChat(agent) {
 }
 
 async function select(agent) {
+  if (!head.isConnected) restoreChatPane();
   selected = agent;
   location.hash = '#/agents/' + agent.id;
   for (const item of list.children) {
@@ -366,6 +456,10 @@ async function boot() {
   if (!agents.length) {
     composer.style.display = 'none';
     emptyState('No agents are shared with you yet. Ask a workspace admin for access.');
+    return;
+  }
+  if (location.hash === '#/admin' && payload.member.admin) {
+    showAdmin();
     return;
   }
   select(agentFromHash() || agents[0]);

@@ -192,12 +192,24 @@ LIST_TURNS_LIMIT = 500
 
 class AgentSummary(BaseModel):
     """One workspace agent as a surface lists it — the read a surface whose member picks an agent
-    (the web portal's switcher) filters through its own audience authority."""
+    (the web portal's switcher) filters through its own audience authority.
+    `internet_access_allowed` is the agent's narrowing of the deploy's sandbox public-internet
+    capability, carried for the administration view."""
 
     id: UUID
     name: str
     main: bool
     model: str
+    internet_access_allowed: bool
+
+
+class InstallationSummary(BaseModel):
+    """One surface installation of the workspace — which surface is bound and the agent its
+    conversations land on. The workspace-administration read behind the portal's agents view;
+    binding stays each surface's own act."""
+
+    surface: str
+    agent_id: UUID
 
 
 class ConversationSummary(BaseModel):
@@ -780,14 +792,39 @@ class SurfaceContext:
                         tables.agent.c.name,
                         tables.agent.c.is_main,
                         tables.agent.c.model,
+                        tables.agent.c.internet_access_allowed,
                     )
                     .where(tables.agent.c.workspace_id == self.workspace_id)
                     .order_by(tables.agent.c.is_main.desc(), tables.agent.c.name)
                 )
             ).all()
         return tuple(
-            AgentSummary(id=row.id, name=row.name, main=row.is_main, model=row.model)
+            AgentSummary(
+                id=row.id,
+                name=row.name,
+                main=row.is_main,
+                model=row.model,
+                internet_access_allowed=row.internet_access_allowed,
+            )
             for row in rows
+        )
+
+    async def list_installations(self) -> tuple[InstallationSummary, ...]:
+        """Every surface installation of this workspace with the agent it binds, ordered by
+        surface — the workspace-administration read behind the portal's agents view."""
+        async with workspace_tx() as connection:
+            rows = (
+                await connection.execute(
+                    sa.select(
+                        tables.surface_installation.c.surface,
+                        tables.surface_installation.c.agent_id,
+                    )
+                    .where(tables.surface_installation.c.workspace_id == self.workspace_id)
+                    .order_by(tables.surface_installation.c.surface)
+                )
+            ).all()
+        return tuple(
+            InstallationSummary(surface=row.surface, agent_id=row.agent_id) for row in rows
         )
 
     async def list_conversations(

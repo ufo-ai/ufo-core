@@ -39,6 +39,7 @@ from ufo.sandbox.session import ProxyEndpoint, RunTokenCodec
 from ufo.schema import tables
 from ufo.schema.records import ConnectRequest, TerminalFrame, Usage
 from ufo.sdk.audience import conversation_audience
+from ufo.sdk.seats import Seats
 from ufo.serve import _mount_shared_surfaces
 from ufo.subjects import SHARED_SUBJECT, member_subject
 from ufo.surfaces import hub_tail
@@ -678,6 +679,108 @@ async def test_web_spend_view_matches_ledger_sums(web: tuple[AsyncClient, UUID, 
     assert "assistant" in body
     assert "egress" in body
     assert "$0.055000" in body
+
+
+async def test_admin_view_reads_the_workspace_shape(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The administration read end to end: agents carry their policy, surface installations, and
+    the exact web-audience grants written through the extension's store; members and seat state
+    are `Seats.snapshot`'s answer."""
+    client, workspace_id, _agent_id = web
+    second_agent = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=second_agent,
+                workspace_id=workspace_id,
+                name="ops",
+                prompt="be operational",
+                model="claude-sonnet-5",
+                internet_access_allowed=False,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.surface_installation).values(
+                workspace_id=workspace_id,
+                surface="slack",
+                installation_id="team:T42",
+                agent_id=second_agent,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    _admin_id, admin_token = await _seed_member(workspace_id, "admin@example.com", admin=True)
+    member_id, _member_token = await _seed_member(workspace_id, "member@example.com")
+    await _grant_web_access(workspace_id, second_agent, "member@example.com")
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.workspace)
+            .values(seat_limit=5, included_seats=2)
+            .where(tables.workspace.c.id == workspace_id)
+        )
+        await connection.execute(
+            sa.update(tables.member)
+            .values(seated_at=sa.func.now())
+            .where(tables.member.c.id == member_id)
+        )
+    view = await client.get(
+        "/surface/web/api/admin", headers={"cookie": f"{SESSION_COOKIE}={admin_token}"}
+    )
+    assert view.status_code == 200
+    payload = view.json()
+    by_name = {agent["name"]: agent for agent in payload["agents"]}
+    assert by_name["assistant"]["main"] and by_name["assistant"]["internet_access_allowed"]
+    assert by_name["assistant"]["installations"] == []
+    assert by_name["assistant"]["web_audience"] == []
+    assert not by_name["ops"]["internet_access_allowed"]
+    assert by_name["ops"]["installations"] == ["slack"]
+    assert by_name["ops"]["web_audience"] == ["member@example.com"]
+    assert {(m["email"], m["admin"], m["seated"]) for m in payload["members"]} == {
+        ("admin@example.com", True, False),
+        ("member@example.com", False, True),
+    }
+    assert payload["seats"] == {"limit": 5, "included": 2}
+
+
+async def test_admin_view_reports_ungated_seats(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The default deploy keeps both seat bounds NULL: auto-seating seats every member at
+    creation, so the wire carries null bounds beside seated members — the page drops its seat
+    column on this shape because the bounds, not per-member state, are what gate anything."""
+    client, workspace_id, _agent_id = web
+    admin_id, admin_token = await _seed_member(workspace_id, "admin@example.com", admin=True)
+    member_id, _member_token = await _seed_member(workspace_id, "member@example.com")
+    async with workspace_tx() as connection:
+        await Seats(workspace_id).auto_seat(connection, admin_id)
+        await Seats(workspace_id).auto_seat(connection, member_id)
+    view = await client.get(
+        "/surface/web/api/admin", headers={"cookie": f"{SESSION_COOKIE}={admin_token}"}
+    )
+    assert view.status_code == 200
+    payload = view.json()
+    assert payload["seats"] == {"limit": None, "included": None}
+    assert {(m["email"], m["seated"]) for m in payload["members"]} == {
+        ("admin@example.com", True),
+        ("member@example.com", True),
+    }
+
+
+async def test_a_non_admin_is_not_found_on_the_admin_view(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    client, workspace_id, agent_id = web
+    await _seed_member(workspace_id, "admin@example.com", admin=True)
+    _member_id, token = await _seed_member(workspace_id, "member@example.com")
+    await _grant_web_access(workspace_id, agent_id, "member@example.com")
+    denied = await client.get(
+        "/surface/web/api/admin", headers={"cookie": f"{SESSION_COOKIE}={token}"}
+    )
+    assert denied.status_code == 404
+    assert "admin@example.com" not in denied.text
 
 
 async def test_a_non_admin_is_not_found_on_the_spend_view(

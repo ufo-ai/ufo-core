@@ -1,7 +1,7 @@
 """The web portal on the core surface seam, in its live mode: the authenticated shell around the
 member's agents — an agent switcher over the surface's own audience, per-agent chat with
 cookie-authenticated turn admission, an SSE tail of each turn's live frames, read projections
-(agents, transcripts), and a spend view.
+(agents, transcripts, and — for workspace admins — the administration view), and a spend view.
 
 The `ufo_session` cookie carries the signed HMAC member bearer the gateway or `ufoctl init` mints
 (the `ufo.sdk.bearer` codec over `{ws, email, exp}`), landed by the one POST that opens a session
@@ -35,8 +35,9 @@ from ufo.sdk.http import (
 )
 from ufo.sdk.hub import CostTick, LiveFrame, Parked, SkillLoad, Terminal, ToolCall
 from ufo.sdk.models import Message, TextBlock
+from ufo.sdk.seats import Seats
 from ufo.sdk.surfaces import ConnectRequestInvalid, SurfaceAuth, SurfaceContext, SurfaceRoute
-from ufo_ext_web.audience import WebAudience, web_audience, web_extension
+from ufo_ext_web.audience import WebAudience, granted_emails, web_audience, web_extension
 
 SURFACE_WEB = "web"
 SESSION_COOKIE = "ufo_session"
@@ -260,6 +261,46 @@ async def _events(
         yield _sse(cursor, frame)
 
 
+async def admin_index(ctx: SurfaceContext, request: Request) -> Response:
+    """One of the two workspace-shaped reads (this view and the spend rollup — spec.md names
+    both): every agent with its policy, surface installations, and web-audience grants, plus
+    members and seat state. The workspace's shape answers a workspace admin only and is not-found
+    for everyone else. Reads only; every mutation stays a chat act."""
+    resolved = await _audience_for(ctx, request)
+    if isinstance(resolved, Response):
+        return resolved
+    _member_id, _email, audience = resolved
+    if not audience.admin:
+        return Response("no such page", status_code=404)
+    extension = web_extension()
+    installations = await ctx.list_installations()
+    grants = await granted_emails(extension.store)
+    async with extension.transaction() as connection:
+        snapshot = await Seats(ctx.workspace_id).snapshot(connection)
+    return JSONResponse(
+        {
+            "agents": [
+                {
+                    "name": agent.name,
+                    "main": agent.main,
+                    "model": agent.model,
+                    "internet_access_allowed": agent.internet_access_allowed,
+                    "installations": [
+                        entry.surface for entry in installations if entry.agent_id == agent.id
+                    ],
+                    "web_audience": list(grants.get(agent.id, ())),
+                }
+                for agent in audience.agents
+            ],
+            "members": [
+                {"email": entry.email, "admin": entry.admin, "seated": entry.seated}
+                for entry in snapshot.members
+            ],
+            "seats": {"limit": snapshot.limit, "included": snapshot.included},
+        }
+    )
+
+
 async def spend(ctx: SurfaceContext, request: Request) -> Response:
     """Render the workspace spend rollup over a window — the same sums `ufoctl spend` prints, for a
     workspace admin. The rollup is the workspace's financial state, not a member's own: it names
@@ -336,6 +377,7 @@ ROUTES = (
     SurfaceRoute(method="GET", path="", handler=portal_page),
     SurfaceRoute(method="POST", path="", handler=open_session),
     SurfaceRoute(method="GET", path="api/agents", handler=agents_index),
+    SurfaceRoute(method="GET", path="api/admin", handler=admin_index),
     SurfaceRoute(method="POST", path="agents/{agent_id}/chat", handler=chat),
     SurfaceRoute(method="GET", path="agents/{agent_id}/transcript", handler=transcript),
     SurfaceRoute(method="GET", path="turns/{turn_id}/stream", handler=stream),

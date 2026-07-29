@@ -36,6 +36,16 @@ def _grant_key(agent_id: UUID, email: str) -> str:
     return f"{AUDIENCE_PREFIX}{agent_id}/{email.strip().lower()}"
 
 
+async def granted_emails(store: ScopedStore) -> dict[UUID, tuple[str, ...]]:
+    """Every web-audience grant, agent → sorted granted emails — the administration view's read
+    over the same rows the grant/revoke verbs write."""
+    grants: dict[UUID, list[str]] = {}
+    for key, _ in await store.list(AUDIENCE_PREFIX):
+        agent_str, _, granted_email = key.removeprefix(AUDIENCE_PREFIX).partition("/")
+        grants.setdefault(UUID(agent_str), []).append(granted_email)
+    return {agent_id: tuple(sorted(emails)) for agent_id, emails in grants.items()}
+
+
 async def _granted_agent_ids(store: ScopedStore, email: str) -> frozenset[UUID]:
     lowered = email.strip().lower()
     granted: set[UUID] = set()

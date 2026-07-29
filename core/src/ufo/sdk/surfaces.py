@@ -28,6 +28,9 @@ from ufo.ext.surface import (
     ConversationSummary as ConversationSummary,
 )
 from ufo.ext.surface import (
+    InstallationSummary as InstallationSummary,
+)
+from ufo.ext.surface import (
     LedgerEntry as LedgerEntry,
 )
 from ufo.ext.surface import (

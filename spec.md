@@ -384,9 +384,10 @@ The web surface is the member portal and its own audience authority: it lists an
 the agents whose web audience holds the signed-in member — grants kept in the web extension's own
 store, granted and revoked in chat (`grant_web_access`/`revoke_web_access`, admin-only, applying
 to the conversation's agent) — while a workspace admin reaches and administers every agent. An
-out-of-audience agent is not-found on every portal route, the spend rollup answers a workspace
-admin only (the workspace's financial state, not a member's own), and the signed bearer enters as
-a session cookie through one POST (the gateway's signed-in card), never a URL.
+out-of-audience agent is not-found on every portal route, the workspace-shaped reads — the spend
+rollup and the administration view (agents with their policy, installations, and web-audience
+grants; members and seats) — answer a workspace admin only, and the signed bearer enters as a
+session cookie through one POST (the gateway's signed-in card), never a URL.
 
 The debug and memory-explorer surfaces are the operator-audience surfaces — the `ufoctl`-verbs
 audience, not a member action. They share one operator web session (`ufo.sdk.operator`, one
