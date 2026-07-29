@@ -25,7 +25,13 @@ from ufo.ext.surface import (
     AgentSummary as AgentSummary,
 )
 from ufo.ext.surface import (
+    ConnectionView as ConnectionView,
+)
+from ufo.ext.surface import (
     ConversationSummary as ConversationSummary,
+)
+from ufo.ext.surface import (
+    CredentialSlotView as CredentialSlotView,
 )
 from ufo.ext.surface import (
     InstallationSummary as InstallationSummary,
@@ -35,6 +41,9 @@ from ufo.ext.surface import (
 )
 from ufo.ext.surface import (
     SharedArtifact as SharedArtifact,
+)
+from ufo.ext.surface import (
+    SourceView as SourceView,
 )
 from ufo.ext.surface import (
     SurfaceAuth as SurfaceAuth,

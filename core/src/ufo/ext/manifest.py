@@ -22,7 +22,7 @@ from ufo.audience import SHARED_AUDIENCE, Audience
 from ufo.browser import CdpProvider
 from ufo.candidates import WorkspaceCandidates
 from ufo.connectors import AuthProxy, CliCredential, ConnectorBroker, ConnectorResolver
-from ufo.credentials import CredentialSource, HostChoice
+from ufo.credentials import CredentialSource, DeclaredSlot, HostChoice
 from ufo.ext.context import CredentialAccess, ExtensionContext
 from ufo.ext.surface import SurfaceSpec
 from ufo.grants import OAuthProvider, OAuthProviderResolver
@@ -612,3 +612,19 @@ class Pack:
     extensions: tuple[str, ...] = ()
     skills: tuple[SkillSpec, ...] = ()
     onboarding_steps: tuple[OnboardingStep, ...] = ()
+
+
+def declared_slots(manifests: tuple[Manifest, ...]) -> tuple[DeclaredSlot, ...]:
+    """Every active manifest's declared BYOK slots, the one assembly every projection over the
+    declarations shares — the `credential` object kind and the portal's credentials panel."""
+    return tuple(
+        DeclaredSlot(
+            name=slot.name,
+            description=slot.description,
+            extension=manifest.name,
+            member_filled=slot.member_filled,
+            host=None if slot.injection is None else slot.injection.host,
+        )
+        for manifest in manifests
+        for slot in manifest.credentials
+    )

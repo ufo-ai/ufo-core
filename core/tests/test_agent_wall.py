@@ -82,6 +82,7 @@ def _context(workspace_id: UUID, surface: str) -> SurfaceContext:
         ),
         _tailer=HubTailer(hub=InProcessHub()),
         _credentials=CredentialStore(fernet=Fernet(Fernet.generate_key())),
+        _declared_slots=(),
         _artifact_token_secret="",
         _public_base_url=None,
     )

@@ -26,7 +26,11 @@ from ufo.config import (
     load_config,
 )
 from ufo.connectors import AuthProxy, ConnectorEntry, ConnectorRegistry, SourceCredentialResolver
-from ufo.credentials import CredentialRequests, CredentialStore, install_credential_requests
+from ufo.credentials import (
+    CredentialRequests,
+    CredentialStore,
+    install_credential_requests,
+)
 from ufo.db import current_workspace, init_db, init_owner_db
 from ufo.ext.context import CredentialAccess, context_for
 from ufo.ext.loader import (
@@ -48,6 +52,7 @@ from ufo.ext.manifest import (
     CdpProviderSpec,
     Manifest,
     SearchProviderSpec,
+    declared_slots,
     open_connector_namespace,
 )
 from ufo.ext.surface import (
@@ -780,6 +785,8 @@ def _mount_shared_surfaces(
     tailer = HubTailer(hub=hub)
     registered: dict[str, SurfaceSpec] = {}
 
+    slots = declared_slots(manifests)
+
     def context_for(workspace_id: UUID, surface: str) -> SurfaceContext:
         return SurfaceContext(
             workspace_id=workspace_id,
@@ -791,6 +798,7 @@ def _mount_shared_surfaces(
             _credentials=credentials,
             _artifact_token_secret=artifact_secret,
             _public_base_url=public_base_url,
+            _declared_slots=slots,
         )
 
     for manifest in manifests:

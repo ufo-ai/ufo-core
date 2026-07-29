@@ -409,3 +409,17 @@ async def credential_host(
             except CredentialSlotUnset:
                 return host.default
             return host.resolve(selected)
+
+
+@dataclass(frozen=True)
+class DeclaredSlot:
+    """One declared BYOK slot as reads project it: the slot name, its documentation, the extension
+    that declares it, whether a member fills it (`member_filled=False` is deploy machinery — a
+    provider callback's seal, never a typed key), and `host` — the wire target when the slot
+    carries one, either a fixed hostname or the `HostChoice` a member selects within."""
+
+    name: str
+    description: str
+    extension: str
+    member_filled: bool = True
+    host: str | HostChoice | None = None

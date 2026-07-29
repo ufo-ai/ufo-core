@@ -20,7 +20,12 @@ from uuid import UUID
 import sqlalchemy as sa
 from pydantic import BaseModel, ConfigDict
 
-from ufo.credentials import CredentialStore, HostChoice, credential_host
+from ufo.credentials import (
+    CredentialStore,
+    DeclaredSlot,
+    HostChoice,
+    credential_host,
+)
 from ufo.db import workspace_tx
 from ufo.ext.context import JsonValue
 from ufo.objects import (
@@ -43,18 +48,6 @@ FILL_REFUSAL = (
 )
 UNSET_GATE = "only a workspace admin can clear a credential slot"
 NAME_DIGEST_LENGTH = 8
-
-
-@dataclass(frozen=True)
-class DeclaredSlot:
-    """One declared BYOK slot as the kind projects it: the slot name, its documentation, the
-    extension that declares it, and `host` — the wire target when the slot carries one, either a
-    fixed hostname or the `HostChoice` a member selects within."""
-
-    name: str
-    description: str
-    extension: str
-    host: str | HostChoice | None = None
 
 
 class CredentialSpec(BaseModel):

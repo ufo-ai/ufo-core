@@ -37,7 +37,6 @@ from ufo.credential_kind import (
     CREDENTIAL_KIND,
     CredentialObjects,
     CredentialSpec,
-    DeclaredSlot,
 )
 from ufo.credentials import CredentialStore, HostChoice
 from ufo.ext.context import ExtensionContext, context_for
@@ -58,6 +57,7 @@ from ufo.ext.manifest import (
     PostToolUseFailure,
     PreToolUse,
     SubagentProfile,
+    declared_slots,
 )
 from ufo.indexing import EmbedClient, IndexBackend
 from ufo.members import MEMBER_OBJECT
@@ -445,16 +445,7 @@ def core_object_kinds(
     """The kinds core itself registers, bound with no extension context — their handlers read the
     ambient workspace directly. `credential` projects every active manifest's declared slots, and
     reads a keyed slot's live host through the store so a read reports the host the wire uses."""
-    slots = tuple(
-        DeclaredSlot(
-            name=slot.name,
-            description=slot.description,
-            extension=manifest.name,
-            host=None if slot.injection is None else slot.injection.host,
-        )
-        for manifest in manifests
-        for slot in manifest.credentials
-    )
+    slots = declared_slots(manifests)
     kind = ObjectKind(
         name=CREDENTIAL_KIND,
         description=CREDENTIAL_DESCRIPTION,

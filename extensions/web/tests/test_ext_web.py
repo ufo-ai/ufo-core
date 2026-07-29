@@ -39,6 +39,7 @@ from ufo.sandbox.session import ProxyEndpoint, RunTokenCodec
 from ufo.schema import tables
 from ufo.schema.records import ConnectRequest, TerminalFrame, Usage
 from ufo.sdk.audience import conversation_audience
+from ufo.sdk.manifest import CredentialSlot, Manifest
 from ufo.sdk.seats import Seats
 from ufo.serve import _mount_shared_surfaces
 from ufo.subjects import SHARED_SUBJECT, member_subject
@@ -213,8 +214,20 @@ async def web(
     dbos_client = DBOSClient(system_database_url=config.database.system_url)
     workspace_id, agent_id = await _seed_workspace()
     app = FastAPI()
+    slotted = Manifest(
+        name="stub",
+        version="0",
+        credentials=(
+            CredentialSlot(name="acme_api_key", description="ACME API key"),
+            CredentialSlot(
+                name="acme_install_seal",
+                description="ACME install binding",
+                member_filled=False,
+            ),
+        ),
+    )
     _mount_shared_surfaces(
-        app, (web_manifest(),), None, blob, sandboxes, hub, dbos_client, "", None
+        app, (web_manifest(), slotted), None, blob, sandboxes, hub, dbos_client, "", None
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="https://web") as client:
         yield client, workspace_id, agent_id
@@ -392,6 +405,187 @@ async def test_agents_index_filters_by_grant_and_widens_for_admins(
         headers={"cookie": f"{SESSION_COOKIE}={member_token}"},
     )
     assert denied.status_code == 404
+
+
+async def _seed_connection(
+    workspace_id: UUID, agent_id: UUID, owner_member_id: UUID, provider: str, *, shared: bool
+) -> None:
+    conversation_id, connection_id = uuid4(), uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=conversation_id,
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                surface="web",
+                queue_key=conversation_id.hex,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.connection).values(
+                id=connection_id,
+                workspace_id=workspace_id,
+                provider=provider,
+                account_id=f"{provider}-account",
+                host="api.example.test",
+                owner_member_id=owner_member_id,
+                conversation_id=conversation_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.connector_grant).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                connection_id=connection_id,
+                conversation_id=conversation_id,
+                shared=shared,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+
+
+async def test_connections_panel_holds_the_member_gate_and_the_wall(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """#624 acceptance, read-side: inside one agent, member M's private connector never appears in
+    member N's panel while agent-shared ones appear to both; another agent's grants are absent; an
+    out-of-audience agent is not-found; a workspace admin sees every edge."""
+    client, workspace_id, agent_id = web
+    second_agent = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=second_agent,
+                workspace_id=workspace_id,
+                name="ops",
+                prompt="be operational",
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    member_m, token_m = await _seed_member(workspace_id, "m@example.com")
+    member_n, token_n = await _seed_member(workspace_id, "n@example.com")
+    _admin, token_admin = await _seed_member(workspace_id, "boss@example.com", admin=True)
+    await _grant_web_access(workspace_id, agent_id, "m@example.com")
+    await _grant_web_access(workspace_id, agent_id, "n@example.com")
+    await _seed_connection(workspace_id, agent_id, member_m, "github", shared=False)
+    await _seed_connection(workspace_id, agent_id, member_n, "slack", shared=True)
+    await _seed_connection(workspace_id, second_agent, member_m, "asana", shared=True)
+    path = f"/surface/web/agents/{agent_id}/connections"
+    m_view = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_m}"})
+    assert [(c["provider"], c["shared"]) for c in m_view.json()["connections"]] == [
+        ("github", False),
+        ("slack", True),
+    ]
+    n_view = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_n}"})
+    assert [c["provider"] for c in n_view.json()["connections"]] == ["slack"]
+    admin_view = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_admin}"})
+    assert [c["provider"] for c in admin_view.json()["connections"]] == ["github", "slack"]
+    other = await client.get(
+        f"/surface/web/agents/{second_agent}/connections",
+        headers={"cookie": f"{SESSION_COOKIE}={token_admin}"},
+    )
+    assert [c["provider"] for c in other.json()["connections"]] == ["asana"]
+    walled = await client.get(
+        f"/surface/web/agents/{second_agent}/connections",
+        headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
+    )
+    assert walled.status_code == 404
+
+
+async def test_credentials_panel_is_not_found_without_a_grant(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The audience gate holds for credentials like every panel: an authenticated member with no
+    grant cannot enumerate the deploy's declared BYOK slots — the agent, and everything under it,
+    is not-found."""
+    client, workspace_id, agent_id = web
+    _member, token = await _seed_member(workspace_id, "outsider@example.com")
+    denied = await client.get(
+        f"/surface/web/agents/{agent_id}/credentials",
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    assert denied.status_code == 404
+    assert "acme_api_key" not in denied.text
+
+
+async def test_credentials_panel_reports_slots_and_never_values(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    client, workspace_id, agent_id = web
+    _member, token = await _seed_member(workspace_id, "m@example.com")
+    await _grant_web_access(workspace_id, agent_id, "m@example.com")
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.credential).values(
+                workspace_id=workspace_id,
+                slot="acme_api_key",
+                ciphertext=b"super-sealed-value",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    listed = await client.get(
+        f"/surface/web/agents/{agent_id}/credentials",
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    assert listed.status_code == 200
+    assert listed.json()["slots"] == [
+        {
+            "slot": "acme_api_key",
+            "extension": "stub",
+            "description": "ACME API key",
+            "filled": True,
+        }
+    ]
+    assert "sealed" not in listed.text
+    assert "acme_install_seal" not in listed.text
+
+
+async def test_sources_panel_gates_on_subject(web: tuple[AsyncClient, UUID, UUID]) -> None:
+    client, workspace_id, agent_id = web
+    member_m, token_m = await _seed_member(workspace_id, "m@example.com")
+    _member_n, token_n = await _seed_member(workspace_id, "n@example.com")
+    await _grant_web_access(workspace_id, agent_id, "m@example.com")
+    await _grant_web_access(workspace_id, agent_id, "n@example.com")
+    async with workspace_tx() as connection:
+        for backend, subject, owner in (
+            ("folder", "shared", None),
+            ("github", f"member:{member_m}", member_m),
+        ):
+            await connection.execute(
+                sa.insert(tables.source).values(
+                    id=uuid4(),
+                    workspace_id=workspace_id,
+                    backend=backend,
+                    config={},
+                    subject=subject,
+                    owner_member_id=owner,
+                    next_sync_at=sa.func.now(),
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+    path = f"/surface/web/agents/{agent_id}/sources"
+    m_view = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_m}"})
+    assert [(s["backend"], s["shared"]) for s in m_view.json()["sources"]] == [
+        ("folder", True),
+        ("github", False),
+    ]
+    n_view = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_n}"})
+    assert [s["backend"] for s in n_view.json()["sources"]] == [("folder")]
+    guessed = await client.get(
+        f"/surface/web/agents/{uuid4()}/sources",
+        headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
+    )
+    assert guessed.status_code == 404
 
 
 async def test_revoking_web_access_ends_streaming_too(

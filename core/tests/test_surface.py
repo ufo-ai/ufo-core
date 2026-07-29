@@ -29,6 +29,7 @@ from ufo.credentials import (
     CredentialRequestInvalid,
     CredentialRequestState,
     CredentialStore,
+    DeclaredSlot,
     seal_credential_request,
 )
 from ufo.db import workspace_tx
@@ -210,6 +211,7 @@ def _context(
         ),
         _tailer=HubTailer(hub=InProcessHub()),
         _credentials=store,
+        _declared_slots=(),
         _artifact_token_secret="artifact-token-secret",
         _public_base_url="https://ufo.example.test",
     )
@@ -539,6 +541,172 @@ async def test_list_agents_orders_main_first_then_name(db: None, tmp_path) -> No
     assert listed[0].internet_access_allowed
     assert listed[1].id == second
     assert listed[1].model == "claude-sonnet-5"
+
+
+async def _seed_agent(workspace_id: UUID, name: str) -> UUID:
+    agent_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=agent_id,
+                workspace_id=workspace_id,
+                name=name,
+                prompt="be brief",
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return agent_id
+
+
+async def _seed_connection(
+    workspace_id: UUID, agent_id: UUID, owner_member_id: UUID, provider: str, *, shared: bool
+) -> None:
+    conversation_id, connection_id = uuid4(), uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=conversation_id,
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                surface=SURFACE,
+                queue_key=conversation_id.hex,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.connection).values(
+                id=connection_id,
+                workspace_id=workspace_id,
+                provider=provider,
+                account_id=f"{provider}-account",
+                host="api.example.test",
+                owner_member_id=owner_member_id,
+                conversation_id=conversation_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.connector_grant).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                connection_id=connection_id,
+                conversation_id=conversation_id,
+                shared=shared,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+
+
+async def test_agent_connections_hold_the_wall_and_the_member_gate(db: None, tmp_path) -> None:
+    workspace_id, agent_id, owner = await _seed(member_email="owner@example.com")
+    other_agent = await _seed_agent(workspace_id, "ops")
+    peer = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=peer,
+                workspace_id=workspace_id,
+                email="peer@example.com",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    await _seed_connection(workspace_id, agent_id, owner, "github", shared=False)
+    await _seed_connection(workspace_id, agent_id, peer, "slack", shared=True)
+    await _seed_connection(workspace_id, other_agent, owner, "asana", shared=True)
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+    owner_view = await context.list_agent_connections(agent_id, owner, admin=False)
+    assert [(view.provider, view.shared) for view in owner_view] == [
+        ("github", False),
+        ("slack", True),
+    ]
+    assert owner_view[0].owner_email == "owner@example.com"
+    peer_view = await context.list_agent_connections(agent_id, peer, admin=False)
+    assert [view.provider for view in peer_view] == ["slack"]
+    admin_view = await context.list_agent_connections(agent_id, peer, admin=True)
+    assert [view.provider for view in admin_view] == ["github", "slack"]
+    assert [
+        view.provider
+        for view in await context.list_agent_connections(other_agent, owner, admin=True)
+    ] == ["asana"]
+
+
+async def test_credential_slots_report_fill_state_and_no_value(db: None, tmp_path) -> None:
+    workspace_id, _, _ = await _seed()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.credential).values(
+                workspace_id=workspace_id,
+                slot="acme_api_key",
+                ciphertext=b"sealed",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    context = replace(
+        _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path)),
+        _declared_slots=(
+            DeclaredSlot(name="acme_api_key", description="ACME key", extension="acme"),
+            DeclaredSlot(name="beta_token", description="Beta token", extension="beta"),
+        ),
+    )
+    listed = await context.list_credential_slots()
+    assert [(view.slot, view.filled) for view in listed] == [
+        ("acme_api_key", True),
+        ("beta_token", False),
+    ]
+    assert all("sealed" not in view.model_dump_json() for view in listed)
+
+
+async def test_sources_gate_on_subject_and_skip_removed(db: None, tmp_path) -> None:
+    workspace_id, _agent_id, owner = await _seed(member_email="owner@example.com")
+    peer = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=peer,
+                workspace_id=workspace_id,
+                email="peer@example.com",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        for backend, subject, owner_id, removed in (
+            ("folder", "shared", None, False),
+            ("github", f"member:{owner}", owner, False),
+            ("asana", "shared", None, True),
+        ):
+            await connection.execute(
+                sa.insert(tables.source).values(
+                    id=uuid4(),
+                    workspace_id=workspace_id,
+                    backend=backend,
+                    config={},
+                    subject=subject,
+                    owner_member_id=owner_id,
+                    next_sync_at=sa.func.now(),
+                    removed_at=sa.func.now() if removed else None,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+    owner_view = await context.list_sources(owner, admin=False)
+    assert [(view.backend, view.shared) for view in owner_view] == [
+        ("folder", True),
+        ("github", False),
+    ]
+    assert owner_view[1].owner_email == "owner@example.com"
+    peer_view = await context.list_sources(peer, admin=False)
+    assert [view.backend for view in peer_view] == ["folder"]
+    admin_view = await context.list_sources(peer, admin=True)
+    assert [view.backend for view in admin_view] == ["folder", "github"]
 
 
 async def test_list_installations_orders_by_surface(db: None, tmp_path) -> None:

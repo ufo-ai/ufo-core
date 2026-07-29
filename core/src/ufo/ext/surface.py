@@ -56,6 +56,7 @@ from ufo.credentials import (
     CredentialRequestInvalid,
     CredentialRequestState,
     CredentialStore,
+    DeclaredSlot,
     open_credential_request,
 )
 from ufo.db import owner_tx, workspace_tx
@@ -88,6 +89,7 @@ from ufo.schema.records import (
     TurnContext,
 )
 from ufo.seats import create_member
+from ufo.subjects import SHARED_SUBJECT
 from ufo.transcript import (
     CompactionRecord,
     Conversation,
@@ -210,6 +212,53 @@ class InstallationSummary(BaseModel):
 
     surface: str
     agent_id: UUID
+
+
+class ConnectionView(BaseModel):
+    """One connector account reaching one agent, as the portal's connections panel lists it: the
+    provider identity, the consenting owner, the edge's disclosure, and when the grant landed."""
+
+    provider: str
+    account_id: str
+    owner_email: str
+    shared: bool
+    connected_at: datetime
+
+    @field_validator("connected_at")
+    @classmethod
+    def _aware_utc(cls, value: datetime) -> datetime:
+        return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+class CredentialSlotView(BaseModel):
+    """One declared BYOK slot and whether the workspace holds a value for it — never the value.
+    Slots come from installed manifests, the same declarations the `credential` object kind
+    projects, minus the slots only the deploy's own code writes (`member_filled=False`, a provider
+    callback's seal): those are machinery a member can neither fill nor rotate, so the panel
+    leaves them out. Deploy config (model keys, signing secrets) is not a slot at all and cannot
+    appear."""
+
+    slot: str
+    extension: str
+    description: str
+    filled: bool
+
+
+class SourceView(BaseModel):
+    """One live source binding as the portal lists it: the backend, its disclosure subject
+    (member-private pages stay gated to their member; `shared` means the agent's audience), the
+    registering owner, and sync health."""
+
+    backend: str
+    shared: bool
+    owner_email: str | None
+    consecutive_errors: int
+    next_sync_at: datetime
+
+    @field_validator("next_sync_at")
+    @classmethod
+    def _aware_utc(cls, value: datetime) -> datetime:
+        return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
 class ConversationSummary(BaseModel):
@@ -345,6 +394,7 @@ class SurfaceContext:
     _credentials: CredentialStore | None
     _artifact_token_secret: str
     _public_base_url: str | None
+    _declared_slots: tuple[DeclaredSlot, ...]
 
     async def credential(self, slot: str) -> str:
         if self._credentials is None:
@@ -805,6 +855,124 @@ class SurfaceContext:
                 main=row.is_main,
                 model=row.model,
                 internet_access_allowed=row.internet_access_allowed,
+            )
+            for row in rows
+        )
+
+    async def list_agent_connections(
+        self, agent_id: UUID, member_id: UUID, *, admin: bool
+    ) -> tuple[ConnectionView, ...]:
+        """The connector accounts granted to one agent that this member may see — the member gate
+        in the query, never the caller: an admin sees every edge, everyone else their own private
+        grants plus agent-shared ones (#645's resolution rule, read-side). The wall stays the
+        query's `agent_id`; another agent's edges are simply absent."""
+        query = (
+            sa.select(
+                tables.connection.c.provider,
+                tables.connection.c.account_id,
+                tables.member.c.email,
+                tables.connector_grant.c.shared,
+                tables.connector_grant.c.created_at,
+            )
+            .select_from(
+                tables.connector_grant.join(
+                    tables.connection,
+                    tables.connector_grant.c.connection_id == tables.connection.c.id,
+                ).join(tables.member, tables.connection.c.owner_member_id == tables.member.c.id)
+            )
+            .where(
+                tables.connector_grant.c.workspace_id == self.workspace_id,
+                tables.connector_grant.c.agent_id == agent_id,
+            )
+            .order_by(tables.connection.c.provider, tables.connection.c.account_id)
+        )
+        if not admin:
+            query = query.where(
+                sa.or_(
+                    tables.connector_grant.c.shared,
+                    tables.connection.c.owner_member_id == member_id,
+                )
+            )
+        async with workspace_tx() as connection:
+            rows = (await connection.execute(query)).all()
+        return tuple(
+            ConnectionView(
+                provider=row.provider,
+                account_id=row.account_id,
+                owner_email=row.email,
+                shared=row.shared,
+                connected_at=row.created_at,
+            )
+            for row in rows
+        )
+
+    async def list_credential_slots(self) -> tuple[CredentialSlotView, ...]:
+        """The member-fillable declared slots with their fill state — never a value. The
+        `credential` object kind lists every slot; this read drops `member_filled=False` ones
+        (deploy-written seals a member can neither fill nor rotate), because the panel exists to
+        show a member what they can act on."""
+        async with workspace_tx() as connection:
+            filled = set(
+                (
+                    await connection.execute(
+                        sa.select(tables.credential.c.slot).where(
+                            tables.credential.c.workspace_id == self.workspace_id
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        return tuple(
+            CredentialSlotView(
+                slot=slot.name,
+                extension=slot.extension,
+                description=slot.description,
+                filled=slot.name in filled,
+            )
+            for slot in sorted(self._declared_slots, key=lambda slot: (slot.extension, slot.name))
+            if slot.member_filled
+        )
+
+    async def list_sources(self, member_id: UUID, *, admin: bool) -> tuple[SourceView, ...]:
+        """The live source bindings this member may see — an admin all of them, everyone else
+        their own registrations plus shared ones. Removed sources stay gone; a member-subject
+        source's pages remain gated to that member wherever they land."""
+        query = (
+            sa.select(
+                tables.source.c.backend,
+                tables.source.c.subject,
+                tables.member.c.email,
+                tables.source.c.consecutive_errors,
+                tables.source.c.next_sync_at,
+            )
+            .select_from(
+                tables.source.outerjoin(
+                    tables.member, tables.source.c.owner_member_id == tables.member.c.id
+                )
+            )
+            .where(
+                tables.source.c.workspace_id == self.workspace_id,
+                tables.source.c.removed_at.is_(None),
+            )
+            .order_by(tables.source.c.backend, tables.source.c.created_at)
+        )
+        if not admin:
+            query = query.where(
+                sa.or_(
+                    tables.source.c.subject == SHARED_SUBJECT,
+                    tables.source.c.owner_member_id == member_id,
+                )
+            )
+        async with workspace_tx() as connection:
+            rows = (await connection.execute(query)).all()
+        return tuple(
+            SourceView(
+                backend=row.backend,
+                shared=row.subject == SHARED_SUBJECT,
+                owner_email=row.email,
+                consecutive_errors=row.consecutive_errors,
+                next_sync_at=row.next_sync_at,
             )
             for row in rows
         )

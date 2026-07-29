@@ -1,7 +1,8 @@
 """The web portal on the core surface seam, in its live mode: the authenticated shell around the
 member's agents — an agent switcher over the surface's own audience, per-agent chat with
 cookie-authenticated turn admission, an SSE tail of each turn's live frames, read projections
-(agents, transcripts, and — for workspace admins — the administration view), and a spend view.
+(agents, transcripts, connections, credential slots, sources), and — for workspace admins — the
+administration view and the spend view.
 
 The `ufo_session` cookie carries the signed HMAC member bearer the gateway or `ufoctl init` mints
 (the `ufo.sdk.bearer` codec over `{ws, email, exp}`), landed by the one POST that opens a session
@@ -215,6 +216,52 @@ async def transcript(ctx: SurfaceContext, request: Request) -> Response:
     return JSONResponse({"messages": rendered})
 
 
+async def connections(ctx: SurfaceContext, request: Request) -> Response:
+    """The selected agent's connector accounts this member may see — their own private grants plus
+    agent-shared ones, every edge for a workspace admin. The member gate is the query's, the wall
+    is the agent id, and the panel only renders what the read returned."""
+    resolved = await _audience_for(ctx, request)
+    if isinstance(resolved, Response):
+        return resolved
+    member_id, _email, audience = resolved
+    agent_id = _agent_param(request)
+    if agent_id is None or not audience.allows(agent_id):
+        return Response("no such agent", status_code=404)
+    listed = await ctx.list_agent_connections(agent_id, member_id, admin=audience.admin)
+    return JSONResponse({"connections": [entry.model_dump(mode="json") for entry in listed]})
+
+
+async def credentials(ctx: SurfaceContext, request: Request) -> Response:
+    """Member-fillable declared BYOK slots and their fill state — never a value, and never the
+    `member_filled=False` seals the `credential` object kind still lists (deploy machinery, not a
+    member's key). The route rides the agent path only for the panel's navigation, and the
+    audience gate keeps an out-of-audience agent not-found here too."""
+    resolved = await _audience_for(ctx, request)
+    if isinstance(resolved, Response):
+        return resolved
+    _member_id, _email, audience = resolved
+    agent_id = _agent_param(request)
+    if agent_id is None or not audience.allows(agent_id):
+        return Response("no such agent", status_code=404)
+    listed = await ctx.list_credential_slots()
+    return JSONResponse({"slots": [entry.model_dump(mode="json") for entry in listed]})
+
+
+async def sources(ctx: SurfaceContext, request: Request) -> Response:
+    """The live source bindings this member may see — their own registrations plus shared ones,
+    all of them for a workspace admin. A member-subject source's indexed pages stay gated to that
+    member; the panel shows the subject so that stays legible."""
+    resolved = await _audience_for(ctx, request)
+    if isinstance(resolved, Response):
+        return resolved
+    member_id, _email, audience = resolved
+    agent_id = _agent_param(request)
+    if agent_id is None or not audience.allows(agent_id):
+        return Response("no such agent", status_code=404)
+    listed = await ctx.list_sources(member_id, admin=audience.admin)
+    return JSONResponse({"sources": [entry.model_dump(mode="json") for entry in listed]})
+
+
 async def stream(ctx: SurfaceContext, request: Request) -> Response:
     """Tail one turn's live frames. Gated like every portal route: the turn must belong to the
     member AND its agent must still be in their web audience, so a revocation ends streaming
@@ -380,6 +427,9 @@ ROUTES = (
     SurfaceRoute(method="GET", path="api/admin", handler=admin_index),
     SurfaceRoute(method="POST", path="agents/{agent_id}/chat", handler=chat),
     SurfaceRoute(method="GET", path="agents/{agent_id}/transcript", handler=transcript),
+    SurfaceRoute(method="GET", path="agents/{agent_id}/connections", handler=connections),
+    SurfaceRoute(method="GET", path="agents/{agent_id}/credentials", handler=credentials),
+    SurfaceRoute(method="GET", path="agents/{agent_id}/sources", handler=sources),
     SurfaceRoute(method="GET", path="turns/{turn_id}/stream", handler=stream),
     SurfaceRoute(method="GET", path="spend", handler=spend),
 )

@@ -127,6 +127,7 @@ def _surface(workspace_id: UUID, tmp_path) -> SurfaceContext:
         ),
         _tailer=HubTailer(hub=InProcessHub()),
         _credentials=None,
+        _declared_slots=(),
         _artifact_token_secret="",
         _public_base_url=None,
     )

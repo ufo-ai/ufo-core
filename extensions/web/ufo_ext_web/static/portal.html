@@ -8,6 +8,7 @@
   :root { color-scheme: light dark; }
   * { box-sizing: border-box; }
   [hidden] { display: none; }
+  #log[hidden], #composer[hidden] { display: none; }
   body { margin: 0; font: 15px/1.5 system-ui, sans-serif; background: Canvas; color: CanvasText;
          height: 100vh; display: grid; grid-template-columns: 240px 1fr; }
   button { font: inherit; cursor: pointer; }
@@ -37,10 +38,22 @@
   .admin-view th, .admin-view td { text-align: left; padding: 4px 14px 4px 0; vertical-align: top;
         border-bottom: 1px solid color-mix(in srgb, CanvasText 12%, transparent); }
   main { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
-  #agent-head { padding: 12px 16px; display: flex; gap: 10px; align-items: baseline;
-                border-bottom: 1px solid color-mix(in srgb, CanvasText 15%, transparent); }
+  #agent-head { padding: 12px 16px 0; display: flex; gap: 10px; align-items: baseline; }
   #agent-head h1 { margin: 0; font-size: 15px; font-weight: 600; }
   #agent-head .model { opacity: 0.55; }
+  #tabs { display: flex; gap: 4px; padding: 6px 12px 0;
+          border-bottom: 1px solid color-mix(in srgb, CanvasText 15%, transparent); }
+  #tabs button { padding: 6px 10px; border: 0; border-bottom: 2px solid transparent;
+                 background: none; color: inherit; opacity: 0.7; }
+  #tabs button[aria-selected="true"] { border-bottom-color: CanvasText; opacity: 1;
+                                       font-weight: 600; }
+  #panel { flex: 1; overflow-y: auto; padding: 16px; }
+  #panel table { border-collapse: collapse; width: 100%; }
+  #panel th, #panel td { text-align: left; padding: 6px 10px;
+                         border-bottom: 1px solid color-mix(in srgb, CanvasText 12%, transparent);
+                         vertical-align: baseline; }
+  #panel th { font-size: 12px; opacity: 0.6; font-weight: 600; }
+  #panel .empty { display: block; margin: 40px auto; }
   #log { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column;
          gap: 10px; }
   .bubble { max-width: 70ch; padding: 8px 12px; border-radius: 12px; white-space: pre-wrap;
@@ -108,7 +121,9 @@
 
 <main hidden>
   <div id="agent-head"></div>
+  <div id="tabs" role="tablist"></div>
   <div id="log"></div>
+  <div id="panel" hidden></div>
   <form id="composer">
     <input id="msg" autocomplete="off" placeholder="Message the agent…">
     <button type="submit" class="send">Send</button>
@@ -121,6 +136,8 @@ const nav = document.querySelector('nav');
 const main = document.querySelector('main');
 const list = document.getElementById('agents');
 const head = document.getElementById('agent-head');
+const tabs = document.getElementById('tabs');
+const panel = document.getElementById('panel');
 const log = document.getElementById('log');
 const composer = document.getElementById('composer');
 const input = document.getElementById('msg');
@@ -190,11 +207,11 @@ async function showAdmin() {
   try {
     res = await fetch(BASE + '/api/admin', { credentials: 'same-origin' });
   } catch (err) {
-    view.textContent = 'network error — try again';
+    view.textContent = 'Network error — try again.';
     return;
   }
   if (!res.ok) {
-    view.textContent = 'error ' + res.status + ' — reload to retry';
+    view.textContent = 'Error ' + res.status + ' — reload to retry.';
     return;
   }
   const payload = await res.json();
@@ -228,7 +245,7 @@ async function showAdmin() {
 }
 
 function restoreChatPane() {
-  main.replaceChildren(head, log, composer);
+  main.replaceChildren(head, tabs, log, panel, composer);
 }
 
 function agentFromHash() {
@@ -277,6 +294,105 @@ function renderChat(agent) {
   }
 }
 
+const PANELS = {
+  connections: {
+    key: 'connections',
+    columns: ['provider', 'account', 'owner', 'access', 'connected'],
+    row: (entry) => [entry.provider, entry.account_id, entry.owner_email,
+                     entry.shared ? 'agent-shared' : 'private',
+                     entry.connected_at.slice(0, 10)],
+    empty: 'No accounts are connected to this agent.',
+  },
+  credentials: {
+    key: 'slots',
+    columns: ['slot', 'description', 'extension', 'state'],
+    row: (entry) => [entry.slot, entry.description, entry.extension,
+                     entry.filled ? 'filled' : 'empty'],
+    empty: 'No credential slots are declared.',
+  },
+  sources: {
+    key: 'sources',
+    columns: ['backend', 'owner', 'access', 'errors', 'next sync'],
+    row: (entry) => [entry.backend, entry.owner_email || '—',
+                     entry.shared ? 'shared' : 'private',
+                     String(entry.consecutive_errors),
+                     entry.next_sync_at.replace('T', ' ').slice(0, 16)],
+    empty: 'No sources are registered.',
+  },
+};
+let tab = 'chat';
+let panelLoad = 0;
+
+function renderTabs() {
+  tabs.replaceChildren(...['chat', 'connections', 'credentials', 'sources'].map((name) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.setAttribute('role', 'tab');
+    button.setAttribute('aria-selected', name === tab);
+    button.textContent = name;
+    button.addEventListener('click', () => selectTab(name));
+    return button;
+  }));
+}
+
+async function selectTab(name) {
+  tab = name;
+  const load = ++panelLoad;
+  renderTabs();
+  const chatting = name === 'chat';
+  log.hidden = !chatting;
+  composer.hidden = !chatting;
+  panel.hidden = chatting;
+  if (chatting) {
+    input.focus();
+    return;
+  }
+  const agent = selected;
+  const spec = PANELS[name];
+  panel.replaceChildren();
+  function fail(text) {
+    const failed = document.createElement('span');
+    failed.className = 'empty';
+    failed.textContent = text;
+    panel.appendChild(failed);
+  }
+  let entries;
+  try {
+    const res = await fetch(BASE + '/agents/' + agent.id + '/' + name,
+      { credentials: 'same-origin' });
+    if (load !== panelLoad) return;
+    if (!res.ok) {
+      fail('Error ' + res.status + ' — reload to retry.');
+      return;
+    }
+    entries = (await res.json())[spec.key];
+  } catch (err) {
+    if (load === panelLoad) fail('Network error — try again.');
+    return;
+  }
+  if (load !== panelLoad) return;
+  if (!entries.length) {
+    const none = document.createElement('span');
+    none.className = 'empty';
+    none.textContent = spec.empty;
+    panel.appendChild(none);
+    return;
+  }
+  const table = document.createElement('table');
+  const header = table.createTHead().insertRow();
+  for (const column of spec.columns) {
+    const cell = document.createElement('th');
+    cell.textContent = column;
+    header.appendChild(cell);
+  }
+  const body = table.createTBody();
+  for (const entry of entries) {
+    const row = body.insertRow();
+    for (const value of spec.row(entry)) row.insertCell().textContent = value;
+  }
+  panel.appendChild(table);
+}
+
 async function select(agent) {
   if (!head.isConnected) restoreChatPane();
   selected = agent;
@@ -294,6 +410,7 @@ async function select(agent) {
   const state = chatState(agent.id);
   renderChat(agent);
   syncComposer();
+  selectTab('chat');
   if (state.messages === null) {
     const res = await fetch(BASE + '/agents/' + agent.id + '/transcript',
       { credentials: 'same-origin' });
@@ -337,12 +454,12 @@ async function run(agent, state, text, reply) {
     res = await fetch(BASE + '/agents/' + agent.id + '/chat',
       { method: 'POST', body: text, credentials: 'same-origin' });
   } catch (err) {
-    reply.textContent = 'network error — try again';
+    reply.textContent = 'Network error — try again.';
     finish();
     return;
   }
   if (!res.ok) {
-    reply.textContent = 'error ' + res.status + ' — try again';
+    reply.textContent = 'Error ' + res.status + ' — try again.';
     finish();
     return;
   }
@@ -444,7 +561,7 @@ async function boot() {
     const failed = document.createElement('div');
     failed.className = 'empty';
     failed.style.gridColumn = '1 / -1';
-    failed.textContent = 'error ' + res.status + ' — reload to retry';
+    failed.textContent = 'Error ' + res.status + ' — reload to retry.';
     document.body.replaceChildren(failed);
     return;
   }
