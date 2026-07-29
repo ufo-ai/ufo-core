@@ -1,633 +1,430 @@
-# Skill and user-authored skill loading  `stage-3.2`
+# Runtime process supervision  `stage-3.2`
 
-This stage is behind-the-scenes setup for reusable “skills,” which are small folders of instructions and helper files the agent can use later during a work turn. The empty __init__.py file simply tells Python that the built-in skills folder is importable, like putting a label on a drawer. The runtime.py file does the main loading work: it defines what counts as a skill, reads skill folders, checks their names and contents, sorts them when one skill depends on another, and prepares their instructions and files so the agent can copy them into its safe working area. The sample probe.py is a tiny test tool for a sample skill; it prints a known success message so people or automated checks can confirm the skill can run. The skill_create extension adds workspace-authored skills. Its manifest.py connects save, view, update, delete, and load operations to the larger system. Its store.py is the gatekeeper: it keeps these user skills private to one workspace, validates them, uses safe names, and prevents them from overwriting built-in skills.
+This stage is shared behind-the-scenes support for the running system. Its job is to make sure server processes can be seen, stopped safely, and cleaned up if they disappear. It is like the control room for work that is already in progress.
+
+runtime_instance.py keeps each live server process registered so the rest of the fleet knows it exists. It also runs background checks that look for work owned by processes that have died. When it finds such work, it helps recover it so jobs do not stay stuck forever. It also spreads a cancellation from a parent turn to any child work that was started under it.
+
+cancellation.py defines the safe way to cancel one turn of work. A “turn” is one unit of activity in a workflow. It first tells the running workflow to stop, then marks the database record as cancelled, so the stored state matches what actually happened.
+
+o11y.py sets up observability: traces, metrics, and structured logs that explain what the system did. It also redacts sensitive text so secrets are not sent to monitoring tools.
 
 ## Files in this stage
 
-### Skill package foundation
-The core skill package is established and the runtime defines how reusable skill folders are discovered, validated, dependency-ordered, and exposed.
+### Turn cancellation
+Shared cancellation logic safely stops active workflow work before marking the corresponding database record as cancelled.
 
-### `core/src/ufo/skills/__init__.py`
+### `core/src/ufo/cancellation.py`
 
-`other` · `import/package discovery`
+`domain_logic` · `cancellation flow`
 
-This is an empty package initializer. In Python, a file named `__init__.py` tells Python that a folder should be treated as an importable package. Think of it like a label on a drawer: the drawer may hold useful tools, but the label itself does not do the work. Here, the drawer is `ufo.skills`, which likely contains modules that define or support “skills” elsewhere in the project. Without this file, some Python setups or tools might not recognize the folder as a package, which could make imports less reliable. Because the file is empty, it does not run setup code, expose shortcuts, or change behavior when the package is imported. Its value is structural: it helps organize the codebase and gives the rest of the system a stable namespace for skill-related code.
+A “turn” is one unit of work in the system, and some turns can start child turns of their own. This file does not try to cancel a whole tree of related turns. Instead, it provides the small, reliable building block for cancelling exactly one turn. Other parts of the system can call this same function whether the cancel request comes from a user-facing tool, an evaluation driver, or a background cleanup process.
 
+The important rule here is order. The system first asks DBOS, the durable workflow engine, to cancel the workflow for the turn. Only after that request is made does it write “cancelled” into the turn’s database row. This is like turning off a machine before putting a “shut down” label on it. If the program crashes halfway through, the database will not falsely claim the turn is cancelled before the workflow was ever told to stop.
 
-### `core/src/ufo/skills/runtime.py`
-
-`domain_logic` · `startup and skill loading during conversation turns`
-
-A skill is a small package of help for the agent: a folder with a `SKILL.md` file for instructions, plus optional extra files such as templates or scripts. This file is the bridge between those folders on disk and what the running agent sees during a conversation.
-
-First, it knows how to parse `SKILL.md`: the top section is YAML frontmatter, which is structured metadata like the skill name, description, and dependencies; the rest is the plain instruction text the agent will read. It checks that the declared name matches the folder name, so a skill cannot quietly pretend to be something else.
-
-Second, it can discover nested skills. A child skill lives inside another skill’s folder, but nesting is only naming and placement. If the child needs the parent’s files, it must explicitly list the parent as a dependency.
-
-Third, `SkillRegistry` is the lookup table of all available skills. When a skill is loaded, the registry expands it into a closure: the requested skill plus every dependency it needs, without duplicates or infinite loops.
-
-Finally, the file prepares the actual context shown to the agent and mounts the skill files under `.skills/` in the sandbox. Think of it like checking out a toolbox: the agent gets the instructions, and the files are placed on the workbench at predictable paths.
+The function also avoids overwriting a turn that already finished normally or failed in its own way. It checks the current status first, and later updates the row only if the status is still non-terminal, meaning still not finished. This protects races where cancellation and normal completion happen at nearly the same time.
 
 #### Function details
 
-##### `RuntimeSkill.mounted_files`  (lines 59–60)
+##### `cancel_one_turn`  (lines 23–58)
 
 ```
-def mounted_files(self) -> dict[str, bytes]
+async def cancel_one_turn(client: DBOSClient, turn_id: UUID) -> bool
 ```
 
-**Purpose**: Builds the complete set of files that should be copied into the sandbox for one skill. It always includes the original `SKILL.md`, plus any bundled asset files.
+**Purpose**: Cancels one turn if it is still active. It first cancels the durable DBOS workflow, then records a cancelled terminal state in the database, so the stored status does not get ahead of the real workflow cancellation.
 
-**Data flow**: It reads the skill’s saved raw `SKILL.md` text and its stored asset files. It turns the markdown into bytes, combines it with the asset file bytes, and returns a dictionary from relative file path to file content.
+**Data flow**: It receives a DBOS client and a turn ID. It opens a workspace database transaction, reads the turn’s current status, and stops immediately with False if the turn is already in a final state. If the turn is still active, it asks DBOS to cancel the workflow whose ID matches the turn ID. Then it opens another database transaction and tries to update that turn row to status cancelled, storing the cancelled terminal frame and a fresh update time, but only if the row is still active. It returns True only when that database update actually changed one row; otherwise it returns False.
 
-**Call relations**: When `mount_skill` is ready to place a skill into the sandbox, it calls this method to learn exactly which files must be written. This keeps the mounting step simple: it only has to write the paths and bytes it is given.
+**Call relations**: This function is the shared cancellation primitive used by higher-level cancellation paths. Inside its own flow, it relies on workspace_tx to safely read and write the database, uses SQLAlchemy select and update statements to inspect and change the turn row, and hands the actual workflow stop request to DBOSClient.cancel_workflow_async before committing the cancelled status.
 
-*Call graph*: called by 1 (mount_skill).
+*Call graph*: 4 external calls (cancel_workflow_async, select, update, workspace_tx).
 
 
-##### `RuntimeSkill.mount_root`  (lines 62–63)
+### Observability plumbing
+Telemetry setup centralizes traces, metrics, structured logging, and sensitive-text protection for runtime operations.
 
-```
-def mount_root(self) -> str
-```
+### `core/src/ufo/o11y.py`
 
-**Purpose**: Returns the sandbox directory where this skill’s files should live. This gives every skill a predictable home under the shared `.skills` folder.
+`io_transport` · `startup and cross-cutting during request or background work`
 
-**Data flow**: It reads the skill’s registry name and joins it to the fixed skills mount directory. The result is a string path such as the skill’s root folder inside the workspace.
+This file is the project’s observability toolkit. Observability means the clues operators use to understand a running system: logs for events, metrics for counts, and traces for following one piece of work across steps. Without this file, failures would be much harder to investigate, background work could lose its connection to the request that started it, and private data might accidentally be written into monitoring systems.
 
-**Call relations**: When `mount_skill` writes files, it first calls this method to find the correct root path. Nested skill names naturally become nested mount paths because the name can contain slashes.
+At startup, `init_o11y` can connect the app to an OpenTelemetry collector. OpenTelemetry is a common standard for sending traces, metrics, and logs to outside monitoring tools. If no endpoint is given, the file leaves the default no-op behavior in place, so the app can run without telemetry export.
 
-*Call graph*: called by 1 (mount_skill).
+During normal work, the file adds useful context automatically. It reads the current workspace from a shared context variable, like a name tag attached to the current task, and adds that workspace ID to spans and logs. It can also carry a trace link across a queue boundary by saving and later restoring a `traceparent` header.
 
-
-##### `LoadedSkill.prompt_body`  (lines 75–85)
-
-```
-def prompt_body(self) -> str
-```
-
-**Purpose**: Creates the text block that will be shown to the agent for one loaded skill. It labels whether the skill was requested directly or was pulled in as a dependency, then includes the skill’s instructions.
-
-**Data flow**: It reads the wrapped `RuntimeSkill` and the optional `dependency_of` name. It builds a header, adds a dependency note if needed, appends the skill instruction body, and returns that text.
-
-**Call relations**: This is the per-skill building block used when creating the full loaded context. It does not include asset file contents; those are mounted separately and shown later through a file tree.
-
-
-##### `LoadedSkills.reseed`  (lines 101–118)
-
-```
-def reseed(self, loads: Iterable[tuple[LoadedSkill, ...]], preloaded: tuple[LoadedSkill, ...]=()) -> None
-```
-
-**Purpose**: Refreshes the record of which skill instructions are already in the model’s current context. This prevents the system from repeating long instructions that the agent has already seen.
-
-**Data flow**: It receives past skill-load closures and optional preloaded skills. It clears the old tracking state, adds every loaded skill name to `in_context`, marks directly requested skills in `asked_for`, and also records preloaded skills as present but not user-requested.
-
-**Call relations**: It calls `LoadedSkills.reset` before rebuilding the record from scratch. This is important because the tracker is meant to match the current conversation window, not simply accumulate history forever.
-
-*Call graph*: calls 1 internal fn (reset).
-
-
-##### `LoadedSkills.drain`  (lines 120–125)
-
-```
-def drain(self) -> tuple[str, ...]
-```
-
-**Purpose**: Returns the names of skills the agent explicitly asked for, then clears the tracker. This is used when the system needs to carry only the important reload hints across a boundary where full instruction text may be dropped.
-
-**Data flow**: It reads the `asked_for` set, sorts it into a stable tuple, clears both tracking sets, and returns the tuple of names.
-
-**Call relations**: It calls `LoadedSkills.reset` after collecting the names. Its output can later be used to reload those direct skills, which will bring their dependencies back through the registry.
-
-*Call graph*: calls 1 internal fn (reset).
-
-
-##### `LoadedSkills.reset`  (lines 127–129)
-
-```
-def reset(self) -> None
-```
-
-**Purpose**: Clears all remembered loaded-skill state. It is the shared cleanup step for rebuilding or draining the tracker.
-
-**Data flow**: It takes the current `in_context` and `asked_for` sets and empties both. It returns nothing; the change is made to the tracker object itself.
-
-**Call relations**: Both `LoadedSkills.reseed` and `LoadedSkills.drain` call this function when they need a clean slate. It is deliberately small so both operations clear state in exactly the same way.
-
-*Call graph*: called by 2 (drain, reseed).
-
-
-##### `_split_frontmatter`  (lines 132–138)
-
-```
-def _split_frontmatter(text: str) -> tuple[str, str]
-```
-
-**Purpose**: Separates a `SKILL.md` file into its metadata section and its instruction body. It also enforces that the file starts and ends its metadata block in the expected format.
-
-**Data flow**: It receives the full text of `SKILL.md`. It checks for the opening `---` fence, finds the closing fence, and returns two strings: the YAML metadata text and the markdown body. If either fence is missing, it raises an error.
-
-**Call relations**: `parse_skill_content` calls this before reading the skill’s name, description, and dependencies. This makes malformed skill files fail early with a clear message.
-
-*Call graph*: called by 1 (parse_skill_content).
-
-
-##### `_child_skill_dirs`  (lines 141–146)
-
-```
-def _child_skill_dirs(skill_dir: Path) -> list[Path]
-```
-
-**Purpose**: Finds immediate subfolders that are themselves skills. A subfolder counts as a child skill only if it contains its own `SKILL.md` file.
-
-**Data flow**: It receives a skill directory path, looks at its direct children on disk, filters for directories containing `SKILL.md`, sorts them, and returns the matching paths.
-
-**Call relations**: `parse_skill` uses this to avoid treating child skill files as part of the parent’s asset bundle. `discover_skills` uses it to recursively register child skills.
-
-*Call graph*: called by 2 (discover_skills, parse_skill); 1 external calls (iterdir).
-
-
-##### `parse_skill_content`  (lines 149–182)
-
-```
-def parse_skill_content(dir_name: str, files: Mapping[str, bytes], registry_name: str | None=None, parent: str | None=None) -> RuntimeSkill
-```
-
-**Purpose**: Turns an in-memory set of skill files into a validated `RuntimeSkill` object. This lets the project parse skills the same way whether they came from disk, storage, or a sandbox export.
-
-**Data flow**: It receives a claimed directory name, a mapping of file paths to bytes, and optional registry naming information. It reads `SKILL.md`, splits and parses the YAML metadata, checks that the frontmatter name matches the directory name, collects non-`SKILL.md` files as assets, and returns a `RuntimeSkill` containing metadata, instructions, dependencies, assets, and the original markdown.
-
-**Call relations**: `parse_skill` calls this after reading files from disk. It relies on `_split_frontmatter` for the markdown structure and `yaml.safe_load` to read the metadata safely.
-
-*Call graph*: calls 1 internal fn (_split_frontmatter); called by 1 (parse_skill); 3 external calls (__init__, PurePosixPath, safe_load).
-
-
-##### `parse_skill`  (lines 185–194)
-
-```
-def parse_skill(skill_dir: Path, registry_name: str | None=None, parent: str | None=None) -> RuntimeSkill
-```
-
-**Purpose**: Reads one skill folder from disk and parses it into a `RuntimeSkill`. It excludes nested child-skill folders so the parent skill does not accidentally absorb the child’s files.
-
-**Data flow**: It receives a directory path and optional registry naming information. It finds child skill directories, reads all ordinary files outside those child subtrees into memory, and passes those bytes to `parse_skill_content`. The result is one validated runtime skill.
-
-**Call relations**: `discover_skills` calls this for each folder it is registering. It uses `_child_skill_dirs` to separate parent assets from child skill packages.
-
-*Call graph*: calls 2 internal fn (_child_skill_dirs, parse_skill_content); called by 1 (discover_skills); 1 external calls (rglob).
-
-
-##### `discover_skills`  (lines 197–215)
-
-```
-def discover_skills(skill_dir: Path, registry_name: str | None=None, parent: str | None=None) -> dict[str, RuntimeSkill]
-```
-
-**Purpose**: Discovers a skill and all of its nested child skills, returning a flat lookup map by registry name. This makes nested folders easy to load by names such as `parent/child`.
-
-**Data flow**: It receives a skill directory and optional parent naming information. It parses the current directory as one skill, then finds child skill directories and recursively discovers each child with a path-style name. It returns a dictionary from skill name to `RuntimeSkill`.
-
-**Call relations**: `_load_core_skills` calls this while building the built-in skill set. Inside its recursion, it calls `parse_skill` for the current folder and `_child_skill_dirs` to find children.
-
-*Call graph*: calls 2 internal fn (_child_skill_dirs, parse_skill); called by 1 (_load_core_skills).
-
-
-##### `_load_core_skills`  (lines 218–225)
-
-```
-def _load_core_skills(root: Path) -> dict[str, RuntimeSkill]
-```
-
-**Purpose**: Loads the project’s built-in skills from the core skills directory. This creates the default skill collection available before user or pack-provided skills are added.
-
-**Data flow**: It receives a root directory, scans its visible child directories, discovers skills under each one, and combines them into a dictionary keyed by skill name.
-
-**Call relations**: This runs when the module is imported to build `CORE_SKILLS_BY_NAME` and the core registry. It delegates the actual recursive parsing to `discover_skills`.
-
-*Call graph*: calls 1 internal fn (discover_skills); 1 external calls (iterdir).
-
-
-##### `SkillRegistry.named`  (lines 242–247)
-
-```
-def named(self, name: str) -> RuntimeSkill
-```
-
-**Purpose**: Looks up one skill by name and gives a helpful error if it does not exist. This is the registry’s safe front door for skill lookup.
-
-**Data flow**: It receives a skill name, checks the registry dictionary, and returns the matching `RuntimeSkill`. If the name is missing, it builds a message listing available skills and raises a `ValueError`.
-
-**Call relations**: `SkillRegistry.closure` and its inner dependency-walking helper call this whenever they need to turn a name into the actual skill object. The clear error helps callers diagnose misspelled or unavailable skills.
-
-*Call graph*: called by 2 (closure, add).
-
-
-##### `SkillRegistry.closure`  (lines 249–272)
-
-```
-def closure(self, *names: str) -> tuple[LoadedSkill, ...]
-```
-
-**Purpose**: Expands requested skill names into the full set of skills that must be loaded, including dependencies. It keeps direct requests first, avoids duplicates, and is safe even if dependencies form a cycle.
-
-**Data flow**: It receives one or more skill names. It first records each requested skill as directly loaded, then walks each requested skill’s dependencies, adding each missing dependency once and remembering which skill pulled it in. It returns an ordered tuple of `LoadedSkill` entries.
-
-**Call relations**: The engine’s skill-loading flow calls this when it needs to know what one load request really includes. It uses `SkillRegistry.named` for lookups and creates `LoadedSkill` objects that later drive prompt text and file mounting.
-
-*Call graph*: calls 1 internal fn (named); called by 1 (_loaded_skill_closures); 1 external calls (__init__).
-
-
-##### `SkillRegistry.closure.add`  (lines 262–267)
-
-```
-def add(skill: RuntimeSkill, dependency_of: str | None) -> None
-```
-
-**Purpose**: Adds one dependency skill to a closure and then walks that dependency’s own dependencies. It is the small recursive worker inside `SkillRegistry.closure`.
-
-**Data flow**: It receives a `RuntimeSkill` and the name of the skill that depends on it. If the skill is already loaded, it stops. Otherwise it records the skill with its dependency label, looks up each dependency by name, and repeats the process.
-
-**Call relations**: This helper is called only from `SkillRegistry.closure`. It calls `SkillRegistry.named` to resolve dependency names and creates `LoadedSkill` entries so the final context can explain why each dependency appeared.
-
-*Call graph*: calls 1 internal fn (named); 1 external calls (__init__).
-
-
-##### `SkillRegistry.index`  (lines 274–282)
-
-```
-def index(self) -> tuple[tuple[str, str], ...]
-```
-
-**Purpose**: Returns the public list of top-level skills that can be shown in the system prompt. Child skills are intentionally left out because they are reached through their parent skill’s instructions.
-
-**Data flow**: It reads the registry’s skills in registration order, keeps only skills without a parent, and returns tuples of skill name and description.
-
-**Call relations**: This is used wherever the agent needs a compact catalog of available skills. It does not load anything; it only describes what the agent may ask to load.
-
-
-##### `SkillRegistry.merged_with`  (lines 284–296)
-
-```
-def merged_with(self, user_skills: tuple[RuntimeSkill, ...]) -> 'SkillRegistry'
-```
-
-**Purpose**: Creates a new registry that adds saved user skills after the base skills. It refuses to let user-controlled skills replace core or pack skills with the same name.
-
-**Data flow**: It copies the current registry dictionary, then examines each user skill. If the name is unused, it adds the user skill; if the name collides, it logs that the shadowing attempt was refused and skips it. It returns a new `SkillRegistry`.
-
-**Call relations**: This is used when combining the trusted base registry with workspace-specific user skills. It calls the logging system when rejecting a collision, preserving the rule that built-in or pack skills cannot be silently overwritten.
-
-*Call graph*: 2 external calls (__init__, log).
-
-
-##### `_mounted_tree`  (lines 302–320)
-
-```
-def _mounted_tree(loaded: tuple[LoadedSkill, ...]) -> str
-```
-
-**Purpose**: Builds a compact text tree showing every file mounted for a skill load. This gives the agent a readable map of where the skill files were placed.
-
-**Data flow**: It receives the loaded skill entries, asks each skill for its mounted files, sorts the combined paths, and formats directories and filenames as an indented tree under the `.skills` mount directory. It returns that tree as text.
-
-**Call relations**: `loaded_context` calls this after preparing the instruction blocks. The tree is shown once for the whole load closure, so repeated directory prefixes are not wasted in the prompt.
-
-*Call graph*: called by 1 (loaded_context); 1 external calls (PurePosixPath).
-
-
-##### `loaded_context`  (lines 323–337)
-
-```
-def loaded_context(loaded: tuple[LoadedSkill, ...], in_context: Container[str]=frozenset()) -> str
-```
-
-**Purpose**: Creates the full text that a skill load contributes to the model’s context. It includes new skill instructions, a note for already-seen skills, and a file tree for everything mounted.
-
-**Data flow**: It receives the closure of loaded skills and a collection of skill names already in context. It builds prompt blocks only for skills not already present, adds a short note naming repeated skills, appends the mounted-file tree, and returns the combined text.
-
-**Call relations**: This is shared by normal skill loading and subagent preloading so skills look the same in both cases. It calls `_mounted_tree` to describe the files that will be available in the sandbox.
-
-*Call graph*: calls 1 internal fn (_mounted_tree).
-
-
-##### `mount_skill`  (lines 340–343)
-
-```
-async def mount_skill(sandbox: SandboxSession, skill: RuntimeSkill) -> None
-```
-
-**Purpose**: Copies one skill’s files into the sandbox workspace so the agent can read and use them. This is the actual file-writing step of skill loading.
-
-**Data flow**: It receives a sandbox session and a runtime skill. It asks the skill for its mount root and its files, then writes each file’s bytes into the sandbox at the corresponding path. It returns nothing after the writes complete.
-
-**Call relations**: After a registry closure decides which skills are needed, this function is used to place each skill’s files where the agent can access them. It calls `RuntimeSkill.mount_root`, `RuntimeSkill.mounted_files`, and the sandbox session’s `write_file` method.
-
-*Call graph*: calls 3 internal fn (write_file, mount_root, mounted_files).
-
-
-### Sample skill probe
-A minimal sample skill probe provides a simple execution check for skill availability.
-
-### `extensions/sample/skills/sample_skill/probe.py`
-
-`entrypoint` · `probe or health-check time`
-
-This file acts like a simple “is it alive?” check for the sample skill. It does not define any reusable code or perform any real skill work. Instead, Python runs the one line in the file immediately, and that line prints `sample-skill-probe-ok` to the screen or calling process. The value of this file is its predictability: if something launches this probe and sees that exact message, it knows the file was found, Python could run it, and the basic sample-skill probe path is working. Without it, there would be no very small, unambiguous signal that the sample skill can be reached and executed. Think of it like pressing a doorbell to confirm the wiring works; it does not open the door, but it proves the connection is live.
-
-
-### Workspace-authored skill storage
-The skill creation extension wires workspace-authored skills into the system and persists them with validation, safe naming, and workspace isolation.
-
-### `extensions/skill_create/ufo_ext_skill_create/manifest.py`
-
-`orchestration` · `startup registration, object operations, and per-turn skill loading`
-
-A skill here is a small bundle of text files, with a required SKILL.md file that names and describes it. This file defines the public shape of that bundle, registers it as a workspace object called “skill,” and tells the main system how to bring saved skills back on later turns. Without it, users could write skill files in the temporary workspace, but they would not have a safe way to persist them or make them available to load later.
-
-The main idea is safety and repeatability. When a skill is saved, any file reference like {from: "path"} is read from the conversation workspace and turned into stored text. The saved object never points back at the temporary sandbox. The file also enforces limits: only a bounded number of files, a bounded total size, and UTF-8 text only. It also avoids leaking full file bodies when someone asks for the object; instead, it returns a digest, which is like a fingerprint, so unchanged files can be kept without pasting their content back into the request.
-
-The SkillObjects class is the object interface: list, get, status, apply, and delete. At startup, manifest() registers this object kind, the teaching skill that explains how to create skills, and a runtime provider that adds saved user skills into the turn’s skill registry.
+The logging helpers (`log`, `warn`, and `log_error`) all pass through one central emitter. Before anything leaves the process, `redact_payload` and `redact_value` remove sensitive fields and make sure values are safe JSON-like data. Metrics are also centralized: only known metric names are allowed, so typos fail loudly instead of silently creating misleading dashboards.
 
 #### Function details
 
-##### `_require_ext`  (lines 100–103)
+##### `init_o11y`  (lines 64–83)
 
 ```
-def _require_ext(ctx: ToolContext) -> ExtensionContext
+def init_o11y(otlp_endpoint: str | None) -> None
 ```
 
-**Purpose**: This small guard makes sure a tool call has the extension context it needs. The extension context is the object that gives access to this extension’s storage and workspace identity.
+**Purpose**: Connects the application to an OpenTelemetry collector, if one was configured. This sets up exporting for traces, metrics, and logs so outside tools can show what the system is doing.
 
-**Data flow**: It receives a tool context. If the context contains an extension context, it returns it unchanged. If not, it stops immediately with an error, because the skill object cannot safely read or write storage without that information.
+**Data flow**: It receives an optional collector base URL. If the URL is missing, it changes nothing. If present, it builds the three exact export URLs, creates OpenTelemetry providers for traces, metrics, and logs, registers them globally, and installs a bridge so ordinary Python warnings can also be exported.
 
-**Call relations**: The object methods use this before touching the user skill store. It is the safety check at the doorway for listing, reading, saving, deleting, and loading stored skill files.
+**Call relations**: This is the setup step for the whole file. It asks `_otlp_signal_urls` to build the collector URLs, then calls `_bridge_warning_logs` after the OpenTelemetry log pipeline exists so standard library warnings can flow into the same monitoring stream.
 
-*Call graph*: called by 5 (_files, apply, delete, get, list).
-
-
-##### `_text`  (lines 106–112)
-
-```
-def _text(path: str, content: bytes) -> str
-```
-
-**Purpose**: This checks that a skill file is real text, not binary data. Skills are intentionally limited to UTF-8 text files so they can be parsed, reviewed, and stored safely.
-
-**Data flow**: It receives a skill-relative path and raw bytes. It tries to decode the bytes as text. If decoding works, it returns the text; if not, it raises a clear error naming the file that is not valid text.
-
-**Call relations**: SkillObjects._resolve calls this after gathering each file’s bytes. That means every inline file, workspace-sourced file, and kept stored file passes the same text-only gate before saving.
-
-*Call graph*: called by 1 (_resolve).
+*Call graph*: calls 2 internal fn (_bridge_warning_logs, _otlp_signal_urls); 13 external calls (set_logger_provider, OTLPLogExporter, OTLPMetricExporter, OTLPSpanExporter, set_meter_provider, LoggerProvider, BatchLogRecordProcessor, MeterProvider, PeriodicExportingMetricReader, create (+3 more)).
 
 
-##### `SkillObjects.list`  (lines 122–128)
+##### `_bridge_warning_logs`  (lines 86–98)
 
 ```
-async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage
+def _bridge_warning_logs(logger_provider: LoggerProvider) -> None
 ```
 
-**Purpose**: This returns the saved user-created skills for the current workspace. It gives a short row for each skill, including its name and a trimmed description.
+**Purpose**: Sends ordinary Python warning-and-error log messages into the OpenTelemetry log pipeline. This helps catch problems from libraries or extension points that do not use this file’s structured logging helpers.
 
-**Data flow**: It receives the tool context and a list query. It gets the extension context, loads all stored skills for the workspace, turns each one into a list row, and then applies the query’s paging rules before returning the page.
+**Data flow**: It receives the OpenTelemetry log provider created during startup. It creates a Python logging handler that listens for warning-level and higher messages, filters out this project’s own structured logger and OpenTelemetry’s own exporter logs, and attaches the handler to the root logger.
 
-**Call relations**: The object system calls this when someone asks to list skill objects. It relies on UserSkillStore for the actual saved skills and hands the rows to the shared object paging helper so listing behaves like other object kinds.
+**Call relations**: It is called by `init_o11y` after logging export has been configured. From then on, warnings from other modules can reach the collector, while this file’s direct structured records still use `_emit_log`.
 
-*Call graph*: calls 1 internal fn (_require_ext); 3 external calls (__init__, __init__, object_page).
-
-
-##### `SkillObjects.get`  (lines 130–148)
-
-```
-async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[UserSkillSpec] | None
-```
-
-**Purpose**: This returns the stored record for one saved skill, but deliberately does not return the file contents. Instead, it returns a fingerprint and size for each file so callers can keep unchanged files without copying their bodies into the request.
-
-**Data flow**: It receives a tool context and skill name. It loads the skill’s stored files and timestamps. If either is missing, it returns nothing. Otherwise, it computes a SHA-256 digest, a standard content fingerprint, for each file and returns those references in an object detail record.
-
-**Call relations**: The object system calls this when a caller wants to inspect one skill object. It uses SkillObjects._files to fetch bytes, uses the store again for timestamps, and builds FileRef values that can later be passed back to SkillObjects.apply to keep files unchanged.
-
-*Call graph*: calls 2 internal fn (_files, _require_ext); 5 external calls (__init__, __init__, __init__, __init__, sha256).
+*Call graph*: called by 1 (init_o11y); 2 external calls (getLogger, LoggingHandler).
 
 
-##### `SkillObjects.status`  (lines 150–158)
+##### `_otlp_signal_urls`  (lines 101–107)
 
 ```
-async def status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None
+def _otlp_signal_urls(otlp_endpoint: str) -> tuple[str, str, str]
 ```
 
-**Purpose**: This gives a quick health-style summary of one saved skill. It reports the skill description, file count, and total stored byte size.
+**Purpose**: Builds the exact HTTP endpoints used to send traces, metrics, and logs to an OpenTelemetry collector. This matters because the exporter sends to the precise URL it is given; it does not add the path automatically.
 
-**Data flow**: It receives a tool context and skill name. It loads the stored files; if the skill is missing, it returns nothing. If present, it parses the skill content to read its description, counts the files, totals their sizes, and returns those facts as a small dictionary.
+**Data flow**: It receives a base collector URL, removes any trailing slash, and returns three URLs: one ending in `v1/traces`, one in `v1/metrics`, and one in `v1/logs`.
 
-**Call relations**: The object system calls this when it needs a lightweight status view. It reuses SkillObjects._files for storage access and the shared skill parser so the description is interpreted the same way it is when skills are loaded.
+**Call relations**: It is used by `init_o11y` before creating the trace, metric, and log exporters. Its output tells each exporter where to send its specific kind of telemetry.
 
-*Call graph*: calls 1 internal fn (_files); 1 external calls (parse_skill_content).
-
-
-##### `SkillObjects.apply`  (lines 160–172)
-
-```
-async def apply(self, ctx: ToolContext, name: str, spec: UserSkillSpec, old: UserSkillSpec | None) -> None
-```
-
-**Purpose**: This creates or updates a saved user skill. It turns the requested file specification into actual text bytes, checks size limits, and then saves the validated skill for the current workspace.
-
-**Data flow**: It receives the tool context, the skill name, the new specification, and the previous specification if any. It rejects specs with too many files, resolves inline text, workspace file references, and unchanged-file fingerprints into complete file contents, checks the total byte limit, and writes the result to the user skill store.
-
-**Call relations**: The object system calls this when a manifest is applied. It delegates the tricky file-gathering work to SkillObjects._resolve, then hands the complete bundle to UserSkillStore.save, along with the names of already-known skills so the store can prevent a user skill from replacing a built-in one.
-
-*Call graph*: calls 2 internal fn (_resolve, _require_ext); 1 external calls (__init__).
+*Call graph*: called by 1 (init_o11y).
 
 
-##### `SkillObjects.delete`  (lines 174–176)
+##### `_ambient_scope`  (lines 110–115)
 
 ```
-async def delete(self, ctx: ToolContext, name: str) -> None
+def _ambient_scope() -> dict[str, str]
 ```
 
-**Purpose**: This removes a saved user-created skill from the current workspace. It is the delete operation for the skill object kind.
+**Purpose**: Finds the current workspace ID and formats it as metadata for logs and traces. This lets call sites avoid passing the workspace ID everywhere by hand.
 
-**Data flow**: It receives the tool context and skill name. It gets the extension context, opens the user skill store, and asks it to delete that skill under the current workspace id. It returns no content after the deletion request completes.
+**Data flow**: It reads `current_workspace`, which is a context value set elsewhere for the current turn or job. If no workspace is active, it returns an empty dictionary. If one is active, it returns a dictionary containing that workspace ID as text.
 
-**Call relations**: The object system calls this when a skill object is deleted. It is a thin bridge from the object API to UserSkillStore.delete.
+**Call relations**: It is used by `turn_span` when creating trace spans and by `_emit_log` when writing logs. In both cases it acts like an automatic label maker for the current unit of work.
 
-*Call graph*: calls 1 internal fn (_require_ext); 1 external calls (__init__).
-
-
-##### `SkillObjects._files`  (lines 178–180)
-
-```
-async def _files(self, ctx: ToolContext, name: str) -> dict[str, bytes] | None
-```
-
-**Purpose**: This is the shared helper for loading the raw stored files of one user skill. It keeps the storage lookup in one place for get, status, and update resolution.
-
-**Data flow**: It receives the tool context and skill name. It gets the extension context, opens the user skill store for the current workspace, and returns the saved file map if it exists, or nothing if it does not.
-
-**Call relations**: SkillObjects.get, SkillObjects.status, and SkillObjects._resolve call this whenever they need the actual saved bytes. It hides the repeated store lookup so those methods can focus on their own jobs.
-
-*Call graph*: calls 1 internal fn (_require_ext); called by 3 (_resolve, get, status); 1 external calls (__init__).
+*Call graph*: called by 2 (_emit_log, turn_span); 1 external calls (get).
 
 
-##### `SkillObjects._resolve`  (lines 182–230)
+##### `current_traceparent`  (lines 118–124)
 
 ```
-async def _resolve(self, ctx: ToolContext, name: str, spec: UserSkillSpec) -> dict[str, bytes]
+def current_traceparent() -> str | None
 ```
 
-**Purpose**: This turns a user’s requested skill file specification into a complete set of file bytes ready to save. It understands three ways to provide a file: inline text, a workspace file reference, or a digest that keeps an already-stored file unchanged.
+**Purpose**: Captures the currently active trace as a standard `traceparent` header. A traceparent is a small text value that lets another piece of work join the same trace later.
 
-**Data flow**: It receives the tool context, skill name, and requested spec. First it loads any existing stored files so FileRef entries can be checked against their SHA-256 fingerprints. Then it gathers all {from: ...} workspace paths, reads them inside the sandbox, decodes the returned base64 content, and combines those bytes with inline strings and kept files. Finally, it verifies every file is UTF-8 text and returns the full path-to-bytes map.
+**Data flow**: It starts with an empty carrier dictionary, asks the trace context propagator to inject the current trace information into it, and returns the `traceparent` value if one was produced. If there is no valid active trace, it returns `None`.
 
-**Call relations**: SkillObjects.apply calls this before saving. This function is the careful middle step between a compact manifest and a safe stored skill: it calls SkillObjects._files to verify kept files, uses the sandbox to read workspace files, and calls _text so non-text files are rejected before UserSkillStore.save ever sees them.
-
-*Call graph*: calls 2 internal fn (_files, _text); called by 1 (apply); 6 external calls (b64decode, sha256, dumps, loads, quote, workspace_path).
+**Call relations**: This function is meant to be called when a turn is admitted or queued, so the trace link can be stored with that work. Later, `turn_span` can read that saved value and connect the new span back to the original trace.
 
 
-##### `_runtime_skills`  (lines 257–260)
+##### `turn_span`  (lines 128–151)
 
 ```
-async def _runtime_skills(ctx: ExtensionContext) -> tuple[RuntimeSkill, ...]
+def turn_span(turn_id: UUID, conversation_id: UUID, traceparent: str | None) -> Iterator[Span]
 ```
 
-**Purpose**: This supplies the current workspace’s saved user skills to the main system at turn time. It is what makes a saved skill show up later as something loadable.
+**Purpose**: Creates a trace span around one durable turn of work. A span is a timed section of a trace, like a chapter in the story of a request.
 
-**Data flow**: It receives the extension context. It opens the user skill store for the current workspace and returns all saved runtime skill records as a tuple.
+**Data flow**: It receives the turn ID, conversation ID, and an optional saved `traceparent`. It builds safe span attributes, including the ambient workspace when present, removes sensitive fields through `redact_payload`, extracts the parent trace context if a traceparent was provided, and starts a server-style span named `turn`. It yields that span to the code inside the `with` block, then closes it when the block ends.
 
-**Call relations**: The Manifest created by manifest() registers this as the runtime skills provider. On later turns, the core system calls it and merges these saved skills beside built-in and pack-provided skills.
+**Call relations**: It calls `_ambient_scope` to tag the span and `redact_payload` to keep attributes safe. It also uses OpenTelemetry’s tracer to make the span current, so logs emitted through `_emit_log` while the span is active can be correlated with it.
 
-*Call graph*: 1 external calls (__init__).
+*Call graph*: calls 2 internal fn (_ambient_scope, redact_payload); 2 external calls (get_tracer, cast).
 
 
-##### `manifest`  (lines 263–270)
+##### `redact_payload`  (lines 154–160)
 
 ```
-def manifest() -> Manifest
+def redact_payload(fields: Mapping[str, object]) -> dict[str, JsonValue]
 ```
 
-**Purpose**: This is the extension’s registration function. It tells the host system this extension’s name, version, object kind, teaching skill, and runtime skill provider.
+**Purpose**: Cleans a dictionary of fields before it is logged or attached to a trace. It removes fields whose names look sensitive, such as prompt, credential, secret, or token.
 
-**Data flow**: It takes no inputs. It builds and returns a Manifest containing the skill object definition, the bundled create-skill teaching skill path, and the function used to load saved user skills each turn.
+**Data flow**: It receives a mapping of field names to values. For each field, it normalizes the key by removing underscores and hyphens and lowercasing it, drops the field if the key is sensitive, and otherwise passes the value through `redact_value`. It returns a new JSON-like dictionary safe for telemetry.
 
-**Call relations**: The extension loader calls this at startup or extension discovery time. The returned Manifest is the package label and instruction sheet the host uses to wire this file’s object operations and runtime skill loading into the rest of the system.
+**Call relations**: It is used by `turn_span` for trace attributes and by `_emit_log` for log attributes. It also works together recursively with `redact_value` when nested dictionaries appear inside larger data.
 
-*Call graph*: 2 external calls (__init__, __init__).
+*Call graph*: calls 1 internal fn (redact_value); called by 3 (_emit_log, redact_value, turn_span).
 
 
-### `extensions/skill_create/ufo_ext_skill_create/store.py`
+##### `redact_value`  (lines 163–173)
 
-`domain_logic` · `request handling and turn startup`
+```
+def redact_value(value: object) -> JsonValue
+```
 
-A “skill” here is a small folder of files, usually led by `SKILL.md`, that teaches the agent a reusable behavior. This file is the storage cupboard for skills created by users inside one workspace. Without it, a skill made during one turn would disappear later, or worse, could leak into another workspace or pretend to be a built-in skill.
+**Purpose**: Turns an arbitrary Python value into a safe JSON-like value for telemetry. It preserves simple values, cleans nested containers, and stringifies unusual objects.
 
-The main class, `UserSkillStore`, works through the extension context, which gives it a database transaction. A transaction is a safe database session where related reads and writes happen together. When a skill is saved, the store first checks that the name is a simple lowercase slug, like `write-summary`, not a path or strange string. It then parses the skill using the same parser used for normal packaged skills, so user-created skills must meet the same rules. It also refuses names already used by core or pack skills, because a user skill must not “shadow” or replace trusted system skills.
+**Data flow**: It receives any object. If the object is already a simple JSON-style value, it returns it unchanged. If it is a mapping, it converts keys to strings and sends the nested dictionary through `redact_payload`. If it is a non-string sequence, it cleans each item. For anything else, it returns the object’s string form.
 
-For storage, the skill folder is turned into a JSON object whose file contents are base64 text. Base64 is a way to store raw bytes safely inside text. A SHA-256 digest, like a fingerprint, records the exact saved bundle. On each turn, `load_all` reads the workspace’s saved skills, decodes them, parses them again, and returns only the ones that still load. If one saved skill is corrupt, it is logged and skipped instead of breaking the whole workspace.
+**Call relations**: It is called by `redact_payload` for each non-sensitive field. When it sees a nested dictionary, it calls `redact_payload` again, so redaction applies at every depth rather than only at the top level.
+
+*Call graph*: calls 1 internal fn (redact_payload); called by 1 (redact_payload).
+
+
+##### `log`  (lines 176–181)
+
+```
+def log(event: str, **fields: object) -> None
+```
+
+**Purpose**: Writes a normal informational structured log event. Use it for routine events that are useful to understand what happened but are not warnings or errors.
+
+**Data flow**: It receives an event name and any extra fields. It passes them to `_emit_log` with information-level severity, so they are redacted, tagged with the current workspace, and sent to both Python logging and OpenTelemetry logging.
+
+**Call relations**: This is one of the public convenience wrappers around `_emit_log`. Code elsewhere can call `log` without needing to know the OpenTelemetry severity values or Python logging levels.
+
+*Call graph*: calls 1 internal fn (_emit_log).
+
+
+##### `log_error`  (lines 184–186)
+
+```
+def log_error(event: str, **fields: object) -> None
+```
+
+**Purpose**: Writes a structured error log event. Use it when something has gone wrong and should be visible as an error in monitoring tools.
+
+**Data flow**: It receives an event name and extra fields. It forwards them to `_emit_log` with error severity, where fields are combined with ambient workspace data, redacted, and emitted.
+
+**Call relations**: Like `log` and `warn`, this function funnels all actual log writing through `_emit_log`. That keeps redaction and workspace tagging consistent for error records.
+
+*Call graph*: calls 1 internal fn (_emit_log).
+
+
+##### `warn`  (lines 189–191)
+
+```
+def warn(event: str, **fields: object) -> None
+```
+
+**Purpose**: Writes a structured warning log event. Use it for expected but notable situations that an operator may want to notice.
+
+**Data flow**: It receives an event name and extra fields. It sends them to `_emit_log` with warning severity, which produces the final redacted structured log record.
+
+**Call relations**: This is the warning-level wrapper around `_emit_log`. It gives callers a simple way to mark an event as important without duplicating the shared logging steps.
+
+*Call graph*: calls 1 internal fn (_emit_log).
+
+
+##### `_emit_log`  (lines 194–208)
+
+```
+def _emit_log(event: str, severity_number: SeverityNumber, severity_text: str, level: int, fields: Mapping[str, object]) -> None
+```
+
+**Purpose**: Performs the actual structured log emission for info, warning, and error events. It is the central checkpoint where workspace context is added and sensitive data is removed.
+
+**Data flow**: It receives an event name, OpenTelemetry severity information, a Python logging level, and caller-supplied fields. It adds the ambient workspace fields, redacts the combined payload, writes a Python log record under the `ufo` logger, and emits an OpenTelemetry log record with the same event and attributes.
+
+**Call relations**: It is called by `log`, `warn`, and `log_error`, which choose the severity. It calls `_ambient_scope` for automatic workspace labels and `redact_payload` for safety before handing the event to Python logging and OpenTelemetry.
+
+*Call graph*: calls 2 internal fn (_ambient_scope, redact_payload); called by 3 (log, log_error, warn); 2 external calls (getLogger, get_logger).
+
+
+##### `emit_metric`  (lines 211–219)
+
+```
+def emit_metric(name: str, amount: int=1, **dimensions: str) -> None
+```
+
+**Purpose**: Increments one of the project’s approved counter metrics. A counter is a number that only goes up, useful for tracking how often important events happen.
+
+**Data flow**: It receives a metric name, an amount to add, and optional text dimensions that describe the count. It first checks the name against the approved metric list and raises an error if the name is unknown. For a known name, it reuses an existing OpenTelemetry counter or creates it the first time, then adds the amount with the given dimensions.
+
+**Call relations**: This function is the public metric entry point for the rest of the system. It talks directly to OpenTelemetry’s meter and keeps a local cache of counters so repeated metric updates do not recreate the same counter.
+
+*Call graph*: 1 external calls (get_meter).
+
+
+### Process supervision
+Runtime instance orchestration keeps server processes visible, recovers work from dead processes, and propagates cancellations to child work.
+
+### `core/src/ufo/runtime_instance.py`
+
+`orchestration` · `startup, main loop, shutdown`
+
+This file is the fleet’s safety patrol. Each server process writes a small database row saying “I am here,” then keeps updating that row every few seconds like a heartbeat. Other processes use those fresh heartbeats to tell which workers are alive. If a process dies, its heartbeat stops getting updated; after a short stale period, its unfinished DBOS workflows can be safely recovered and sent back through the durable work system. DBOS is the workflow engine here: it records work so it can resume after crashes instead of losing progress.
+
+The file also runs a cancellation reconciler. Cancelling one turn only marks that turn as cancelled. But turns can spawn child turns, like branches from a tree. The reconciler periodically looks for live descendants under any cancelled ancestor and cancels them too. This makes cancellation eventually reach the whole branch, even if the original canceller crashed halfway through.
+
+The important idea is caution. A live process must never have its work “recovered” by another process, because that could start duplicate work. So recovery only touches executors whose heartbeat is missing or stale. Each loop logs temporary failures and keeps going, because these background jobs are meant to survive brief database or workflow-system problems.
 
 #### Function details
 
-##### `UserSkillStore.save`  (lines 86–147)
+##### `record_fleet_seat`  (lines 38–53)
 
 ```
-async def save(self, workspace_id: UUID, name: str, files: Mapping[str, bytes], registry_names: frozenset[str]) -> RuntimeSkill
+async def record_fleet_seat(instance_id: UUID) -> None
 ```
 
-**Purpose**: Saves a user-authored skill for one workspace after checking that it is safe and valid. It is used when the agent or user has produced a skill folder that should survive future turns.
+**Purpose**: Creates the database row that represents this running server process before the workflow system starts. This makes the process visible as alive so other processes do not mistake its future work for abandoned work.
 
-**Data flow**: It receives a workspace ID, the desired skill name, a map of file paths to file bytes, and the names of skills already available this turn. It checks the name, parses the files into a runtime skill, checks whether the workspace already owns that name, refuses collisions with built-in or pack skills, and enforces the workspace skill limit for new names. It then base64-encodes the files, stores the bundle as JSON, creates a SHA-256 fingerprint for it, and either updates the existing database row or inserts a new one. It returns the parsed skill that was just saved.
+**Data flow**: It receives this process’s unique instance id. It opens a database transaction, inserts a runtime instance row with no workspace attached, stamps the current time as its heartbeat and creation time, then writes a log entry saying the fleet seat was recorded.
 
-**Call relations**: This is the main write path for the store. During saving it asks `_owns` whether this workspace already has the skill name, and asks `_count` how many saved skills the workspace has before allowing a new one. It hands the raw files to the shared skill parser so saved user skills follow the same rules as other skills, then writes the final bundle through the extension database transaction.
+**Call relations**: This is the first part of the liveness story. It uses the shared database transaction helper to write the seat, and later the Heartbeat methods keep that same row fresh or remove it at shutdown.
 
-*Call graph*: calls 2 internal fn (_count, _owns); 9 external calls (__init__, __init__, __init__, __init__, b64encode, sha256, insert, update, parse_skill_content).
-
-
-##### `UserSkillStore.load_all`  (lines 149–186)
-
-```
-async def load_all(self, workspace_id: UUID) -> tuple[RuntimeSkill, ...]
-```
-
-**Purpose**: Loads every saved user skill for a workspace so the runtime can include them in the skill registry for the current turn. It keeps one broken saved skill from stopping all other skills from working.
-
-**Data flow**: It receives a workspace ID and reads all saved skill names and stored content for that workspace from the database. For each row, it validates the stored JSON shape, decodes each base64 file back into bytes, and parses the files into a runtime skill. Valid skills are collected and returned as a tuple; invalid or corrupt stored skills are logged and skipped.
-
-**Call relations**: This is the read path used when the system is preparing the workspace’s available skills for a turn. It relies on the same parser used by saving, so loaded skills are checked again before use. If parsing fails, it does not pass the error upward; it logs the problem and continues so the rest of the workspace can still run.
-
-*Call graph*: 3 external calls (b64decode, select, parse_skill_content).
+*Call graph*: 3 external calls (insert, owner_tx, log).
 
 
-##### `UserSkillStore.files`  (lines 188–203)
+##### `Heartbeat.run`  (lines 66–76)
 
 ```
-async def files(self, workspace_id: UUID, name: str) -> dict[str, bytes] | None
+async def run(self) -> None
 ```
 
-**Purpose**: Fetches the original file bundle for one saved skill. This is useful when something needs to inspect, edit, or display the saved skill’s actual files rather than just load it as a runtime skill.
+**Purpose**: Runs forever, refreshing this process’s heartbeat at a fixed interval. If one database update fails, it logs the problem and keeps trying so a brief database hiccup does not make a healthy process look dead.
 
-**Data flow**: It receives a workspace ID and skill name, then looks up that exact saved skill in the database. If no row exists, it returns `None`. If a row exists, it validates the stored JSON, decodes each base64 file body back into bytes, and returns a dictionary from file path to file bytes.
+**Data flow**: It takes the Heartbeat object’s instance id as stored state. On each loop it calls Heartbeat.beat to update the database row, catches database errors, logs them, waits a short time, and repeats without returning.
 
-**Call relations**: This function is a focused lookup helper for callers that need one skill’s stored files. Unlike `load_all`, it does not parse the files into a runtime skill; it simply reconstructs the saved folder contents from storage.
+**Call relations**: This is the continuous driver for Heartbeat.beat. It is meant to run beside the server while the process is alive, so ExecutorRecovery can later compare fresh heartbeat rows against pending workflow executors.
 
-*Call graph*: 2 external calls (b64decode, select).
-
-
-##### `UserSkillStore.delete`  (lines 205–212)
-
-```
-async def delete(self, workspace_id: UUID, name: str) -> None
-```
-
-**Purpose**: Removes one saved user skill from a workspace. It is used when a user or tool wants a skill to stop being available in future turns.
-
-**Data flow**: It receives a workspace ID and skill name. It opens a database transaction and deletes the row matching both values. It does not return a value, and deleting a missing skill simply leaves the database unchanged.
-
-**Call relations**: This is the cleanup path for the store. Other save and load operations use the same workspace-and-name key, so deleting that row means later calls such as `load_all`, `files`, or `timestamps` will no longer find that skill.
-
-*Call graph*: 1 external calls (delete).
+*Call graph*: calls 1 internal fn (beat); 2 external calls (sleep, log).
 
 
-##### `UserSkillStore.timestamps`  (lines 214–224)
+##### `Heartbeat.beat`  (lines 78–88)
 
 ```
-async def timestamps(self, workspace_id: UUID, name: str) -> tuple[datetime, datetime] | None
+async def beat(self) -> None
 ```
 
-**Purpose**: Looks up when a saved skill was first created and when it was last updated. This is useful for showing history or deciding whether a saved skill has changed.
+**Purpose**: Writes one fresh liveness stamp for this process. It is the actual database update behind the heartbeat loop.
 
-**Data flow**: It receives a workspace ID and skill name, then asks the database for that row’s creation and update times. If the skill is missing, it returns `None`. If present, it returns the two timestamps as a pair.
+**Data flow**: It reads the Heartbeat object’s instance id. It opens a database transaction and updates that runtime instance row’s heartbeat and updated timestamps to the current database time. It does not return data; the database row is the output.
 
-**Call relations**: This is a small read helper alongside `files`. It uses the same workspace-scoped lookup as the rest of the store, so it only reports dates for a skill owned by that workspace.
+**Call relations**: Heartbeat.run calls this on every tick. The rows it refreshes are later read by ExecutorRecovery._live_executors to decide which executors are still alive and must not be recovered.
 
-*Call graph*: 1 external calls (select).
-
-
-##### `UserSkillStore._count`  (lines 226–234)
-
-```
-async def _count(self, workspace_id: UUID) -> int
-```
-
-**Purpose**: Counts how many user skills are currently saved in one workspace. It exists to enforce the limit that keeps each turn from becoming slow because too many saved skills must be loaded and parsed.
-
-**Data flow**: It receives a workspace ID, queries the database for the number of rows belonging to that workspace, and returns that number as an integer. It does not change stored data.
-
-**Call relations**: `save` calls this before adding a brand-new skill. If the count is already at the maximum, `save` refuses the new skill instead of letting the workspace grow without bound.
-
-*Call graph*: called by 1 (save); 1 external calls (select).
+*Call graph*: called by 1 (run); 2 external calls (update, owner_tx).
 
 
-##### `UserSkillStore._owns`  (lines 236–246)
+##### `Heartbeat.retire`  (lines 90–96)
 
 ```
-async def _owns(self, workspace_id: UUID, name: str) -> bool
+async def retire(self) -> None
 ```
 
-**Purpose**: Checks whether a workspace already has a saved skill with a given name. This helps distinguish between updating the workspace’s own skill and trying to override a core or pack skill.
+**Purpose**: Removes this process’s runtime instance row during a graceful shutdown. This tells peers immediately that the seat is gone instead of making them wait for the heartbeat to become stale.
 
-**Data flow**: It receives a workspace ID and skill name, searches the database for a matching row, and returns `true` if one exists or `false` if not. It only reads data.
+**Data flow**: It reads the Heartbeat object’s instance id. It opens a database transaction and deletes the matching runtime instance row. It returns nothing, but changes the shared liveness table.
 
-**Call relations**: `save` calls this early in the save process. If the workspace already owns the name, saving is treated as an update. If it does not own the name and that name is already in the current registry, `save` treats it as a collision with a trusted skill and refuses it.
+**Call relations**: The server shutdown path calls this through core/src/ufo/serve._stop_executor. After it runs, ExecutorRecovery._live_executors will no longer see this executor as alive.
 
-*Call graph*: called by 1 (save); 1 external calls (select).
+*Call graph*: called by 1 (_stop_executor); 2 external calls (delete, owner_tx).
+
+
+##### `ExecutorRecovery.run`  (lines 116–122)
+
+```
+async def run(self) -> None
+```
+
+**Purpose**: Runs the recovery sweep forever on a timer. Its job is to keep checking for workflow work that was assigned to processes that are no longer alive.
+
+**Data flow**: It uses the configured interval from the ExecutorRecovery object. Each cycle it sleeps, calls ExecutorRecovery.sweep, logs database or DBOS workflow errors if they happen, and then continues looping.
+
+**Call relations**: This is the background driver for ExecutorRecovery.sweep. Every server process can run it, so any surviving process can help recover work left behind by a crashed peer.
+
+*Call graph*: calls 1 internal fn (sweep); 2 external calls (sleep, log).
+
+
+##### `ExecutorRecovery.sweep`  (lines 124–132)
+
+```
+async def sweep(self) -> None
+```
+
+**Purpose**: Finds workflow executors that have pending work but no fresh heartbeat, then asks DBOS to recover that work. This prevents queued or half-dispatched work from staying stuck after a process crash.
+
+**Data flow**: It asks ExecutorRecovery._pending_executors for executor ids attached to pending workflows, and ExecutorRecovery._live_executors for executor ids with fresh runtime rows. It subtracts live executors from pending executors. For each remaining stranded executor, it calls DBOS recovery in a worker thread and logs how many workflows were recovered.
+
+**Call relations**: ExecutorRecovery.run calls this repeatedly. It relies on Heartbeat.beat keeping live rows fresh, and hands stranded executor ids to DBOS._recover_pending_workflows so the durable workflow system can re-dispatch them safely.
+
+*Call graph*: calls 2 internal fn (_live_executors, _pending_executors); called by 1 (run); 2 external calls (to_thread, log).
+
+
+##### `ExecutorRecovery._pending_executors`  (lines 134–146)
+
+```
+async def _pending_executors(self) -> set[str]
+```
+
+**Purpose**: Looks in DBOS for executors that currently own pending workflows. These are candidates for recovery, but only if their executor is not still alive.
+
+**Data flow**: It asks DBOS to list pending workflows, without loading large input or output payloads. It warns in the log if the scan hits the configured limit, then extracts and returns the set of executor ids found on those pending workflow records.
+
+**Call relations**: ExecutorRecovery.sweep calls this before comparing against live executors. Its result is only half the decision: ExecutorRecovery._live_executors supplies the safety check that prevents recovering work from a process that is still running.
+
+*Call graph*: called by 1 (sweep); 2 external calls (to_thread, log).
+
+
+##### `ExecutorRecovery._live_executors`  (lines 148–158)
+
+```
+async def _live_executors(self) -> set[str]
+```
+
+**Purpose**: Reads the database to find executor ids whose heartbeat is still fresh. These executors are considered alive and their workflows must not be recovered by another process.
+
+**Data flow**: It computes a cutoff time by subtracting the allowed stale age from the current time. It queries runtime instance rows whose heartbeat is newer than that cutoff, converts their ids to strings, and returns them as a set.
+
+**Call relations**: ExecutorRecovery.sweep calls this alongside ExecutorRecovery._pending_executors. The difference between the two sets is what tells the sweep which pending workflow owners are truly stranded.
+
+*Call graph*: called by 1 (sweep); 4 external calls (now, timedelta, select, owner_tx).
+
+
+##### `CancelReconciler.run`  (lines 182–188)
+
+```
+async def run(self) -> None
+```
+
+**Purpose**: Runs the cancellation reconciliation loop forever. It periodically checks whether any live child or grandchild turns should be cancelled because an ancestor turn was cancelled.
+
+**Data flow**: It uses the reconciler’s interval setting. Each cycle it sleeps, calls CancelReconciler.sweep, logs database or DBOS errors if they happen, and continues looping.
+
+**Call relations**: This is the timed driver for CancelReconciler.sweep. Every server process can run it, so cancellation cleanup does not depend on the original process that noticed or requested the cancellation.
+
+*Call graph*: calls 1 internal fn (sweep); 2 external calls (sleep, log).
+
+
+##### `CancelReconciler.sweep`  (lines 190–197)
+
+```
+async def sweep(self) -> None
+```
+
+**Purpose**: Finds live turns that sit underneath a cancelled ancestor and cancels them one by one. This is how cancellation spreads down a tree of spawned work.
+
+**Data flow**: It opens a database transaction and runs the query built by CancelReconciler._orphans_query. For each matching turn, it enters that turn’s workspace context, calls cancel_one_turn with the DBOS client and turn id, and logs when a turn was actually cancelled.
+
+**Call relations**: CancelReconciler.run calls this on each interval. It depends on CancelReconciler._orphans_query to identify descendants needing cancellation, then hands each turn to ufo.cancellation.cancel_one_turn so cancellation uses the same safe primitive as direct turn cancellation.
+
+*Call graph*: calls 1 internal fn (_orphans_query); called by 1 (run); 4 external calls (cancel_one_turn, owner_tx, log, ws).
+
+
+##### `CancelReconciler._orphans_query`  (lines 199–234)
+
+```
+def _orphans_query(self) -> sa.Select
+```
+
+**Purpose**: Builds the database query that finds every non-finished turn with a cancelled ancestor. It climbs parent links, so it catches not only direct children but also deeper descendants.
+
+**Data flow**: It starts from turns whose status is still non-terminal, then constructs a recursive SQL query. The query repeatedly follows parent_turn_id upward until it finds a cancelled ancestor or runs out of parents, and returns each matching live turn id with its workspace id.
+
+**Call relations**: CancelReconciler.sweep calls this to decide what needs cancellation. The query only identifies the orphaned live turns; the sweep then performs the actual cancellation through cancel_one_turn.
+
+*Call graph*: called by 1 (sweep); 1 external calls (select).

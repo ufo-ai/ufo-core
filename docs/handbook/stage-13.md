@@ -1,474 +1,408 @@
-# Source synchronization, page change processing, indexing, search, memory, and graph enrichment  `stage-13`
+# Live streaming, reply delivery, and artifact download  `stage-13`
 
-This stage is the system’s data intake and recall workshop. It runs mostly behind the scenes, either on scheduled source-sync jobs or when a page-change hook fires. Its job is to bring in information from outside tools, notice what changed, store the latest document text, remove deleted items, and prepare everything for search, memory, alerts, and graph-based lookup later.
+This stage is the system’s live delivery layer. It runs during an agent’s turn and after it finishes, making sure people watching in Slack, the web app, or a terminal can see progress, receive the final answer, and download any shared files. It is like the broadcast booth for the work loop.
 
-The provider-specific source connectors are the many “plugs” for services like Google, Microsoft, Slack, GitHub, Notion, Salesforce, and others. They translate each service’s records into one common format. The package marker file simply makes the source code importable. The backend file is the adapter bridge: it turns connector output into UFO pages, progress cursors, deletes, and snapshots. The sync file is the main engine: it pulls configured sources, saves changed text, records additions and removals, and hands changes onward.
+The central piece is the live message hub. It publishes updates such as generated text, tool activity, costs, and the final result while a turn is running. It also keeps a short history, so a screen that disconnects can resume from its last known point instead of losing the stream. The hub tail builds on this by combining those live messages with saved database state. That lets a late or reconnecting client catch up and still see a clean ending.
 
-The recall and enrichment parts then make the saved knowledge useful. Indexing splits text into searchable chunks and embeddings. Memory condenses important facts. The knowledge graph extracts people, places, and links. Alerts watch changed pages for topics that matter.
-
-## Sub-stages
-
-- [Provider-specific source connectors](stage-13.1.md) `stage-13.1` — 52 files
-- [Recall, indexing, memory consolidation, and graph extraction](stage-13.2.md) `stage-13.2` — 15 files
+For larger deployments, the Redis stream hub moves the same live updates through Redis Streams, a shared message pipe that multiple server processes can read from. Finally, the artifacts route protects file downloads with signed tokens, so shared links can fetch the actual stored file only when the link is valid.
 
 ## Files in this stage
 
-### Source sync orchestration
-Package setup, connector bridging, and the core sync engine translate external provider records into stored page changes ready for deletion, snapshotting, indexing, and search.
+### Turn stream tailing
+These files let clients follow an agent turn live, replay missed events after reconnecting, and finish with saved final state.
 
-### `core/src/ufo/sources/__init__.py`
+### `core/src/ufo/surfaces/hub_tail.py`
 
-`other` · `import/package discovery`
+`orchestration` · `request handling`
 
-This is an empty package marker file. In Python, a folder can be treated as an importable package when it has an `__init__.py` file. That means code elsewhere can refer to modules inside this directory using names like `ufo.sources.something` instead of relying on raw file paths. Think of it like a label on a drawer: the drawer may contain useful tools, but this label mainly tells Python, “this drawer belongs to the project and can be opened by name.” Because the file is empty, it does not set up any shared state, run startup code, or expose shortcuts for other modules. If it were missing, imports involving `ufo.sources` might fail or behave differently depending on the Python packaging setup.
+A “turn” produces live frames, such as text updates and final status. The tricky part is timing: a caller may start watching before the turn ends, after it ends, or after missing some live messages. This file solves that by listening to two sources at once. One source is the hub, an in-memory broadcaster for live updates. The other is the database, which is the durable record of whether the turn has finished or is parked. “Parked” means the turn is paused rather than truly finished, for example because a spending cap was hit.
 
+The main flow is like watching a race with both a live announcer and an official scoreboard. The hub gives quick live updates, while the database is the scoreboard that cannot be missed. `tail_frames` starts both a hub listener and a polling task. If a terminal or parked frame appears from either path, the stream ends. If the hub drops a frame because a queue is full, correctness is still protected because the database poll will eventually see the final or parked state.
 
-### `core/src/ufo/sources/backend.py`
-
-`orchestration` · `source sync run`
-
-Connectors know how to talk to outside tools, such as GitHub or Zendesk, and they return records in pages. UFO's sync engine wants one clear result per run: pages to save, a cursor for where to continue next time, and possibly records to delete. This file translates between those two worlds.
-
-The main piece is `ConnectorBackend`. For one configured account and one connector stream, it asks the auth proxy for a credential, finds the requested stream, calls the connector, and turns each provider record into a UFO `Page`. A `Page` is a recallable stored item with a stable reference, text body, digest, title, and timestamps.
-
-The file also protects sync jobs from running forever. Incremental streams are capped at a fixed number of records per run. If the connector gives a real checkpoint cursor, UFO stores it. If not, this adapter stores its own small resume envelope that says, in effect, “start from the old place, skip the records already consumed, then continue.” This is like putting a bookmark plus a count into a long stack of papers.
-
-Full snapshot streams are different. They are used to detect missing records, so they must read the whole collection; otherwise UFO might wrongly delete live data. The file is also careful not to expose credentials beyond the in-process sync job.
+The file also checks a special seat/admission case: if the speaker no longer has permission to continue, the parked message explains that the seat was revoked instead of showing the normal spend-cap message.
 
 #### Function details
 
-##### `ConnectorBackend.fetch`  (lines 106–195)
+##### `tail_frames`  (lines 27–53)
 
 ```
-async def fetch(self, config: ConnectorSourceConfig, cursor: str | None, auth: SourceAuth) -> SyncResult
+async def tail_frames(hub: Hub, turn_id: UUID, since: str='') -> AsyncIterator[tuple[str, LiveFrame]]
 ```
 
-**Purpose**: Runs one connector stream for one account and returns UFO's standard sync result. It is the main adapter method: it gets credentials, reads provider records, converts them into pages, tracks deletes, and decides where the next run should resume.
+**Purpose**: Streams all live frames for one turn until the turn reaches a finished or parked state. It is used by callers that need a reliable live view, including callers that reconnect and provide the last cursor they saw.
 
-**Data flow**: It starts with a source config, the previous cursor, and auth information. It asks the auth proxy for a credential, finds the requested stream, chooses the correct base URL, and decodes any UFO-made backfill cursor. Then it reads pages from the connector. Each record becomes a UFO `Page`; delete notices become stable delete references; cursor fields update the watermark. If the run reaches the incremental cap, it returns the pages collected so far plus either the connector's checkpoint or UFO's own skip-count envelope. If the stream finishes, it returns all collected pages, the final next cursor, any deletes, and whether this was a full snapshot.
+**Data flow**: It receives a hub, a turn ID, and optionally a cursor, which is a saved position in the stream. First it checks whether the hub can still resume from that cursor; if not, it starts from the retained beginning. It creates a shared queue, starts one background task to read live hub frames, and another to poll the database for the turn’s durable status. It first checks the database immediately; if the turn is already done or parked, it yields that ending frame and stops. Otherwise it yields frames from the queue until a terminal or parked frame appears, then cancels the background tasks.
 
-**Call relations**: The sync driver calls this when it wants to pull one configured connector source. Inside the run, it relies on `_stream` to pick the stream, `_decode_cursor` to understand UFO's own resume state, `_page` to convert each record, and `_max_str` to advance a simple string watermark. If a provider does not advance its checkpoint for too long, it emits a warning before returning a safe resume cursor instead of letting the worker spin forever.
+**Call relations**: This is the central routine used by `HubTailer.tail`. It calls `_pump` to bring in live hub messages, `_poll_status` to keep checking the saved turn state, and `turn_status_frame` to detect whether the stream should end. It also asks the hub whether a reconnect cursor is still covered before deciding where to resume.
 
-*Call graph*: calls 4 internal fn (_decode_cursor, _page, _stream, _max_str); 4 external calls (__init__, __init__, dumps, warn).
-
-
-##### `ConnectorBackend._stream`  (lines 197–201)
-
-```
-def _stream(self, name: str) -> StreamSpec
-```
-
-**Purpose**: Finds the connector stream named in the source configuration. This prevents a sync from silently running the wrong stream when the configuration contains a bad name.
-
-**Data flow**: It receives a stream name, looks through the streams exposed by the connector, and returns the matching stream specification. If none match, it stops with an error that names both the connector and the missing stream.
-
-**Call relations**: `ConnectorBackend.fetch` calls this near the start of a run, before any provider records are fetched. The returned stream specification tells the rest of the run which primary key, cursor field, timestamp fields, and delete behavior to use.
-
-*Call graph*: called by 1 (fetch).
+*Call graph*: calls 4 internal fn (covers, _poll_status, _pump, turn_status_frame); called by 1 (tail); 3 external calls (Queue, ensure_future, gather).
 
 
-##### `ConnectorBackend._decode_cursor`  (lines 204–221)
+##### `_pump`  (lines 56–63)
 
 ```
-def _decode_cursor(cursor: str | None) -> '_BackfillEnvelope | None'
+async def _pump(hub: Hub, turn_id: UUID, since: str, frames: asyncio.Queue[tuple[str, LiveFrame]]) -> None
 ```
 
-**Purpose**: Recognizes the special resume cursor that this adapter writes for capped backfills without native connector checkpoints. It leaves all other cursors alone so connector-specific cursor formats still pass through unchanged.
+**Purpose**: Copies live frames from the hub subscription into the shared queue used by the main tailing loop. It is the live-announcer side of the system.
 
-**Data flow**: It receives the stored cursor text, if any. If the cursor is missing, not JSON, not a JSON object, or does not contain the reserved `ufo_backfill` key, it returns nothing, meaning the cursor should be treated as ordinary connector state. If the reserved key is present, it validates the contained origin, skip count, and watermark. A malformed UFO envelope becomes a runtime error because this adapter is supposed to be the only writer of that format.
+**Data flow**: It receives the hub, the turn ID, the starting cursor, and the queue. It subscribes to the hub for that turn, then places each incoming cursor-and-frame pair into the queue. If something goes wrong while listening, it records a log message and stops rather than crashing the caller directly.
 
-**Call relations**: `ConnectorBackend.fetch` calls this only for incremental streams. The result tells `fetch` whether to resume normally from the connector cursor or to re-drive from an older origin and skip already-consumed records.
+**Call relations**: `tail_frames` starts this as a background task. `_pump` depends on the hub’s `subscribe` stream for live updates and feeds those updates back to `tail_frames` through the queue. Its log entry helps operators notice if the live path failed, while the polling path can still protect the final result.
 
-*Call graph*: called by 1 (fetch); 1 external calls (loads).
-
-
-##### `ConnectorBackend._page`  (lines 223–249)
-
-```
-def _page(self, stream: StreamSpec, record: dict[str, Any]) -> Page
-```
-
-**Purpose**: Turns one raw provider record into UFO's stored page format. This gives every record a stable identity, searchable body text, checksum, stream name, title, and normalized timestamps.
-
-**Data flow**: It receives the stream specification and one record dictionary. It gets a stable record reference, asks the connector to render the record into a title and body, extracts created and updated timestamps, hashes the body to make a digest, and returns a `Page` object ready for the sync result.
-
-**Call relations**: `ConnectorBackend.fetch` calls this for every record that should be landed in UFO. `_page` delegates the identity choice to `_record_ref` and timestamp cleanup to `_record_timestamp`, then hands the completed page back to `fetch` so it can be included in the final `SyncResult`.
-
-*Call graph*: calls 2 internal fn (_record_ref, _record_timestamp); called by 1 (fetch); 2 external calls (__init__, sha256).
+*Call graph*: calls 1 internal fn (subscribe); called by 1 (tail_frames); 1 external calls (log).
 
 
-##### `_record_timestamp`  (lines 252–283)
+##### `_poll_status`  (lines 66–75)
 
 ```
-def _record_timestamp(record: dict[str, Any], field: str | None, *, connector: str, stream: str) -> str | None
+async def _poll_status(turn_id: UUID, frames: asyncio.Queue[tuple[str, LiveFrame]]) -> None
 ```
 
-**Purpose**: Extracts and normalizes a timestamp from a provider record, or returns nothing if the timestamp is missing or unusable. This keeps stored page dates in one expected format even when providers send dates in different shapes.
+**Purpose**: Periodically checks the database to see whether the turn has finished or become parked. This is the safety net that makes the stream reliable even if the live hub missed something.
 
-**Data flow**: It receives a record, the timestamp field name, and labels for the connector and stream. If no field is configured, it returns nothing. Otherwise it reads the value directly or through a nested path, accepts strings and non-boolean integers, and passes them through the timestamp normalizer. If the value cannot be normalized, it logs a warning and returns nothing rather than storing a bad date.
+**Data flow**: It receives the turn ID and the shared queue. Once per polling interval, it asks `turn_status_frame` whether the saved turn state now has an ending frame. If there is no ending state yet, it keeps waiting. When it finds a terminal or parked frame, it puts that frame into the queue with an empty cursor and exits. If polling fails, it logs the problem.
 
-**Call relations**: `ConnectorBackend._page` calls this while building each stored page, once for the created time and once for the updated time. It uses `get_path` when the field is nested inside the record and the shared timestamp normalizer so pages across connectors use the same date style.
+**Call relations**: `tail_frames` starts this alongside `_pump`. While `_pump` listens to live messages, `_poll_status` watches the durable stored state. When `_poll_status` finds the stream-ending state, it hands it back through the same queue so `tail_frames` can yield it and stop cleanly.
 
-*Call graph*: called by 1 (_page); 3 external calls (warn, get_path, normalize_page_timestamp).
-
-
-##### `_record_ref`  (lines 286–290)
-
-```
-def _record_ref(stream: StreamSpec, record: dict[str, Any]) -> str
-```
-
-**Purpose**: Chooses the stable reference used to identify one provider record inside a stream. This is what lets an unchanged record, an updated record, and a delete notice all point to the same stored page.
-
-**Data flow**: It receives the stream specification and one record. If the configured primary key is a string or integer, it returns that value as text. If the primary key is missing or not a simple value, it hashes the whole record in a stable JSON order and returns that hash as a fallback reference.
-
-**Call relations**: `ConnectorBackend._page` calls this before creating a `Page`. The returned reference is combined with the stream name, so pages and delete markers use the same `stream/reference` shape throughout the sync flow.
-
-*Call graph*: called by 1 (_page); 2 external calls (sha256, dumps).
+*Call graph*: calls 1 internal fn (turn_status_frame); called by 1 (tail_frames); 2 external calls (sleep, log).
 
 
-##### `_max_str`  (lines 293–298)
+##### `turn_status_frame`  (lines 78–107)
 
 ```
-def _max_str(current: str | None, value: Any) -> str | None
+async def turn_status_frame(turn_id: UUID) -> LiveFrame | None
 ```
 
-**Purpose**: Keeps the largest string watermark seen so far. This is used for simple incremental streams where newer records can be tracked by a string cursor value such as an ISO timestamp.
+**Purpose**: Looks up the saved state of a turn and converts it into the frame that should end a stream, if one exists. It returns nothing while the turn is still queued or running.
 
-**Data flow**: It receives the current watermark and a candidate value from a record. If the candidate is not a string, it leaves the current watermark unchanged. If there is no current watermark, or the candidate sorts after it, it returns the candidate; otherwise it returns the current value.
+**Data flow**: It receives a turn ID and opens a workspace database transaction. It reads the turn’s status, saved terminal frame, workspace, speaker information, and admission details. If the turn does not exist, it returns nothing. If a terminal frame is stored, it validates that saved data and returns a `Terminal` live frame. If the turn is not parked, it returns nothing. If the turn is parked, it checks whether the relevant seat or admission gate is now absent or revoked; in that case it returns a parked frame with a seat-revoked message. Otherwise it returns a parked frame saying the turn is over a spend cap and can resume when the cap is raised.
 
-**Call relations**: `ConnectorBackend.fetch` calls this while reading records from streams with a cursor field. The updated watermark is later used as the next cursor when the connector does not provide a stronger native checkpoint.
+**Call relations**: Both `tail_frames` and `_poll_status` call this function. `tail_frames` uses it immediately so late subscribers can finish right away if the turn already ended. `_poll_status` uses it repeatedly as the durable fallback. Internally it relies on database access, terminal-frame validation, and seat/admission helpers to decide which final message is truthful.
 
-*Call graph*: called by 1 (fetch).
+*Call graph*: called by 2 (_poll_status, tail_frames); 8 external calls (__init__, __init__, __init__, model_validate, select, workspace_tx, gate_member, seat_gate_absent).
 
 
-### `core/src/ufo/sources/sync.py`
+##### `HubTailer.tail`  (lines 119–120)
 
-`orchestration` · `startup registration, scheduled sync polling, and downstream index replay`
+```
+def tail(self, turn_id: UUID, since: str='') -> AsyncIterator[tuple[str, LiveFrame]]
+```
 
-This file turns outside content into stable “pages” inside the system. A source can be a local folder or an extension such as a SaaS connector. Each backend knows how to fetch its own documents and returns a clear result: the pages it saw, a cursor for resuming later, and any deletions. The sync driver then compares those fetched pages with what is already stored. If a page is new or its digest, meaning a fingerprint of its content, has changed, the driver writes the body to the blob store and updates the database row. If only browse details like title changed, it updates just those details. If a full snapshot no longer contains a page, or a delta source explicitly reports a deletion, the page is tombstoned, meaning marked as removed rather than simply forgotten. The file also prevents duplicate work by claiming due sources before syncing them, like putting a sticky note on a task so another worker does not grab it. Failures are rescheduled with backoff, while intentional skips, such as missing permissions, do not erase existing pages. Finally, CorePageFeed lets an indexer replay changed pages in a safe order using a cursor, so downstream search can catch up without missing changes.
+**Purpose**: Provides a small object-oriented wrapper around `tail_frames` for code that is given a `HubTailer` instead of importing the hub-tail module directly. It lets surface code ask for a turn stream through a simple method.
+
+**Data flow**: It receives a turn ID and optional cursor. It uses the `Hub` stored on the `HubTailer` instance and passes everything to `tail_frames`. The result is the same asynchronous stream of cursor-and-frame pairs produced by `tail_frames`.
+
+**Call relations**: Surface code calls this method when it needs to tail a turn. The method does not add new behavior; it hands the work to `tail_frames`, keeping the hub dependency tucked behind the `HubTailer` object.
+
+*Call graph*: calls 1 internal fn (tail_frames).
+
+
+### `core/src/ufo/hub.py`
+
+`io_transport` · `request handling / live turn streaming`
+
+This file solves the problem of showing live progress without making the agent wait for every viewer. Think of it like a small radio station for each turn: the agent broadcasts frames, and any surface that is listening receives them. If a listener is slow, the hub drops that listener’s oldest waiting frame rather than blocking the broadcast.
+
+The frames are small updates such as streamed text, a final terminal frame, a spend update, a tool call announcement, or a skill-load announcement. Each published frame gets a simple increasing cursor, like ticket number 1, 2, 3. A subscriber can later say “start after ticket 27,” and the hub replays any still-remembered frames after that point before sending new live frames.
+
+The main interface is `Hub`, which describes what any hub must do: publish, subscribe, and answer whether a cursor is still covered by its replay buffer. `InProcessHub` is the built-in version that works inside one running process. It uses a lock, which is a small gate that prevents two threads from changing the same shared state at the same time, because publishers and subscribers may run on different event loops. When a turn is finished and no one is listening, its stored stream is removed so memory does not grow forever.
 
 #### Function details
 
-##### `normalize_page_timestamp`  (lines 50–70)
+##### `Hub.publish`  (lines 75–75)
 
 ```
-def normalize_page_timestamp(value: str) -> str
+async def publish(self, turn_id: UUID, frame: LiveFrame) -> str
 ```
 
-**Purpose**: This function converts a timestamp from a source into one consistent UTC format. Sources may send times as Unix numbers, milliseconds, ISO strings, or dates, so this keeps the rest of the system from guessing.
+**Purpose**: This is the promised shape of a hub’s publish operation. Code uses it to send one live frame for a turn and get back the cursor assigned to that frame.
 
-**Data flow**: It receives a timestamp string. If the string is numeric, it treats it as seconds or milliseconds since 1970; otherwise it parses it as an ISO-style date/time and requires a timezone unless it is a plain date. It returns a UTC ISO timestamp with microseconds, or raises a clear error if the value cannot be trusted.
+**Data flow**: It takes a turn ID and a live frame, such as text, cost, or final status. A real hub implementation stores or forwards that frame, assigns it a cursor, and returns that cursor to the caller.
 
-**Call relations**: Page.normalize_timestamp calls this whenever a Page is built with created_at or updated_at. That means source backends can provide common timestamp shapes, while the database and page feed receive a consistent value.
+**Call relations**: The queue code calls this when it needs to publish a failed terminal result. In this file, `InProcessHub.publish` is the concrete built-in version that does the actual fan-out work.
 
-*Call graph*: called by 1 (normalize_timestamp); 2 external calls (fromisoformat, fromtimestamp).
-
-
-##### `Page.normalize_timestamp`  (lines 88–91)
-
-```
-def normalize_timestamp(cls, value: str | None) -> str | None
-```
-
-**Purpose**: This validator cleans up optional page timestamps before a Page object is accepted. It allows missing timestamps but standardizes any timestamp that is present.
-
-**Data flow**: It receives either None or a timestamp string from a fetched page. None passes through unchanged; a string is sent to normalize_page_timestamp. The output is either None or a normalized UTC timestamp string stored on the Page.
-
-**Call relations**: This runs as part of Page creation. It delegates the actual parsing rules to normalize_page_timestamp so every source uses the same timestamp behavior.
-
-*Call graph*: calls 1 internal fn (normalize_page_timestamp).
+*Call graph*: called by 1 (_commit_failed_terminal).
 
 
-##### `StreamSkipped.__init__`  (lines 123–125)
+##### `Hub.subscribe`  (lines 77–79)
 
 ```
-def __init__(self, reason: str) -> None
+def subscribe(self, turn_id: UUID, cursor: str='') -> AsyncIterator[tuple[str, LiveFrame]]
 ```
 
-**Purpose**: This creates a special error that means a source stream was intentionally skipped, not broken. It carries a human-readable reason, such as missing permissions or a plan limitation.
+**Purpose**: This is the promised shape of a hub’s subscribe operation. A surface uses it to receive frames for one turn, optionally starting after a cursor it has already seen.
 
-**Data flow**: It receives a reason string. It stores that reason on the exception and also passes it to the normal RuntimeError machinery. The result is an exception object the sync driver can recognize and treat differently from real failures.
+**Data flow**: It takes a turn ID and an optional cursor. A real hub implementation first sends remembered frames after that cursor, then keeps yielding new live frames as they arrive.
 
-**Call relations**: Many connector pagination flows raise this when a provider refuses access in an expected way. SyncDriver.run catches it and calls _skip, which reschedules normally without deleting pages or increasing the error count.
+**Call relations**: The hub tailing code calls this while pumping live frames to a surface. In this file, `InProcessHub.subscribe` is the concrete built-in version that combines replay with live delivery.
 
-*Call graph*: called by 49 (paginate, paginate, paginate, paginate, _org_stream, paginate, paginate, paginate, paginate, paginate (+15 more)).
-
-
-##### `SourceBackend.config_model`  (lines 159–159)
-
-```
-def config_model(self) -> type[ConfigT]
-```
-
-**Purpose**: This protocol property says every source backend must declare the shape of its configuration. It keeps source settings typed and validated instead of being an unchecked dictionary.
-
-**Data flow**: A backend provides a Pydantic model class, which is a validation class for structured data. The sync driver reads the source row’s stored config and validates it against that model before fetching.
-
-**Call relations**: SyncDriver._fetch relies on this property before calling the backend. FolderSource and extension backends provide concrete models so the driver can use all backends through the same interface.
+*Call graph*: called by 1 (_pump).
 
 
-##### `SourceBackend.fetch`  (lines 161–161)
+##### `Hub.covers`  (lines 81–81)
 
 ```
-async def fetch(self, config: ConfigT, cursor: str | None, auth: SourceAuth) -> SyncResult
+async def covers(self, turn_id: UUID, cursor: str) -> bool
 ```
 
-**Purpose**: This protocol method defines what every source backend must do: fetch documents for one source sync run. It is the contract between the core sync system and all source-specific connectors.
+**Purpose**: This is the promised shape of a check that tells whether the hub still has enough history to resume from a given cursor. It helps callers decide whether they can reconnect smoothly or must reload durable state instead.
 
-**Data flow**: It receives validated config, the last saved cursor if any, and SourceAuth containing workspace and credential access information. It returns a SyncResult containing fetched pages, a next cursor, deletions, and whether the result is a full snapshot.
+**Data flow**: It takes a turn ID and a cursor. A real hub implementation checks its retained replay history and returns true if the cursor is still within the kept range, otherwise false.
 
-**Call relations**: SyncDriver._fetch calls this on whichever backend matches the source row. FolderSource implements it locally, and extension backends implement it for external systems.
+**Call relations**: The surface tailing flow calls this before relying on replay. In this file, `InProcessHub.covers` is the built-in implementation that checks the in-memory replay ring.
 
-
-##### `FolderSource.fetch`  (lines 175–187)
-
-```
-async def fetch(self, config: SourceConfig, cursor: str | None, auth: SourceAuth) -> SyncResult
-```
-
-**Purpose**: This fetches all files from a configured local folder and turns each file into a Page. It is the built-in source backend for simple local-directory content.
-
-**Data flow**: It receives folder configuration, ignores the cursor because folders are scanned fully each time, and ignores auth because local files need no provider token. It reads files in a background thread, makes each file path the stable page key and title, hashes the file text into a digest, and returns a snapshot SyncResult.
-
-**Call relations**: SyncDriver._fetch can call this through the SourceBackend interface when a source row uses the folder backend. It uses FolderSource._read for disk access and produces Page and SyncResult objects for the driver to commit.
-
-*Call graph*: 5 external calls (__init__, __init__, to_thread, sha256, Path).
+*Call graph*: called by 1 (tail_frames).
 
 
-##### `FolderSource._read`  (lines 190–197)
+##### `_offer`  (lines 84–87)
 
 ```
-def _read(root: Path) -> tuple[tuple[str, str], ...]
+def _offer(queue: asyncio.Queue[tuple[str, LiveFrame]], item: tuple[str, LiveFrame]) -> None
 ```
 
-**Purpose**: This reads the actual files from a local source directory. It deliberately fails if the root folder is missing, so a temporary mount problem does not make the system think every document was deleted.
+**Purpose**: This helper puts a frame into one subscriber’s queue without ever waiting. If that subscriber is already backed up, it removes the oldest queued frame to make room for the newest one.
 
-**Data flow**: It receives a root Path. It checks that the root is a directory, walks all files under it in sorted order, reads each file as UTF-8 text, and returns pairs of relative file path and text content.
+**Data flow**: It receives a queue and a cursor-frame pair. If the queue is full, it discards one old item, then immediately inserts the new item; it returns nothing and only changes the queue.
 
-**Call relations**: FolderSource.fetch runs this in a worker thread so file reading does not block the async event loop. Its returned file list is then converted into Page objects.
-
-*Call graph*: 2 external calls (is_dir, rglob).
+**Call relations**: `InProcessHub.publish` schedules this helper on each subscriber’s event loop. That lets publishing stay fast and safe even when the subscriber is running on a different loop or thread.
 
 
-##### `source_row_id`  (lines 200–207)
+##### `InProcessHub.publish`  (lines 116–130)
 
 ```
-def source_row_id(workspace_id: UUID, backend: str, config: Mapping[str, object]) -> UUID
+async def publish(self, turn_id: UUID, frame: LiveFrame) -> str
 ```
 
-**Purpose**: This makes a repeatable ID for a source row from workspace, backend name, and configuration. It prevents the same configured source from being inserted again after a restart.
+**Purpose**: This sends one live frame to everyone currently subscribed to a turn and saves it in that turn’s replay buffer. It returns the new cursor so callers can remember how far the stream has advanced.
 
-**Data flow**: It receives a workspace ID, backend name, and config mapping. It serializes the config in a stable key order and feeds the combined information into UUID generation. The output is always the same UUID for the same source definition.
+**Data flow**: It receives a turn ID and a live frame. Under a lock, it creates the turn stream if needed, increases the sequence number, stores the frame in a bounded replay buffer, and copies the current subscriber list. After releasing the lock, it schedules delivery to each subscriber queue and returns the cursor string. If the frame ends the stream and nobody is listening, it deletes the turn’s in-memory stream.
 
-**Call relations**: register_sources calls this while creating configured sources at startup. Because the ID is deterministic, registration can safely run again without duplicating existing sources.
+**Call relations**: This is the concrete implementation behind the `Hub.publish` contract. It creates `_TurnStream` records as needed, uses a bounded deque as the replay ring, and hands each subscriber delivery off to `_offer` so slow subscribers do not block the publisher.
 
-*Call graph*: called by 1 (register_sources); 2 external calls (dumps, uuid5).
-
-
-##### `page_id_for`  (lines 210–213)
-
-```
-def page_id_for(source_id: UUID, source_ref: str) -> UUID
-```
-
-**Purpose**: This makes a repeatable ID for one page inside one source. It lets updates, refetches, and deletion reports all point to the same database row.
-
-**Data flow**: It receives a source ID and the page’s source_ref, which is the stable key from the backend. It combines them into a deterministic UUID. The output is the page row ID used throughout syncing.
-
-**Call relations**: SyncDriver._commit calls this for fetched pages and explicit deletes. That ensures the later write step updates or tombstones the correct page.
-
-*Call graph*: called by 1 (_commit); 1 external calls (uuid5).
+*Call graph*: 2 external calls (__init__, deque).
 
 
-##### `register_sources`  (lines 216–250)
+##### `InProcessHub.subscribe`  (lines 132–162)
 
 ```
-async def register_sources(configured: tuple[SourceEntry, ...]) -> None
+async def subscribe(self, turn_id: UUID, cursor: str='') -> AsyncIterator[tuple[str, LiveFrame]]
 ```
 
-**Purpose**: This creates database rows for sources listed in configuration. It runs at boot so configured sources are known to the sync scheduler.
+**Purpose**: This lets a surface follow one turn’s live stream. It first replays remembered frames after the supplied cursor, then waits for and yields new frames as they are published.
 
-**Data flow**: It receives configured source entries. If there are any, it opens a workspace transaction, finds the workspace ID, computes each deterministic source ID, checks whether it already exists, and inserts missing rows due for immediate sync.
+**Data flow**: It receives a turn ID and optional cursor. It creates a bounded queue for this subscriber, records the subscriber’s current event loop, registers the subscriber under the lock, and snapshots buffered frames newer than the cursor. It yields the replayed frames first, then repeatedly yields new queue items. When the caller stops listening, it removes the subscriber and deletes the turn stream if no subscribers remain.
 
-**Call relations**: It uses source_row_id to avoid duplicates. It is separate from the polling sync loop: it prepares source rows once, and SyncDriver later claims and syncs them.
+**Call relations**: This is the concrete implementation behind the `Hub.subscribe` contract used by the surface pumping code. It works with `InProcessHub.publish` through shared locked state: publish stores frames and fans them to registered queues, while subscribe registers a queue and reads both replayed and live frames without duplicating them.
 
-*Call graph*: calls 1 internal fn (source_row_id); 4 external calls (now, insert, select, workspace_tx).
-
-
-##### `SyncDriver.candidate_workspaces`  (lines 294–314)
-
-```
-async def candidate_workspaces(self) -> tuple[UUID, ...]
-```
-
-**Purpose**: This finds which workspaces currently have sources ready to sync. It lets the scheduler avoid opening work for workspaces with nothing due.
-
-**Data flow**: It reads the current time, queries source rows across ownership scope for due, non-removed, unclaimed or expired-claim sources, and returns distinct workspace IDs. It does not sync anything itself.
-
-**Call relations**: A higher-level dispatcher can call this before binding a workspace and running SyncDriver.run. It uses owner_tx because it needs a cross-workspace look, while actual sync writes happen under workspace transactions.
-
-*Call graph*: 4 external calls (now, or_, select, owner_tx).
+*Call graph*: 4 external calls (__init__, Queue, get_running_loop, deque).
 
 
-##### `SyncDriver.run`  (lines 316–339)
+##### `InProcessHub.covers`  (lines 164–172)
 
 ```
-async def run(self) -> None
+async def covers(self, turn_id: UUID, cursor: str) -> bool
 ```
 
-**Purpose**: This is the main per-workspace sync loop. It claims due sources, fetches each one, commits successful results, and reschedules failures or skips.
+**Purpose**: This tells a caller whether a given cursor is still inside the in-memory replay history for a turn. It is a quick safety check before trying to resume a live stream without gaps.
 
-**Data flow**: It creates a unique claim token, asks _claim_due for available sources, and processes them one by one. For each source it calls _fetch, then _commit; if a StreamSkipped is raised it logs and calls _skip; for other errors it logs and calls _release, clearing the cursor only for CursorExpired.
+**Data flow**: It receives a turn ID and cursor. If the cursor is empty, or the turn has no stored stream or buffer, it returns false. Otherwise it reads the oldest retained cursor under the lock and returns true when that oldest cursor is less than or equal to the requested cursor.
 
-**Call relations**: This ties together the driver’s private steps. It is the method the scheduler uses when a workspace has due source work.
-
-*Call graph*: calls 5 internal fn (_claim_due, _commit, _fetch, _release, _skip); 2 external calls (log, uuid4).
+**Call relations**: This is the concrete implementation behind the `Hub.covers` contract used by the surface tailing flow. It does not deliver frames itself; it only tells the caller whether `subscribe` can likely replay from the requested point.
 
 
-##### `SyncDriver._claim_due`  (lines 341–385)
+### Artifact downloads
+This route serves stored artifact bytes only through valid signed download links.
 
-```
-async def _claim_due(self, claim: str) -> tuple[ClaimedSource, ...]
-```
+### `core/src/ufo/surfaces/artifacts.py`
 
-**Purpose**: This reserves a batch of due sources for the current worker. Claiming prevents two workers from syncing the same source at the same time.
+`io_transport` · `request handling`
 
-**Data flow**: It receives a claim token, finds due source rows whose claims are empty or expired, optionally uses database row locking on Postgres, and writes the claim plus an expiration time. It returns ClaimedSource value objects containing the information needed to fetch.
+This file solves a simple but important problem: shared files need to be downloadable, but not publicly open to anyone who can guess a URL. It creates one FastAPI route, meaning one web endpoint, for artifact downloads. A token in the request acts like a temporary claim ticket. Without that ticket, or if the ticket is invalid, expired, or points to a missing file, the route refuses to send any bytes.
 
-**Call relations**: SyncDriver.run calls this first. The returned sources are then passed through _fetch and _commit, or to _release/_skip if something prevents normal completion.
+When a request comes in, the route reads two things from the running app: the blob store, which is where file contents live, and the artifact token secret, which is the private key used to check that the token was really created by this deployment. It then verifies the token against the current time. If verification succeeds, the token reveals which stored blob should be downloaded and, optionally, what filename the user should see.
 
-*Call graph*: called by 1 (run); 7 external calls (__init__, now, timedelta, or_, select, update, workspace_tx).
+Before streaming, the route checks that the blob still exists. This matters because it avoids opening a download stream for a file that is gone. If a filename is present, it prepares a browser-friendly download header, including safe encoding for names with special characters. Finally, it returns a streaming response, so the file is sent in chunks rather than loaded fully into memory. That is like pouring from a large container through a hose instead of carrying the whole container at once.
 
+#### Function details
 
-##### `SyncDriver._fetch`  (lines 387–393)
+##### `download`  (lines 26–53)
 
 ```
-async def _fetch(self, source: ClaimedSource) -> SyncResult
+async def download(request: Request, token: str='') -> StreamingResponse
 ```
 
-**Purpose**: This calls the correct backend for one claimed source. It also validates the stored source configuration before giving it to backend code.
+**Purpose**: This function serves a requested artifact file to the browser or client, but only after checking that the caller has a valid artifact token. It is used when someone follows a generated artifact link, such as a shared file link or a large attachment link.
 
-**Data flow**: It receives a ClaimedSource. It looks up the backend by name, validates the stored config with that backend’s config_model, builds SourceAuth with the workspace and optional auth proxy, and returns the backend’s SyncResult.
+**Data flow**: It receives the web request and an optional token string from the URL. It reads the blob store and token secret from the application state, rejects the request if the token is missing, checks the token against the current time, and uses the verified token to find the stored blob key and optional filename. If the blob does not exist, it returns a not-found error. If everything is valid, it builds download headers when needed and returns a streaming response that sends the blob contents in chunks.
 
-**Call relations**: SyncDriver.run calls this after claiming a source. It hands off source-specific work to FolderSource or an extension backend, while keeping the driver responsible for scheduling and commits.
+**Call relations**: This function is called by FastAPI when an HTTP GET request reaches the artifact download path. During that request, it relies on the artifact-token verifier to decide whether the link is trustworthy, asks the blob store whether the file exists and for a stream of its contents, and hands the resulting stream to FastAPI’s streaming response machinery so the network layer can send the file without loading it all into memory.
 
-*Call graph*: called by 1 (run); 1 external calls (__init__).
-
-
-##### `SyncDriver._commit`  (lines 395–432)
-
-```
-async def _commit(self, source: ClaimedSource, result: SyncResult) -> None
-```
-
-**Purpose**: This decides what changed after a backend fetch and prepares the database/blob updates. It avoids rewriting unchanged page bodies by comparing content digests.
-
-**Data flow**: It receives a claimed source and SyncResult. It loads prior page state, computes stable page IDs, compares each fetched page with existing digest and tombstone state, writes new or changed bodies to the blob store, separates metadata-only updates, computes explicit deletions, and passes all write instructions to _write.
-
-**Call relations**: SyncDriver.run calls this after _fetch succeeds. It uses _prior_pages for comparison, page_id_for for stable IDs, and _write for the actual database transaction.
-
-*Call graph*: calls 3 internal fn (_prior_pages, _write, page_id_for); called by 1 (run); 2 external calls (__init__, __init__).
+*Call graph*: 5 external calls (now, HTTPException, StreamingResponse, verify_artifact_token, quote).
 
 
-##### `SyncDriver._prior_pages`  (lines 434–466)
+### Redis stream hub
+This extension moves live turn updates through Redis Streams so streaming works across multiple server processes.
 
-```
-async def _prior_pages(self, source_id: UUID) -> dict[UUID, tuple[str, bool, PageBrowse]]
-```
+### `extensions/redis_hub/ufo_ext_redis_hub/stream_hub.py`
 
-**Purpose**: This loads the current database state for all pages belonging to one source. It gives _commit the comparison baseline it needs to detect real changes.
+`io_transport` · `live request streaming and reconnect replay`
 
-**Data flow**: It receives a source ID, queries page rows for that source, and builds a dictionary keyed by page ID. Each entry contains the stored digest, whether it is tombstoned, and browse metadata such as stream and title.
+This file is a live message hub. When a turn is producing an answer, it publishes small “frames” such as a text fragment, a tool call, or a final result into Redis, an external fast data store. A viewer can then subscribe to the same Redis stream and receive those frames in order.
 
-**Call relations**: SyncDriver._commit calls this before comparing fetched pages. The result determines whether pages need new body writes, metadata updates, or no work.
+The problem it solves is fan-out across processes. If one server process is doing the work and another server process is serving the browser connection, an in-memory queue would not be enough because the two processes cannot see each other’s memory. Redis acts like a shared noticeboard: publishers pin new frames to it, and subscribers read from it.
 
-*Call graph*: called by 1 (_commit); 3 external calls (__init__, select, workspace_tx).
+Each turn gets its own Redis Stream, like a separate timeline. Published frames are converted into a small JSON package with a kind label and the frame’s data. Subscribers read entries from a remembered cursor, so reconnecting clients can replay anything still kept in Redis. Old stream entries are trimmed and idle streams expire, because these frames are only for live display; the permanent final answer is stored elsewhere.
 
+One important detail is that Redis clients are kept separately per asyncio event loop. An asyncio event loop is the engine that runs async tasks. Sharing one Redis client across different loops can break, so this file creates the right client for the loop currently using it.
 
-##### `SyncDriver._write`  (lines 468–561)
+#### Function details
+
+##### `frame_payload`  (lines 53–56)
 
 ```
-async def _write(self, source: ClaimedSource, next_cursor: str | None, changed: list[ChangedPage], metadata: list[PageBrowse], fetched: list[UUID], deleted: list[UUID], snapshot: bool) -> None
+def frame_payload(frame: LiveFrame) -> dict[str, object]
 ```
 
-**Purpose**: This performs the final database updates for a successful sync. It inserts or updates changed pages, marks deletions, and schedules the source’s next normal sync.
+**Purpose**: Turns one live frame into a simple wire-friendly package. It records both what kind of frame it is and the frame’s data, so another process can rebuild the same type later.
 
-**Data flow**: It receives the source, next cursor, changed pages, metadata-only pages, fetched page IDs, deleted page IDs, and a snapshot flag. Inside one workspace transaction it upserts changed pages, updates metadata-only rows, tombstones explicit deletes, tombstones missing pages for snapshots, and clears the source claim while resetting errors.
+**Data flow**: It receives a LiveFrame object, such as a text delta or terminal frame. It looks up the frame’s kind name, asks the frame to turn its fields into JSON-safe data, and returns a dictionary containing the kind and data.
 
-**Call relations**: SyncDriver._commit calls this after it has worked out the change set. Its timestamp choices matter for CorePageFeed, which later reads pages in updated_at/id order and must not miss a quick rewrite.
+**Call relations**: When RedisStreamHub.publish is about to send a frame to Redis, it calls this function first. The result is then converted to JSON and written into the Redis Stream.
 
-*Call graph*: called by 1 (_commit); 6 external calls (now, timedelta, insert, select, update, workspace_tx).
-
-
-##### `SyncDriver._release`  (lines 563–587)
-
-```
-async def _release(self, source: ClaimedSource, cursor_reset: bool) -> None
-```
-
-**Purpose**: This frees a source claim after a real failure and schedules a retry later. It uses increasing delay so a repeatedly failing source does not hammer its provider or block other sources.
-
-**Data flow**: It receives the failed source and whether the cursor should be reset. It increments the error count, computes a capped exponential backoff, optionally clears the cursor, updates next_sync_at, and removes the claim.
-
-**Call relations**: SyncDriver.run calls this when _fetch or _commit raises an ordinary exception. CursorExpired is treated specially by passing cursor_reset as true, so the next run starts fresh.
-
-*Call graph*: called by 1 (run); 4 external calls (now, timedelta, update, workspace_tx).
+*Call graph*: called by 1 (publish); 1 external calls (model_dump).
 
 
-##### `SyncDriver._skip`  (lines 589–606)
+##### `frame_from_payload`  (lines 59–63)
 
 ```
-async def _skip(self, source: ClaimedSource) -> None
+def frame_from_payload(payload: dict[str, object]) -> LiveFrame
 ```
 
-**Purpose**: This frees a source claim after an intentional skip, such as missing permission for a stream. It does not treat the skip as a data failure.
+**Purpose**: Rebuilds a live frame from the small package that was stored in Redis. It checks the kind label so unknown or invalid frame types fail clearly instead of being misread.
 
-**Data flow**: It receives the skipped source. It updates the source row to run again at the normal interval, resets the error count, and clears the claim, while leaving the cursor and existing pages untouched.
+**Data flow**: It receives a dictionary read from JSON. It reads the kind, finds the matching frame model, validates the stored data against that model, and returns a LiveFrame object ready for the rest of the system to use.
 
-**Call relations**: SyncDriver.run calls this only after catching StreamSkipped. Because no pages are committed, snapshot deletion logic cannot accidentally remove existing content for a skipped stream.
+**Call relations**: RedisStreamHub.subscribe calls this after reading and decoding a Redis entry. It is the bridge from stored stream data back into the live frame objects that subscribers expect.
 
-*Call graph*: called by 1 (run); 4 external calls (now, timedelta, update, workspace_tx).
-
-
-##### `PageFeed.pages_changed_since`  (lines 642–642)
-
-```
-async def pages_changed_since(self, cursor: str | None, limit: int) -> PageBatch
-```
-
-**Purpose**: This protocol method defines how an indexer asks for changed pages. It is the read-side contract for replaying page updates after a cursor.
-
-**Data flow**: A caller provides an optional cursor and a limit. An implementation returns a PageBatch containing page changes and the next cursor to continue from.
-
-**Call relations**: CorePageFeed implements this protocol for the core page table and blob store. Extensions or indexers use the protocol rather than knowing the storage details.
+*Call graph*: called by 1 (subscribe); 1 external calls (cast).
 
 
-##### `CorePageFeed.pages_changed_since`  (lines 654–704)
+##### `_stream_id`  (lines 66–68)
 
 ```
-async def pages_changed_since(self, cursor: str | None, limit: int) -> PageBatch
+def _stream_id(entry_id: str) -> tuple[int, int]
 ```
 
-**Purpose**: This returns a small ordered batch of page changes for an indexer. It lets downstream indexing resume safely after the last processed page.
+**Purpose**: Converts a Redis Stream entry id into two numbers that can be compared safely. Redis ids look like a timestamp plus a sequence number, such as `123-0`.
 
-**Data flow**: It receives an optional cursor in the form changed-time plus page ID, and a requested limit. It queries page rows after that cursor in updated_at/id order, caps the batch size, reads each non-tombstoned body from the blob store, uses an empty body for tombstones, builds PageChange objects, and returns them with a cursor pointing at the last row.
+**Data flow**: It receives a stream entry id as text. It splits the id at the dash, converts the millisecond timestamp and sequence part into integers, and returns them as a pair.
 
-**Call relations**: Indexing code calls this through the PageFeed interface. It relies on SyncDriver._write updating page rows with strictly advancing timestamps, so replay can move forward without skipping changes.
+**Call relations**: RedisStreamHub.covers uses this helper when deciding whether a subscriber’s cursor is still inside the retained part of the stream. Comparing numeric pairs avoids mistakes that plain string comparison could make.
 
-*Call graph*: 8 external calls (__init__, __init__, fromisoformat, and_, or_, select, workspace_tx, UUID).
+*Call graph*: called by 1 (covers).
+
+
+##### `_stream_entries`  (lines 71–80)
+
+```
+def _stream_entries(batch: XReadResponse) -> list[StreamEntry]
+```
+
+**Purpose**: Extracts the actual stream entries from Redis’s `xread` response and checks that the response shape is the one this code expects. This prevents the code from quietly misreading a different Redis protocol format.
+
+**Data flow**: It receives the raw batch returned by Redis. If the batch is empty, it returns an empty list. If the batch is not the expected list shape, it raises an error. Otherwise it pulls out and returns the entries for the stream.
+
+**Call relations**: RedisStreamHub.subscribe calls this after every Redis `xread`. It gives the subscribe loop a clean list of entries to turn into live frames.
+
+*Call graph*: called by 1 (subscribe).
+
+
+##### `RedisStreamHub._client`  (lines 96–102)
+
+```
+def _client(self) -> Redis
+```
+
+**Purpose**: Returns a Redis client that is safe to use on the current async event loop. This matters because async Redis clients are tied to the loop that created them.
+
+**Data flow**: It looks at the currently running asyncio event loop. If this hub already has a Redis client for that loop, it returns it. If not, it creates a new client from the configured Redis URL, stores it for that loop, and returns it.
+
+**Call relations**: Publish, subscribe, and covers all call this before talking to Redis. It is the safeguard that lets background workflow code and web-serving code use the same hub object without sharing unsafe loop-bound connection state.
+
+*Call graph*: called by 3 (covers, publish, subscribe); 2 external calls (get_running_loop, from_url).
+
+
+##### `RedisStreamHub._stream`  (lines 104–105)
+
+```
+def _stream(self, turn_id: UUID) -> str
+```
+
+**Purpose**: Builds the Redis Stream name for a particular turn. This keeps all live frames for one turn in one predictable Redis location.
+
+**Data flow**: It receives a turn id, adds the configured stream prefix, and returns a stream name string like a namespaced address.
+
+**Call relations**: Publish, subscribe, and covers all call this when they need to write to, read from, or inspect the Redis Stream for a turn. It keeps naming consistent across the whole hub.
+
+*Call graph*: called by 3 (covers, publish, subscribe).
+
+
+##### `RedisStreamHub.publish`  (lines 107–114)
+
+```
+async def publish(self, turn_id: UUID, frame: LiveFrame) -> str
+```
+
+**Purpose**: Adds one live frame to the Redis Stream for a turn and returns the new stream cursor. A caller uses this whenever it wants subscribers to see a new piece of live progress.
+
+**Data flow**: It receives a turn id and a LiveFrame. It turns the turn id into a Redis Stream name, converts the frame into compact JSON, appends it to Redis, trims the stream to a maximum size, refreshes the stream’s expiry time, and returns the Redis entry id that was created.
+
+**Call relations**: This is the publishing side of the hub. It calls _stream to find the destination, frame_payload to make the frame safe to send, json.dumps to serialize it, and _client to get the correct Redis connection. Subscribers later use the returned entry ids as cursors for replay.
+
+*Call graph*: calls 3 internal fn (_client, _stream, frame_payload); 1 external calls (dumps).
+
+
+##### `RedisStreamHub.subscribe`  (lines 116–140)
+
+```
+async def subscribe(self, turn_id: UUID, cursor: str='') -> AsyncIterator[tuple[str, LiveFrame]]
+```
+
+**Purpose**: Continuously reads live frames for a turn from Redis, starting after a given cursor. It lets a client replay retained frames and then keep waiting for new ones.
+
+**Data flow**: It receives a turn id and an optional cursor. It chooses the Redis Stream, starts at the cursor or at the beginning, repeatedly asks Redis for new entries, waits briefly when there is nothing new, decodes each entry’s JSON, rebuilds the LiveFrame, updates the cursor, and yields the cursor plus frame to the caller.
+
+**Call relations**: This is the receiving side of the hub. It uses _stream and _client to read from Redis, _stream_entries to normalize Redis responses, json.loads to decode stored JSON, and frame_from_payload to rebuild frame objects. If Redis read timeouts happen during blocking waits, it treats them as normal idle moments and simply keeps listening.
+
+*Call graph*: calls 4 internal fn (_client, _stream, _stream_entries, frame_from_payload); 1 external calls (loads).
+
+
+##### `RedisStreamHub.covers`  (lines 142–148)
+
+```
+async def covers(self, turn_id: UUID, cursor: str) -> bool
+```
+
+**Purpose**: Checks whether a saved cursor is still covered by the Redis Stream. This tells a reconnecting subscriber whether it can resume without a gap or should redraw from another source.
+
+**Data flow**: It receives a turn id and cursor. If the cursor is empty, it returns false. Otherwise it reads the first retained entry in the turn’s stream. If the stream has no entries, it returns false. If entries exist, it compares the first retained id with the cursor and returns true only when the cursor has not fallen behind the retained history.
+
+**Call relations**: Reconnect logic can call this before subscribing from an old cursor. It uses _stream to find the stream, _client to inspect Redis, and _stream_id to compare Redis entry ids as ordered numbers.
+
+*Call graph*: calls 3 internal fn (_client, _stream, _stream_id).
 
 ## 📊 State Registers Touched
 
-- `reg-workspace-tenant-record` — The customer workspace record that all users, conversations, data, tools, and billing are kept under.
-- `reg-durable-work-queue` — The shared queue of conversation and job work waiting to be claimed, retried, resumed, or completed by workers.
-- `reg-credential-secret-store` — The encrypted store of workspace secrets and credential kinds used without exposing raw tokens to agents.
-- `reg-authorization-grants` — The saved permissions showing which user-approved outside accounts an agent may use.
-- `reg-blob-storage-backend` — The shared large-file storage used for workspace files, transcripts, source snapshots, and artifacts.
-- `reg-network-egress-policy` — The allow-or-deny rules for outbound network calls, including when approved secrets may be attached.
-- `reg-connector-broker-catalog` — The known external service brokers and provider actions that let agents use connected services safely.
-- `reg-source-page-sync-state` — The saved sources, pages, sync cursors, deletion markers, and retry state for imported external content.
-- `reg-search-index-memory-graph` — The shared recall stores for searchable chunks, remembered facts, memory pages, and knowledge-graph links.
-- `reg-scheduled-task-state` — The saved clock-based tasks, waits, pauses, last-run markers, and expiration times used to wake work later.
-- `reg-alert-watch-state` — Saved alert subscriptions, match rules, checkpoints, and pending notifications used to react to changed synced pages.
-- `reg-web-search-fetch-backend` — The configured web-search and page-fetch provider backend, client settings, and availability used by research, browsing, source, and SDK search calls.
+- `reg-auth-session` — The signed login and identity state that proves which member or operator is using the system.
+- `reg-audience-policy` — The saved visibility rules that decide which people may see or use a conversation or agent.
+- `reg-conversation-state` — The durable conversation record that ties a surface, agent, audience, sandbox handle, and message history together.
+- `reg-turn-queue` — The durable queue of conversation turns waiting to be claimed, run, completed, cancelled, or retried.
+- `reg-transcript-state` — The stored conversation transcript, including exact recent messages and compact summaries of older content.
+- `reg-sandbox-session` — The saved or live sandbox workspace where an agent can run commands and keep files across tool calls.
+- `reg-live-stream-hub` — The live stream of turn updates that lets clients watch progress and reconnect without losing recent events.
+- `reg-artifact-storage` — The shared file and blob storage for generated artifacts, plus the signed download state used to protect them.
+- `reg-surface-installations` — The saved Slack, web, terminal, and other surface bindings used to receive messages and send replies back.
+- `reg-accounting-ledger` — The shared usage ledger that records tokens, egress, sandbox usage, billing exports, and spend-limit checks.
+- `reg-observability-context` — The shared logging, metrics, tracing, and trace-link state used to understand work across requests and subagents.
+- `reg-surface-delivery-state` — Durable outbound reply/writeback state used to de-duplicate, track, retry, and complete delivery of responses to Slack, web, terminal, or other surfaces.

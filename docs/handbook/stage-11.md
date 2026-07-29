@@ -1,451 +1,471 @@
-# Delegated subagents and specialized worker turns  `stage-11`
+# Delegated subagents and multi-step workflows  `stage-11`
 
-This stage is the system’s way of giving a main agent temporary helpers during a work turn. Instead of doing every task itself, the parent turn can start a child turn, send it a clear job, wait for its answer, send follow-up messages, or cancel it. The core subagents file is the switchboard: it connects a chosen helper profile to saved child-turn records and to the background queue that runs the work. The core profiles file supplies the default “general purpose” helper when no specialist is needed.
+This stage is used during the main work loop, when the main agent decides a job is big or specialized enough to hand to a helper. A “subagent” is a smaller child session with its own instructions, tools, input, and expected output, like sending a specialist to do one part of a project.
 
-Extensions add specialist helpers. The browser files define a browser-capable subagent and delegation tools for one web session or many parallel visits. The research files define normal and deep research workers, plus a batch tool that runs many research jobs and saves their results together. The sites files define a website-building worker and a tool that starts it with a full website request. The brief pipeline files define outline, draft, and critique writing workers. Together, these pieces act like a workshop where the main agent assigns jobs to the right specialist and gathers the finished results.
+The core profile file defines the fallback general-purpose helper, used when no more specific helper is available. The core subagents file is the dispatcher: it starts child turns, ties them back to the parent turn, tracks them, and allows them to be cancelled safely.
+
+Each extension adds specialists. The browser files define a browser subagent and tools for sending one or many web-browsing tasks to it. The research files define normal and deep research helpers, plus a wide-research tool that runs many research jobs in parallel and saves the combined results. The sites files define a website-building helper and the tool that delegates a full site build to it. The brief pipeline defines three writing steps: outline, draft, and critique.
 
 ## Files in this stage
 
-### Core subagent framework
-The built-in profile and orchestration layer define how parent turns create, run, communicate with, and stop delegated child turns.
+### Core subagent foundation
+Defines the default helper profile and the orchestration machinery that lets parent turns launch, track, cancel, and collect child agent work.
 
 ### `core/src/ufo/loop/profiles.py`
 
-`config` · `subagent setup`
+`config` · `startup and subagent spawning`
 
-This file is the default job description for a child agent. A child agent is like an assistant given one contained task by a parent agent. If the system needs to spawn a helper and no plugin or extension names a special profile, it falls back to this general-purpose profile.
+This file is the system’s fallback recipe for creating a child agent. A child agent is like a coworker given one clear task by the main agent: it works in the same shared workspace, uses a limited set of tools, and reports back a short result.
 
-The profile sets clear boundaries. The helper can work in the shared workspace, read and edit files, run shell commands, search where available, load skills, and save results. But it cannot ask the human user questions, create more subagents, message or cancel sibling agents, or approve account connections. In plain terms, it is meant to do the assigned work, not coordinate the whole team.
+The important idea is safety and focus. The general-purpose subagent can read and write files, search, edit, run shell commands, load skills, and use some optional extension tools if they exist. But it cannot ask the human user questions, create more subagents, message or cancel sibling subagents, wait on them, or approve account connections. In everyday terms, it can do assigned work, but it cannot recruit others, interrupt others, or make user-facing decisions.
 
-The file also defines the small data shapes for this exchange. `GeneralPurposeInput` contains the task text the parent gives the helper. `GeneralPurposeOutput` contains the result summary the helper reports back.
+The file also defines simple input and output shapes using Pydantic models, which are structured data definitions. The subagent receives a `task` string and returns a `result` string. Its prompt tells it how to behave: work independently, avoid repeated failed attempts, load relevant skills first, use proper Office formats for formal documents, share files through `/workspace`, and finish with a concise summary.
 
-The long prompt is the helper’s instruction sheet. It tells the helper to be self-directed, avoid endless retry loops, load relevant skills first, use proper Office file formats when needed, save handoff files in `/workspace`, and return a brief result at the end. Finally, the file packages all of this into `GENERAL_PURPOSE_PROFILE` and exposes it through `CORE_SUBAGENT_PROFILES`, making it available as the core built-in subagent option.
+Finally, the file packages all of this into `GENERAL_PURPOSE_PROFILE` and exposes it through `CORE_SUBAGENT_PROFILES`, so the rest of the system has a standard built-in profile to use.
 
 
 ### `core/src/ufo/loop/subagents.py`
 
-`orchestration` · `turn execution`
+`orchestration` · `request handling`
 
-A subagent is like sending a specialist assistant into a side room with its own instructions, tools, and expected answer shape. This file defines how those specialists are registered, how their prompts are built, and how a parent turn starts and follows their work.
+A subagent is like asking a specialist to do a clearly defined side job: the parent gives it a named profile, a structured input, and expects a structured output. This file is the machinery that makes that safe and durable. It first keeps a registry of available subagent profiles, so a caller cannot ask for an unknown or duplicate specialist. It also builds the subagent's system prompt, combining the profile's instructions, optional skill information, shared citation rules, and a strict final instruction that the subagent must finish by calling the `finish` tool with data matching its output contract.
 
-First, `SubagentRegistry` holds the available subagent profiles and makes sure two profiles do not share the same name. A profile says what prompt to use, which tools are allowed, and what input and output data should look like.
+The `Subagents` class is bound to one parent turn. When the parent spawns a child, this file validates the input, creates a child conversation and first turn in the database, and puts that turn on the durable work queue. A durable queue means the work can survive retries or process restarts. If a deduplication key is supplied, the same parent request reconnects to the same child instead of creating a duplicate, which prevents double work and double billing.
 
-`subagent_system_prompt` builds the instruction text the child agent will see. It fills in the skill list, adds any preloaded skill instructions, adds shared citation and formatting rules, and ends with a strict instruction: the child must finish by calling the `finish` tool with output matching its declared schema.
-
-`Subagents` is the runtime helper bound to one parent turn. Its main job is `spawn`: validate the input, create a child conversation and first child turn in the database, enqueue that turn in DBOS (the durable workflow queue), and either return immediately for background work or wait until the child finishes. The child gets its own queue partition, so the parent can wait without blocking the child from running. The class also supports waiting for background children, sending follow-up messages, and canceling child turns safely.
+The parent can wait for a child, start it in the background, send a follow-up message, or cancel it. The file also checks that a requested child really belongs to this parent and this requester before allowing control actions. Without this file, subagent work would be hard to validate, easy to duplicate, and unsafe to reconnect after failures.
 
 #### Function details
 
-##### `SubagentRegistry.__post_init__`  (lines 77–81)
+##### `SubagentRegistry.__post_init__`  (lines 78–82)
 
 ```
 def __post_init__(self) -> None
 ```
 
-**Purpose**: Checks the registry as soon as it is created and rejects duplicate subagent names. This prevents later confusion where asking for one name could secretly match more than one profile.
+**Purpose**: Checks the list of subagent profiles as soon as the registry is created. It prevents two profiles from using the same name, because a name must point to exactly one subagent recipe.
 
-**Data flow**: It reads the profile names stored in the registry → counts which names appear more than once → either leaves the registry unchanged or raises an error naming the duplicates.
+**Data flow**: It reads the profile names from the registry's `profiles` tuple. If every name is unique, nothing changes and construction succeeds; if any name appears more than once, it raises an error naming the duplicates.
 
-**Call relations**: This runs automatically after `SubagentRegistry` is constructed. It protects later lookups, especially calls from `Subagents.spawn`, which depend on a profile name pointing to exactly one profile.
+**Call relations**: This runs automatically after a `SubagentRegistry` is built. Later lookups rely on this check, because `get` can safely return the one matching profile instead of guessing between duplicates.
 
 
-##### `SubagentRegistry.get`  (lines 83–90)
+##### `SubagentRegistry.get`  (lines 84–91)
 
 ```
 def get(self, name: str) -> SubagentProfile
 ```
 
-**Purpose**: Finds the subagent profile with the requested name. If the name is not known, it raises a clear error that also lists the valid choices.
+**Purpose**: Finds a subagent profile by name. It gives callers a clear failure if they ask for a profile that was not registered.
 
-**Data flow**: It receives a profile name → scans the registry’s stored profiles → returns the matching profile, or builds a helpful message and raises `UnknownSubagentProfile` if none match.
+**Data flow**: It receives a profile name, scans the stored profiles, and returns the matching `SubagentProfile` if found. If there is no match, it builds a readable list of valid names and raises `UnknownSubagentProfile`.
 
-**Call relations**: This is the front door for turning a user-facing profile name into the actual profile object. `Subagents.spawn` uses it before starting a child, and `_untrusted_output` uses it to decide whether a completed child’s output should be treated as trusted.
+**Call relations**: The spawn path uses this before starting a child turn, so unknown subagents are rejected before any database rows or queue jobs are created. The trust-check path also uses it to decide whether a finished child's output should be treated as trusted.
 
 *Call graph*: 1 external calls (__init__).
 
 
-##### `subagent_system_prompt`  (lines 93–125)
+##### `subagent_system_prompt`  (lines 94–126)
 
 ```
 def subagent_system_prompt(profile: SubagentProfile, *, skills: Sequence[tuple[str, str]]=CORE_SKILL_INDEX, preload: tuple[LoadedSkill, ...]=()) -> str
 ```
 
-**Purpose**: Builds the full system prompt, meaning the instruction text that controls a subagent’s behavior. It combines the profile’s own instructions with skill information, shared citation rules, and the final output contract.
+**Purpose**: Builds the full instruction text that a child subagent receives. It combines the profile's own prompt, skill information, shared citation and formatting rules, and the final output contract.
 
-**Data flow**: It receives a subagent profile, an optional list of available skills, and optional preloaded skill content → fills the skill-index placeholder, checks that no prompt placeholders were left unresolved, adds preloaded skill text if it is not too large, and appends the shared output rules → returns one complete prompt string.
+**Data flow**: It takes a subagent profile, an optional list of available skills, and optional preloaded skill bodies. It fills the skill-index placeholder, rejects leftover prompt placeholders, optionally appends preloaded skill instructions within a size limit, then returns one final prompt string ending with the required `finish` instruction.
 
-**Call relations**: This function is used when preparing the child agent’s run. It calls `render_skill_index` to make the readable skill list, `PROMPT_VAR_RE.findall` to catch unfilled template slots, and `loaded_context` to turn preloaded skills into prompt text.
+**Call relations**: This is used when preparing a subagent turn for the model. It hands off to prompt-rendering helpers to create the skill index and to skill-runtime code to format loaded skill content, but it keeps the final output rule last so profile or skill text cannot override it.
 
 *Call graph*: 3 external calls (findall, render_skill_index, loaded_context).
 
 
-##### `Subagents.spawn`  (lines 137–181)
+##### `Subagents.authorize`  (lines 140–141)
+
+```
+def authorize(self, requester_member_id: UUID | None) -> 'Subagents'
+```
+
+**Purpose**: Creates a copy of the subagent controller that is tied to a specific requesting audience member. This is used when the system needs later child operations to be checked against that requester.
+
+**Data flow**: It receives an optional member ID and returns a new `Subagents` object with the same client, registry, parent turn, and audience, but with `requester_member_id` set to the supplied value. The original object is not changed.
+
+**Call relations**: Callers use this before spawning or controlling subagents on behalf of a particular member. The copied value is later read by `acting_member_id` and enforced by `_require_child` and `_admit`.
+
+*Call graph*: 1 external calls (replace).
+
+
+##### `Subagents.acting_member_id`  (lines 144–145)
+
+```
+def acting_member_id(self) -> UUID | None
+```
+
+**Purpose**: Decides which audience member the subagent action is acting for. It prefers the explicitly authorized requester, and otherwise falls back to the parent turn's member.
+
+**Data flow**: It reads `requester_member_id` and `parent.on_behalf_of_member_id`. It returns the requester ID if present; if not, it returns the parent turn's on-behalf-of member ID.
+
+**Call relations**: This value is stamped onto child turns when they are admitted or messaged. It is also used by `_require_child` so a member cannot control a child turn that belongs to another member's request.
+
+
+##### `Subagents.spawn`  (lines 147–191)
 
 ```
 async def spawn(self, profile: str, payload: dict[str, Any], background: bool=False, dedup_key: str | None=None) -> SpawnResult
 ```
 
-**Purpose**: Starts a child subagent turn from a parent turn. It can either wait for the child’s final answer or return immediately with the child turn id so the parent can continue other work.
+**Purpose**: Starts a child subagent turn, either returning immediately for background work or waiting for the child to finish and returning its validated output. This is the main entry point for asking a subagent to do work.
 
-**Data flow**: It receives a profile name, an input payload, a background flag, and an optional deduplication key → looks up the profile, validates the payload against the profile’s input schema, chooses a child conversation id, derives the child turn id, writes the child records, and queues the child turn → returns a `SpawnResult` with either just the child id or the validated final output. If the child fails or returns invalid trusted output, it raises an error.
+**Data flow**: It receives a profile name, input payload, optional background flag, and optional deduplication key. It looks up the profile, validates the payload against the profile's input model, chooses a child conversation ID, creates the child turn through `_admit`, queues it through `_enqueue` if needed, then either returns the child turn ID immediately or waits for the terminal result, checks success, validates the final text against the output model, and returns a `SpawnResult`.
 
-**Call relations**: This is the main public entry point for creating subagents. It uses `_admit` to create or reconnect to the child database rows, `_enqueue` to ask the workflow queue to run the child, and `_await_terminal` when the caller wants foreground waiting. It uses `uuid5` when a deduplication key should reconnect to the same child on retry, and `uuid4` when each spawn should be fresh.
+**Call relations**: This is the top-level spawn flow used by tools or agent logic that need a specialist child turn. It relies on the registry for profile lookup, `_admit` for durable database creation, `_enqueue` for queue dispatch, and `_await_terminal` for foreground waiting.
 
 *Call graph*: calls 3 internal fn (_admit, _await_terminal, _enqueue); 5 external calls (__init__, __init__, turn_id_for, uuid4, uuid5).
 
 
-##### `Subagents.wait`  (lines 183–202)
+##### `Subagents.wait`  (lines 193–212)
 
 ```
 async def wait(self, turn_ids: tuple[UUID, ...]) -> tuple[SubagentStatus, ...]
 ```
 
-**Purpose**: Waits for one or more background subagents to finish and reports their final status. A parent uses this after it has started children in the background and later wants their results.
+**Purpose**: Waits for one or more background subagent turns to finish and reports their final status and text. It lets the parent come back later after doing other work.
 
-**Data flow**: It receives a tuple of child turn ids → first checks that each one really belongs to this parent turn, then polls each child until it has a terminal result → returns a tuple of `SubagentStatus` objects containing the child id, status, final text, and whether the output should be treated as untrusted.
+**Data flow**: It receives a tuple of child turn IDs. For each ID, it first verifies that the turn is truly this parent's child, then waits until that child has a terminal record, and finally returns a tuple of `SubagentStatus` objects containing each turn ID, status, final text, and whether the output should be treated as untrusted.
 
-**Call relations**: This is the companion to background `spawn`. It calls `_require_child` to prevent a parent from inspecting unrelated turns, `_await_terminal` to wait for each child’s durable final record, and `_untrusted_output` to label the child’s text safely.
+**Call relations**: This completes the background-spawn loop that starts in `spawn(background=True)`. It uses `_require_child` for ownership checks, `_await_terminal` for polling, and `_untrusted_output` to preserve the profile's trust setting in the returned status.
 
 *Call graph*: calls 3 internal fn (_await_terminal, _require_child, _untrusted_output); 1 external calls (__init__).
 
 
-##### `Subagents.cancel`  (lines 204–221)
+##### `Subagents.cancel`  (lines 214–231)
 
 ```
 async def cancel(self, turn_id: UUID) -> SubagentStatus
 ```
 
-**Purpose**: Cancels a running child subagent that was spawned by this parent. It is used when the parent no longer wants the child’s work or needs to stop it safely.
+**Purpose**: Cancels a child subagent turn that belongs to this parent and reports what state it ended in. It gives the parent a safe way to stop background child work.
 
-**Data flow**: It receives a child turn id → verifies that the turn is this parent’s child → asks the shared cancellation code to cancel the durable workflow → reads the child’s current database status and terminal text if present → returns a `SubagentStatus` summary.
+**Data flow**: It receives a child turn ID, verifies ownership, asks the shared cancellation system to cancel that turn, then reads the turn's status and terminal frame from the database. It returns a `SubagentStatus` with the turn ID, current status, and terminal text if there is one.
 
-**Call relations**: This public method relies on `_require_child` for safety before calling `cancel_one_turn`, the shared cancellation primitive. After cancellation, it reads the database through `workspace_tx` and turns any stored terminal frame into plain status text.
+**Call relations**: This is called when a parent wants to stop a child. It delegates the actual durable cancellation to the shared `cancel_one_turn` helper, then reads the result itself so the caller gets a clear status back.
 
 *Call graph*: calls 1 internal fn (_require_child); 5 external calls (__init__, model_validate, select, cancel_one_turn, workspace_tx).
 
 
-##### `Subagents.message`  (lines 223–297)
+##### `Subagents.message`  (lines 233–305)
 
 ```
 async def message(self, turn_id: UUID, text: str) -> SubagentStatus
 ```
 
-**Purpose**: Sends a follow-up message to a background child subagent by creating the next turn in that child’s own conversation. This lets a parent continue a child’s thread instead of starting a brand-new subagent.
+**Purpose**: Adds a follow-up message to a background subagent's own conversation. This lets a parent continue an existing child subagent instead of starting over.
 
-**Data flow**: It receives the existing child turn id and message text → verifies the child belongs to this parent → reads the child conversation and profile, locks the conversation row, calculates the next sequence number, inserts a new queued turn with the message as inbound text, and enqueues it if no earlier turn is already waiting → returns a `SubagentStatus` for the newly queued follow-up.
+**Data flow**: It receives an existing child turn ID and message text. It verifies the child belongs to this parent, locks the child's conversation, calculates the next sequence number, inserts a new queued turn with the message as inbound text, marks it ready for dispatch if no earlier queued turn is waiting, possibly enqueues it, and returns a queued `SubagentStatus` for the new follow-up turn.
 
-**Call relations**: This method is used after a background subagent already exists and the parent wants to continue it. It calls `_require_child` first, writes the follow-up inside `workspace_tx`, and calls `_enqueue` only when the new turn is ready to be dispatched without cutting ahead of an earlier queued turn.
+**Call relations**: This is used after a background subagent already exists and needs another instruction. It shares the same ownership check as cancel and wait, and it hands the new follow-up turn to `_enqueue` only when it is safe for that conversation's ordering.
 
 *Call graph*: calls 2 internal fn (_enqueue, _require_child); 8 external calls (__init__, exists, insert, select, update, workspace_tx, current_traceparent, turn_id_for).
 
 
-##### `Subagents._untrusted_output`  (lines 299–305)
+##### `Subagents._untrusted_output`  (lines 307–313)
 
 ```
 def _untrusted_output(self, profile: str) -> bool
 ```
 
-**Purpose**: Decides whether a child subagent’s output should be marked untrusted. If the profile is missing, it chooses the safer answer and treats the output as untrusted.
+**Purpose**: Decides whether a child's output should be treated as untrusted content. It errs on the side of caution if the child's profile can no longer be found.
 
-**Data flow**: It receives a profile name → tries to find that profile in the registry → returns the profile’s `untrusted_output` flag, or returns `true` if the profile no longer exists.
+**Data flow**: It receives a profile name, tries to look up that profile, and returns the profile's `untrusted_output` flag. If the lookup fails, it returns `true` so the output is not treated as safe instructions.
 
-**Call relations**: `Subagents.wait` uses this when reporting background child results. This keeps old or unknown child outputs from being accidentally treated as safe instructions.
+**Call relations**: The background wait path calls this while building `SubagentStatus`. It keeps trust decisions attached to the profile definition, but protects the system if old database turns refer to profiles that are no longer registered.
 
 *Call graph*: called by 1 (wait).
 
 
-##### `Subagents._require_child`  (lines 307–318)
+##### `Subagents._require_child`  (lines 315–332)
 
 ```
 async def _require_child(self, turn_id: UUID) -> str
 ```
 
-**Purpose**: Checks that a turn id belongs to a subagent spawned by the current parent turn. This prevents one turn from waiting on, canceling, or messaging someone else’s child.
+**Purpose**: Confirms that a turn ID belongs to a subagent spawned by this exact parent turn and requester. It prevents one turn from cancelling, messaging, or waiting on someone else's child.
 
-**Data flow**: It receives a turn id → reads that turn’s parent id and subagent profile from the database → returns the profile name if the parent matches, or raises an error if the turn is missing or unrelated.
+**Data flow**: It receives a turn ID, reads the turn's parent ID, profile name, and on-behalf-of member ID from the database, and compares them with the current parent and acting member. If everything matches, it returns the child profile name; otherwise it raises an error.
 
-**Call relations**: This is a safety gate used by `wait`, `cancel`, and `message`. Those public methods call it before touching child state so their later database and queue actions are limited to the right parent-child relationship.
+**Call relations**: Wait, cancel, and message call this before touching a child turn. It is the guardrail that makes later operations safe.
 
 *Call graph*: called by 3 (cancel, message, wait); 2 external calls (select, workspace_tx).
 
 
-##### `Subagents._admit`  (lines 320–389)
+##### `Subagents._admit`  (lines 334–400)
 
 ```
 async def _admit(self, conversation_id: UUID, turn_id: UUID, profile: str, inbound: str) -> bool
 ```
 
-**Purpose**: Creates the database records for a new child subagent conversation and its first turn, or reconnects to existing records if this spawn is being retried. This makes subagent spawning durable and safe to repeat.
+**Purpose**: Creates the database records for a child subagent conversation and its first queued turn. It is written to be safe to run again without creating duplicates.
 
-**Data flow**: It receives a child conversation id, child turn id, profile name, and serialized input text → opens a workspace transaction, inserts the child conversation if missing, inserts the first queued child turn if missing, reads the child turn status, and marks it as ready for dispatch if it is still queued → returns `true` when the turn should be enqueued, or `false` when it already moved past the queued state.
+**Data flow**: It receives the child conversation ID, child turn ID, profile name, and validated inbound JSON text. It inserts the conversation and first turn if they do not already exist, checks that any existing turn belongs to the same acting member, marks a queued turn as dispatch-enqueued, and returns `true` if the caller should enqueue work now or `false` if the turn is already past the queued state.
 
-**Call relations**: `Subagents.spawn` calls this before queueing work. It uses conflict-safe inserts so a retry with the same deduplication key attaches to the existing child instead of creating and billing a duplicate. It also records the current trace context so observability can connect the child run back to the parent run.
+**Call relations**: The spawn flow calls this before queueing a child. Its conflict-safe inserts are what make deduplication keys useful: a retry can reconnect to the same stored child instead of making a second one.
 
-*Call graph*: called by 1 (spawn); 4 external calls (select, update, workspace_tx, current_traceparent).
+*Call graph*: called by 1 (spawn); 5 external calls (select, update, audience_member, workspace_tx, current_traceparent).
 
 
-##### `Subagents._enqueue`  (lines 391–420)
+##### `Subagents._enqueue`  (lines 402–431)
 
 ```
 async def _enqueue(self, turn_id: UUID, conversation_id: UUID) -> None
 ```
 
-**Purpose**: Asks DBOS, the durable workflow queue, to run a queued turn. It also cleans up the database marker if enqueueing is interrupted or fails, so another dispatcher can try again later.
+**Purpose**: Places a queued turn onto the durable turn-processing queue. If enqueueing fails, it clears the dispatch marker so another dispatcher can try later.
 
-**Data flow**: It receives a turn id and conversation id → builds queue options including the queue name, workflow name, workflow id, partition key, and app version → calls the DBOS client to enqueue the workflow. If the call is canceled or errors, it clears the turn’s dispatch timestamp for still-queued turns; on ordinary errors it also logs that enqueueing was deferred.
+**Data flow**: It receives a turn ID and conversation ID, builds queue options including the workflow name, workflow ID, partition key, and app version, then asks the DBOS client to enqueue the work. If cancellation or an error interrupts enqueueing, it updates the database to remove the dispatch timestamp for that queued turn; non-cancellation errors are also logged.
 
-**Call relations**: `Subagents.spawn` uses this for the first child turn, and `Subagents.message` uses it for follow-up turns. It is the handoff point between database admission and actual background execution.
+**Call relations**: Spawn uses this for a new child turn, and message uses it for a follow-up turn. It is the bridge between database admission and actual background execution.
 
 *Call graph*: called by 2 (message, spawn); 3 external calls (update, workspace_tx, log).
 
 
-##### `Subagents._await_terminal`  (lines 422–432)
+##### `Subagents._await_terminal`  (lines 433–443)
 
 ```
 async def _await_terminal(self, turn_id: UUID) -> TerminalFrame
 ```
 
-**Purpose**: Waits until a child turn has a final terminal record in the database. A terminal record is the durable note saying the turn is done, failed, canceled, or otherwise finished.
+**Purpose**: Waits until a turn has a final terminal record in the database. A terminal record is the saved end state of a turn, such as done, failed, or cancelled.
 
-**Data flow**: It receives a turn id → repeatedly reads the turn’s terminal field from the database → if the field is present, validates it as a `TerminalFrame` and returns it; if not, sleeps briefly and tries again.
+**Data flow**: It receives a turn ID and repeatedly reads that turn's terminal field from the database. If the field is present, it converts it into a `TerminalFrame` and returns it; if not, it sleeps briefly and checks again.
 
-**Call relations**: `Subagents.spawn` uses this when the parent wants a foreground result, and `Subagents.wait` uses it for background children. It is intentionally simple polling: it keeps checking the durable database record until the child has truly finished.
+**Call relations**: Foreground spawn uses this to wait for a child answer before returning to the parent. Background wait uses the same polling path, so already-finished children return quickly and still go through the same terminal parsing.
 
 *Call graph*: called by 2 (spawn, wait); 4 external calls (sleep, model_validate, select, workspace_tx).
 
 
-### Brief writing pipeline profiles
-The brief pipeline extension registers staged outline, draft, and critique worker profiles for structured writing workflows.
-
-### `extensions/brief_pipeline/ufo_ext_brief_pipeline/__init__.py`
-
-`other` · `startup/import time`
-
-This is the package’s front door. In Python, an `__init__.py` file tells the language that a folder should be treated as an importable package, meaning other code can refer to it by name. Here, the file only contains a short documentation string: “Brief pipeline extension.” That acts like a label on a folder, helping readers and tools understand what this package is meant to contain.
-
-There is no setup code, no configuration, and no functions here. Its value is structural: without it, depending on the Python version and packaging setup, the extension might not be recognized or imported in the expected way. Think of it like a sign on a room in a building. The sign does not do the work inside the room, but it tells people and systems what the room is for and helps them find it.
-
+### Brief writing stages
+Defines the outline, draft, and critique stages used to run a structured multi-step brief-writing workflow.
 
 ### `extensions/brief_pipeline/ufo_ext_brief_pipeline/pipeline.py`
 
-`config` · `extension load`
+`config` · `startup / extension load`
 
-This file is the blueprint for a simple writing assembly line. The parent agent can ask one subagent to make an outline, pass that outline to another subagent to write a draft, and then pass the draft to a third subagent for critique. Each subagent is “toolless,” meaning it cannot call extra tools or start more agents; it only reads its prompt and produces a structured answer. That keeps the pipeline predictable, like three people at fixed stations on a production line.
+This file is the recipe card for a small writing assembly line. The goal is to produce a brief by splitting the work into three focused subagents: one makes an outline, one turns that outline into a draft, and one reviews the draft. Without this file, the parent agent would not know what each stage is called, what information to send into it, what kind of answer to expect back, or which instruction prompt to use.
 
-The file first names the three stages and points to the folder that holds their prompt text. It then defines small Pydantic models, which are structured data shapes that say exactly what information must go in and what must come out. For example, the outline stage receives a topic and audience, and returns an outline. The draft stage receives the topic and outline, and returns a draft. The critic receives a draft, and returns a verdict plus optional improvements.
+The file uses Pydantic models, which are Python classes that describe and check structured data. For example, the outline stage receives a topic and audience, then must return an object containing an outline. The draft stage receives the topic and outline, then returns a draft. The critic stage receives the draft, then returns a verdict and optional improvements.
 
-Finally, the file builds three SubagentProfile objects. A profile is the full instruction card for a subagent: its name, prompt, allowed tools, input type, output type, and round limit. Without this file, the brief pipeline would not know what stages exist, what prompts to use, or how to safely pass work from one stage to the next.
+At the bottom, the file builds three `SubagentProfile` objects. A profile is like a job description for a subagent: its name, its prompt text, whether it can use tools, what input and output formats it must follow, and how many back-and-forth rounds it may take. Here, all three stages are “toolless,” meaning they only write structured text and do not call external tools. This keeps the pipeline shallow and predictable: the parent agent is the one that starts each stage and passes the result along.
 
 
-### Browser delegation workers
-Browser delegation tools start focused or parallel browser-capable subagents using a reusable browser worker profile.
+### Browser subagent delegation
+Provides tools for delegating one or many browsing tasks to a constrained browser-focused child agent.
 
 ### `extensions/browser/ufo_ext_browser/delegation.py`
 
 `orchestration` · `request handling`
 
-This file is the bridge between a non-browser agent and a specialized browser subagent. The main agent does not directly receive a raw browser window to control. Instead, it hands over a self-contained assignment, like “go to this site and extract pricing,” and waits for the browser agent to report back. That separation matters because browser work can be slow, unpredictable, or get stuck on a bad website. The single-task tool starts a fresh browser session every time, waits up to a caller-specified time limit, and cancels the child task if it runs too long. The batch tool, called wide_browse, reads a workspace file containing URLs or site names, removes blank lines and duplicates, and sends each item to a browser child task. It limits how many children run at once, like letting only a fixed number of shoppers enter a store at a time, so the system is not overwhelmed. It can also append a requested JSON output shape to each browser prompt, then writes all collected results to wide_browse.json. The file ends by registering these two capabilities as tool definitions, including their input shapes and safety markings.
+This file is the bridge between a general agent and a special browser agent. Instead of giving the main agent direct control of a browser, it asks a separate “browser” subagent to do the web work and report back. That matters because browser automation can get stuck on slow sites, popups, or loops. This file puts clear limits around those jobs so one bad web session does not block the whole parent turn forever.
+
+There are two user-facing tools here. `browser_task` starts one fresh browser session for a specific web objective, such as searching a site or filling a form. It waits for the browser subagent to finish, but only up to a fixed time budget. If the time runs out, it cancels the child task and returns an error message.
+
+`wide_browse` is the batch version. It reads a workspace file containing URLs or names, removes blank lines and duplicates, then sends each item to browser subagents. It limits how many run at once, like opening only a sensible number of checkout lanes instead of flooding the store. Each result is collected into `wide_browse.json` so later steps can inspect the full batch output.
+
+The file also defines the input shapes for both tools, including the fields users must provide and the allowed timeout range.
 
 #### Function details
 
-##### `_browser_task`  (lines 86–111)
+##### `_browser_task`  (lines 93–118)
 
 ```
 async def _browser_task(ctx: ToolContext, args: BrowserTaskInput) -> ToolResult
 ```
 
-**Purpose**: Runs one complete browser assignment by starting a browser subagent and waiting for its final report. It is used when the parent agent needs a fresh, isolated web session for one multi-step task.
+**Purpose**: Runs one browser automation job through the browser subagent and returns the subagent’s final summary. It exists so the parent agent can request web work without directly controlling a browser session.
 
-**Data flow**: It receives the tool context and a structured request containing a starting URL, task instructions, a short task name, and a timeout. It checks that subagent control is available, starts a browser child turn in the background, and waits for that child to finish within the allowed number of minutes. If the child times out, it cancels the browser run and returns an error message. If the child finishes successfully, it reads the child’s text as a BrowserResult, turns it back into JSON, and returns that JSON as the tool output.
+**Data flow**: It receives a tool context and a `BrowserTaskInput` containing the starting URL, task instructions, task name, timeout, and user-facing description. It starts a background browser subagent with the task details, waits for that child turn within the allowed number of minutes, and then validates the child’s text as a `BrowserResult`. If the child finishes normally, it returns that result as text inside a `ToolResult`; if time runs out, it cancels the child and returns an error result explaining the timeout.
 
-**Call relations**: This function is registered as the handler for the browser_task tool. When that tool is invoked, it uses the context’s spawn ability to create the browser child, waits through the subagent control interface, and formats the child’s BrowserResult into a normal ToolResult for the parent agent.
+**Call relations**: This is the handler behind the `browser_task` tool definition. When the tool is invoked, it uses the context’s spawn ability to create a browser-profile child turn, wraps the wait in `asyncio.timeout` so the parent cannot hang forever, and formats the final answer with `TextContent` and `ToolResult`.
 
 *Call graph*: 5 external calls (__init__, __init__, timeout, spawn, model_validate_json).
 
 
-##### `_read_lines`  (lines 114–125)
+##### `_read_lines`  (lines 121–134)
 
 ```
 async def _read_lines(ctx: ToolContext, path: str) -> list[str]
 ```
 
-**Purpose**: Reads a workspace text file and turns it into a clean list of unique non-empty lines. In this file, each line is meant to be a URL or site name for batch browsing.
+**Purpose**: Reads a workspace text file and turns it into a clean list of unique, non-empty lines. `wide_browse` uses this to turn an entities file into the set of sites or names it should browse.
 
-**Data flow**: It receives the tool context and a file path. It asks the sandbox to run a safe cat command for that path, checks whether reading succeeded, then walks through the file line by line. It trims spaces, skips empty lines, removes duplicates while keeping the first occurrence, and returns the resulting list of entities.
+**Data flow**: It receives the tool context and a file path. It safely quotes the path for a shell command, reads the file with `cat`, and raises an error if the read fails. Then it walks through the file line by line, trims extra spaces, skips empty lines, removes duplicates while preserving first-seen order, and returns the cleaned list.
 
-**Call relations**: This helper is called by _wide_browse before any browser children are started. It gives _wide_browse a clean work list, so the batch process does not waste browser sessions on blank lines or repeated entries.
+**Call relations**: `_wide_browse` calls this first, before it starts any browser work. Its output becomes the list of entities that `_wide_browse` fans out across browser subagents.
 
-*Call graph*: called by 1 (_wide_browse); 1 external calls (dumps).
+*Call graph*: called by 1 (_wide_browse); 1 external calls (quote).
 
 
-##### `_wide_browse`  (lines 128–155)
+##### `_wide_browse`  (lines 137–164)
 
 ```
 async def _wide_browse(ctx: ToolContext, args: WideBrowseInput) -> ToolResult
 ```
 
-**Purpose**: Runs the same kind of browser extraction task across many URLs or site names in parallel. It is useful when the agent needs structured information from a list of targets rather than from just one website.
+**Purpose**: Runs many browser tasks from a file of URLs or site names, collects their results, and writes a combined JSON output file. It is useful when the same extraction or research prompt must be applied to many targets.
 
-**Data flow**: It receives the tool context and a request naming an entities file, a prompt template, an output schema file, and a user-facing description. It reads and deduplicates the entities, rejects lists that are too large, tries to read the JSON schema text, and creates a limit on how many browser child tasks may run at once. It then launches one visit for each entity, waits for all visits to finish, writes the collected rows to wide_browse.json in the workspace, and returns a short JSON response containing both the rows and the output file name.
+**Data flow**: It receives a tool context and a `WideBrowseInput` containing an entities file, a prompt template, a JSON schema file path, and a user-facing description. It reads and deduplicates the entities, refuses batches larger than the configured maximum, reads the optional output schema, and creates a semaphore, which is a small gate that limits how many child tasks run at once. It launches one `visit` task per entity with `asyncio.gather`, writes the collected rows to `wide_browse.json`, and returns a JSON message containing both the rows and the output file name.
 
-**Call relations**: This function is registered as the handler for the wide_browse tool. It first relies on _read_lines to prepare the input list, then uses its inner visit function for each entity. It gathers all those visits together so the parent receives one combined result rather than many separate browser outputs.
+**Call relations**: This is the handler behind the `wide_browse` tool definition. It starts by calling `_read_lines`, then uses its inner `visit` helper for each entity, gathers all visits in parallel, serializes the final rows with `json.dumps`, and returns them through `TextContent` and `ToolResult`.
 
-*Call graph*: calls 1 internal fn (_read_lines); 5 external calls (__init__, __init__, Semaphore, gather, dumps).
+*Call graph*: calls 1 internal fn (_read_lines); 6 external calls (__init__, __init__, Semaphore, gather, dumps, quote).
 
 
-##### `_wide_browse.visit`  (lines 136–149)
+##### `_wide_browse.visit`  (lines 145–158)
 
 ```
 async def visit(entity: str) -> dict[str, object]
 ```
 
-**Purpose**: Runs one browser subtask for one entity inside the larger wide_browse batch. It turns a single URL or site name into a browser-agent prompt and records the result in a row.
+**Purpose**: Runs the browser subagent for one entity in a `wide_browse` batch. It turns a single URL or site name into one browser task and packages that task’s result into one row.
 
-**Data flow**: It receives one entity from the cleaned list. Before starting, it waits for the shared concurrency slot so only a limited number of browser tasks run at the same time. It fills the prompt template by replacing {entity}, appends the requested output schema if one was read successfully, and spawns a browser child using a deterministic deduplication key. It returns a dictionary with the entity name and the browser child’s JSON output, or an empty string if there was no output.
+**Data flow**: It receives one entity string from the batch. It waits for permission from the semaphore so only a limited number of visits run at the same time, substitutes the entity into the prompt template, appends the output schema if one was read, and spawns a browser subagent for that entity. It returns a dictionary containing the original entity and the browser result as JSON text, or an empty string if there was no output.
 
-**Call relations**: This inner function is created and used only by _wide_browse. _wide_browse starts many visit calls through asyncio.gather, and each visit hands one prepared task to the browser subagent through the context’s spawn mechanism.
+**Call relations**: `_wide_browse` creates and runs this helper once for each cleaned entity. Each `visit` does the per-entity child-agent work, and `_wide_browse` later gathers all returned rows into the final `wide_browse.json` file.
 
 
 ### `extensions/browser/ufo_ext_browser/subagent.py`
 
-`config` · `startup / subagent setup`
+`config` · `startup / subagent registration`
 
-This file is like a job description and tool badge for a browser-focused assistant. The larger system can delegate web work to a child agent, and this file says what that child agent is called, what instructions it should follow, what tools it may use, and what kind of request and answer it should exchange with the parent agent.
+This file is like an ID card and instruction packet for a specialized helper agent whose job is web automation. Instead of letting the main agent directly do every browser task, the system can delegate a focused job to this browser subagent. That keeps browser work scoped and gives it its own prompt, tools, and expected request and response format.
 
-When the file is loaded, it reads a Markdown prompt file named `subagent_browser.md`. That prompt contains the detailed working instructions for the browser subagent. The file also gathers the browser tool names from the browser extension and adds a few basic workspace tools, such as reading and writing files, so the subagent can save notes, findings, or screenshots where the parent agent can later inspect them.
+At load time, the file reads a Markdown prompt called `subagent_browser.md`. That prompt tells the browser subagent how to behave. It then builds a tool list from the browser extension's browser tools, plus a few core file and search tools such as reading, writing, editing, and web search. This means the subagent can browse, collect information, and save notes or screenshots into the shared workspace for the parent agent to inspect later.
 
-Two small data shapes are defined with Pydantic, a library that checks whether data has the expected fields and types. `BrowserTask` describes what the parent can ask for: a task, an optional starting URL, and an optional task name. `BrowserResult` describes what comes back: a text result.
-
-Finally, `BROWSER_PROFILE` combines all of this into a `SubagentProfile`. The `untrusted_output=True` setting is important: it marks the browser subagent’s answer as something that may come from the open web, so the parent system should treat it carefully rather than blindly trusting it.
+The file also defines two small data shapes using Pydantic, a library that checks that data has the expected fields. `BrowserTask` describes what the parent sends in: the task, and optionally a starting URL and task name. `BrowserResult` describes what comes back: a text result. Finally, `BROWSER_PROFILE` ties everything together as a `SubagentProfile`, marking its output as untrusted so the parent system knows to treat returned web content carefully.
 
 
-### Research delegation workers
-Research delegation runs batches of normal or deep research subagents and collects their structured results.
+### Research subagent delegation
+Provides batch research delegation backed by normal and deep research subagent profiles and consolidated JSON output.
 
 ### `extensions/research/ufo_ext_research/delegation.py`
 
-`orchestration` · `request handling`
+`orchestration` · `tool invocation`
 
-This file solves the problem of doing the same research task many times, once for each company, person, topic, or other entity in a list. Instead of asking one research agent to work through the list slowly, it fans the work out to several research subagents at the same time, like opening several checkout lanes instead of making everyone wait in one line.
+This file solves a practical bottleneck: researching many companies, people, topics, or other entities one at a time is slow and repetitive. The `wide_research` tool lets a user provide a plain text file with one entity per line, then spreads the work across several research subagents at once. Think of it like giving the same worksheet to a small team, where each person fills it out for a different company, then one coordinator collects the answers into a single folder.
 
-The main tool is called `wide_research`. A user gives it an entities file, a prompt template, an optional output schema file, and a description. The tool reads the entities file from the sandbox, which is the controlled workspace where tool commands can read and write files. It removes blank lines and duplicates so the same entity is not researched twice.
+The file first defines what inputs the tool needs: an entity list, a prompt template, an optional output schema file, and a user-facing description. When the tool runs, it reads and cleans the entity list, removes duplicates, and refuses to continue if the list is too large. It then optionally reads a schema, which is a description of the shape the returned data should follow.
 
-It then limits the list to a safe maximum size and starts a bounded number of research jobs in parallel. “Bounded” matters: it prevents the system from launching too many child agents at once. For each entity, the prompt template is filled in by replacing `{entity}` with the actual name. If an output schema file can be read, the schema text is added to the child objective so each subagent knows what shape of answer to return.
-
-Each child run uses a deterministic deduplication key based on the parent tool call and the entity. That means if the parent run is retried after a crash, already-started or completed child work can be reconnected to instead of repeated. Finally, the collected results are written to `wide_research.json` and also returned in the tool response.
+For each entity, it builds a research objective by replacing `{entity}` in the prompt template. It starts research subagents through `ctx.spawn`, but limits how many run at the same time so the system is not overloaded. Each child run gets a deterministic deduplication key, meaning that if the parent run is retried after a crash, already-started or completed child jobs can be reused instead of repeated. Finally, it writes the collected rows to `wide_research.json` and returns a short result pointing to that file.
 
 #### Function details
 
-##### `_read_lines`  (lines 41–52)
+##### `_read_lines`  (lines 42–55)
 
 ```
 async def _read_lines(ctx: ToolContext, path: str) -> list[str]
 ```
 
-**Purpose**: This helper reads a text file from the sandbox and turns it into a clean list of unique entities. It is used so the batch research tool starts from a tidy, duplicate-free list.
+**Purpose**: This helper reads the user’s entity file from the sandbox and turns it into a clean list. It removes blank lines and duplicates so each entity is researched only once.
 
-**Data flow**: It receives a tool context and a file path. It asks the sandbox to run `cat` on that path, checks whether the read succeeded, then splits the file into lines. Each line is trimmed, blank lines are ignored, and repeated entries are skipped. It returns the cleaned list of entity strings, or raises an error if the file cannot be read.
+**Data flow**: It receives a tool context and a file path. It safely quotes the path, asks the sandbox shell to run `cat` on that file, and checks whether the read succeeded. It then walks through the file line by line, trims extra spaces, skips empty entries, remembers which names it has already seen, and returns a list of unique entities in their original order. If the file cannot be read, it raises an error instead of letting the wider research job continue with bad input.
 
-**Call relations**: The main `_wide_research` function calls `_read_lines` at the start of the workflow. This helper hands `_wide_research` the list of entities that will be sent to child research agents.
+**Call relations**: This is the first step used by `_wide_research` when a batch research request begins. It relies on shell quoting through `shlex.quote` so that file paths are treated as file paths, not as accidental shell commands. Once it returns the cleaned entity list, `_wide_research` decides whether the list is small enough and then fans out the work.
 
-*Call graph*: called by 1 (_wide_research); 1 external calls (dumps).
+*Call graph*: called by 1 (_wide_research); 1 external calls (quote).
 
 
-##### `_wide_research`  (lines 55–82)
+##### `_wide_research`  (lines 58–85)
 
 ```
 async def _wide_research(ctx: ToolContext, args: WideResearchInput) -> ToolResult
 ```
 
-**Purpose**: This is the main implementation of the `wide_research` tool. It reads the input list, launches parallel research subagents for each entity, collects their answers, writes a JSON results file, and returns a summary to the caller.
+**Purpose**: This is the main engine behind the `wide_research` tool. It reads the requested entities, launches bounded parallel research jobs for them, collects the child results, writes a JSON output file, and returns a summary to the caller.
 
-**Data flow**: It receives the tool context and structured input arguments. It reads entities from the requested file, rejects the request if there are too many, tries to read the output schema file, and creates a semaphore, which is a simple gate that allows only a fixed number of jobs to run at once. It then starts one `visit` task per entity, waits for all of them to finish, writes the resulting rows to `wide_research.json`, and returns a tool result containing the rows and the output file name.
+**Data flow**: It receives the tool context and the validated tool arguments. First it asks `_read_lines` for the cleaned entity list, then rejects the request if there are more than 128 entities. It tries to read the requested output schema file from the sandbox, creates a semaphore, which is a limit on how many child tasks may run at once, and starts one visit task per entity. After all visits finish through `asyncio.gather`, it writes the combined rows to `wide_research.json` in the workspace. It returns a `ToolResult` containing JSON text with the rows and the output file name.
 
-**Call relations**: This function is registered as the handler for `WIDE_RESEARCH_TOOL`, so the tool system calls it when a user invokes `wide_research`. It relies on `_read_lines` for input cleanup, uses its nested `visit` function to run each child research job, waits for all visits with `asyncio.gather`, and wraps the final answer in `TextContent` and `ToolResult` for the wider tool framework.
+**Call relations**: The tool definition at the bottom of the file uses this function as its handler, so it runs whenever someone calls `wide_research`. It calls `_read_lines` to prepare the input list, creates the parallel work using its nested `visit` function, uses `asyncio.Semaphore` and `asyncio.gather` to coordinate that work, and wraps the final response with `TextContent` and `ToolResult`.
 
-*Call graph*: calls 1 internal fn (_read_lines); 5 external calls (__init__, __init__, Semaphore, gather, dumps).
+*Call graph*: calls 1 internal fn (_read_lines); 6 external calls (__init__, __init__, Semaphore, gather, dumps, quote).
 
 
-##### `_wide_research.visit`  (lines 63–76)
+##### `_wide_research.visit`  (lines 66–79)
 
 ```
 async def visit(entity: str) -> dict[str, object]
 ```
 
-**Purpose**: This inner function performs the research work for one entity. It builds the exact objective for that entity, runs a research subagent, and turns the subagent’s answer into one row of the final JSON output.
+**Purpose**: This nested helper performs the research work for one entity. It builds that entity’s prompt, starts a research subagent, and formats the child’s answer as one row in the final output.
 
-**Data flow**: It receives a single entity string from the cleaned list. It waits for permission from the semaphore so the system does not run too many subagents at the same time. Then it fills the prompt template with the entity name, appends the output schema if one was available, and asks the context to spawn a child using the research profile. It returns a dictionary with the entity name and the child agent’s serialized result text, or an empty string if there was no output.
+**Data flow**: It receives one entity string from the cleaned list. Before doing work, it waits for permission from the semaphore so only a limited number of subagents run at the same time. It replaces `{entity}` in the prompt template with the actual entity name, appends the output schema if one was successfully read, and spawns a research-profile child task with a deduplication key based on the parent call and entity. It returns a small dictionary containing the entity name and the child result as JSON text, or an empty string if the child produced no output.
 
-**Call relations**: `_wide_research` creates and calls this function once per entity while gathering all work in parallel. Each `visit` hands the actual research task off to `ctx.spawn`, using the research profile and a stable deduplication key so retries can reconnect to previous child work instead of duplicating it.
+**Call relations**: `_wide_research` creates one `visit` task for each entity and runs them together with `asyncio.gather`. Each `visit` hands its prepared objective to `ctx.spawn`, which starts the actual research subagent. Its returned row is later collected by `_wide_research` into the final `wide_research.json` file.
 
 
 ### `extensions/research/ufo_ext_research/subagent.py`
 
 `config` · `startup / subagent registration`
 
-This file is like a job description for research-focused child agents. A child agent is a smaller assistant that the main agent can delegate work to, so the main agent does not have to do every search, page read, and note-taking step itself.
+This file is like a job description and tool badge for the project’s research assistants. Without it, the larger agent system would not know how to start a focused research child agent, what prompt to give it, or which tools it is allowed to touch.
 
-The file sets up two profiles. The regular `research` profile is for focused research tasks. The `deep_research` profile uses the same kind of tools and input/output format, but gets a much larger round limit, meaning it can spend more back-and-forth steps gathering and checking information from multiple sources.
+It creates two profiles. The regular `research` profile is for scoped research tasks. The `deep_research` profile uses a larger round limit, meaning it can spend more back-and-forth steps on harder, multi-source work. Both profiles use the same basic input and output: they receive an `objective`, which is the research goal, and return a `result`, which is the finished answer.
 
-Both profiles are limited to a research-safe tool set. They can search the web, fetch pages, use vertical search, ask a browser task to inspect pages, call external tools, read and write files, search memory, and use spreadsheet-style helpers. They do not get every possible browser control directly; that boundary keeps browser-specific work in the browser subagent.
+The file also sets boundaries. These subagents get web search and fetch tools, some browser-task access, file tools, shell access, spreadsheet help, memory search, and external-tool access. But they do not get every possible browser control; the comment explains that raw browser control belongs to a separate browser subagent. This separation matters because it keeps each helper focused, like giving one worker a research desk and another the full browser workstation.
 
-The prompt text is loaded from nearby Markdown files. Those prompts are the detailed instructions that shape how each subagent behaves. The file also defines simple input and output data models: a research task comes in as an `objective`, and the answer comes back as a `result`. Without this file, the system would not know how to create these research subagents or what tools and limits they should have.
+Finally, the file loads the actual instruction text from Markdown prompt files and packages everything into `SubagentProfile` objects. Other parts of the system can then register or launch these profiles by name.
 
 
-### Website building workers
-Website delegation hands complete site-building jobs to a specialized website-building child assistant profile.
+### Website-building delegation
+Provides a website-building delegation tool and the specialized child-agent profile used to implement focused site creation tasks.
 
 ### `extensions/sites/ufo_ext_sites/delegation.py`
 
 `orchestration` · `request handling`
 
-This file exists so the main agent does not have to build websites directly inside its own conversation. Instead, it can delegate the whole job to a focused helper agent that knows how to build, serve, and check websites in the sandbox. Think of it like a project manager handing a complete brief to a specialist contractor, then waiting for the contractor’s report.
+This file is a delegation doorway. When the main agent needs a website, web app, dashboard, or web game built, it can call the `build_website` tool rather than doing every step itself. The tool starts a fresh child session with a specialized website-building agent. Think of it like asking a contractor to take a complete project brief, build the site, test it, and report back.
 
-The file defines the public tool name and description shown to the agent. It also defines `BuildWebsiteInput`, the shape of the information the tool accepts. The most important field is `objective`, which must contain the full website brief because the child agent does not inherit the parent conversation history. Optional fields give the build a friendly name, preload helpful skills before the child starts, or allow a larger round budget for unusually big builds.
+The input model, `BuildWebsiteInput`, describes what the child needs before it starts. The most important field is `objective`, which must be self-contained because the child does not inherit the main conversation history. Other fields give the task a friendly name, optionally preload useful skills so the child starts with instructions already available, and optionally allow a larger round budget for bigger builds. The `user_description` is meant for the activity timeline, but it is not sent to the child.
 
-The actual work is done by `_build_website`. It asks the current tool context to spawn the website-building subagent, sends the cleaned input along, then turns the child’s result into plain text content inside a standard tool result. Finally, `DELEGATION_TOOLS` exposes this as a `ToolDef`, so the rest of the system can register and call it like any other tool.
+The actual tool function, `_build_website`, calls `ctx.spawn`, which is the safe project mechanism for starting a subagent. It passes only the relevant build settings, waits for the child to finish, turns the child’s structured output into text, and wraps that text as a tool result. Finally, `DELEGATION_TOOLS` registers this behavior as a callable tool named `build_website`.
 
 #### Function details
 
-##### `_build_website`  (lines 47–50)
+##### `_build_website`  (lines 50–55)
 
 ```
 async def _build_website(ctx: ToolContext, args: BuildWebsiteInput) -> ToolResult
 ```
 
-**Purpose**: This function runs when the `build_website` tool is used. It starts a fresh website-building subagent with the user’s build brief and returns the subagent’s summary as the tool’s answer.
+**Purpose**: This function runs the `build_website` tool. It starts a specialized website-building subagent with the build instructions, waits for its result, and returns that result as plain tool output.
 
-**Data flow**: It receives a tool context, which is the object that knows how to start child agents, and a `BuildWebsiteInput` object containing the website brief and optional build settings. It converts that input into a plain data dictionary while leaving out missing optional values, sends it to the website-building subagent, waits for the subagent to finish, then serializes the subagent’s output into text. It returns a `ToolResult` containing that text, so the caller gets a normal tool response.
+**Data flow**: It receives a tool context and a `BuildWebsiteInput` object. It turns the input into a dictionary, leaving out empty fields and also leaving out `user_description`, then sends that dictionary to a child agent named for website building. When the child returns, it converts the child’s output to JSON text if there is any output, or to an empty string if not. It then packages that text into a `TextContent` item inside a `ToolResult`.
 
-**Call relations**: This function is attached to the `build_website` tool definition, so the tool system calls it when an agent chooses that tool. Inside, it hands the job to `ToolContext.spawn`, using the configured website-building subagent name, and wraps the returned output with `TextContent` and `ToolResult` so it fits the standard tool-response format.
+**Call relations**: This function is the handler attached to the registered `build_website` tool. When the main agent calls that tool, `_build_website` asks `ToolContext.spawn` to create the website-building child session. After the child finishes, `_build_website` hands the summary back to the caller in the standard tool-result format.
 
 *Call graph*: 4 external calls (__init__, __init__, spawn, model_dump).
 
 
 ### `extensions/sites/ufo_ext_sites/subagent.py`
 
-`config` · `startup / subagent setup`
+`config` · `startup or subagent registration`
 
-This file is like an ID card and rule sheet for a specialized helper. The helper’s job is website building, so the file gives it a name, loads its written instructions from a nearby prompt file, sets a limit on how many back-and-forth steps it may take, and lists the tools it is allowed to use.
+This file is like a job description for a specialist helper. The main system can ask a subagent, which is a smaller agent working inside a focused task, to build a website. To do that safely and consistently, the system needs to know what that helper is called, what instructions it should follow, what tools it may use, and what kind of answer it should return.
 
-The tool list combines basic file-editing abilities, such as reading and writing files, with site-specific tools used to build and serve pages. It also includes a JavaScript REPL, which is an interactive JavaScript runner the subagent can use to test a live page, plus optional web research tools if those are installed.
+The file first loads a website-building prompt from a nearby Markdown file. That prompt contains the detailed workflow the subagent should follow. It then sets a maximum number of rounds, so the helper cannot keep working forever.
 
-The file also defines two simple data shapes using Pydantic, a library that checks whether data has the expected fields. `WebsiteBuildingTask` describes what the parent system gives the subagent, mainly the goal to accomplish. `WebsiteBuildingResult` describes what the subagent returns: a text result.
+It also lists the tools this subagent is allowed to use. These include basic file tools for reading and editing code, site-specific tools for building and serving the site, a JavaScript REPL for checking a running page, and optional web research tools if those are installed. This tool list matters because it limits the subagent to the abilities needed for website work, rather than giving it unrestricted access to everything.
 
-Finally, all of this is bundled into `WEBSITE_BUILDING_PROFILE`, a `SubagentProfile` object. Without this file, the system would not have a clear recipe for launching the website-building subagent safely and consistently.
+Two small data models describe the conversation boundary: `WebsiteBuildingTask` is the shape of the request sent in, and `WebsiteBuildingResult` is the shape of the answer sent back. Finally, all of this is packaged into `WEBSITE_BUILDING_PROFILE`, which the rest of the system can register or launch when it needs this kind of specialist task.
 
 ## 📊 State Registers Touched
 
-- `reg-extension-pack-manifest` — The installed pack and extension menu that says what tools, routes, jobs, skills, credentials, and backends exist.
-- `reg-agent-profile-settings` — The saved assistant settings for a workspace, including which agent is used and what it is allowed to do.
-- `reg-conversation-thread-state` — The saved conversation identity and history that let the system continue the same thread over time.
-- `reg-turn-record-lifecycle` — The durable record of each unit of agent work, including who started it, its status, parent links, and final result.
-- `reg-durable-work-queue` — The shared queue of conversation and job work waiting to be claimed, retried, resumed, or completed by workers.
-- `reg-cancellation-state` — The shared stop signal and saved cancellation status for turns, child turns, and paused work.
-- `reg-tool-catalog` — The live list of tools the model can call, including their names, descriptions, schemas, and dispatch targets.
-- `reg-prompt-skill-library` — The enabled instructions, skill folders, helper profiles, and prompt versions that shape how the agent behaves.
-- `reg-browser-session-provider` — The shared way to obtain a browser automation endpoint for a turn, regardless of where the browser runs.
-- `reg-live-stream-hub` — The live stream of turn updates that clients can watch and replay after reconnecting.
-- `reg-observability-trace-context` — The trace, metric, and log context that follows requests and turns so operators can understand what happened.
-- `reg-site-preview-serving-state` — The extension-maintained mapping from generated site/app outputs to served preview routes or shareable live site handles.
-- `reg-browser-runtime-session-state` — Mutable browser automation session state such as active CDP sessions, tabs, cookies, screenshots, and downloads used while browser tools and subagents operate.
+- `reg-agent-identity` — The saved identity and settings of each agent, including its main workspace role and whether it may use the internet.
+- `reg-conversation-state` — The durable conversation record that ties a surface, agent, audience, sandbox handle, and message history together.
+- `reg-turn-queue` — The durable queue of conversation turns waiting to be claimed, run, completed, cancelled, or retried.
+- `reg-transcript-state` — The stored conversation transcript, including exact recent messages and compact summaries of older content.
+- `reg-tool-catalog` — The shared catalog of tools the model is allowed to see and call during a turn.
+- `reg-skill-store` — The shared set of built-in, extension-provided, and user-created skills available to agents.
+- `reg-live-stream-hub` — The live stream of turn updates that lets clients watch progress and reconnect without losing recent events.
+- `reg-background-jobs` — The shared registry and saved queue of scheduled, recurring, delayed, and administrative background work.
+- `reg-fleet-presence` — The shared record of live runtime processes used for supervision, cancellation, and recovery after crashes.
+- `reg-observability-context` — The shared logging, metrics, tracing, and trace-link state used to understand work across requests and subagents.
+- `reg-subagent-delegation-state` — The parent-child turn and conversation links plus in-flight child-task tracking used to coordinate delegated subagents, cancellation, and result collection.
+- `reg-interactive-tool-session-state` — Live state for interactive sandbox tools such as browser contexts, page/element references, REPL kernels, and long-running app sessions reused across tool calls or delegated browser work.

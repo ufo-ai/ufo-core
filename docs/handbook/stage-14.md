@@ -1,25 +1,29 @@
-# Scheduled, recurring, billing, evaluation, and self-improvement jobs  `stage-14`
+# Scheduled jobs, billing operations, and self-improvement loops  `stage-14`
 
-This stage is the system’s behind-the-scenes clockwork. It runs work that should happen later, repeatedly, or without a person waiting on the screen. The scheduled-tasks files let agents create recurring tasks, pause a workflow until a reply or timeout, check simple “cron” schedules, meaning repeating time rules, and safely wake due tasks without firing the same one twice. Core scheduling stores those tasks, claims them, and advances or removes them. Core jobs turns extension-declared background work into real queued runs in the right workspace.
+This stage is behind-the-scenes machinery. It runs work that should happen later or on a schedule, rather than during one user request. The shared job engine finds background jobs at startup, chooses which workspaces need them, and runs each job inside the right workspace. A candidate finder safely looks across workspaces only to collect IDs, so private work stays scoped.
 
-Billing is handled by the Metronome extension, which connects usage and seat counts to Metronome and Stripe, and lets owners manage billing through chat. Evaluation support provides fake but realistic mail, calendar, and code-search connectors, so tests can run safely without touching real services.
+The scheduling pieces act like an alarm clock. Agents can create repeating tasks or “wait until” pauses. A cron parser checks timing rules and computes the next run. A runner wakes up, claims due tasks so they do not fire twice, invokes them, records results, and reschedules repeats.
 
-The self-improvement pieces form a cautious improvement loop. They collect past failures into a test corpus, ask a model to propose a better prompt, replay old conversations without rerunning real tools, judge the results, and use statistical gates before opening an approval proposal. Governance then makes sure prompt changes are reviewed and not applied over newer edits.
+Other jobs handle business operations. The Metronome extension sends usage and seat data to billing systems and connects Stripe payment setup to chat tools. A Slack Connect job turns completed signups into one invitation without slowing signup.
+
+The self-improvement loop mines past failures into a test corpus, asks a model for prompt rewrites, replays old tasks without re-running real tools, evaluates old versus new prompts, applies safety gates, and only then opens governed proposals. Governance applies changes only if the original prompt has not changed meanwhile.
 
 ## Files in this stage
 
-### Self-improvement evaluation
-These files build, replay, judge, and statistically gate prompt changes before they can be proposed for approval.
+### Prompt self-improvement loop
+Builds, tests, gates, and governs proposed prompt changes using archived work, replayed tasks, model-generated candidates, and proposal safeguards.
 
 ### `extensions/self_improvement/ufo_ext_self_improvement/evaluation.py`
 
-`domain_logic` · `self-improvement evaluation`
+`domain_logic` · `self-improvement evaluation phase`
 
-This file is the evidence-gathering part of a self-improvement system. When the system invents a possible better prompt, it cannot simply trust that it sounds better. It must check whether the prompt improves real task outcomes without making other tasks worse. This file does that check in a controlled way.
+This file is the evidence-gathering part of the self-improvement system. When the system has a candidate prompt, it cannot just trust that the prompt sounds better. It must test it on real saved examples and check whether it improves results without hurting other kinds of tasks.
 
-The main class, CandidateEvaluation, compares two prompt versions: the current prompt, called the absent case, and the proposed prompt, called the present case. For each saved task example, it replays the task using archived messages and the same replay setup. The important idea is fairness: the task, tools, and judge stay the same, so the prompt body is the main thing being tested. This is like testing two recipes with the same ingredients and oven, so any taste difference is likely due to the recipe.
+The main object, CandidateEvaluation, compares two “arms”: the current prompt and the candidate prompt. For each held-out task, it replays the agent using the same saved messages and archived tool behavior, so the prompt is meant to be the only meaningful difference. This is like testing two recipes with the same ingredients and oven, changing only one instruction.
 
-After each replay, the file asks a separate judge model to decide whether the final answer satisfies the original request. The judge must return a small JSON object saying whether the answer was accepted. These accept-or-reject results become OutcomeLabel records. Finally, the labels are passed to a two-stage gate: first checking improvement on the candidate's own task class, then checking that performance does not regress on broader held-out tasks.
+Each replay produces a final answer. The file then asks a judge model to decide whether that answer satisfies the original request. The judge must return a small JSON object saying whether the answer was accepted. If the judge response is missing valid JSON, the answer is treated as not accepted, which is a conservative choice.
+
+After collecting pass/fail labels for local tasks and global tasks, this file calls the two-stage gate. The local check asks, “Did the candidate improve the task class it was meant to improve?” The global check asks, “Did it avoid making other task classes worse?” Without this file, prompt changes could be accepted based on guesswork instead of controlled evidence.
 
 #### Function details
 
@@ -29,11 +33,11 @@ After each replay, the file asks a separate judge model to decide whether the fi
 async def evaluate(self, candidate_prompt: str, current_prompt: str, local_held_out: tuple[TaskExample, ...], global_held_out: tuple[TaskExample, ...]=()) -> GateVerdict
 ```
 
-**Purpose**: This is the main evaluation entry for a candidate prompt. It compares the candidate prompt against the current prompt on local held-out examples and optional global held-out examples, then returns a gate verdict saying whether the candidate should pass.
+**Purpose**: This is the top-level test for a candidate prompt. It compares the candidate prompt against the current prompt on local held-out tasks and optional global held-out tasks, then returns the gate’s final verdict.
 
-**Data flow**: It receives the candidate prompt, the current prompt, a set of local saved task examples, and optionally a set of broader global examples. It turns each set into accept-or-reject labels by asking _labels to replay and judge them. It then sends the local and global labels to the two-stage gate, which produces the final pass-or-fail style verdict.
+**Data flow**: It receives the candidate prompt, the current prompt, a set of local examples, and optionally a set of broader global examples. It asks _labels to turn each example into pass/fail results for both prompts. It then gives those labels to the two-stage gate, which returns whether the candidate should pass or fail.
 
-**Call relations**: This method starts the file's main workflow. It calls _labels twice: once for the candidate's own task area and once for wider regression checks. After the evidence is collected, it hands that evidence to two_stage_gate, which applies the acceptance rules.
+**Call relations**: This method starts the evaluation flow for the file. It relies on _labels to collect the raw evidence, then hands that evidence to two_stage_gate so the broader acceptance rules can decide whether the prompt change is safe and useful.
 
 *Call graph*: calls 1 internal fn (_labels); 1 external calls (two_stage_gate).
 
@@ -44,11 +48,11 @@ async def evaluate(self, candidate_prompt: str, current_prompt: str, local_held_
 async def _labels(self, candidate_prompt: str, current_prompt: str, held_out: tuple[TaskExample, ...]) -> tuple[OutcomeLabel, ...]
 ```
 
-**Purpose**: This helper creates the raw evidence used by the gate. For every saved task, it runs both prompt versions and records whether each resulting answer was accepted.
+**Purpose**: This function runs the side-by-side prompt comparison for a group of saved examples. For every task, it tests both the current prompt and the candidate prompt, then records whether each answer was accepted.
 
-**Data flow**: It receives a candidate prompt, the current prompt, and a group of held-out task examples. It creates a ReplayEvaluation object using the configured replay model and round limit. For each example, it replays the task once with the current prompt and once with the candidate prompt. Each final answer is sent to _accepts, and the yes-or-no result is wrapped into an OutcomeLabel that also records whether it came from the candidate prompt. It returns all labels as an immutable tuple.
+**Data flow**: It receives both prompts and a tuple of held-out task examples. It creates a ReplayEvaluation object, replays each example once with the current prompt and once with the candidate prompt, asks _accepts to judge each final answer, and turns each result into an OutcomeLabel showing which prompt was used and whether it succeeded. It returns all labels as an immutable tuple.
 
-**Call relations**: This method is called by evaluate when evidence is needed for either the local or global test set. During its loop, it relies on ReplayEvaluation to regenerate an answer and on _accepts to judge that answer. The labels it builds are later consumed by the two-stage gate.
+**Call relations**: It is called by evaluate when local or global evidence is needed. Inside the loop, it uses ReplayEvaluation to regenerate answers under controlled conditions, calls _accepts to score those answers, and packages the scores as OutcomeLabel objects for the gate.
 
 *Call graph*: calls 1 internal fn (_accepts); called by 1 (evaluate); 2 external calls (__init__, __init__).
 
@@ -59,24 +63,24 @@ async def _labels(self, candidate_prompt: str, current_prompt: str, held_out: tu
 async def _accepts(self, request: str, answer: str) -> bool
 ```
 
-**Purpose**: This helper asks the judge model whether one answer satisfies one user request. It turns the judge's reply into a simple true or false result.
+**Purpose**: This function asks the judge model whether one generated answer satisfies the original user request. It turns the judge’s response into a simple true or false result.
 
-**Data flow**: It receives the original request and the answer produced during replay. It sends both to the judge model with instructions to return only JSON, specifically an object with an accepted field. It then looks for a JSON object inside the judge's text, parses it, and returns true only if the parsed object says accepted is exactly true. If the judge response is missing JSON or contains invalid JSON, it safely returns false.
+**Data flow**: It receives the original request and the answer being judged. It sends both to the judge model with instructions to return only JSON, then looks for a JSON object in the judge’s text. If the JSON can be parsed and contains accepted set to true, it returns true; otherwise, including malformed output, it returns false.
 
-**Call relations**: This method is called by _labels after each replayed answer is produced. It creates the user message sent to the judge model and uses JSON parsing to convert the model's text into a dependable boolean decision for the OutcomeLabel.
+**Call relations**: It is called by _labels after each replay produces an answer. It creates the user message sent to the judge model and uses json.loads to read the judge’s JSON response, giving _labels the clean pass/fail value needed for comparison.
 
 *Call graph*: called by 1 (_labels); 2 external calls (__init__, loads).
 
 
 ### `core/src/ufo/governance.py`
 
-`domain_logic` · `proposal creation and approval`
+`domain_logic` · `agent configuration change and approval`
 
-This file is a safety gate for changing an agent’s configuration, especially its prompt. Instead of letting code overwrite the prompt directly, it creates a proposal that says: “change this prompt from the version I saw to this new text.” The “version I saw” is stored as a digest, which is a short fingerprint made from the prompt text. If even one character changes, the fingerprint changes too.
+This file is a safety gate for changing an agent’s configuration, specifically its prompt. Instead of letting code overwrite an agent prompt directly, it creates a proposal that says: “change this prompt from version A to version B.” The important trick is the digest, which is a short fingerprint made from the prompt text. Like checking a package seal before opening it, the system checks that the current prompt still matches the fingerprint recorded when the proposal was made.
 
-The main idea is like signing off on edits to a shared document. When someone proposes an edit, they record which copy of the document they were looking at. Later, when the proposal is approved, the system checks whether the document is still that same copy. If it is, the edit is applied. If someone changed it in the meantime, the proposal is rejected instead of accidentally overwriting newer work.
+The main class, Governance, works inside one workspace. When someone proposes a change, it first confirms the target agent really belongs to that workspace. Then it stores a pending proposal with the old prompt fingerprint, the new prompt text, and the new prompt fingerprint.
 
-The `Governance` class is tied to one workspace, so proposals cannot cross workspace boundaries. It records who proposed the change through the `extension` field. All database work happens inside a transaction, meaning the related reads and writes are treated as one careful unit. Approval also locks the agent row while checking and updating it, so two approvals cannot safely step on each other.
+Later, approval is cautious. It loads the proposal, checks that it is still pending, then locks and reads the current agent prompt from the database. If the prompt has changed since the proposal was opened, the proposal is rejected instead of being applied. If it still matches, the prompt is updated and the proposal is marked approved. This prevents stale approvals from accidentally overwriting newer work.
 
 #### Function details
 
@@ -86,11 +90,11 @@ The `Governance` class is tied to one workspace, so proposals cannot cross works
 def prompt_digest(prompt: str) -> str
 ```
 
-**Purpose**: Creates a stable fingerprint for a prompt. The system uses this fingerprint to tell whether a prompt is still the same text that a proposal was based on.
+**Purpose**: This turns a prompt into a stable fingerprint using SHA-256, a standard one-way hashing method. The fingerprint lets the system compare prompt versions without relying on the full text each time.
 
-**Data flow**: It takes prompt text in, turns it into bytes, runs it through SHA-256, which is a standard fingerprinting algorithm, and returns the fingerprint as a text string. It does not change anything outside itself.
+**Data flow**: It receives prompt text as input. It encodes that text, runs it through SHA-256, and returns the resulting hexadecimal fingerprint string. It does not change anything outside itself.
 
-**Call relations**: When a change is proposed, `Governance.propose_change` uses this to record the fingerprint of the new prompt. When a proposal is approved, `Governance.approve_proposal` uses it again to compare the agent’s current prompt with the prompt version the proposal expected.
+**Call relations**: When a change is proposed, Governance.propose_change uses this to record the fingerprint of the new prompt. When a proposal is approved, Governance.approve_proposal uses it to check whether the current prompt still matches the original fingerprint saved in the proposal.
 
 *Call graph*: called by 2 (approve_proposal, propose_change); 1 external calls (sha256).
 
@@ -101,11 +105,11 @@ def prompt_digest(prompt: str) -> str
 async def propose_change(self, change: AgentChange) -> ProposalRef
 ```
 
-**Purpose**: Opens a proposed prompt change for an agent in this workspace. It records the requested change as pending, but does not update the agent itself.
+**Purpose**: This opens a new proposed prompt change for an agent in the current workspace. It records what prompt version the change expects to replace, and what new prompt should be used if the proposal is later approved.
 
-**Data flow**: It receives an `AgentChange`, including the target agent, the expected old prompt fingerprint, and the new prompt text. It creates a new proposal ID, checks that the agent really exists in this workspace, calculates the fingerprint of the new prompt, and writes a pending proposal row to the database. It returns a `ProposalRef`, which is a small reference containing the new proposal ID.
+**Data flow**: It receives an AgentChange containing the target agent, the expected old prompt fingerprint, and the new prompt text. It creates a new proposal ID, checks the database to make sure the agent exists in this workspace, computes the new prompt’s fingerprint, and inserts a pending proposal row. It returns a ProposalRef containing the new proposal ID. If the agent is not in the workspace, it raises an error instead of creating anything.
 
-**Call relations**: This is the first half of the governed-change flow. Code that wants to change an agent calls this instead of editing the agent directly. It relies on `workspace_tx` for a safe database transaction, uses SQLAlchemy to read and insert rows, calls `prompt_digest` to fingerprint the new prompt, and hands the caller back a proposal reference that can later be passed to `Governance.approve_proposal`.
+**Call relations**: This is used at the start of the governance flow, when code wants to request a prompt change rather than apply it directly. It calls prompt_digest to fingerprint the proposed new prompt, uses a workspace database transaction so the checks and insert happen safely together, and returns a reference that later approval code can use.
 
 *Call graph*: calls 1 internal fn (prompt_digest); 5 external calls (__init__, insert, select, workspace_tx, uuid4).
 
@@ -116,11 +120,11 @@ async def propose_change(self, change: AgentChange) -> ProposalRef
 async def approve_proposal(self, proposal_id: UUID) -> None
 ```
 
-**Purpose**: Approves a pending proposal only if the agent’s prompt has not changed since the proposal was made. If the prompt has changed, it rejects the proposal rather than overwriting newer work.
+**Purpose**: This attempts to approve and apply a pending proposal. It only changes the agent prompt if the prompt has not changed since the proposal was created.
 
-**Data flow**: It receives a proposal ID, loads that proposal from the current workspace, and checks that it exists and is still pending. It then reads and locks the agent’s current prompt, calculates its fingerprint, and compares it with the proposal’s expected old fingerprint. If they differ, it marks the proposal rejected and logs that result. If they match, it writes the proposed prompt onto the agent, marks the proposal approved, and logs the approval.
+**Data flow**: It receives a proposal ID. It loads the proposal for this workspace, confirms it exists and is still pending, then reads and locks the current agent prompt so another update cannot race with it. It compares the current prompt’s fingerprint with the proposal’s saved starting fingerprint. If they differ, it marks the proposal rejected and logs that result. If they match, it updates the agent prompt, marks the proposal approved, and logs the approval.
 
-**Call relations**: This is the second half of the governed-change flow. It is called after someone or something decides a proposal should be accepted. It uses `workspace_tx` so the check and update happen safely together, calls `prompt_digest` for the comparison, uses SQLAlchemy to read and update database rows, and sends outcome messages to `ufo.o11y.log` so the approval or rejection can be observed later.
+**Call relations**: This is the second half of the governance flow, after Governance.propose_change has created a pending proposal. It relies on prompt_digest for the safety comparison, uses a workspace database transaction to keep the decision and update together, and sends outcome messages to the logging system so approvals and rejections can be observed later.
 
 *Call graph*: calls 1 internal fn (prompt_digest); 4 external calls (select, update, workspace_tx, log).
 
@@ -129,11 +133,13 @@ async def approve_proposal(self, proposal_id: UUID) -> None
 
 `domain_logic` · `self-improvement corpus building`
 
-The self-improvement loop needs real examples of where the system struggled. This file looks through recorded trajectories, meaning full conversation histories, and treats a tool error as a useful “friction signal”: a sign that something went wrong and might be worth improving. It first finds the user’s original request, because that is the goal the system was trying to satisfy. It also finds the first tool result marked as an error, then traces that error back to the tool call it answered so it can name the failing tool.
+This file helps the self-improvement loop find useful training and testing material from the workspace’s history. The basic idea is simple: if a past conversation contains a tool error, that error is a clear sign of friction. Since the system does not have a separate “I struggled here” signal, tool failures become the clue for what should be improved.
 
-Each useful failed conversation becomes a TaskExample. That example keeps the conversation id, the user request, the full message history for replay, and a plain text problem summary such as “the search tool errored: ...”. Examples are then grouped into TaskClass objects named like “tool:<name>”, so failures from the same tool are studied together.
+A single flagged conversation becomes a TaskExample. That example keeps the conversation id, the user’s original request, the full message history, and a short description of the tool problem. Examples are grouped into TaskClass objects, where each class represents one failing tool, named like “tool:search” or “tool:browser”.
 
-A key safety idea is the split between “mine” and “held_out”. The mine set is what the proposer can learn from. The held-out set is kept separate for grading, like keeping some exam questions unseen while studying. Classes that do not have enough examples are ignored, because they cannot support both learning and fair checking.
+The important safety feature is the split between “mine” and “held_out”. The “mine” set is what a proposer may study when suggesting an improvement. The “held_out” set is saved for later replay, like an exam the proposal has not already seen. This prevents the system from grading a candidate on the same conversations it learned from.
+
+The file also enforces small limits: a class must have at least enough examples to place one in each side of the split. Classes are sorted so the largest, most useful groups appear first.
 
 #### Function details
 
@@ -142,6 +148,12 @@ A key safety idea is the split between “mine” and “held_out”. The mine s
 ```
 def first_request(messages: tuple[Message, ...]) -> str | None
 ```
+
+**Purpose**: Finds the first real user request in a conversation. This gives the self-improvement loop a plain grading target: what the user originally wanted.
+
+**Data flow**: It receives the conversation messages. It scans them from the start, looking for the first message whose role is user and whose content is non-empty text. It returns that text, or returns nothing if no usable user request is found.
+
+**Call relations**: When bad_trajectory is deciding whether a conversation can become an example, it calls first_request to get the user request. If this function cannot find one, the conversation is skipped because there is no clear task to judge against.
 
 *Call graph*: called by 1 (bad_trajectory).
 
@@ -152,6 +164,12 @@ def first_request(messages: tuple[Message, ...]) -> str | None
 def first_tool_error(messages: tuple[Message, ...]) -> tuple[str, str] | None
 ```
 
+**Purpose**: Finds the first tool failure recorded in a conversation and identifies which tool failed. This is the main signal that a trajectory is worth studying.
+
+**Data flow**: It receives the conversation messages. First it reads tool-use blocks and remembers which tool name belongs to each tool-use id. Then it scans for the first tool-result block marked as an error. If it can match that failed result back to a tool name, it returns the tool name and the error text. If no matched tool error exists, it returns nothing.
+
+**Call relations**: bad_trajectory calls this function before making an example. The result tells bad_trajectory both whether the conversation is useful and which tool-based class the example belongs to.
+
 *Call graph*: called by 1 (bad_trajectory).
 
 
@@ -160,6 +178,12 @@ def first_tool_error(messages: tuple[Message, ...]) -> tuple[str, str] | None
 ```
 def bad_trajectory(trajectory: Trajectory) -> tuple[str, TaskExample] | None
 ```
+
+**Purpose**: Turns one past conversation into a self-improvement example, but only if it contains both a user request and a tool error. It also decides the example’s class based on the failed tool.
+
+**Data flow**: It receives one trajectory, which includes the conversation id and messages. It asks first_tool_error for the first failed tool round and first_request for the original user request. If either is missing, it returns nothing. Otherwise it builds a problem sentence such as “the X tool errored: ...”, packages the useful details into a TaskExample, and returns that example together with a class name like “tool:X”.
+
+**Call relations**: task_classes calls bad_trajectory for every trajectory it is given. bad_trajectory is the filter in the pipeline: it passes along only conversations that have enough information to be useful for proposing and grading improvements.
 
 *Call graph*: calls 2 internal fn (first_request, first_tool_error); called by 1 (task_classes); 1 external calls (__init__).
 
@@ -170,6 +194,12 @@ def bad_trajectory(trajectory: Trajectory) -> tuple[str, TaskExample] | None
 def task_classes(trajectories: tuple[Trajectory, ...]) -> tuple[TaskClass, ...]
 ```
 
+**Purpose**: Builds the final set of task classes from many past trajectories. It groups examples by the tool that failed and keeps only groups large enough to be split fairly into learning and testing examples.
+
+**Data flow**: It receives a tuple of trajectories. For each one, it calls bad_trajectory; skipped trajectories disappear from consideration. The remaining examples are collected by class name. Each class group is then passed to _split, which either returns a usable TaskClass or rejects the group for being too small. The final classes are sorted with larger classes first, and returned as a tuple.
+
+**Call relations**: This is the main entry point within this file’s logic. It coordinates the smaller helpers: bad_trajectory extracts useful examples, and _split turns each group into separate mine and held-out sets.
+
 *Call graph*: calls 2 internal fn (_split, bad_trajectory).
 
 
@@ -179,18 +209,24 @@ def task_classes(trajectories: tuple[Trajectory, ...]) -> tuple[TaskClass, ...]
 def _split(name: str, examples: tuple[TaskExample, ...]) -> TaskClass | None
 ```
 
+**Purpose**: Splits one group of examples into a held-out test set and a mine set for learning. This protects evaluation from using the exact same examples that inspired a proposed improvement.
+
+**Data flow**: It receives a class name and that class’s examples. If there are too few examples to put at least one on each side, it returns nothing. Otherwise it sorts examples by conversation id for a stable, repeatable order, chooses an evaluation count, puts the first part into held_out, puts the rest into mine, and returns a TaskClass.
+
+**Call relations**: task_classes calls _split after grouping examples by failed tool. _split is the final gate: it decides whether a tool failure class has enough evidence to be useful, and if so hands back a ready-to-use TaskClass.
+
 *Call graph*: called by 1 (task_classes); 1 external calls (__init__).
 
 
 ### `extensions/self_improvement/ufo_ext_self_improvement/cron.py`
 
-`orchestration` · `scheduled background tick`
+`orchestration` · `scheduled cron tick`
 
-This file is the safety gate for automatic prompt improvement. It does not directly change an agent. Instead, it periodically reviews recent agent work, tries to create one improved prompt candidate for each agent and current prompt version, tests that candidate, and only asks the wider governance system to approve it if it passes enough times in a row.
+This file is the careful “heartbeat” of the self-improvement extension. On each scheduled tick, it reviews the workspace’s recorded agent trajectories, meaning past conversations or task attempts, grouped by agent. For each agent, it may open one candidate improved prompt for the agent’s current prompt digest, which is a fingerprint of the exact prompt version being targeted.
 
-The central idea is like a probation period. A new prompt is not trusted after one good test. It must pass the evaluation gate for `stability_count` scheduled ticks before it can be promoted into a proposal. If it fails, it is marked rejected. If it succeeds enough times, it is marked promoted and linked to the proposal that was opened.
+The important safety idea is that this code never directly changes an agent. It only asks for a governed proposal after a candidate has passed evaluation enough times in a row. Think of it like a probation period: a new prompt must keep passing tests over multiple checks before it is sent to people or governance for approval.
 
-The file also remembers candidate state in the extension's scoped store. That stored record includes which original prompt digest the candidate was based on, the proposed prompt text, the task it targets, the held-out examples used to test it, its pass count, and whether it is still being evaluated. This matters because the cron job runs repeatedly. Without stored state, it could keep proposing the same candidate again and again, or forget that a candidate already failed. A terminal candidate is suppressed until the agent prompt changes through approval, which changes the digest.
+The file stores each candidate’s state in the extension’s scoped store. That saved state records the prompt it came from, the proposed new prompt, which held-out examples are used to test it, how many times it has passed, and whether it was rejected or promoted. If a candidate was already rejected or promoted for the same prompt digest, the code will not propose it again until the agent’s prompt digest changes through an approved update. This prevents the system from endlessly re-opening the same idea.
 
 #### Function details
 
@@ -200,11 +236,11 @@ The file also remembers candidate state in the extension's scoped store. That st
 async def run(self) -> None
 ```
 
-**Purpose**: Starts one full self-improvement tick. It gathers all available trajectories, groups them by agent, and advances the improvement process separately for each agent.
+**Purpose**: This is the top-level scheduled action. It gathers all known trajectories, groups them by agent, and advances the self-improvement process separately for each agent.
 
-**Data flow**: It reads trajectories from the extension context. It turns the mixed list into per-agent groups, then sends each agent id and its matching trajectories onward. It returns nothing; its effect is whatever candidate state or governance proposal is created during the per-agent work.
+**Data flow**: It starts by asking the extension context for all trajectories. It groups those records by agent ID, then sends each agent’s group of trajectories into the next step. It does not return a value; its effect is to move candidate prompt evaluations forward and possibly create governed proposals.
 
-**Call relations**: This is the top-level method for the cron pass. It uses `_by_agent` to sort the raw trajectories into agent-sized batches, then calls `ImproveCron._advance` for each batch so each agent can be checked independently.
+**Call relations**: The cron runner calls this method when the scheduled self-improvement tick fires. Inside, it relies on _by_agent to sort trajectories into per-agent bundles, then calls ImproveCron._advance once for each bundle.
 
 *Call graph*: calls 2 internal fn (_advance, _by_agent).
 
@@ -215,11 +251,11 @@ async def run(self) -> None
 async def _advance(self, agent_id: UUID, trajectories: tuple[Trajectory, ...]) -> None
 ```
 
-**Purpose**: Moves one agent forward by one step in the candidate lifecycle. It either finds or opens a candidate for the agent's current prompt version, then tests that candidate.
+**Purpose**: This moves one agent forward by one step in the improvement process. It either finds or opens a candidate for the agent’s current prompt version, then tests that candidate if one exists.
 
-**Data flow**: It receives an agent id and that agent's trajectories. It reads the prompt digest from the first trajectory, builds the storage key for that agent, asks for an active candidate or opens a new one, and stops if there is no candidate to work on. If there is a candidate, it passes it to the gate evaluation step.
+**Data flow**: It receives an agent ID and that agent’s trajectories. It reads the current prompt digest from the first trajectory, builds the storage key for this agent’s candidate, and asks _active_or_open for a candidate. If there is no candidate, it stops. If there is one, it passes the candidate into _gate for evaluation.
 
-**Call relations**: This method is called by `ImproveCron.run` once per agent. It delegates candidate lookup or creation to `ImproveCron._active_or_open`, then hands the candidate to `ImproveCron._gate` to decide whether it should keep waiting, be rejected, or become a proposal.
+**Call relations**: ImproveCron.run calls this after grouping the trajectories. This method is the bridge between candidate setup, done by ImproveCron._active_or_open, and candidate testing, done by ImproveCron._gate.
 
 *Call graph*: calls 2 internal fn (_active_or_open, _gate); called by 1 (run).
 
@@ -230,11 +266,11 @@ async def _advance(self, agent_id: UUID, trajectories: tuple[Trajectory, ...]) -
 async def _active_or_open(self, key: str, from_digest: str, trajectories: tuple[Trajectory, ...]) -> CandidateState | None
 ```
 
-**Purpose**: Finds the current candidate for an agent, or creates one if it is safe and useful to do so. It prevents repeated proposals for a prompt version that already has a resolved candidate.
+**Purpose**: This finds the still-active candidate for a prompt version, or creates a new one if it is safe and useful to do so. It also prevents already resolved candidates from being proposed again for the same prompt digest.
 
-**Data flow**: It receives a store key, the current prompt digest, and the agent's trajectories. It first checks the store for an existing candidate. If that stored candidate matches the current digest and is still evaluating, it returns it; if it is already promoted or rejected, it returns nothing. If there is no usable stored candidate, it looks for task classes in the trajectories, asks the prompt proposer for a new prompt for the first class, stores the new `CandidateState`, and returns it. If no task class or no proposal exists, it returns nothing.
+**Data flow**: It receives a storage key, the current prompt digest, and the agent’s trajectories. First it checks the scoped store for a saved candidate. If the saved candidate belongs to this same prompt digest and is still evaluating, it returns that candidate. If the saved candidate was already promoted or rejected, it returns nothing. If there is no usable saved candidate, it looks for task classes in the trajectories, asks the prompt proposer for a new prompt based on the current prompt and one task class, saves the opened candidate, and returns it.
 
-**Call relations**: This method is called from `ImproveCron._advance` before any evaluation happens. It uses `task_classes` to find meaningful groups of examples and constructs a `CandidateState` when the proposer supplies a candidate prompt.
+**Call relations**: ImproveCron._advance calls this before any evaluation happens. This function calls task_classes to find usable task groups, and it uses the proposer to create a candidate prompt when none is already active.
 
 *Call graph*: called by 1 (_advance); 2 external calls (__init__, task_classes).
 
@@ -245,11 +281,11 @@ async def _active_or_open(self, key: str, from_digest: str, trajectories: tuple[
 async def _gate(self, agent_id: UUID, key: str, from_digest: str, candidate: CandidateState, trajectories: tuple[Trajectory, ...]) -> None
 ```
 
-**Purpose**: Tests a candidate prompt and decides its next state. It rejects failing candidates, counts repeated passing ticks, and opens a governed change proposal only after enough consecutive passes.
+**Purpose**: This is the safety gate for a candidate prompt. It evaluates whether the proposed prompt is good enough, counts consecutive passing ticks, rejects failures, and opens a governed change proposal only after enough repeated passes.
 
-**Data flow**: It receives the agent id, store key, original prompt digest, candidate state, and trajectories. It builds two evaluation sets: the candidate's own held-out examples and held-out examples from other task classes. It asks the evaluator to compare the candidate prompt against the current prompt. If the verdict fails, it saves the candidate as rejected with zero passes. If it passes but has not reached the required stability count, it saves the increased pass count and keeps evaluating. If it has passed enough times, it creates an `AgentChange` proposal and saves the candidate as promoted with the proposal id.
+**Data flow**: It receives the agent, storage key, current prompt digest, candidate state, and trajectories. It builds two test sets: the candidate’s own held-out examples and held-out examples from other task classes. It sends the proposed prompt, the old prompt, and those examples to the evaluator. If the candidate fails, it saves it as rejected with zero passes. If it passes but has not yet reached the required stability count, it saves the increased pass count and keeps evaluating. If it reaches the required count, it asks the extension context to propose an AgentChange and then saves the candidate as promoted with the proposal ID.
 
-**Call relations**: This method is called by `ImproveCron._advance` after a candidate is available. It calls `_held_out` to reconstruct the candidate's held-out examples, uses `task_classes` to gather broader safety checks, calls `_save` to persist state changes, and uses the extension context's proposal mechanism to hand successful changes to governance instead of applying them directly.
+**Call relations**: ImproveCron._advance calls this after a candidate is available. This function calls _held_out to rebuild the candidate’s saved test examples, calls task_classes to gather broader comparison examples, uses _save to persist each outcome, and creates an AgentChange only when the candidate has passed the gate enough times.
 
 *Call graph*: calls 2 internal fn (_save, _held_out); called by 1 (_advance); 2 external calls (__init__, task_classes).
 
@@ -260,11 +296,11 @@ async def _gate(self, agent_id: UUID, key: str, from_digest: str, candidate: Can
 async def _save(self, key: str, candidate: CandidateState, *, status: CandidateStatus, gate_passes: int, proposal_id: str | None=None) -> None
 ```
 
-**Purpose**: Writes an updated candidate record back to the extension store. It is used whenever the gate changes a candidate's status, pass count, or proposal link.
+**Purpose**: This writes an updated candidate state back to the extension’s store. It keeps the existing candidate details but changes the status, pass count, and optional proposal ID.
 
-**Data flow**: It receives the storage key, the existing candidate, the new status, the new pass count, and optionally a proposal id. It makes an updated copy of the candidate and stores it as JSON-friendly data. It returns nothing, but the persistent store now reflects the new candidate state.
+**Data flow**: It receives the storage key, the existing candidate, and the new status information. It copies the candidate with the updated fields, turns it into JSON-friendly data, and writes it to the scoped store. It returns nothing, but the stored candidate state changes.
 
-**Call relations**: This helper is only called by `ImproveCron._gate`. It keeps the persistence step consistent so rejection, continued evaluation, and promotion all update the stored candidate in the same way.
+**Call relations**: ImproveCron._gate calls this whenever evaluation changes a candidate’s state. It is the small persistence step that makes future cron ticks remember whether a candidate is still being tested, rejected, or already promoted.
 
 *Call graph*: called by 1 (_gate); 1 external calls (model_copy).
 
@@ -275,11 +311,11 @@ async def _save(self, key: str, candidate: CandidateState, *, status: CandidateS
 def _by_agent(trajectories: tuple[Trajectory, ...]) -> Mapping[UUID, tuple[Trajectory, ...]]
 ```
 
-**Purpose**: Splits a mixed collection of trajectories into one group per agent. This lets the cron job evaluate each agent's prompt history separately.
+**Purpose**: This groups trajectory records by the agent that produced them. It lets the cron process each agent independently instead of mixing all past work together.
 
-**Data flow**: It receives all trajectories together. It reads each trajectory's agent id, collects trajectories with the same id into a list, converts each list to a tuple, and returns a mapping from agent id to that agent's trajectories.
+**Data flow**: It receives a tuple of trajectories. It reads each trajectory’s agent ID, collects trajectories with the same agent ID into a group, and returns a mapping from agent ID to that agent’s tuple of trajectories.
 
-**Call relations**: This helper is called by `ImproveCron.run` at the start of a tick. Its output controls how many times `ImproveCron._advance` runs and ensures one agent's data is not mixed with another's.
+**Call relations**: ImproveCron.run calls this immediately after fetching trajectories. The grouped output drives the rest of the cron flow, because ImproveCron._advance expects to work on one agent at a time.
 
 *Call graph*: called by 1 (run).
 
@@ -290,11 +326,11 @@ def _by_agent(trajectories: tuple[Trajectory, ...]) -> Mapping[UUID, tuple[Traje
 def _held_out(trajectories: tuple[Trajectory, ...], held_out: tuple[str, ...]) -> tuple[TaskExample, ...]
 ```
 
-**Purpose**: Rebuilds the held-out examples for a candidate from the current trajectories. Held-out examples are test cases kept aside so the new prompt can be judged on work it was not built from.
+**Purpose**: This reconstructs the candidate’s saved held-out test examples from the current trajectories. It keeps only examples that are still present and are considered bad trajectories, because those are the examples used to judge whether the new prompt improves problem cases.
 
-**Data flow**: It receives the agent's trajectories and a tuple of held-out conversation ids stored in the candidate. It indexes the trajectories by conversation id, looks up each requested id, skips any missing trajectory, and uses `bad_trajectory` to turn relevant failed or flagged work into a `TaskExample`. It returns the collected examples as a tuple.
+**Data flow**: It receives all trajectories for an agent and a tuple of saved conversation IDs. It builds a lookup table from conversation ID to trajectory, then walks through the saved IDs. For each matching trajectory, it asks bad_trajectory whether that trajectory should be turned into a task example. Matching flagged examples are collected and returned as a tuple.
 
-**Call relations**: This helper is called by `ImproveCron._gate` when preparing the evaluation input. It relies on `bad_trajectory` from the corpus code to identify usable examples, then hands those examples back to the gate so the evaluator can test the candidate prompt.
+**Call relations**: ImproveCron._gate calls this before evaluation so the evaluator gets the candidate’s own held-out examples. This function delegates the judgment of whether a trajectory is a useful bad example to bad_trajectory.
 
 *Call graph*: called by 1 (_gate); 1 external calls (bad_trajectory).
 
@@ -303,11 +339,13 @@ def _held_out(trajectories: tuple[Trajectory, ...], held_out: tuple[str, ...]) -
 
 `domain_logic` · `self-improvement evaluation`
 
-This file is the promotion gate for self-improvement. Imagine testing a new recipe against the old one: you do not switch restaurants because four customers happened to like the new dish unless the evidence is strong enough. Here, each replayed example says whether it used the candidate prompt and whether the judge accepted the answer. The file compares the candidate arm, called "present," with the current-prompt arm, called "absent."
+This file is the safety gate for self-improvement. When the system tries a candidate prompt, it does not promote it just because it won a few examples by luck. Instead, it asks: did the candidate improve acceptance often enough, with enough evidence, and did it avoid hurting other task types?
 
-The main question is acceptance lift: how much better the candidate's acceptance rate is than the old prompt's rate. Because small samples can be misleading, the code does not trust the raw difference alone. It builds a confidence interval, meaning a cautious range of plausible values, using Wilson bounds and a Newcombe difference method. In plain terms, it asks: "Even after accounting for uncertainty, is the candidate still clearly better?"
+The file treats each replayed example as belonging to one of two arms: the candidate prompt was present, or it was absent. It then counts successes and totals for both arms. From those counts it estimates the “lift,” meaning how much better the candidate did than the current prompt.
 
-The gate has two stages. First, `score_gate` checks the local task class where the candidate was meant to help. Each side must have enough examples, and the cautious lower estimate of improvement must beat a minimum floor. Then `two_stage_gate` checks a broader held-out set through `global_non_inferior`. That second check is intentionally forgiving: it blocks only when there is confident evidence that the candidate makes other task classes meaningfully worse.
+Because small samples can be misleading, the code uses confidence bounds. A confidence bound is a cautious estimate that says, in effect, “even after allowing for uncertainty, the improvement is at least this much.” The local gate only passes if this cautious lower estimate clears a required floor and both arms have enough examples.
+
+There is also a second, broader check. A candidate may be great for one mined task class but harmful to other tasks. The global check blocks only when there is confident evidence of regression. If the broader evidence is too thin or merely noisy, it does not block promotion. In short, this file is like a quality-control inspector: reward real wins, ignore lucky noise, and stop changes that clearly break other work.
 
 #### Function details
 
@@ -317,11 +355,11 @@ The gate has two stages. First, `score_gate` checks the local task class where t
 def wilson_lower_bound(accepted: int, total: int, z: float=WILSON_Z_95) -> float
 ```
 
-**Purpose**: This calculates a cautious lower estimate for a success rate, such as "how low might the true acceptance rate reasonably be?" It is used when the system wants to avoid being fooled by lucky small samples.
+**Purpose**: This function calculates a cautious lower estimate for a success rate. It answers: given some accepted examples out of a total, what success rate can we reasonably trust as a lower limit?
 
-**Data flow**: It receives a number of accepted examples and a total number of examples. If there are no examples, it returns 0. Otherwise, it computes the observed success rate, adjusts it for uncertainty using the Wilson formula, and returns a lower-bound rate between 0 and 1.
+**Data flow**: It receives a number of accepted examples, a total number of examples, and an optional confidence setting. If there are no examples, it returns 0. Otherwise it computes a Wilson confidence bound, which adjusts the raw success rate downward to account for uncertainty, and returns a value between 0 and 1.
 
-**Call relations**: This is a building block for comparing two prompt arms. `lift_lower_bound` uses it to be conservative about the candidate's success rate, and `lift_upper_bound` uses it when estimating the most optimistic possible lift in the opposite direction.
+**Call relations**: This is a building block for comparing prompt versions. The lift calculations call it when they need the pessimistic side of a success rate before deciding whether a candidate truly improved or whether the result may be noise.
 
 *Call graph*: called by 2 (lift_lower_bound, lift_upper_bound); 1 external calls (sqrt).
 
@@ -332,11 +370,11 @@ def wilson_lower_bound(accepted: int, total: int, z: float=WILSON_Z_95) -> float
 def wilson_upper_bound(accepted: int, total: int, z: float=WILSON_Z_95) -> float
 ```
 
-**Purpose**: This calculates a cautious upper estimate for a success rate, such as "how high might the true acceptance rate reasonably be?" It helps the gate understand the best reasonable case for one side of a comparison.
+**Purpose**: This function calculates a cautious upper estimate for a success rate. It answers: after allowing for uncertainty, how high could this success rate reasonably be?
 
-**Data flow**: It receives accepted and total counts. If there are no examples, it returns 1, meaning the rate could be anything up to perfect because there is no evidence. Otherwise, it applies the Wilson formula and returns an upper-bound rate between 0 and 1.
+**Data flow**: It receives accepted examples, total examples, and an optional confidence setting. If there are no examples, it returns 1, meaning the rate is completely unconstrained. Otherwise it computes the upper Wilson confidence bound and returns a value between 0 and 1.
 
-**Call relations**: This supports the lift calculations. `lift_lower_bound` uses it to give the old prompt the benefit of the doubt, while `lift_upper_bound` uses it to give the candidate the benefit of the doubt when checking for possible harm.
+**Call relations**: The lift calculations use this alongside the lower bound. It helps measure the uncertainty around each prompt arm so the gate can avoid promoting changes based on fragile evidence.
 
 *Call graph*: called by 2 (lift_lower_bound, lift_upper_bound); 1 external calls (sqrt).
 
@@ -347,11 +385,11 @@ def wilson_upper_bound(accepted: int, total: int, z: float=WILSON_Z_95) -> float
 def lift_lower_bound(cont: Contingency) -> float
 ```
 
-**Purpose**: This estimates the lowest reasonable improvement the candidate prompt has over the old prompt. It answers the gate's core local question: "Is the candidate still better after we account for uncertainty?"
+**Purpose**: This function computes the cautious lower bound of the candidate prompt’s improvement over the current prompt. It is the key local evidence measure used to decide whether a candidate really looks better.
 
-**Data flow**: It receives a `Contingency` count summary: accepted and total examples for candidate-present and candidate-absent runs. If either side has no examples, it returns 0. Otherwise, it compares the raw success rates and subtracts a combined uncertainty amount built from Wilson bounds, producing a cautious lower estimate of the lift.
+**Data flow**: It receives a Contingency count: accepted and total examples for the candidate-present arm and the candidate-absent arm. If either arm has no examples, it returns 0. Otherwise it compares the two raw acceptance rates, subtracts an uncertainty penalty built from Wilson bounds, and returns the cautious lower estimate of the lift.
 
-**Call relations**: `score_gate` calls this after turning individual replay results into counts. Internally it calls `wilson_lower_bound`, `wilson_upper_bound`, and square-root math so it can combine the uncertainty from both arms into one direct comparison.
+**Call relations**: score_gate calls this after the replay labels have been counted. It relies on wilson_lower_bound and wilson_upper_bound to account for uncertainty in both arms before the local promotion decision is made.
 
 *Call graph*: calls 2 internal fn (wilson_lower_bound, wilson_upper_bound); called by 1 (score_gate); 1 external calls (sqrt).
 
@@ -362,11 +400,11 @@ def lift_lower_bound(cont: Contingency) -> float
 def lift_upper_bound(cont: Contingency) -> float
 ```
 
-**Purpose**: This estimates the highest reasonable improvement the candidate prompt might have over the old prompt. In this file it is mainly used to decide whether a candidate is clearly harmful on broader tasks.
+**Purpose**: This function computes the optimistic upper bound of the candidate prompt’s lift. It is mainly used to decide whether a candidate is clearly harmful on the broader task set.
 
-**Data flow**: It receives the same counted comparison as `lift_lower_bound`. If either side has no examples, it returns 0. Otherwise, it compares the raw success rates and adds a combined uncertainty amount, producing the optimistic upper end of the lift range.
+**Data flow**: It receives a Contingency count for candidate-present and candidate-absent examples. If either side is empty, it returns 0. Otherwise it compares the raw rates and adds an uncertainty allowance, producing the best plausible lift after accounting for uncertainty.
 
-**Call relations**: `global_non_inferior` calls this when deciding whether global results show a real regression. It uses the Wilson lower and upper helpers so the global check blocks only when even the optimistic reading is worse than the allowed margin.
+**Call relations**: global_non_inferior calls this during the broader safety check. If even this optimistic estimate is worse than the allowed regression margin, the candidate is treated as confidently harmful.
 
 *Call graph*: calls 2 internal fn (wilson_lower_bound, wilson_upper_bound); called by 1 (global_non_inferior); 1 external calls (sqrt).
 
@@ -377,11 +415,11 @@ def lift_upper_bound(cont: Contingency) -> float
 def contingency(labels: tuple[OutcomeLabel, ...]) -> Contingency
 ```
 
-**Purpose**: This turns a list of replay outcomes into simple counts that the statistical checks can use. It separates examples where the candidate prompt was present from examples where it was absent.
+**Purpose**: This function turns individual replay results into the four counts needed for statistical comparison. It separates examples where the candidate prompt was present from examples where it was absent, then counts successes in each group.
 
-**Data flow**: It receives a tuple of `OutcomeLabel` records, each saying whether the candidate was present and whether the answer succeeded. It splits those records into present and absent groups, counts total and accepted examples in each group, and returns a `Contingency` summary.
+**Data flow**: It receives a tuple of OutcomeLabel records. Each record says whether the candidate was present and whether the answer succeeded. The function splits the labels into present and absent groups, counts accepted examples and totals for each, and returns a Contingency object containing those four numbers.
 
-**Call relations**: Both `score_gate` and `global_non_inferior` call this before doing their statistical comparisons. It is the bridge between raw replay labels and the count-based lift formulas.
+**Call relations**: Both score_gate and global_non_inferior call this before doing any lift math. It is the small counting step that converts raw replay outcomes into the shape required by the statistical gate.
 
 *Call graph*: called by 2 (global_non_inferior, score_gate); 1 external calls (__init__).
 
@@ -392,11 +430,11 @@ def contingency(labels: tuple[OutcomeLabel, ...]) -> Contingency
 def score_gate(labels: tuple[OutcomeLabel, ...], lower_bound: float=LIFT_LOWER_BOUND, n_floor: int=N_FLOOR) -> GateVerdict
 ```
 
-**Purpose**: This gives the local promotion verdict for the task class the candidate is supposed to improve. It fails candidates that do not have enough replay evidence or whose cautious improvement estimate is too small.
+**Purpose**: This function makes the local promotion decision for the task class where the candidate was discovered. It passes only when there are enough examples on both sides and the cautious lift estimate is above the required improvement floor.
 
-**Data flow**: It receives replay labels, plus optional thresholds for the minimum lift and minimum number of examples per side. It summarizes the labels with `contingency`, computes the cautious lift with `lift_lower_bound`, then returns a `GateVerdict` saying pass or fail, the reason, the lift estimate, and the sample sizes.
+**Data flow**: It receives replay labels, plus optional thresholds for minimum lift and minimum examples per arm. It counts the outcomes with contingency, computes the lower lift bound, checks whether both arms have enough data, then checks whether the lift is strong enough. It returns a GateVerdict saying pass or fail, with a human-readable reason and the evidence counts.
 
-**Call relations**: `two_stage_gate` calls this first. If `score_gate` says the candidate did not clearly improve the local task class, the larger two-stage process stops there and returns that failure.
+**Call relations**: two_stage_gate calls this first. If score_gate fails, the full two-stage process stops immediately because there is no proven local win to promote.
 
 *Call graph*: calls 2 internal fn (contingency, lift_lower_bound); called by 1 (two_stage_gate); 1 external calls (__init__).
 
@@ -407,11 +445,11 @@ def score_gate(labels: tuple[OutcomeLabel, ...], lower_bound: float=LIFT_LOWER_B
 def global_non_inferior(labels: tuple[OutcomeLabel, ...], margin: float=GLOBAL_REGRESSION_MARGIN, n_floor: int=N_FLOOR) -> bool
 ```
 
-**Purpose**: This checks whether the candidate avoids clearly hurting other task classes. It is not trying to prove the candidate is globally better; it only blocks when there is confident evidence of meaningful harm.
+**Purpose**: This function checks whether the candidate avoids clearly hurting other task classes. It is deliberately permissive when evidence is scarce: it blocks only when the data confidently shows meaningful regression.
 
-**Data flow**: It receives replay labels for the broader global set, plus an allowed regression margin and minimum sample size. It summarizes the labels with `contingency`. If either side has too few examples, it returns true because there is not enough evidence to prove harm. Otherwise, it computes the optimistic lift upper bound and returns whether that value is still above the negative regression margin.
+**Data flow**: It receives replay labels from the broader global set, plus optional settings for allowed regression margin and minimum examples. It counts the outcomes. If either arm has too few examples, it returns true. Otherwise it computes the optimistic lift bound and returns true unless even that optimistic bound is below the allowed negative margin.
 
-**Call relations**: `two_stage_gate` calls this only after the local gate has passed. It hands off the statistical optimism check to `lift_upper_bound` so a candidate is rejected only when the broad results look bad even under a generous reading.
+**Call relations**: two_stage_gate calls this only after the local gate has passed. It uses contingency and lift_upper_bound to decide whether a locally good prompt should still be rejected because it damages other work.
 
 *Call graph*: calls 2 internal fn (contingency, lift_upper_bound); called by 1 (two_stage_gate).
 
@@ -422,26 +460,24 @@ def global_non_inferior(labels: tuple[OutcomeLabel, ...], margin: float=GLOBAL_R
 def two_stage_gate(local_labels: tuple[OutcomeLabel, ...], global_labels: tuple[OutcomeLabel, ...]) -> GateVerdict
 ```
 
-**Purpose**: This is the full promotion decision. It requires both a clear local win and no clear global regression before allowing a candidate prompt to pass.
+**Purpose**: This function gives the final promotion verdict. It requires both a proven local improvement and no confident global regression.
 
-**Data flow**: It receives local replay labels and global replay labels. First it sends the local labels to `score_gate`. If that fails, it returns the local failure verdict unchanged. If the local check passes, it sends the global labels to `global_non_inferior`. A global failure is converted into a failing `GateVerdict`; otherwise the successful local verdict is returned.
+**Data flow**: It receives two sets of replay labels: local labels for the task class being improved, and global labels for other task classes. First it asks score_gate for the local verdict. If that fails, it returns that failure. If the local check passes, it asks global_non_inferior whether the broader behavior is safe. If the global check fails, it returns a failing GateVerdict with a regression reason. Otherwise it returns the successful local verdict.
 
-**Call relations**: This function ties the file's two safeguards together. It uses `score_gate` as the first filter and `global_non_inferior` as the safety check, ensuring a prompt cannot be promoted just because it helped one area while damaging others.
+**Call relations**: This is the top-level decision function in the file. It ties together the local evidence check and the broader safety check, using score_gate first and global_non_inferior second so that only locally promising candidates face the global regression screen.
 
 *Call graph*: calls 2 internal fn (global_non_inferior, score_gate); 1 external calls (__init__).
 
 
 ### `extensions/self_improvement/ufo_ext_self_improvement/model.py`
 
-`io_transport` · `cross-cutting model calls during proposing, replay, and grading`
+`io_transport` · `cross-cutting during proposal, replay, and grading model calls`
 
-This file is a narrow adapter around the project’s model access layer. In plain terms, it is like a standard plug shape: the self-improvement code can plug into a model without caring about the larger wiring behind the wall.
+The self-improvement extension needs to call a language model in several places, such as proposing changes, replaying past work, and grading results. Without this file, each part of the extension would have to know the details of the SDK’s model request format, token limit, and settings. That would make model use harder to change and easier to get inconsistent.
 
-It defines two small promises, called protocols. A protocol is a lightweight interface: it says, “anything with this method can be used here.” `ModelLeg` promises a `complete` method for asking the model to produce plain text. `ReplayLeg` promises a `turn` method for asking the model to produce a full chat message, optionally using tools.
+This file defines two small promises, called protocols: `ModelLeg` means “something that can complete a text prompt,” and `ReplayLeg` means “something that can produce the next message when tools are available.” A protocol is like saying, “I do not care what brand of plug this is, as long as it fits this socket.”
 
-`ModelAccessLeg` is the real adapter. It wraps an SDK `ModelAccess` object, which knows which model to use and how model usage is metered. When someone asks it for a completion or a turn, it builds a `ModelRequest` with the system instructions, conversation messages, token limit, and tool list when needed. It also turns reasoning off and caps output at 2048 tokens.
-
-Without this file, different parts of the extension would have to know SDK request details themselves. That would make model calls easier to get wrong and harder to keep consistent.
+`ModelAccessLeg` is the real adapter. It wraps the SDK’s `ModelAccess`, which is the project’s metered, workspace-aware access point to the model. “Metered” means calls can be tracked or limited, usually because model use has cost. Both model calls use the same maximum output size, 2048 tokens, and turn model reasoning off. The result is a narrow, predictable model interface that the rest of the extension can depend on.
 
 #### Function details
 
@@ -451,11 +487,11 @@ Without this file, different parts of the extension would have to know SDK reque
 async def complete(self, system: str, messages: tuple[Message, ...]) -> str
 ```
 
-**Purpose**: This is the promised shape for anything that can ask the model for a plain text answer. Code can depend on this small promise instead of depending on one specific model implementation.
+**Purpose**: This describes the simplest kind of model call the extension needs: give the model instructions and conversation messages, and get back plain text. It is a promise that any compatible model adapter must fulfill.
 
-**Data flow**: It takes system instructions and a tuple of chat messages as input. An implementation is expected to send those to a model and return the model’s text as a string. This protocol method itself does not perform the work; it describes what the work must look like.
+**Data flow**: It receives a system instruction and a tuple of conversation messages. A concrete implementation will send those to a model and return the model’s text answer. This protocol method itself does not do the work; it defines the shape of the work.
 
-**Call relations**: This is the contract that a concrete class such as `ModelAccessLeg` can satisfy. Parts of the self-improvement flow that only need text completion can be written against this contract, so they do not need to know about SDK request objects.
+**Call relations**: Other code can depend on `ModelLeg.complete` when it only needs text from a model and does not want to know which model adapter is underneath. `ModelAccessLeg.complete` is the concrete implementation in this file that satisfies that promise.
 
 
 ##### `ReplayLeg.turn`  (lines 17–19)
@@ -464,11 +500,11 @@ async def complete(self, system: str, messages: tuple[Message, ...]) -> str
 async def turn(self, system: str, messages: tuple[Message, ...], tools: tuple[ToolSchema, ...]) -> Message
 ```
 
-**Purpose**: This is the promised shape for anything that can ask the model to take one replay-style turn. Unlike a plain completion, the result is a full message, and the model may be given tool descriptions it can use.
+**Purpose**: This describes a model call for replay-style work, where the model may be given tools it can choose to use. It returns a full message rather than just text, because the message may include tool-related output.
 
-**Data flow**: It takes system instructions, prior conversation messages, and available tool schemas. An implementation is expected to send that information to a model and return the next `Message`. This protocol method only defines the expected input and output shape.
+**Data flow**: It receives a system instruction, prior conversation messages, and tool descriptions. A concrete implementation will pass those to the model and return the next model message. The protocol only states this contract; it does not perform the call itself.
 
-**Call relations**: This gives replay code a small, stable contract to call. `ModelAccessLeg.turn` is the concrete version in this file that fulfills the contract by building an SDK model request.
+**Call relations**: Replay code can ask for a `ReplayLeg` when it needs a model turn with tools available. `ModelAccessLeg.turn` is the concrete adapter here that turns that request into the SDK’s `ModelRequest` format.
 
 
 ##### `ModelAccessLeg.complete`  (lines 28–37)
@@ -477,11 +513,11 @@ async def turn(self, system: str, messages: tuple[Message, ...], tools: tuple[To
 async def complete(self, system: str, messages: tuple[Message, ...]) -> str
 ```
 
-**Purpose**: This asks the SDK-backed model for a plain text completion using the extension’s standard settings. It is used when the caller wants text back, not a full tool-aware chat turn.
+**Purpose**: This sends a plain text completion request through the SDK’s model access layer. It is used when the extension needs the model to answer with text, not a tool-using message.
 
-**Data flow**: It receives system instructions and conversation messages. It wraps them in a `ModelRequest`, adding the selected model name, a 2048-token output cap, and `reasoning="off"`. It sends that request through the wrapped `ModelAccess` object and returns the resulting text string.
+**Data flow**: It starts with a system instruction and conversation messages. It builds a `ModelRequest` using the wrapped model’s name, the shared 2048-token output limit, and reasoning set to off. It sends that request to `self.model.complete` and returns the text string that comes back.
 
-**Call relations**: This is the concrete fulfillment of the `ModelLeg.complete` contract. Its key handoff is to `ModelRequest.__init__`, which packages the request fields into the SDK’s expected form before the request is passed to `self.model.complete`.
+**Call relations**: This is the real implementation behind the `ModelLeg.complete` promise. When proposal or grading code needs a straightforward model answer, it can call this method instead of constructing SDK requests itself. Inside, it hands the formatted request to the SDK model layer.
 
 *Call graph*: 1 external calls (__init__).
 
@@ -492,26 +528,26 @@ async def complete(self, system: str, messages: tuple[Message, ...]) -> str
 async def turn(self, system: str, messages: tuple[Message, ...], tools: tuple[ToolSchema, ...]) -> Message
 ```
 
-**Purpose**: This asks the SDK-backed model to produce the next full message in a tool-aware replay. It is used when the caller needs a structured chat message, possibly influenced by available tools.
+**Purpose**: This sends a tool-aware model turn through the SDK’s model access layer. It is used when replay logic needs the model to produce the next assistant message while knowing what tools are available.
 
-**Data flow**: It receives system instructions, conversation messages, and tool schemas. It builds a `ModelRequest` that includes the selected model, the same 2048-token cap, the tools, and `reasoning="off"`. It sends that request through the wrapped `ModelAccess` object and returns the model’s `Message`.
+**Data flow**: It receives a system instruction, conversation messages, and tool schemas, which are descriptions of tools the model may call. It packages them into a `ModelRequest` with the current model name, the shared token limit, and reasoning turned off. It sends the request to `self.model.turn` and returns the resulting `Message`.
 
-**Call relations**: This is the concrete fulfillment of the `ReplayLeg.turn` contract. It first hands the gathered inputs to `ModelRequest.__init__` so the SDK receives a properly shaped request, then passes that request to `self.model.turn` to get the next replay message.
+**Call relations**: This is the real implementation behind the `ReplayLeg.turn` promise. Replay-oriented code calls it when it needs a full assistant message rather than just text. The method translates the extension’s narrow request into the SDK’s `ModelRequest` and passes it on to the underlying model access object.
 
 *Call graph*: 1 external calls (__init__).
 
 
 ### `extensions/self_improvement/ufo_ext_self_improvement/proposer.py`
 
-`domain_logic` · `self-improvement proposal phase`
+`domain_logic` · `self-improvement proposal generation`
 
-This file is part of a self-improvement loop for an AI agent. Its job is not to decide whether a new prompt is safe or good enough; it only proposes a possible rewrite. Think of it like a first draft writer: it reads the current instructions, looks at a small pile of “this went badly” examples, and suggests a clearer version of the instructions that might prevent the same problem next time.
+This file is one step in a self-improvement loop. The system has noticed a class of tasks where an agent ran into friction. Instead of changing code directly, it asks another model to rewrite the agent’s system prompt so the agent has clearer instructions next time.
 
-The main piece is `PromptProposer`, which owns a `ModelLeg`. A `ModelLeg` is the connection to a language model for one step of the process. When asked to propose a change, it first checks whether the task class has mined examples. If there are no examples, there is nothing useful to learn from, so it returns nothing.
+The main piece is PromptProposer. It receives the current prompt and a TaskClass, which contains the task name and examples of problems the agent had. If there are no examples, it does nothing, because there is no evidence to learn from. If examples exist, it builds a user-facing request that includes the task class, the current prompt, and a limited number of short examples. It sends that to a model together with a system instruction that says: improve the prompt, keep the agent’s broader purpose intact, and return only the revised prompt.
 
-If examples exist, it builds a careful request for the model. That request includes the task class name, the current system prompt, and a limited number of example requests and problems. The system instruction tells the model to make the smallest useful change, preserve the agent’s broader behavior, and return only the full revised prompt.
+The result is cleaned up before use. This matters because models sometimes wrap answers in Markdown code fences, even when asked not to. If the model returns an empty answer, or simply repeats the existing prompt, the file treats that as no useful proposal and returns nothing.
 
-After the model replies, the file cleans off common formatting clutter such as Markdown code fences. If the answer is empty or exactly the same as the current prompt, it is treated as a no-op and discarded. Otherwise it returns a `PromptCandidate`, which records the task class and the proposed new prompt.
+The output, when successful, is a PromptCandidate: a small record tying the task class name to the proposed new prompt. Later parts of the system can evaluate or gate that candidate before adopting it.
 
 #### Function details
 
@@ -521,11 +557,11 @@ After the model replies, the file cleans off common formatting clutter such as M
 async def propose(self, current_prompt: str, task_class: TaskClass) -> PromptCandidate | None
 ```
 
-**Purpose**: This is the main entry point for creating a possible improved system prompt. It uses the current prompt and a task class with failure examples to ask a model for a revised prompt, then rejects empty or unchanged answers.
+**Purpose**: This is the main action in the file: it tries to create a revised system prompt for one task class. Someone would use it when the system has examples of an agent struggling and wants a model-written improvement to consider.
 
-**Data flow**: It receives the agent’s current system prompt and a `TaskClass`, which includes the task name and mined examples of friction. If there are no examples, it stops and returns `None`. Otherwise it builds a model request with `_prompt`, sends that request through `self.model.complete`, cleans the model’s text with `_clean`, and compares the result with the original prompt. If the cleaned result is useful and different, it returns a `PromptCandidate` containing the task class name and the new prompt text; otherwise it returns `None`.
+**Data flow**: It takes the current system prompt and a task class. First it checks whether the task class has mined examples; if not, it returns nothing. If examples exist, it builds a prompt for the model, sends that prompt as a user message along with fixed system instructions, cleans the model’s text reply, and compares it with the original prompt. The output is either a PromptCandidate containing the task name and revised prompt, or None if there was no useful change.
 
-**Call relations**: This function drives the file’s whole flow. It calls `PromptProposer._prompt` to prepare the message that the model will see, wraps that message in a `Message` object for the model API, then calls `_clean` after the model answers. When a real change is found, it creates a `PromptCandidate` so later parts of the self-improvement system can evaluate or apply the proposal.
+**Call relations**: This function drives the proposal step. It calls PromptProposer._prompt to prepare the text shown to the model, creates a Message object so the model receives that text in the expected chat format, calls the model through its ModelLeg, then calls _clean to remove unwanted wrapping. If the cleaned answer passes the basic checks, it creates and returns a PromptCandidate for later evaluation.
 
 *Call graph*: calls 2 internal fn (_prompt, _clean); 2 external calls (__init__, __init__).
 
@@ -536,11 +572,11 @@ async def propose(self, current_prompt: str, task_class: TaskClass) -> PromptCan
 def _prompt(self, current_prompt: str, task_class: TaskClass) -> str
 ```
 
-**Purpose**: This builds the user-facing instruction text that is sent to the model. It lays out the task class, the current system prompt, and a short set of examples showing what went wrong.
+**Purpose**: This function writes the actual request that will be shown to the model. It packages the task class, the current prompt, and selected failure examples into a clear instruction asking for a full revised prompt.
 
-**Data flow**: It receives the current prompt and a `TaskClass`. From the task class, it reads the name and the mined examples, keeping only up to the configured maximum number of examples and trimming each request and problem to the configured character limit. It turns those pieces into one readable text block and returns that block as a string.
+**Data flow**: It takes the current prompt and a task class. It reads the task class name and its mined examples, trims each example’s request and problem text to a fixed length, and includes only up to the allowed maximum number of examples. It returns one formatted text block that says what task class is being improved, shows the current system prompt, lists examples, and asks for the full revised prompt.
 
-**Call relations**: `PromptProposer.propose` calls this right before contacting the model. Its output becomes the content of the user message, while the fixed proposer system instruction supplies the model’s overall role and rules.
+**Call relations**: PromptProposer.propose calls this when it has decided there is enough evidence to ask the model for a rewrite. The text returned here becomes the content of the user message sent to the model.
 
 *Call graph*: called by 1 (propose).
 
@@ -551,11 +587,11 @@ def _prompt(self, current_prompt: str, task_class: TaskClass) -> str
 def _clean(text: str) -> str
 ```
 
-**Purpose**: This removes simple formatting that a model may add around its answer, especially Markdown code fences. It helps turn the model’s response into plain prompt text that can be compared and stored.
+**Purpose**: This helper tidies the model’s answer so the rest of the system receives just the proposed prompt text. It mainly removes extra Markdown code fences that a model might add around its response.
 
-**Data flow**: It receives raw text from the model. It trims whitespace from the beginning and end. If the text starts with a triple-backtick code fence, it removes the opening fence and, when present, the closing fence, then trims the result again. It returns the cleaned prompt body as a string.
+**Data flow**: It takes the raw text returned by the model. It trims leading and trailing whitespace. If the result starts with a triple-backtick code fence, it removes the opening fence and, if present, the closing fence at the end. It then trims the result again and returns the cleaned prompt text.
 
-**Call relations**: `PromptProposer.propose` calls this after the model returns text. The cleaned result is then checked for two failure cases: an empty answer or an answer that is unchanged from the current prompt.
+**Call relations**: PromptProposer.propose calls this immediately after the model replies. The cleaned text is what gets checked for emptiness or no change before a PromptCandidate is created.
 
 *Call graph*: called by 1 (propose).
 
@@ -564,11 +600,11 @@ def _clean(text: str) -> str
 
 `domain_logic` · `self-improvement evaluation`
 
-This file solves a careful testing problem: how can you ask, “Would a different prompt have produced a better final answer?” without rerunning tools, touching outside systems, or changing the facts the model saw? It does this through a “replay.” A replay is like restaging a play with a new director’s note, while keeping the same props and recorded offstage answers.
+This file solves a practical testing problem: how can you tell whether a new prompt would have produced a better answer on an old task, without repeating actions that might touch the outside world? It does this by replaying the conversation like a stage rehearsal. The model is allowed to speak again under the new system prompt, but whenever it asks to use a tool, the code gives it the exact tool result that was saved from the original run instead of executing the tool again.
 
-The archived conversation is first trimmed so the original final answer is removed, but the earlier user messages, tool calls, and tool results remain available as context. The file then builds a small catalog of only the tools that were used in that archived run. When the model asks to use a tool during replay, the code does not execute anything. Instead, it looks up the matching old tool result from the archive and feeds that back.
+The replay starts by removing the original final answer, while keeping the user messages and previous tool results as context. It then builds a small fake tool catalog from the tools that appeared in the archive. During replay, if the model asks for the same tool with the same input, it receives the archived result. If it asks for a tool call that was not in the archive, the replay is marked as “diverged,” meaning it left the known path. The code then returns whatever answer text it had so far, because it cannot safely continue.
 
-If the model asks for a tool call that does not match the archive, the replay is marked as “diverged.” That means it has left the known path, so the system cannot safely provide a stored answer. The partial answer is still returned so a grader can judge it, but it is treated as a weaker signal. A round limit prevents the replay from looping forever.
+A round limit prevents endless back-and-forth. The final result records three things: the regenerated answer text, whether the replay diverged from the archive, and how many model turns it took.
 
 #### Function details
 
@@ -578,11 +614,11 @@ If the model asks for a tool call that does not match the archive, the replay is
 def _canonical_input(value: object) -> str
 ```
 
-**Purpose**: This helper turns a tool’s input into a stable text key. It makes sure the same input object is written the same way every time, so archived and replayed tool calls can be compared reliably.
+**Purpose**: This helper turns a tool input into a stable text form so the same input can be recognized later. It sorts object keys and removes extra spacing, so equivalent inputs compare the same way.
 
-**Data flow**: It receives any input value from a tool call. It converts that value into compact JSON text with keys sorted into a consistent order. The result is a string that can be used as part of a lookup key.
+**Data flow**: It receives any tool input value, such as a dictionary of arguments. It converts that value to a compact JSON string with keys in a predictable order. The output is that normalized string, used as part of a lookup key.
 
-**Call relations**: When archived tool results are indexed, archived_tool_results uses this helper to record the exact shape of each old tool call. Later, _feed_archived uses the same helper on replayed tool calls, so both sides speak the same matching language.
+**Call relations**: When archived tool results are indexed, archived_tool_results uses this function to record each tool call by name and normalized input. Later, _feed_archived uses the same normalization on newly requested tool calls so it can find the matching archived result.
 
 *Call graph*: called by 2 (_feed_archived, archived_tool_results); 1 external calls (dumps).
 
@@ -593,11 +629,11 @@ def _canonical_input(value: object) -> str
 def replay_head(messages: tuple[Message, ...]) -> tuple[Message, ...]
 ```
 
-**Purpose**: This function prepares the archived conversation for replay by removing the original final answer. The goal is to keep the useful context but force the model to generate its own new ending under the candidate prompt.
+**Purpose**: This function prepares the archived conversation for replay by removing the old final answer. The new prompt should regenerate the answer itself, but it still needs the earlier user messages and tool history.
 
-**Data flow**: It receives the full archived message history. Starting from the end, it removes trailing assistant messages that are plain final answers rather than tool-use requests. It returns the shortened message history that replay should begin from.
+**Data flow**: It receives the full archived message list. Starting from the end, it drops trailing assistant messages unless one contains a tool request, because those trailing assistant messages are treated as final answer text. It returns the shortened message tuple that becomes the replay starting point.
 
-**Call relations**: ReplayEvaluation.replay calls this near the start of a replay. The returned conversation becomes the starting point passed to the model, so the model sees the old task and tool context but not the old final answer it is supposed to replace.
+**Call relations**: ReplayEvaluation.replay calls this near the beginning. The returned conversation is then passed into each model turn, giving the model the old context without letting it simply copy the old final response.
 
 *Call graph*: called by 1 (replay).
 
@@ -608,11 +644,11 @@ def replay_head(messages: tuple[Message, ...]) -> tuple[Message, ...]
 def archived_tool_results(messages: tuple[Message, ...]) -> dict[tuple[str, str], ToolResultBlock]
 ```
 
-**Purpose**: This function builds the lookup table that lets replay answer tool calls from history instead of running tools again. It connects each archived tool request to the archived result that answered it.
+**Purpose**: This function builds a lookup table of saved tool answers from the archived conversation. It is what lets replay answer tool calls from history instead of touching live tools.
 
-**Data flow**: It reads every message in the archived conversation. First it collects tool results by their tool-use id. Then it finds each tool-use block, matches it to its result, and stores that result under a key made from the tool name and normalized input. It returns a dictionary of archived answers ready for replay.
+**Data flow**: It receives the archived messages. First it collects tool result blocks by their tool-use id. Then it finds each archived tool call, matches it to its saved result, and stores that result under a key made from the tool name and normalized input. It returns this dictionary of replayable tool answers.
 
-**Call relations**: ReplayEvaluation.replay calls this before asking the model to replay the task. _feed_archived later depends on this lookup table to decide whether a replayed tool call matches the archived path and, if it does, to return the old result.
+**Call relations**: ReplayEvaluation.replay calls this before the model is run. Later, _feed_archived consults the returned table whenever the model asks for a tool result during replay.
 
 *Call graph*: calls 1 internal fn (_canonical_input); called by 1 (replay).
 
@@ -623,11 +659,11 @@ def archived_tool_results(messages: tuple[Message, ...]) -> dict[tuple[str, str]
 def replay_tools(messages: tuple[Message, ...]) -> tuple[ToolSchema, ...]
 ```
 
-**Purpose**: This function creates the small tool list shown to the model during replay. It includes only the distinct tools that appeared in the archived conversation, which keeps replay scoped to the old path.
+**Purpose**: This function creates the limited tool list shown to the model during replay. It includes only tools that the archived run actually used, so the replay stays tied to the original path.
 
-**Data flow**: It scans the archived messages for tool-use blocks and records each tool name once, in the order first seen. For each name it creates a permissive tool schema, meaning a description of a callable tool that accepts object-shaped input without strict argument rules. It returns these schemas as a tuple.
+**Data flow**: It reads the archived messages and records each distinct tool name from tool-use blocks. For each name, it creates a permissive tool schema, meaning a simple description of a callable tool that accepts object-like inputs. It returns the tuple of these tool schemas.
 
-**Call relations**: ReplayEvaluation.replay calls this before each replay run begins. The resulting tool catalog is passed to the model turn, giving the model enough information to reproduce old calls while avoiding access to the live system’s full tool registry.
+**Call relations**: ReplayEvaluation.replay calls this during setup. The resulting tool list is passed to the model on each replay turn, giving the model enough information to reproduce archived tool calls without exposing the live system’s full tool registry.
 
 *Call graph*: called by 1 (replay); 1 external calls (__init__).
 
@@ -638,11 +674,11 @@ def replay_tools(messages: tuple[Message, ...]) -> tuple[ToolSchema, ...]
 def _feed_archived(tool_uses: tuple[ToolUseBlock, ...], results: Mapping[tuple[str, str], ToolResultBlock]) -> Message | None
 ```
 
-**Purpose**: This function answers the model’s replayed tool calls using stored archive results. If even one requested call cannot be found in the archive, it reports that replay can no longer safely continue on the old path.
+**Purpose**: This function answers the model’s requested tool calls using saved results from the archive. If any requested call has no saved match, it signals that the replay has gone off the known path.
 
-**Data flow**: It receives the tool calls requested in the current model turn and the archived-result lookup table. For each call, it builds the same lookup key used during indexing. If a matching archived result exists, it creates a new tool-result block tied to the current call id but carrying the old content and error flag. If all calls match, it returns one user message containing those results; if any call is missing, it returns nothing.
+**Data flow**: It receives the tool calls from one model turn and the archived-result lookup table. For each call, it normalizes the input and searches for a saved result with the same tool name and input. If all are found, it creates a user message containing matching tool result blocks with the new call ids. If any result is missing, it returns None.
 
-**Call relations**: ReplayEvaluation.replay calls this whenever the model asks to use tools. A returned message is appended to the replay conversation so the model can continue. A missing result tells ReplayEvaluation.replay that the model has diverged from the archive.
+**Call relations**: ReplayEvaluation.replay calls this whenever the model asks to use tools. A returned message is appended to the replay conversation so the model can continue; a None return causes the replay to stop and be marked as diverged.
 
 *Call graph*: calls 1 internal fn (_canonical_input); called by 1 (replay); 2 external calls (__init__, __init__).
 
@@ -653,29 +689,29 @@ def _feed_archived(tool_uses: tuple[ToolUseBlock, ...], results: Mapping[tuple[s
 async def replay(self, archived: tuple[Message, ...], system_prompt: str) -> ReplayResult
 ```
 
-**Purpose**: This is the main replay procedure. It reruns the model side of one archived task under a supplied system prompt, while feeding back archived tool results instead of executing tools.
+**Purpose**: This is the main replay flow. It runs one archived task against one candidate system prompt, safely reusing archived tool results until the model gives a final answer, diverges, or reaches the round limit.
 
-**Data flow**: It receives an archived conversation and a system prompt to test. It prepares archived tool answers, builds the replay-only tool list, and removes the original final answer from the conversation. Then it repeatedly asks the model for the next turn. If the model gives a final text answer with no tool calls, it returns that answer as a successful replay. If the model asks for tools, it tries to feed archived results back. If the call is unknown, or if the round limit is reached, it returns the best partial text and marks the replay as diverged.
+**Data flow**: It receives the archived conversation and the system prompt to test. It builds the archived tool-result lookup, creates the replay tool list, and strips away the original final answer. Then it repeatedly asks the model for the next assistant message. If the model gives final text without tool calls, it returns that as a successful replay. If the model asks for tools, it tries to feed back archived results; if that fails, it returns a diverged result with the best text seen so far. If too many rounds pass, it also returns a diverged result.
 
-**Call relations**: This method ties together all the helpers in the file. It uses archived_tool_results, replay_tools, and replay_head for setup, then relies on _feed_archived during each model round. Its final ReplayResult is what the rest of the self-improvement system can grade when comparing prompt candidates.
+**Call relations**: This method ties together the whole file. It uses archived_tool_results, replay_tools, and replay_head for setup, calls the configured model for each replay leg, uses _feed_archived to answer tool calls from history, and finally produces a ReplayResult describing the outcome.
 
 *Call graph*: calls 4 internal fn (_feed_archived, archived_tool_results, replay_head, replay_tools); 1 external calls (__init__).
 
 
-### Scheduled job runtime
-These files provide the generic background-job and durable scheduling machinery that wakes workers, claims due work, and advances or retires scheduled items.
+### Scheduled task timers
+Provides durable scheduled-task storage, due-task claiming, cron calculation, and workspace-facing tools for recurring reminders and reliable waits.
 
 ### `extensions/scheduled_tasks/ufo_ext_scheduled_tasks/runner.py`
 
 `orchestration` · `recurring scheduled tick`
 
-This file is the “clock tick” for scheduled tasks. Think of it like a caretaker who walks down a hallway every few minutes: it checks which reminders are due, marks the ones it is about to work on so no other caretaker grabs them, skips anything that has expired, and starts the real work for the rest.
+This runner is the part of the scheduled-tasks extension that wakes up at regular intervals and asks, “What should fire now?” It is not triggered by the schedule records themselves; it is more like a caretaker making rounds on a clock. Without it, due tasks would sit in storage and never be delivered back into their conversations.
 
-The main piece is ScheduledTaskRunner. It depends on an ExtensionContext, which must contain a scheduler. The scheduler is the storage-and-control layer that knows how to claim due tasks, retire expired ones, invoke a task inside its conversation, and move repeating tasks to their next date.
+The runner first checks that a scheduler has been connected to the extension context. It then records the current time and asks the schedule store for due tasks, claiming each one with a lease. A lease is a temporary reservation, like putting a sticky note on a library book, so another overlapping runner tick does not process the same task at the same time.
 
-On each run, the runner records the current time, asks the scheduler for due tasks, and processes each one. A short lease is used when claiming tasks. A lease is a temporary hold, like putting a sticky note on a job saying “I’m working on this,” so overlapping runner ticks do not fire the same task twice.
+For each claimed task, it checks whether the task has expired before firing. If it has, the task is retired and nothing is invoked. If it is still valid, the runner works out the next fire time for repeating schedules. When the next fire would be at or after the task’s expiry, it adds a special final-fire instruction telling the conversation to finish the task and ask the user whether to continue, change, or stop the cadence.
 
-For each task, the runner first checks whether it expired before it could be fired. If it is still valid, it may calculate the next cron fire time. A cron schedule is a compact rule such as “every day at 9.” If the next repeat would fall after the task’s expiry, this fire is treated as the final one, and the model receives a special instruction to finish and ask the user what to do next. Failed fires are reported together so the surrounding job system can notice and retry later.
+If invocation succeeds, repeating tasks are rescheduled only after the turn is accepted. If invocation fails, the failure is remembered and the leased occurrence is left for retry. At the end of the tick, any failures are raised together by task name.
 
 #### Function details
 
@@ -685,11 +721,11 @@ For each task, the runner first checks whether it expired before it could be fir
 async def run(self) -> None
 ```
 
-**Purpose**: This is the top-level tick of the scheduled-task runner. It checks that a scheduler exists, claims tasks that are due right now, fires each one, and reports any failures at the end.
+**Purpose**: Runs one scheduled-task polling tick. It claims all tasks that are due now, asks the runner to fire each one, and reports any task fires that failed.
 
-**Data flow**: It starts with the runner’s context and reads the scheduler from it. It captures the current time, asks the scheduler for due tasks using a temporary lease, then sends each claimed task into _fire. If _fire returns a failure label, run collects it. When all tasks are processed, it either finishes quietly or raises one error listing the tasks that failed.
+**Data flow**: It reads the extension context to find the scheduler. It takes the current time, asks the scheduler for due tasks, and passes each claimed task into ScheduledTaskRunner._fire. If every task succeeds or is skipped because it no longer applies, it returns with no value; if any task fails to fire, it raises an error listing the failed task names.
 
-**Call relations**: This is the method the recurring extension job calls when the clock says it is time to poll. It delegates the actual per-task decision making to ScheduledTaskRunner._fire, while it stays responsible for the overall batch: finding due tasks, looping through them, and surfacing failures.
+**Call relations**: This is the outer loop for one clock tick. It calls ScheduledTaskRunner._fire for the detailed work on each claimed task, using the current time from the system clock to decide what is due and to help evaluate expiry.
 
 *Call graph*: calls 1 internal fn (_fire); 1 external calls (now).
 
@@ -700,1770 +736,319 @@ async def run(self) -> None
 async def _fire(self, scheduler: ScheduleStore, task: ScheduledTask, tick_at: datetime, expiry_checked_at: datetime) -> str | None
 ```
 
-**Purpose**: This processes one claimed scheduled task. It decides whether the task should be retired, invoked now, or rescheduled for its next repeat.
+**Purpose**: Processes one claimed scheduled task. It retires expired tasks, invokes active ones back into their conversation, and advances repeating tasks to their next fire time when the invocation is accepted.
 
-**Data flow**: It receives the scheduler, the claimed task, the tick time, and the time used for the expiry check. First it asks the scheduler to retire the task if it has expired. If not expired, it works out the next fire time for repeating schedules. If this looks like the last allowed fire before expiry, it prepares a special final-fire instruction for the task. It then asks the scheduler to invoke the task. If invocation fails, it returns a short failure description. If invocation is accepted and the task repeats, it asks the scheduler to save the next fire time. The result is either no failure, meaning success or harmless no-op, or a string naming the failed task and error type.
+**Data flow**: It receives the scheduler, the claimed task, the tick time, and the time used for the expiry check. First it asks the scheduler whether the task should be retired because it expired. If not, it calculates the next fire time for repeating schedules, prepares a final-fire instruction when this is the last allowed occurrence, and asks the scheduler to invoke the task. If invocation fails, it returns a short failure label; if invocation succeeds and the task repeats, it asks the scheduler to reschedule the task for the following fire time. The result is either no failure or a task-name failure string.
 
-**Call relations**: ScheduledTaskRunner.run calls this once for each due task it claimed. Inside, this function hands storage-sensitive decisions to the scheduler: retiring expired tasks, invoking the task, and rescheduling repeats. It also calls the cron helper next_fire when it needs to translate a repeating schedule rule into the next actual date.
+**Call relations**: ScheduledTaskRunner.run calls this once for each due claimed task. Inside, it relies on the schedule store to retire expired work, invoke the task, and reschedule repeating work, and it uses next_fire to calculate the next cron-style occurrence when the task is not one-time.
 
 *Call graph*: calls 3 internal fn (invoke, reschedule, retire_if_expired); called by 1 (run); 1 external calls (next_fire).
 
 
-### `core/src/ufo/jobs.py`
-
-`orchestration` · `startup and background scheduled work`
-
-This file is the project’s background-jobs control room. At startup, the app discovers core jobs and extension-provided jobs, gives each one a stable name, and registers it with DBOS, the durable workflow system used here to keep queued work reliable across restarts. Without this file, source syncing, page-change hooks, turn recovery, and sandbox cleanup would either not run or would run in unsafe ways, such as outside the correct workspace or several times at once.
-
-The main pattern is: a scheduled “tick” finds which workspaces actually have work, then enqueues one real job run per workspace. This is like a mail carrier checking which houses have mail before making deliveries. A slow job in one workspace does not block the others, and duplicate ticks for the same workspace are folded together.
-
-The file also defines several core jobs. `TurnDispatcher` finds queued or parked conversation turns and offers them to the worker queue. `SandboxReaper` destroys idle disposable sandboxes so unused containers do not live forever. `PageChangeRunner` feeds changed source pages to extension hooks using per-hook cursors, so each consumer resumes where it left off. `JobRunner` ties all jobs together at boot, registers schedules, and is the only path that actually runs handlers inside a bound workspace and extension context.
-
-#### Function details
-
-##### `TurnDispatcher.run`  (lines 126–141)
-
-```
-async def run(self) -> None
-```
-
-**Purpose**: Finds turns that are ready to be sent to the turn worker queue, then sends only the ones allowed to run. Parked turns are rechecked for seat access and spending permission before they are released.
-
-**Data flow**: It starts with dispatchable turn rows from the database. For parked rows, it reads seat and spending state for the relevant workspace and member; rows that still fail those gates are skipped. The remaining rows are stamped and enqueued for turn processing.
-
-**Call relations**: This is the top-level action for the turn-dispatch background job. It asks `_dispatchable_turns` for candidates, uses seat and spend checks when needed, and hands each accepted turn to `_enqueue`.
-
-*Call graph*: calls 2 internal fn (_dispatchable_turns, _enqueue); 4 external calls (__init__, __init__, workspace_tx, gate_member).
-
-
-##### `TurnDispatcher.candidate_workspaces`  (lines 143–151)
-
-```
-async def candidate_workspaces(self) -> tuple[UUID, ...]
-```
-
-**Purpose**: Finds which workspaces contain turns that may need dispatching. This prevents the scheduler from opening every workspace when only a few have pending work.
-
-**Data flow**: It computes a grace-period cutoff time, scans the owner-level database view for workspaces with eligible queued or parked turns, and returns their workspace IDs.
-
-**Call relations**: The job fan-out system calls this before running the turn-dispatch job. It uses `_eligible` to describe the database condition that also guides the later workspace-local scan.
-
-*Call graph*: calls 1 internal fn (_eligible); 4 external calls (now, timedelta, select, owner_tx).
-
-
-##### `TurnDispatcher._dispatchable_turns`  (lines 153–192)
-
-```
-async def _dispatchable_turns(self) -> tuple[_DispatchTurn, ...]
-```
-
-**Purpose**: Reads a small batch of turns in the current workspace that are ready to be offered to workers. It keeps conversation order by choosing only the earliest eligible turn in each conversation state.
-
-**Data flow**: It reads turn and conversation rows from the workspace database, filters them through the same eligibility rule used by the fleet-wide scan, orders them predictably, and returns `_DispatchTurn` objects containing the fields needed for gating and enqueueing.
-
-**Call relations**: `TurnDispatcher.run` calls this first. The returned objects become the input to the gating checks and then to `_enqueue`.
-
-*Call graph*: calls 1 internal fn (_eligible); called by 1 (run); 6 external calls (__init__, now, timedelta, case, select, workspace_tx).
-
-
-##### `TurnDispatcher._enqueue`  (lines 194–224)
-
-```
-async def _enqueue(self, turn: _DispatchTurn) -> None
-```
-
-**Purpose**: Safely stamps one turn as offered and then places it on the DBOS turn queue. The stamp stops two dispatchers from offering the same stale turn at the same time.
-
-**Data flow**: It receives one `_DispatchTurn`, rechecks that the row is still in the same state, still stale, and still first in order, then updates its dispatch timestamp. If that update succeeds, it builds enqueue options and submits the turn to the worker queue; if not, nothing is emitted.
-
-**Call relations**: `TurnDispatcher.run` calls this for each approved turn. It relies on `_first_in_status` and `_stale` to make the database update safe before handing work to DBOS.
-
-*Call graph*: calls 2 internal fn (_first_in_status, _stale); called by 1 (run); 5 external calls (now, timedelta, update, workspace_tx, uuid4).
-
-
-##### `TurnDispatcher._eligible`  (lines 226–234)
-
-```
-def _eligible(self, cutoff: datetime) -> sa.ColumnElement[bool]
-```
-
-**Purpose**: Builds the database test for whether a turn should be considered by the dispatcher. Eligible means queued or parked, not recently offered, and first in line for its conversation and status.
-
-**Data flow**: It takes a cutoff time and combines simpler database conditions into one expression. The result is not a Python boolean; it is a SQLAlchemy expression used inside database queries.
-
-**Call relations**: Both `candidate_workspaces` and `_dispatchable_turns` use this so the fleet-wide scan and the workspace-local scan agree about what counts as dispatchable.
-
-*Call graph*: calls 2 internal fn (_first_in_status, _stale); called by 2 (_dispatchable_turns, candidate_workspaces); 2 external calls (and_, or_).
-
-
-##### `TurnDispatcher._stale`  (lines 236–240)
-
-```
-def _stale(self, cutoff: datetime) -> sa.ColumnElement[bool]
-```
-
-**Purpose**: Builds the database test for whether a turn has not been offered recently. This lets the system retry work if a process stamped a row but failed before enqueueing it.
-
-**Data flow**: It takes a cutoff time and returns a database condition matching rows with no dispatch timestamp or a timestamp older than that cutoff.
-
-**Call relations**: `_eligible` uses this when searching, and `_enqueue` uses it again during the final update so a recently claimed row is not claimed twice.
-
-*Call graph*: called by 2 (_eligible, _enqueue); 1 external calls (or_).
-
-
-##### `TurnDispatcher._first_in_status`  (lines 242–251)
-
-```
-def _first_in_status(self, status: TurnStatus) -> sa.ColumnElement[bool]
-```
-
-**Purpose**: Builds the database test that a turn is the earliest turn of its status in its conversation. This protects conversation order, so later turns cannot jump ahead.
-
-**Data flow**: It takes a turn status, creates a database subquery looking for any earlier turn with the same workspace, conversation, and status, and returns a condition that is true only when no such earlier row exists.
-
-**Call relations**: `_eligible` uses it while finding candidates, and `_enqueue` uses it again during the atomic stamp step to preserve the same ordering under races.
-
-*Call graph*: called by 2 (_eligible, _enqueue); 2 external calls (exists, select).
-
-
-##### `SandboxReaper.run`  (lines 281–291)
-
-```
-async def run(self) -> None
-```
-
-**Purpose**: Destroys disposable sandboxes for conversations that have been idle long enough. This saves container resources while leaving durable workspace data intact so the next turn can recreate the sandbox.
-
-**Data flow**: It reads idle sandbox handles in the bound workspace, ignores handles belonging to another backend, checks again that the conversation did not become active, asks the carrier to destroy the sandbox, and clears the stored handle from the conversation row.
-
-**Call relations**: This is the top-level action for the sandbox cleanup job. It gets candidates from `_idle_sandboxes`, protects active conversations with `_now_active`, destroys through the carrier, and finishes with `_clear`.
-
-*Call graph*: calls 3 internal fn (_clear, _idle_sandboxes, _now_active); 2 external calls (__init__, sandbox_handle_id).
-
-
-##### `SandboxReaper.candidate_workspaces`  (lines 293–312)
-
-```
-async def candidate_workspaces(self) -> tuple[UUID, ...]
-```
-
-**Purpose**: Finds workspaces that have at least one idle sandbox handle worth checking. This keeps the reaper from entering workspaces that have nothing to clean up.
-
-**Data flow**: It computes the idle cutoff time, scans conversation rows from an owner-level database view, filters to conversations with sandbox handles and no recent or in-flight turns, and returns distinct workspace IDs.
-
-**Call relations**: The job runner calls this before launching workspace-specific reaper work. It shares the `_active_since` condition with the workspace-local scan.
-
-*Call graph*: calls 1 internal fn (_active_since); 4 external calls (now, timedelta, select, owner_tx).
-
-
-##### `SandboxReaper._clear`  (lines 314–320)
-
-```
-async def _clear(self, conversation_id: UUID) -> None
-```
-
-**Purpose**: Removes the stored sandbox handle from a conversation after the sandbox has been destroyed. This prevents later turns from trying to attach to a dead or released container.
-
-**Data flow**: It receives a conversation ID, opens the current workspace transaction, and updates that conversation row so `sandbox_handle` becomes empty.
-
-**Call relations**: `SandboxReaper.run` calls this after the carrier destroy call succeeds.
-
-*Call graph*: called by 1 (run); 2 external calls (update, workspace_tx).
-
-
-##### `SandboxReaper._now_active`  (lines 322–340)
-
-```
-async def _now_active(self, conversation_id: UUID) -> bool
-```
-
-**Purpose**: Checks immediately before deletion whether a conversation has become active again. This avoids destroying a sandbox that a just-admitted turn may be using.
-
-**Data flow**: It receives a conversation ID, looks for any non-terminal turn in that conversation, and returns true if such a turn exists.
-
-**Call relations**: `SandboxReaper.run` calls this after reading the idle snapshot but before destroying the sandbox, because the external container destroy operation cannot be part of the same database transaction.
-
-*Call graph*: called by 1 (run); 2 external calls (select, workspace_tx).
-
-
-##### `SandboxReaper._idle_sandboxes`  (lines 342–361)
-
-```
-async def _idle_sandboxes(self) -> tuple[tuple[UUID, str], ...]
-```
-
-**Purpose**: Lists sandbox handles in the current workspace whose conversations look idle. This is the workspace-local version of the cleanup search.
-
-**Data flow**: It computes the idle cutoff, reads conversations with stored sandbox handles, excludes conversations with active or recently updated turns, and returns pairs of conversation ID and stored handle string.
-
-**Call relations**: `SandboxReaper.run` uses this as its starting list. It relies on `_active_since` to describe what counts as still busy.
-
-*Call graph*: calls 1 internal fn (_active_since); called by 1 (run); 4 external calls (now, timedelta, select, workspace_tx).
-
-
-##### `SandboxReaper._active_since`  (lines 363–375)
-
-```
-def _active_since(self, cutoff: datetime) -> sa.ColumnElement[bool]
-```
-
-**Purpose**: Builds the database test for whether a conversation is busy or recently touched. The reaper uses the opposite of this test to find idle conversations.
-
-**Data flow**: It takes a cutoff time and returns a SQLAlchemy condition matching conversations with any in-flight turn or any turn updated at or after the cutoff.
-
-**Call relations**: Both `candidate_workspaces` and `_idle_sandboxes` use this so the broad workspace search and the bound workspace cleanup agree.
-
-*Call graph*: called by 2 (_idle_sandboxes, candidate_workspaces); 3 external calls (exists, or_, select).
-
-
-##### `_page_beyond_cursor`  (lines 378–390)
-
-```
-def _page_beyond_cursor(updated_at: datetime, page_id: UUID, cursor: object) -> bool
-```
-
-**Purpose**: Decides whether a page change is newer than a stored cursor. A cursor is the bookmark that tells a page-change consumer where it last stopped.
-
-**Data flow**: It receives a page update time, page ID, and stored cursor value. If the cursor is missing or malformed as a non-string, it treats the page as pending; otherwise it compares timestamp first and page ID second, and returns true if the page lies after the cursor.
-
-**Call relations**: `PageChangeRunner.workspaces_with_changes` uses this after reading each workspace’s newest page and stored cursor.
-
-*Call graph*: called by 1 (workspaces_with_changes); 3 external calls (fromisoformat, replace, UUID).
-
-
-##### `PageChangeRunner.consumers`  (lines 448–472)
-
-```
-def consumers(self) -> tuple[PageChangeConsumer, ...]
-```
-
-**Purpose**: Finds all registered extension hooks that want to be notified about page changes. It also makes sure two hooks in the same extension do not accidentally share the same cursor name.
-
-**Data flow**: It scans manifests, collects hooks whose event is `page_change`, records the extension name, declared credential slots, hook spec, and handler-name discriminator, and returns `PageChangeConsumer` records. If a duplicate discriminator appears inside one extension, it raises an error.
-
-**Call relations**: `core_jobs` calls this when building the set of built-in jobs, creating one scheduled job per page-change consumer.
-
-*Call graph*: called by 1 (core_jobs); 1 external calls (__init__).
-
-
-##### `PageChangeRunner.workspaces_with_changes`  (lines 474–526)
-
-```
-async def workspaces_with_changes(self, consumer: PageChangeConsumer) -> tuple[UUID, ...]
-```
-
-**Purpose**: Finds which workspaces have source pages newer than a specific page-change consumer’s cursor. This avoids running hook workflows where nothing changed.
-
-**Data flow**: It builds a cursor key for the consumer, reads stored cursors and each workspace’s newest page from the owner-level database view, compares each newest page with that workspace’s cursor, and returns only the workspace IDs with pending changes.
-
-**Call relations**: The page-change job candidate wrapper calls this before fan-out. It uses `_page_beyond_cursor` for the final comparison.
-
-*Call graph*: calls 1 internal fn (_page_beyond_cursor); 2 external calls (select, owner_tx).
-
-
-##### `PageChangeRunner.drive`  (lines 528–546)
-
-```
-async def drive(self, consumer: PageChangeConsumer) -> None
-```
-
-**Purpose**: Runs one page-change consumer for the currently bound workspace. It feeds changed pages to the hook in batches and advances that consumer’s cursor only after the hook succeeds.
-
-**Data flow**: It creates the extension context, reads the stored cursor, asks the page feed for a batch of pages changed since that cursor, calls the hook with that batch, stores the next cursor, and repeats until there are no more changes or the final partial batch is done.
-
-**Call relations**: The generated page-change job handler calls this. It uses `_context_for` to build the extension-facing tools and sends each batch to the consumer’s hook.
-
-*Call graph*: calls 1 internal fn (_context_for); 2 external calls (__init__, __init__).
-
-
-##### `PageChangeRunner._context_for`  (lines 548–563)
-
-```
-def _context_for(self, extension: str, declared: frozenset[str]) -> ExtensionContext
-```
-
-**Purpose**: Builds the `ExtensionContext` used by a page-change hook. That context is the extension’s safe toolbox: store, page feed, model access, blob access, and optional invokers.
-
-**Data flow**: It receives the extension name and declared credential slots, reads the current workspace ID, optionally builds an invoker for that workspace, and returns a context object wired with the runner’s configured services.
-
-**Call relations**: `PageChangeRunner.drive` calls this before invoking a hook so the hook runs with the same scoped environment as other jobs.
-
-*Call graph*: called by 1 (drive); 2 external calls (context_for, ws_current).
-
-
-##### `core_jobs`  (lines 566–635)
-
-```
-def core_jobs(sync_driver: SyncDriver, turn_dispatcher: TurnDispatcher, reaper: SandboxReaper, page_change_runner: PageChangeRunner) -> tuple[JobSpec, ...]
-```
-
-**Purpose**: Builds the list of background jobs that every deployment should run. These include source syncing, page-change consumers, turn dispatch, and sandbox cleanup.
-
-**Data flow**: It receives the concrete runners for those core tasks, wraps each task in a `JobSpec`, asks `PageChangeRunner` for its consumers, creates one page-change job per consumer, and returns the full tuple of job specs.
-
-**Call relations**: Startup code uses this before combining core jobs with extension jobs. The small nested functions inside it adapt each runner method to the common job-handler shape.
-
-*Call graph*: calls 1 internal fn (consumers); 1 external calls (__init__).
-
-
-##### `core_jobs._sync_sources`  (lines 583–584)
-
-```
-async def _sync_sources(context: ExtensionContext) -> None
-```
-
-**Purpose**: Adapts the source sync driver to the common job handler shape. It ignores the extension context because source syncing is already supplied by the core driver.
-
-**Data flow**: It receives an `ExtensionContext`, does not read from it, calls the sync driver, and produces no direct return value beyond completion or failure.
-
-**Call relations**: `core_jobs` stores this function inside the source-sync `JobSpec`, so `JobRunner.fire` eventually calls it through the normal job path.
-
-
-##### `core_jobs._dispatch_turns`  (lines 586–587)
-
-```
-async def _dispatch_turns(context: ExtensionContext) -> None
-```
-
-**Purpose**: Adapts `TurnDispatcher.run` to the common job handler shape. It lets turn dispatch participate in the same scheduling and workspace binding system as other jobs.
-
-**Data flow**: It receives an `ExtensionContext`, ignores it, runs the turn dispatcher, and returns when dispatching is complete.
-
-**Call relations**: `core_jobs` places this in the turn-dispatch `JobSpec`; later `JobRunner.fire` invokes it inside a workspace.
-
-
-##### `core_jobs._reap_sandboxes`  (lines 589–590)
-
-```
-async def _reap_sandboxes(context: ExtensionContext) -> None
-```
-
-**Purpose**: Adapts `SandboxReaper.run` to the common job handler shape. It makes sandbox cleanup a normal scheduled job.
-
-**Data flow**: It receives an `ExtensionContext`, ignores it, runs the sandbox reaper, and returns after eligible sandboxes are cleaned.
-
-**Call relations**: `core_jobs` places this in the sandbox-reap `JobSpec`; `JobRunner.fire` later calls it for each candidate workspace.
-
-
-##### `core_jobs._drive_consumer`  (lines 592–598)
-
-```
-def _drive_consumer(consumer: PageChangeConsumer) -> Callable[[ExtensionContext], Awaitable[None]]
-```
-
-**Purpose**: Creates a job handler for one specific page-change consumer. This wrapper remembers which hook should be driven when the job fires.
-
-**Data flow**: It receives a `PageChangeConsumer` and returns an async handler function. The returned function will later call the page-change runner for that exact consumer.
-
-**Call relations**: `core_jobs` uses this while creating page-change `JobSpec` objects. The returned `_handler` is what the job runner invokes.
-
-
-##### `core_jobs._drive_consumer._handler`  (lines 595–596)
-
-```
-async def _handler(context: ExtensionContext) -> None
-```
-
-**Purpose**: Runs the page-change cursor loop for the consumer captured by `_drive_consumer`. It is the actual job handler stored in the page-change job spec.
-
-**Data flow**: It receives an `ExtensionContext`, does not use it directly, calls `page_change_runner.drive` for the captured consumer, and completes when that consumer has drained its pending page batch work.
-
-**Call relations**: This function is returned by `_drive_consumer` and later called by `JobRunner.fire` as part of a page-change job.
-
-
-##### `core_jobs._consumer_candidates`  (lines 600–604)
-
-```
-def _consumer_candidates(consumer: PageChangeConsumer) -> WorkspaceCandidates
-```
-
-**Purpose**: Creates a workspace-candidate function for one page-change consumer. This lets each hook run only in workspaces with changes relevant to its own cursor.
-
-**Data flow**: It receives a `PageChangeConsumer` and returns an async function. That returned function will later ask the page-change runner for workspaces with pending changes for that consumer.
-
-**Call relations**: `core_jobs` attaches this to each page-change `JobSpec`, pairing the consumer’s handler with its own candidate search.
-
-
-##### `core_jobs._consumer_candidates._candidates`  (lines 601–602)
-
-```
-async def _candidates() -> tuple[UUID, ...]
-```
-
-**Purpose**: Finds workspaces with pending page changes for the consumer captured by `_consumer_candidates`.
-
-**Data flow**: It takes no explicit input, uses the captured consumer, calls `page_change_runner.workspaces_with_changes`, and returns workspace IDs.
-
-**Call relations**: The job fan-out path calls this through `JobRunner.candidates` when a page-change job tick fires.
-
-
-##### `bindings_from`  (lines 646–671)
-
-```
-def bindings_from(manifests: tuple[Manifest, ...], core_jobs: tuple[JobSpec, ...]) -> tuple[_Binding, ...]
-```
-
-**Purpose**: Assigns stable names and extension scopes to all jobs. Core jobs go under the `core` namespace, while extension jobs go under their extension’s namespace.
-
-**Data flow**: It receives extension manifests and core job specs, creates `_Binding` records with a unique key, extension name, declared credential slots, and job spec, and returns all bindings as a tuple.
-
-**Call relations**: Startup code uses this before creating a `JobRunner`. The runner later uses these bindings to look up schedules, candidates, and handlers by key.
-
-*Call graph*: 1 external calls (__init__).
-
-
-##### `JobRunner.launch`  (lines 693–717)
-
-```
-def launch(self) -> None
-```
-
-**Purpose**: Registers all jobs with DBOS at startup. Cron-style jobs become schedules, while one-shot jobs are enqueued once with deduplication so repeated boots do not duplicate them.
-
-**Data flow**: It stores this runner in the module-level firing slot, walks every binding, either enqueues an immediate tick or builds a schedule registration, logs what happened, and finally applies all schedules through DBOS.
-
-**Call relations**: This is the boot-time entry into the jobs system. It prepares later calls to `job_tick` by making the active `JobRunner` discoverable.
-
-*Call graph*: 6 external calls (now, apply_schedules, ScheduleInput, SetEnqueueOptions, log, warn).
-
-
-##### `JobRunner.tick`  (lines 719–731)
-
-```
-async def tick(self, scheduled_time: datetime, key: str) -> None
-```
-
-**Purpose**: Handles one scheduled firing of a job by spreading it across the workspaces that currently have work. Each workspace gets at most one outstanding run for that job.
-
-**Data flow**: It receives the scheduled time and job key, asks for candidate workspace IDs, and enqueues one `job_workflow` per workspace using a deduplication ID based on job key and workspace.
-
-**Call relations**: `job_tick` calls this from the durable workflow system. It calls `candidates` first, then hands each workspace-specific run to the job queue.
-
-*Call graph*: calls 1 internal fn (candidates); 2 external calls (SetEnqueueOptions, warn).
-
-
-##### `JobRunner.candidates`  (lines 733–734)
-
-```
-async def candidates(self, key: str) -> tuple[UUID, ...]
-```
-
-**Purpose**: Looks up the candidate-workspace function for a job and runs it. This is how a job decides where it actually has work.
-
-**Data flow**: It receives a job key, finds the matching binding, calls that binding’s `spec.candidates` function, and returns workspace IDs.
-
-**Call relations**: `JobRunner.tick` calls this before enqueueing workspace-specific job workflows. It depends on `_binding` for the key lookup.
-
-*Call graph*: calls 1 internal fn (_binding); called by 1 (tick).
-
-
-##### `JobRunner.fire`  (lines 736–755)
-
-```
-async def fire(self, key: str, workspace_id: UUID) -> None
-```
-
-**Purpose**: Runs one job handler inside one workspace and one extension context. This is the safe path that prevents job code from running without a workspace boundary.
-
-**Data flow**: It receives a job key and workspace ID, finds the binding, enters that workspace scope, builds an `ExtensionContext` with the configured services, calls the job handler, logs and re-raises any error.
-
-**Call relations**: `job_workflow` calls this after DBOS dequeues a workspace-specific job. It uses `_binding` for metadata and `context_for` to prepare the handler’s environment.
-
-*Call graph*: calls 1 internal fn (_binding); 3 external calls (context_for, log_error, ws).
-
-
-##### `JobRunner._binding`  (lines 757–761)
-
-```
-def _binding(self, key: str) -> _Binding
-```
-
-**Purpose**: Finds the registered binding for a job key. It gives the rest of the runner access to the job’s schedule, candidate finder, handler, and extension scope.
-
-**Data flow**: It receives a key, searches the runner’s binding tuple, returns the matching binding, or raises an error if the key was never registered.
-
-**Call relations**: `JobRunner.candidates` and `JobRunner.fire` both call this before doing their work.
-
-*Call graph*: called by 2 (candidates, fire).
-
-
-##### `job_tick`  (lines 768–772)
-
-```
-async def job_tick(scheduled_time: datetime, key: str) -> None
-```
-
-**Purpose**: DBOS workflow entry for a job tick. It is the durable callback that starts fan-out from one scheduled or one-shot firing.
-
-**Data flow**: It receives the scheduled time and job key from DBOS, reads the active module-level `JobRunner`, fails if jobs were not launched, and asks the runner to process the tick.
-
-**Call relations**: DBOS calls this when a schedule fires or a one-shot tick is enqueued. It delegates the real logic to `JobRunner.tick`.
-
-
-##### `job_workflow`  (lines 776–780)
-
-```
-async def job_workflow(scheduled_time: datetime, key: str, workspace_id: str) -> None
-```
-
-**Purpose**: DBOS workflow entry for running one job in one workspace. It is the durable unit placed on the bounded jobs queue.
-
-**Data flow**: It receives the scheduled time, job key, and workspace ID as a string, reads the active `JobRunner`, converts the workspace ID to a UUID, and asks the runner to fire the job.
-
-**Call relations**: `JobRunner.tick` enqueues this workflow for each candidate workspace. DBOS later runs it, and it delegates the handler execution to `JobRunner.fire`.
-
-*Call graph*: 1 external calls (UUID).
-
-
 ### `core/src/ufo/scheduling.py`
 
-`domain_logic` · `background scheduled polling and task creation/cancellation during request handling`
+`domain_logic` · `request handling and background scheduled-task polling`
 
-Scheduled work in this system is not kept only in memory. It is written as rows in the database, so a task still exists if a process restarts. This file is the main doorway to those rows. It knows how to create a scheduled task, cancel it, list it, inspect its latest result, and let a background runner safely pick up work that is due.
+A scheduled task is like an appointment card kept in the database: it says which workspace and conversation it belongs to, which agent should wake up, what prompt to send, and when it should run next. Without this file, scheduled work would either disappear when the process restarts or be fired twice by competing background workers.
 
-The central idea is a lease, like putting a temporary sticky note on a task saying, “I am working on this until this time.” `ScheduleStore.claim_due` marks due tasks with a claim so two runners do not fire the same task at once. If a claim gets too old, another runner may pick it up later. Expired tasks are deleted when they no longer need to run.
+The file defines a plain in-memory shape, `ScheduledTask`, for one database row, plus `ScheduleStore`, the main doorway for reading and changing those rows. Member-facing actions use the current workspace and current object agent, so a task cannot accidentally be attached to the wrong agent or conversation. Recurring tasks can be created, edited, cancelled, listed, and inspected.
 
-The file also treats one-time pauses specially. A pause is a scheduled wake-up for a conversation, but it must coordinate with newer human messages so the system does not resume an old turn after the conversation has already moved on. All normal task reads and writes happen inside the current workspace, so one workspace cannot accidentally see or change another workspace’s schedules.
+It also supports one-time workflow pauses. These are special tasks named with an internal prefix and scheduled as `@once`; normal create, update, and cancel paths reject them so they are not mistaken for user-defined recurring jobs.
+
+For background scheduling, the file carefully leases due tasks. A lease is a short temporary claim, like putting a sticky note on a job saying “worker A is doing this until 10:05.” Expired tasks are removed, due tasks are claimed in bounded batches, and claims are checked when retiring or rescheduling. This keeps overlapping pollers from doing the same work twice.
 
 #### Function details
 
-##### `ScheduleInvoker.invoke_scheduled`  (lines 55–57)
+##### `ScheduleInvoker.invoke_scheduled`  (lines 56–58)
 
 ```
 async def invoke_scheduled(self, task: ScheduledTask, runtime_instruction: str | None=None) -> UUID | None
 ```
 
-**Purpose**: This is the interface a real scheduler runner must provide to actually fire a scheduled task. It says, in effect, “given this stored task, re-enter the right conversation and maybe return the turn that was created.”
+**Purpose**: This is an interface method for something that knows how to actually run a scheduled task. The store owns the saved schedule, but an invoker owns the act of re-entering the agent conversation.
 
-**Data flow**: It receives a `ScheduledTask` and an optional runtime instruction. An implementation uses that information to run the task in the rest of the system, then returns the created turn ID if one exists, or nothing if no turn was created.
+**Data flow**: It receives a `ScheduledTask` and an optional runtime instruction. An implementation uses those details to start or resume work, then returns the new turn identifier if one was created, or nothing if no turn was admitted.
 
-**Call relations**: This file only defines the promise, not the implementation. `ScheduleStore.invoke` calls through to an object that follows this interface, and the scheduled task runner uses that path when it is time to fire a claimed task.
+**Call relations**: The method is not implemented here; it is a promise that another part of the system fulfills. `ScheduleStore.invoke` calls it when the scheduled-task runner is ready to fire a claimed task.
 
 
-##### `_utc`  (lines 93–96)
+##### `_utc`  (lines 94–97)
 
 ```
 def _utc(value: datetime | None) -> datetime | None
 ```
 
-**Purpose**: This small helper makes database timestamps easier to compare by ensuring plain timestamps are treated as UTC time. UTC is the shared world clock used here so times from different places do not drift in meaning.
+**Purpose**: This small helper makes database timestamps easier to compare by ensuring a timestamp has UTC timezone information when it was stored without one. It leaves missing values and already timezone-aware values alone.
 
-**Data flow**: It takes a datetime value or `None`. If the value is missing or already has timezone information, it leaves it alone; if it has no timezone, it labels it as UTC and returns that adjusted value.
+**Data flow**: It takes either a datetime or `None`. If the datetime has no timezone attached, it returns the same clock time marked as UTC; otherwise it returns the original value.
 
-**Call relations**: `_task` uses this when turning a database row into a `ScheduledTask`, and `ScheduleStore.inspect` uses it when returning status information. This keeps expiry times consistent for callers.
+**Call relations**: Rows from the database pass through `_task` and `ScheduleStore.inspect`, and both use `_utc` before exposing expiration times to the rest of the scheduling code.
 
 *Call graph*: called by 2 (inspect, _task); 1 external calls (replace).
 
 
-##### `_claim_available`  (lines 99–103)
+##### `_claim_available`  (lines 100–104)
 
 ```
 def _claim_available(now: datetime) -> sa.ColumnElement[bool]
 ```
 
-**Purpose**: This builds the database condition for “this task can be claimed now.” A task is available if nobody has claimed it, or if its old claim has timed out.
+**Purpose**: This builds the database condition for “this scheduled task is free to take.” A task is available if nobody has claimed it, or if its old claim has timed out.
 
-**Data flow**: It receives the current time. It produces a SQL condition that matches rows whose `claimed_by` field is empty or whose claim expiration time is earlier than the current time.
+**Data flow**: It receives the current time. It produces a SQL condition that can be used in a database query to find rows whose `claimed_by` field is empty or whose claim expiration is in the past.
 
-**Call relations**: `due_task_workspaces.candidates` uses this to find workspaces that may have runnable work, and `ScheduleStore.claim_due` uses the same rule when actually leasing tasks. Using the same test in both places prevents the runner from reopening workspaces whose tasks are still under valid leases.
+**Call relations**: The candidate finder and the due-task claimer both use this same rule, so the system agrees on which tasks are really available for workers.
 
 *Call graph*: called by 2 (claim_due, candidates); 1 external calls (or_).
 
 
-##### `_expired`  (lines 106–110)
+##### `_expired`  (lines 107–111)
 
 ```
 def _expired(now: datetime) -> sa.ColumnElement[bool]
 ```
 
-**Purpose**: This builds the database condition for “this scheduled task is past its expiry time.” Expired tasks should be cleaned up instead of fired again.
+**Purpose**: This builds the database condition for “this scheduled task has passed its expiration time.” Expired tasks should not be fired again.
 
-**Data flow**: It receives the current time. It returns a SQL condition that matches rows with an expiry timestamp that is not empty and is at or before the current time.
+**Data flow**: It receives the current time. It produces a SQL condition that matches tasks with an `expires_at` value that is not empty and is at or before that time.
 
-**Call relations**: `due_task_workspaces.candidates` uses it to notice workspaces that need cleanup, even if no task is due to run. `ScheduleStore.claim_due` uses it to delete expired tasks before leasing runnable ones.
+**Call relations**: The workspace candidate finder uses it to notice workspaces that need cleanup, and `ScheduleStore.claim_due` uses it to delete expired rows before claiming due work.
 
 *Call graph*: called by 2 (claim_due, candidates); 1 external calls (and_).
 
 
-##### `_task`  (lines 113–131)
+##### `_task`  (lines 114–132)
 
 ```
 def _task(row: sa.RowMapping) -> ScheduledTask
 ```
 
-**Purpose**: This converts a raw database row into a `ScheduledTask` object that the rest of the Python code can use comfortably. It is the translation point between table fields and the in-process task value.
+**Purpose**: This turns a raw database row into a `ScheduledTask` object that the rest of the Python code can use safely and consistently.
 
-**Data flow**: It receives a row mapping from a database query. It copies the row’s IDs, schedule text, prompt, timing fields, claim marker, and metadata into a `ScheduledTask`, normalizing the expiry time through `_utc` on the way out.
+**Data flow**: It receives a database row mapping with scheduled-task columns. It copies the row fields into a `ScheduledTask`, normalizes the expiration timestamp through `_utc`, and returns the new in-memory object.
 
-**Call relations**: `ScheduleStore.list` uses this for tasks shown to callers, and `ScheduleStore.claim_due` uses it for tasks handed to the runner. It keeps both paths returning the same shape of task object.
+**Call relations**: Create, update, list, and claim operations all receive rows from the database and pass them through `_task` before returning them to callers.
 
-*Call graph*: calls 1 internal fn (_utc); called by 2 (claim_due, list); 1 external calls (__init__).
+*Call graph*: calls 1 internal fn (_utc); called by 4 (claim_due, create, list, update); 1 external calls (__init__).
 
 
-##### `due_task_workspaces`  (lines 134–161)
+##### `due_task_workspaces`  (lines 135–162)
 
 ```
 def due_task_workspaces() -> WorkspaceCandidates
 ```
 
-**Purpose**: This creates the candidate finder used by the scheduled-task runner to decide which workspaces deserve attention. Instead of scanning every workspace deeply, it first asks, “which workspaces have due or expired schedule rows?”
+**Purpose**: This creates the background runner’s workspace finder. It answers the question, “Which workspaces might have scheduled tasks ready to run or clean up?”
 
-**Data flow**: It takes no direct input. It returns an async candidate function that, when called, reads the database and produces a tuple of workspace IDs with claimable due or expired work.
+**Data flow**: It creates and returns an async candidate function. That function later reads the database and returns workspace IDs, not tasks themselves.
 
-**Call relations**: The runner can use the returned function as its workspace-selection seam. The actual database lookup happens inside `due_task_workspaces.candidates`, which applies the same claim and expiry rules used later by `ScheduleStore.claim_due`.
+**Call relations**: The scheduled-task runner can use this as its first filter. It finds promising workspaces globally, then the runner binds to each workspace before touching the actual task rows.
 
 
-##### `due_task_workspaces.candidates`  (lines 141–159)
+##### `due_task_workspaces.candidates`  (lines 142–160)
 
 ```
 async def candidates() -> tuple[UUID, ...]
 ```
 
-**Purpose**: This performs the database lookup for workspaces that might need scheduled-task processing right now. It includes both tasks that are due to fire and expired tasks that should be removed.
+**Purpose**: This is the actual database lookup behind `due_task_workspaces`. It finds workspaces that contain at least one claim-available due task or expired task.
 
-**Data flow**: It reads the current UTC time, builds database filters for claimable and expired tasks, then queries scheduled-task rows across workspaces using an owner-level transaction. It returns only the distinct workspace IDs, not the tasks themselves.
+**Data flow**: It reads the current UTC time, builds conditions for available claims and expired tasks, then runs an owner-level database query that returns distinct workspace IDs. It outputs those IDs as a tuple.
 
-**Call relations**: It is the inner function returned by `due_task_workspaces`. It calls `_claim_available` and `_expired` so the workspace pre-scan matches the later per-workspace claim logic.
+**Call relations**: It uses `_claim_available` and `_expired` so it matches the same rules later used by `ScheduleStore.claim_due`. It only returns workspace IDs; later code must enter the workspace context before claiming tasks.
 
 *Call graph*: calls 2 internal fn (_claim_available, _expired); 4 external calls (now, or_, select, owner_tx).
 
 
-##### `ScheduleStore.workspace_id`  (lines 173–174)
+##### `ScheduleStore.workspace_id`  (lines 176–177)
 
 ```
 def workspace_id(self) -> UUID
 ```
 
-**Purpose**: This property tells the store which workspace it is currently operating in. It relies on the ambient workspace context rather than accepting a workspace ID on every method.
+**Purpose**: This property returns the workspace that the current operation is scoped to. It prevents schedule operations from accidentally crossing workspace boundaries.
 
-**Data flow**: It reads the current workspace from `ws_current()` and returns that workspace’s ID. It does not change anything.
+**Data flow**: It reads the current workspace context through `ws_current()` and returns its workspace ID.
 
-**Call relations**: Nearly every database method in `ScheduleStore` uses this value in its queries. That is what keeps a store bound to the active workspace and stops it from reading or changing another workspace’s tasks.
+**Call relations**: Most `ScheduleStore` methods use this property when building database queries, so every create, update, delete, claim, and read is tied to the active workspace.
 
 *Call graph*: 1 external calls (ws_current).
 
 
-##### `ScheduleStore.invoke`  (lines 176–181)
+##### `ScheduleStore.invoke`  (lines 179–184)
 
 ```
 async def invoke(self, task: ScheduledTask, runtime_instruction: str | None=None) -> UUID | None
 ```
 
-**Purpose**: This asks the wired scheduler invoker to actually run a scheduled task. It is a guardrail: the store can only fire work if an invoker has been provided.
+**Purpose**: This asks the configured invoker to actually run a scheduled task. It exists so the storage layer can delegate execution without knowing the details of agent runtime.
 
-**Data flow**: It receives a `ScheduledTask` and an optional runtime instruction. If no invoker is configured, it raises an error; otherwise it forwards the task to the invoker and returns the resulting turn ID or `None`.
+**Data flow**: It receives a `ScheduledTask` and optional runtime instruction. If no invoker was provided when the store was built, it raises an error; otherwise it passes the task to the invoker and returns the resulting turn ID or `None`.
 
-**Call relations**: The scheduled task runner calls this during its fire step. This method hands off from durable scheduling storage to the runtime code that re-enters the conversation.
+**Call relations**: The scheduled-task runner calls this while firing a claimed task. This method then hands off to `ScheduleInvoker.invoke_scheduled`, which is supplied by another part of the system.
 
 *Call graph*: called by 1 (_fire).
 
 
-##### `ScheduleStore.create`  (lines 183–218)
+##### `ScheduleStore.create`  (lines 186–260)
 
 ```
-async def create(self, conversation_id: UUID, agent_id: UUID, name: str, schedule: str, prompt: str, description: str, next_run_at: datetime, created_by_member_id: UUID | None=None, expires_at: dateti
+async def create(self, conversation_id: UUID, name: str, schedule: str, prompt: str, description: str, next_run_at: datetime, created_by_member_id: UUID | None=None, expires_at: datetime | None=None)
 ```
 
-**Purpose**: This creates or updates a normal recurring scheduled task. It uses the task name as the stable handle, so later cancellation by name points to exactly one task in the workspace.
+**Purpose**: This creates a new recurring scheduled task for the current agent and conversation. It checks that the task is valid and unique before saving it.
 
-**Data flow**: It receives the conversation, agent, task name, schedule string, prompt, description, first run time, optional creator, and optional expiry. It rejects one-time pause schedules and reserved pause names, then calls `_upsert` to insert or update the database row and returns the resulting `ScheduledTask`.
+**Data flow**: It receives the conversation ID, task name, schedule text, prompt, description, next run time, optional creator, and optional expiration. It rejects one-time pause names and schedules, verifies that the conversation belongs to the current agent, inserts a row, and returns it as a `ScheduledTask`; if a task with the same workspace, agent, and name already exists, it raises an error.
 
-**Call relations**: `create` is the public path for recurring tasks. It delegates the database and conflict-resolution work to `ScheduleStore._upsert`, while adding checks that keep recurring tasks separate from one-time pauses.
+**Call relations**: User-facing scheduling code calls this when defining a recurring task. It uses `object_agent_id` to bind the task to the current agent, `workspace_tx` for the database transaction, and `_task` to convert the saved row into the return value.
 
-*Call graph*: calls 1 internal fn (_upsert).
-
-
-##### `ScheduleStore.pause`  (lines 220–242)
-
-```
-async def pause(self, conversation_id: UUID, agent_id: UUID, prompt: str, description: str, next_run_at: datetime, origin_seq: int, created_by_member_id: UUID | None=None) -> ScheduledTask | None
-```
-
-**Purpose**: This creates a one-time scheduled wake-up for a conversation pause. It remembers the conversation sequence that requested the pause so the system can avoid resuming stale work after newer member activity.
-
-**Data flow**: It receives the conversation, agent, prompt, description, wake-up time, origin sequence number, and optional creator. It builds a reserved pause name and calls `_upsert`; the result is a `ScheduledTask` if the pause was armed, or `None` if newer conversation state means the pause should not be created.
-
-**Call relations**: `pause` is the public path for one-time workflow pauses. Like `create`, it delegates to `_upsert`, but it passes the special one-time schedule marker and the origin sequence that activates pause-specific safety checks.
-
-*Call graph*: calls 1 internal fn (_upsert).
+*Call graph*: calls 1 internal fn (_task); 4 external calls (select, workspace_tx, object_agent_id, uuid4).
 
 
-##### `ScheduleStore._upsert`  (lines 244–386)
+##### `ScheduleStore.update`  (lines 262–319)
 
 ```
-async def _upsert(self, conversation_id: UUID, agent_id: UUID, name: str, schedule: str, prompt: str, description: str, next_run_at: datetime, origin_seq: int | None, created_by_member_id: UUID | None
+async def update(self, expected: ScheduledTask, schedule: str, prompt: str, description: str, next_run_at: datetime, expires_at: datetime | None=None) -> ScheduledTask
 ```
 
-**Purpose**: This is the shared database routine behind both recurring task creation and one-time pause creation. “Upsert” means insert a new row, or update the existing row with the same workspace and name.
+**Purpose**: This edits an existing recurring scheduled task without changing its identity: same task ID, same name, same conversation, same agent, and same creator. That protects against overwriting a task that changed underneath the editor.
 
-**Data flow**: It receives all task definition fields, including whether this is tied to an origin conversation sequence. It first locks the conversation row, then for pauses checks whether a pending or newer member message should cancel or immediately redirect the pause. It then inserts or updates the scheduled-task row, clears any old claim, and returns a fresh `ScheduledTask`; in some pause cases it returns `None` to mean “do not arm this pause.”
+**Data flow**: It receives the `ScheduledTask` the caller believes is current, plus replacement schedule, prompt, description, next run time, and optional expiration. It rejects one-time pauses, confirms the current agent still matches, updates the exact matching row, clears old run and claim markers, and returns the updated task. If no exact row matches, it raises an error.
 
-**Call relations**: `ScheduleStore.create` and `ScheduleStore.pause` both call this. It is the main place where schedule definitions become durable database rows, and where pause-specific conversation safety rules are enforced before a task can be stored.
+**Call relations**: Editing flows call this after they have an existing task object. It uses the database as the source of truth and `_task` to return the fresh row.
 
-*Call graph*: called by 2 (create, pause); 6 external calls (__init__, now, exists, select, workspace_tx, uuid4).
+*Call graph*: calls 1 internal fn (_task); 3 external calls (update, workspace_tx, object_agent_id).
 
 
-##### `ScheduleStore.cancel`  (lines 388–396)
+##### `ScheduleStore.pause`  (lines 321–338)
 
 ```
-async def cancel(self, name: str) -> bool
+async def pause(self, conversation_id: UUID, prompt: str, description: str, next_run_at: datetime, origin_seq: int, created_by_member_id: UUID | None=None) -> ScheduledTask | None
 ```
 
-**Purpose**: This removes a scheduled task by name from the current workspace. It is the normal way to stop a recurring scheduled task from firing again.
+**Purpose**: This arms a one-time pause for a conversation. A pause is a special scheduled wake-up used by workflow logic, not a normal recurring user task.
 
-**Data flow**: It receives a task name. It deletes the matching scheduled-task row for the active workspace and returns `true` if a row was actually removed, or `false` if there was no such task.
+**Data flow**: It receives the conversation, prompt, description, desired wake time, originating conversation sequence number, and optional creator. It simply forwards those details to `_upsert_pause` and returns either the saved pause task or `None` if a member reply means the pause should not be armed.
 
-**Call relations**: Callers use this when a user or workflow cancels a named schedule. It works directly inside a workspace transaction and does not call helper functions because the operation is a simple delete.
+**Call relations**: Higher-level workflow code calls this public method. The real checks and database upsert are done by `ScheduleStore._upsert_pause`.
 
-*Call graph*: 2 external calls (delete, workspace_tx).
+*Call graph*: calls 1 internal fn (_upsert_pause).
 
 
-##### `ScheduleStore.list`  (lines 398–414)
+##### `ScheduleStore._upsert_pause`  (lines 340–482)
+
+```
+async def _upsert_pause(self, conversation_id: UUID, prompt: str, description: str, next_run_at: datetime, origin_seq: int, created_by_member_id: UUID | None) -> ScheduledTask | None
+```
+
+**Purpose**: This creates or replaces the special one-time pause task for a conversation. It also avoids scheduling a timer when a human member has already replied in a way that should resume the conversation instead.
+
+**Data flow**: It receives pause details and reads the current agent and workspace. It verifies the conversation belongs to that agent, checks for unconsumed member messages, looks for newer member turns after the origin sequence, and may return `None` if the pause should not happen. If a queued member turn should resume the workflow, it records that turn and makes the task due immediately. It then inserts or updates the special `@pause:<conversation_id>` task and returns a `ScheduledTask` object.
+
+**Call relations**: `ScheduleStore.pause` calls this helper. It uses database reads and locks to make member replies and timer recovery converge on one durable next step instead of racing each other.
+
+*Call graph*: called by 1 (pause); 7 external calls (__init__, now, exists, select, workspace_tx, object_agent_id, uuid4).
+
+
+##### `ScheduleStore.cancel`  (lines 484–507)
+
+```
+async def cancel(self, expected: ScheduledTask) -> None
+```
+
+**Purpose**: This deletes a recurring scheduled task, but only if it still matches the exact task the caller expected. That prevents accidentally cancelling a different task after a concurrent edit.
+
+**Data flow**: It receives the expected `ScheduledTask`. It rejects one-time pauses, confirms the current agent matches, deletes the row that matches the task’s ID, agent, conversation, name, workspace, and creator, and returns nothing. If no row was deleted, it raises an error.
+
+**Call relations**: User-facing cancellation flows call this for recurring tasks. It uses `object_agent_id` and `workspace_tx` to keep the delete inside the current agent and workspace boundary.
+
+*Call graph*: 3 external calls (delete, workspace_tx, object_agent_id).
+
+
+##### `ScheduleStore.list`  (lines 509–527)
 
 ```
 async def list(self) -> tuple[ScheduledTask, ...]
 ```
 
-**Purpose**: This returns all normal recurring scheduled tasks in the current workspace. It deliberately excludes one-time pauses, because those are internal wake-ups rather than user-facing recurring schedules.
+**Purpose**: This returns all recurring scheduled tasks visible to the current agent in the current workspace. It deliberately excludes one-time workflow pauses.
 
-**Data flow**: It reads scheduled-task rows for the active workspace where the schedule is not the one-time marker, ordered by name. Each row is converted through `_task`, and the method returns the tasks as a tuple.
+**Data flow**: It reads the current agent and workspace, queries scheduled-task rows whose schedule is not `@once`, orders them by name, converts each row through `_task`, and returns them as a tuple.
 
-**Call relations**: This is the read path for showing or using the workspace’s defined recurring schedules. It relies on `_task` so listed tasks look the same as claimed tasks returned by `claim_due`.
+**Call relations**: Status pages or object reads can call this to show a user’s recurring schedules. It relies on `_task` so callers get normal `ScheduledTask` objects instead of raw database rows.
 
-*Call graph*: calls 1 internal fn (_task); 2 external calls (select, workspace_tx).
+*Call graph*: calls 1 internal fn (_task); 3 external calls (select, workspace_tx, object_agent_id).
 
 
-##### `ScheduleStore.claim_due`  (lines 416–470)
+##### `ScheduleStore.claim_due`  (lines 529–583)
 
 ```
 async def claim_due(self, now: datetime, lease_seconds: int, limit: int=CLAIM_BATCH_MAX_TASKS) -> tuple[ScheduledTask, ...]
 ```
 
-**Purpose**: This leases due tasks so a runner can safely fire them without another runner firing the same rows at the same time. It also removes expired tasks that are claimable.
+**Purpose**: This is the worker-safe way to take scheduled tasks that are ready to run. It cleans up expired tasks, then places a short lease on a limited batch of due tasks so other workers do not run the same ones.
 
-**Data flow**: It receives the current time, a lease length in seconds, and a maximum number of tasks to claim. Inside one transaction, it deletes claimable expired rows, selects the oldest due non-expired rows up to the limit, marks them with a unique claim ID and claim expiry time, then returns those rows as `ScheduledTask` objects.
+**Data flow**: It receives the current time, a lease length in seconds, and an optional batch limit. It creates a unique claim ID, deletes expired tasks that are free to touch, selects the oldest due available tasks up to the limit, marks them with the claim and claim expiration, and returns them as `ScheduledTask` objects.
 
-**Call relations**: The scheduled-task runner uses this after it has entered a workspace selected by `due_task_workspaces`. It calls `_expired`, `_claim_available`, and `_task`, and its returned claimed tasks are later passed into firing, retiring, or rescheduling steps.
+**Call relations**: The scheduled-task runner calls this after it has selected a workspace. It uses `_claim_available` and `_expired` to match the candidate rules, then `_task` to return claimed tasks ready for firing.
 
 *Call graph*: calls 3 internal fn (_claim_available, _expired, _task); 7 external calls (timedelta, delete, not_, select, update, workspace_tx, uuid4).
 
 
-##### `ScheduleStore.retire_if_expired`  (lines 472–486)
+##### `ScheduleStore.retire_if_expired`  (lines 585–599)
 
 ```
 async def retire_if_expired(self, task: ScheduledTask, now: datetime) -> bool
 ```
 
-**Purpose**: This deletes a specific claimed task if it has expired before the runner fires it. It is a final safety check so expired work is not invoked just because it was claimed earlier.
+**Purpose**: This deletes a claimed task if it expired before the worker could invoke it. It is a final safety check before firing.
 
-**Data flow**: It receives a claimed `ScheduledTask` and the current time. If the task is unclaimed, it raises an error; if it is not expired, it returns `false`; if it is expired, it deletes the exact row with the matching claim and returns `true`.
+**Data flow**: It receives a claimed `ScheduledTask` and the current time. If the task is not claimed, it raises an error. If the task has no expiration or has not yet expired, it returns `False`. If it is expired, it deletes the exact row with the matching claim and returns `True`.
 
-**Call relations**: The scheduled task runner calls this during its fire flow before invocation. Matching both task ID and claim ID means it only retires the version this runner actually leased.
+**Call relations**: The scheduled-task runner calls this during `_fire` before invoking the task. The claim check means a worker only retires the task it actually leased.
 
 *Call graph*: called by 1 (_fire); 2 external calls (delete, workspace_tx).
 
 
-##### `ScheduleStore.reschedule`  (lines 488–521)
+##### `ScheduleStore.reschedule`  (lines 601–634)
 
 ```
 async def reschedule(self, task: ScheduledTask, next_run_at: datetime, last_run_at: datetime, last_turn_id: UUID | None=None) -> bool
 ```
 
-**Purpose**: This advances a recurring claimed task after it has fired. It records when it ran, optionally records the turn it created, sets the next run time, and releases the lease.
+**Purpose**: This advances a recurring task after it has fired. It records when it ran, optionally records the turn it created, sets the next run time, and releases the worker’s claim.
 
-**Data flow**: It receives a claimed task, the next run time, the last run time, and optionally the turn ID produced by the fire. It refuses unclaimed tasks and one-time pauses. Then it updates the exact claimed row, clears the claim fields, clears any pause resume marker, and returns whether the row was updated.
+**Data flow**: It receives a claimed recurring task, the next run time, the last run time, and optionally the turn ID created by the fire. It rejects unclaimed tasks and one-time pauses, updates the exact claimed database row, clears claim fields, and returns `True` if the row was updated or `False` if the claim no longer matched.
 
-**Call relations**: The scheduled task runner calls this after a successful recurring fire. It is paired with `claim_due`: one method leases the row before work, and this one releases and advances it afterward.
+**Call relations**: The scheduled-task runner calls this after a successful fire. Later, `ScheduleStore.inspect` can use the recorded last turn to show the latest result.
 
 *Call graph*: called by 1 (_fire); 2 external calls (update, workspace_tx).
 
 
-##### `ScheduleStore.inspect`  (lines 523–559)
+##### `ScheduleStore.inspect`  (lines 636–675)
 
 ```
-async def inspect(self, name: str) -> TaskInspection | None
+async def inspect(self, expected: ScheduledTask) -> TaskInspection | None
 ```
 
-**Purpose**: This returns a status snapshot for one recurring scheduled task. It shows when the task will run next, when it last ran, and what happened in the latest recorded turn.
+**Purpose**: This reads the live status of one recurring task, including its timing and the latest turn it produced. It is used for status rendering rather than for changing the schedule.
 
-**Data flow**: It receives a task name. It looks up the matching recurring scheduled task in the current workspace and left-joins to the recorded last turn, if any. If no task exists it returns `None`; otherwise it returns a `TaskInspection` with timing fields, turn status, and the last terminal text response if present.
+**Data flow**: It receives the expected task. It queries the matching task row for the current workspace and agent, joins to the last turn if one was recorded, and returns a `TaskInspection` with next run, last run, expiration, last turn status, and final response text. If the task no longer exists or is a one-time pause, it returns `None`.
 
-**Call relations**: This is the read path used when something needs to render a scheduled task’s live status. It calls `_utc` for the expiry timestamp and packages the result into `TaskInspection`.
+**Call relations**: Status views call this when they need more than the task definition. It uses `_utc` for the expiration timestamp and reads the turn table so users can see the latest scheduled run outcome.
 
-*Call graph*: calls 1 internal fn (_utc); 3 external calls (__init__, select, workspace_tx).
+*Call graph*: calls 1 internal fn (_utc); 4 external calls (__init__, select, workspace_tx, object_agent_id).
 
-
-### Evaluation sandbox connectors
-These files define the deterministic fake connector environment used to run evaluations without touching real mailbox, calendar, or code-search systems.
-
-### `extensions/eval_env/ufo_ext_eval_env/__init__.py`
-
-`other` · `test and evaluation setup`
-
-This package is for a deterministic evaluation environment. “Deterministic” means it should behave the same way every time it is run, like using a practice inbox and calendar with fixed contents instead of a live account that changes from minute to minute. That matters because evaluations need fair, repeatable conditions. If the system is being tested on tasks involving mail or calendar data, using real services would introduce noise: messages could arrive, events could change, network calls could fail, or private data could leak into a test. This package’s purpose is to offer fake connector providers for mailbox and calendar features, so the rest of the project can exercise those workflows safely and consistently. The file itself does not define functions or classes; it serves as the package’s front door and includes a short description of what the package contains.
-
-
-### `extensions/eval_env/ufo_ext_eval_env/manifest.py`
-
-`domain_logic` · `eval setup and connector tool calls`
-
-This file creates a small fake workplace for evaluating an agent: a mailbox, a calendar, and a code search tool. The important idea is that it is not a loose mock. The agent still discovers tools, reads their schemas, and calls them through the same connector route used in production. The difference is that the data lives in workspace-scoped evaluation storage, so tests can seed a known starting state and later check exactly what changed.
-
-The email tools can send mail and list messages. Sent mail is written to an `eval_env_email` table, so a grader can verify it later. The calendar tools create, list, update, and cancel events in an `eval_env_event` table. Cancelled events stay visible with a cancelled status, which is useful for checking behavior rather than hiding the record. Code search is different: it is read-only. Evaluation authors seed the exact search response under a query string, and the tool returns that response byte-for-byte. If no fixture was seeded, it fails loudly so a broken test setup is not mistaken for an empty search result.
-
-The file also declares three connector providers, one each for email, calendar, and code search, plus a minimal OAuth-style login stub because the connector registry expects one.
-
-#### Function details
-
-##### `_transaction`  (lines 171–175)
-
-```
-def _transaction()
-```
-
-**Purpose**: Opens a database transaction tied to this evaluation extension. Code uses it whenever it needs to read or change the evaluation mailbox or calendar safely.
-
-**Data flow**: It takes no direct input. It builds an extension context using the eval environment name, with a scoped store and no declared credentials, then returns a transaction object. Callers enter that transaction and use the resulting connection to run database queries.
-
-**Call relations**: The email and calendar routines call this before touching their tables. It is the shared doorway through which `_send_email`, `_list_emails`, `_create_event`, `_list_events`, and `_change_event` reach durable workspace storage.
-
-*Call graph*: called by 5 (_change_event, _create_event, _list_emails, _list_events, _send_email); 3 external calls (__init__, __init__, __init__).
-
-
-##### `_moment`  (lines 178–182)
-
-```
-def _moment(value: str) -> datetime
-```
-
-**Purpose**: Turns a text timestamp into a real date-time value. If the text does not say what time zone it is in, the function treats it as UTC, meaning universal coordinated time.
-
-**Data flow**: It receives an ISO 8601 date-time string, parses it, checks whether a time zone is present, and adds UTC if one is missing. It returns a timezone-aware `datetime` object ready to store in the calendar table.
-
-**Call relations**: Calendar creation and calendar updates call this before saving start or end times. It keeps event times consistent no matter whether the tool caller included an explicit time zone.
-
-*Call graph*: called by 2 (_create_event, _update_event); 1 external calls (fromisoformat).
-
-
-##### `EvalEnvBroker.tools`  (lines 190–198)
-
-```
-async def tools(self, workspace_id: UUID, provider: str, query: str) -> tuple[BrokerTool, ...]
-```
-
-**Purpose**: Returns the tools available for one provider, optionally narrowed by a search word. This is how the connector can answer, “What can this email, calendar, or code-search provider do?”
-
-**Data flow**: It receives a workspace id, provider name, and search text. It looks up that provider’s catalog, compares the search text with each tool’s slug and description, and returns matching tools. If there is no query, or no matches, it returns the full catalog for that provider.
-
-**Call relations**: The broker’s `search` method calls this when the system asks for tool discovery results. It sits at the front of the evaluation connector experience, before any specific tool is executed.
-
-*Call graph*: called by 1 (search).
-
-
-##### `EvalEnvBroker.schema`  (lines 200–204)
-
-```
-async def schema(self, workspace_id: UUID, provider: str, slug: str) -> BrokerTool
-```
-
-**Purpose**: Finds the detailed definition for one named tool. The schema tells the agent what arguments that tool accepts.
-
-**Data flow**: It receives a workspace id, provider name, and tool slug. It scans that provider’s catalog and returns the matching `BrokerTool`. If no tool has that slug, it raises an unknown-tool error.
-
-**Call relations**: This is used by the connector layer when a caller asks to describe a specific tool. It does not call the tool itself; it only returns the instruction card for that tool.
-
-*Call graph*: 1 external calls (__init__).
-
-
-##### `EvalEnvBroker.execute`  (lines 206–245)
-
-```
-async def execute(self, workspace_id: UUID, provider: str, slug: str, arguments: Mapping[str, object], account_id: str, idempotency_key: str | None) -> dict[str, object]
-```
-
-**Purpose**: Runs the requested evaluation tool. It is the central dispatcher that turns a provider name and tool slug into the right email, calendar, or code-search action.
-
-**Data flow**: It receives the workspace id, provider, tool slug, raw argument data, account id, and idempotency key. It validates the raw arguments with the right input model, then calls the matching private method. It returns that method’s response dictionary, or raises an unknown-tool error if the provider and slug do not match the catalog.
-
-**Call relations**: The connector runtime calls this after an agent chooses a tool. This function then hands off to `_send_email`, `_list_emails`, `_create_event`, `_list_events`, `_update_event`, `_cancel_event`, or `_search_code` depending on the request.
-
-*Call graph*: calls 7 internal fn (_cancel_event, _create_event, _list_emails, _list_events, _search_code, _send_email, _update_event); 1 external calls (__init__).
-
-
-##### `EvalEnvBroker._search_code`  (lines 247–255)
-
-```
-async def _search_code(self, args: SearchCodeArgs) -> dict[str, object]
-```
-
-**Purpose**: Returns a pre-seeded code search response for the exact query the agent asked for. It deliberately fails if the test did not seed that query, so evaluation mistakes are caught early.
-
-**Data flow**: It receives validated code-search arguments containing a query string. It reads the scoped store key made from the code-search prefix plus that query. If the stored value is a dictionary, it copies and returns it; otherwise it raises an error saying no fixture exists.
-
-**Call relations**: `execute` calls this when the code-search provider receives the `search_code` tool call. Unlike email and calendar methods, it does not use SQL tables because code search results are fixed fixtures, not mutable state.
-
-*Call graph*: called by 1 (execute); 1 external calls (__init__).
-
-
-##### `EvalEnvBroker._send_email`  (lines 257–272)
-
-```
-async def _send_email(self, workspace_id: UUID, args: SendEmailArgs) -> dict[str, object]
-```
-
-**Purpose**: Records a sent email in the evaluation mailbox. This lets an evaluation check that the agent sent the right message to the right people.
-
-**Data flow**: It receives a workspace id and validated email arguments. It creates a new email id, opens a transaction, inserts a row into the email table with folder `sent`, the fixed assistant sender address, recipients, subject, body, and current time, then returns the new id, sent status, and recipient list.
-
-**Call relations**: `execute` calls this for the `send_email` tool. It uses `_transaction` to make the database write durable and isolated to the extension’s storage.
-
-*Call graph*: calls 1 internal fn (_transaction); called by 1 (execute); 3 external calls (now, insert, uuid4).
-
-
-##### `EvalEnvBroker._list_emails`  (lines 274–309)
-
-```
-async def _list_emails(self, workspace_id: UUID, args: ListEmailsArgs) -> dict[str, object]
-```
-
-**Purpose**: Reads emails from the evaluation mailbox, newest first. It can filter by folder and by a simple text query over sender, subject, and body.
-
-**Data flow**: It receives a workspace id and validated listing arguments. It builds database conditions for the workspace and folder, optionally adds a case-insensitive substring search, reads matching rows ordered by sent time descending, and returns them as plain dictionaries with ids, addresses, subject, body, and timestamp.
-
-**Call relations**: `execute` calls this for the `list_emails` tool. It uses `_transaction` for the read and SQL filtering to make the returned mailbox view match the requested folder and query.
-
-*Call graph*: calls 1 internal fn (_transaction); called by 1 (execute); 2 external calls (or_, select).
-
-
-##### `EvalEnvBroker._create_event`  (lines 311–325)
-
-```
-async def _create_event(self, workspace_id: UUID, args: CreateEventArgs) -> dict[str, object]
-```
-
-**Purpose**: Adds a confirmed event to the evaluation calendar. This is how an agent’s calendar creation action becomes persistent test state.
-
-**Data flow**: It receives a workspace id and validated event details. It creates a new event id, converts start and end strings into date-time values, inserts a calendar row with confirmed status and attendees, then returns the event id and status.
-
-**Call relations**: `execute` calls this for the `create_event` tool. It relies on `_moment` for time parsing and `_transaction` for the database insert.
-
-*Call graph*: calls 2 internal fn (_moment, _transaction); called by 1 (execute); 2 external calls (insert, uuid4).
-
-
-##### `EvalEnvBroker._list_events`  (lines 327–340)
-
-```
-async def _list_events(self, workspace_id: UUID, args: ListEventsArgs) -> dict[str, object]
-```
-
-**Purpose**: Reads calendar events for a workspace in start-time order. It can also narrow the list to event titles containing a search string.
-
-**Data flow**: It receives a workspace id and validated listing arguments. It builds a query for that workspace, optionally filters by title, reads rows ordered by start time up to the requested limit, and converts each row into a plain event dictionary.
-
-**Call relations**: `execute` calls this for the `list_events` tool. It uses `_transaction` to read the table and `_event_json` to shape each database row into the response format the tool returns.
-
-*Call graph*: calls 2 internal fn (_event_json, _transaction); called by 1 (execute); 1 external calls (select).
-
-
-##### `EvalEnvBroker._update_event`  (lines 342–354)
-
-```
-async def _update_event(self, workspace_id: UUID, args: UpdateEventArgs) -> dict[str, object]
-```
-
-**Purpose**: Changes selected fields on an existing calendar event. It supports partial updates, so callers can change only the title, only the time, only attendees, or any combination.
-
-**Data flow**: It receives a workspace id and validated update arguments. It builds a changes dictionary from only the fields that were provided, converting time strings when needed. If nothing was provided to change, it raises an error. Otherwise it passes the event id and changes to `_change_event` and returns the updated event.
-
-**Call relations**: `execute` calls this for the `update_event` tool. This function prepares the requested changes, while `_change_event` does the shared database update and final lookup.
-
-*Call graph*: calls 2 internal fn (_change_event, _moment); called by 1 (execute).
-
-
-##### `EvalEnvBroker._cancel_event`  (lines 356–357)
-
-```
-async def _cancel_event(self, workspace_id: UUID, args: CancelEventArgs) -> dict[str, object]
-```
-
-**Purpose**: Marks an existing calendar event as cancelled. The event is not deleted, so evaluations can still see that cancellation happened.
-
-**Data flow**: It receives a workspace id and validated cancel arguments containing an event id. It asks `_change_event` to set that event’s status to `cancelled`, then returns the updated event record.
-
-**Call relations**: `execute` calls this for the `cancel_event` tool. It is a small wrapper around `_change_event`, sharing the same update-and-return behavior used by event editing.
-
-*Call graph*: calls 1 internal fn (_change_event); called by 1 (execute).
-
-
-##### `EvalEnvBroker._change_event`  (lines 359–378)
-
-```
-async def _change_event(self, workspace_id: UUID, event_id: str, changes: dict[str, object]) -> dict[str, object]
-```
-
-**Purpose**: Applies changes to one calendar event and returns the event after the change. It is the common update engine for both editing and cancelling events.
-
-**Data flow**: It receives a workspace id, event id string, and a dictionary of fields to change. It opens a transaction, updates the matching calendar row for that workspace, checks that exactly one row changed, then reads the row back and converts it to a response dictionary. If no matching event exists, it raises an error.
-
-**Call relations**: `_update_event` and `_cancel_event` both call this after deciding what should change. It uses `_transaction` for the database work and `_event_json` to produce the final tool response.
-
-*Call graph*: calls 2 internal fn (_event_json, _transaction); called by 2 (_cancel_event, _update_event); 3 external calls (select, update, UUID).
-
-
-##### `EvalEnvBroker._event_json`  (lines 380–388)
-
-```
-def _event_json(self, row: sa.Row) -> dict[str, object]
-```
-
-**Purpose**: Converts a calendar database row into the simple dictionary returned by calendar tools. This keeps event responses consistent across listing, updating, and cancelling.
-
-**Data flow**: It receives a row from the calendar table. It turns the id into text, formats start and end times as ISO strings, and copies the title, attendees, and status into a dictionary. The database row is not changed.
-
-**Call relations**: `_list_events` uses this for every listed event, and `_change_event` uses it after an update or cancellation. It is the final formatting step before calendar data leaves the broker.
-
-*Call graph*: called by 2 (_change_event, _list_events).
-
-
-##### `EvalEnvBroker.file_outputs`  (lines 390–391)
-
-```
-def file_outputs(self, response: dict[str, object]) -> tuple[BrokerFile, ...]
-```
-
-**Purpose**: States that evaluation environment tools do not produce downloadable files. Every result is returned directly as structured data.
-
-**Data flow**: It receives a tool response dictionary but does not inspect it. It always returns an empty tuple, meaning there are no broker files attached to the response.
-
-**Call relations**: The connector interface can ask brokers whether a response has file outputs. For this broker, the answer is always no, so no later file-handling step is needed.
-
-
-##### `EvalEnvBroker.stage_upload`  (lines 393–402)
-
-```
-async def stage_upload(self, workspace_id: UUID, provider: str, slug: str, filename: str, mimetype: str, md5: str) -> StagedUpload
-```
-
-**Purpose**: Rejects file uploads for these evaluation providers. Email, calendar, and code search in this environment only accept normal tool arguments, not uploaded files.
-
-**Data flow**: It receives upload details such as workspace id, provider, tool slug, filename, MIME type, and checksum. Instead of creating an upload slot, it raises a runtime error explaining that uploads are not accepted.
-
-**Call relations**: This exists because the broker interface includes upload staging. If any caller tries to use uploads with the eval providers, this function stops the flow immediately.
-
-
-##### `EvalEnvBroker.search`  (lines 404–405)
-
-```
-async def search(self, workspace_id: UUID, provider: str, query: str) -> BrokerSearch
-```
-
-**Purpose**: Wraps tool discovery results in the standard broker search response object. It is a connector-friendly way to search available tools.
-
-**Data flow**: It receives a workspace id, provider, and query string. It asks `tools` for the matching tool catalog, then places those tools inside a `BrokerSearch` result.
-
-**Call relations**: The connector runtime can call this when searching external tools. It delegates the actual matching to `tools` and only packages the answer in the expected response type.
-
-*Call graph*: calls 1 internal fn (tools); 1 external calls (__init__).
-
-
-##### `EvalEnvBroker.credential`  (lines 407–408)
-
-```
-async def credential(self, workspace_id: UUID, provider: str, account: str) -> Credential
-```
-
-**Purpose**: Returns a simple synthetic credential for the evaluation account. This gives the connector machinery something credential-shaped without using a real secret.
-
-**Data flow**: It receives a workspace id, provider, and account id. It builds and returns a credential whose bearer token is text in the form `eval-env:<account>`.
-
-**Call relations**: The connector framework may ask the broker for credentials before making a call. In this evaluation broker, the credential is only a placeholder because all work happens inside local eval storage.
-
-*Call graph*: 1 external calls (__init__).
-
-
-##### `_EvalEnvOAuth.authorize_url`  (lines 419–420)
-
-```
-def authorize_url(self, state: str, redirect_uri: str) -> str
-```
-
-**Purpose**: Builds a fake authorization web address for the evaluation provider. It satisfies the connector’s expectation that each provider has an OAuth-style connect flow.
-
-**Data flow**: It receives a state value and redirect URI. It combines them with the provider’s fake host into an HTTPS authorization URL string and returns that string.
-
-**Call relations**: The eval flow normally seeds grants directly, so this is rarely exercised. It is present for registry completeness alongside `_EvalEnvOAuth.exchange` and the provider declarations in `manifest`.
-
-
-##### `_EvalEnvOAuth.exchange`  (lines 422–425)
-
-```
-async def exchange(self, code: str, redirect_uri: str, workspace_id: UUID, state: str) -> OAuthAccount
-```
-
-**Purpose**: Completes the fake OAuth exchange by returning the fixed evaluation account id. OAuth is a login handoff pattern where an app trades a temporary code for an account grant.
-
-**Data flow**: It receives a code, redirect URI, workspace id, and state, but does not need their contents. It returns an `OAuthAccount` with the constant account id used by this eval environment.
-
-**Call relations**: If the connector registry ever drives the eval provider’s connect flow, this method supplies the account object. In normal evaluations, grants are seeded directly instead.
-
-*Call graph*: 1 external calls (__init__).
-
-
-##### `manifest`  (lines 428–450)
-
-```
-def manifest() -> Manifest
-```
-
-**Purpose**: Declares the evaluation extension to the host system. It registers the email, calendar, and code-search providers with labels, fake OAuth descriptors, and the shared broker that runs their tools.
-
-**Data flow**: It creates one `EvalEnvBroker`, then builds a `Manifest` containing three `ConnectorProvider` entries. Each entry names a provider through its OAuth stub, gives it a human label, and points it at the broker. The completed manifest is returned to the extension loader.
-
-**Call relations**: This is the file’s registration point. When the extension system loads the eval environment, it calls `manifest`, and the returned object tells the host which providers exist and how their tool calls should reach `EvalEnvBroker`.
-
-*Call graph*: 4 external calls (__init__, __init__, __init__, __init__).
-
-
-### Billing automation
-This file connects scheduled and chat-driven product flows to Metronome and Stripe for usage billing, seat counts, and billing setup.
-
-### `extensions/metronome/ufo_ext_metronome.py`
-
-`orchestration` · `scheduled billing/usage jobs and owner chat tool calls`
-
-This file is the bridge between UFO’s internal records and the outside billing services. Without it, settled usage would stay inside UFO and never reach Metronome, seat counts would not be billed or reported, and workspace owners would have no chat tools for granting seats or starting billing.
-
-It does four main jobs. First, a scheduled usage shipper reads finished usage records, turns each one into a Metronome ingest event, sends the batch, and only then marks those records as shipped. The event identifiers are stable, like writing the same tracking number on a package every retry, so a crash can safely resend without double billing. Second, a daily seat shipper records how many people currently hold seats and sends that snapshot to Metronome. Third, a seat approval job notices unseated members when the included seats are full and asks the owner in their private conversation whether to grant a paid overage seat.
-
-The file also provides chat tools: grant a seat, revoke a seat, list seats, and manage billing. Billing setup creates or reuses a Stripe Customer, returns a Stripe Customer Portal link for saving a card, stores the intended Metronome package, and later a scheduled activation job creates the Metronome customer and contract once Stripe reports a default payment method. Provider calls use stable identities so retries reconcile with existing objects instead of creating duplicates.
-
-#### Function details
-
-##### `UsageShipper.run`  (lines 198–213)
-
-```
-async def run(self) -> None
-```
-
-**Purpose**: Sends one workspace’s settled usage records to Metronome in safe batches. It is built so retrying after a crash sends the same events again rather than inventing new ones.
-
-**Data flow**: It reads the Metronome bearer token from the environment, gets the workspace’s fixed backfill floor, asks the extension context for pending usage exports, converts them into event dictionaries, posts them to Metronome, logs the shipment, and then acknowledges the exports so they are not sent again unless the post failed before acknowledgement.
-
-**Call relations**: The scheduled `_ship` wrapper creates a `UsageShipper` and calls this method. During the run it relies on `_floor` to decide how far back to look, `_events` to shape UFO usage into Metronome events, `_ingest` to perform the HTTP send, and `_require_env` to fail early if the bearer token is missing.
-
-*Call graph*: calls 4 internal fn (_events, _floor, _ingest, _require_env); 1 external calls (log).
-
-
-##### `UsageShipper._floor`  (lines 215–225)
-
-```
-async def _floor(self) -> datetime
-```
-
-**Purpose**: Chooses the earliest usage time this workspace is allowed to ship. On the first run it stores a fixed cutoff so the initial catch-up stays inside Metronome’s allowed backfill window.
-
-**Data flow**: It reads a saved timestamp from the workspace store. If none exists, it calculates “now minus the backfill window,” saves that timestamp, and returns it; otherwise it parses and returns the stored timestamp.
-
-**Call relations**: Only `UsageShipper.run` calls this before asking for pending usage exports. Its result limits the records that core returns for shipping.
-
-*Call graph*: called by 1 (run); 3 external calls (fromisoformat, now, timedelta).
-
-
-##### `UsageShipper._events`  (lines 227–246)
-
-```
-def _events(self, exports: tuple[UsageExport, ...]) -> list[dict[str, object]]
-```
-
-**Purpose**: Turns internal usage export records into the exact event shape Metronome expects. Each event carries a stable transaction id so retries can be deduplicated by Metronome.
-
-**Data flow**: It receives a tuple of `UsageExport` objects, reads the workspace id as the customer id, formats each usage time, and produces a list of dictionaries containing the usage dimension, model, amount, price details, turn id, and whether the workspace used its own provider key.
-
-**Call relations**: It is called by `UsageShipper.run` just before `_ingest`. It delegates timestamp formatting to `_rfc3339` so all outbound times use the same format.
-
-*Call graph*: calls 1 internal fn (_rfc3339); called by 1 (run).
-
-
-##### `_ship`  (lines 249–250)
-
-```
-async def _ship(ctx: ExtensionContext) -> None
-```
-
-**Purpose**: Small scheduled-job entry point for usage shipping. It adapts the job runner’s workspace context into a `UsageShipper` run.
-
-**Data flow**: It receives an `ExtensionContext`, constructs a `UsageShipper` with the configured test or production transport, and awaits its run; it returns nothing directly.
-
-**Call relations**: The extension manifest registers this as the handler for the usage shipping job. Its only job is to hand off to `UsageShipper.run`.
-
-*Call graph*: 1 external calls (__init__).
-
-
-##### `SeatShipper.run`  (lines 263–279)
-
-```
-async def run(self) -> None
-```
-
-**Purpose**: Sends Metronome one daily snapshot of how many seats a workspace is using. It also initializes the workspace’s seat limit and included-seat count if they have not been set yet.
-
-**Data flow**: It reads the bearer token, checks whether today’s seat snapshot was already shipped, opens a database transaction, ensures default seat settings exist, reads a seat snapshot, sends one Metronome ingest event, logs the count, and stores today’s date as shipped.
-
-**Call relations**: The scheduled `_ship_seats` wrapper calls this. It uses `_event` to build the seat event, `_ingest` to send it, `_require_env` for configuration, and the `Seats` core service for the actual seat data.
-
-*Call graph*: calls 3 internal fn (_event, _ingest, _require_env); 3 external calls (__init__, now, log).
-
-
-##### `SeatShipper._event`  (lines 281–292)
-
-```
-def _event(self, snapshot: SeatSnapshot, today: str) -> dict[str, object]
-```
-
-**Purpose**: Builds the Metronome event for one day’s seat count. The event id is tied to the workspace and date so retries for the same day are treated as the same snapshot.
-
-**Data flow**: It receives a `SeatSnapshot` and a date string, reads the workspace id, stamps the current time, and returns a dictionary with the seated count and seat limit as string properties.
-
-**Call relations**: It is called by `SeatShipper.run` after the current seat snapshot is read. It uses `_rfc3339` to format the event timestamp.
-
-*Call graph*: calls 1 internal fn (_rfc3339); called by 1 (run); 1 external calls (now).
-
-
-##### `_ship_seats`  (lines 295–296)
-
-```
-async def _ship_seats(ctx: ExtensionContext) -> None
-```
-
-**Purpose**: Small scheduled-job entry point for daily seat-count shipping. It turns the job runner’s context into a `SeatShipper` run.
-
-**Data flow**: It receives an `ExtensionContext`, creates a `SeatShipper` with the configured transport, awaits it, and produces no separate result.
-
-**Call relations**: The manifest registers this for the seat shipping job. It simply hands control to `SeatShipper.run`.
-
-*Call graph*: 1 external calls (__init__).
-
-
-##### `SeatApprovals.run`  (lines 312–337)
-
-```
-async def run(self) -> None
-```
-
-**Purpose**: Finds unseated members who need owner approval for paid overage seats and asks the owner in chat. It avoids asking twice for the same member.
-
-**Data flow**: It reads the current seat snapshot, stops if included seats are not exhausted, filters unseated members, checks a per-email marker in the store, finds the owner’s private conversation, invokes an internal prompt asking for a grant or decline decision, and then records that the ask was made.
-
-**Call relations**: The scheduled `_ask_seat_approvals` wrapper starts this flow. It relies on the core `Seats` service for membership state and `owner_conversation` to find where to send the approval request.
-
-*Call graph*: 3 external calls (__init__, now, owner_conversation).
-
-
-##### `_ask_seat_approvals`  (lines 340–341)
-
-```
-async def _ask_seat_approvals(ctx: ExtensionContext) -> None
-```
-
-**Purpose**: Small scheduled-job entry point for seat approval prompts. It runs the approval scanner for one workspace.
-
-**Data flow**: It receives an `ExtensionContext`, constructs `SeatApprovals`, awaits its run, and returns nothing directly.
-
-**Call relations**: The manifest registers this as the seat approval job handler. It exists to hand off cleanly to `SeatApprovals.run`.
-
-*Call graph*: 1 external calls (__init__).
-
-
-##### `BillingConfig.from_env`  (lines 360–379)
-
-```
-def from_env(cls) -> 'BillingConfig'
-```
-
-**Purpose**: Loads the environment variables needed for billing setup and activation. It fails before any provider call if the deployment is missing required billing settings.
-
-**Data flow**: It reads the Stripe secret key, Stripe portal configuration id, Metronome bearer token, and Metronome package alias from environment variables. If any are missing it raises one error naming all missing settings; otherwise it returns a validated `BillingConfig` object.
-
-**Call relations**: Billing tool calls and the billing activation job call this at the start of their work. Usage and seat shipping do not use it because they only need the Metronome bearer token.
-
-
-##### `BillingActivation.run`  (lines 414–441)
-
-```
-async def run(self) -> None
-```
-
-**Purpose**: Turns a workspace’s saved payment method into a live Metronome billing plan. It resumes safely if a previous job run stopped halfway.
-
-**Data flow**: It reads the stored billing record, stops if there is no pending setup or it is already activated, loads billing config, checks Stripe for a default payment method, creates or recovers the Metronome customer, creates or recovers the Metronome contract, stores each new provider id, and finally notifies the owner.
-
-**Call relations**: The scheduled `_activate_billing` wrapper calls this. It coordinates `_billing_record`, `_has_default_payment_method`, `_metronome_customer`, `_metronome_contract`, `_contract_key`, `_store`, and `_notify` in order.
-
-*Call graph*: calls 7 internal fn (_notify, _store, _billing_record, _contract_key, _has_default_payment_method, _metronome_contract, _metronome_customer).
-
-
-##### `BillingActivation._store`  (lines 443–445)
-
-```
-async def _store(self, record: BillingRecord) -> BillingRecord
-```
-
-**Purpose**: Persists the current billing record for a workspace. It is used after each successful provider step so the next job tick knows where to resume.
-
-**Data flow**: It receives a `BillingRecord`, serializes it to JSON-friendly data, writes it under the billing key in the extension store, and returns the same record.
-
-**Call relations**: Both `BillingActivation.run` and `_notify` call this after changing billing state. It is the durable checkpoint between provider calls.
-
-*Call graph*: called by 2 (_notify, run); 1 external calls (model_dump).
-
-
-##### `BillingActivation._notify`  (lines 447–465)
-
-```
-async def _notify(self, record: BillingRecord) -> None
-```
-
-**Purpose**: Tells the workspace owner that billing is active, then marks activation complete. If there is no owner conversation yet, it leaves the record pending so a later tick can try again.
-
-**Data flow**: It looks up the owner’s private conversation, sends an internal prompt announcing the active package with a stable idempotency key, stores a copy of the record with `activated_at` set to the current time, and logs the activation.
-
-**Call relations**: Only `BillingActivation.run` calls this after the Metronome contract exists. It uses `_store` to record the final activation mark.
-
-*Call graph*: calls 1 internal fn (_store); called by 1 (run); 4 external calls (now, model_copy, log, owner_conversation).
-
-
-##### `_activate_billing`  (lines 468–469)
-
-```
-async def _activate_billing(ctx: ExtensionContext) -> None
-```
-
-**Purpose**: Small scheduled-job entry point for billing activation. It runs the activation workflow for one workspace.
-
-**Data flow**: It receives an `ExtensionContext`, constructs `BillingActivation` with the configured transport, awaits its run, and returns nothing directly.
-
-**Call relations**: The manifest registers this as the billing activation job handler. It hands off to `BillingActivation.run`.
-
-*Call graph*: 1 external calls (__init__).
-
-
-##### `_billing_record`  (lines 472–474)
-
-```
-async def _billing_record(ctx: ExtensionContext) -> BillingRecord | None
-```
-
-**Purpose**: Reads the workspace’s saved billing setup state, if one exists. This is the shared way billing tools and jobs find Stripe and Metronome ids.
-
-**Data flow**: It reads the billing key from the extension store. If nothing is stored it returns `None`; otherwise it validates the stored data into a `BillingRecord` object.
-
-**Call relations**: It is used by billing activation, setup, status, and portal flows. Those callers use its result to decide whether billing has started and which provider objects to query.
-
-*Call graph*: called by 4 (run, _billing_portal, _billing_setup, _billing_status).
-
-
-##### `_contract_key`  (lines 477–481)
-
-```
-def _contract_key(workspace_id: UUID) -> str
-```
-
-**Purpose**: Creates the permanent identity string for this workspace’s Metronome contract. This lets the code recognize the correct contract later, even if the customer has other contracts.
-
-**Data flow**: It receives the workspace UUID and returns a string made from a fixed prefix plus that UUID.
-
-**Call relations**: Billing activation uses it when creating a contract, and billing status uses it when checking whether the workspace’s own plan exists.
-
-*Call graph*: called by 2 (run, _billing_status).
-
-
-##### `grant_seat`  (lines 506–512)
-
-```
-async def grant_seat(ctx: ToolContext, args: GrantSeatInput) -> ToolResult
-```
-
-**Purpose**: Chat tool that grants a seat to a workspace member by email. It is owner-only because granting may create a billable overage seat.
-
-**Data flow**: It validates that the caller is the owner, opens a transaction, grants the requested email a seat through the core `Seats` service, reads the updated snapshot, and returns that snapshot as JSON text.
-
-**Call relations**: The manifest exposes this as the `grant_seat` tool. It relies on `_owner_seats` for permission checking and `_snapshot_result` to format the response.
-
-*Call graph*: calls 2 internal fn (_owner_seats, _snapshot_result).
-
-
-##### `revoke_seat`  (lines 515–525)
-
-```
-async def revoke_seat(ctx: ToolContext, args: RevokeSeatInput) -> ToolResult
-```
-
-**Purpose**: Chat tool that removes a member’s seat by email. It also marks that member as already decided so the approval job does not ask the owner about them again.
-
-**Data flow**: It validates that the caller is the owner, revokes the seat inside a transaction, reads the updated snapshot, writes a per-email approval marker with the current time, and returns the snapshot as JSON text.
-
-**Call relations**: The manifest exposes this as the `revoke_seat` tool. It uses `_owner_seats` for permission checking and `_snapshot_result` for the tool response.
-
-*Call graph*: calls 2 internal fn (_owner_seats, _snapshot_result); 1 external calls (now).
-
-
-##### `list_seats`  (lines 528–532)
-
-```
-async def list_seats(ctx: ToolContext, args: ListSeatsInput) -> ToolResult
-```
-
-**Purpose**: Chat tool that reports the workspace’s seat limit, included allowance, overage count, and members. It does not change anything.
-
-**Data flow**: It opens a transaction, reads the current seat snapshot for the workspace, and returns that snapshot as JSON text.
-
-**Call relations**: The manifest exposes this as the `list_seats` tool. It uses the core `Seats` service for data and `_snapshot_result` to shape the answer.
-
-*Call graph*: calls 1 internal fn (_snapshot_result); 1 external calls (__init__).
-
-
-##### `manage_billing`  (lines 535–544)
-
-```
-async def manage_billing(ctx: ToolContext, args: ManageBillingInput) -> ToolResult
-```
-
-**Purpose**: Chat tool for owner billing actions: setup, status, or portal. It keeps billing conversations restricted to the owner’s private chat.
-
-**Data flow**: It validates the caller and conversation through `_owner_billing`, loads billing configuration, branches on the requested action, and returns the result from setup, status, or portal handling.
-
-**Call relations**: The manifest exposes this as the `manage_billing` tool. It delegates the actual work to `_billing_setup`, `_billing_status`, or `_billing_portal`.
-
-*Call graph*: calls 4 internal fn (_billing_portal, _billing_setup, _billing_status, _owner_billing).
-
-
-##### `_owner_billing`  (lines 547–558)
-
-```
-async def _owner_billing(ctx: ToolContext) -> ExtensionContext
-```
-
-**Purpose**: Checks that a billing tool call is allowed. Billing can only be managed by the workspace owner, speaking as themselves, in their own private conversation.
-
-**Data flow**: It inspects the tool context for a speaking member, compares audience and speaker, asks the context whether the speaker is the owner, and returns the extension context if all checks pass; otherwise it raises an error before any provider call happens.
-
-**Call relations**: `manage_billing` calls this before setup, status, or portal work. It is the gate that prevents non-owners or shared channels from triggering Stripe or Metronome changes.
-
-*Call graph*: calls 1 internal fn (speaker_is_owner); called by 1 (manage_billing).
-
-
-##### `_billing_setup`  (lines 561–595)
-
-```
-async def _billing_setup(ext: ExtensionContext, config: BillingConfig) -> ToolResult
-```
-
-**Purpose**: Starts billing setup for a workspace and returns a Stripe portal link for saving a payment method. It records the intended plan before handing the link to the owner.
-
-**Data flow**: It reads any existing billing record. If none exists, it creates or reuses a Stripe Customer, builds a new billing record with the configured Metronome package and an hour-aligned contract start time, stores it, creates a Stripe portal session for payment-method update, logs setup, and returns the portal URL plus useful ids.
-
-**Call relations**: `manage_billing` calls this for the `setup` action. It uses `_stripe_customer` for the Stripe Customer, `_portal_session` for the hosted link, `_billing_record` to avoid overwriting active progress, and `_text_result` for the response.
-
-*Call graph*: calls 4 internal fn (_billing_record, _portal_session, _stripe_customer, _text_result); called by 1 (manage_billing); 3 external calls (__init__, now, log).
-
-
-##### `_billing_status`  (lines 598–626)
-
-```
-async def _billing_status(ext: ExtensionContext, config: BillingConfig) -> ToolResult
-```
-
-**Purpose**: Reports what Stripe and Metronome currently say about the workspace’s billing. It does not trust only local stored flags.
-
-**Data flow**: It reads the billing record. If none exists it returns `configured: false`; otherwise it asks Stripe whether a default payment method exists, asks Metronome whether the workspace’s own contract exists, and returns a JSON status including provider ids and whether the plan is active.
-
-**Call relations**: `manage_billing` calls this for the `status` action. It uses `_has_default_payment_method`, `_contract_key`, `_contract_for`, and `_text_result`.
-
-*Call graph*: calls 5 internal fn (_billing_record, _contract_for, _contract_key, _has_default_payment_method, _text_result); called by 1 (manage_billing).
-
-
-##### `_billing_portal`  (lines 629–637)
-
-```
-async def _billing_portal(ext: ExtensionContext, config: BillingConfig) -> ToolResult
-```
-
-**Purpose**: Creates a fresh Stripe Customer Portal link for an already set-up workspace. The owner can use it for invoices, payment methods, and billing details.
-
-**Data flow**: It reads the billing record, raises an error if setup has not happened yet, creates a portal session without narrowing it to a setup-only flow, and returns the URL as JSON text.
-
-**Call relations**: `manage_billing` calls this for the `portal` action. It uses `_billing_record`, `_portal_session`, and `_text_result`.
-
-*Call graph*: calls 3 internal fn (_billing_record, _portal_session, _text_result); called by 1 (manage_billing).
-
-
-##### `_owner_seats`  (lines 640–645)
-
-```
-async def _owner_seats(ctx: ToolContext) -> Seats
-```
-
-**Purpose**: Checks that a seat-changing tool call is allowed. Only the workspace owner can grant or revoke seats.
-
-**Data flow**: It inspects the tool context for a speaking member, asks whether that speaker is the owner, and returns a `Seats` service for the workspace if allowed; otherwise it raises an error.
-
-**Call relations**: `grant_seat` and `revoke_seat` call this before making seat changes. It protects the core seat operations from unauthorized chat requests.
-
-*Call graph*: calls 1 internal fn (speaker_is_owner); called by 2 (grant_seat, revoke_seat); 1 external calls (__init__).
-
-
-##### `_snapshot_result`  (lines 648–662)
-
-```
-def _snapshot_result(snapshot: SeatSnapshot) -> ToolResult
-```
-
-**Purpose**: Formats a seat snapshot into the JSON text returned by seat tools. It makes the response easy for the agent to read and explain.
-
-**Data flow**: It receives a `SeatSnapshot`, calculates billed overage seats from seated minus included seats, copies each member’s email, seated state, and owner flag, and wraps the payload as a tool result.
-
-**Call relations**: Seat tools call this after reading or changing seats. It delegates the final wrapping to `_text_result`.
-
-*Call graph*: calls 1 internal fn (_text_result); called by 3 (grant_seat, list_seats, revoke_seat).
-
-
-##### `_text_result`  (lines 665–666)
-
-```
-def _text_result(payload: dict[str, object]) -> ToolResult
-```
-
-**Purpose**: Wraps a small dictionary as a tool result containing JSON text. This gives chat tools a consistent response format.
-
-**Data flow**: It receives a dictionary, serializes it with JSON, places that text inside a `TextContent`, and returns a `ToolResult` containing it.
-
-**Call relations**: Billing and seat helper functions use this whenever they need to return structured information to the agent.
-
-*Call graph*: called by 4 (_billing_portal, _billing_setup, _billing_status, _snapshot_result); 3 external calls (__init__, __init__, dumps).
-
-
-##### `_require_env`  (lines 698–702)
-
-```
-def _require_env(name: str) -> str
-```
-
-**Purpose**: Reads a required environment variable and gives a clear error if it is missing. This prevents silent billing or shipping failures from bad deployment configuration.
-
-**Data flow**: It receives an environment variable name, looks it up, returns the value if present, and raises a runtime error if absent or empty.
-
-**Call relations**: Usage and seat shippers call this before posting to Metronome. Billing flows use `BillingConfig.from_env` instead because they need several settings at once.
-
-*Call graph*: called by 2 (run, run).
-
-
-##### `_stripe_customer`  (lines 705–722)
-
-```
-async def _stripe_customer(config: BillingConfig, workspace_id: UUID, transport: httpx.AsyncBaseTransport | None) -> str
-```
-
-**Purpose**: Creates or reuses the one Stripe Customer for a workspace. It uses a stable idempotency key so retrying the request does not create duplicate customers.
-
-**Data flow**: It receives billing config, a workspace id, and an optional HTTP transport, posts customer details and workspace metadata to Stripe, validates that Stripe returned a non-empty customer id, and returns that id.
-
-**Call relations**: `_billing_setup` calls this the first time billing is set up. It performs the provider request through `_stripe` and checks the returned id through `_as_str`.
-
-*Call graph*: calls 2 internal fn (_as_str, _stripe); called by 1 (_billing_setup).
-
-
-##### `_portal_session`  (lines 725–741)
-
-```
-async def _portal_session(config: BillingConfig, customer_id: str, flow: str | None, transport: httpx.AsyncBaseTransport | None) -> str
-```
-
-**Purpose**: Creates a short-lived Stripe Customer Portal URL. Depending on the flow, it can either focus the owner on saving a payment method or open the broader billing portal.
-
-**Data flow**: It receives billing config, a Stripe customer id, an optional flow name, and an optional transport, posts a portal-session request to Stripe, validates the returned URL, and returns it.
-
-**Call relations**: `_billing_setup` calls it for the payment-method update link, and `_billing_portal` calls it for the full portal. It uses `_stripe` for the HTTP request and `_as_str` to validate the URL.
-
-*Call graph*: calls 2 internal fn (_as_str, _stripe); called by 2 (_billing_portal, _billing_setup).
-
-
-##### `_has_default_payment_method`  (lines 744–754)
-
-```
-async def _has_default_payment_method(config: BillingConfig, customer_id: str, transport: httpx.AsyncBaseTransport | None) -> bool
-```
-
-**Purpose**: Checks whether Stripe says the customer has a default payment method saved. This is the gate that decides whether billing activation may proceed.
-
-**Data flow**: It receives billing config, a Stripe customer id, and an optional transport, fetches the customer from Stripe, looks inside invoice settings, and returns true only when a default payment method string is present.
-
-**Call relations**: Billing activation calls this before creating Metronome billing objects, and billing status calls it to report whether a card is on file. It performs the provider read through `_stripe`.
-
-*Call graph*: calls 1 internal fn (_stripe); called by 2 (run, _billing_status).
-
-
-##### `_stripe`  (lines 757–775)
-
-```
-async def _stripe(config: BillingConfig, method: str, path: str, transport: httpx.AsyncBaseTransport | None, data: dict[str, str] | None=None, idempotency_key: str | None=None) -> dict[str, object]
-```
-
-**Purpose**: Sends one HTTP request to Stripe and returns the JSON response. It centralizes Stripe authentication, API version pinning, timeout, idempotency headers, and error handling.
-
-**Data flow**: It receives request details, builds headers with the secret key and fixed Stripe API version, optionally adds an idempotency key, sends the request with `httpx`, raises `StripeError` for non-success responses, and returns the decoded JSON body.
-
-**Call relations**: Stripe-specific helpers call this for customer creation, portal sessions, and customer lookup. It is the low-level Stripe transport layer for the file.
-
-*Call graph*: called by 3 (_has_default_payment_method, _portal_session, _stripe_customer); 2 external calls (__init__, AsyncClient).
-
-
-##### `_metronome_customer`  (lines 778–823)
-
-```
-async def _metronome_customer(config: BillingConfig, alias: str, stripe_customer_id: str, transport: httpx.AsyncBaseTransport | None) -> str
-```
-
-**Purpose**: Finds or creates the workspace’s Metronome customer. The workspace UUID is used as the ingest alias so usage events attach to the right billable customer.
-
-**Data flow**: It first searches Metronome for a customer with the workspace alias. If found, it returns that id. If not, it posts a customer create request with Stripe billing-provider configuration, handles alias conflicts by looking up the customer again, and returns the created or reconciled id.
-
-**Call relations**: Billing activation calls this after Stripe has a default payment method. It uses `_customer_by_alias` for lookup and `_metronome` for provider calls.
-
-*Call graph*: calls 2 internal fn (_customer_by_alias, _metronome); called by 1 (run); 1 external calls (__init__).
-
-
-##### `_customer_by_alias`  (lines 826–835)
-
-```
-async def _customer_by_alias(config: BillingConfig, alias: str, transport: httpx.AsyncBaseTransport | None) -> str | None
-```
-
-**Purpose**: Looks up a Metronome customer by its ingest alias. This is how the extension recognizes the customer tied to a workspace’s usage events.
-
-**Data flow**: It sends a Metronome customer list request filtered by ingest alias, returns the first customer id if one is present, and returns `None` otherwise.
-
-**Call relations**: `_metronome_customer` uses this before creating a customer and again when reconciling a conflict. It performs the HTTP request through `_metronome`.
-
-*Call graph*: calls 1 internal fn (_metronome); called by 1 (_metronome_customer).
-
-
-##### `_metronome_contract`  (lines 838–874)
-
-```
-async def _metronome_contract(config: BillingConfig, customer_id: str, record: BillingRecord, uniqueness_key: str, transport: httpx.AsyncBaseTransport | None) -> str
-```
-
-**Purpose**: Finds or creates the workspace’s Metronome contract, which represents the live billing plan. It uses a permanent uniqueness key so retries and conflicts point back to the same contract.
-
-**Data flow**: It first checks whether a matching contract already exists. If not, it posts a create request with the customer id, package alias, stored start time, and uniqueness key. If Metronome reports a conflict, it looks up the contract again. It returns the existing, created, or reconciled contract id.
-
-**Call relations**: Billing activation calls this after the Metronome customer id is known. It uses `_contract_for` for lookup, `_rfc3339` for the contract start timestamp, and `_metronome` for provider calls.
-
-*Call graph*: calls 3 internal fn (_contract_for, _metronome, _rfc3339); called by 1 (run); 1 external calls (__init__).
-
-
-##### `_contract_for`  (lines 877–900)
-
-```
-async def _contract_for(config: BillingConfig, customer_id: str, uniqueness_key: str, transport: httpx.AsyncBaseTransport | None) -> str | None
-```
-
-**Purpose**: Finds this workspace’s own live Metronome contract on a customer. It matches by the extension’s uniqueness key rather than assuming any listed contract belongs to this workspace.
-
-**Data flow**: It posts a contract list request for the customer, scans the returned contracts, returns the id whose uniqueness key matches, and returns `None` if no such contract is found.
-
-**Call relations**: Billing status uses this to report whether the plan is active, and `_metronome_contract` uses it before and after create attempts. It calls `_metronome` for the provider request.
-
-*Call graph*: calls 1 internal fn (_metronome); called by 2 (_billing_status, _metronome_contract).
-
-
-##### `_metronome`  (lines 903–923)
-
-```
-async def _metronome(config: BillingConfig, method: str, path: str, transport: httpx.AsyncBaseTransport | None, body: dict[str, object] | None=None, params: dict[str, str] | None=None, idempotency_key
-```
-
-**Purpose**: Sends one HTTP request to Metronome and returns the JSON response. It centralizes Metronome authentication, timeout, conflict detection, and error reporting.
-
-**Data flow**: It receives request details, builds an authorization header with the Metronome bearer token, optionally adds an idempotency key, sends the request with JSON body or query parameters, raises `MetronomeConflict` on HTTP 409, raises `MetronomeError` on other failures, and returns decoded JSON on success.
-
-**Call relations**: Metronome customer and contract helpers call this for all non-ingest billing API requests. Usage and seat event ingestion use the separate `_ingest` helper.
-
-*Call graph*: called by 4 (_contract_for, _customer_by_alias, _metronome_contract, _metronome_customer); 3 external calls (__init__, __init__, AsyncClient).
-
-
-##### `_as_str`  (lines 926–930)
-
-```
-def _as_str(value: object, field: str) -> str
-```
-
-**Purpose**: Validates that a provider response field is a non-empty string. It turns malformed provider responses into clear local errors.
-
-**Data flow**: It receives any value plus the field name being checked. If the value is a non-empty string it returns it; otherwise it raises a value error naming the missing field.
-
-**Call relations**: `_stripe_customer` uses it to validate customer ids, and `_portal_session` uses it to validate portal URLs.
-
-*Call graph*: called by 2 (_portal_session, _stripe_customer).
-
-
-##### `_ingest`  (lines 933–941)
-
-```
-async def _ingest(token: str, events: list[dict[str, object]], transport: httpx.AsyncBaseTransport | None) -> None
-```
-
-**Purpose**: Posts usage or seat events to Metronome’s ingest endpoint. This is the sending path for metered events, separate from Metronome’s customer and contract APIs.
-
-**Data flow**: It receives a bearer token, a list of event dictionaries, and an optional transport, posts the events to the ingest URL, and raises `MetronomeError` if Metronome does not accept them.
-
-**Call relations**: `UsageShipper.run` calls this for usage batches, and `SeatShipper.run` calls it for daily seat snapshots.
-
-*Call graph*: called by 2 (run, run); 2 external calls (__init__, AsyncClient).
-
-
-##### `_rfc3339`  (lines 944–946)
-
-```
-def _rfc3339(moment: datetime) -> str
-```
-
-**Purpose**: Formats datetimes for provider APIs in an internet-standard timestamp style. If a time has no timezone, it treats it as UTC.
-
-**Data flow**: It receives a `datetime`, ensures it has timezone information by adding UTC when missing, and returns its ISO/RFC3339-style string form.
-
-**Call relations**: Usage event creation, seat event creation, and Metronome contract creation call this so outbound timestamps are consistent.
-
-*Call graph*: called by 3 (_event, _events, _metronome_contract); 1 external calls (replace).
-
-
-##### `manifest`  (lines 949–999)
-
-```
-def manifest() -> Manifest
-```
-
-**Purpose**: Declares this extension to the UFO host: its tools, scheduled jobs, prompt guidance, and credential slot. This is how the rest of the system discovers and runs the extension.
-
-**Data flow**: It constructs tool definitions, job specifications with schedules and workspace candidate selectors, prompt sections for seats and billing behavior, and a credential slot for an Anthropic bring-your-own-key value, then returns a `Manifest` object.
-
-**Call relations**: The extension loader calls this when registering the extension. The returned manifest connects chat tools to their handlers and scheduled jobs to `_ship`, `_ship_seats`, `_ask_seat_approvals`, and `_activate_billing`.
-
-*Call graph*: 6 external calls (__init__, __init__, __init__, __init__, metered_workspaces, member_workspaces).
-
-
-### Scheduled task authoring
-These files let users and workflows create recurring tasks, validate cron-like schedules, and pause work durably until a reply or timer resumes it.
 
 ### `extensions/scheduled_tasks/ufo_ext_scheduled_tasks/cron.py`
 
-`domain_logic` · `schedule validation and task rescheduling`
+`domain_logic` · `schedule creation and scheduled-task polling`
 
-The main task store only needs to know one thing: the next date and time a task should run. It does not understand cron, which is a compact text format for saying things like “run every day at 9:00” or “run every 5 minutes.” This file keeps that cron knowledge inside the scheduled-tasks extension, where it belongs.
+Scheduled tasks need a way to say “run every day at 9” or “run every five minutes.” This file is the small place where that timing language lives. It uses cron expressions, which are compact five-part strings that describe minute, hour, day of month, month, and day of week.
 
-It supports the common 5-field cron shape, usually meaning minute, hour, day of month, month, and day of week. First, `validate_cron` makes sure the text has exactly five parts and that the `croniter` library can understand it. This catches mistakes early, before a bad schedule is stored or used.
+The rest of the scheduled-task system stores a simple date and time called `next_run_at`. It does not need to understand cron itself. That is important because it keeps the storage layer simple: it only sorts tasks by their next due time, like a calendar app sorting reminders. This file translates the human schedule rule into the next concrete reminder time.
 
-Then `next_fire` asks `croniter` for the next matching time after a given moment. An important detail is that it moves strictly forward. If a runner wakes up late, it does not try to create one run for every missed schedule slot. Instead, it finds the next single catch-up time. In everyday terms, it is like checking the next bus after you arrive at the stop, not trying to board every bus you already missed.
+There are two key behaviors. First, `validate_cron` rejects schedules that are not five-field cron expressions or are not accepted by the cron parser. Second, `next_fire` asks the cron library for the next scheduled time strictly after a given moment. That “strictly after” detail matters: if the runner was asleep or delayed, it does not create a separate run for every missed tick. Instead, it moves forward to one next catch-up time, avoiding a sudden burst of overdue jobs.
 
 #### Function details
 
@@ -2473,11 +1058,11 @@ Then `next_fire` asks `croniter` for the next matching time after a given moment
 def validate_cron(schedule: str) -> str
 ```
 
-**Purpose**: This function checks whether a schedule string is a valid 5-field cron expression. It is used to reject malformed schedules before the system relies on them.
+**Purpose**: Checks whether a schedule string is a valid five-field cron expression. It is used to catch bad schedules early, before they are stored or used to calculate future task runs.
 
-**Data flow**: It receives a schedule as text. It first splits the text into space-separated parts and confirms there are exactly five. Then it asks the external `croniter` library whether the expression is valid cron syntax. If either check fails, it raises a clear error; if both pass, it returns the original schedule unchanged.
+**Data flow**: A schedule string goes in. The function first splits it into space-separated parts and makes sure there are exactly five, matching the expected cron format. It then asks the cron parsing library whether the expression is valid. If anything is wrong, it raises a clear error; if everything is acceptable, it returns the original schedule unchanged.
 
-**Call relations**: This is the gatekeeper before cron text is accepted by the scheduled-tasks extension. Inside the check, it hands the schedule to `croniter.croniter.is_valid` so the project does not have to reimplement all cron syntax rules itself.
+**Call relations**: When some higher-level scheduling code wants to accept or save a cron schedule, this function is the gatekeeper. Inside, it hands the final validity check to `croniter.croniter.is_valid`, which knows the detailed cron rules.
 
 *Call graph*: 1 external calls (is_valid).
 
@@ -2488,198 +1073,1736 @@ def validate_cron(schedule: str) -> str
 def next_fire(schedule: str, after: datetime) -> datetime
 ```
 
-**Purpose**: This function calculates the next time a cron-based task should run after a given moment. It lets the rest of the task system work with plain dates instead of understanding cron rules.
+**Purpose**: Calculates the next time a cron schedule should run after a given moment. This turns a repeating rule into one exact date and time the rest of the system can store and compare.
 
-**Data flow**: It receives a cron schedule and an `after` datetime, meaning the point in time to move forward from. It gives both to `croniter`, which builds a small schedule calculator, and then asks that calculator for the next matching datetime. The result is returned as the next fire time; nothing else is changed.
+**Data flow**: A cron schedule and a starting datetime go in. The function gives both to the cron library, which walks forward through the schedule. The result is a datetime for the next matching run time after the supplied moment.
 
-**Call relations**: When the task system needs to update a task’s next run time, this function is the bridge from cron text to an actual timestamp. It delegates the detailed calendar calculation to `croniter.croniter`, then returns the computed datetime to whichever scheduling flow asked for it.
+**Call relations**: The scheduled-task runner or update logic calls this when it needs to set the next `next_run_at` value. This function delegates the calendar math to `croniter.croniter`, then returns the concrete next fire time to the caller.
 
 *Call graph*: 1 external calls (croniter).
 
 
 ### `extensions/scheduled_tasks/ufo_ext_scheduled_tasks/tools.py`
 
-`domain_logic` · `object request handling and workflow pause/resume setup`
+`domain_logic` · `request handling and scheduled workflow pauses`
 
-This file is the bridge between the agent’s normal tool/object world and the scheduling store that remembers future work. A scheduled task is treated like a workspace object: it has a name, a schedule, a prompt, an owner, details, and status. The file defines what a valid task looks like, checks that its cron schedule is valid, and saves it so that a later scheduled fire can re-enter the same conversation as the same agent. A cron schedule is a compact text pattern for recurring times, such as “9am every weekday.”
+This file is the bridge between the agent-facing tools and the scheduling storage behind them. A scheduled task is treated like a workspace object: it has a name, a schedule, a prompt to run later, and ownership rules. The file defines the shape of that object, checks that expiry times are valid UTC times, and supplies the logic for listing, reading, creating, changing, and cancelling tasks.
 
-The main class, ScheduledTaskObjects, is the object-store adapter. Think of it like a clerk at a service desk: listing tasks, showing details, checking status, applying updates, and cancelling tasks, while enforcing who is allowed to do each action. Tasks are private to their creator, with the workspace owner also allowed to delete them.
+The most important rule is privacy. A task belongs to the member who created it. That creator can see and edit the task content. An admin can see management details and change timing, but cannot rewrite another member’s prompt or description. This matters because scheduled task runs act on behalf of the original creator, so changing the prompt would be like putting words into someone else’s mouth.
 
-The file also defines pause_and_wait, a normal tool rather than an object. It creates a one-time hidden scheduler row used internally by workflows. If no newer member message has already arrived, it arms a timer. If a message has already arrived, it skips the timer and tells the agent to finish so that the member message can resume the workflow.
+The file also defines `pause_and_wait`, a separate tool for durable pauses. “Durable” means the wait is saved in the scheduler, so it can resume later even after time passes. It is like leaving a sticky note for the future: either a member message wakes the workflow, or a timer does. One-shot pause rows are internal scheduler records, not public scheduled-task objects.
 
 #### Function details
 
-##### `ScheduledTaskSpec.validate_utc_expiry`  (lines 65–68)
+##### `ScheduledTaskSpec.validate_utc_expiry`  (lines 75–78)
 
 ```
 def validate_utc_expiry(cls, value: datetime | None) -> datetime | None
 ```
 
-**Purpose**: This checks that a task expiry time, if one is supplied, is written as a UTC time. UTC is the shared world clock the scheduler uses, so accepting local or timezone-less times would make future cancellation ambiguous.
+**Purpose**: This checks that a task expiry time is written as a real UTC timestamp. UTC is the shared world clock used here so schedules do not shift depending on a user’s local time zone.
 
-**Data flow**: It receives the proposed expires_at value from the task specification. If the value is missing, it lets it pass. If the value has no timezone or is not exactly UTC, it raises a validation error; otherwise it returns the same timestamp unchanged.
+**Data flow**: It receives the optional `expires_at` value from a task specification. If there is no expiry, it lets that through. If there is an expiry, it checks that the timestamp has UTC time-zone information; a non-UTC or timezone-less value is rejected with a clear error. The output is the same valid value, ready to store.
 
-**Call relations**: This validator runs as part of building a ScheduledTaskSpec. Later, ScheduledTaskObjects._apply_owned can safely pass the expiry time to the scheduler knowing it is in the expected clock format.
+**Call relations**: This validation runs as part of building or checking a `ScheduledTaskSpec`. It uses the timestamp’s own offset information and compares it to zero offset, which means UTC.
 
 *Call graph*: 2 external calls (utcoffset, timedelta).
 
 
-##### `_require_scheduler`  (lines 85–88)
+##### `_require_scheduler`  (lines 99–102)
 
 ```
 def _require_scheduler(ctx: ToolContext) -> ScheduleStore
 ```
 
-**Purpose**: This is the safety check that finds the scheduling store in the current tool context. It prevents scheduled-task code from running in an environment where no scheduler is available.
+**Purpose**: This is a safety check that retrieves the scheduler store from the current tool context. It makes sure scheduled-task code is only used when the scheduled-tasks extension has actually been installed and wired in.
 
-**Data flow**: It receives the current ToolContext and looks inside its extension context for a scheduler. If the scheduler is present, it returns it. If not, it raises an error explaining that scheduled tasks require the scheduled-tasks extension and store.
+**Data flow**: It takes the current `ToolContext`, looks inside its extension area, and expects to find a scheduler store there. If the store exists, it returns it. If not, it stops immediately with a runtime error instead of letting later code fail in a confusing way.
 
-**Call relations**: All code in this file that needs to read or write scheduled rows calls this first: listing, finding, status checks, creating, deleting, and pausing. It is the common doorway to ScheduleStore.
+**Call relations**: The task object methods and `pause_and_wait` call this before reading or writing schedules. It is the common doorway to `ScheduleStore`, so create, update, delete, list, inspect, find, and pause operations all start by passing through this check.
 
 *Call graph*: called by 6 (_apply_owned, _delete_owned, _find, _owned_rows, _status, pause_and_wait).
 
 
-##### `_summary`  (lines 91–92)
+##### `_summary`  (lines 105–106)
 
 ```
 def _summary(task: ScheduledTask) -> str
 ```
 
-**Purpose**: This makes a short human-readable label for a scheduled task in listings. It combines the schedule with the description, or with the prompt if no description was given.
+**Purpose**: This creates the short one-line summary shown when scheduled tasks are listed. It gives a quick human-readable glimpse of the schedule and what the task is for.
 
-**Data flow**: It receives a ScheduledTask row. It builds text in the form “schedule — description or prompt” and trims it to the maximum summary length so listings stay compact.
+**Data flow**: It receives a stored scheduled task. It combines the cron schedule with either the task description or, if there is no description, the prompt itself. Then it cuts the text down to a fixed maximum length so listings stay compact.
 
-**Call relations**: ScheduledTaskObjects._owned_rows uses this when it turns raw scheduler rows into object-listing rows for the generic object system.
+**Call relations**: `ScheduledTaskObjects._owned_rows` calls this when the current viewer is allowed to see the task content. If the content is private, the listing uses a safer generic summary instead.
 
 *Call graph*: called by 1 (_owned_rows).
 
 
-##### `ScheduledTaskObjects._owned_rows`  (lines 113–121)
+##### `ScheduledTaskObjects._admin_can_apply`  (lines 126–127)
 
 ```
-async def _owned_rows(self, ctx: ToolContext) -> tuple[OwnedRow, ...]
+def _admin_can_apply(self, _old: ScheduledTaskSpec, spec: ScheduledTaskSpec) -> bool
 ```
 
-**Purpose**: This produces the list of scheduled tasks that the object system can show, including each task’s name, short summary, and owner. It is how scheduler rows become normal workspace objects in a listing.
+**Purpose**: This decides whether an admin is allowed to apply a proposed update to someone else’s scheduled task. Admins may adjust timing details, but they may not change the prompt or description that will run as the original creator.
 
-**Data flow**: It receives the tool context, gets the scheduler through _require_scheduler, and asks the store for its visible scheduled tasks. For each task, it builds an OwnedRow with the task name, a compact summary from _summary, and an ObjectOwner based on the member who created it. It returns all of those rows as a tuple.
+**Data flow**: It receives the old task spec and the proposed new spec. It looks only at which fields were included in the update. If the update includes `prompt` or `description`, it returns false for admin-only editing; otherwise it returns true.
 
-**Call relations**: The generic member-owned object machinery calls this when it needs rows for the scheduled_task object kind. It relies on _require_scheduler for storage access and _summary for display text.
-
-*Call graph*: calls 2 internal fn (_require_scheduler, _summary); 2 external calls (__init__, __init__).
+**Call relations**: This method supports the broader object-permission flow supplied by the member-owned object base class. It encodes this file’s privacy rule: scheduling metadata is administratively adjustable, but task content stays under the creator’s control.
 
 
-##### `ScheduledTaskObjects._detail`  (lines 123–142)
+##### `ScheduledTaskObjects._owned_rows`  (lines 129–145)
 
 ```
-async def _detail(self, ctx: ToolContext, name: str) -> ObjectDetail[ScheduledTaskSpec] | None
+async def _owned_rows(self, ctx: ToolContext) -> tuple[OwnedRow[GeneratedObjectOwner], ...]
 ```
 
-**Purpose**: This returns the full object details for one scheduled task. It lets a caller see the saved schedule, prompt, description, expiry, timestamps, and the conversation where the task reports.
+**Purpose**: This builds the list entries for scheduled tasks that exist in the scheduler. Each entry includes the task name, a safe summary, and generated ownership information used by the object system.
 
-**Data flow**: It receives the tool context and a task name. It uses _find to look up the task. If there is no match, it returns nothing. If found, it builds a ScheduledTaskSpec from the stored task fields, adds creation and update times, and adds a link pointing to the conversation tied to the task.
+**Data flow**: It takes the current context, gets the scheduler store, and asks it for all visible scheduled task rows. For each task, it creates an owned-row record. If the current speaker may see the content, the summary includes the description or prompt; otherwise it only says it is a private member task. The result is a tuple of listing rows.
 
-**Call relations**: The object system uses this when someone asks to get a specific scheduled_task. It hands lookup work to ScheduledTaskObjects._find, then packages the result as an ObjectDetail for the broader object API.
+**Call relations**: The object system uses this method when scheduled tasks are listed. It calls `_require_scheduler` to reach storage, `_content_visible` to protect private content, and `_summary` to make readable list text.
 
-*Call graph*: calls 1 internal fn (_find); 4 external calls (__init__, __init__, __init__, __init__).
-
-
-##### `ScheduledTaskObjects._status`  (lines 144–168)
-
-```
-async def _status(self, ctx: ToolContext, name: str) -> dict[str, JsonValue] | None
-```
-
-**Purpose**: This reports runtime information about a scheduled task, such as when it will next run and what happened last time. It separates the task’s definition from its current operating state.
-
-**Data flow**: It receives the tool context and task name, then asks the scheduler to inspect that task. If the scheduler has no such task, it returns nothing. Otherwise it builds a dictionary with next run time, last run time, expiry time, and, when available, a small excerpt of the last run’s response and turn status.
-
-**Call relations**: The object system calls this when it needs status for a scheduled_task. It goes straight to the scheduler through _require_scheduler because status comes from scheduler inspection rather than from the object spec alone.
-
-*Call graph*: calls 1 internal fn (_require_scheduler).
+*Call graph*: calls 3 internal fn (_content_visible, _require_scheduler, _summary); 2 external calls (__init__, __init__).
 
 
-##### `ScheduledTaskObjects._apply_owned`  (lines 170–192)
+##### `ScheduledTaskObjects._detail`  (lines 147–169)
 
 ```
-async def _apply_owned(self, ctx: ToolContext, name: str, spec: ScheduledTaskSpec, old: ScheduledTaskSpec | None, owner: ObjectOwner | None) -> None
+async def _detail(self, ctx: ToolContext, name: str, owner: GeneratedObjectOwner) -> ObjectDetail[ScheduledTaskSpec] | None
 ```
 
-**Purpose**: This creates or updates a scheduled task after checking ownership and validating the schedule. It is the point where a requested object change becomes a durable recurring job.
+**Purpose**: This returns the full object-style details for one scheduled task, when the requested task still matches the expected stored generation. It lets the object system show the task spec, timestamps, and where the task reports.
 
-**Data flow**: It receives the current context, object name, new task spec, old spec if any, and owner information. It checks whether an existing creator is trying to edit their own task; if someone else tries, it raises an ownership error. It validates the cron text, calculates the next fire time from the current UTC time, and writes the task to the scheduler with the current conversation, agent, prompt, description, creator, and expiry.
+**Data flow**: It receives the current context, a task name, and an owner token that includes the expected stored generation. It looks up the task by name. If the task is missing or has changed generation, it returns nothing. Otherwise it packages the schedule, prompt, description, expiry, creation and update times, and a link back to the conversation where task runs report.
 
-**Call relations**: The object framework calls this when a scheduled_task manifest is applied. It uses _require_scheduler to reach the store, validate_cron to reject bad schedules, and next_fire to decide the first upcoming run.
+**Call relations**: This is used by the object-read path for scheduled tasks. It calls `_find` to locate the task and `_content_visible` to decide whether the full spec should be visible to the requester.
 
-*Call graph*: calls 1 internal fn (_require_scheduler); 4 external calls (__init__, now, next_fire, validate_cron).
+*Call graph*: calls 2 internal fn (_content_visible, _find); 4 external calls (__init__, __init__, __init__, __init__).
 
 
-##### `ScheduledTaskObjects._delete_owned`  (lines 194–195)
+##### `ScheduledTaskObjects._status`  (lines 171–201)
 
 ```
-async def _delete_owned(self, ctx: ToolContext, name: str, owner: ObjectOwner) -> None
+async def _status(self, ctx: ToolContext, name: str, owner: GeneratedObjectOwner) -> dict[str, JsonValue] | None
 ```
 
-**Purpose**: This cancels a scheduled task that the ownership rules have allowed someone to delete. It removes the future recurring work from the scheduler.
+**Purpose**: This produces the live status view for a scheduled task: when it will run next, when it last ran, whether it expires, and a small safe glimpse of the last run if allowed.
 
-**Data flow**: It receives the context, task name, and owner information. The owner information is not changed here; the surrounding object machinery has already used it for permission checks. The function gets the scheduler and asks it to cancel the named task.
+**Data flow**: It receives the current context, task name, and expected owner generation. It finds the task, verifies it is still the same stored task, and asks the scheduler to inspect it. If inspection succeeds, it returns a dictionary containing the next run time, last run time, expiry, and last-run information. If the viewer can see the task content, the last response may be included as a shortened excerpt.
 
-**Call relations**: The object framework calls this after its member-owned deletion gate has accepted the request. It uses _require_scheduler, then hands the actual cancellation to ScheduleStore.
+**Call relations**: The object system calls this when it needs status information beyond the saved spec. It uses `_find` for identity checking, `_require_scheduler` to ask storage for inspection data, and `_content_visible` to avoid leaking private output.
 
-*Call graph*: calls 1 internal fn (_require_scheduler).
+*Call graph*: calls 3 internal fn (_content_visible, _find, _require_scheduler).
 
 
-##### `ScheduledTaskObjects._find`  (lines 197–200)
+##### `ScheduledTaskObjects._apply_owned`  (lines 203–252)
+
+```
+async def _apply_owned(self, ctx: ToolContext, name: str, spec: ScheduledTaskSpec, old: ScheduledTaskSpec | None, owner: GeneratedObjectOwner | None) -> None
+```
+
+**Purpose**: This is the main create-or-update path for scheduled task objects. It validates the schedule, enforces ownership rules, and writes the new or changed task into the scheduler.
+
+**Data flow**: It receives the current context, the object name, the requested spec, the previous spec if known, and the owner record if this is an update. First it validates any cron schedule. Then it requires an acting member, because scheduled tasks run as a real member. For a new task, it requires both schedule and prompt, calculates the first run time, and creates the scheduler record tied to the current conversation. For an existing task, it checks that the stored task still matches, checks whether the speaker is the creator or an admin, preserves omitted fields, recalculates the next run time, and updates the scheduler record.
+
+**Call relations**: This method is called by the object-apply flow when a scheduled-task manifest is created or re-applied. It relies on `_find` for change detection, `_require_scheduler` for storage, `validate_cron` to reject bad schedules, `next_fire` to compute the next run, and `speaker_is_admin` when permission depends on admin status.
+
+*Call graph*: calls 3 internal fn (speaker_is_admin, _find, _require_scheduler); 4 external calls (__init__, now, next_fire, validate_cron).
+
+
+##### `ScheduledTaskObjects._delete_owned`  (lines 254–258)
+
+```
+async def _delete_owned(self, ctx: ToolContext, name: str, owner: GeneratedObjectOwner) -> None
+```
+
+**Purpose**: This cancels a scheduled task after confirming that the task being deleted is still the exact stored generation the caller meant to delete. That prevents accidentally cancelling a task that changed while someone was editing.
+
+**Data flow**: It receives the current context, task name, and expected owner generation. It finds the current stored task. If the task is missing or has a different generation, it raises an error. If it matches, it asks the scheduler store to cancel it.
+
+**Call relations**: The object-delete flow uses this method for scheduled-task cancellation. It calls `_find` to confirm identity and `_require_scheduler` to reach the scheduler’s cancel operation.
+
+*Call graph*: calls 2 internal fn (_find, _require_scheduler).
+
+
+##### `ScheduledTaskObjects._find`  (lines 260–263)
 
 ```
 async def _find(self, ctx: ToolContext, name: str) -> ScheduledTask | None
 ```
 
-**Purpose**: This looks up one scheduled task by name from the scheduler’s list. It is a small helper used when full details are needed.
+**Purpose**: This searches the scheduler’s task list for a scheduled task with a specific name. It is a small helper that keeps the lookup behavior consistent across read, status, update, and delete operations.
 
-**Data flow**: It receives the context and a task name. It gets the scheduler, lists scheduled tasks, scans for the first task whose name matches, and returns that task. If none match, it returns nothing.
+**Data flow**: It takes the current context and a task name. It retrieves the scheduler, asks for the stored task list, and returns the first task whose name matches. If none match, it returns nothing.
 
-**Call relations**: ScheduledTaskObjects._detail calls this before building an ObjectDetail. It keeps the name-searching logic in one place instead of repeating it inside the detail builder.
+**Call relations**: `_apply_owned`, `_delete_owned`, `_detail`, and `_status` all call this before acting on one named task. It delegates the actual storage access to `_require_scheduler`.
 
-*Call graph*: calls 1 internal fn (_require_scheduler); called by 1 (_detail).
+*Call graph*: calls 1 internal fn (_require_scheduler); called by 4 (_apply_owned, _delete_owned, _detail, _status).
 
 
-##### `pause_and_wait`  (lines 230–267)
+##### `ScheduledTaskObjects._content_visible`  (lines 265–268)
+
+```
+def _content_visible(self, ctx: ToolContext, task: ScheduledTask) -> bool
+```
+
+**Purpose**: This answers the privacy question: may the current speaker see the task’s prompt, description, and response excerpts? It keeps private task content from being shown to other members.
+
+**Data flow**: It receives the current context and a stored task. If the task has no recorded creator, or if the creator matches the current acting member, it returns true. Otherwise it returns false.
+
+**Call relations**: `_owned_rows`, `_detail`, and `_status` call this before including task content in listings, detailed specs, or last-run responses. It is the simple privacy gate used throughout the file.
+
+*Call graph*: called by 3 (_detail, _owned_rows, _status).
+
+
+##### `pause_and_wait`  (lines 303–339)
 
 ```
 async def pause_and_wait(ctx: ToolContext, args: PauseAndWaitInput) -> ToolResult
 ```
 
-**Purpose**: This tool pauses the current workflow until either a new member message arrives or a durable timer expires. It is useful for real-world waits such as approvals, verification emails, or cooldown periods where the agent must stop now and resume later with clear instructions.
+**Purpose**: This tool pauses an ongoing workflow until either a new member message arrives or a durable timer fires. It is meant for real-world waits such as approval, verification email, or cooldown periods.
 
-**Data flow**: It receives the tool context and PauseAndWaitInput containing the message to show now, wait length, reason, next steps, and optional metadata. It calculates a resume time, builds a hidden resume prompt, and asks the scheduler to create a one-time pause row tied to the current conversation and turn. If a newer member message has already been admitted, it returns instructions saying the member message will resume the workflow. Otherwise it returns instructions saying a timer is armed, including the resume time and the state needed later.
+**Data flow**: It receives the tool context and pause instructions: what to say now, how many minutes to wait, what to do after resuming, why it is waiting, optional saved metadata, and a user-facing description. It computes a resume time, writes a pause record into the scheduler, and then returns instructions for the agent’s immediate reply. If a newer member message has already arrived, it tells the agent that no timer was armed and that the message will resume the workflow. Otherwise it tells the agent that the workflow is awaiting the timer.
 
-**Call relations**: The tool system invokes this when the agent calls the pause_and_wait tool. It uses _require_scheduler to reach durable scheduling, then returns a ToolResult containing TextContent that tells the agent exactly how to end its turn while preserving the resume instructions.
+**Call relations**: This is the handler behind the `pause_and_wait` tool definition. It calls `_require_scheduler` to create the durable pause, uses JSON text to pass resume instructions forward, and returns a `ToolResult` containing a directive the agent should follow before ending its turn.
 
 *Call graph*: calls 1 internal fn (_require_scheduler); 5 external calls (__init__, __init__, now, timedelta, dumps).
 
+
+### Workspace background jobs
+Discovers workspaces with pending background work, runs jobs safely inside workspace context, and handles deferred Slack Connect invitation fulfillment.
+
+### `control/src/ufo_control/gateway_slack_connect.py`
+
+`orchestration` · `background polling during gateway runtime`
+
+This file solves a reliability problem: Slack invitations are useful, but Slack can be slow, rate-limited, or temporarily unavailable. Instead of doing Slack work during signup, the system records the completed signup in the database and lets this background worker pick it up later. Think of it like a mailroom: signup drops a durable request in a tray, and this worker keeps checking the tray until the invitation has been sent or clearly needs human help.
+
+The workflow first creates delivery rows for eligible signup claims. Only claims that used an invite code and created a new workspace qualify, and only the earliest claim for a workspace is used. It then leases one due row, so two gateway replicas do not work on the same customer at the same time. While leased, it verifies the Slack bot token belongs to the expected operator workspace, creates or finds the deterministic channel name, and sends a Slack Connect invite to the signup email.
+
+The file is careful about duplicate invitations. It records that an invite is being attempted before calling Slack, and if a response is lost it checks Slack’s own invite and sharing state before trying again. Temporary failures are retried with backoff. Permanent failures are saved as failed rows for operator review. Tokens are redacted from stored errors and logs.
+
+#### Function details
+
+##### `SlackTransientError.__init__`  (lines 167–169)
+
+```
+def __init__(self, message: str, retry_after: float | None=None) -> None
+```
+
+**Purpose**: This creates an error object for Slack problems that may clear up on their own, such as a network timeout or Slack rate limit. It can also carry a suggested wait time before trying again.
+
+**Data flow**: It receives an error message and, optionally, a retry-after delay. It stores the message like a normal runtime error and saves the delay on the error object, so later code can decide when to retry.
+
+**Call relations**: SlackConnectClient._call raises this when an HTTP call to Slack fails in a way that looks temporary. Later, the inviter catches this kind of error and reschedules the delivery instead of marking it permanently failed.
+
+*Call graph*: called by 1 (_call).
+
+
+##### `rearm_failed_delivery`  (lines 188–203)
+
+```
+async def rearm_failed_delivery(pool: asyncpg.Pool, onboard_claim_id: UUID) -> datetime | None
+```
+
+**Purpose**: This is the operator recovery hook for retrying one failed Slack Connect delivery after a human has fixed the cause. It only resets failed rows; it does not touch rows that already succeeded.
+
+**Data flow**: It receives a database pool and a signup claim ID. It looks for a matching delivery row in the failed state, resets it back to pending, clears old worker, retry, attempt, and error fields, and returns the time it had last been updated. If there is no failed row to reset, it returns nothing.
+
+**Call relations**: This function is separate from the automatic poller. An operator command can call it when a row needs another try; the normal SlackConnectInviter polling loop will then pick up the re-armed row later.
+
+*Call graph*: 1 external calls (fetchval).
+
+
+##### `SlackConnectClient.team_id`  (lines 215–216)
+
+```
+async def team_id(self) -> str
+```
+
+**Purpose**: This asks Slack which workspace the configured bot token belongs to. It is used as a safety check before creating or changing channels.
+
+**Data flow**: It sends an auth.test request to Slack through _call, then uses _text to pull the team_id value out of Slack’s response. The result is the Slack workspace ID as text.
+
+**Call relations**: SlackConnectInviter._verify_team calls this before any delivery mutates Slack. It relies on _call for the HTTP request and _text for safe response reading.
+
+*Call graph*: calls 2 internal fn (_call, _text).
+
+
+##### `SlackConnectClient.create_channel`  (lines 218–220)
+
+```
+async def create_channel(self, name: str) -> str
+```
+
+**Purpose**: This creates a public Slack channel with the given deterministic name. The channel becomes the place where the customer’s Slack Connect invitation will point.
+
+**Data flow**: It receives a channel name, sends it to Slack’s conversations.create API, and reads the new channel ID from the response. It returns that channel ID.
+
+**Call relations**: SlackConnectInviter._open_channel calls this when the database row does not yet have a channel ID. If Slack says the name is already taken, _open_channel recovers by looking up the existing channel instead.
+
+*Call graph*: calls 2 internal fn (_call, _text).
+
+
+##### `SlackConnectClient.channel_id_by_name`  (lines 222–243)
+
+```
+async def channel_id_by_name(self, name: str) -> str
+```
+
+**Purpose**: This finds the Slack channel ID for an exact channel name, including archived channels. It is the recovery path when Slack says a channel name already exists.
+
+**Data flow**: It receives a channel name, pages through Slack’s public channel list, and compares each channel’s name exactly. If it finds a match, it returns that channel’s ID. If it cannot find the channel within the bounded search, it raises a permanent error because Slack’s state is inconsistent from this worker’s point of view.
+
+**Call relations**: SlackConnectInviter._open_channel uses this after create_channel hits a name-taken error. It calls _call for each Slack page and _text to extract the matching channel ID safely.
+
+*Call graph*: calls 2 internal fn (_call, _text); 1 external calls (__init__).
+
+
+##### `SlackConnectClient.outgoing_invite_id`  (lines 245–276)
+
+```
+async def outgoing_invite_id(self, channel_id: str) -> str | None
+```
+
+**Purpose**: This checks whether a live Slack Connect invitation already exists for a channel. It helps avoid sending a duplicate invite when a previous attempt may have reached Slack but the response was lost.
+
+**Data flow**: It receives a Slack channel ID, pages through Slack’s outgoing Connect invitations, and looks for entries for that channel. If it finds a live invitation, it returns the invitation ID. If it finds only dead invitations, it returns nothing. If Slack reports an unknown status or there are too many pages to inspect safely, it raises a permanent error for human review.
+
+**Call relations**: SlackConnectInviter._invite calls this only when the database shows an invite was attempted before. It uses _call to read Slack’s invite list and _text to extract the live invitation ID.
+
+*Call graph*: calls 2 internal fn (_call, _text); 1 external calls (__init__).
+
+
+##### `SlackConnectClient.is_externally_shared`  (lines 278–281)
+
+```
+async def is_externally_shared(self, channel_id: str) -> bool
+```
+
+**Purpose**: This checks whether a Slack channel is already shared or pending sharing with an external workspace. It is another safety check before deciding whether a new invitation is needed.
+
+**Data flow**: It receives a channel ID, asks Slack for channel details, and reads Slack’s sharing flags from the response. It returns true if the channel is already externally shared or pending external sharing, otherwise false.
+
+**Call relations**: SlackConnectInviter._invite calls this after no live invite is found during reconciliation. It uses _call to get Slack’s channel information.
+
+*Call graph*: calls 1 internal fn (_call).
+
+
+##### `SlackConnectClient.invite_shared`  (lines 283–290)
+
+```
+async def invite_shared(self, channel_id: str, email: str) -> str
+```
+
+**Purpose**: This sends the actual Slack Connect invitation email for a channel. It also refuses email addresses that are too long before making the Slack request.
+
+**Data flow**: It receives a channel ID and recipient email. It checks the email length, sends Slack’s conversations.inviteShared request, and extracts the invite ID from Slack’s response. The returned invite ID can then be saved in the database.
+
+**Call relations**: SlackConnectInviter._invite calls this after it has decided it is safe to send a fresh invite. It relies on _call for the Slack request and _text to read the invite ID.
+
+*Call graph*: calls 2 internal fn (_call, _text); 1 external calls (__init__).
+
+
+##### `SlackConnectClient.redact`  (lines 292–293)
+
+```
+def redact(self, message: str) -> str
+```
+
+**Purpose**: This removes the bot token from an error message before the message is logged or stored. It also limits how much text is kept.
+
+**Data flow**: It receives a message string, replaces any occurrence of the secret bot token with a fixed placeholder, cuts the result to the allowed length, and returns the safe text.
+
+**Call relations**: The inviter uses this when saving retry or failure errors. This keeps secrets out of database rows and logs when Slack calls fail.
+
+
+##### `SlackConnectClient._call`  (lines 295–323)
+
+```
+async def _call(self, method: str, params: dict[str, str | int]) -> dict[str, Any]
+```
+
+**Purpose**: This is the shared low-level helper for calling Slack’s Web API. It turns HTTP responses and Slack error codes into the project’s own temporary or permanent error types.
+
+**Data flow**: It receives a Slack method name and request parameters. It sends an authenticated HTTP POST to Slack, drops empty parameter values, then inspects the HTTP status and Slack JSON response. On success it returns the response payload. On rate limits, server errors, transport failures, name conflicts, or other Slack errors, it raises the appropriate error.
+
+**Call relations**: All higher-level SlackConnectClient methods use this rather than making HTTP requests directly. It calls _retry_after when Slack rate-limits the request, and its errors drive whether SlackConnectInviter._advance retries, fails, or recovers.
+
+*Call graph*: calls 2 internal fn (__init__, _retry_after); called by 6 (channel_id_by_name, create_channel, invite_shared, is_externally_shared, outgoing_invite_id, team_id); 3 external calls (__init__, __init__, AsyncClient).
+
+
+##### `SlackConnectClient._text`  (lines 325–331)
+
+```
+def _text(self, payload: dict[str, Any], *path: str) -> str
+```
+
+**Purpose**: This safely reads a text value from a nested Slack response. It prevents later code from silently accepting a malformed response.
+
+**Data flow**: It receives a response dictionary and a path of keys to follow. It walks through the dictionary one key at a time. If any key is missing or the shape is wrong, it raises a permanent Slack error; otherwise it returns the found value as text.
+
+**Call relations**: SlackConnectClient.team_id, create_channel, channel_id_by_name, outgoing_invite_id, and invite_shared use this after _call succeeds. It centralizes response validation for values the workflow depends on.
+
+*Call graph*: called by 5 (channel_id_by_name, create_channel, invite_shared, outgoing_invite_id, team_id); 1 external calls (__init__).
+
+
+##### `_retry_after`  (lines 334–338)
+
+```
+def _retry_after(response: httpx.Response) -> float | None
+```
+
+**Purpose**: This reads Slack’s retry-after header when Slack rate-limits the worker. The header tells the system how long to wait before trying again.
+
+**Data flow**: It receives an HTTP response, looks for a numeric retry-after header, and returns that value capped at the project’s maximum allowed delay. If the header is missing or not a plain number, it returns nothing.
+
+**Call relations**: SlackConnectClient._call uses this when Slack returns HTTP 429, which means too many requests. The resulting delay is carried inside SlackTransientError and later used by _reschedule.
+
+*Call graph*: called by 1 (_call).
+
+
+##### `SlackConnectInviter.run`  (lines 364–388)
+
+```
+async def run(self) -> None
+```
+
+**Purpose**: This is the forever-running background loop for Slack Connect deliveries. It keeps polling for work and deliberately stays alive even when one sweep fails.
+
+**Data flow**: It starts with a failure counter at zero, repeatedly calls poll, and resets the counter after successful polling. If an unexpected error happens, it logs the failure and continues. If no row was claimed, it sleeps for the configured poll interval before checking again.
+
+**Call relations**: The gateway lifespan can start this task when Slack Connect delivery is enabled. It calls poll for each sweep, and only cancellation stops the loop.
+
+*Call graph*: calls 1 internal fn (poll); 1 external calls (sleep).
+
+
+##### `SlackConnectInviter.poll`  (lines 390–405)
+
+```
+async def poll(self) -> bool
+```
+
+**Purpose**: This performs one sweep of the delivery queue. It creates any missing delivery rows, claims one due row, and advances that row through Slack work.
+
+**Data flow**: It first materializes eligible signup claims into delivery rows. Then it tries to claim one pending or expired row. If none exists, it returns false. If it claims one, it starts a lease-renewal task, advances the delivery, cancels the renewal task, waits for cleanup, and returns true.
+
+**Call relations**: SlackConnectInviter.run calls this repeatedly. Inside a sweep, it hands off to _materialize, _claim, _renew_lease, and _advance to separate database queue work from Slack delivery work.
+
+*Call graph*: calls 4 internal fn (_advance, _claim, _materialize, _renew_lease); called by 1 (run); 2 external calls (create_task, gather).
+
+
+##### `SlackConnectInviter._materialize`  (lines 407–421)
+
+```
+async def _materialize(self) -> None
+```
+
+**Purpose**: This adds delivery rows for completed signup claims that qualify for Slack Connect. It is how durable signup events become work items for the background poller.
+
+**Data flow**: It opens a database transaction, takes a database advisory lock so only one replica inserts at a time, and runs the insert-from-select statement. Eligible claims become pending delivery rows, while conflicts are skipped instead of stopping the whole batch.
+
+**Call relations**: SlackConnectInviter.poll calls this before claiming work. It protects the rest of the queue from one conflicting channel name and makes sure all replicas derive the same channel name from the database.
+
+*Call graph*: called by 1 (poll).
+
+
+##### `SlackConnectInviter._claim`  (lines 423–435)
+
+```
+async def _claim(self) -> _Delivery | None
+```
+
+**Purpose**: This leases one delivery row for the current worker. A lease is a time-limited claim that says, “this replica is working on this row right now.”
+
+**Data flow**: It asks the database for one pending row that is due, or one previously claimed row whose lease expired. If a row is found, the database marks it claimed, records this worker ID, extends the lease expiry, increments the attempt count, and returns the row data. The function wraps that data in a _Delivery object. If no row is due, it returns nothing.
+
+**Call relations**: SlackConnectInviter.poll calls this after materializing rows. The returned _Delivery is then passed to _advance, while _renew_lease keeps the claim alive during slow Slack calls.
+
+*Call graph*: called by 1 (poll); 1 external calls (__init__).
+
+
+##### `SlackConnectInviter._renew_lease`  (lines 437–459)
+
+```
+async def _renew_lease(self, onboard_claim_id: UUID) -> None
+```
+
+**Purpose**: This keeps a claimed delivery row reserved while Slack calls are still in progress. Without it, another replica might think the row was abandoned and send a duplicate invitation.
+
+**Data flow**: It receives a signup claim ID and loops forever until cancelled. After each renewal delay, it updates the row’s lease expiry if this worker still owns it. Database errors are logged and retried; cancellation is allowed to stop the loop.
+
+**Call relations**: SlackConnectInviter.poll starts this as a separate task after _claim succeeds and cancels it after _advance finishes. The actual delivery writes still check ownership through _write.
+
+*Call graph*: called by 1 (poll); 1 external calls (sleep).
+
+
+##### `SlackConnectInviter._advance`  (lines 461–488)
+
+```
+async def _advance(self, delivery: _Delivery) -> None
+```
+
+**Purpose**: This is the main step-by-step delivery path for one claimed row. It verifies configuration, opens or finds the Slack channel, sends or reconciles the invitation, and records the final result.
+
+**Data flow**: It receives a _Delivery row. It verifies the Slack team, gets a channel ID either from the row or by opening a channel, then gets an invitation ID either from the row or by inviting/reconciling. Temporary Slack errors cause the row to be rescheduled. Permanent errors cause it to be marked failed. Success marks the row delivered and clears lease and retry fields.
+
+**Call relations**: SlackConnectInviter.poll calls this after claiming a row. It delegates the major phases to _verify_team, _open_channel, and _invite, and uses _reschedule, _fail, and _write to record outcomes.
+
+*Call graph*: calls 6 internal fn (_fail, _invite, _open_channel, _reschedule, _verify_team, _write); called by 1 (poll).
+
+
+##### `SlackConnectInviter._verify_team`  (lines 490–498)
+
+```
+async def _verify_team(self) -> None
+```
+
+**Purpose**: This confirms the Slack bot token belongs to the expected operator workspace before any channel is changed. It prevents a misconfigured token from creating customer channels in the wrong Slack workspace.
+
+**Data flow**: It asks the Slack client for the token’s team ID and compares it with the configured expected team ID. If they match, nothing is returned and delivery continues. If they differ, it raises a configuration error.
+
+**Call relations**: SlackConnectInviter._advance calls this first on every delivery. It intentionally rechecks each time instead of caching, so token rotation mistakes are caught immediately.
+
+*Call graph*: called by 1 (_advance); 1 external calls (__init__).
+
+
+##### `SlackConnectInviter._open_channel`  (lines 500–506)
+
+```
+async def _open_channel(self, delivery: _Delivery) -> str
+```
+
+**Purpose**: This makes sure the delivery row has a Slack channel ID. It creates the deterministic channel if possible, or finds the existing channel if Slack says the name is already taken.
+
+**Data flow**: It receives a _Delivery row. It tries to create the Slack channel named in the row. If Slack reports the name is taken, it looks up that exact name instead. It then writes the channel ID back to the database and returns it.
+
+**Call relations**: SlackConnectInviter._advance calls this when the row does not already have a channel ID. It hands the database update to _write so lease ownership is checked before saving.
+
+*Call graph*: calls 1 internal fn (_write); called by 1 (_advance).
+
+
+##### `SlackConnectInviter._invite`  (lines 508–525)
+
+```
+async def _invite(self, delivery: _Delivery, channel_id: str) -> str | None
+```
+
+**Purpose**: This makes sure the customer has a Slack Connect invitation, while avoiding blind duplicate sends. It reconciles with Slack first if an earlier attempt may already have happened.
+
+**Data flow**: It receives a _Delivery row and channel ID. If the row already has an invite-attempt timestamp, it checks for an existing live outgoing invite and then checks whether the channel is already externally shared. If either proves delivery, it records or returns that result. Otherwise it records that a new invite is being attempted, sends the invite email, saves the returned invitation ID, and returns it.
+
+**Call relations**: SlackConnectInviter._advance calls this after a channel exists. It uses _write before the Slack invite call to make lost responses recoverable, and uses _persist_invitation to save a known invite ID.
+
+*Call graph*: calls 2 internal fn (_persist_invitation, _write); called by 1 (_advance).
+
+
+##### `SlackConnectInviter._persist_invitation`  (lines 527–529)
+
+```
+async def _persist_invitation(self, delivery: _Delivery, invitation_id: str) -> str
+```
+
+**Purpose**: This saves Slack’s invitation ID on the delivery row. That ID is proof that Slack accepted the invitation request.
+
+**Data flow**: It receives the delivery row and the invitation ID. It writes the ID into the database for that claim and returns the same ID to the caller.
+
+**Call relations**: SlackConnectInviter._invite calls this both when it finds an existing live invite and when it sends a new one. It delegates the guarded database update to _write.
+
+*Call graph*: calls 1 internal fn (_write); called by 1 (_invite).
+
+
+##### `SlackConnectInviter._reschedule`  (lines 531–550)
+
+```
+async def _reschedule(self, delivery: _Delivery, error: SlackTransientError) -> None
+```
+
+**Purpose**: This schedules a temporary failure for another try later. It uses Slack’s suggested delay when available, otherwise it uses increasing backoff delays.
+
+**Data flow**: It receives the delivery row and a temporary Slack error. If the row has already reached the maximum attempt count, it marks the row failed. Otherwise it computes a delay, resets the row to pending, clears the worker and lease, stores the next attempt time and redacted error message, and logs the retry.
+
+**Call relations**: SlackConnectInviter._advance calls this when SlackConnectClient raises a temporary error. If retries are exhausted, _reschedule hands off to _fail; otherwise it updates the row through _write.
+
+*Call graph*: calls 2 internal fn (_fail, _write); called by 1 (_advance); 1 external calls (timedelta).
+
+
+##### `SlackConnectInviter._fail`  (lines 552–563)
+
+```
+async def _fail(self, delivery: _Delivery, error: Exception) -> None
+```
+
+**Purpose**: This marks a delivery row as needing operator review. It is used for permanent Slack errors, exhausted retries, and unexpected failures.
+
+**Data flow**: It receives the delivery row and an error. It redacts any bot token from the error text, writes the row as failed, clears the worker, lease, and next retry time, stores the safe error message, and logs the failure.
+
+**Call relations**: SlackConnectInviter._advance calls this for permanent or unexpected errors. SlackConnectInviter._reschedule also calls it when a temporary problem has been retried too many times. The database write goes through _write.
+
+*Call graph*: calls 1 internal fn (_write); called by 2 (_advance, _reschedule).
+
+
+##### `SlackConnectInviter._write`  (lines 565–574)
+
+```
+async def _write(self, onboard_claim_id: UUID, assignment: str, *values: object) -> None
+```
+
+**Purpose**: This performs guarded database updates for a delivery row. It only writes if the current worker still owns the lease.
+
+**Data flow**: It receives a signup claim ID, a SQL assignment fragment, and any extra values needed by that assignment. It updates the matching row only when the worker ID still matches this inviter, refreshes updated_at, and returns nothing. If no row was updated, it raises a lease-lost error.
+
+**Call relations**: _advance, _open_channel, _invite, _persist_invitation, _reschedule, and _fail all use this for state changes. If another replica has taken over the row, the raised _LeaseLost stops the old worker from overwriting newer work.
+
+*Call graph*: called by 6 (_advance, _fail, _invite, _open_channel, _persist_invitation, _reschedule); 1 external calls (__init__).
+
+
+##### `slack_connect_from_env`  (lines 577–592)
+
+```
+def slack_connect_from_env(pool: asyncpg.Pool) -> SlackConnectInviter | None
+```
+
+**Purpose**: This builds the Slack Connect inviter from environment variables at gateway startup. It also allows the whole feature to be turned off cleanly.
+
+**Data flow**: It receives a database pool and reads the enable switch from the environment. If disabled, it returns nothing. If enabled, it requires the bot token and expected team ID, creates a SlackConnectClient and SlackConnectInviter, assigns a worker ID from hostname and process ID, and returns the inviter. If the enable switch is not a clear true or false value, it raises an error.
+
+**Call relations**: Startup code can call this to decide whether to launch SlackConnectInviter.run. It uses _require_env to fail early when required settings are missing.
+
+*Call graph*: calls 1 internal fn (_require_env); 4 external calls (__init__, __init__, getpid, gethostname).
+
+
+##### `_require_env`  (lines 595–599)
+
+```
+def _require_env(name: str) -> str
+```
+
+**Purpose**: This reads a required environment variable and fails clearly if it is missing. It prevents a half-configured Slack Connect deployment from starting.
+
+**Data flow**: It receives the environment variable name, reads its value, and returns the value if present. If the value is missing or empty, it raises a runtime error explaining that the variable is required when Slack Connect is enabled.
+
+**Call relations**: slack_connect_from_env calls this for the bot token and expected Slack team ID after the feature switch is enabled.
+
+*Call graph*: called by 1 (slack_connect_from_env).
+
+
+### `core/src/ufo/candidates.py`
+
+`domain_logic` · `scheduler tick before job dispatch`
+
+In this project, data is separated by workspace, like keeping each customer’s papers in a different locked drawer. Most code is only allowed to open one drawer at a time. But a background job first needs to know which drawers might contain work. This file provides that narrow exception.
+
+The key idea is called a workspace candidate: a small async function that returns a tuple of workspace IDs. It does not return the actual rows of work, customer data, or task details. It only answers, “Which workspaces should the dispatcher visit?”
+
+The function `owner_candidates` is the safe doorway for extensions. An extension supplies a builder function that creates a database query selecting workspace IDs from its own tables. Core code then runs that query through `owner_tx`, the special database path that can read across workspaces. This is deliberately kept inside core, so extensions do not get direct access to the cross-workspace connection.
+
+A subtle but important detail is that the query is built each time candidates are requested. That means time-based checks, such as “due before now,” use the current time on each scheduler tick instead of freezing the time when the extension was loaded. After IDs are returned, the dispatcher is expected to re-enter each workspace normally before running the job.
+
+#### Function details
+
+##### `owner_candidates`  (lines 27–40)
+
+```
+def owner_candidates(due: Callable[[], sa.Select[tuple[UUID]]]) -> WorkspaceCandidates
+```
+
+**Purpose**: This function turns a query-building function into a workspace-candidate function. It gives extensions a safe way to say which workspaces have pending work without giving them direct access to the cross-workspace database connection.
+
+**Data flow**: It receives `due`, a no-argument function that builds a database select query whose first column is a workspace ID. It wraps that builder inside an async `candidates` function. The result is a callable that, when run later, will execute the fresh query and return only the workspace IDs it finds.
+
+**Call relations**: This is the public seam used when job or extension code needs to declare where work may exist. It creates and returns `owner_candidates.candidates`, which does the actual database read at scheduler time.
+
+
+##### `owner_candidates.candidates`  (lines 35–38)
+
+```
+async def candidates() -> tuple[UUID, ...]
+```
+
+**Purpose**: This inner async function performs the actual candidate lookup. It reads across workspaces only long enough to collect workspace IDs, not the underlying work data.
+
+**Data flow**: When called, it opens `owner_tx`, the special cross-workspace database transaction. Inside that transaction it calls `due()` to build a fresh query, executes it, collects all rows, and takes the first value from each row as a workspace ID. It closes the transaction and returns those IDs as a tuple.
+
+**Call relations**: This function is the callable returned by `owner_candidates`. During a scheduler tick or dispatch preparation, core code can call it to learn which workspaces to visit. Its only direct handoff is to `ufo.db.owner_tx`, which supplies the special database connection used for this limited read.
+
+*Call graph*: 1 external calls (owner_tx).
+
+
+### `core/src/ufo/jobs.py`
+
+`orchestration` · `startup and scheduled background work`
+
+This file is the project’s background-job switchboard. At startup, the system has a list of job descriptions from the core app and installed extensions. This file registers those jobs with DBOS, a durable workflow system that stores queued work in the database so it can survive crashes and restarts. Without this layer, extension jobs would not be discovered dynamically, recurring work could be lost, and a job might accidentally run outside the workspace it belongs to.
+
+The main pattern is “tick, fan out, then work.” A scheduled or one-time tick fires for a job. The tick asks the job which workspaces actually have pending work. It then queues one separate workflow for each workspace. This matters because one slow or stuck workspace should not block others, and duplicate ticks should not pile up multiple copies of the same job for the same workspace.
+
+The file also defines core jobs that every deployment needs. One syncs source pages. One replays page changes to extension hooks, with a separate cursor for each hook so they do not trip over each other. One dispatches queued or parked conversation turns onto the turn-processing queue, while checking ordering, seat access, and spending limits. In short, this file is the reliable background-work coordinator for both core features and extensions.
+
+#### Function details
+
+##### `TurnDispatcher.run`  (lines 124–162)
+
+```
+async def run(self) -> None
+```
+
+**Purpose**: Looks for conversation turns that are ready to be sent to the turn worker queue. For parked turns, it first checks whether the needed people have seats and whether spending rules allow the turn to resume.
+
+**Data flow**: It starts by reading dispatchable turn records. For each parked turn, it opens a workspace database transaction, gathers the members whose seats matter, checks seat admission and spend allowance, and skips the turn if either check fails. For turns that pass, or ordinary queued turns, it hands the turn to the enqueue step, which marks it and offers it to the worker queue.
+
+**Call relations**: This is called by the core turn-dispatch job. It relies on _dispatchable_turns to find candidates and on _enqueue to make the queue offer safely, so the scan, gate checks, and actual queue handoff stay separated.
+
+*Call graph*: calls 2 internal fn (_dispatchable_turns, _enqueue); 5 external calls (__init__, __init__, select, workspace_tx, gate_member).
+
+
+##### `TurnDispatcher.candidate_workspaces`  (lines 164–172)
+
+```
+async def candidate_workspaces(self) -> tuple[UUID, ...]
+```
+
+**Purpose**: Finds which workspaces have at least one turn that may need dispatching. This lets the job runner avoid opening workspaces that have no pending turn work.
+
+**Data flow**: It computes a cutoff time for stale dispatch stamps, queries the owner-level database view for distinct workspace IDs with eligible turns, and returns those IDs as a tuple. It does not enqueue anything itself.
+
+**Call relations**: The JobRunner asks this through the core turn-dispatch JobSpec before fanning out work. It uses _eligible to describe the same readiness rules that the per-workspace scanner later applies.
+
+*Call graph*: calls 1 internal fn (_eligible); 4 external calls (now, timedelta, select, owner_tx).
+
+
+##### `TurnDispatcher._dispatchable_turns`  (lines 174–213)
+
+```
+async def _dispatchable_turns(self) -> tuple[_DispatchTurn, ...]
+```
+
+**Purpose**: Loads a bounded batch of turn rows in the current workspace that are ready to be offered to workers. It preserves conversation order so a later turn cannot jump ahead of an earlier one.
+
+**Data flow**: It computes the stale-stamp cutoff, queries the workspace database for queued or parked turns matching the eligibility rule, sorts them so queued turns and older turns are considered first, limits the count, and converts each database row into a small _DispatchTurn object.
+
+**Call relations**: TurnDispatcher.run calls this at the start of a dispatch pass. It shares the _eligible rule with candidate_workspaces so the fleet-wide check and workspace-local scan agree.
+
+*Call graph*: calls 1 internal fn (_eligible); called by 1 (run); 6 external calls (__init__, now, timedelta, case, select, workspace_tx).
+
+
+##### `TurnDispatcher._enqueue`  (lines 215–245)
+
+```
+async def _enqueue(self, turn: _DispatchTurn) -> None
+```
+
+**Purpose**: Safely marks one turn as offered to the queue and then enqueues the worker workflow for it. The marking step prevents two dispatchers from both offering the same turn at the same time.
+
+**Data flow**: It receives a _DispatchTurn, recalculates the stale cutoff, and tries to update the matching turn row only if it still has the same status, is still stale, and is still first in its conversation for that status. If the update succeeds, it builds queue options, chooses a workflow ID, and asks DBOS to enqueue the turn workflow. If the row was already claimed or changed, it returns without doing anything.
+
+**Call relations**: TurnDispatcher.run calls this after any parked-turn checks pass. It uses _first_in_status and _stale to make the database update act like a lock, then hands the work to DBOS’s turn queue.
+
+*Call graph*: calls 2 internal fn (_first_in_status, _stale); called by 1 (run); 5 external calls (now, timedelta, update, workspace_tx, uuid4).
+
+
+##### `TurnDispatcher._eligible`  (lines 247–255)
+
+```
+def _eligible(self, cutoff: datetime) -> sa.ColumnElement[bool]
+```
+
+**Purpose**: Builds the database rule for turns that may be dispatched. A turn is eligible only if it is queued or parked, its previous dispatch stamp is missing or old, and it is the first turn of its status in its conversation.
+
+**Data flow**: It takes a cutoff time and combines smaller database conditions into one boolean SQL expression. The result is not a Python true-or-false answer yet; it is a filter used inside database queries.
+
+**Call relations**: candidate_workspaces uses this to find workspaces with possible work, and _dispatchable_turns uses it to fetch the actual rows. It depends on _stale for retry timing and _first_in_status for conversation ordering.
+
+*Call graph*: calls 2 internal fn (_first_in_status, _stale); called by 2 (_dispatchable_turns, candidate_workspaces); 2 external calls (and_, or_).
+
+
+##### `TurnDispatcher._stale`  (lines 257–261)
+
+```
+def _stale(self, cutoff: datetime) -> sa.ColumnElement[bool]
+```
+
+**Purpose**: Builds the database rule for whether a turn’s dispatch offer is missing or old enough to retry. This lets the system recover if a process marked a turn but crashed before the worker claimed it.
+
+**Data flow**: It takes a cutoff time and produces a SQL condition that matches rows whose dispatch_enqueued_at field is empty or earlier than the cutoff. Nothing is changed; the output is a query filter.
+
+**Call relations**: _eligible uses this while scanning, and _enqueue uses it again during the final update. Rechecking it at enqueue time prevents racing dispatchers from acting on stale information.
+
+*Call graph*: called by 2 (_eligible, _enqueue); 1 external calls (or_).
+
+
+##### `TurnDispatcher._first_in_status`  (lines 263–272)
+
+```
+def _first_in_status(self, status: TurnStatus) -> sa.ColumnElement[bool]
+```
+
+**Purpose**: Builds the database rule that a turn must be the earliest turn of its status in its conversation. This protects the order of conversation turns.
+
+**Data flow**: It takes a turn status such as queued or parked and creates a SQL condition saying “there is no earlier turn in the same workspace and conversation with this same status.” The result is used as part of larger queries and updates.
+
+**Call relations**: _eligible uses this when finding possible turns, and _enqueue uses it just before offering a turn. This double use keeps both discovery and final claiming tied to the same ordering rule.
+
+*Call graph*: called by 2 (_eligible, _enqueue); 2 external calls (exists, select).
+
+
+##### `_page_beyond_cursor`  (lines 275–280)
+
+```
+def _page_beyond_cursor(revision: int, page_id: UUID, cursor: object) -> bool
+```
+
+**Purpose**: Answers whether a page change comes after a stored cursor. A cursor is like a bookmark that says how far a page-change consumer has already read.
+
+**Data flow**: It receives a page revision, a page ID, and a stored cursor value. If there is no cursor, it returns true because everything is pending. Otherwise it parses the cursor into its saved revision and page ID, compares the new page position with that boundary, and returns true only if the page is later.
+
+**Call relations**: PageChangeRunner.workspaces_with_changes uses this while deciding which workspaces have page changes waiting for a specific consumer. It delegates cursor parsing to the page_cursor helper from the source-sync code.
+
+*Call graph*: called by 1 (workspaces_with_changes); 1 external calls (page_cursor).
+
+
+##### `PageChangeRunner.consumers`  (lines 339–363)
+
+```
+def consumers(self) -> tuple[PageChangeConsumer, ...]
+```
+
+**Purpose**: Collects all registered page-change hooks from the active extension manifests. Each hook becomes a separate consumer with its own job name and cursor.
+
+**Data flow**: It walks through every manifest, records the credential slots that extension declared, and selects only hooks whose event is page_change. It uses each handler function’s name as a discriminator, rejects duplicate names within the same extension, and returns PageChangeConsumer records.
+
+**Call relations**: core_jobs calls this when building the always-on job list. The returned consumers are later used to create one scheduled page-change job per hook.
+
+*Call graph*: called by 1 (core_jobs); 1 external calls (__init__).
+
+
+##### `PageChangeRunner.workspaces_with_changes`  (lines 365–430)
+
+```
+async def workspaces_with_changes(self, consumer: PageChangeConsumer) -> tuple[UUID, ...]
+```
+
+**Purpose**: Finds the workspaces where one page-change consumer has unread page updates. This prevents the system from running that consumer in workspaces where its cursor is already caught up.
+
+**Data flow**: It builds the cursor key for the consumer, reads stored cursors from the extension store, and reads each workspace’s newest page position. For each workspace, it compares the newest page with that consumer’s cursor. Workspaces with newer pages, missing cursors, or unparseable cursors are returned as pending; workspaces with no pages or no new pages are skipped.
+
+**Call relations**: The page-change job’s candidate function calls this before JobRunner fans out work. It uses _page_beyond_cursor for the comparison and logs a warning if one workspace’s cursor cannot be parsed, without blocking the whole fleet.
+
+*Call graph*: calls 1 internal fn (_page_beyond_cursor); 3 external calls (select, owner_tx, warn).
+
+
+##### `PageChangeRunner.drive`  (lines 432–452)
+
+```
+async def drive(self, consumer: PageChangeConsumer) -> None
+```
+
+**Purpose**: Runs one page-change consumer inside the currently bound workspace. It feeds the consumer batches of changed pages and advances that consumer’s cursor only after the handler succeeds.
+
+**Data flow**: It creates the extension context, reads the consumer’s stored cursor, and repeatedly asks the page feed for a batch after that cursor. For each non-empty batch, it calls the hook handler with a PageChangeBatch payload, then stores the next cursor. It stops when there are no changes or when the last batch is smaller than the batch limit.
+
+**Call relations**: The handler returned by core_jobs._drive_consumer calls this. It uses _context_for to give the extension access to its scoped store and services, and it calls the extension’s hook handler with HookContext.
+
+*Call graph*: calls 1 internal fn (_context_for); 2 external calls (__init__, __init__).
+
+
+##### `PageChangeRunner._context_for`  (lines 454–470)
+
+```
+def _context_for(self, extension: str, declared: frozenset[str]) -> ExtensionContext
+```
+
+**Purpose**: Builds the ExtensionContext used by a page-change hook. This context is the hook’s toolbox: scoped storage, page access, optional model/index/blob/sandbox services, and job or turn invokers when available.
+
+**Data flow**: It receives the extension name and declared credential slots. If an invoker factory exists, it creates an invoker for the current workspace. It then passes all available services into context_for and returns the resulting ExtensionContext.
+
+**Call relations**: PageChangeRunner.drive calls this before invoking a hook. It uses the current workspace binding, so the context points at the workspace selected by the job runner rather than at a global scope.
+
+*Call graph*: called by 1 (drive); 2 external calls (context_for, ws_current).
+
+
+##### `core_jobs`  (lines 473–532)
+
+```
+def core_jobs(sync_driver: SyncDriver, turn_dispatcher: TurnDispatcher, page_change_runner: PageChangeRunner) -> tuple[JobSpec, ...]
+```
+
+**Purpose**: Creates the set of built-in jobs that every deployment should run. These include source syncing, page-change fan-out, and turn dispatch recovery.
+
+**Data flow**: It receives the sync driver, turn dispatcher, and page-change runner. It creates small wrapper handlers and candidate functions, asks the page-change runner for its consumers, builds one JobSpec for each page-change consumer, and returns all core JobSpecs as a tuple.
+
+**Call relations**: Startup code uses this before combining core jobs with extension jobs. The wrapper functions inside it connect generic JobSpec handlers to the concrete sync, dispatch, and page-change runner methods.
+
+*Call graph*: calls 1 internal fn (consumers); 1 external calls (__init__).
+
+
+##### `core_jobs._sync_sources`  (lines 489–490)
+
+```
+async def _sync_sources(context: ExtensionContext) -> None
+```
+
+**Purpose**: Adapts the source-sync driver to the job handler shape. The job system passes an ExtensionContext, but source syncing only needs to run the sync driver.
+
+**Data flow**: It receives a context object and ignores it. It awaits sync_driver.run, which performs the actual source polling and page landing, and returns nothing.
+
+**Call relations**: core_jobs places this function into the source-sync JobSpec. Later, JobRunner.fire calls it through that JobSpec when the source-sync job runs in a workspace.
+
+
+##### `core_jobs._dispatch_turns`  (lines 492–493)
+
+```
+async def _dispatch_turns(context: ExtensionContext) -> None
+```
+
+**Purpose**: Adapts the turn dispatcher to the job handler shape. It lets turn dispatch run as a normal core job.
+
+**Data flow**: It receives a context object and ignores it. It awaits turn_dispatcher.run, which scans and enqueues ready turns, then returns nothing.
+
+**Call relations**: core_jobs places this function into the turn-dispatch JobSpec. JobRunner.fire later invokes it when a scheduled dispatch tick is fanned out to a workspace.
+
+
+##### `core_jobs._drive_consumer`  (lines 495–501)
+
+```
+def _drive_consumer(consumer: PageChangeConsumer) -> Callable[[ExtensionContext], Awaitable[None]]
+```
+
+**Purpose**: Creates a job handler for one specific page-change consumer. This is how each hook gets its own scheduled job while sharing the same runner logic.
+
+**Data flow**: It receives a PageChangeConsumer and returns an async handler function. The returned handler closes over that consumer, meaning it remembers which hook it is supposed to drive.
+
+**Call relations**: core_jobs calls this while building page-change JobSpecs. The returned _handler is what JobRunner.fire eventually calls for that consumer’s page-change workflow.
+
+
+##### `core_jobs._drive_consumer._handler`  (lines 498–499)
+
+```
+async def _handler(context: ExtensionContext) -> None
+```
+
+**Purpose**: Runs the page-change cursor loop for the consumer captured by core_jobs._drive_consumer. It is the actual JobSpec handler for that one page-change hook.
+
+**Data flow**: It receives an ExtensionContext from the job runner, but the page-change runner builds the hook-specific context itself. It awaits page_change_runner.drive for the captured consumer and returns when that consumer is caught up or fails.
+
+**Call relations**: JobRunner.fire calls this through a page-change JobSpec. It hands control to PageChangeRunner.drive, where pages are read, the hook is invoked, and the cursor is advanced.
+
+
+##### `core_jobs._consumer_candidates`  (lines 503–507)
+
+```
+def _consumer_candidates(consumer: PageChangeConsumer) -> WorkspaceCandidates
+```
+
+**Purpose**: Creates the candidate-workspace function for one page-change consumer. It tells the job runner which workspaces have unread page changes for that hook.
+
+**Data flow**: It receives a PageChangeConsumer and returns an async function that remembers that consumer. The returned function will later produce workspace IDs.
+
+**Call relations**: core_jobs uses this when constructing each page-change JobSpec. JobRunner.tick later calls the returned _candidates function before queuing per-workspace work.
+
+
+##### `core_jobs._consumer_candidates._candidates`  (lines 504–505)
+
+```
+async def _candidates() -> tuple[UUID, ...]
+```
+
+**Purpose**: Asks the page-change runner which workspaces need work for the captured consumer. This keeps page-change fan-out selective instead of running everywhere.
+
+**Data flow**: It takes no direct inputs. It awaits page_change_runner.workspaces_with_changes for the captured consumer and returns the tuple of workspace IDs that still have pending page changes.
+
+**Call relations**: JobRunner.tick calls this through the JobSpec candidate hook. Its output determines how many page-change workflows are enqueued for that tick.
+
+
+##### `bindings_from`  (lines 543–568)
+
+```
+def bindings_from(manifests: tuple[Manifest, ...], core_jobs: tuple[JobSpec, ...]) -> tuple[_Binding, ...]
+```
+
+**Purpose**: Attaches each job to the namespace and credentials it should run with. Core jobs are placed under the core namespace, while extension jobs are placed under their extension’s namespace.
+
+**Data flow**: It receives extension manifests and core JobSpecs. It creates _Binding records for every core job and every extension job, including the unique key, extension name, declared credential slots, and JobSpec. It returns all bindings as a tuple.
+
+**Call relations**: Startup code uses this before creating a JobRunner. JobRunner later uses these bindings to register schedules, find candidate workspaces, and build the right ExtensionContext when firing a job.
+
+*Call graph*: 1 external calls (__init__).
+
+
+##### `JobRunner.launch`  (lines 591–615)
+
+```
+def launch(self) -> None
+```
+
+**Purpose**: Registers all known jobs with DBOS at startup. Recurring jobs become schedules, and one-time jobs are enqueued once with duplicate protection.
+
+**Data flow**: It stores this JobRunner in the module-level _firing variable so DBOS workflow entrypoints can find it. It loops over every binding: jobs without schedules are enqueued immediately with a deduplication key, while scheduled jobs are collected as ScheduleInput records. Finally it applies all schedules to DBOS and logs what happened.
+
+**Call relations**: This is the boot-time bridge between discovered JobSpecs and DBOS. Later, DBOS calls job_tick for scheduled fires or queued one-shots, and job_tick uses the _firing runner set here.
+
+*Call graph*: 6 external calls (now, apply_schedules, ScheduleInput, SetEnqueueOptions, log, warn).
+
+
+##### `JobRunner.tick`  (lines 617–639)
+
+```
+async def tick(self, scheduled_time: datetime, key: str) -> None
+```
+
+**Purpose**: Handles one firing of a job by spreading it across the workspaces that actually need it. It queues one durable workflow per candidate workspace.
+
+**Data flow**: It receives the scheduled time and job key. If this process does not know that key, it logs a warning and stops. Otherwise it asks the job for candidate workspace IDs, then enqueues job_workflow once per workspace using a deduplication ID based on the job and workspace, skipping duplicates that are already running or queued.
+
+**Call relations**: job_tick calls this when DBOS fires a schedule or one-shot tick. It calls candidates to find the fan-out targets and hands each target off to job_workflow through the jobs queue.
+
+*Call graph*: calls 2 internal fn (_registered, candidates); 2 external calls (SetEnqueueOptions, warn).
+
+
+##### `JobRunner.candidates`  (lines 641–642)
+
+```
+async def candidates(self, key: str) -> tuple[UUID, ...]
+```
+
+**Purpose**: Runs the candidate-workspace function for a registered job. This answers “where is there work to do?” before any actual handler runs.
+
+**Data flow**: It receives a job key, resolves the matching binding, calls that JobSpec’s candidates function, and returns the workspace IDs it produces.
+
+**Call relations**: JobRunner.tick calls this during fan-out. It uses _binding, which raises if the key is not registered, so callers should only use it for known jobs.
+
+*Call graph*: calls 1 internal fn (_binding); called by 1 (tick).
+
+
+##### `JobRunner.fire`  (lines 644–664)
+
+```
+async def fire(self, key: str, workspace_id: UUID) -> None
+```
+
+**Purpose**: Runs one job handler for one workspace. It is the only path that actually executes a job’s handler, and it always binds the workspace first.
+
+**Data flow**: It receives a job key and workspace ID, resolves the binding, enters the workspace context, builds an ExtensionContext with the right services and credentials, and awaits the JobSpec handler. If the handler raises an error, it logs the failure and re-raises so the workflow is marked failed.
+
+**Call relations**: job_workflow calls this after DBOS starts a per-workspace job execution. It uses _binding to find the job and context_for to build the handler’s environment.
+
+*Call graph*: calls 1 internal fn (_binding); 3 external calls (context_for, log_error, ws).
+
+
+##### `JobRunner._registered`  (lines 666–667)
+
+```
+def _registered(self, key: str) -> _Binding | None
+```
+
+**Purpose**: Looks up whether this process has a binding for a job key. It returns the binding if present, or nothing if the key belongs to an old, removed, or different-version job.
+
+**Data flow**: It receives a key and scans the runner’s bindings for a matching binding.key. The output is either the _Binding record or None.
+
+**Call relations**: JobRunner.tick uses this to skip stale schedules safely. JobRunner._binding also uses it when a missing binding should be treated as an error.
+
+*Call graph*: called by 2 (_binding, tick).
+
+
+##### `JobRunner._binding`  (lines 669–676)
+
+```
+def _binding(self, key: str) -> _Binding
+```
+
+**Purpose**: Returns the binding for a job key, or raises an error if the process cannot run that job. This is used once the code expects the key to be valid.
+
+**Data flow**: It receives a key, asks _registered for the matching binding, and returns it if found. If no binding exists, it raises RuntimeError with the missing key.
+
+**Call relations**: JobRunner.candidates and JobRunner.fire call this before using a JobSpec. JobRunner.tick uses _registered first because unknown scheduled keys are expected and should be skipped rather than treated as fatal.
+
+*Call graph*: calls 1 internal fn (_registered); called by 2 (candidates, fire).
+
+
+##### `job_tick`  (lines 683–687)
+
+```
+async def job_tick(scheduled_time: datetime, key: str) -> None
+```
+
+**Purpose**: DBOS workflow entrypoint for a job tick. It is the durable wrapper that DBOS calls when a schedule fires or a one-time job tick is queued.
+
+**Data flow**: It receives the scheduled time and job key from DBOS. It reads the module-level _firing runner set during launch; if no runner exists, it raises an error. Otherwise it passes the scheduled time and key to runner.tick.
+
+**Call relations**: JobRunner.launch registers or enqueues this workflow with DBOS. This function does not know job details itself; it delegates to the active JobRunner.
+
+
+##### `job_workflow`  (lines 691–695)
+
+```
+async def job_workflow(scheduled_time: datetime, key: str, workspace_id: str) -> None
+```
+
+**Purpose**: DBOS workflow entrypoint for one job running in one workspace. It is the durable wrapper around the real per-workspace job execution.
+
+**Data flow**: It receives the scheduled time, job key, and workspace ID as a string. It finds the active _firing runner, converts the workspace ID into a UUID, and calls runner.fire. The scheduled time is part of the workflow input but the actual firing logic uses the key and workspace.
+
+**Call relations**: JobRunner.tick enqueues this workflow once for each candidate workspace. This function delegates to JobRunner.fire, which binds the workspace and invokes the actual handler.
+
+*Call graph*: 1 external calls (UUID).
+
+
+### Billing operations
+Connects workspaces to Metronome, Stripe, and chat administration flows for durable usage billing, payment setup, and seat management.
+
+### `extensions/metronome/ufo_ext_metronome.py`
+
+`orchestration` · `scheduled jobs and chat tool handling`
+
+This file is the billing bridge for a workspace. It does three main jobs. First, it ships settled usage records to Metronome, a billing and metering service. Each usage event gets a stable transaction ID, like a receipt number, so if the job crashes and sends the same event again, Metronome can recognize it as the same event instead of charging twice. Second, it sends a daily seat-count snapshot, so billing knows how many people had access. A missed day does not pile up into a permanent mistake because the next snapshot reports the current count again. Third, it lets workspace admins use chat tools to grant or revoke seats, list seat status, and set up billing.
+
+Billing setup is split into two stages. The chat tool creates or reuses a Stripe Customer and returns a short-lived Stripe portal link where the admin can save a payment method. A scheduled activation job later checks Stripe, then creates the matching Metronome customer and contract. The code uses stable identities, such as the workspace ID and a fixed contract key, so retries reconcile with existing provider objects instead of making duplicates.
+
+The manifest at the bottom tells the host system which tools, scheduled jobs, prompt instructions, and credential slots this extension provides.
+
+#### Function details
+
+##### `UsageShipper.run`  (lines 197–212)
+
+```
+async def run(self) -> None
+```
+
+**Purpose**: Sends one workspace's settled usage records to Metronome in batches. It is careful to acknowledge records only after Metronome accepts them, so a crash causes a safe resend rather than lost usage.
+
+**Data flow**: It reads the Metronome bearer token from the environment, finds the workspace's fixed backfill floor, then asks the extension context for pending usage exports. It turns those exports into Metronome events, posts them, logs success, and marks the exports as acknowledged. It repeats until there is no more work or the final batch is smaller than the batch size.
+
+**Call relations**: The scheduled `_ship` wrapper creates a `UsageShipper` and calls this method. During the run it relies on `_floor` to decide how far back to look, `_events` to shape records for Metronome, `_ingest` to send them, and `_require_env` to fail early if the token is missing.
+
+*Call graph*: calls 4 internal fn (_events, _floor, _ingest, _require_env); 1 external calls (log).
+
+
+##### `UsageShipper._floor`  (lines 214–224)
+
+```
+async def _floor(self) -> datetime
+```
+
+**Purpose**: Chooses the earliest usage time this workspace will ever ship. This prevents the first run from backfilling too far into the past while still letting old unshipped records be sent later.
+
+**Data flow**: It reads a stored timestamp from the workspace store. If none exists, it creates one set to seven days before the current time, saves it, and returns it. If one already exists, it parses and returns that saved time unchanged.
+
+**Call relations**: Only `UsageShipper.run` calls this before asking for pending usage exports. It acts like a fixed starting line for all later usage shipping in that workspace.
+
+*Call graph*: called by 1 (run); 3 external calls (fromisoformat, now, timedelta).
+
+
+##### `UsageShipper._events`  (lines 226–245)
+
+```
+def _events(self, exports: tuple[UsageExport, ...]) -> list[dict[str, object]]
+```
+
+**Purpose**: Converts internal usage export records into the event format Metronome expects. It preserves the important billing details, including model, amount, price, and whether the workspace used its own provider key.
+
+**Data flow**: It takes a tuple of `UsageExport` objects and reads the workspace ID from the context. For each export, it builds a dictionary with a deterministic transaction ID, customer ID, timestamp, event type, and string-valued properties. The result is a list of event dictionaries ready to send.
+
+**Call relations**: `UsageShipper.run` calls this immediately before `_ingest`. It uses `_rfc3339` so event timestamps are written in a standard internet date format.
+
+*Call graph*: calls 1 internal fn (_rfc3339); called by 1 (run).
+
+
+##### `_ship`  (lines 248–249)
+
+```
+async def _ship(ctx: ExtensionContext) -> None
+```
+
+**Purpose**: Acts as the scheduled job entry for usage shipping. It adapts the host job system's context into a `UsageShipper` run.
+
+**Data flow**: It receives an extension context, creates a `UsageShipper` with that context and the configured test or production transport, and starts the shipper. It does not return a value beyond completing or raising an error.
+
+**Call relations**: The extension `manifest` registers this as the usage job handler. Its whole job is to hand control to `UsageShipper.run`.
+
+*Call graph*: 1 external calls (__init__).
+
+
+##### `SeatShipper.run`  (lines 262–278)
+
+```
+async def run(self) -> None
+```
+
+**Purpose**: Sends Metronome one daily snapshot of how many seats a workspace is using. It also makes sure default seat limits and included seats exist before counting.
+
+**Data flow**: It reads the Metronome token, checks whether today's snapshot was already marked as shipped, and exits if so. Otherwise it opens a transaction, ensures the workspace has a seat limit and included-seat count, reads the current seat snapshot, sends one Metronome event, logs it, and stores today's date as shipped.
+
+**Call relations**: The scheduled `_ship_seats` wrapper creates a `SeatShipper` and calls this method. It calls `_event` to build the snapshot event, `_ingest` to send it, and `_require_env` to require the token.
+
+*Call graph*: calls 3 internal fn (_event, _ingest, _require_env); 3 external calls (__init__, now, log).
+
+
+##### `SeatShipper._event`  (lines 280–291)
+
+```
+def _event(self, snapshot: SeatSnapshot, today: str) -> dict[str, object]
+```
+
+**Purpose**: Builds the single Metronome event that represents today's seat count for a workspace.
+
+**Data flow**: It receives a `SeatSnapshot` and today's date string. It reads the workspace ID, creates a stable transaction ID using workspace and date, records the current time, and includes the seated count and seat limit as event properties. It returns that event dictionary.
+
+**Call relations**: `SeatShipper.run` calls this after reading the seat snapshot and before sending it through `_ingest`. It uses `_rfc3339` to format the timestamp.
+
+*Call graph*: calls 1 internal fn (_rfc3339); called by 1 (run); 1 external calls (now).
+
+
+##### `_ship_seats`  (lines 294–295)
+
+```
+async def _ship_seats(ctx: ExtensionContext) -> None
+```
+
+**Purpose**: Acts as the scheduled job entry for daily seat-count shipping.
+
+**Data flow**: It receives an extension context, creates a `SeatShipper` with the configured transport, and runs it. Any provider error is allowed to surface so the scheduler can retry later.
+
+**Call relations**: The `manifest` registers this as the seat shipping job handler. It simply hands the scheduled tick to `SeatShipper.run`.
+
+*Call graph*: 1 external calls (__init__).
+
+
+##### `SeatApprovals.run`  (lines 311–336)
+
+```
+async def run(self) -> None
+```
+
+**Purpose**: Creates chat-based approval requests when a workspace has unseated members but no included seats left. This lets admins decide whether to grant an overage seat without needing a separate approval screen.
+
+**Data flow**: It reads the current seat snapshot. If included seats are unknown or not full, it stops. Otherwise it finds unseated members, skips anyone already asked about, finds an admin conversation, sends an internal prompt asking the admin to approve or decline, and then stores a marker so the same person is not asked again.
+
+**Call relations**: The scheduled `_ask_seat_approvals` wrapper creates this class and runs it. It uses `Seats` to read seat state and `admin_conversation` to find where the approval request should be delivered.
+
+*Call graph*: 3 external calls (__init__, now, admin_conversation).
+
+
+##### `_ask_seat_approvals`  (lines 339–340)
+
+```
+async def _ask_seat_approvals(ctx: ExtensionContext) -> None
+```
+
+**Purpose**: Acts as the scheduled job entry for seat approval prompts.
+
+**Data flow**: It receives an extension context, creates `SeatApprovals`, and runs it. The result is either no action or one or more admin-facing approval prompts.
+
+**Call relations**: The `manifest` registers this as the seat approval job handler. It delegates the real decision-making to `SeatApprovals.run`.
+
+*Call graph*: 1 external calls (__init__).
+
+
+##### `BillingConfig.from_env`  (lines 359–378)
+
+```
+def from_env(cls) -> 'BillingConfig'
+```
+
+**Purpose**: Loads and validates the environment variables needed for billing setup and activation. It fails before making provider calls if any required setting is missing.
+
+**Data flow**: It reads Stripe and Metronome settings from environment variables, collects all missing names, and raises an error if any are absent. If everything is present, it returns a frozen `BillingConfig` object with those values.
+
+**Call relations**: Billing entry points call this before talking to Stripe or Metronome. It protects `_billing_setup`, `_billing_status`, `_billing_portal`, and `BillingActivation.run` from starting provider work with incomplete configuration.
+
+
+##### `BillingActivation.run`  (lines 415–442)
+
+```
+async def run(self) -> None
+```
+
+**Purpose**: Turns a saved Stripe payment method into an active Metronome billing plan. It progresses step by step and records each completed provider object so retries resume safely.
+
+**Data flow**: It reads the workspace billing record and exits if there is none or it is already activated. It loads billing config, asks Stripe whether a default payment method exists, creates or recovers a Metronome customer if needed, creates or recovers the workspace contract if needed, stores each new ID, and finally notifies the initiating conversation.
+
+**Call relations**: The scheduled `_activate_billing` wrapper calls this. It coordinates `_billing_record`, `_has_default_payment_method`, `_metronome_customer`, `_metronome_contract`, `_contract_key`, `_store`, and `_notify` into one activation flow.
+
+*Call graph*: calls 7 internal fn (_notify, _store, _billing_record, _contract_key, _has_default_payment_method, _metronome_contract, _metronome_customer).
+
+
+##### `BillingActivation._store`  (lines 444–446)
+
+```
+async def _store(self, record: BillingRecord) -> BillingRecord
+```
+
+**Purpose**: Saves the current billing record for the workspace. It is used after each activation milestone so a later retry knows where to continue.
+
+**Data flow**: It takes a `BillingRecord`, converts it to JSON-friendly data, writes it under the billing key in the extension store, and returns the same record.
+
+**Call relations**: `BillingActivation.run` calls this after learning provider IDs. `_notify` calls it again after marking activation complete.
+
+*Call graph*: called by 2 (_notify, run); 1 external calls (model_dump).
+
+
+##### `BillingActivation._notify`  (lines 448–461)
+
+```
+async def _notify(self, record: BillingRecord) -> None
+```
+
+**Purpose**: Tells the original chat conversation that billing is now active, then marks the record as activated. This makes the confirmation happen once.
+
+**Data flow**: It receives the billing record, sends an internal message to the stored conversation and agent using a stable idempotency key, updates the record with the current activation time, stores it, and writes a log entry.
+
+**Call relations**: `BillingActivation.run` calls this after the Metronome contract exists. It uses `_store` to persist the final activated state.
+
+*Call graph*: calls 1 internal fn (_store); called by 1 (run); 3 external calls (now, model_copy, log).
+
+
+##### `_activate_billing`  (lines 464–465)
+
+```
+async def _activate_billing(ctx: ExtensionContext) -> None
+```
+
+**Purpose**: Acts as the scheduled job entry for billing activation.
+
+**Data flow**: It receives an extension context, creates `BillingActivation` with the configured transport, and runs it. The job either advances pending billing setup or exits when there is nothing to do.
+
+**Call relations**: The `manifest` registers this as the billing activation job handler. It delegates the workflow to `BillingActivation.run`.
+
+*Call graph*: 1 external calls (__init__).
+
+
+##### `_billing_record`  (lines 468–470)
+
+```
+async def _billing_record(ctx: ExtensionContext) -> BillingRecord | None
+```
+
+**Purpose**: Reads the workspace's stored billing setup state, if one exists.
+
+**Data flow**: It looks up the billing key in the extension store. If nothing is stored, it returns `None`; otherwise it validates the stored data as a `BillingRecord` and returns that object.
+
+**Call relations**: Billing activation and billing chat actions call this whenever they need to know whether setup has begun and which provider IDs are known.
+
+*Call graph*: called by 4 (run, _billing_portal, _billing_setup, _billing_status).
+
+
+##### `_contract_key`  (lines 473–477)
+
+```
+def _contract_key(workspace_id: UUID) -> str
+```
+
+**Purpose**: Creates the permanent Metronome contract identity for a workspace. This stable key lets the code find the same contract across retries and conflicts.
+
+**Data flow**: It receives a workspace UUID and returns a string formed from a fixed prefix plus that UUID. It does not read or change anything else.
+
+**Call relations**: `BillingActivation.run` uses this when creating a contract, and `_billing_status` uses it when checking whether the workspace's own contract exists.
+
+*Call graph*: called by 2 (run, _billing_status).
+
+
+##### `grant_seat`  (lines 515–521)
+
+```
+async def grant_seat(ctx: ToolContext, args: GrantSeatInput) -> ToolResult
+```
+
+**Purpose**: Chat tool handler that grants a workspace seat to a member by email. It is meant for admins and returns the updated seat picture.
+
+**Data flow**: It verifies admin seat access through `_admin_seats`, opens a transaction, grants the seat, reads the new snapshot, and formats that snapshot as a tool result. The workspace seat state changes inside the transaction.
+
+**Call relations**: The tool definition for `grant_seat` points to this handler. It relies on `_admin_seats` for permission checks and `_snapshot_result` for the response shown back to the agent.
+
+*Call graph*: calls 2 internal fn (_admin_seats, _snapshot_result).
+
+
+##### `revoke_seat`  (lines 524–534)
+
+```
+async def revoke_seat(ctx: ToolContext, args: RevokeSeatInput) -> ToolResult
+```
+
+**Purpose**: Chat tool handler that removes a member's seat by email. It also records that this member has already been decided on, so the approval job will not immediately ask about them again.
+
+**Data flow**: It verifies admin seat access, opens a transaction, revokes the seat, reads the updated snapshot, writes a seat-approval marker for that email, and returns the snapshot as a tool result.
+
+**Call relations**: The tool definition for `revoke_seat` points to this handler. It shares permission checking with `grant_seat` through `_admin_seats` and formats its answer through `_snapshot_result`.
+
+*Call graph*: calls 2 internal fn (_admin_seats, _snapshot_result); 1 external calls (now).
+
+
+##### `list_seats`  (lines 537–541)
+
+```
+async def list_seats(ctx: ToolContext, args: ListSeatsInput) -> ToolResult
+```
+
+**Purpose**: Chat tool handler that reports the current seat limit, included seats, overage count, and member seat status.
+
+**Data flow**: It reads the workspace ID from the tool context, opens a transaction, asks `Seats` for a snapshot, and turns that snapshot into a JSON text tool result. It does not change seat state.
+
+**Call relations**: The tool definition for `list_seats` points to this handler. It uses `_snapshot_result`, the same response formatter used by the seat-changing tools.
+
+*Call graph*: calls 1 internal fn (_snapshot_result); 1 external calls (__init__).
+
+
+##### `manage_billing`  (lines 544–553)
+
+```
+async def manage_billing(ctx: ToolContext, args: ManageBillingInput) -> ToolResult
+```
+
+**Purpose**: Chat tool handler for billing setup, billing status, and portal links. It gives admins one conversational doorway into Stripe and Metronome billing actions.
+
+**Data flow**: It checks that the speaker can manage billing, loads billing configuration, then routes the requested action. `setup` starts or resumes payment setup, `status` reads provider state, and `portal` creates a management link.
+
+**Call relations**: The tool definition for `manage_billing` points to this handler. It delegates permission checks to `_admin_billing` and then hands off to `_billing_setup`, `_billing_status`, or `_billing_portal`.
+
+*Call graph*: calls 4 internal fn (_admin_billing, _billing_portal, _billing_setup, _billing_status).
+
+
+##### `_admin_billing`  (lines 556–562)
+
+```
+async def _admin_billing(ctx: ToolContext) -> ExtensionContext
+```
+
+**Purpose**: Confirms that a billing tool call comes from a speaking workspace admin. This prevents ordinary members or system-only turns from changing billing.
+
+**Data flow**: It reads the tool context, requires a speaker member ID, asks whether that speaker is an admin, and raises an error if not. If the speaker is allowed, it returns the extension context needed for billing work.
+
+**Call relations**: `manage_billing` calls this before any billing action. It uses the context's `speaker_is_admin` check as the source of truth for permission.
+
+*Call graph*: calls 1 internal fn (speaker_is_admin); called by 1 (manage_billing).
+
+
+##### `_billing_setup`  (lines 565–605)
+
+```
+async def _billing_setup(ctx: ToolContext, ext: ExtensionContext, config: BillingConfig) -> ToolResult
+```
+
+**Purpose**: Starts billing setup by creating or reusing the workspace's Stripe Customer and returning a Stripe portal link for saving a payment method.
+
+**Data flow**: It reads any existing billing record. If none exists, it creates a Stripe Customer, records the intended Metronome package and contract start time, and stores the record before returning the link. It then creates a payment-method-update portal session and returns the URL, customer ID, and package as JSON text.
+
+**Call relations**: `manage_billing` calls this for the `setup` action. It uses `_billing_record`, `_stripe_customer`, `_portal_session`, `_text_result`, and logging; the later `BillingActivation.run` job completes the plan after Stripe shows a saved payment method.
+
+*Call graph*: calls 4 internal fn (_billing_record, _portal_session, _stripe_customer, _text_result); called by 1 (manage_billing); 3 external calls (__init__, now, log).
+
+
+##### `_billing_status`  (lines 608–636)
+
+```
+async def _billing_status(ext: ExtensionContext, config: BillingConfig) -> ToolResult
+```
+
+**Purpose**: Reports the billing state as Stripe and Metronome currently see it. It avoids pretending a plan is active just because a local record exists.
+
+**Data flow**: It reads the billing record. If there is none, it returns `configured: false`. Otherwise it asks Stripe whether a payment method is on file and, if there is a Metronome customer ID, asks Metronome whether the workspace's contract key exists. It returns those facts as JSON text.
+
+**Call relations**: `manage_billing` calls this for the `status` action. It uses `_has_default_payment_method`, `_contract_for`, `_contract_key`, and `_text_result` to assemble the response.
+
+*Call graph*: calls 5 internal fn (_billing_record, _contract_for, _contract_key, _has_default_payment_method, _text_result); called by 1 (manage_billing).
+
+
+##### `_billing_portal`  (lines 639–647)
+
+```
+async def _billing_portal(ext: ExtensionContext, config: BillingConfig) -> ToolResult
+```
+
+**Purpose**: Creates a fresh Stripe Customer Portal link for an already set up workspace. Admins use this for invoices, billing details, and payment methods.
+
+**Data flow**: It reads the billing record and raises an error if setup has not happened yet. If a record exists, it asks Stripe for a portal session with the stored customer ID and returns the URL as JSON text.
+
+**Call relations**: `manage_billing` calls this for the `portal` action. It uses `_billing_record`, `_portal_session`, and `_text_result`.
+
+*Call graph*: calls 3 internal fn (_billing_record, _portal_session, _text_result); called by 1 (manage_billing).
+
+
+##### `_admin_seats`  (lines 650–655)
+
+```
+async def _admin_seats(ctx: ToolContext) -> Seats
+```
+
+**Purpose**: Confirms that a seat-changing tool call comes from a speaking workspace admin, then returns the seat helper for that workspace.
+
+**Data flow**: It checks for a speaker member ID, asks whether the speaker is an admin, and raises an error if either condition fails. If allowed, it creates and returns a `Seats` object for the current workspace.
+
+**Call relations**: `grant_seat` and `revoke_seat` call this before changing seats. It centralizes the permission rule so both tools enforce the same gate.
+
+*Call graph*: calls 1 internal fn (speaker_is_admin); called by 2 (grant_seat, revoke_seat); 1 external calls (__init__).
+
+
+##### `_snapshot_result`  (lines 658–672)
+
+```
+def _snapshot_result(snapshot: SeatSnapshot) -> ToolResult
+```
+
+**Purpose**: Turns a seat snapshot into the JSON text returned by seat tools. It presents both totals and per-member status in one response.
+
+**Data flow**: It receives a `SeatSnapshot`, calculates billed overage seats when included seats are known, copies each member's email, seated flag, and admin flag, and passes the resulting dictionary to `_text_result`.
+
+**Call relations**: `grant_seat`, `revoke_seat`, and `list_seats` all call this so their outputs have the same shape.
+
+*Call graph*: calls 1 internal fn (_text_result); called by 3 (grant_seat, list_seats, revoke_seat).
+
+
+##### `_text_result`  (lines 675–676)
+
+```
+def _text_result(payload: dict[str, object]) -> ToolResult
+```
+
+**Purpose**: Wraps a dictionary as a text-based tool result. This is the common final packaging step for chat tool responses.
+
+**Data flow**: It takes a dictionary, serializes it to a JSON string, places that string in a `TextContent` object, and returns a `ToolResult` containing that content.
+
+**Call relations**: Billing and seat helper functions call this whenever they need to send structured data back through the tool system.
+
+*Call graph*: called by 4 (_billing_portal, _billing_setup, _billing_status, _snapshot_result); 3 external calls (__init__, __init__, dumps).
+
+
+##### `_require_env`  (lines 708–712)
+
+```
+def _require_env(name: str) -> str
+```
+
+**Purpose**: Reads one required environment variable and fails clearly if it is missing.
+
+**Data flow**: It receives an environment variable name, looks it up, and returns the value if present. If the value is empty or absent, it raises a runtime error naming the missing setting.
+
+**Call relations**: `UsageShipper.run` and `SeatShipper.run` call this before sending Metronome ingest events, because those jobs cannot work without the bearer token.
+
+*Call graph*: called by 2 (run, run).
+
+
+##### `_stripe_customer`  (lines 715–732)
+
+```
+async def _stripe_customer(config: BillingConfig, workspace_id: UUID, transport: httpx.AsyncBaseTransport | None) -> str
+```
+
+**Purpose**: Creates or reuses the workspace's Stripe Customer. A stable idempotency key helps Stripe treat retries as the same request.
+
+**Data flow**: It receives billing config, a workspace ID, and an optional HTTP transport. It posts customer details and workspace metadata to Stripe, then extracts and returns the customer ID from the response.
+
+**Call relations**: `_billing_setup` calls this when no billing record exists yet. It sends the actual HTTP request through `_stripe` and validates the returned ID with `_as_str`.
+
+*Call graph*: calls 2 internal fn (_as_str, _stripe); called by 1 (_billing_setup).
+
+
+##### `_portal_session`  (lines 735–751)
+
+```
+async def _portal_session(config: BillingConfig, customer_id: str, flow: str | None, transport: httpx.AsyncBaseTransport | None) -> str
+```
+
+**Purpose**: Creates a short-lived Stripe Customer Portal URL. Depending on the requested flow, the link can be limited to saving a payment method or can open the broader billing portal.
+
+**Data flow**: It receives config, a Stripe customer ID, an optional flow name, and transport. It builds Stripe form data, posts it to the portal sessions endpoint, extracts the returned URL, and gives that URL back.
+
+**Call relations**: `_billing_setup` calls this to make a payment-method setup link, and `_billing_portal` calls it to make a general management link. It uses `_stripe` for the provider request and `_as_str` to check the URL.
+
+*Call graph*: calls 2 internal fn (_as_str, _stripe); called by 2 (_billing_portal, _billing_setup).
+
+
+##### `_has_default_payment_method`  (lines 754–764)
+
+```
+async def _has_default_payment_method(config: BillingConfig, customer_id: str, transport: httpx.AsyncBaseTransport | None) -> bool
+```
+
+**Purpose**: Checks whether Stripe has a default payment method saved for the customer. This is the activation gate for turning billing into a live Metronome plan.
+
+**Data flow**: It receives config, a Stripe customer ID, and transport. It fetches the customer from Stripe, looks inside invoice settings for a string default payment method, and returns true or false.
+
+**Call relations**: `BillingActivation.run` uses this before creating Metronome billing objects. `_billing_status` uses it to report whether payment is ready.
+
+*Call graph*: calls 1 internal fn (_stripe); called by 2 (run, _billing_status).
+
+
+##### `_stripe`  (lines 767–785)
+
+```
+async def _stripe(config: BillingConfig, method: str, path: str, transport: httpx.AsyncBaseTransport | None, data: dict[str, str] | None=None, idempotency_key: str | None=None) -> dict[str, object]
+```
+
+**Purpose**: Performs one Stripe API request with the right authentication, pinned API version, timeout, and optional idempotency key.
+
+**Data flow**: It receives config, HTTP method, path, transport, optional form data, and optional idempotency key. It sends the request to Stripe, raises `StripeError` on any non-success response, and returns the parsed JSON body on success.
+
+**Call relations**: `_stripe_customer`, `_portal_session`, and `_has_default_payment_method` all use this shared Stripe transport helper so their error handling and headers stay consistent.
+
+*Call graph*: called by 3 (_has_default_payment_method, _portal_session, _stripe_customer); 2 external calls (__init__, AsyncClient).
+
+
+##### `_metronome_customer`  (lines 788–833)
+
+```
+async def _metronome_customer(config: BillingConfig, alias: str, stripe_customer_id: str, transport: httpx.AsyncBaseTransport | None) -> str
+```
+
+**Purpose**: Finds or creates the Metronome customer for a workspace. The workspace ID is used as an ingest alias so usage events attach to the right billing customer.
+
+**Data flow**: It first looks for an existing Metronome customer by alias. If found, it returns that ID. If not, it posts a new customer with Stripe billing configuration. If Metronome reports a conflict, it looks up the alias again and returns the reconciled customer if present.
+
+**Call relations**: `BillingActivation.run` calls this after Stripe has a payment method. It uses `_customer_by_alias` for lookup and `_metronome` for the provider requests.
+
+*Call graph*: calls 2 internal fn (_customer_by_alias, _metronome); called by 1 (run); 1 external calls (__init__).
+
+
+##### `_customer_by_alias`  (lines 836–845)
+
+```
+async def _customer_by_alias(config: BillingConfig, alias: str, transport: httpx.AsyncBaseTransport | None) -> str | None
+```
+
+**Purpose**: Looks up a Metronome customer by the workspace ingest alias.
+
+**Data flow**: It receives config, an alias, and transport. It asks Metronome for customers matching that alias and returns the first customer ID if one is present; otherwise it returns `None`.
+
+**Call relations**: `_metronome_customer` calls this before creating a customer and again after a conflict. The actual HTTP request goes through `_metronome`.
+
+*Call graph*: calls 1 internal fn (_metronome); called by 1 (_metronome_customer).
+
+
+##### `_metronome_contract`  (lines 848–884)
+
+```
+async def _metronome_contract(config: BillingConfig, customer_id: str, record: BillingRecord, uniqueness_key: str, transport: httpx.AsyncBaseTransport | None) -> str
+```
+
+**Purpose**: Finds or creates the workspace's Metronome contract, which represents the active billing plan. It uses a stable uniqueness key so retries point to the same contract.
+
+**Data flow**: It receives config, customer ID, billing record, uniqueness key, and transport. It first checks whether the contract already exists. If not, it posts a contract create request using the recorded package and start time. On conflict, it looks up the contract again. It returns the contract ID or raises if the response has no ID.
+
+**Call relations**: `BillingActivation.run` calls this after the Metronome customer is known. It uses `_contract_for` to read existing contracts, `_metronome` to create one, and `_rfc3339` to format the start time.
+
+*Call graph*: calls 3 internal fn (_contract_for, _metronome, _rfc3339); called by 1 (run); 1 external calls (__init__).
+
+
+##### `_contract_for`  (lines 887–910)
+
+```
+async def _contract_for(config: BillingConfig, customer_id: str, uniqueness_key: str, transport: httpx.AsyncBaseTransport | None) -> str | None
+```
+
+**Purpose**: Searches a Metronome customer's live contracts for the one that belongs to this workspace. It matches by the exact uniqueness key, not by whatever contract appears first.
+
+**Data flow**: It receives config, a Metronome customer ID, a uniqueness key, and transport. It lists the customer's contracts, scans them, and returns the ID of the contract whose uniqueness key matches. If none match, it returns `None`.
+
+**Call relations**: `_metronome_contract` uses this before and after create attempts. `_billing_status` uses it to decide whether the workspace's own plan is active.
+
+*Call graph*: calls 1 internal fn (_metronome); called by 2 (_billing_status, _metronome_contract).
+
+
+##### `_metronome`  (lines 913–933)
+
+```
+async def _metronome(config: BillingConfig, method: str, path: str, transport: httpx.AsyncBaseTransport | None, body: dict[str, object] | None=None, params: dict[str, str] | None=None, idempotency_key
+```
+
+**Purpose**: Performs one Metronome API request with the right authentication, timeout, JSON body, query parameters, and optional idempotency key.
+
+**Data flow**: It receives config, HTTP method, path, transport, and optional request details. It sends the request, raises `MetronomeConflict` for HTTP 409 conflicts, raises `MetronomeError` for other failures, and returns the parsed JSON body on success.
+
+**Call relations**: Metronome customer and contract helpers call this shared transport function. It keeps provider error handling consistent for `_customer_by_alias`, `_metronome_customer`, `_contract_for`, and `_metronome_contract`.
+
+*Call graph*: called by 4 (_contract_for, _customer_by_alias, _metronome_contract, _metronome_customer); 3 external calls (__init__, __init__, AsyncClient).
+
+
+##### `_as_str`  (lines 936–940)
+
+```
+def _as_str(value: object, field: str) -> str
+```
+
+**Purpose**: Checks that a provider response field is a non-empty string. It turns malformed provider responses into clear local errors.
+
+**Data flow**: It receives any value and a human-readable field name. If the value is a non-empty string, it returns it; otherwise it raises a `ValueError` naming the missing field.
+
+**Call relations**: `_stripe_customer` uses this for Stripe customer IDs, and `_portal_session` uses it for Stripe portal URLs.
+
+*Call graph*: called by 2 (_portal_session, _stripe_customer).
+
+
+##### `_ingest`  (lines 943–951)
+
+```
+async def _ingest(token: str, events: list[dict[str, object]], transport: httpx.AsyncBaseTransport | None) -> None
+```
+
+**Purpose**: Sends usage or seat events to Metronome's ingest endpoint. This is the final network step for metered events.
+
+**Data flow**: It receives a bearer token, a list of event dictionaries, and an optional transport. It posts the list to Metronome with authorization. If Metronome rejects the request, it raises `MetronomeError`; otherwise it returns nothing.
+
+**Call relations**: `UsageShipper.run` calls this for usage batches, and `SeatShipper.run` calls it for daily seat snapshots.
+
+*Call graph*: called by 2 (run, run); 2 external calls (__init__, AsyncClient).
+
+
+##### `_rfc3339`  (lines 954–956)
+
+```
+def _rfc3339(moment: datetime) -> str
+```
+
+**Purpose**: Formats a datetime as a standard timestamp string suitable for provider APIs. If the datetime has no timezone, it treats it as UTC.
+
+**Data flow**: It receives a datetime. If it is timezone-aware, it uses it as-is; if not, it attaches UTC. It returns the ISO/RFC3339-style string form.
+
+**Call relations**: `UsageShipper._events`, `SeatShipper._event`, and `_metronome_contract` call this when putting timestamps into Metronome requests.
+
+*Call graph*: called by 3 (_event, _events, _metronome_contract); 1 external calls (replace).
+
+
+##### `manifest`  (lines 959–1009)
+
+```
+def manifest() -> Manifest
+```
+
+**Purpose**: Declares everything this extension offers to the host system: tools, scheduled jobs, prompt guidance, and a credential slot. Without this, the host would not know how to run or expose the extension.
+
+**Data flow**: It builds and returns a `Manifest` containing four chat tools, four scheduled jobs with their candidate workspace sets, two prompt sections for the agent, and one Anthropic API key credential slot. It does not perform billing work itself.
+
+**Call relations**: The host loads this function to discover the extension. The job specs point to `_ship`, `_ship_seats`, `_ask_seat_approvals`, and `_activate_billing`; the tool definitions point to `grant_seat`, `revoke_seat`, `list_seats`, and `manage_billing`.
+
+*Call graph*: 6 external calls (__init__, __init__, __init__, __init__, metered_workspaces, member_workspaces).
+
 ## 📊 State Registers Touched
 
-- `reg-effective-config` — The running service’s merged settings, such as required keys, enabled backends, safety options, and service behavior.
-- `reg-extension-pack-manifest` — The installed pack and extension menu that says what tools, routes, jobs, skills, credentials, and backends exist.
-- `reg-workspace-tenant-record` — The customer workspace record that all users, conversations, data, tools, and billing are kept under.
-- `reg-member-session-auth` — The signed-in person’s identity and session proof used to decide who is making a request.
-- `reg-agent-profile-settings` — The saved assistant settings for a workspace, including which agent is used and what it is allowed to do.
-- `reg-conversation-thread-state` — The saved conversation identity and history that let the system continue the same thread over time.
-- `reg-turn-record-lifecycle` — The durable record of each unit of agent work, including who started it, its status, parent links, and final result.
-- `reg-durable-work-queue` — The shared queue of conversation and job work waiting to be claimed, retried, resumed, or completed by workers.
-- `reg-runtime-presence` — The live roll-call of server and worker processes used to recover abandoned work safely.
-- `reg-cancellation-state` — The shared stop signal and saved cancellation status for turns, child turns, and paused work.
-- `reg-seat-entitlement` — The workspace membership and seat-limit state that decides which people the agent may serve.
-- `reg-spend-ledger-billing` — The shared usage ledger, prices, caps, exports, and billing records used to track and limit spending.
-- `reg-model-catalog-pricing` — The shared list of available AI models, provider details, limits, credentials, and prices.
-- `reg-prompt-skill-library` — The enabled instructions, skill folders, helper profiles, and prompt versions that shape how the agent behaves.
-- `reg-source-page-sync-state` — The saved sources, pages, sync cursors, deletion markers, and retry state for imported external content.
-- `reg-search-index-memory-graph` — The shared recall stores for searchable chunks, remembered facts, memory pages, and knowledge-graph links.
-- `reg-scheduled-task-state` — The saved clock-based tasks, waits, pauses, last-run markers, and expiration times used to wake work later.
-- `reg-extension-object-store` — The durable per-workspace storage and named objects that extensions expose or update over time.
-- `reg-transcript-compaction-store` — The saved conversation transcript and compacted summaries used to rebuild context and inspect past turns.
-- `reg-self-improvement-governance-state` — Saved failure corpora, replay/evaluation results, prompt-change proposals, approvals, and guards for the self-improvement loop.
-- `reg-alert-watch-state` — Saved alert subscriptions, match rules, checkpoints, and pending notifications used to react to changed synced pages.
-- `reg-evaluation-fixture-state` — Durable fake inbox, calendar, code-search, and other test-fixture records used by evaluation jobs without touching real providers.
-- `reg-human-approval-proposal-state` — Durable proposal records for changes or actions that must be reviewed, accepted, rejected, or superseded before taking effect.
+- `reg-database-schema` — The shared database layout and migration version that define which long-term records the system can store.
+- `reg-workspace-boundary` — The current workspace or tenant boundary used to keep each customer’s data and actions separate.
+- `reg-effective-configuration` — The chosen runtime settings that tell the service how this deployment should behave.
+- `reg-pack-selection` — The selected product pack that decides which bundle of extensions, skills, and infrastructure is enabled.
+- `reg-extension-inventory` — The installed extension set and their declared capabilities, such as tools, routes, jobs, skills, and storage.
+- `reg-extension-store` — Per-workspace saved extension data that add-ons use to remember their own small pieces of state.
+- `reg-model-catalog` — The shared list of available AI models, their limits, features, provider names, and calling rules.
+- `reg-model-provider-adapters` — The shared provider clients that translate internal model requests into Anthropic, OpenAI, OpenRouter, or similar APIs.
+- `reg-pricing-table` — The shared price list used to turn model and service usage into cost records.
+- `reg-workspace-objects` — The shared records for workspaces, agents, members, conversations, artifacts, memories, sources, and other workspace objects.
+- `reg-membership-and-seats` — The shared membership, admin role, paid seat, and seat-limit state for a workspace.
+- `reg-agent-identity` — The saved identity and settings of each agent, including its main workspace role and whether it may use the internet.
+- `reg-conversation-state` — The durable conversation record that ties a surface, agent, audience, sandbox handle, and message history together.
+- `reg-turn-queue` — The durable queue of conversation turns waiting to be claimed, run, completed, cancelled, or retried.
+- `reg-source-sync-state` — The saved state of external sources, synced pages, deletion markers, cursors, and retry backoff.
+- `reg-surface-installations` — The saved Slack, web, terminal, and other surface bindings used to receive messages and send replies back.
+- `reg-background-jobs` — The shared registry and saved queue of scheduled, recurring, delayed, and administrative background work.
+- `reg-fleet-presence` — The shared record of live runtime processes used for supervision, cancellation, and recovery after crashes.
+- `reg-accounting-ledger` — The shared usage ledger that records tokens, egress, sandbox usage, billing exports, and spend-limit checks.
+- `reg-observability-context` — The shared logging, metrics, tracing, and trace-link state used to understand work across requests and subagents.
+- `reg-proposal-governance` — The saved proposals and safety checks used to govern prompt or system improvements before applying them.
+- `reg-surface-delivery-state` — Durable outbound reply/writeback state used to de-duplicate, track, retry, and complete delivery of responses to Slack, web, terminal, or other surfaces.
+- `reg-evaluation-replay-state` — Saved evaluation corpora, replay fixtures, prompt-candidate runs, scores, and comparison results used before self-improvement proposals are governed.
+- `reg-prompt-template-state` — The canonical prompt and instruction templates, versions, and digests used to assemble model prompts and guard prompt-improvement proposals against stale edits.
+- `reg-outbound-http-client-pool` — Shared outbound HTTP client/session pool state used for connection reuse, retries, and provider/API calls across model adapters, connectors, search, tools, and billing jobs.
+- `reg-acting-principal-scope` — The current acting principal context—member, agent, on-behalf-of member, and object/agent scope—used to authorize actions, attribute turns, choose grants, and keep tool work tied to the right actor.
+- `reg-evaluation-environment-state` — Persisted synthetic evaluation-environment data, such as fake email and calendar records, used by evaluation connectors and replay/test workflows without touching real external services.
