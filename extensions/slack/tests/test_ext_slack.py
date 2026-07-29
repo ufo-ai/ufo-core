@@ -3445,8 +3445,10 @@ async def test_a_dead_tail_kills_the_status_follower_and_still_clears(
         ).scalar_one()
 
     deadline = time.monotonic() + 10
-    while not [r for r in caplog.records if r.message == "slack.thread_status.dead"]:
-        assert time.monotonic() < deadline, "a dead tail never reached the event log"
+    while turn_id in slack._STATUS_TASKS or not [
+        r for r in caplog.records if r.message == "slack.thread_status.dead"
+    ]:
+        assert time.monotonic() < deadline, "a dead tail never completed follower cleanup"
         await asyncio.sleep(0.01)
 
     dead = [r for r in caplog.records if r.message == "slack.thread_status.dead"]
