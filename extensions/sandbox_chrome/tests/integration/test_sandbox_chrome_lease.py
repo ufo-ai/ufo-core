@@ -7,8 +7,8 @@ The local carrier runs each command as a host subprocess carrying the turn's egr
 probes actually run under and the one no fake carrier reproduces. The proxy refuses a destination
 that is not globally routable, so a probe that reaches Chrome only by way of the proxy cannot
 succeed; this is the live proof the whole chain (launch, the Host-rewriting proxy carrying the
-WebSocket upgrade, the resolved DevTools path, a CDP round trip) works from inside. Skips where no
-Chrome binary is present or something already holds the DevTools ports."""
+WebSocket upgrade, the resolved DevTools path, a CDP round trip) works from inside. Missing Chrome
+infrastructure fails the required integration gate and skips an optional local run."""
 
 from __future__ import annotations
 
@@ -28,6 +28,7 @@ from uuid import uuid4
 import pytest
 import ufo_ext_sandbox_chrome as ext
 import websockets
+from ufo_testsupport.plugin import integration_dependency_available
 
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import (
@@ -63,6 +64,7 @@ def _chrome() -> str | None:
         found = shutil.which(candidate) if "/" not in candidate else candidate
         if found and Path(found).exists():
             return found
+    integration_dependency_available(False, "Chrome/Chromium binary is not available")
     return None
 
 
@@ -71,12 +73,17 @@ def _port_free(port: int) -> bool:
         return probe.connect_ex(("127.0.0.1", port)) != 0
 
 
+DEVTOOLS_PORTS_FREE = integration_dependency_available(
+    all(_port_free(port) for port in (ext.BROWSER_CDP_PORT, ext.BROWSER_CDP_PROXY_PORT)),
+    "DevTools ports are already held",
+)
+
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.serial,
     pytest.mark.skipif(_chrome() is None, reason="no Chrome/Chromium binary for a live lease"),
     pytest.mark.skipif(
-        not _port_free(ext.BROWSER_CDP_PORT) or not _port_free(ext.BROWSER_CDP_PROXY_PORT),
+        not DEVTOOLS_PORTS_FREE,
         reason="the DevTools ports are already held on this machine",
     ),
 ]

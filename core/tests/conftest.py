@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from aiobotocore.session import get_session
 from botocore.exceptions import BotoCoreError, ClientError
+from ufo_testsupport.plugin import integration_dependency_available
 
 from sandbox.build_template import ROOT, pod_dockerfile
 from ufo.blob import S3BlobStore
@@ -24,18 +25,20 @@ IMAGE_BUILD_TIMEOUT_S = 1200
 CONTAINER_OP_TIMEOUT_S = 180
 
 
-def docker_or_skip(
+def run_docker_build(
     argv: list[str], *, timeout: int, stdin_text: str | None = None
 ) -> subprocess.CompletedProcess[str]:
     """Run a docker CLI command with a hard wall. A stalled image pull/build or a wedged daemon is
-    external, network-bound work; bounding it skips this docker-gated test with a clear reason
-    instead of hanging the whole suite forever (a client's wait always ends)."""
+    external, network-bound work; bounding it fails the required integration gate and skips an
+    optional local run instead of hanging the whole suite forever (a client's wait always ends)."""
     try:
         return subprocess.run(
             argv, input=stdin_text, capture_output=True, text=True, check=False, timeout=timeout
         )
     except subprocess.TimeoutExpired:
-        pytest.skip(f"docker '{argv[1]}' exceeded {timeout}s (stalled pull/build or wedged daemon)")
+        reason = f"docker '{argv[1]}' exceeded {timeout}s (stalled pull/build or wedged daemon)"
+        integration_dependency_available(False, reason)
+        pytest.skip(reason)
 
 
 def docker_or_fail(argv: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
@@ -61,15 +64,18 @@ def sandbox_image() -> str:
     """The real sandbox image every docker-gated test runs against, built once per session. Session
     scope is what the build actually is — one tag in one daemon, global to the run. A narrower scope
     rebuilds it each time the `db` param reorders tests across the owning module's boundary."""
-    if shutil.which("docker") is None:
-        pytest.skip("docker is not available")
-    built = docker_or_skip(
+    if not integration_dependency_available(
+        shutil.which("docker") is not None, "Docker executable is not available"
+    ):
+        pytest.skip("Docker executable is not available")
+    built = run_docker_build(
         ["docker", "build", "-t", SANDBOX_TEST_IMAGE, "-f", "-", str(ROOT)],
         timeout=IMAGE_BUILD_TIMEOUT_S,
         stdin_text=pod_dockerfile(),
     )
-    if built.returncode != 0:
-        pytest.skip(f"cannot build the sandbox image: {built.stderr.strip()}")
+    reason = f"sandbox image cannot be built: {built.stderr.strip()}"
+    if not integration_dependency_available(built.returncode == 0, reason):
+        pytest.skip(reason)
     return SANDBOX_TEST_IMAGE
 
 
@@ -146,8 +152,10 @@ async def _create_bucket_when_ready(store: S3BlobStore) -> None:
 
 @pytest.fixture(scope="module")
 def s3_store() -> Iterator[S3BlobStore]:
-    if shutil.which("docker") is None:
-        pytest.skip("docker is not available")
+    if not integration_dependency_available(
+        shutil.which("docker") is not None, "Docker executable is not available"
+    ):
+        pytest.skip("Docker executable is not available")
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
@@ -160,9 +168,12 @@ def s3_store() -> Iterator[S3BlobStore]:
             timeout=MINIO_OP_TIMEOUT_S,
         )
     except subprocess.TimeoutExpired:
-        pytest.skip(f"docker run minio exceeded {MINIO_OP_TIMEOUT_S}s (stalled image pull)")
-    if started.returncode != 0:
-        pytest.skip(f"docker cannot run minio: {started.stderr.strip()}")
+        reason = f"docker run minio exceeded {MINIO_OP_TIMEOUT_S}s (stalled image pull)"
+        integration_dependency_available(False, reason)
+        pytest.skip(reason)
+    reason = f"Docker cannot run minio: {started.stderr.strip()}"
+    if not integration_dependency_available(started.returncode == 0, reason):
+        pytest.skip(reason)
     container = started.stdout.strip()
     store = S3BlobStore(
         bucket=TEST_BUCKET, endpoint_url=f"http://127.0.0.1:{port}", region="us-east-1"

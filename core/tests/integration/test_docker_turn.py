@@ -4,9 +4,10 @@ turn dispatches it through the real carrier into a real container built exactly 
 builds it, and the container's real stdout is asserted from the durable transcript the turn wrote —
 nothing here asserts a fake carrier.
 
-`docker`-gated and serial (a live container + one database). Skips with a clear reason when Docker
-is absent or the image cannot build."""
+`docker`-gated and serial (a live container + one database). Missing Docker or a failed image build
+fails the required integration gate and skips an optional local run."""
 
+import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -86,7 +87,15 @@ class BashThenAnswerModel:
             yield Usage(input_tokens=1, output_tokens=1)
             return
         yield ToolCallStart(id="b1", name="bash")
-        yield ToolCallDelta(id="b1", partial_json=f'{{"command": "echo {MARKER}"}}')
+        yield ToolCallDelta(
+            id="b1",
+            partial_json=json.dumps(
+                {
+                    "command": f"echo {MARKER}",
+                    "user_description": "checking the sandbox",
+                }
+            ),
+        )
         yield Usage(input_tokens=1, output_tokens=1)
 
 

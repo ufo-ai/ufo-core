@@ -5,8 +5,8 @@ test-local cdp provider at it, and one `BuaSurface` connects and drives a real p
 read_page → get_page_text → find → a `computer` screenshot and click → tabs create/context/close.
 Nothing here
 is faked — the CDP protocol handling (WebSocket transport, DOMSnapshot + accessibility join, input
-synthesis, settle) is exercised against Chrome itself. Skips with a clear reason where no Chrome
-binary is present, so the suite stays collectable everywhere."""
+synthesis, settle) is exercised against Chrome itself. A missing Chrome binary fails the required
+integration gate and skips an optional local run."""
 
 import base64
 import os
@@ -23,6 +23,7 @@ from urllib.parse import quote
 import httpx
 import pytest
 from ufo_ext_browser.bua.backend import BuaSurface
+from ufo_testsupport.plugin import integration_dependency_available
 
 from ufo.browser import CdpEndpoint, CdpLease, FileBytes
 
@@ -52,6 +53,7 @@ def _chrome() -> str | None:
         found = shutil.which(candidate) if "/" not in candidate else candidate
         if found and Path(found).exists():
             return found
+    integration_dependency_available(False, "Chrome/Chromium binary is not available")
     return None
 
 

@@ -31,6 +31,7 @@ POSTGRES_TEST_URL = os.environ.get(
     "UFO_TEST_POSTGRES_URL",
     "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo_test",
 )
+INTEGRATION_REQUIRED_ENV = "UFO_INTEGRATION_REQUIRED"
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -44,6 +45,12 @@ def postgres_reachable() -> bool:
             return True
     except OSError:
         return False
+
+
+def integration_dependency_available(available: bool, reason: str) -> bool:
+    if not available and os.environ.get(INTEGRATION_REQUIRED_ENV):
+        raise RuntimeError(f"required integration dependency unavailable: {reason}")
+    return available
 
 
 async def reset_postgres_database(name: str) -> None:
@@ -66,8 +73,10 @@ def database_url(
         url = f"sqlite+aiosqlite:///{tmp_path_factory.mktemp('db') / 'ufo_test.db'}"
         apply_migrations(url)
         return url
-    if not postgres_reachable():
-        pytest.skip("postgres service not reachable")
+    if not integration_dependency_available(
+        postgres_reachable(), "Postgres service is not reachable"
+    ):
+        pytest.skip("Postgres service is not reachable")
     base = make_url(POSTGRES_TEST_URL)
     url = base.set(database=f"{base.database}_{worker_id}")
     dsn = url.render_as_string(hide_password=False)

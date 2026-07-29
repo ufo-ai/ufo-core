@@ -908,7 +908,11 @@ async def test_a_read_over_the_cap_offloads_without_losing_the_file_it_read(
 
     block = await engine._dispatch(
         ctx,
-        ToolUseBlock(id="call4", name="read", input={"file_path": "wide.log"}),
+        ToolUseBlock(
+            id="call4",
+            name="read",
+            input={"file_path": "wide.log", "user_description": TOOL_NARRATION},
+        ),
         {},
     )
     assert isinstance(block.content, str)

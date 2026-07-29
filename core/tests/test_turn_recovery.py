@@ -97,7 +97,18 @@ class _CountingCarrier:
     execs: list[tuple[str, ...]]
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
-        return SandboxHandle(conversation_id=spec.conversation_id, container_id="test")
+        proxy_url = f"http://{spec.run_token}:@sandbox-proxy.test"
+        return SandboxHandle(
+            conversation_id=spec.conversation_id,
+            container_id="test",
+            run_token=spec.run_token,
+            egress_env={
+                "HTTP_PROXY": proxy_url,
+                "HTTPS_PROXY": proxy_url,
+                "http_proxy": proxy_url,
+                "https_proxy": proxy_url,
+            },
+        )
 
     async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None: ...
 
@@ -299,10 +310,10 @@ def test_queued_turn_killed_mid_run_recovers_on_fresh_boot(
 ) -> None:
     """The deploy-rollout scenario, with real process death: process one runs the turn through the
     partitioned turns queue and dies via os._exit mid-round-two, leaving the workflow PENDING with
-    two recorded steps; process two boots the way `ufoctl serve` boots (sync-context DBOS.launch,
-    recovery firing during it, asyncio.run boot work continuing on the main thread) and must drive
-    the turn to a done terminal. A hang here is the prod wedge: an eternally-running turn silently
-    blocking its conversation partition."""
+    its recorded round-one steps; process two boots the way `ufoctl serve` boots (sync-context
+    DBOS.launch, recovery firing during it, asyncio.run boot work continuing on the main thread)
+    and must drive the turn to a done terminal. A hang here is the prod wedge: an eternally-running
+    turn silently blocking its conversation partition."""
     if not database_url.startswith("postgresql"):
         pytest.skip("prod-topology recovery proof runs on postgres")
     system_url = _reset_private_system_db(database_url)
@@ -356,6 +367,7 @@ def _workflow_attempts_and_steps(system_url: str, turn_id: str) -> tuple[int | N
 
 
 LIVE_PEER_WINDOW_SECONDS = 15
+ROUND_ONE_DISPATCH_STEP = 3
 
 
 @pytest.mark.serial
@@ -376,16 +388,15 @@ def test_booting_peer_leaves_live_turn_alone_then_recovers_it_after_death(
     incumbent = subprocess.Popen(
         [sys.executable, str(WORKER), "incumbent"],
         env=env,
-        stdout=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
         stderr=subprocess.STDOUT,
-        text=True,
     )
     thief = None
     try:
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
             attempts, steps = _workflow_attempts_and_steps(system_url, turn_id)
-            if 2 in steps:
+            if ROUND_ONE_DISPATCH_STEP in steps:
                 break
             assert incumbent.poll() is None, "incumbent died before reaching round two"
             time.sleep(0.5)

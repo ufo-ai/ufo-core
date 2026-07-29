@@ -7,7 +7,8 @@ redis client. Every LiveFrame kind is published (XADD) and read back (XREAD) ove
 resumed subscription replays only the frames after a cursor, and STREAM_MAXLEN trimming is asserted
 through the hub's own `covers` — a trimmed cursor stops being covered, a retained one still is.
 
-`docker`-gated: skips with a clear reason when Docker is absent or the redis image cannot start."""
+`docker`-gated: missing infrastructure fails the required integration gate and skips an optional
+local run."""
 
 import asyncio
 import shutil
@@ -23,6 +24,7 @@ import ufo_ext_redis_hub.stream_hub as stream_hub
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 from ufo_ext_redis_hub.stream_hub import STREAM_PREFIX, RedisStreamHub
+from ufo_testsupport.plugin import integration_dependency_available
 
 from ufo.hub import CostTick, LiveFrame, Parked, SkillLoad, Terminal, ToolCall
 from ufo.models.interface import TextDelta
@@ -60,8 +62,10 @@ async def _ping(url: str) -> None:
 
 @pytest.fixture
 def redis_url() -> Iterator[str]:
-    if shutil.which("docker") is None:
-        pytest.skip("docker is not available")
+    if not integration_dependency_available(
+        shutil.which("docker") is not None, "Docker executable is not available"
+    ):
+        pytest.skip("Docker executable is not available")
     port = _free_port()
     started = subprocess.run(
         ["docker", "run", "-d", "--rm", "-p", f"{port}:6379", REDIS_IMAGE],
@@ -69,8 +73,9 @@ def redis_url() -> Iterator[str]:
         text=True,
         check=False,
     )
-    if started.returncode != 0:
-        pytest.skip(f"docker cannot run {REDIS_IMAGE}: {started.stderr.strip()}")
+    reason = f"Docker cannot run {REDIS_IMAGE}: {started.stderr.strip()}"
+    if not integration_dependency_available(started.returncode == 0, reason):
+        pytest.skip(reason)
     container = started.stdout.strip()
     url = f"redis://127.0.0.1:{port}/0"
     try:
@@ -81,7 +86,9 @@ def redis_url() -> Iterator[str]:
                 break
             except RedisError:
                 if time.monotonic() >= deadline:
-                    pytest.skip(f"redis container ({container}) did not become ready in time")
+                    reason = f"Redis container ({container}) did not become ready in time"
+                    integration_dependency_available(False, reason)
+                    pytest.skip(reason)
                 time.sleep(READY_POLL_S)
         yield url
     finally:

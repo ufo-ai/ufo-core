@@ -3,11 +3,11 @@
 Two phases, two real processes against one shared DBOS system database — the prod topology a
 deploy rollout creates. `crash` runs a turn through the real partitioned turns queue and dies with
 `os._exit` mid-round-two, exactly a killed pod: the workflow stays PENDING with its queue
-assignment and two recorded steps. `recover` boots the way `ufoctl serve` boots — runtime installed,
-`DBOS.launch()` from the sync main thread (recovery fires there), then the main thread keeps running
-`asyncio.run(...)` work the way serve's remaining boot does — and must drive the recovered turn to
-its terminal. On timeout it dumps every task on the DBOS background loop, so a hang names its exact
-suspension point in the output the test surfaces."""
+assignment and recorded round-one steps. `recover` boots the way `ufoctl serve` boots — runtime
+installed, `DBOS.launch()` from the sync main thread (recovery fires there), then the main thread
+keeps running `asyncio.run(...)` work the way serve's remaining boot does — and must drive the
+recovered turn to its terminal. On timeout it dumps every task on the DBOS background loop, so a
+hang names its exact suspension point in the output the test surfaces."""
 
 import asyncio
 import faulthandler
@@ -69,6 +69,7 @@ THIEF_WAIT_SECONDS = 600
 RECOVERY_WAIT_SECONDS = 30
 INCUMBENT_ROUND_TWO_SECONDS = 6.0
 THIEF_ROUND_TWO_SECONDS = 12.0
+BASH_USER_DESCRIPTION = "running a check"
 
 
 def _rounds_completed(request: ModelRequest) -> int:
@@ -76,7 +77,9 @@ def _rounds_completed(request: ModelRequest) -> int:
         1
         for message in request.messages
         if isinstance(message.content, tuple)
-        and any(isinstance(block, ToolResultBlock) for block in message.content)
+        and any(
+            isinstance(block, ToolResultBlock) and not block.is_error for block in message.content
+        )
     )
 
 
@@ -97,7 +100,15 @@ class _PacedModel:
         match _rounds_completed(request):
             case 0:
                 yield ToolCallStart(id="c1", name="bash")
-                yield ToolCallDelta(id="c1", partial_json='{"command": "echo one"}')
+                yield ToolCallDelta(
+                    id="c1",
+                    partial_json=json.dumps(
+                        {
+                            "command": "echo one",
+                            "user_description": BASH_USER_DESCRIPTION,
+                        }
+                    ),
+                )
                 yield Usage(input_tokens=2, output_tokens=2)
             case 1:
                 deadline = asyncio.get_running_loop().time() + self.round_two_seconds
@@ -105,7 +116,15 @@ class _PacedModel:
                     yield TextDelta(text="pacing ")
                     await asyncio.sleep(0.2)
                 yield ToolCallStart(id="c2", name="bash")
-                yield ToolCallDelta(id="c2", partial_json='{"command": "echo two"}')
+                yield ToolCallDelta(
+                    id="c2",
+                    partial_json=json.dumps(
+                        {
+                            "command": "echo two",
+                            "user_description": BASH_USER_DESCRIPTION,
+                        }
+                    ),
+                )
                 yield Usage(input_tokens=2, output_tokens=2)
             case _:
                 if self.endless:
@@ -125,7 +144,12 @@ class _CrashModel:
             yield TextDelta(text="about to die")
             os._exit(CRASH_EXIT_CODE)
         yield ToolCallStart(id="c1", name="bash")
-        yield ToolCallDelta(id="c1", partial_json='{"command": "echo hi"}')
+        yield ToolCallDelta(
+            id="c1",
+            partial_json=json.dumps(
+                {"command": "echo hi", "user_description": BASH_USER_DESCRIPTION}
+            ),
+        )
         yield Usage(input_tokens=2, output_tokens=2)
 
 
@@ -143,7 +167,18 @@ class _AnswerModel:
 @dataclass(frozen=True)
 class _EchoCarrier:
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
-        return SandboxHandle(conversation_id=spec.conversation_id, container_id="test")
+        proxy_url = f"http://{spec.run_token}:@sandbox-proxy.test"
+        return SandboxHandle(
+            conversation_id=spec.conversation_id,
+            container_id="test",
+            run_token=spec.run_token,
+            egress_env={
+                "HTTP_PROXY": proxy_url,
+                "HTTPS_PROXY": proxy_url,
+                "http_proxy": proxy_url,
+                "https_proxy": proxy_url,
+            },
+        )
 
     async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None: ...
 

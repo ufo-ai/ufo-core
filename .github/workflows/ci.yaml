@@ -95,13 +95,17 @@ jobs:
       - run: uv sync
       - run: uv run --project control pytest control/tests --ignore=control/tests/test_rls.py -q
 
+  integration:
+    uses: ./.github/workflows/integration.yaml
+
   test:
     if: always()
-    needs: [test-shard, control-test]
+    needs: [test-shard, control-test, integration]
     runs-on: ubuntu-latest
     steps:
       - run: test "${{ needs.test-shard.result }}" = success
       - run: test "${{ needs.control-test.result }}" = success
+      - run: test "${{ needs.integration.result }}" = success
 
   # The workspace RLS proof uses its own SUPERUSER Postgres on :5544 (never the parallel
   # suite's :5541). Setup CREATEs roles + databases, applies RLS
