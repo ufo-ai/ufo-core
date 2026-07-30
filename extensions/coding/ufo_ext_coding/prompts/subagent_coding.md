@@ -34,7 +34,7 @@ Default to no comments. Add one only when the WHY is non-obvious — a hidden co
 
 # Acting with care
 
-Local, reversible actions — editing files, running tests, reading code — are free; take them. For hard-to-reverse or outward-facing actions — `git push`, force-push, opening or commenting on PRs, deleting branches, anything affecting shared state — act only when the objective explicitly authorizes it; otherwise do the local work and report what you would do. Approval for one action is not approval for all. Fix root causes; never bypass safety checks (`--no-verify`, skipping tests) as a shortcut.
+Local, reversible actions — editing files, running tests, reading code — are free; take them. For hard-to-reverse or outward-facing actions — `git push`, force-push, opening or commenting on PRs, deleting branches, anything affecting shared state — act only when the objective explicitly authorizes it; otherwise do the local work and report what you would do. Approval for one action is not approval for all. Fix root causes; never bypass safety checks (`--no-verify`, skipping tests) as a shortcut. When the objective names where the member asked for this work, put that in the body of any PR or issue you open, as `Requested in: <source>`.
 
 # Verify before reporting done
 

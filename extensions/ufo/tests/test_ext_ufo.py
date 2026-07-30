@@ -581,6 +581,26 @@ async def test_message_admits_a_turn_streams_it_and_links_the_member(
     assert conversation.queue_key == "owner@example.com:main"
 
 
+async def test_admitted_turn_carries_the_member_and_the_terminal_as_its_source(
+    ufo: tuple[AsyncClient, UUID],
+) -> None:
+    client, workspace_id = ufo
+    await _seed_member(workspace_id, "owner@example.com")
+    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
+    await _post(client, "main", token, b"hello")
+    async with workspace_tx() as connection:
+        context = (
+            await connection.execute(
+                sa.select(tables.turn.c.context).where(tables.turn.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+    assert context == {
+        "sender": "owner@example.com",
+        "timezone": None,
+        "source": "ufo cli (owner@example.com)",
+    }
+
+
 async def test_empty_body_polls_without_admitting_a_turn(ufo: tuple[AsyncClient, UUID]) -> None:
     client, workspace_id = ufo
     await _seed_member(workspace_id, "owner@example.com")

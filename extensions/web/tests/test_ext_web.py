@@ -321,12 +321,22 @@ async def test_web_turn_round_trip_admits_streams_and_links_identity(
                 )
             )
         ).one_or_none()
+        context = (
+            await connection.execute(
+                sa.select(tables.turn.c.context).where(tables.turn.c.id == UUID(turn_id))
+            )
+        ).scalar_one()
     assert linked.member_id == member_id
     assert conversation.surface == "web"
     assert conversation.member_id == member_id
     assert conversation.agent_id == agent_id
     assert conversation.queue_key == f"{agent_id}/owner@example.com"
     assert writeback is None
+    assert context == {
+        "sender": "owner@example.com",
+        "timezone": None,
+        "source": "ufo web (owner@example.com)",
+    }
     transcript = await client.get(
         f"/surface/web/agents/{agent_id}/transcript",
         headers={"cookie": f"{SESSION_COOKIE}={token}"},

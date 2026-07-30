@@ -31,6 +31,8 @@ Before calling `spawn_subagent(profile="coding", ...)`, choose exactly one setup
 
 A coding subagent should not spend startup time deciding whether to clone.
 
+When the requesting message's `<context>` carries a `source`, put it in the objective too — a subagent never sees the parent's context — so a PR or issue it opens can name where the request came from.
+
 ## Connecting GitHub for private repositories
 
 A private clone or push needs the workspace connected, and only a workspace admin can do it. Call `connect_github` and give them the link it returns. On GitHub they choose the organization and which repositories the ufo App may reach; GitHub returns them to ufo and the connection completes itself. Nothing is pasted back and no id or token is ever typed — GitHub confirms under that admin's authorization that they reach the installation. The link is single-purpose and expires shortly, so mint a fresh one rather than reusing an old message.

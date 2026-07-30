@@ -32,9 +32,11 @@ from ufo.sdk.surfaces import (
     SurfaceAuth,
     SurfaceContext,
     SurfaceRoute,
+    TurnContext,
 )
 
 SURFACE_UFO = "ufo"
+SOURCE = "ufo cli"
 PROMPT = ">"
 POLL_SECONDS = 1
 MAX_MESSAGE_BYTES = 40_000
@@ -236,7 +238,14 @@ async def channel(ctx: SurfaceContext, request: Request) -> Response:
     else:
         if len(body.encode()) > MAX_MESSAGE_BYTES:
             return PlainTextResponse("message too large", status_code=413)
-        turn_id = (await ctx.admit(conversation_id, body, speaker_member_id=member_id)).turn_id
+        turn_id = (
+            await ctx.admit(
+                conversation_id,
+                body,
+                context=TurnContext(sender=email, source=f"{SOURCE} ({email})"),
+                speaker_member_id=member_id,
+            )
+        ).turn_id
     connect = None if member_id is None else partial(ctx.connect_url, turn_id, member_id)
     return StreamingResponse(
         stream_directives(

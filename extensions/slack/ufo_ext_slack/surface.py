@@ -120,6 +120,7 @@ SLACK_SIGNING_SECRET_ENV = "SLACK_SIGNING_SECRET"
 SLACK_AUTH_TEST_URL = "https://slack.com/api/auth.test"
 SLACK_OAUTH_AUTHORIZE_URL = "https://slack.com/oauth/v2/authorize"
 SLACK_OAUTH_ACCESS_URL = "https://slack.com/api/oauth.v2.access"
+SLACK_GET_PERMALINK_URL = "https://slack.com/api/chat.getPermalink"
 SLACK_OAUTH_CALLBACK_PATH = "oauth"
 SLACK_INSTALL_PAYLOAD = "slack-oauth-install"
 SLACK_INSTALL_TIMEOUT_SECONDS = 20
@@ -1160,9 +1161,10 @@ async def ingest(ctx: SurfaceContext, request: Request) -> Response:
     if inbound is None:
         return JSONResponse({"ok": True, "ignored": True})
     bot_token = await ctx.credential(SLACK_BOT_TOKEN_SLOT)
-    sender, context = await asyncio.gather(
+    sender, context, source = await asyncio.gather(
         _slack_user(bot_token, inbound.slack_user_id),
         _ambient_context(ctx, bot_token, inbound, identity),
+        _slack_permalink(bot_token, inbound.queue_key.partition(":")[0], inbound.ts),
     )
     member_id = await _resolve_member(ctx, inbound.slack_user_id, inbound.is_dm, sender)
     audience = conversation_audience(member_id) if inbound.audience is None else inbound.audience
@@ -1175,7 +1177,7 @@ async def ingest(ctx: SurfaceContext, request: Request) -> Response:
         conversation_id,
         body,
         idempotency_key=inbound.message_id,
-        context=_turn_context(sender),
+        context=_turn_context(sender, source),
         speaker_member_id=member_id,
     )
     _track_status(ctx, admitted.turn_id, inbound.queue_key, inbound.ts)
@@ -1315,21 +1317,45 @@ async def _slack_user(bot_token: str, slack_user_id: str) -> SlackUser | None:
     )
 
 
-def _turn_context(sender: SlackUser | None) -> TurnContext:
-    """The admitted turn's ambient context from the sender read; a timezone Slack reports that is
-    not a known zone is dropped with a log rather than failing the member's message."""
+async def _slack_permalink(bot_token: str, channel: str, ts: str) -> str | None:
+    """Slack's own link to one message — the member's for an inbound, the answered question's for a
+    button click — which the agent carries into anything it creates for that request. Fetched rather
+    than composed: the permalink anchors the message, with its thread parameters when it is a reply,
+    which the ids in hand cannot express, since a DM is keyed by channel alone. Needs no scope of
+    its own and shares the sender read's short timeout; a failed read logs and the turn is admitted
+    with no source rather than one that points at the wrong place."""
+    try:
+        async with httpx.AsyncClient(timeout=AMBIENT_FETCH_TIMEOUT_SECONDS) as client:
+            payload = await _slack_ok(
+                client.get(
+                    SLACK_GET_PERMALINK_URL,
+                    params={"channel": channel, "message_ts": ts},
+                    headers={"Authorization": f"Bearer {bot_token}"},
+                )
+            )
+    except Exception as error:
+        _LOG.warning("slack permalink failed for %s in %s: %s", ts, channel, error)
+        return None
+    permalink = payload.get("permalink")
+    return permalink if isinstance(permalink, str) and permalink else None
+
+
+def _turn_context(sender: SlackUser | None, source: str | None) -> TurnContext:
+    """The admitted turn's ambient context from the sender read plus the permalink to the member's
+    message; a timezone Slack reports that is not a known zone is dropped with a log rather than
+    failing the member's message."""
     if sender is None:
-        return TurnContext()
+        return TurnContext(source=source)
     line = (
         f"{sender.name} ({sender.email})"
         if sender.name and sender.email
         else sender.name or sender.email
     )
     try:
-        return TurnContext(sender=line, timezone=sender.timezone)
+        return TurnContext(sender=line, timezone=sender.timezone, source=source)
     except ValidationError:
         _LOG.warning("slack timezone %r is not a known zone; dropped", sender.timezone)
-        return TurnContext(sender=line)
+        return TurnContext(sender=line, source=source)
 
 
 async def _resolve_member(
@@ -2046,13 +2072,18 @@ async def interactive(ctx: SurfaceContext, request: Request) -> Response:
                     text = f"Complete the connection privately: <{url}|Open authorization>"
             _ephemeral_in_background(ctx, click, text)
         case AnswerClick():
-            bot_token = await ctx.credential(SLACK_BOT_TOKEN_SLOT)
-            if member_id is None:
-                sender = await _slack_user(bot_token, click.slack_user_id)
-                member_id = await _resolve_member(ctx, click.slack_user_id, click.is_dm, sender)
             conversation_id = await ctx.find_conversation(click.queue_key)
             if conversation_id is None:
                 return JSONResponse({"ok": True, "ignored": True})
+            bot_token = await ctx.credential(SLACK_BOT_TOKEN_SLOT)
+            if member_id is None:
+                sender, answered_at = await asyncio.gather(
+                    _slack_user(bot_token, click.slack_user_id),
+                    _slack_permalink(bot_token, click.channel, click.message_ts),
+                )
+                member_id = await _resolve_member(ctx, click.slack_user_id, click.is_dm, sender)
+            else:
+                answered_at = await _slack_permalink(bot_token, click.channel, click.message_ts)
             if click.is_dm and member_id is not None:
                 conversation_id = await ctx.conversation_for(
                     click.queue_key, conversation_audience(member_id)
@@ -2063,6 +2094,7 @@ async def interactive(ctx: SurfaceContext, request: Request) -> Response:
                 conversation_id,
                 body,
                 idempotency_key=answer_key,
+                context=TurnContext(source=answered_at),
                 speaker_member_id=member_id,
             )
             _track_status(ctx, admitted.turn_id, click.queue_key, click.message_ts)

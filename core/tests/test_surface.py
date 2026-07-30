@@ -828,7 +828,11 @@ async def test_admitted_context_round_trips_to_the_loaded_turn(db: None, tmp_pat
     workspace_id, _, member_id = await _seed(member_email="bee@example.com")
     context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
     conversation_id = await context.conversation_for("C1:1.0", SHARED_AUDIENCE)
-    ambient = TurnContext(sender="Bee Jones (bee@example.com)", timezone="America/New_York")
+    ambient = TurnContext(
+        sender="Bee Jones (bee@example.com)",
+        timezone="America/New_York",
+        source="https://app.slack.com/client/T1/C1/thread/C1-1.0",
+    )
     admitted = await context.admit(
         conversation_id,
         "hello",

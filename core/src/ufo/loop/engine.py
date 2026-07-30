@@ -446,10 +446,10 @@ def _parse_args(partials: list[str]) -> dict[str, object]:
 
 def _context_tag(message_id: UUID, context: TurnContext | None, admitted_at: datetime) -> str:
     """The <context> tag rendered before a member inbound: the admission moment (in the sender's
-    zone when the surface supplied one, else UTC) and the sender the surface named. The persisted
-    moment — the turn row's for the founding message, the queue row's for a drained arrival —
-    never the wall clock, so a queued, parked, or replayed message keeps the time the member
-    actually spoke."""
+    zone when the surface supplied one, else UTC), the sender the surface named, and the source it
+    named for the request. The persisted moment — the turn row's for the founding message, the queue
+    row's for a drained arrival — never the wall clock, so a queued, parked, or replayed message
+    keeps the time the member actually spoke."""
     zone = ZoneInfo(context.timezone) if context is not None and context.timezone else UTC
     lines = [
         f"message_ref: {message_id}",
@@ -457,6 +457,8 @@ def _context_tag(message_id: UUID, context: TurnContext | None, admitted_at: dat
     ]
     if context is not None and context.sender:
         lines.append(f"sender: {context.sender}")
+    if context is not None and context.source:
+        lines.append(f"source: {context.source}")
     return "<context>\n" + "\n".join(lines) + "\n</context>\n"
 
 
@@ -613,9 +615,10 @@ class TranscriptRepair:
 
     async def load_messages(self) -> tuple[Message, ...]:
         """Prior transcript plus this turn's inbound, prefixed with the <context> tag on a member
-        turn — the model has no clock, so the tag carries the admission moment and the sender, and
-        it persists into the transcript so each past exchange keeps its moment. A subagent's
-        inbound stays the bare schema payload its profile contract promises."""
+        turn — the model has no clock, so the tag carries the admission moment, the sender, and the
+        source the surface named, and it persists into the transcript so each past exchange keeps
+        its moment. A subagent's inbound stays the bare schema payload its profile
+        contract promises."""
         inbound = self.turn.inbound
         if self.turn.subagent_profile is None:
             inbound = _context_tag(self.turn.id, self.turn.context, self.turn.created_at) + inbound

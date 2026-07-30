@@ -104,6 +104,7 @@ REAL_ASYNC_CLIENT = httpx.AsyncClient
 
 EVENTS_PATH = "/surface/slack"
 INTERACTIVE_PATH = f"{EVENTS_PATH}/interactive"
+READ_OVERLAP_DEADLINE_SECONDS = 2.0
 
 
 @pytest.fixture(autouse=True)
@@ -174,6 +175,14 @@ class StubDbos:
         self.enqueued.append(workflow_id)
 
 
+def _permalink(params: httpx.QueryParams) -> str:
+    """`chat.getPermalink` as Slack answers it: the workspace's own domain, the channel, the message
+    stamped without its dot, and the thread parameters that anchor a reply inside its thread."""
+    channel, ts = str(params.get("channel")), str(params.get("message_ts"))
+    stamp = ts.replace(".", "")
+    return f"https://acme.slack.com/archives/{channel}/p{stamp}?thread_ts={ts}&cid={channel}"
+
+
 def _mock_transport(
     recorder: list[httpx.Request],
     users: dict[str, str],
@@ -213,6 +222,10 @@ def _mock_transport(
             slack.SLACK_CONVERSATIONS_HISTORY_URL,
         ):
             return httpx.Response(200, json={"ok": True, "messages": []})
+        if url == slack.SLACK_GET_PERMALINK_URL:
+            return httpx.Response(
+                200, json={"ok": True, "permalink": _permalink(request.url.params)}
+            )
         if url == slack.SLACK_CONVERSATIONS_INFO_URL:
             channel_id = str(request.url.params.get("channel"))
             configured = None if channels is None else channels.get(channel_id, {})
@@ -658,17 +671,44 @@ def test_ambient_digest_filters_and_bounds() -> None:
 
 
 def test_turn_context_composes_the_sender_line_and_drops_an_unknown_timezone() -> None:
+    link = "https://acme.slack.com/archives/C9/p1005?thread_ts=100.5&cid=C9"
     full = slack._turn_context(
-        slack.SlackUser(name="Bee Jones", email="bee@example.com", timezone="America/New_York")
+        slack.SlackUser(name="Bee Jones", email="bee@example.com", timezone="America/New_York"),
+        link,
     )
-    assert (full.sender, full.timezone) == ("Bee Jones (bee@example.com)", "America/New_York")
+    assert (full.sender, full.timezone, full.source) == (
+        "Bee Jones (bee@example.com)",
+        "America/New_York",
+        link,
+    )
     degraded = slack._turn_context(
-        slack.SlackUser(name="Bee Jones", email=None, timezone="Mars/Olympus_Mons")
+        slack.SlackUser(name="Bee Jones", email=None, timezone="Mars/Olympus_Mons"), link
     )
-    assert (degraded.sender, degraded.timezone) == ("Bee Jones", None)
-    assert slack._turn_context(None) == slack._turn_context(
-        slack.SlackUser(name=None, email=None, timezone=None)
+    assert (degraded.sender, degraded.timezone, degraded.source) == ("Bee Jones", None, link)
+    assert slack._turn_context(None, link) == slack._turn_context(
+        slack.SlackUser(name=None, email=None, timezone=None), link
     )
+    assert slack._turn_context(None, None).source is None
+
+
+async def test_permalink_anchors_the_message_and_a_refused_read_leaves_no_link(
+    monkeypatch,
+) -> None:
+    recorder: list[httpx.Request] = []
+    _patch_httpx(monkeypatch, _mock_transport(recorder, {}))
+    assert await slack._slack_permalink(BOT_TOKEN, "D7", "100.5") == (
+        "https://acme.slack.com/archives/D7/p1005?thread_ts=100.5&cid=D7"
+    )
+    asked = _fetches(recorder, slack.SLACK_GET_PERMALINK_URL)[0]
+    assert (asked.url.params.get("channel"), asked.url.params.get("message_ts")) == ("D7", "100.5")
+
+    _patch_httpx(
+        monkeypatch,
+        httpx.MockTransport(
+            lambda _: httpx.Response(200, json={"ok": False, "error": "message_not_found"})
+        ),
+    )
+    assert await slack._slack_permalink(BOT_TOKEN, "D7", "100.5") is None
 
 
 async def test_bad_signature_is_rejected(db: None, tmp_path, monkeypatch) -> None:
@@ -1508,6 +1548,7 @@ async def test_dm_links_member_by_email_and_status_anchors_to_the_message(
     assert turn_context == {
         "sender": "Bee Jones (bee@example.com)",
         "timezone": "America/New_York",
+        "source": "https://acme.slack.com/archives/D9/p70?thread_ts=7.0&cid=D9",
     }
 
 
@@ -1541,6 +1582,38 @@ async def test_channel_persists_the_speaker_without_claiming_the_conversation(
         ).one()
     assert row.speaker_member_id == member_id
     assert row.member_id is None
+
+
+async def test_threaded_channel_reply_asks_for_its_own_permalink_not_the_threads(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    workspace_id, _ = await _seed(member_email="bee@example.com")
+    recorder: list[httpx.Request] = []
+    _, client, _ = await _mount(
+        monkeypatch, workspace_id, tmp_path, recorder, users={"UBEE": "bee@example.com"}
+    )
+    mention = _event_body(
+        type="app_mention",
+        user="UBEE",
+        channel="C9",
+        ts="10.0",
+        thread_ts="9.0",
+        text=f"<@{BOT_USER_ID}> ship it",
+    )
+    async with client:
+        response = await client.post(
+            EVENTS_PATH, content=mention, headers=_sign(mention, int(time.time()))
+        )
+    assert response.status_code == 200
+    asked = _fetches(recorder, slack.SLACK_GET_PERMALINK_URL)[0]
+    assert (asked.url.params.get("channel"), asked.url.params.get("message_ts")) == ("C9", "10.0")
+    async with workspace_tx() as connection:
+        context = (
+            await connection.execute(
+                sa.select(tables.turn.c.context).where(tables.turn.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+    assert context["source"] == ("https://acme.slack.com/archives/C9/p100?thread_ts=10.0&cid=C9")
 
 
 async def _loaded_audiences(workspace_id: UUID) -> dict[str, str]:
@@ -4924,6 +4997,93 @@ async def _seed_answer_conversation(workspace_id: UUID, queue_key: str = "C5:200
     return conversation_id
 
 
+async def test_a_click_on_a_conversation_this_workspace_has_none_of_reads_nothing(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    workspace_id, _ = await _seed(member_email="bee@example.com")
+    recorder: list[httpx.Request] = []
+    _, client, _ = await _mount(
+        monkeypatch, workspace_id, tmp_path, recorder, users={"U9": "bee@example.com"}
+    )
+    click = _click_body()
+    async with client:
+        response = await client.post(INTERACTIVE_PATH, content=click, headers=_signed_form(click))
+    assert response.json() == {"ok": True, "ignored": True}
+    assert _fetches(recorder, slack.SLACK_USERS_INFO_URL) == []
+    assert _fetches(recorder, slack.SLACK_GET_PERMALINK_URL) == []
+
+
+async def test_a_click_whose_member_is_linked_still_sources_its_answer(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    workspace_id, member_id = await _seed(member_email="bee@example.com")
+    await _seed_answer_conversation(workspace_id)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.surface_identity).values(
+                workspace_id=workspace_id,
+                member_id=member_id,
+                surface=slack.SURFACE_SLACK,
+                external_id="U9",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    recorder: list[httpx.Request] = []
+    _, client, _ = await _mount(
+        monkeypatch, workspace_id, tmp_path, recorder, users={"U9": "bee@example.com"}
+    )
+    click = _click_body()
+    async with client:
+        await client.post(INTERACTIVE_PATH, content=click, headers=_signed_form(click))
+        await asyncio.gather(*slack._REWRITE_TASKS)
+    async with workspace_tx() as connection:
+        context = (
+            await connection.execute(
+                sa.select(tables.turn.c.context).where(tables.turn.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+    assert context["source"] == (
+        "https://acme.slack.com/archives/C5/p999100?thread_ts=999.100&cid=C5"
+    )
+    assert _fetches(recorder, slack.SLACK_USERS_INFO_URL) == []
+    assert len(_fetches(recorder, slack.SLACK_GET_PERMALINK_URL)) == 1
+
+
+async def test_an_unlinked_clickers_two_reads_run_together(db: None, tmp_path, monkeypatch) -> None:
+    workspace_id, _ = await _seed(member_email="bee@example.com")
+    await _seed_answer_conversation(workspace_id)
+    recorder: list[httpx.Request] = []
+    base = _mock_transport(recorder, {"U9": "bee@example.com"})
+    permalinked = asyncio.Event()
+
+    async def gated(request: httpx.Request) -> httpx.Response:
+        url = str(request.url).split("?")[0]
+        if url == slack.SLACK_USERS_INFO_URL:
+            await asyncio.wait_for(permalinked.wait(), READ_OVERLAP_DEADLINE_SECONDS)
+        response = base.handler(request)
+        if url == slack.SLACK_GET_PERMALINK_URL:
+            permalinked.set()
+        return response
+
+    _, client, _ = await _mount_transport(
+        monkeypatch, workspace_id, tmp_path, httpx.MockTransport(gated)
+    )
+    click = _click_body()
+    async with client:
+        await client.post(INTERACTIVE_PATH, content=click, headers=_signed_form(click))
+        await asyncio.gather(*slack._REWRITE_TASKS)
+    async with workspace_tx() as connection:
+        linked = (
+            await connection.execute(
+                sa.select(tables.surface_identity.c.member_id).where(
+                    tables.surface_identity.c.external_id == "U9"
+                )
+            )
+        ).one_or_none()
+    assert linked is not None and linked.member_id is not None
+
+
 async def test_dm_answer_click_claims_the_conversation_for_its_resolved_member(
     db: None, tmp_path, monkeypatch
 ) -> None:
@@ -5162,15 +5322,19 @@ async def test_each_question_row_takes_its_own_answer(db: None, tmp_path, monkey
     async with workspace_tx() as connection:
         turns = (
             await connection.execute(
-                sa.select(tables.turn.c.inbound, tables.turn.c.idempotency_key).where(
-                    tables.turn.c.workspace_id == workspace_id
-                )
+                sa.select(
+                    tables.turn.c.inbound,
+                    tables.turn.c.idempotency_key,
+                    tables.turn.c.context,
+                ).where(tables.turn.c.workspace_id == workspace_id)
             )
         ).all()
         arrivals = (
             await connection.execute(
                 sa.select(
-                    tables.inbound_message.c.body, tables.inbound_message.c.idempotency_key
+                    tables.inbound_message.c.body,
+                    tables.inbound_message.c.idempotency_key,
+                    tables.inbound_message.c.context,
                 ).where(tables.inbound_message.c.workspace_id == workspace_id)
             )
         ).all()
@@ -5180,6 +5344,9 @@ async def test_each_question_row_takes_its_own_answer(db: None, tmp_path, monkey
     assert [(arrival.idempotency_key, arrival.body) for arrival in arrivals] == [
         ("C5:200.0:999.100:answer:0", "[Answered by <@U9> via button] Ship")
     ]
+    answered_at = "https://acme.slack.com/archives/C5/p999100?thread_ts=999.100&cid=C5"
+    assert [turn.context["source"] for turn in turns] == [answered_at]
+    assert [arrival.context["source"] for arrival in arrivals] == [answered_at]
 
     rewrites = [
         json.loads(request.content)

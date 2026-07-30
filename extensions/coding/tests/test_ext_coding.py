@@ -52,6 +52,15 @@ def test_coding_profile_raises_the_round_budget() -> None:
     assert coding.CODING_PROFILE.max_rounds == 100
 
 
+def test_both_prompt_ends_carry_the_source_through_the_objective() -> None:
+    instructions = skill_registry((coding.manifest(),)).named("coding").instructions
+    assert "requesting message's `<context>` carries a `source`" in instructions
+    assert "put it in the objective" in instructions
+    assert "the objective names where the member asked" in coding.CODING_PROMPT
+    assert "Requested in: <source>" in coding.CODING_PROMPT
+    assert "input carries" not in coding.CODING_PROMPT
+
+
 def test_extended_context_survives_the_spawn_payload_serialization() -> None:
     spawned = coding.CodingInput.model_validate({"objective": "x", "extended_context": True})
     assert json.loads(spawned.model_dump_json())["extended_context"] is True

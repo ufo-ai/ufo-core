@@ -3008,8 +3008,9 @@ async def test_member_turn_carries_the_context_tag_and_a_subagent_turn_does_not(
     the admission moment — rendered from the turn's persisted stamp, never the wall clock, so a
     queued, parked, or replayed turn keeps the time the member actually spoke — in the sender's
     zone with the sender named when the surface supplied them, UTC alone otherwise; the tagged
-    form is what persists into the transcript. A subagent turn's inbound stays the bare schema
-    payload its profile contract promises."""
+    form is what persists into the transcript. A surface that knows where the message came from
+    adds a source line the model can quote back into anything it creates. A subagent turn's
+    inbound stays the bare schema payload its profile contract promises."""
     plain = await _seed_turn("queued", None)
     model = CapturingModel()
     engine = _engine(plain, model, tmp_path)
@@ -3035,6 +3036,25 @@ async def test_member_turn_carries_the_context_tag_and_a_subagent_turn_does_not(
         f"message_ref: {placed.id}\n"
         "time: Friday 2026-07-10 03:32 JST\n"
         "sender: Marshall Rich (marshall@metalcraft.ai)\n"
+        "</context>\n"
+        "hi"
+    )
+    linked = (await _seed_turn("queued", None)).model_copy(
+        update={
+            "context": TurnContext(
+                sender="Marshall Rich",
+                source="https://app.slack.com/client/T1/C9/thread/C9-100.5",
+            )
+        }
+    )
+    linked_model = CapturingModel()
+    await _engine(linked, linked_model, tmp_path).run()
+    assert linked_model.seen[0][-1].content == (
+        "<context>\n"
+        f"message_ref: {linked.id}\n"
+        "time: Thursday 2026-07-09 18:32 UTC\n"
+        "sender: Marshall Rich\n"
+        "source: https://app.slack.com/client/T1/C9/thread/C9-100.5\n"
         "</context>\n"
         "hi"
     )

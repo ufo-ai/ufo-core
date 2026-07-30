@@ -41,6 +41,13 @@ def test_shell_requires_message_authority_for_admin_actions() -> None:
     assert "Omit it only for conversation-common work." in SHELL
 
 
+def test_shell_asks_for_the_source_without_naming_a_surface() -> None:
+    assert "may also carry a `source`" in SHELL
+    assert "Requested in: <source>" in SHELL
+    for surface in ("Slack", "slack", "ufo cli", "ufo web", "permalink"):
+        assert surface not in SHELL
+
+
 def test_digest_is_stable_for_equal_content_and_shifts_with_it() -> None:
     first = render_system_prompt("A", (), knowledge_cutoff="2026-01")
     again = render_system_prompt("A", (), knowledge_cutoff="2026-01")

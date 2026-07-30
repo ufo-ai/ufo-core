@@ -798,11 +798,12 @@ class SurfaceContext:
         a surface never names one. Delivery is admission's concern, derived from the conversation's
         surface: a durable-surface turn registers for the poller atomically with its row, a live
         surface's turn registers nothing and its member tails the hub — the surface supplies only
-        the message, its idempotency key, and the ambient `TurnContext` (sender, timezone) the
-        engine renders before the inbound. A redelivery deduped to the turn already admitted joins
-        it, as does a follow-up folded into a live one. A prepared `intent` (a panel's form submit)
-        admits a turn that dispatches that one tool call verbatim instead of running model rounds —
-        it requires the speaking member, its admission never folds into a live turn (each submit
+        the message, its idempotency key, and the ambient `TurnContext` (sender, timezone, and the
+        source — where the member said it, in whatever form this surface can name) the engine
+        renders before the inbound. A redelivery deduped to the turn already admitted joins it, as
+        does a follow-up folded into a live one. A prepared `intent` (a panel's form submit) admits
+        a turn that dispatches that one tool call verbatim instead of running model rounds — it
+        requires the speaking member, its admission never folds into a live turn (each submit
         founds its own queued turn on the member's durable intent conversation with the agent, and
         the per-conversation partition runs them in order), and its `body` must equal the
         envelope's serialization, which is the turn's inbound."""

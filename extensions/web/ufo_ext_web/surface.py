@@ -40,11 +40,18 @@ from ufo.sdk.http import (
 from ufo.sdk.hub import CostTick, LiveFrame, Parked, SkillLoad, Terminal, ToolCall
 from ufo.sdk.models import Message, TextBlock
 from ufo.sdk.seats import Seats
-from ufo.sdk.surfaces import ConnectRequestInvalid, SurfaceAuth, SurfaceContext, SurfaceRoute
+from ufo.sdk.surfaces import (
+    ConnectRequestInvalid,
+    SurfaceAuth,
+    SurfaceContext,
+    SurfaceRoute,
+    TurnContext,
+)
 from ufo_ext_web.audience import WebAudience, granted_emails, web_audience, web_extension
 from ufo_ext_web.panels import agent_overview, submit_intent
 
 SURFACE_WEB = "web"
+SOURCE = "ufo web"
 SESSION_COOKIE = "ufo_session"
 TOKEN_FIELD = "token"
 MAX_INBOUND_CHARS = 200_000
@@ -180,7 +187,12 @@ async def chat(ctx: SurfaceContext, request: Request) -> Response:
     conversation_id = await ctx.conversation_for(
         _conversation_key(agent_id, email), conversation_audience(member_id), agent_id=agent_id
     )
-    admitted = await ctx.admit(conversation_id, inbound, speaker_member_id=member_id)
+    admitted = await ctx.admit(
+        conversation_id,
+        inbound,
+        context=TurnContext(sender=email, source=f"{SOURCE} ({email})"),
+        speaker_member_id=member_id,
+    )
     return JSONResponse({"turn_id": str(admitted.turn_id)})
 
 
