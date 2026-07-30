@@ -464,80 +464,84 @@ def chat_server(
     config = dbos_launched_cli
     monkeypatch.setenv("UFO_TOKEN_SECRET", TOKEN_SECRET)
     init_db(config.database.url)
-    workspace_id = asyncio.run(_bootstrap_workspace())
-
-    hub = InProcessHub()
-    blob = FilesystemBlobStore(root=config.blob.root)
-    dbos_client = DBOSClient(system_database_url=config.database.system_url)
-    sandboxes = ConversationSandbox(
-        carrier=LocalCarrier(),
-        backend="local",
-        off_cluster=False,
-        image_ref=SANDBOX_IMAGE_REF,
-        proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
-        workspace_root=tmp_path / "workspaces",
-    )
-    loop_queue.reset_runtime()
-    loop_queue.init_runtime(
-        loop_queue.Runtime(
-            config=config,
-            blob=blob,
-            sandboxes=sandboxes,
-            hub=hub,
-            cdp_provider=None,
-            search_provider=None,
-            connectors=ConnectorRegistry(entries={}),
-            run_tokens=RunTokenCodec(TOKEN_SECRET.encode()),
-            dbos=dbos_client,
-            subagents=SubagentRegistry(()),
-            subagent_grants={},
-            manifests=(),
-            registry=STANDIN_REGISTRY,
-            skills=skill_registry(()),
-            credentials=None,
-            index=DefaultIndex(transaction=workspace_tx),
-            embed=StubEmbed(),
-            artifact_token_secret="",
-        )
-    )
-
-    port = _free_port()
-    app = FastAPI()
-    _mount_shared_surfaces(
-        app,
-        (ufo_manifest(),),
-        None,
-        blob,
-        sandboxes,
-        hub,
-        dbos_client,
-        "",
-        None,
-        None,
-        ("auto", "claude-opus-4-8", "claude-sonnet-5"),
-        skills=EMPTY_SKILL_REGISTRY,
-        user_skills=no_user_skills,
-    )
-    server = _ThreadedServer(app, port)
-    server.start()
-
-    config_path = tmp_path / "ufo.toml"
-    config_path.write_text(
-        f'[database]\nurl = "{config.database.url}"\n\n'
-        f'[blob]\nbackend = "filesystem"\nroot = "{config.blob.root}"\n\n'
-        f'[serve]\nhost = "127.0.0.1"\nport = {port}\n'
-    )
-    monkeypatch.setenv("UFO_CONFIG", str(config_path))
-    monkeypatch.setenv("UFOCTL_DIR", str(tmp_path / ".ufoctl"))
-    (tmp_path / ".ufoctl").mkdir(mode=0o700, exist_ok=True)
-    token = mint_token(TOKEN_SECRET, str(workspace_id), OWNER_EMAIL, timedelta(hours=1))
-    (tmp_path / ".ufoctl" / "token").write_text(token)
-
+    server = None
+    dbos_client = None
     try:
+        workspace_id = asyncio.run(_bootstrap_workspace())
+
+        hub = InProcessHub()
+        blob = FilesystemBlobStore(root=config.blob.root)
+        dbos_client = DBOSClient(system_database_url=config.database.system_url)
+        sandboxes = ConversationSandbox(
+            carrier=LocalCarrier(),
+            backend="local",
+            off_cluster=False,
+            image_ref=SANDBOX_IMAGE_REF,
+            proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
+            workspace_root=tmp_path / "workspaces",
+        )
+        loop_queue.reset_runtime()
+        loop_queue.init_runtime(
+            loop_queue.Runtime(
+                config=config,
+                blob=blob,
+                sandboxes=sandboxes,
+                hub=hub,
+                cdp_provider=None,
+                search_provider=None,
+                connectors=ConnectorRegistry(entries={}),
+                run_tokens=RunTokenCodec(TOKEN_SECRET.encode()),
+                dbos=dbos_client,
+                subagents=SubagentRegistry(()),
+                subagent_grants={},
+                manifests=(),
+                registry=STANDIN_REGISTRY,
+                skills=skill_registry(()),
+                credentials=None,
+                index=DefaultIndex(transaction=workspace_tx),
+                embed=StubEmbed(),
+                artifact_token_secret="",
+            )
+        )
+
+        port = _free_port()
+        app = FastAPI()
+        _mount_shared_surfaces(
+            app,
+            (ufo_manifest(),),
+            None,
+            blob,
+            sandboxes,
+            hub,
+            dbos_client,
+            "",
+            None,
+            None,
+            ("auto", "claude-opus-4-8", "claude-sonnet-5"),
+            skills=EMPTY_SKILL_REGISTRY,
+            user_skills=no_user_skills,
+        )
+        server = _ThreadedServer(app, port)
+        server.start()
+
+        config_path = tmp_path / "ufo.toml"
+        config_path.write_text(
+            f'[database]\nurl = "{config.database.url}"\n\n'
+            f'[blob]\nbackend = "filesystem"\nroot = "{config.blob.root}"\n\n'
+            f'[serve]\nhost = "127.0.0.1"\nport = {port}\n'
+        )
+        monkeypatch.setenv("UFO_CONFIG", str(config_path))
+        monkeypatch.setenv("UFOCTL_DIR", str(tmp_path / ".ufoctl"))
+        (tmp_path / ".ufoctl").mkdir(mode=0o700, exist_ok=True)
+        token = mint_token(TOKEN_SECRET, str(workspace_id), OWNER_EMAIL, timedelta(hours=1))
+        (tmp_path / ".ufoctl" / "token").write_text(token)
+
         yield CliRunner(), str(config_path)
     finally:
-        server.stop()
-        dbos_client.destroy()
+        if server is not None:
+            server.stop()
+        if dbos_client is not None:
+            dbos_client.destroy()
         loop_queue.reset_runtime()
         asyncio.run(dispose_db())
 

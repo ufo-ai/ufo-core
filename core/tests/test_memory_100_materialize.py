@@ -52,8 +52,10 @@ def memory_100_database_url(database_url: str, tmp_path: Path) -> str:
 @pytest.fixture
 async def memory_100_db(memory_100_database_url: str) -> AsyncIterator[None]:
     init_db(memory_100_database_url)
-    yield
-    await dispose_db()
+    try:
+        yield
+    finally:
+        await dispose_db()
 
 
 def _snapshot(root: Path) -> None:

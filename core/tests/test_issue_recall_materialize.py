@@ -117,27 +117,29 @@ def issue_recall_database_url(database_url: str, tmp_path: Path) -> str:
 async def seeded_workspace(issue_recall_database_url: str) -> AsyncIterator[UUID]:
     """The database `ufoctl init` leaves behind: one workspace, nothing derived."""
     init_db(issue_recall_database_url)
-    workspace_id = uuid4()
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.workspace).values(
-                id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
+    try:
+        workspace_id = uuid4()
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.insert(tables.workspace).values(
+                    id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
+                )
             )
-        )
-        await connection.execute(
-            sa.insert(tables.agent).values(
-                id=uuid5(workspace_id, "issue_recall/main"),
-                workspace_id=workspace_id,
-                name="main",
-                prompt="p",
-                model="m",
-                is_main=True,
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
+            await connection.execute(
+                sa.insert(tables.agent).values(
+                    id=uuid5(workspace_id, "issue_recall/main"),
+                    workspace_id=workspace_id,
+                    name="main",
+                    prompt="p",
+                    model="m",
+                    is_main=True,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
             )
-        )
-    yield workspace_id
-    await dispose_db()
+        yield workspace_id
+    finally:
+        await dispose_db()
 
 
 def _materializer(
