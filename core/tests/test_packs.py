@@ -39,6 +39,16 @@ def test_activating_the_assistant_pack_makes_exactly_its_bundle_active() -> None
     assert names == [*assistant.EXTENSIONS, assistant.NAME]
 
 
+def test_assistant_packs_mount_the_member_portal() -> None:
+    """The gateway's signed-in card posts every member's bearer to /surface/web, so any pack a
+    deploy fronts with that card must mount the web surface — the hosted fleet answering the
+    portal with 404 is the outage this pins."""
+    for pack in (assistant, assistant_hosted):
+        manifests = load_manifests(pack.NAME)
+        web = next(manifest for manifest in manifests if manifest.name == "web")
+        assert [surface.name for surface in web.surfaces] == ["web"]
+
+
 def test_assistant_billing_pack_is_the_local_bundle_plus_metronome() -> None:
     """The opt-in local billing bundle: everything the assistant pack has, plus the one extension
     that owns the billing chain — so `manage_billing` and the activation job exist on a laptop

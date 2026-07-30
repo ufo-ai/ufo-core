@@ -6,8 +6,8 @@ allowlist), keyed connectors (a workspace API key injected at the egress proxy) 
 the browser/computer-use tools,
 website building and the code REPL, document generation, todos, scheduled tasks, member-authored
 skills, the ufo terminal
-surface and the operator session debugger, the Bedrock and OpenRouter model providers, Metronome
-plan provisioning, usage and seat metering, and the coding
+surface, the member web portal, and the operator session debugger, the Bedrock and OpenRouter
+model providers, Metronome plan provisioning, usage and seat metering, and the coding
 subagent — but over managed backends instead
 of core's own: the Turbopuffer index (in place of the local index), the Slack surface, the Redis
 live-frame hub, the E2B sandbox carrier, and a Browserbase-hosted Chrome per browser run (the
@@ -31,6 +31,7 @@ EXTENSIONS = (
     "exa",
     "todos",
     "ufo",
+    "web",
     "debugger",
     "slack",
     "sites",

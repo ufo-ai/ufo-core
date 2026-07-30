@@ -40,6 +40,7 @@ EXTENSIONS = (
     "index_default",
     "embed_openai",
     "ufo",
+    "web",
     "debugger",
 )
 
