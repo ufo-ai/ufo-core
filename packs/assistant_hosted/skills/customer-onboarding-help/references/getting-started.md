@@ -3,8 +3,10 @@
 ## The shape of the flow
 
 A new customer is invited by the UFO team, by email. Signup is command-line first: the customer runs
-the install command, signs in with their work email, and lands in their own workspace. There is no
-separate web onboarding portal, and the sign-in page reaches the same workspace.
+the install command, signs in with their work email, and lands in their own workspace. The sign-in
+page reaches the same workspace, and its signed-in card carries "Open your workspace" — the web
+portal, where a member chats with the workspace's main agent in the browser. An admin reaches
+every agent there; other agents appear once an admin shares them (see `capabilities.md`).
 
 ## Step by step, as the customer experiences it
 
@@ -20,7 +22,8 @@ separate web onboarding portal, and the sign-in page reaches the same workspace.
 5. **A workspace admin is offered billing setup at the end.** In the terminal the admin gets a choice
    on the concluding screen; picking it starts a chat with the agent, which returns a link for saving
    a payment method. A joined teammate gets the ordinary prompt instead, and signing in through the
-   web page ends on a signed-in card without the menu.
+   web page ends on a signed-in card without the menu; "Open your workspace" there opens the web
+   portal, where the workspace's main agent already answers them.
 6. **Slack comes next.** See `slack-install.md`.
 
 ## What to say when asked

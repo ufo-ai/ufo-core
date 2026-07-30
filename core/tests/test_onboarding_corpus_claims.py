@@ -21,6 +21,7 @@ CORPUS = REPO_ROOT / "packs/assistant_hosted/skills/customer-onboarding-help"
 SLACK_TOOLS = "extensions/slack/ufo_ext_slack/tools.py"
 METRONOME = "extensions/metronome/ufo_ext_metronome.py"
 GATEWAY = "control/src/ufo_control/gateway.py"
+GATEWAY_WEB = "control/src/ufo_control/gateway_web.py"
 INVITES = "control/src/ufo_control/gateway_invite.py"
 SLACK_CONNECT = "control/src/ufo_control/gateway_slack_connect.py"
 AUDIENCE = "core/src/ufo/audience.py"
@@ -39,6 +40,20 @@ class Claim:
 
 
 CLAIMS = (
+    Claim(
+        claim="the signed-in card carries an 'Open your workspace' button",
+        corpus="references/getting-started.md",
+        phrase='signed-in card carries "Open your workspace"',
+        source=GATEWAY_WEB,
+        pattern=r"Open your workspace",
+    ),
+    Claim(
+        claim="the card's button opens the web portal",
+        corpus="references/capabilities.md",
+        phrase='"Open your workspace" button opens the web portal',
+        source=GATEWAY_WEB,
+        pattern=r"portal\.action = workspace \+ '/surface/web'",
+    ),
     Claim(
         claim="signup asks for nothing but an email and a verification code",
         corpus="references/getting-started.md",

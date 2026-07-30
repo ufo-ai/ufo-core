@@ -20,14 +20,15 @@ where the tools its claims describe are active.
 The description these cases route through was hillclimbed against them, measured as the opening
 round of a real hosted turn, ten rounds a case. A topic list of what the corpus covers routed 12 of
 the 17 cases that round held; the shipped description — which names the product and its mechanics
-before the questions a customer literally types — routes all but one or two rounds of the 16 here.
+before the questions a customer literally types — routes all but one or two rounds of the cases
+that measurement covered.
 
 A case whose point is that the agent *does* something carries `samples=3`, because routing measures
-about nine rounds in ten and at one sample an eleven-case suite passes whole about a third of the
-time — a clean run would say more about luck than about the corpus. A case whose point is that the
-agent *refrains* stays at one sample, whichever way its grader points: "any sample passes" is the
-harness's semantics, so three samples would let the one round that stayed quiet excuse the two that
-disclosed. That covers the `own_work_scorer` controls and the two disclosure guardrails alike.
+about nine rounds in ten, so at one sample a suite this size would pass whole only about a third of
+the time — a clean run would say more about luck than about the corpus. A case whose point is that
+the agent *refrains* stays at one sample, whichever way its grader points: "any sample passes" is
+the harness's semantics, so three samples would let the one round that stayed quiet excuse the two
+that disclosed. That covers the `own_work_scorer` controls and the two disclosure guardrails alike.
 
 A single trigger phrase carries more than it looks like it does: removing one took its case from
 ten rounds in ten to zero, because nothing else in the description overlapped how that question was
@@ -260,6 +261,20 @@ CASES = (
             "they can create today, without implying a date or promising it is coming.",
             "The answer does not invent a workaround such as a settings toggle, a second "
             "invitation, or a naming trick.",
+        ),
+    ),
+    CapabilityCase(
+        "web-portal",
+        "Is there a web page where I can chat with the agent instead of the terminal?",
+        corpus_scorer("capabilities.md", "getting-started.md"),
+        samples=3,
+        digest_tag="onboarding:web-portal",
+        rubric=(
+            "The answer affirms the web portal exists: the sign-in page's signed-in card carries "
+            "'Open your workspace', which opens the portal where a member chats with the "
+            "workspace's main agent in the browser.",
+            "The answer does not deny a web portal exists or describe the terminal as the only "
+            "way to reach the agent.",
         ),
     ),
     CapabilityCase(

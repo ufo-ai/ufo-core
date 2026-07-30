@@ -12,7 +12,5 @@ describe them as coming soon in a way a customer could hold the team to.
   genuinely separate second workspace is not something a customer can create today.
 - **Cancelling a running turn.** A turn that is already running cannot be cancelled by the customer
   and will run to completion. It stays resumable.
-- **A separate web onboarding portal.** Onboarding is command-line first; the sign-in page reaches the
-  same workspace. There is no distinct portal site to visit.
 
 Name the gap, give whatever manual path exists today, and say you are passing the request on.

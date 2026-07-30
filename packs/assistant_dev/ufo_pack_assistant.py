@@ -7,7 +7,7 @@ namespace plus the Pipedream allowlist), keyed connectors (a workspace API key i
 egress proxy) and MCP,
 the sandbox browser/computer-use tools with Chrome driven inside each conversation's sandbox (the
 sandbox-chrome cdp provider), website building and the code REPL, document generation,
-todos, scheduled tasks, member-authored skills, the web chat surface, the operator session debugger
+todos, scheduled tasks, member-authored skills, the member web portal, the operator session debugger
 (and, riding the memory extension, the memory explorer), an extra OpenRouter model provider, and
 the coding subagent. It runs on core's own local carrier and index with no managed infrastructure
 — that is what distinguishes it from `assistant_hosted`. It bundles only extensions and adds no
