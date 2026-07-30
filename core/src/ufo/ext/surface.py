@@ -33,6 +33,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequenc
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Literal, Protocol
+from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
@@ -74,6 +75,14 @@ from ufo.sandbox.conversation import (
     WORKSPACE_WRITE_MAX_BYTES,
     ConversationSandbox,
     WorkspaceFile,
+)
+from ufo.sandbox.ingress_host import site_label
+from ufo.sandbox.ingress_token import (
+    INGRESS_VIEW_KIND,
+    INGRESS_VIEW_PATH,
+    INGRESS_VIEW_TTL_SECONDS,
+    IngressClaims,
+    mint_ingress_token,
 )
 from ufo.scheduling import ScheduleStore
 from ufo.schema import tables
@@ -451,6 +460,7 @@ class SurfaceContext:
     _credentials: CredentialStore | None
     _artifact_token_secret: str
     _public_base_url: str | None
+    _ingress_public_url: str | None
     _deploy_sandbox_internet: bool
     _models: tuple[str, ...]
     _skills: SkillRegistry
@@ -557,6 +567,29 @@ class SurfaceContext:
             self._artifact_token_secret, artifact.blob_key, artifact.filename, expires_at
         )
         return f"{self._public_base_url.rstrip('/')}{ARTIFACT_DOWNLOAD_PATH}?token={token}"
+
+    def ingress_url(self, conversation_id: UUID, port: int) -> str | None:
+        """The URL that opens one conversation's sandbox port in a browser, or None when the ingress
+        is unconfigured (no `[sandbox] ingress_public_url`) — the surface then serves no site. The
+        port gets its own signed origin, and the view token the ingress trades for that origin's
+        session cookie. The origin is stable per `(conversation, port)`, so a bookmark and the
+        site's stored state survive a redeploy, while the token expires, so a leaked URL stops
+        opening new sessions. Mints the view token the ingress verifies — never a session token,
+        the other kind — so no surface holds the deploy secret or a credential a site accepts."""
+        if not self._ingress_public_url:
+            return None
+        base = urlsplit(self._ingress_public_url)
+        token = mint_ingress_token(
+            IngressClaims(
+                workspace_id=self.workspace_id,
+                conversation_id=conversation_id,
+                port=port,
+                expires_at=int(datetime.now(UTC).timestamp()) + INGRESS_VIEW_TTL_SECONDS,
+            ),
+            INGRESS_VIEW_KIND,
+        )
+        label = site_label(conversation_id, port)
+        return f"{base.scheme}://{label}.{base.netloc}{INGRESS_VIEW_PATH}/{token}"
 
     async def _identity_member(self, surface: str, external_id: str) -> UUID | None:
         """The member a surface's external id is linked to, or None. `linked_member` reads this

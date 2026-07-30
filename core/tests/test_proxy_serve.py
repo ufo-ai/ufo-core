@@ -19,8 +19,8 @@ from ufo.proxy_serve import (
     ProxyServe,
     _credential_store,
     _egress_ca,
-    _owner_dsn,
     model_rule_base,
+    owner_dsn,
 )
 from ufo.sandbox.proxy.rules import ANTHROPIC_HOST, ScopeRule, derive_model_rules
 from ufo.sandbox.session import EGRESS_CA_CERT_ENV, EGRESS_CA_KEY_ENV, RunTokenCodec
@@ -151,21 +151,21 @@ def test_owner_dsn_prefers_the_env_and_pins_the_async_driver(
     plain libpq URL; the
     proxy pins the async psycopg driver so SQLAlchemy never resolves the sync psycopg2 dialect."""
     monkeypatch.setenv(OWNER_DSN_ENV, "postgresql://env-owner@db/ufo")
-    assert _owner_dsn(_config(owner_url="postgresql://config-owner@db/ufo")) == (
+    assert owner_dsn(_config(owner_url="postgresql://config-owner@db/ufo")) == (
         "postgresql+psycopg://env-owner@db/ufo"
     )
 
 
 def test_owner_dsn_falls_back_to_the_config_field(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(OWNER_DSN_ENV, raising=False)
-    assert _owner_dsn(_config(owner_url="postgresql://owner@db/ufo")) == (
+    assert owner_dsn(_config(owner_url="postgresql://owner@db/ufo")) == (
         "postgresql+psycopg://owner@db/ufo"
     )
 
 
 def test_owner_dsn_keeps_an_explicit_driver_scheme(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(OWNER_DSN_ENV, "postgresql+psycopg://owner@db/ufo")
-    assert _owner_dsn(_config(owner_url=None)) == "postgresql+psycopg://owner@db/ufo"
+    assert owner_dsn(_config(owner_url=None)) == "postgresql+psycopg://owner@db/ufo"
 
 
 def test_owner_dsn_fails_loud_when_env_and_config_are_unset(
@@ -173,7 +173,7 @@ def test_owner_dsn_fails_loud_when_env_and_config_are_unset(
 ) -> None:
     monkeypatch.delenv(OWNER_DSN_ENV, raising=False)
     with pytest.raises(RuntimeError, match=OWNER_DSN_ENV):
-        _owner_dsn(_config(owner_url=None))
+        owner_dsn(_config(owner_url=None))
 
 
 def test_bundle_baked_config_satisfies_the_proxy(monkeypatch: pytest.MonkeyPatch) -> None:

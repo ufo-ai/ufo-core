@@ -28,9 +28,11 @@ from ufo.sdk.sandbox import (
     SENTINEL_MODEL_KEY,
     WORKSPACE_DIR,
     CarrierSpec,
+    DialTarget,
     ExecResult,
     SandboxHandle,
     SandboxSpec,
+    SandboxUnreachable,
 )
 
 CARRIER_NAME = "docker"
@@ -406,11 +408,11 @@ class DockerCarrier:
 
         return stream(), failure
 
-    async def host(self, handle: SandboxHandle, port: int) -> str:
+    async def dial(self, handle: SandboxHandle, port: int) -> DialTarget:
         """The docker carrier publishes no per-port host, so an in-sandbox service (a browser's CDP
         endpoint, a site's dev-server preview) has no external route here — a deploy that reaches an
         in-sandbox port needs a remote carrier (e2b)."""
-        raise RuntimeError(
+        raise SandboxUnreachable(
             "the docker carrier exposes no external per-port host; reach an in-sandbox service "
             "through a remote carrier (e2b)"
         )

@@ -10,6 +10,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
 import lz4.frame
@@ -25,6 +26,7 @@ from ufo.audience import (
     foreign_room_audience,
     room_audience,
 )
+from ufo.bearer import UFO_TOKEN_SECRET_ENV
 from ufo.blob import FilesystemBlobStore
 from ufo.credentials import (
     CredentialRequestInvalid,
@@ -54,6 +56,15 @@ from ufo.hub import InProcessHub
 from ufo.loop.queue import _load_turn
 from ufo.models.interface import Message, TextBlock, ToolResultBlock, ToolUseBlock
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
+from ufo.sandbox.ingress_host import parse_site_label
+from ufo.sandbox.ingress_token import (
+    INGRESS_SESSION_KIND,
+    INGRESS_VIEW_KIND,
+    INGRESS_VIEW_PATH,
+    INGRESS_VIEW_TTL_SECONDS,
+    IngressTokenError,
+    verify_ingress_token,
+)
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import ProxyEndpoint
 from ufo.schema import tables
@@ -217,6 +228,7 @@ def _context(
         _skills=EMPTY_SKILL_REGISTRY,
         _user_skills=no_user_skills,
         _public_base_url="https://ufo.example.test",
+        _ingress_public_url="https://sites.example.test",
         _deploy_sandbox_internet=False,
         _models=("auto", "claude-opus-4-8", "claude-sonnet-5"),
     )
@@ -1008,6 +1020,68 @@ def test_public_base_url_is_the_wired_connect_base(tmp_path) -> None:
     context = _context(uuid4(), StubDbos(), FilesystemBlobStore(root=tmp_path))
     assert context.public_base_url == "https://ufo.example.test"
     assert replace(context, _public_base_url=None).public_base_url is None
+
+
+def test_ingress_url_addresses_the_site_the_ingress_resolves(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The mint and the ingress agree by construction: the label the surface puts in the hostname
+    parses back to the same `(conversation, port)`, and the view token in the path verifies to the
+    workspace the context is bound to. It is a *view* token, never the session kind the ingress
+    accepts as a cookie, so the link cannot be pasted into a jar to skip the handshake. The secret
+    stays core-side — a surface holds neither end."""
+    monkeypatch.setenv(UFO_TOKEN_SECRET_ENV, "s3cret")
+    workspace_id, conversation_id = uuid4(), uuid4()
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+    url = context.ingress_url(conversation_id, 8000)
+    assert url is not None
+    base = urlsplit(url)
+    label, _, host = base.netloc.partition(".")
+    assert host == "sites.example.test"
+    assert parse_site_label(label) == (conversation_id, 8000)
+    minted = base.path.removeprefix(f"{INGRESS_VIEW_PATH}/")
+    claims = verify_ingress_token(minted, datetime.now(UTC), INGRESS_VIEW_KIND)
+    assert (claims.workspace_id, claims.conversation_id, claims.port) == (
+        workspace_id,
+        conversation_id,
+        8000,
+    )
+    with pytest.raises(IngressTokenError):
+        verify_ingress_token(minted, datetime.now(UTC), INGRESS_SESSION_KIND)
+
+
+def test_ingress_url_mints_the_configured_ttl_and_keeps_the_bases_port(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two decisions this mint sells but nothing read. The TTL is the containment the docstring
+    claims — a leaked link stops opening sessions — so the minted `expires_at` is asserted, not just
+    that the token verifies (which only says it has not expired *yet*: a ten-year token passes it).
+    And the label goes in front of `netloc`, not `hostname`, so a base carrying a port keeps it;
+    `hostname` would drop it and every site on that deploy would 404 at a label the config
+    deliberately admits."""
+    monkeypatch.setenv(UFO_TOKEN_SECRET_ENV, "s3cret")
+    workspace_id, conversation_id = uuid4(), uuid4()
+    context = replace(
+        _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path)),
+        _ingress_public_url="https://sites.example.test:8443",
+    )
+    before = int(datetime.now(UTC).timestamp())
+    url = context.ingress_url(conversation_id, 8000)
+    assert url is not None
+    base = urlsplit(url)
+    assert base.netloc.endswith(".sites.example.test:8443")
+    assert base.port == 8443
+    claims = verify_ingress_token(
+        base.path.removeprefix(f"{INGRESS_VIEW_PATH}/"), datetime.now(UTC), INGRESS_VIEW_KIND
+    )
+    assert claims.expires_at - before == pytest.approx(INGRESS_VIEW_TTL_SECONDS, abs=2)
+
+
+def test_ingress_url_is_none_without_a_configured_base(tmp_path) -> None:
+    """A deploy that serves no sandbox port has no address to mint against, so the surface names no
+    site rather than inventing a hostname."""
+    context = _context(uuid4(), StubDbos(), FilesystemBlobStore(root=tmp_path))
+    assert replace(context, _ingress_public_url=None).ingress_url(uuid4(), 8000) is None
 
 
 async def test_poller_delivers_a_done_turn_and_attaches_its_files(db: None, tmp_path) -> None:

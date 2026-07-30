@@ -25,9 +25,11 @@ from ufo.sandbox.session import (
     NO_PROXY_HOSTS,
     SENTINEL_MODEL_KEY,
     WORKSPACE_DIR,
+    DialTarget,
     ExecResult,
     SandboxHandle,
     SandboxSpec,
+    SandboxUnreachable,
 )
 
 LOCAL_CONTAINER_ID = "local"
@@ -157,12 +159,12 @@ class LocalCarrier:
         finally:
             await asyncio.to_thread(source.close)
 
-    async def host(self, handle: SandboxHandle, port: int) -> str:
+    async def dial(self, handle: SandboxHandle, port: int) -> DialTarget:
         """The local carrier runs commands as host subprocesses, not a network-addressable sandbox,
         so an in-sandbox service (a browser's CDP endpoint, a site's dev-server preview) has no
         external per-port host — a deploy that reaches an in-sandbox port needs a remote carrier
         (e2b)."""
-        raise RuntimeError(
+        raise SandboxUnreachable(
             "the local carrier exposes no external per-port host; reach an in-sandbox service "
             "through a remote carrier (e2b)"
         )

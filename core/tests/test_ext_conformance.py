@@ -78,6 +78,7 @@ from ufo.models.registry import model_registry
 from ufo.onboarding import run_onboarding_steps
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.sandbox.local import LocalCarrier
+from ufo.sandbox.select import select_carrier
 from ufo.sandbox.session import (
     ExecResult,
     ProxyEndpoint,
@@ -93,7 +94,6 @@ from ufo.serve import (
     _mount_ext_routes,
     _mount_shared_surfaces,
     _select_auth_proxy,
-    _select_carrier,
     _select_cdp_provider,
     _select_hub,
     _select_search_provider,
@@ -597,7 +597,7 @@ def _carrier_config(backend: str) -> Config:
 
 
 def test_config_backend_defaults_to_the_built_in_local_carrier() -> None:
-    carrier, off_cluster = _select_carrier(_carrier_config("local"), ())
+    carrier, off_cluster = select_carrier(_carrier_config("local"), ())
     assert isinstance(carrier, LocalCarrier)
     assert off_cluster is False
 
@@ -607,7 +607,7 @@ def test_config_backend_selects_a_manifest_contributed_carrier() -> None:
     `[sandbox] backend` naming it `serve` builds exactly that carrier — a deploy swaps the sandbox
     backend to an extension's without core naming it."""
     manifest = _sample_manifest()
-    carrier, off_cluster = _select_carrier(_carrier_config(sample.CARRIER_NAME), (manifest,))
+    carrier, off_cluster = select_carrier(_carrier_config(sample.CARRIER_NAME), (manifest,))
     assert isinstance(carrier, sample.SampleCarrier)
     assert off_cluster is False
 
@@ -618,7 +618,7 @@ async def test_a_workspace_write_reaches_the_manifest_contributed_carrier() -> N
     in — never through `exec`, whose command line is what a provider rejects once a payload is
     large. The size limit itself is the real carriers' proof; this is the dispatch."""
     manifest = _sample_manifest()
-    carrier, _ = _select_carrier(_carrier_config(sample.CARRIER_NAME), (manifest,))
+    carrier, _ = select_carrier(_carrier_config(sample.CARRIER_NAME), (manifest,))
     assert isinstance(carrier, sample.SampleCarrier)
     handle = SandboxHandle(conversation_id=uuid4(), container_id="test")
 
@@ -629,7 +629,7 @@ async def test_a_workspace_write_reaches_the_manifest_contributed_carrier() -> N
 
 def test_an_unregistered_backend_fails_loud() -> None:
     with pytest.raises(RuntimeError, match="not a registered carrier"):
-        _select_carrier(_carrier_config("nope"), ())
+        select_carrier(_carrier_config("nope"), ())
 
 
 def test_a_carrier_colliding_with_a_built_in_fails_loud() -> None:
@@ -639,7 +639,7 @@ def test_a_carrier_colliding_with_a_built_in_fails_loud() -> None:
         carriers=(CarrierSpec(name="local", factory=sample.SampleCarrier),),
     )
     with pytest.raises(RuntimeError, match="two carriers register backend"):
-        _select_carrier(_carrier_config("local"), (collide,))
+        select_carrier(_carrier_config("local"), (collide,))
 
 
 def test_pack_prompt_section_reaches_the_rendered_system_prompt() -> None:
@@ -1256,6 +1256,7 @@ async def test_sample_surface_admits_links_streams_and_delivers(
         dbos,
         "",
         None,
+        None,
         ("auto", "claude-opus-4-8", "claude-sonnet-5"),
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
@@ -1381,6 +1382,7 @@ async def test_sample_surface_live_admit_tails_and_stays_off_writeback(
         InProcessHub(),
         dbos,
         "",
+        None,
         None,
         ("auto", "claude-opus-4-8", "claude-sonnet-5"),
         skills=EMPTY_SKILL_REGISTRY,

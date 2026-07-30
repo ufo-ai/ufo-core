@@ -27,6 +27,7 @@ from ufo.db import apply_migrations, dispose_db, init_db, workspace_tx
 from ufo.ext.loader import load_manifests, lockfile_path
 from ufo.ext.store import ExtensionStore, read_catalog
 from ufo.grants import GrantSummary, workspace_grant_summaries
+from ufo.ingress_serve import run as ingress_run
 from ufo.onboarding import DEFAULT_AGENT_MODEL, AlreadyInitialized, Onboarded, Onboarding
 from ufo.proxy_serve import OWNER_DSN_ENV
 from ufo.proxy_serve import run as proxy_run
@@ -232,6 +233,12 @@ def serve() -> None:
 def proxy() -> None:
     """Run the shared egress proxy: one service fronting every workspace sandbox."""
     proxy_run()
+
+
+@main.command()
+def ingress() -> None:
+    """Run the sandbox ingress: a token-gated reverse proxy to conversations' sandbox ports."""
+    ingress_run()
 
 
 @main.command()

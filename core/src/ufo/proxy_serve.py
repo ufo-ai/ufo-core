@@ -75,7 +75,7 @@ def run() -> None:
     server = ProxyServe(
         config=config,
         manifests=manifests,
-        owner_dsn=_owner_dsn(config),
+        owner_dsn=owner_dsn(config),
         ca_cert=ca_cert,
         ca_key=ca_key,
         credentials=_credential_store(config, injecting_slots(manifests)),
@@ -100,7 +100,7 @@ def _egress_ca() -> tuple[str, str]:
     return cert, key
 
 
-def _owner_dsn(config: Config) -> str:
+def owner_dsn(config: Config) -> str:
     """The RLS-bypassing owner DSN the shared proxy opens instead of the scoped `database.url`.
     One process serves every workspace, so the resolver's explicit `workspace_id` filters scope
     each query. Read from `UFO_OWNER_DSN`, falling back to `[database] owner_url`; neither set fails

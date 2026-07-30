@@ -96,6 +96,7 @@ from ufo.sdk.objects import (
 from ufo.sdk.sandbox import (
     WORKSPACE_DIR,
     CarrierSpec,
+    DialTarget,
     ExecResult,
     SandboxHandle,
     SandboxSession,
@@ -1046,8 +1047,8 @@ class SampleCarrier:
             raise FileNotFoundError(path)
         yield self.written[path]
 
-    async def host(self, handle: SandboxHandle, port: int) -> str:
-        return f"{CARRIER_CONTAINER}:{port}"
+    async def dial(self, handle: SandboxHandle, port: int) -> DialTarget:
+        return DialTarget(host=f"{CARRIER_CONTAINER}:{port}", tls=False)
 
 
 def resolve_workspace(request: Request) -> UUID | None:

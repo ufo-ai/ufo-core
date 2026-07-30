@@ -4,6 +4,7 @@ import os
 import tomllib
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -16,6 +17,7 @@ IN_PROCESS_BACKEND = "in_process"
 DEFAULT_CDP_PROVIDER = "sandbox_chrome"
 DEFAULT_AUTO_MODEL = "claude-opus-5"
 DEFAULT_PROXY_PORT = 8888
+DEFAULT_INGRESS_PORT = 8100
 
 
 class DatabaseConfig(BaseModel):
@@ -145,13 +147,49 @@ class SandboxConfig(BaseModel):
     `proxy_port` is the stable port the egress proxy binds. `proxy_public_url` is the externally
     reachable base a remote sandbox carrier such as E2B dials; local carriers leave it unset and
     reach the process-local proxy directly. `serve` fails loud when a remote carrier has no public
-    proxy URL — open, unmetered egress is never a silent default."""
+    proxy URL — open, unmetered egress is never a silent default.
+
+    `ingress_port` is the stable port the sandbox ingress binds. `ingress_public_url` is the
+    wildcard base every served sandbox port is a subdomain of (`https://sites.example.com`, backed
+    by a wildcard DNS record and cert): the ingress resolves each request's site from the label
+    under it, and `SurfaceContext.ingress_url` mints links against it. `https` and a host, with an
+    optional port and nothing more — a site's session cookie is `Secure`. Unset, a surface mints no
+    link and `ufoctl ingress` refuses to boot — a site would have no address to be served at."""
 
     model_config = ConfigDict(extra="forbid")
     backend: str = "local"
     workspace_root: Path = Path("./workspaces")
     proxy_port: int = DEFAULT_PROXY_PORT
     proxy_public_url: str | None = None
+    ingress_port: int = DEFAULT_INGRESS_PORT
+    ingress_public_url: str | None = None
+
+    @model_validator(mode="after")
+    def _ingress_base_is_addressable(self) -> "SandboxConfig":
+        """The knob is `https` and an authority, and nothing else. Its two readers take it apart
+        differently — the ingress resolves a request's site by stripping `hostname` off the Host,
+        while `SurfaceContext.ingress_url` puts a label in front of `netloc` — and they agree only
+        while the value carries no path, query, fragment, or userinfo: a path would be dropped from
+        every minted link without a word, and userinfo would ride into the hostname the label goes
+        in front of. `https` is required for a separate reason: the session cookie the ingress binds
+        is `Secure`, so a plain-http base would boot green and 403 every visit. Rejected here so no
+        deploy can boot holding either."""
+        if self.ingress_public_url is None:
+            return self
+        base = urlsplit(self.ingress_public_url)
+        if base.scheme != "https" or not base.hostname:
+            raise ValueError(
+                "sandbox.ingress_public_url must be an https base with a host "
+                "(e.g. https://sites.example.com) — a site's session cookie is `Secure`, so a "
+                "plain-http origin can never carry one"
+            )
+        if base.path or base.query or base.fragment or base.username or base.password:
+            raise ValueError(
+                "sandbox.ingress_public_url is a scheme and a host only, with no path, query, "
+                "fragment, or credentials (e.g. https://sites.example.com) — every site's address "
+                "is a label put in front of that host"
+            )
+        return self
 
 
 class ExtConfig(BaseModel):

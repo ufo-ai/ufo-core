@@ -29,3 +29,6 @@ ufo.db-*
 .claude/skills/babysit-prs/*
 !.claude/skills/babysit-prs/SKILL.md
 .worktrees/
+.superpowers/
+docs/superpowers/
+e2e-evidence.md

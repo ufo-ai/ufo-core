@@ -104,8 +104,12 @@ resource "helm_release" "external_dns" {
   wait             = false
 
   values = [yamlencode({
-    provider       = { name = "cloudflare" }
-    policy         = "sync"
+    provider = { name = "cloudflare" }
+    policy   = "sync"
+    # Pinned rather than left to the chart default: every browser-facing hostname — the apex, the
+    # app host, and the sites wildcard — is published from an Ingress annotation, so a chart bump
+    # that dropped `ingress` would stop publishing all three with nothing failing.
+    sources        = ["service", "ingress"]
     txtOwnerId     = module.eks.cluster_name
     domainFilters  = [var.dns_zone_name]
     serviceAccount = { name = "external-dns" }

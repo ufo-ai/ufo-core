@@ -20,6 +20,7 @@ their reasoning intact — nothing is deleted. Start from [`0000-template.md`](0
 | [0017](0017-workspace-objects.md) | Workspace objects — registered kinds, YAML CRUD in chat | implemented |
 | [0018](0018-model-spec-single-source.md) | Model spec — one record per model, the single source of truth | accepted |
 | [0019](0019-shared-brain.md) | Shared brain — scope and audience | proposed |
+| [0020](0020-hosted-sites.md) | Hosted sites — sandbox ingress and the access-controlled frame | proposed |
 
 `0006` shipped and `0019` replaced its member-facing surface with `memory_search`; the record stays
 for its reasoning. `0010` is an audit, not a proposal — `accepted` marks its findings as the working

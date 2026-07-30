@@ -32,6 +32,7 @@ from ufo_testsupport.plugin import integration_dependency_available
 
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import (
+    DialTarget,
     ProxyEndpoint,
     SandboxHandle,
     SandboxSession,
@@ -94,8 +95,8 @@ class LoopbackHostCarrier(LocalCarrier):
     the endpoint the lease builds is dialable on this machine. Command execution, the egress
     environment and the workspace stay the local carrier's own."""
 
-    async def host(self, handle: SandboxHandle, port: int) -> str:
-        return f"127.0.0.1:{port}"
+    async def dial(self, handle: SandboxHandle, port: int) -> DialTarget:
+        return DialTarget(host=f"127.0.0.1:{port}", tls=False)
 
 
 @pytest.fixture

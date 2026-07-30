@@ -255,6 +255,123 @@ spec:
             items:
               - {key: ufo.toml, path: ufo.toml}
 ---
+# The sandbox ingress is the inbound twin of the egress proxy: a generic token-gated reverse proxy
+# from a public hostname to a conversation's live sandbox port. It runs from the ufo bundle image
+# (`ufoctl ingress`), opens the RLS-bypassing owner DSN to resolve `conversation.sandbox_handle`,
+# and dials the sandbox through the carrier seam. High-traffic site bytes land here, off the serve
+# event loop.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ufo-ingress
+  namespace: ${namespace}
+  labels: {app: ufo-ingress}
+spec:
+  replicas: 2
+  strategy:
+    rollingUpdate:
+      maxSurge: 100%
+      maxUnavailable: 0
+  selector:
+    matchLabels: {app: ufo-ingress}
+  template:
+    metadata:
+      labels: {app: ufo-ingress}
+    spec:
+      terminationGracePeriodSeconds: ${termination_grace_period_seconds}
+      enableServiceLinks: false
+      containers:
+        - name: ingress
+          image: ${bundle_image}
+          # ENTRYPOINT ["ufoctl"] is baked in; `ingress` reads the shared fleet config mounted below.
+          args: [ingress]
+          # Endpoint/NLB-target deregistration propagates for a beat after the pod turns
+          # Terminating; keep the listener accepting until it lands, then SIGTERM starts the drain.
+          lifecycle:
+            preStop:
+              exec:
+                command: [sleep, "${prestop_seconds}"]
+          ports:
+            - {name: ingress, containerPort: 8100}
+          env:
+            - {name: UFO_OTLP_ENDPOINT, value: "${otlp_endpoint}"}
+            # The RLS-bypassing owner DSN (password-bearing → a Secret, never a ConfigMap).
+            - name: UFO_OWNER_DSN
+              valueFrom:
+                secretKeyRef: {name: ufo-control-secrets, key: postgres-admin-dsn}
+            - name: UFO_TOKEN_SECRET
+              valueFrom:
+                secretKeyRef: {name: ufo-platform-secrets, key: UFO_TOKEN_SECRET}
+            - name: E2B_API_KEY
+              valueFrom:
+                secretKeyRef: {name: ufo-platform-secrets, key: E2B_API_KEY}
+          resources:
+            requests: {cpu: 250m, memory: 384Mi}
+            limits: {cpu: "2", memory: 768Mi}
+          volumeMounts:
+            - {name: config, mountPath: /app/ufo.toml, subPath: ufo.toml}
+          # No /healthz on the raw reverse proxy; a TCP probe confirms the bind after fail-loud boot.
+          readinessProbe:
+            tcpSocket: {port: ingress}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket: {port: ingress}
+            initialDelaySeconds: 30
+            periodSeconds: 20
+      volumes:
+        - name: config
+          secret:
+            secretName: ufo-serve
+            items:
+              - {key: ufo.toml, path: ufo.toml}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ufo-ingress
+  namespace: ${namespace}
+  labels: {app: ufo-ingress}
+spec:
+  selector: {app: ufo-ingress}
+  ports:
+    - {name: ingress, port: 8100, targetPort: ingress}
+---
+# Every hosted site answers at its own subdomain of ${sites_host}, so one wildcard record and one
+# wildcard certificate cover all of them and each site is its own browser origin — which is what
+# keeps one site's cookies and storage away from the next. The record is proxied, like every other
+# hosted host, so site bytes get the same DDoS/WAF edge and the NLB address stays unpublished.
+# Proxying a wildcard is available on every Cloudflare plan, and this zone's edge certificate must
+# carry a `*.${sites_host}` SAN: a wildcard SAN matches exactly one label, so `*.<apex>` does not
+# cover a site's deeper name. Our own certificate needs no proxied record — cert-manager issues it
+# over DNS-01. The edge SAN's coverage is the open question the RFC's risks track.
+# Every proxied response carries `Cache-Control: private, no-store` from the ingress, since a shared
+# cache that stored a site's bytes would answer later requests without the cookie check.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ufo-ingress
+  namespace: ${namespace}
+  annotations:
+    cert-manager.io/cluster-issuer: ${cluster_issuer}
+    external-dns.alpha.kubernetes.io/hostname: "*.${sites_host}"
+    external-dns.alpha.kubernetes.io/cloudflare-proxied: "true"
+spec:
+  ingressClassName: ${ingress_class}
+  tls:
+    - hosts: ["*.${sites_host}"]
+      secretName: ufo-ingress-tls
+  rules:
+    - host: "*.${sites_host}"
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: ufo-ingress
+                port: {name: ingress}
+---
 # The shared serve fleet is one Deployment serving turns for every workspace. It runs the
 # bundle image (`ufoctl serve`) over the ufo-serve Secret's ufo.toml (mounted over the image's baked
 # dev config): the RLS-SUBJECT ufo_serve DSN and the hosted assistant_hosted backends (s3 blob, e2b

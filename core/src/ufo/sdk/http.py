@@ -17,9 +17,12 @@ from starlette.responses import StreamingResponse as StreamingResponse
 def set_session_cookie(
     response: Response, name: str, token: str, *, samesite: Literal["lax", "strict", "none"]
 ) -> None:
-    """The one sanctioned way to bind a session cookie. It takes no `domain`, so the cookie is
-    always host-only — a session can never widen to a parent domain and so never crosses a
-    subdomain, environment, or preview host, whatever the deploy's hostnames are. `HttpOnly` and
-    `Secure` are non-negotiable; only `SameSite` varies by surface. A repo gate forbids raw
+    """The one sanctioned way to bind a session cookie. It takes no `domain`, so every cookie set
+    through it is host-only — it can never widen to a parent domain, and so never crosses a
+    subdomain, environment, or preview host, whatever the deploy's hostnames are. That covers the
+    cookies ufo sets and only those: a proxy relaying another server's `Set-Cookie` is handing on a
+    header this function never saw, and confining it is that proxy's own job (`ingress_serve`
+    strips `Domain` from every cookie a hosted site sends). `HttpOnly` and `Secure` are
+    non-negotiable; only `SameSite` varies by surface. A repo gate forbids raw
     `Response.set_cookie` outside this module, so the host-only guarantee cannot be bypassed."""
     response.set_cookie(name, token, httponly=True, secure=True, samesite=samesite)

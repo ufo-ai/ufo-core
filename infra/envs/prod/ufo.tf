@@ -79,6 +79,7 @@ locals {
 
   # The member-facing host for the shared serve fleet.
   shared_host = "app.${module.platform.hostname}"
+  sites_host  = "sites.${module.platform.hostname}"
 
   # The shared fleet configuration.
   serve_config = <<-TOML
@@ -115,6 +116,7 @@ locals {
     [sandbox]
     backend = "e2b"
     proxy_public_url = "https://sandbox-proxy.${module.platform.hostname}"
+    ingress_public_url = "https://${local.sites_host}"
 
     [connect]
     public_base_url = "https://${local.shared_host}"
@@ -190,6 +192,7 @@ data "kubectl_file_documents" "hosted" {
     namespace                        = local.system_namespace
     apex_host                        = module.platform.hostname
     shared_host                      = local.shared_host
+    sites_host                       = local.sites_host
     cluster_issuer                   = "letsencrypt"
     ingress_class                    = "nginx"
     bundle_image                     = local.bundle_image

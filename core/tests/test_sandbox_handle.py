@@ -42,6 +42,7 @@ from ufo.sandbox.conversation import (
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import (
     Carrier,
+    DialTarget,
     ExecResult,
     ProxyEndpoint,
     RunToken,
@@ -154,8 +155,8 @@ class _ResumeRecordingCarrier:
     def read(self, handle: SandboxHandle, path: str) -> AsyncIterator[bytes]:
         raise AssertionError("open_sandbox never reads")
 
-    async def host(self, handle: SandboxHandle, port: int) -> str:
-        raise AssertionError("open_sandbox never resolves a host")
+    async def dial(self, handle: SandboxHandle, port: int) -> DialTarget:
+        raise AssertionError("open_sandbox never dials a port")
 
 
 async def test_open_sandbox_persists_the_backend_prefixed_handle(db: None, tmp_path: Path) -> None:
@@ -917,8 +918,8 @@ class _UniqueIdCarrier:
     def read(self, *args: object, **kwargs: object) -> AsyncIterator[bytes]:
         raise AssertionError("these opens never read")
 
-    async def host(self, handle: SandboxHandle, port: int) -> str:
-        raise AssertionError("these opens never route")
+    async def dial(self, handle: SandboxHandle, port: int) -> DialTarget:
+        raise AssertionError("these opens never dial a port")
 
 
 def _conversation_sandboxes(carrier: object, tmp_path: Path, backend: str) -> ConversationSandbox:
@@ -1031,5 +1032,5 @@ class _TruncatingCarrier:
     def read(self, *args: object, **kwargs: object) -> AsyncIterator[bytes]:
         raise AssertionError("the listing never reads")
 
-    async def host(self, handle: SandboxHandle, port: int) -> str:
-        raise AssertionError("the listing never routes")
+    async def dial(self, handle: SandboxHandle, port: int) -> DialTarget:
+        raise AssertionError("the listing never dials a port")

@@ -8,9 +8,9 @@ answers there, launch an in-sandbox TCP proxy on 9223 that rewrites each request
 `127.0.0.1:9222` (Chrome's DevTools rejects a non-localhost Host, and `--remote-allow-origins=*`
 does not fix that — the proxy is load-bearing: it carries the WebSocket upgrade and frames through),
 and read Chrome's `webSocketDebuggerUrl` back *through* that proxy. A lease therefore returns only
-once the whole in-sandbox chain answers, and `lease` builds the
-`wss://<public-host-of-9223><ws-path>` endpoint carrying the sandbox's traffic token as a connection
-header.
+once the whole in-sandbox chain answers, and `lease` builds its endpoint from the carrier's own dial
+of port 9223 — address, scheme and the headers that port needs to answer are the carrier's to state,
+so nothing here guesses a scheme or names a provider's traffic header.
 
 Readiness is a port that answers, never a pid that exists: a browser recorded but not serving is
 ended and relaunched, so one bad start cannot poison every later lease of the same sandbox. A
@@ -62,7 +62,6 @@ PROXY_LOG_PATH = f"{BROWSER_DIR}/proxy.log"
 PROXY_PID_PATH = "/tmp/ufo-browser-proxy.pid"
 PROXY_SCRIPT_PATH = "/tmp/ufo-browser-proxy.py"
 LOG_TAIL_LINES = 20
-TRAFFIC_ACCESS_HEADER = "e2b-traffic-access-token"
 
 PROXY_SOURCE = (
     f"""CHROME_HOST = "127.0.0.1"
@@ -358,9 +357,12 @@ class SandboxChromeCdpProvider:
             raise RuntimeError(
                 f"sandbox_chrome failed to bring up the browser: {result.stderr or result.stdout}"
             )
-        host = await sandbox.host(BROWSER_CDP_PROXY_PORT)
-        headers = {TRAFFIC_ACCESS_HEADER: sandbox.traffic_token} if sandbox.traffic_token else {}
-        endpoint = CdpEndpoint(url=_remote_ws_url(host, _ws_path(result.stdout)), headers=headers)
+        target = await sandbox.dial(BROWSER_CDP_PROXY_PORT)
+        scheme = "wss" if target.tls else "ws"
+        endpoint = CdpEndpoint(
+            url=f"{scheme}://{target.host}{_ws_path(result.stdout)}",
+            headers=dict(target.headers),
+        )
         return SandboxChromeCdpLease(endpoint, sandbox)
 
     async def reattach(self, token: str) -> CdpLease:
@@ -373,22 +375,6 @@ def _ws_path(url: str) -> str:
         if stripped.startswith(prefix):
             return stripped.removeprefix(prefix)
     raise RuntimeError(f"browser websocket url must be local: {stripped!r}")
-
-
-def _remote_ws_url(host: str, path: str) -> str:
-    base = _remote_url(host).rstrip("/")
-    if base.startswith("https://"):
-        return f"wss://{base.removeprefix('https://')}{path}"
-    if base.startswith("http://"):
-        return f"ws://{base.removeprefix('http://')}{path}"
-    raise ValueError(f"remote host must resolve to http or https: {host!r}")
-
-
-def _remote_url(host: str) -> str:
-    if host.startswith(("http://", "https://")):
-        return host
-    scheme = "http" if host.startswith(("localhost:", "127.0.0.1:")) else "https"
-    return f"{scheme}://{host}"
 
 
 def manifest() -> Manifest:

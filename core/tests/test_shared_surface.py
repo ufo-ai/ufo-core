@@ -2,6 +2,7 @@
 
 from collections.abc import AsyncIterator
 from pathlib import Path
+from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
@@ -11,6 +12,7 @@ from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse
 from ufo_testsupport.surfaces import EMPTY_SKILL_REGISTRY, no_user_skills
 
+from ufo.bearer import UFO_TOKEN_SECRET_ENV
 from ufo.blob import blob_store_for
 from ufo.config import BlobConfig
 from ufo.db import current_workspace, workspace_tx
@@ -19,6 +21,7 @@ from ufo.ext.manifest import Manifest
 from ufo.ext.surface import SurfaceAuth, SurfaceContext, SurfaceRoute, SurfaceSpec
 from ufo.hub import InProcessHub
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
+from ufo.sandbox.ingress_host import parse_site_label
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import ProxyEndpoint
 from ufo.schema import tables
@@ -31,6 +34,11 @@ PROBE_SURFACE = "probe"
 class NoAdmission:
     async def enqueue_async(self, options: object, workspace_id: str, turn_id: str) -> None:
         raise AssertionError("the lifecycle probe must not admit a turn")
+
+
+SITE_CONVERSATION = UUID("11111111-1111-1111-1111-111111111111")
+SITE_PORT = 8000
+SITE_BASE = "https://sites.example.test"
 
 
 async def _identify_workspace(request: Request, _auth: SurfaceAuth) -> UUID | None:
@@ -59,6 +67,42 @@ async def _must_not_run(_ctx: SurfaceContext, _request: Request) -> Response:
     raise AssertionError("a pre-binding response must skip the surface handler")
 
 
+async def _mint_site_link(ctx: SurfaceContext, request: Request) -> Response:
+    return Response(ctx.ingress_url(SITE_CONVERSATION, SITE_PORT) or "")
+
+
+def _site_link_app(tmp_path: Path, ingress_public_url: str | None) -> FastAPI:
+    surface = SurfaceSpec(
+        name=PROBE_SURFACE,
+        routes=(SurfaceRoute(method="POST", path="site", handler=_mint_site_link),),
+        identify=_identify_workspace,
+    )
+    app = FastAPI()
+    _mount_shared_surfaces(
+        app,
+        (Manifest(name="probe_ext", version="0", surfaces=(surface,)),),
+        None,
+        blob_store_for(BlobConfig(backend="filesystem", root=tmp_path)),
+        ConversationSandbox(
+            carrier=LocalCarrier(),
+            backend="local",
+            off_cluster=False,
+            image_ref=SANDBOX_IMAGE_REF,
+            proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
+            workspace_root=tmp_path / "workspaces",
+        ),
+        InProcessHub(),
+        NoAdmission(),
+        "",
+        None,
+        ingress_public_url,
+        ("auto", "claude-opus-4-8", "claude-sonnet-5"),
+        skills=EMPTY_SKILL_REGISTRY,
+        user_skills=no_user_skills,
+    )
+    return app
+
+
 def _app(tmp_path: Path) -> FastAPI:
     surface = SurfaceSpec(
         name=PROBE_SURFACE,
@@ -85,6 +129,7 @@ def _app(tmp_path: Path) -> FastAPI:
         InProcessHub(),
         NoAdmission(),
         "",
+        None,
         None,
         ("auto", "claude-opus-4-8", "claude-sonnet-5"),
         skills=EMPTY_SKILL_REGISTRY,
@@ -116,6 +161,7 @@ def _challenge_app(tmp_path: Path) -> FastAPI:
         InProcessHub(),
         NoAdmission(),
         "",
+        None,
         None,
         ("auto", "claude-opus-4-8", "claude-sonnet-5"),
         skills=EMPTY_SKILL_REGISTRY,
@@ -255,3 +301,39 @@ def test_assistant_hosted_mounts_slack_and_debugger_on_shared_serve() -> None:
     names = {manifest.name for manifest in load_manifests("assistant_hosted")}
     assert "slack" in names
     assert "debugger" in names
+
+
+async def test_the_ingress_base_reaches_a_mounted_surface(
+    db: None, tmp_path: Path, monkeypatch
+) -> None:
+    """The knob's producer is `run()`'s wiring and its consumer is a surface's `ingress_url`, so the
+    proof goes through the real mount rather than a hand-built context: without this, replacing
+    `_mount_shared_surfaces`'s `_ingress_public_url=ingress_public_url` with `None` left every test
+    green while no deploy could mint a site link. The same route mints nothing when the deploy
+    leaves the knob unset, which is what tells the two apart."""
+    monkeypatch.setenv(UFO_TOKEN_SECRET_ENV, "s3cret")
+    baseline = current_workspace.set(None)
+    try:
+        workspace_id = await _workspace()
+        async with AsyncClient(
+            transport=ASGITransport(app=_site_link_app(tmp_path, SITE_BASE)),
+            base_url="http://probe",
+        ) as client:
+            minted = await client.post(
+                f"/surface/{PROBE_SURFACE}/site", headers={"x-workspace": str(workspace_id)}
+            )
+        assert minted.status_code == 200
+        label, _, host = urlsplit(minted.text).netloc.partition(".")
+        assert host == "sites.example.test"
+        assert parse_site_label(label) == (SITE_CONVERSATION, SITE_PORT)
+        async with AsyncClient(
+            transport=ASGITransport(app=_site_link_app(tmp_path, None)),
+            base_url="http://probe",
+        ) as client:
+            unset = await client.post(
+                f"/surface/{PROBE_SURFACE}/site", headers={"x-workspace": str(workspace_id)}
+            )
+        assert unset.status_code == 200
+        assert unset.text == ""
+    finally:
+        current_workspace.reset(baseline)

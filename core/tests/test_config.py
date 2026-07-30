@@ -170,6 +170,41 @@ def test_auto_model_rejects_the_auto_sentinel(tmp_path: Path) -> None:
         load_config(path)
 
 
+def test_ingress_public_url_must_be_a_full_https_base(tmp_path: Path) -> None:
+    """Every site's address is built by putting a label in front of this host, so a bare hostname or
+    a path-only value would mint links to nowhere. `http` is refused for a reason of its own: the
+    session cookie the ingress binds is `Secure`, so a plain-http origin can never carry one and
+    every visit would 403 after booting green. Caught at load, not at the first site."""
+    path = tmp_path / "ufo.toml"
+    for rejected in ("sites.example.com", "http://sites.example.com", "ws://sites.example.com"):
+        path.write_text(VALID + f'\n[sandbox]\ningress_public_url = "{rejected}"\n')
+        with pytest.raises(ValidationError):
+            load_config(path)
+    path.write_text(VALID + '\n[sandbox]\ningress_public_url = "https://sites.example.com"\n')
+    assert load_config(path).sandbox.ingress_public_url == "https://sites.example.com"
+
+
+def test_ingress_public_url_is_a_scheme_and_a_host_and_nothing_else(tmp_path: Path) -> None:
+    """The knob's two readers take it apart differently — the ingress strips its `hostname` off each
+    request's Host, `SurfaceContext.ingress_url` puts a label in front of its `netloc` — so anything
+    beyond scheme and authority makes them disagree in silence: a path would vanish from every
+    minted link, and userinfo would ride into the host the label goes in front of. A port is the one
+    extra both readers survive, so it stays legal."""
+    path = tmp_path / "ufo.toml"
+    for rejected in (
+        "https://sites.example.com/base",
+        "https://sites.example.com/",
+        "https://sites.example.com?x=1",
+        "https://sites.example.com#f",
+        "https://user:pw@sites.example.com",
+    ):
+        path.write_text(VALID + f'\n[sandbox]\ningress_public_url = "{rejected}"\n')
+        with pytest.raises(ValidationError):
+            load_config(path)
+    path.write_text(VALID + '\n[sandbox]\ningress_public_url = "https://sites.example.com:8443"\n')
+    assert load_config(path).sandbox.ingress_public_url == "https://sites.example.com:8443"
+
+
 def test_postgres_system_url_uses_sync_driver(tmp_path: Path) -> None:
     path = tmp_path / "ufo.toml"
     path.write_text(

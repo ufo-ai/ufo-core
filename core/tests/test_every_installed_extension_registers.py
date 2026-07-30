@@ -59,13 +59,13 @@ from ufo.loop.subagents import SubagentRegistry
 from ufo.models.registry import model_registry
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.sandbox.local import LocalCarrier
+from ufo.sandbox.select import select_carrier
 from ufo.sandbox.session import ProxyEndpoint
 from ufo.serve import (
     _connect_flow,
     _mount_ext_routes,
     _mount_shared_surfaces,
     _select_auth_proxy,
-    _select_carrier,
     _select_cdp_provider,
     _select_hub,
     _select_search_provider,
@@ -172,7 +172,7 @@ def _check_hubs(manifest: Manifest) -> None:
 def _check_carriers(manifest: Manifest) -> None:
     for spec in manifest.carriers:
         _resolve_backend(
-            lambda spec=spec: _select_carrier(_config(sandbox_backend=spec.name), (manifest,))
+            lambda spec=spec: select_carrier(_config(sandbox_backend=spec.name), (manifest,))
         )
 
 
@@ -244,6 +244,7 @@ def _check_surfaces(manifest: Manifest, store: CredentialStore, tmp_path: Path) 
         InProcessHub(),
         _StubDbos(),
         "",
+        None,
         None,
         ("auto", "claude-opus-4-8", "claude-sonnet-5"),
         skills=EMPTY_SKILL_REGISTRY,

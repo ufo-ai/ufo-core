@@ -91,14 +91,14 @@ from ufo.runtime_instance import (
     record_fleet_seat,
 )
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
-from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.proxy.rules import (
     connector_transfer_hosts,
     derive_artifact_store_rules,
     derive_manifest_rules,
 )
 from ufo.sandbox.proxy.server import EgressProxy, PerAgentRules, generate_ca
-from ufo.sandbox.session import EGRESS_CA_CERT_ENV, Carrier, ProxyEndpoint, RunTokenCodec
+from ufo.sandbox.select import select_carrier
+from ufo.sandbox.session import EGRESS_CA_CERT_ENV, ProxyEndpoint, RunTokenCodec
 from ufo.schema.records import DBOS_APP_NAME, DBOS_APP_VERSION, DBOS_MAX_EXECUTOR_THREADS
 from ufo.search import SearchProvider
 from ufo.skills.runtime import RuntimeSkill, SkillRegistry
@@ -167,7 +167,7 @@ def run() -> None:
     artifact_secret = os.environ.get(config.artifacts.token_secret_env, "")
     hub = _select_hub(config, manifests)
     dbos_client = DBOSClient(system_database_url=config.database.system_url)
-    carrier, carrier_off_cluster = _select_carrier(config, manifests)
+    carrier, carrier_off_cluster = select_carrier(config, manifests)
     registry = model_registry(config, manifests)
     embed = embed_backend(manifests, config.memory.embed_backend, credentials)
     index = index_backend(manifests, config.memory.index_backend, credentials)
@@ -264,6 +264,7 @@ def run() -> None:
         dbos_client,
         artifact_secret,
         config.connect.public_base_url,
+        config.sandbox.ingress_public_url,
         (AUTO_MODEL, *sorted(registry.specs)),
         skills=skills,
         user_skills=lambda: turn_runtime_skills(manifests, credentials, index, embed),
@@ -362,49 +363,6 @@ def _launch_jobs(
         sandboxes=runtime.sandboxes,
         registry=runtime.registry,
     ).launch()
-
-
-def _select_carrier(config: Config, manifests: tuple[Manifest, ...]) -> tuple[Carrier, bool]:
-    """The one sandbox backend this process runs, chosen by `[sandbox] backend`: core's default
-    `local` carrier plus every carrier an extension contributes via its `carriers` Manifest point
-    (`docker`, `e2b`, a remote runner). An extension name that collides with the built-in or another
-    extension fails loud, and a backend name no carrier registers fails loud — so the selected name
-    resolves to exactly one factory, built once here and held on `Runtime.sandboxes`. A remote
-    backend with no `[sandbox] proxy_public_url` fails loud too: its sandbox could reach neither the
-    process-local proxy nor a metered egress route, so
-    it would run open — never a silent default."""
-    factories: dict[str, Callable[[], Carrier]] = {"local": LocalCarrier}
-    off_cluster: set[str] = set()
-    for manifest in manifests:
-        for spec in manifest.carriers:
-            if spec.name in factories:
-                raise RuntimeError(f"two carriers register backend {spec.name!r}")
-            factories[spec.name] = spec.factory
-            if spec.off_cluster:
-                off_cluster.add(spec.name)
-    factory = factories.get(config.sandbox.backend)
-    if factory is None:
-        raise NotRegisteredError(
-            f"sandbox backend {config.sandbox.backend!r} is not a registered carrier "
-            f"(have {sorted(factories)})"
-        )
-    if config.sandbox.backend in off_cluster:
-        public_url = config.sandbox.proxy_public_url
-        if not public_url:
-            raise RuntimeError(
-                f"sandbox backend {config.sandbox.backend!r} is remote and cannot reach the "
-                "process-local egress proxy; set [sandbox] proxy_public_url to the externally "
-                "reachable HTTPS proxy URL so in-sandbox egress is credential-injected, "
-                "default-denied, and metered"
-            )
-        parsed = urlparse(public_url)
-        if parsed.scheme != "https" or parsed.hostname is None:
-            raise RuntimeError(
-                f"sandbox backend {config.sandbox.backend!r} is remote; "
-                "[sandbox] proxy_public_url must be an HTTPS URL so its run token is encrypted "
-                "in transit"
-            )
-    return factory(), config.sandbox.backend in off_cluster
 
 
 def _source_backends(manifests: tuple[Manifest, ...]) -> dict[str, SourceBackend]:
@@ -775,6 +733,7 @@ def _mount_shared_surfaces(
     dbos_client: DBOSClient,
     artifact_secret: str,
     public_base_url: str | None,
+    ingress_public_url: str | None,
     models: tuple[str, ...],
     *,
     skills: SkillRegistry,
@@ -812,6 +771,7 @@ def _mount_shared_surfaces(
             _credentials=credentials,
             _artifact_token_secret=artifact_secret,
             _public_base_url=public_base_url,
+            _ingress_public_url=ingress_public_url,
             _deploy_sandbox_internet=deploy_sandbox_internet,
             _models=models,
             _skills=skills,

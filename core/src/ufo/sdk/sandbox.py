@@ -9,9 +9,11 @@ from ufo.sandbox.session import NO_PROXY_HOSTS as NO_PROXY_HOSTS
 from ufo.sandbox.session import SENTINEL_MODEL_KEY as SENTINEL_MODEL_KEY
 from ufo.sandbox.session import WORKSPACE_DIR as WORKSPACE_DIR
 from ufo.sandbox.session import Carrier as Carrier
+from ufo.sandbox.session import DialTarget as DialTarget
 from ufo.sandbox.session import ExecResult as ExecResult
 from ufo.sandbox.session import ProxyEndpoint as ProxyEndpoint
 from ufo.sandbox.session import SandboxHandle as SandboxHandle
 from ufo.sandbox.session import SandboxSession as SandboxSession
 from ufo.sandbox.session import SandboxSpec as SandboxSpec
+from ufo.sandbox.session import SandboxUnreachable as SandboxUnreachable
 from ufo.sandbox.session import workspace_path as workspace_path

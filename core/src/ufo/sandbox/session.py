@@ -123,15 +123,15 @@ class SandboxSpec:
 class SandboxHandle:
     """An opaque reference to a created-or-attached container; the carrier reads it, not tools. It
     carries `workspace_host_path` so a host-path carrier can rewrite a logical `/workspace` path to
-    where it actually serves it, the `traffic_token` a carrier that gates its public per-port host
-    behind one (e2b) sets at create so a caller dialing `host` carries it as a connection header,
-    and the base `run_token` plus `egress_env` a scoped session rewrites for each exec. A container
-    shared across turns never pins either one's authority."""
+    where it actually serves it, and the base `run_token` plus `egress_env` a scoped session
+    rewrites for each exec. A container shared across turns never pins either one's authority.
+    Whatever a public per-port host requires on the wire is not here: `dial` reads it off the live
+    container, so a handle rebuilt from the durable row alone (the ingress) reaches a port exactly
+    as the process that created it does."""
 
     conversation_id: UUID
     container_id: str
     workspace_host_path: str | None = None
-    traffic_token: str | None = None
     run_token: str | None = None
     egress_env: Mapping[str, str] = field(default_factory=dict)
 
@@ -152,6 +152,21 @@ class ExecResult:
     stdout: str
     stderr: str
     exit_code: int
+
+
+@dataclass(frozen=True)
+class DialTarget:
+    """An externally dialable authority for one in-sandbox port, plus whatever the carrier
+    requires on the wire to reach it (e2b's traffic-access header). `tls` says whether the
+    authority terminates TLS, so a consumer picks https/wss vs http/ws instead of guessing."""
+
+    host: str
+    tls: bool
+    headers: Mapping[str, str] = field(default_factory=dict)
+
+
+class SandboxUnreachable(RuntimeError):
+    """The dial contract's error: a carrier's sandbox is gone or has no external route."""
 
 
 class Carrier(Protocol):
@@ -190,12 +205,15 @@ class Carrier(Protocol):
         carrier off the host directory). Raises FileNotFoundError for a path holding no file."""
         ...
 
-    async def host(self, handle: SandboxHandle, port: int) -> str:
-        """The externally-reachable `host` (optionally `host:port`) a caller outside the sandbox
-        dials to reach any in-sandbox `port` — the generic inbound seam for a service the turn
-        started inside the container (a browser's CDP endpoint, a site's dev-server preview). Each
-        carrier maps its own reachability (e2b's public per-port host); a carrier with no external
-        route raises."""
+    async def dial(self, handle: SandboxHandle, port: int) -> DialTarget:
+        """Everything a caller outside the sandbox needs to reach one in-sandbox `port` — the
+        generic inbound seam for a service the turn started inside the container (a browser's CDP
+        endpoint, a site's dev-server preview). The returned `DialTarget` carries the authority to
+        dial (`host`, `host:port` where the carrier publishes no per-port name), whether that
+        authority terminates TLS (`tls` picks the caller's scheme — https/wss or http/ws — so no
+        caller guesses), and any header the wire requires (e2b's traffic-access token). A carrier
+        with no external route, or whose sandbox is gone or unroutable, raises
+        `SandboxUnreachable` — never the provider SDK's own error."""
         ...
 
 
@@ -253,7 +271,6 @@ class SandboxSession:
                 conversation_id=self.handle.conversation_id,
                 container_id=self.handle.container_id,
                 workspace_host_path=self.handle.workspace_host_path,
-                traffic_token=self.handle.traffic_token,
                 run_token=run_token,
                 egress_env={**authorized, **env},
             ),
@@ -334,14 +351,7 @@ class SandboxSession:
         without the host process ever holding it whole."""
         return self.carrier.read(self.handle, workspace_path(path))
 
-    async def host(self, port: int) -> str:
-        """The externally-reachable host for an in-sandbox `port`, from the carrier's own
-        reachability map — how a caller in the serve process dials any service this turn started
-        inside the container (a browser's CDP endpoint, a site's dev-server preview)."""
-        return await self.carrier.host(self.handle, port)
-
-    @property
-    def traffic_token(self) -> str | None:
-        """The carrier's per-sandbox traffic token when it gates the public per-port host behind
-        one (e2b), else None — carried as a connection header by a caller dialing `host`."""
-        return self.handle.traffic_token
+    async def dial(self, port: int) -> DialTarget:
+        """The externally dialable target for an in-sandbox `port`, from the carrier's own
+        reachability map — address, TLS, and any header the wire requires (e2b's traffic token)."""
+        return await self.carrier.dial(self.handle, port)

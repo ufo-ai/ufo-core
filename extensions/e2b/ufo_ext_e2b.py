@@ -52,7 +52,7 @@ from uuid import UUID
 from e2b import AsyncSandbox as E2BSdkSandbox
 from e2b.exceptions import FileNotFoundException, SandboxNotFoundException, TimeoutException
 from e2b.sandbox.commands.command_handle import CommandExitException
-from e2b.sandbox.sandbox_api import SandboxLifecycle
+from e2b.sandbox.sandbox_api import SandboxLifecycle, SandboxNetworkOpts
 
 from ufo.sdk.manifest import Manifest
 from ufo.sdk.o11y import log
@@ -61,10 +61,12 @@ from ufo.sdk.sandbox import (
     SENTINEL_MODEL_KEY,
     WORKSPACE_DIR,
     CarrierSpec,
+    DialTarget,
     ExecResult,
     ProxyEndpoint,
     SandboxHandle,
     SandboxSpec,
+    SandboxUnreachable,
 )
 
 CARRIER_NAME = "e2b"
@@ -72,6 +74,7 @@ E2B_API_KEY_ENV = "E2B_API_KEY"
 E2B_TEMPLATE_NAME = "ufo-sbx"
 NODE_GLOBAL_MODULES = "/usr/local/lib/node_modules"
 PLAYWRIGHT_BROWSERS_DIR = "/usr/local/lib/playwright"
+TRAFFIC_ACCESS_HEADER = "e2b-traffic-access-token"
 SANDBOX_ENV: dict[str, str] = {
     "NODE_PATH": NODE_GLOBAL_MODULES,
     "PLAYWRIGHT_BROWSERS_PATH": PLAYWRIGHT_BROWSERS_DIR,
@@ -82,6 +85,7 @@ EXEC_LEASE_MARGIN_SECONDS = 60
 EXEC_TIMEOUT_CODE = 124
 CONVERSATION_METADATA_KEY = "ufo.conversation_id"
 E2B_LIFECYCLE: SandboxLifecycle = {"on_timeout": "pause", "auto_resume": True}
+E2B_NETWORK: SandboxNetworkOpts = {"allow_public_traffic": False}
 CA_STAGING_PATH = "/root/.ufo-egress-ca.pem"
 CA_SANDBOX_PATH = "/usr/local/share/ca-certificates/ufo-egress-ca.crt"
 SYSTEM_CA_BUNDLE = "/etc/ssl/certs/ca-certificates.crt"
@@ -189,6 +193,7 @@ class E2BSdk(Protocol):
         timeout: int,  # noqa: ASYNC109
         metadata: dict[str, str],
         lifecycle: SandboxLifecycle,
+        network: SandboxNetworkOpts,
         api_key: str,
     ) -> E2BSandbox: ...
 
@@ -237,8 +242,7 @@ class E2BCarrier:
         refusing instead would wedge every later turn of the conversation on a sandbox nothing can
         bring back."""
         egress_env = _egress_env(spec.proxy, spec.run_token)
-        self._evict_expired()
-        live = self._live.get(spec.conversation_id)
+        live = self._leased(spec.conversation_id)
         resume_id = (
             spec.resume_id
             if spec.resume_id is not None
@@ -254,7 +258,6 @@ class E2BCarrier:
         return SandboxHandle(
             conversation_id=spec.conversation_id,
             container_id=sandbox.sandbox_id,
-            traffic_token=sandbox.traffic_access_token,
             run_token=spec.run_token,
             egress_env={**egress_env, **spec.env},
         )
@@ -281,23 +284,8 @@ class E2BCarrier:
         return SandboxHandle(
             conversation_id=spec.conversation_id,
             container_id=sandbox.sandbox_id,
-            traffic_token=sandbox.traffic_access_token,
             run_token=spec.run_token,
         )
-
-    def _evict_expired(self) -> None:
-        """Drop the leases whose provider clock has run out. An expired lease's sandbox is already
-        paused provider-side — the lease IS the provider timeout — so this destroys nothing: it
-        sheds the bookkeeping, which otherwise grows by one live SDK object per conversation for
-        the process's life now that no reaper drives a removal. A later touch of an evicted
-        conversation reconnects from its durable handle exactly as a fresh process would."""
-        now = self.clock()
-        for conversation_id in [
-            conversation_id
-            for conversation_id, lease in self._live.items()
-            if lease.expires_at <= now
-        ]:
-            del self._live[conversation_id]
 
     async def _resume_or_open(self, spec: SandboxSpec, resume_id: str | None) -> E2BSandbox:
         """Resume the conversation's sandbox, or open one on the deploy's template. `connect` both
@@ -317,13 +305,38 @@ class E2BCarrier:
                     conversation_id=str(spec.conversation_id),
                     sandbox_id=resume_id,
                 )
-        return await self.sdk.create(
+        sandbox = await self.sdk.create(
             template=self.template,
             timeout=SANDBOX_LEASE_SECONDS,
             metadata={CONVERSATION_METADATA_KEY: str(spec.conversation_id)},
             lifecycle=E2B_LIFECYCLE,
+            network=E2B_NETWORK,
             api_key=self.api_key,
         )
+        if not sandbox.traffic_access_token:
+            raise RuntimeError(
+                "e2b returned no traffic access token for a sandbox created with public "
+                "traffic disabled — its ports would be unreachable through the ingress; "
+                "check the template"
+            )
+        return sandbox
+
+    def _leased(self, conversation_id: UUID) -> _Lease | None:
+        """The conversation's lease, having dropped every lease whose deadline has passed. `destroy`
+        and `_drop` are the map's only other exits and the ingress reaches neither — it dials, for
+        every conversation it ever serves — so without this the map holds a sandbox reference for
+        every conversation the process has ever touched. Sweeping on lookup rather than by key
+        bounds it to the leases still running: a conversation served once and never returned to
+        leaves nothing behind. Dropping the reference is the whole reclaim — the SDK caches one
+        envd transport, and so one connection pool, per event loop rather than per sandbox, so
+        closing an evicted sandbox's own client would close the pool every other sandbox shares.
+        The caller's own lease is returned whether or not it lapsed, since a lapsed lease still
+        names the container to reconnect to and is the one thing the renewal below reports."""
+        lease = self._live.get(conversation_id)
+        now = self.clock()
+        for expired in [key for key, entry in self._live.items() if entry.expires_at <= now]:
+            del self._live[expired]
+        return lease
 
     async def _install_ca(self, sandbox: E2BSandbox, ca_cert: str) -> None:
         await sandbox.files.write(CA_STAGING_PATH, ca_cert, user="root")
@@ -418,15 +431,25 @@ class E2BCarrier:
         finally:
             await stream.aclose()
 
-    async def host(self, handle: SandboxHandle, port: int) -> str:
+    async def dial(self, handle: SandboxHandle, port: int) -> DialTarget:
         """The sandbox's public per-port host: e2b routes an in-sandbox port over a per-port
         subdomain (`{port}-{sandbox_id}.{domain}`), reached from outside with the sandbox's traffic
         token. The generic inbound path for any service the turn started inside the container (a
         browser's CDP endpoint, a site's dev-server preview). `get_host` is pure address formatting,
         no round trip — the lease is what the caller is really asking for, since an address is
-        worthless if the container pauses before the dial."""
-        sandbox = await self._sandbox(handle, self.idle_seconds)
-        return sandbox.get_host(port)
+        worthless if the container pauses before the dial. A sandbox the provider no longer has
+        raises `SandboxNotFoundException` on reconnect — not this carrier's contract to leak — so it
+        maps to `SandboxUnreachable`, the one error every carrier's `dial` raises."""
+        try:
+            sandbox = await self._sandbox(handle, self.idle_seconds)
+        except SandboxNotFoundException as error:
+            raise SandboxUnreachable(f"e2b sandbox {handle.container_id!r} is gone") from error
+        token = sandbox.traffic_access_token
+        return DialTarget(
+            host=sandbox.get_host(port),
+            tls=True,
+            headers={TRAFFIC_ACCESS_HEADER: token} if token else {},
+        )
 
     async def _sandbox(self, handle: SandboxHandle, needed_seconds: int) -> E2BSandbox:
         """The conversation's sandbox, leased past the work about to run on it. Every caller states
@@ -440,10 +463,19 @@ class E2BCarrier:
         clock before the call, so the deadline recorded is always earlier than the real one and the
         container is never worked on past what the provider agreed to. The entry is dropped before
         the call and restored only by a connect that returned, so a provider fault leaves nothing
-        behind for the next call to trust."""
-        lease = self._live.get(handle.conversation_id)
+        behind for the next call to trust.
+
+        The lease is keyed by conversation but the caller names a container, so a lease naming a
+        different one is a miss however fresh it is: the handle is read from the conversation row
+        per call, and a sandbox recreated since the lease was taken makes that row — not the
+        cache — the truth about where this conversation's work goes."""
+        lease = self._leased(handle.conversation_id)
         renewed = self.clock()
-        if lease is not None and lease.expires_at - renewed >= needed_seconds:
+        if (
+            lease is not None
+            and lease.sandbox.sandbox_id == handle.container_id
+            and lease.expires_at - renewed >= needed_seconds
+        ):
             return lease.sandbox
         self._live.pop(handle.conversation_id, None)
         span = max(SANDBOX_LEASE_SECONDS, needed_seconds)

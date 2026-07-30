@@ -37,6 +37,7 @@ from ufo_ext_e2b import (
     DEFAULT_IDLE_SECONDS,
     E2B_API_KEY_ENV,
     E2B_LIFECYCLE,
+    E2B_NETWORK,
     E2B_TEMPLATE_NAME,
     ENSURE_WORKSPACE_COMMAND,
     EXEC_LEASE_MARGIN_SECONDS,
@@ -53,6 +54,7 @@ from ufo_ext_e2b import (
 )
 
 from ufo.config import BlobConfig, Config, DatabaseConfig, SandboxConfig
+from ufo.sandbox.select import select_carrier
 from ufo.sandbox.session import (
     NO_PROXY_HOSTS,
     WORKSPACE_DIR,
@@ -60,8 +62,8 @@ from ufo.sandbox.session import (
     ProxyEndpoint,
     SandboxHandle,
     SandboxSpec,
+    SandboxUnreachable,
 )
-from ufo.serve import _select_carrier
 from ufo.tools.builtins import MAX_BASH_TIMEOUT_MS
 
 
@@ -220,6 +222,7 @@ class _Sdk:
     command_timeout_on: tuple[str, ...] = ()
     command_timeout_counts: dict[str, int] = field(default_factory=dict)
     on_call: Callable[[], None] | None = None
+    traffic_access_token: str | None = "traffic-tok"
 
     async def create(
         self,
@@ -228,6 +231,7 @@ class _Sdk:
         timeout: int,  # noqa: ASYNC109
         metadata: dict[str, str],
         lifecycle: object,
+        network: object,
         api_key: str,
     ) -> _Sandbox:
         if self.on_call is not None:
@@ -238,6 +242,7 @@ class _Sdk:
         sandbox = _Sandbox(
             sandbox_id=sandbox_id,
             provider=provider,
+            traffic_access_token=self.traffic_access_token,
             commands=_Commands(
                 fail_on=self.command_fail_on,
                 fail_counts=dict(self.command_fail_counts),
@@ -253,6 +258,7 @@ class _Sdk:
                 "timeout": timeout,
                 "metadata": metadata,
                 "lifecycle": lifecycle,
+                "network": network,
                 "api_key": api_key,
             }
         )
@@ -302,10 +308,30 @@ async def test_create_opens_a_sandbox_on_the_template_and_returns_its_handle() -
     assert created["template"] == "tpl-1"
     assert created["api_key"] == "key-1"
     assert created["lifecycle"] == E2B_LIFECYCLE
+    assert created["network"] == E2B_NETWORK
     assert created["metadata"] == {CONVERSATION_METADATA_KEY: str(conversation)}
     runs = sdk.sandboxes["sbx-1"].commands.runs
     assert (ENSURE_WORKSPACE_COMMAND, None, WORKSPACE_ENSURE_TIMEOUT_SECONDS) in runs
-    assert handle.traffic_token == "traffic-tok"
+
+
+async def test_create_disables_public_port_traffic() -> None:
+    sdk = _Sdk()
+    carrier = E2BCarrier(api_key="k", template="tpl", sdk=sdk)
+
+    await carrier.create(_spec(uuid4()))
+
+    assert sdk.created[0]["network"] == {"allow_public_traffic": False}
+
+
+async def test_create_fails_loud_when_no_traffic_token_returns() -> None:
+    """The token is not on the handle any more — `dial` reads it off the live container — but a
+    template that returns none at create leaves every port unreachable through the ingress, so the
+    create is where that is caught."""
+    sdk = _Sdk(traffic_access_token=None)
+    carrier = E2BCarrier(api_key="k", template="tpl", sdk=sdk)
+
+    with pytest.raises(RuntimeError, match="traffic access token"):
+        await carrier.create(_spec(uuid4()))
 
 
 async def test_create_installs_the_proxy_ca_into_system_trust_as_root() -> None:
@@ -436,15 +462,69 @@ async def test_create_with_a_plaintext_proxy_url_fails_loud() -> None:
         await carrier.create(spec)
 
 
-async def test_host_returns_the_sandbox_public_per_port_host() -> None:
-    """The producer half of the browser's `Carrier.host` seam: e2b routes an in-sandbox port over
-    its public per-port host, so the serve process can dial Chrome's CDP endpoint inside the
-    sandbox."""
+async def test_dial_returns_the_per_port_host_and_traffic_header() -> None:
     sdk = _Sdk()
-    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk)
+    carrier = E2BCarrier(api_key="k", template="tpl", sdk=sdk)
     handle = await carrier.create(_spec(uuid4()))
 
-    assert await carrier.host(handle, 9223) == "9223-sbx-1.e2b.test"
+    target = await carrier.dial(handle, 8000)
+
+    assert target.host == f"8000-{handle.container_id}.e2b.test"
+    assert target.tls is True
+    assert target.headers == {"e2b-traffic-access-token": "traffic-tok"}
+
+
+async def test_dial_omits_the_header_when_the_sandbox_carries_no_traffic_token() -> None:
+    """A resumed sandbox `dial` reaches through `connect`, not `create`'s fresh-token guard — a
+    sandbox with no token on the wire dials without the header rather than raising."""
+    sdk = _Sdk()
+    sdk.sandboxes["sbx-1"] = _Sandbox(
+        sandbox_id="sbx-1",
+        provider=_Provider(clock=sdk.clock, expires_at=sdk.clock() + SANDBOX_LEASE_SECONDS),
+        commands=_Commands(),
+        files=_Files(),
+        traffic_access_token=None,
+    )
+    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk)
+    handle = SandboxHandle(conversation_id=uuid4(), container_id="sbx-1")
+
+    target = await carrier.dial(handle, 9223)
+
+    assert target.headers == {}
+
+
+async def test_a_lease_naming_another_container_is_a_miss() -> None:
+    """The lease is keyed by conversation, the caller names a container. The ingress re-reads the
+    conversation's handle per request precisely so a sandbox recreated since is picked up at once,
+    so a fresh lease naming the old container must not answer for the new one — otherwise every
+    viewer keeps reaching a sandbox the conversation no longer runs on until the lease lapses."""
+    clock = _Clock()
+    sdk, carrier = _leased(clock)
+    handle = await carrier.create(_spec(uuid4()))
+    recreated = SandboxHandle(conversation_id=handle.conversation_id, container_id="sbx-2")
+    sdk.sandboxes["sbx-2"] = _Sandbox(
+        sandbox_id="sbx-2",
+        provider=_Provider(clock=sdk.clock, expires_at=sdk.clock() + SANDBOX_LEASE_SECONDS),
+        commands=_Commands(),
+        files=_Files(),
+    )
+
+    target = await carrier.dial(recreated, 8000)
+
+    assert target.host == "8000-sbx-2.e2b.test"
+    assert sdk.connected == ["sbx-2"]
+
+
+async def test_dial_raises_sandbox_unreachable_when_the_sandbox_is_gone() -> None:
+    """A sandbox the provider no longer has raises `SandboxNotFoundException` on reconnect; `dial`
+    maps it to `SandboxUnreachable`, the one error every carrier's `dial` raises, rather than
+    leaking the e2b SDK's own exception type."""
+    sdk = _Sdk()
+    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk)
+    handle = SandboxHandle(conversation_id=uuid4(), container_id="sbx-1")
+
+    with pytest.raises(SandboxUnreachable):
+        await carrier.dial(handle, 9223)
 
 
 async def test_second_create_for_the_conversation_resumes_rather_than_recreates() -> None:
@@ -673,16 +753,41 @@ async def test_a_write_renews_a_lease_that_no_longer_covers_the_idle_span() -> N
     assert sdk.connect_leases == [SANDBOX_LEASE_SECONDS]
 
 
-async def test_a_host_lookup_renews_a_lease_that_no_longer_covers_the_idle_span() -> None:
-    """A caller asking for the public host is about to dial the service behind it, so the lookup
-    renews the same lease — an address is worthless if the container pauses before the dial."""
+async def test_a_dial_renews_a_lease_that_no_longer_covers_the_idle_span() -> None:
+    """A caller dialling a port is about to reach the service behind it, so the dial renews the
+    same lease — an address is worthless if the container pauses before the exchange."""
     clock = _Clock()
     sdk, carrier = _leased(clock)
     handle = await carrier.create(_spec(uuid4()))
     clock.advance(SANDBOX_LEASE_SECONDS - 100)
 
-    assert await carrier.host(handle, 9223) == "9223-sbx-1.e2b.test"
+    target = await carrier.dial(handle, 9223)
+
+    assert target.host == "9223-sbx-1.e2b.test"
     assert sdk.connect_leases == [SANDBOX_LEASE_SECONDS]
+
+
+async def test_an_expired_lease_is_dropped_and_the_next_dial_reconnects() -> None:
+    """The ingress process only ever dials, never destroys, so a lapsed lease is the map's one
+    remaining exit — without it a process that serves a site for every conversation it is asked
+    about holds an SDK client per conversation for the life of the pod. The sweep runs on lookup
+    and drops every lapsed lease, not only the one being looked up, so a conversation served once
+    and never returned to leaves nothing behind; the dial that follows reconnects, which is what
+    resumes the container the provider paused."""
+    clock = _Clock()
+    sdk, carrier = _leased(clock)
+    served_once, served_again = uuid4(), uuid4()
+    await carrier.create(_spec(served_once))
+    handle = await carrier.create(_spec(served_again))
+    clock.advance(SANDBOX_LEASE_SECONDS)
+    assert sdk.sandboxes["sbx-1"].provider.paused
+
+    target = await carrier.dial(handle, 8000)
+
+    assert list(carrier._live) == [served_again]
+    assert sdk.connected == [handle.container_id]
+    assert not sdk.sandboxes[handle.container_id].provider.paused
+    assert target.host == f"8000-{handle.container_id}.e2b.test"
 
 
 async def test_a_process_that_reconnects_carries_the_lease_on_connect() -> None:
@@ -831,7 +936,7 @@ def test_config_backend_e2b_resolves_the_extension_contributed_carrier(
         blob=BlobConfig(backend="filesystem", root=Path("blobs")),
         sandbox=SandboxConfig(backend="e2b", proxy_public_url=PROXY_PUBLIC_URL),
     )
-    carrier, off_cluster = _select_carrier(config, (e2b_ext.manifest(),))
+    carrier, off_cluster = select_carrier(config, (e2b_ext.manifest(),))
     assert isinstance(carrier, E2BCarrier)
     assert off_cluster
     assert carrier.template == E2B_TEMPLATE_NAME
@@ -852,7 +957,7 @@ def test_e2b_backend_without_proxy_public_url_fails_closed(
         sandbox=SandboxConfig(backend="e2b"),
     )
     with pytest.raises(RuntimeError, match="proxy_public_url"):
-        _select_carrier(config, (e2b_ext.manifest(),))
+        select_carrier(config, (e2b_ext.manifest(),))
 
 
 def test_e2b_backend_with_plaintext_proxy_public_url_fails_closed(
@@ -869,7 +974,7 @@ def test_e2b_backend_with_plaintext_proxy_public_url_fails_closed(
     )
 
     with pytest.raises(RuntimeError, match="HTTPS"):
-        _select_carrier(config, (e2b_ext.manifest(),))
+        select_carrier(config, (e2b_ext.manifest(),))
 
 
 async def test_exec_env_rides_the_handle_not_the_conversation() -> None:

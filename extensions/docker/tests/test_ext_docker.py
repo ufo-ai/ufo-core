@@ -20,6 +20,7 @@ from ufo_ext_docker import DockerCarrier
 from ufo.config import BlobConfig, Config, DatabaseConfig, SandboxConfig
 from ufo.db import workspace_tx
 from ufo.sandbox.conversation import ConversationSandbox
+from ufo.sandbox.select import select_carrier
 from ufo.schema import tables
 from ufo.sdk.sandbox import (
     NO_PROXY_HOSTS,
@@ -29,7 +30,6 @@ from ufo.sdk.sandbox import (
     SandboxHandle,
     SandboxSpec,
 )
-from ufo.serve import _select_carrier
 from ufo.workspace import ws
 
 
@@ -56,7 +56,7 @@ def test_config_backend_docker_resolves_the_extension_contributed_carrier() -> N
         blob=BlobConfig(backend="filesystem", root=Path("blobs")),
         sandbox=SandboxConfig(backend="docker"),
     )
-    carrier, off_cluster = _select_carrier(config, (docker_ext.manifest(),))
+    carrier, off_cluster = select_carrier(config, (docker_ext.manifest(),))
     assert isinstance(carrier, DockerCarrier)
     assert off_cluster is False
 

@@ -17,7 +17,7 @@ import pytest
 import ufo_ext_sandbox_chrome as ext
 
 from ufo.browser import SessionGone
-from ufo.sandbox.session import ExecResult, SandboxHandle, SandboxSession
+from ufo.sandbox.session import DialTarget, ExecResult, SandboxHandle, SandboxSession
 
 CANNED_WS = "ws://127.0.0.1:9222/devtools/browser/9f1c-abc-123"
 FAKE_HOST = "9223-sbx123.e2b.app"
@@ -26,13 +26,17 @@ FAKE_HOST = "9223-sbx123.e2b.app"
 @dataclass
 class FakeCarrier:
     """Records the shell commands the session runs and answers the bring-up with a canned DevTools
-    url; `host` returns the carrier's public per-port host. A real object the session drives through
-    the `Carrier` protocol, never a mock of the provider under test."""
+    url; `dial` returns the carrier's public per-port target. A real object the session drives
+    through the `Carrier` protocol, never a mock of the provider under test."""
 
     commands: list[str] = field(default_factory=list)
-    host_ports: list[int] = field(default_factory=list)
     timeouts: list[int] = field(default_factory=list)
-    host_value: str = FAKE_HOST
+    dial_ports: list[int] = field(default_factory=list)
+    dial_target: DialTarget = field(
+        default_factory=lambda: DialTarget(
+            host=FAKE_HOST, tls=True, headers={"e2b-traffic-access-token": "tok-xyz"}
+        )
+    )
     download_bytes: bytes = b""
     download_size: int = 0
 
@@ -52,9 +56,9 @@ class FakeCarrier:
             )
         return ExecResult(stdout=f"{CANNED_WS}\n", stderr="", exit_code=0)
 
-    async def host(self, handle: SandboxHandle, port: int) -> str:
-        self.host_ports.append(port)
-        return self.host_value
+    async def dial(self, handle: SandboxHandle, port: int) -> DialTarget:
+        self.dial_ports.append(port)
+        return self.dial_target
 
 
 @dataclass
@@ -83,8 +87,8 @@ class ShellCarrier:
             exit_code=process.returncode or 0,
         )
 
-    async def host(self, handle: SandboxHandle, port: int) -> str:
-        raise AssertionError("host must not be reached when a download is read")
+    async def dial(self, handle: SandboxHandle, port: int) -> DialTarget:
+        raise AssertionError("the sandbox is not dialed when a download is read")
 
 
 @dataclass
@@ -98,14 +102,12 @@ class FailingCarrier:
             stdout="", stderr="the browser exited 1 without serving\nAbort trap", exit_code=1
         )
 
-    async def host(self, handle: SandboxHandle, port: int) -> str:
-        raise AssertionError("host must not be reached when the browser fails to come up")
+    async def dial(self, handle: SandboxHandle, port: int) -> DialTarget:
+        raise AssertionError("dial must not be reached when the browser fails to come up")
 
 
-def _session(carrier: object, *, traffic_token: str | None = "tok-xyz") -> SandboxSession:
-    handle = SandboxHandle(
-        conversation_id=uuid4(), container_id="sbx123", traffic_token=traffic_token
-    )
+def _session(carrier: object) -> SandboxSession:
+    handle = SandboxHandle(conversation_id=uuid4(), container_id="sbx123")
     return SandboxSession(carrier=carrier, handle=handle)  # type: ignore[arg-type]
 
 
@@ -115,7 +117,7 @@ async def test_lease_builds_the_wss_endpoint_with_the_traffic_header() -> None:
     endpoint = await lease.endpoint()
     assert endpoint.url == "wss://9223-sbx123.e2b.app/devtools/browser/9f1c-abc-123"
     assert endpoint.headers == {"e2b-traffic-access-token": "tok-xyz"}
-    assert carrier.host_ports == [9223]
+    assert carrier.dial_ports == [9223]
     assert await lease.token() == endpoint.url
     assert await lease.aclose() is None
 
@@ -157,8 +159,9 @@ async def test_lease_without_a_sandbox_fails_loud() -> None:
         await ext.SandboxChromeCdpProvider().lease(None)
 
 
-async def test_lease_omits_the_header_when_the_sandbox_has_no_traffic_token() -> None:
-    lease = await ext.SandboxChromeCdpProvider().lease(_session(FakeCarrier(), traffic_token=None))
+async def test_lease_omits_the_header_when_the_dial_target_carries_none() -> None:
+    carrier = FakeCarrier(dial_target=DialTarget(host=FAKE_HOST, tls=True))
+    lease = await ext.SandboxChromeCdpProvider().lease(_session(carrier))
     assert (await lease.endpoint()).headers == {}
 
 
