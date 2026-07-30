@@ -38,6 +38,7 @@ from ufo.config import Config
 from ufo.connectors import ConnectorRegistry
 from ufo.credentials import (
     CredentialRequestState,
+    CredentialSlotUnset,
     CredentialStore,
     seal_credential_request,
 )
@@ -80,6 +81,18 @@ from ufo.surfaces import hub_tail
 from ufo.workspace import ws
 
 SECRET = "artifact-signing-secret"
+SLOTTED = Manifest(
+    name="stub",
+    version="0",
+    credentials=(
+        CredentialSlot(name="acme_api_key", description="ACME API key"),
+        CredentialSlot(
+            name="acme_install_seal",
+            description="ACME install binding",
+            member_filled=False,
+        ),
+    ),
+)
 TOKEN_SECRET = "web-token-secret"
 STREAM_TIMEOUT_SECONDS = 30
 STREAM_GATE = StreamGate()
@@ -225,6 +238,7 @@ def dbos_runtime(
                 connectors_manifest(),
                 skill_create_manifest(),
                 sources_manifest(),
+                SLOTTED,
             ),
             registry=STANDIN_REGISTRY,
             skills=skill_registry(()),
@@ -254,21 +268,9 @@ async def web(
     dbos_client = DBOSClient(system_database_url=config.database.system_url)
     workspace_id, agent_id = await _seed_workspace()
     app = FastAPI()
-    slotted = Manifest(
-        name="stub",
-        version="0",
-        credentials=(
-            CredentialSlot(name="acme_api_key", description="ACME API key"),
-            CredentialSlot(
-                name="acme_install_seal",
-                description="ACME install binding",
-                member_filled=False,
-            ),
-        ),
-    )
     _mount_shared_surfaces(
         app,
-        (web_manifest(), slotted),
+        (web_manifest(), SLOTTED),
         CredentialStore(fernet=CREDENTIAL_FERNET),
         blob,
         sandboxes,
@@ -285,7 +287,7 @@ async def web(
             DefaultIndex(transaction=workspace_tx),
             StubEmbed(),
         ),
-        objects=member_object_registry((web_manifest(), slotted, sites_manifest())),
+        objects=member_object_registry((web_manifest(), SLOTTED, sites_manifest())),
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="https://web") as client:
         yield client, workspace_id, agent_id
@@ -632,6 +634,7 @@ async def test_credentials_view_reports_slots_and_never_values(
     assert listed.json()["slots"] == [
         {
             "slot": "acme_api_key",
+            "name": "acme-api-key",
             "extension": "stub",
             "description": "ACME API key",
             "filled": True,
@@ -2702,6 +2705,131 @@ async def test_an_intent_naming_another_kind_is_refused_at_validation(
             headers={"cookie": f"{SESSION_COOKIE}={token}"},
         )
         assert refused.status_code == 400
+    async with workspace_tx() as connection:
+        turns = (
+            await connection.execute(sa.select(sa.func.count()).select_from(tables.turn))
+        ).scalar_one()
+    assert turns == 0
+
+
+async def test_a_credential_set_intent_mints_a_prompt_and_the_seal_stores_the_value(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """Set/replace end to end with no pending chat request: the panel's `request` intent dispatches
+    `request_credentials` verbatim, the turn's terminal frame carries the server-minted seal and
+    its prompts, and the value crosses only in the sealed fulfillment — the intent outcome, the
+    audit turn, and every response body stay secret-free. A deploy-written slot is not a slot the
+    panel can name."""
+    client, workspace_id, agent_id = web
+    _admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    minted = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json={"verb": "request", "kind": "credential", "name": "acme-api-key"},
+        headers=cookie,
+    )
+    assert minted.status_code == 200
+    outcome = minted.json()
+    assert outcome["applied"] is True
+    request = outcome["credentials"]
+    assert [prompt["slot"] for prompt in request["prompts"]] == ["acme_api_key"]
+    assert [prompt["prompt"] for prompt in request["prompts"]] == ["ACME API key"]
+    assert request["sealed"]
+    stored = await client.post(
+        "/surface/web/credentials",
+        data={"sealed": request["sealed"], "slot": "acme_api_key", "value": "s3cr3t-value"},
+        headers=cookie,
+    )
+    assert stored.status_code == 200
+    assert "s3cr3t-value" not in stored.text
+    assert (
+        await CredentialStore(fernet=CREDENTIAL_FERNET).get(workspace_id, "acme_api_key")
+        == "s3cr3t-value"
+    )
+    async with workspace_tx() as connection:
+        audit = (
+            await connection.execute(
+                sa.select(tables.turn.c.status, tables.turn.c.inbound, tables.turn.c.terminal)
+            )
+        ).one()
+    assert audit.status == "done"
+    assert "s3cr3t-value" not in audit.inbound
+    assert "s3cr3t-value" not in str(audit.terminal)
+    machinery = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json={"verb": "request", "kind": "credential", "name": "acme-install-seal"},
+        headers=cookie,
+    )
+    refused = machinery.json()
+    assert refused["applied"] is False
+    assert "No credential slot named" in refused["message"]
+
+
+async def test_a_credential_clear_intent_empties_the_slot_and_gates_on_admin(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """Clear rides the intent lane to the credential kind's delete verb: an admin's clear empties
+    the stored value and the slot lists as empty again; a non-admin gets the kind's own admin
+    refusal — for clear and for minting a prompt alike — and the value stands."""
+    client, workspace_id, agent_id = web
+    _admin_id, admin_token = await _seed_member(workspace_id, "admin@example.com", admin=True)
+    _member_id, member_token = await _seed_member(workspace_id, "member@example.com")
+    store = CredentialStore(fernet=CREDENTIAL_FERNET)
+    await store.put(workspace_id, "acme_api_key", "live-value")
+    member_cookie = {"cookie": f"{SESSION_COOKIE}={member_token}"}
+    held = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json={"verb": "delete", "kind": "credential", "name": "acme-api-key"},
+        headers=member_cookie,
+    )
+    refusal = held.json()
+    assert refusal["applied"] is False
+    assert "admin" in refusal["message"]
+    assert await store.get(workspace_id, "acme_api_key") == "live-value"
+    unminted = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json={"verb": "request", "kind": "credential", "name": "acme-api-key"},
+        headers=member_cookie,
+    )
+    assert unminted.json()["applied"] is False
+    assert "admin" in unminted.json()["message"]
+    cleared = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json={"verb": "delete", "kind": "credential", "name": "acme-api-key"},
+        headers={"cookie": f"{SESSION_COOKIE}={admin_token}"},
+    )
+    assert cleared.json()["applied"] is True
+    with pytest.raises(CredentialSlotUnset):
+        await store.get(workspace_id, "acme_api_key")
+    listed = await client.get(
+        "/surface/web/workspace/credentials",
+        headers={"cookie": f"{SESSION_COOKIE}={admin_token}"},
+    )
+    slots = {entry["slot"]: entry for entry in listed.json()["slots"]}
+    assert slots["acme_api_key"]["filled"] is False
+    assert slots["acme_api_key"]["name"] == "acme-api-key"
+
+
+async def test_a_credential_intent_never_carries_a_spec(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The kind pairing is the gate: a credential slot's value is set through its private prompt,
+    so an apply naming the kind — the shape that would carry a secret in an intent body — is
+    malformed before any turn exists."""
+    client, workspace_id, agent_id = web
+    _admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
+    crossed = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json={
+            "verb": "apply",
+            "kind": "credential",
+            "name": "acme-api-key",
+            "spec": {"value": "s3cr3t"},
+        },
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    assert crossed.status_code == 400
+    assert "s3cr3t" not in crossed.text
     async with workspace_tx() as connection:
         turns = (
             await connection.execute(sa.select(sa.func.count()).select_from(tables.turn))

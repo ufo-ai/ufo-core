@@ -12,8 +12,6 @@ Core-registered: the loader builds the kind from every active manifest's declare
 it with no extension context — the handlers read the ambient workspace directly, exactly as
 `ScopedStore` does."""
 
-import hashlib
-import re
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -25,6 +23,7 @@ from ufo.credentials import (
     DeclaredSlot,
     HostChoice,
     credential_host,
+    named_slots,
 )
 from ufo.db import workspace_tx
 from ufo.ext.context import JsonValue
@@ -47,7 +46,6 @@ FILL_REFUSAL = (
     "request_credentials"
 )
 UNSET_GATE = "only a workspace admin can clear a credential slot"
-NAME_DIGEST_LENGTH = 8
 
 
 class CredentialSpec(BaseModel):
@@ -62,10 +60,6 @@ class CredentialSpec(BaseModel):
     host: str = ""
     host_slot: str = ""
     host_options: tuple[str, ...] = ()
-
-
-def _slug(raw: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "-", raw.lower()).strip("-")
 
 
 @dataclass(frozen=True)
@@ -174,18 +168,7 @@ class CredentialObjects:
             )
 
     def _named(self) -> dict[str, DeclaredSlot]:
-        grouped: dict[str, list[DeclaredSlot]] = {}
-        for slot in self.slots:
-            grouped.setdefault(_slug(slot.name), []).append(slot)
-        named: dict[str, DeclaredSlot] = {}
-        for plain, group in grouped.items():
-            if len(group) == 1:
-                named[plain] = group[0]
-                continue
-            for slot in group:
-                qualifier = hashlib.sha256(f"{slot.extension}:{slot.name}".encode()).hexdigest()
-                named[f"{plain}-{qualifier[:NAME_DIGEST_LENGTH]}"] = slot
-        return named
+        return named_slots(self.slots)
 
     async def _filled_slots(self) -> frozenset[str]:
         async with workspace_tx() as connection:

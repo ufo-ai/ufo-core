@@ -376,9 +376,17 @@ const wire = {
       slots: [
         {
           slot: "api_key",
+          name: "api-key",
           description: "Acme API key",
           extension: "acme",
           filled: false,
+        },
+        {
+          slot: "signing_key",
+          name: "signing-key",
+          description: "Signing key",
+          extension: "acme",
+          filled: true,
         },
       ],
     },
@@ -450,16 +458,34 @@ const sandbox = {
         throw new TypeError("network down");
       }
       wire.credentialPosts.push(String(options.body));
-      if (wire.credentialPosts.length === 1) {
+      if (wire.credentialRefuses) {
+        wire.credentialRefuses = false;
         return { ok: false, status: 413, text: async () => "value too large" };
       }
       return { ok: true, status: 200, json: async () => ({ stored: "api_key" }) };
     }
     if (options?.method === "POST" && url.endsWith("/intents")) {
-      wire.posted.push(JSON.parse(options.body));
+      const submitted = JSON.parse(options.body);
+      wire.posted.push(submitted);
       wire.intentUrls.push(url);
       if (wire.holdPost) await wire.holdPost;
       wire.overview.agent.updated_at = "2026-07-30T12:00:00+00:00";
+      if (submitted.verb === "request" && submitted.kind === "credential") {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            applied: true,
+            message: "",
+            turn_id: "t",
+            credentials: {
+              sealed: "sealed-from-the-turn",
+              reason: "Set api_key from the portal.",
+              prompts: [{ slot: "api_key", prompt: "Acme API key" }],
+            },
+          }),
+        };
+      }
       if (wire.intentRefuses) {
         return {
           ok: true,
@@ -1005,11 +1031,50 @@ try {
   await new Promise((resolve) => setTimeout(resolve, 0));
   const slotCells = viewCells();
   const expectedSlots = [
-    "slot", "description", "extension", "state",
-    "api_key", "Acme API key", "acme", "empty",
+    "slot", "description", "extension", "state", "",
+    "api_key", "Acme API key", "acme", "empty", "",
+    "signing_key", "Signing key", "acme", "filled", "",
   ];
   if (slotCells.join("|") !== expectedSlots.join("|")) {
     throw new Error(`the credentials view reads ${JSON.stringify(slotCells)}`);
+  }
+  const slotRows = body.querySelectorAll("tr");
+  const emptyActions = slotRows[1].childNodes.at(-1).querySelectorAll("button");
+  if (emptyActions.length !== 1 || emptyActions[0].textContent !== "Set") {
+    throw new Error("an empty slot offers something other than Set alone");
+  }
+  await emptyActions[0].fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  if (wire.intentUrls.at(-1) !== `/surface/web/agents/${AGENT_A}/intents`) {
+    throw new Error(`the credential intent posted to ${wire.intentUrls.at(-1)}`);
+  }
+  if (JSON.stringify(wire.posted.at(-1)) !== JSON.stringify(
+    { verb: "request", kind: "credential", name: "api-key" })) {
+    throw new Error(`the credential intent submitted ${JSON.stringify(wire.posted.at(-1))}`);
+  }
+  const secretField = body.querySelector("input[type]");
+  const promptForm = body.querySelectorAll("form").at(-1);
+  if (!promptForm || !secretField || secretField.type !== "password") {
+    throw new Error("the minted prompt rendered no password field");
+  }
+  secretField.value = "s3cr3t";
+  await promptForm.fire("submit");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const fulfilled = wire.credentialPosts.at(-1);
+  if (!fulfilled || !fulfilled.includes("sealed-from-the-turn")) {
+    throw new Error(`the fulfillment posted ${fulfilled}`);
+  }
+  if (!fulfilled.includes("s3cr3t")) throw new Error("the secret never reached the sealed post");
+  const filledActions = body
+    .querySelectorAll("tr")[2].childNodes.at(-1).querySelectorAll("button");
+  if (filledActions.map((button) => button.textContent).join("|") !== "Replace|Clear") {
+    throw new Error("a filled slot offers something other than Replace and Clear");
+  }
+  await filledActions[1].fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  if (JSON.stringify(wire.posted.at(-1)) !== JSON.stringify(
+    { verb: "delete", kind: "credential", name: "signing-key" })) {
+    throw new Error(`Clear submitted ${JSON.stringify(wire.posted.at(-1))}`);
   }
   wire.workspace.credentials.slots = [];
   await workspaceNamed("Credentials").fire("click");
@@ -1366,13 +1431,15 @@ try {
   const credentialForm = credentialField.parentNode;
   const credentialLabel = credentialForm.parentNode.childNodes[0];
   const storeButton = credentialForm.querySelectorAll("button")[0];
+  const postsBefore = wire.credentialPosts.length;
   credentialField.value = "   ";
   await credentialForm.fire("submit");
   await new Promise((resolve) => setTimeout(resolve, 0));
-  if (wire.credentialPosts.length !== 0) {
+  if (wire.credentialPosts.length !== postsBefore) {
     throw new Error("a whitespace value reached the wire");
   }
   wire.credentialThrows = true;
+  wire.credentialRefuses = true;
   credentialField.value = "sk-live";
   await credentialForm.fire("submit");
   await new Promise((resolve) => setTimeout(resolve, 0));
@@ -1394,8 +1461,9 @@ try {
     throw new Error(`stored label reads "${credentialLabel.textContent}"`);
   }
   if (credentialForm.isConnected) throw new Error("stored prompt kept its form");
-  if (wire.credentialPosts.length !== 2 || !wire.credentialPosts[1].includes("sealed-blob")) {
-    throw new Error(`credential posts were ${JSON.stringify(wire.credentialPosts)}`);
+  const chatPosts = wire.credentialPosts.slice(postsBefore);
+  if (chatPosts.length !== 2 || !chatPosts[1].includes("sealed-blob")) {
+    throw new Error(`credential posts were ${JSON.stringify(chatPosts)}`);
   }
   if (byId.log.querySelectorAll(".files").length !== 1) {
     throw new Error("the transcript's files handoff rendered no download box");

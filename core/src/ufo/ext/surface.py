@@ -63,6 +63,7 @@ from ufo.credentials import (
     CredentialRequestState,
     CredentialStore,
     DeclaredSlot,
+    named_slots,
     open_credential_request,
 )
 from ufo.db import owner_tx, workspace_tx
@@ -341,9 +342,11 @@ class CredentialSlotView(BaseModel):
     projects, minus the slots only the deploy's own code writes (`member_filled=False`, a provider
     callback's seal): those are machinery a member can neither fill nor rotate, so the panel
     leaves them out. Deploy config (model keys, signing secrets) is not a slot at all and cannot
-    appear."""
+    appear. `name` is the `credential` object kind's name for the slot — the address a prepared
+    intent mutates."""
 
     slot: str
+    name: str
     extension: str
     description: str
     filled: bool
@@ -1387,9 +1390,14 @@ class SurfaceContext:
                 .scalars()
                 .all()
             )
+        names = {
+            slot.extension + "/" + slot.name: name
+            for name, slot in named_slots(self._declared_slots).items()
+        }
         return tuple(
             CredentialSlotView(
                 slot=slot.name,
+                name=names[slot.extension + "/" + slot.name],
                 extension=slot.extension,
                 description=slot.description,
                 filled=slot.name in filled,

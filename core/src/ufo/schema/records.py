@@ -33,7 +33,9 @@ class ToolIntent(BaseModel):
     round, so the submitted values apply exactly or the refusal returns, never a paraphrase. The
     turn row is the audit record: the intent serializes as its inbound, the speaker is the
     submitting member, and the result commits as its terminal frame. The Literal is the closed
-    whitelist; a verb joins it with its panel producer, never ahead of one."""
+    whitelist; a verb joins it with its panel producer, never ahead of one — `request_credentials`
+    mints the sealed private prompt a panel's set or replace fulfills against, so the secret
+    itself never rides an intent."""
 
     tool: Literal[
         "object_apply",
@@ -42,6 +44,7 @@ class ToolIntent(BaseModel):
         "grant_web_access",
         "revoke_web_access",
         "memory_update",
+        "request_credentials",
     ]
     input: dict[str, JsonValue]
 

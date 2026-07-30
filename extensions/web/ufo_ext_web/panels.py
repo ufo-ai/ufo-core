@@ -23,7 +23,7 @@ from ufo.sdk.audience import conversation_audience
 from ufo.sdk.http import JSONResponse, Request, Response
 from ufo.sdk.hub import Parked, Terminal
 from ufo.sdk.objects import AgentSpec
-from ufo.sdk.surfaces import SurfaceContext, TerminalFrame, ToolIntent
+from ufo.sdk.surfaces import CredentialSlotView, SurfaceContext, TerminalFrame, ToolIntent
 from ufo_ext_web.audience import granted_emails, web_extension
 
 INTENT_MAX_CHARS = 16_384
@@ -38,18 +38,36 @@ class ApplyIntent(BaseModel):
     kind gates: it names the provider and opens the same private OAuth handoff chat's
     `connect_account` leaves — the URL rides the turn's terminal and is minted per speaking member
     at stream time, never in a transcript or an intent response — so it pairs with the `connection`
-    kind exactly, both ways."""
+    kind exactly, both ways. The `credential` kind pairs the other way: a slot's value is a secret
+    a private prompt collects, so only `delete` (clear) names it here."""
 
     verb: Literal["apply", "delete", "connect"]
-    kind: Literal["agent", "member", "skill", "connector_grant", "connection", "source"]
+    kind: Literal[
+        "agent", "member", "skill", "connector_grant", "connection", "source", "credential"
+    ]
     name: str
     spec: dict[str, JsonValue] | None = None
 
     @model_validator(mode="after")
-    def _connect_pairs_with_connection(self) -> "ApplyIntent":
+    def _verb_pairs_with_its_kind(self) -> "ApplyIntent":
         if (self.verb == "connect") != (self.kind == "connection"):
             raise ValueError("connect pairs with the connection kind exactly")
+        if self.kind == "credential" and self.verb != "delete":
+            raise ValueError(
+                "a credential slot's value is set through its private prompt, never a spec"
+            )
         return self
+
+
+class CredentialIntent(BaseModel):
+    """One request for the private prompt that fills a member-fillable credential slot. The panel
+    never carries the secret: this mints the same sealed `request_credentials` handoff a chat turn
+    produces, the terminal frame returns it, and the value crosses only in the sealed fulfillment
+    the prompt posts."""
+
+    verb: Literal["request"]
+    kind: Literal["credential"]
+    name: str
 
 
 class AudienceIntent(BaseModel):
@@ -76,11 +94,29 @@ class CorrectionIntent(BaseModel):
 class PanelIntent(BaseModel):
     """What a panel form submits: the closed set of mutations a panel produces today."""
 
-    submitted: ApplyIntent | AudienceIntent | CorrectionIntent = Field(discriminator="verb")
+    submitted: ApplyIntent | AudienceIntent | CorrectionIntent | CredentialIntent = Field(
+        discriminator="verb"
+    )
 
 
-def _tool_intent(submitted: ApplyIntent | AudienceIntent | CorrectionIntent) -> ToolIntent:
+def _tool_intent(
+    submitted: ApplyIntent | AudienceIntent | CorrectionIntent | CredentialIntent,
+    slot: CredentialSlotView | None,
+) -> ToolIntent:
     match submitted:
+        case CredentialIntent():
+            assert slot is not None
+            return ToolIntent(
+                tool="request_credentials",
+                input={
+                    "reason": (
+                        f"{slot.extension} authenticates with this value; it is stored "
+                        "encrypted and never shown again."
+                    ),
+                    "prompts": [{"slot": slot.slot, "prompt": slot.description or slot.slot}],
+                    "user_description": f"Set credential {slot.slot} from the portal.",
+                },
+            )
         case CorrectionIntent():
             return ToolIntent(
                 tool="memory_update",
@@ -138,6 +174,15 @@ def _tool_intent(submitted: ApplyIntent | AudienceIntent | CorrectionIntent) -> 
 
 def _outcome(frame: TerminalFrame, turn_id: UUID) -> Response:
     if frame.status == "done":
+        if frame.credential_request is not None:
+            return JSONResponse(
+                {
+                    "applied": True,
+                    "message": "",
+                    "turn_id": str(turn_id),
+                    "credentials": frame.credential_request.model_dump(mode="json"),
+                }
+            )
         return JSONResponse({"applied": True, "message": "Saved.", "turn_id": str(turn_id)})
     reason = frame.error_message or frame.text
     message = (
@@ -165,12 +210,20 @@ async def submit_intent(
         model = submitted.spec.get("model")
         if model not in ctx.models:
             return JSONResponse({"applied": False, "message": f"No model named {model!r}."})
+    slot: CredentialSlotView | None = None
+    if isinstance(submitted, ApplyIntent | CredentialIntent) and submitted.kind == "credential":
+        by_name = {view.name: view for view in await ctx.list_credential_slots()}
+        slot = by_name.get(submitted.name)
+        if slot is None:
+            return JSONResponse(
+                {"applied": False, "message": f"No credential slot named {submitted.name!r}."}
+            )
     conversation_id = await ctx.conversation_for(
         f"intent/{agent_id}/{email}",
         conversation_audience(member_id),
         agent_id=agent_id,
     )
-    intent = _tool_intent(submitted)
+    intent = _tool_intent(submitted, slot)
     admitted = await ctx.admit(
         conversation_id,
         intent.model_dump_json(),

@@ -925,23 +925,31 @@ class TurnEngine:
                         "failed", usage_events, error=IntentRefused(result.text)
                     )
                 else:
+                    dispatched_result = (
+                        ToolResultBlock(
+                            tool_use_id=bound_call.id,
+                            content=result.text,
+                            is_error=False,
+                        ),
+                    )
                     connect_request = _final_act(
                         (bound_call,),
-                        (
-                            ToolResultBlock(
-                                tool_use_id=bound_call.id,
-                                content=result.text,
-                                is_error=False,
-                            ),
-                        ),
+                        dispatched_result,
                         CONNECT_ACCOUNT_TOOL,
                         ConnectRequest,
+                    )
+                    credential_request = _final_act(
+                        (bound_call,),
+                        dispatched_result,
+                        REQUEST_CREDENTIALS_TOOL,
+                        CredentialRequest,
                     )
                     frame = await self._commit(
                         "done",
                         usage_events,
                         answer=result.text,
                         connect_request=connect_request,
+                        credential_request=credential_request,
                     )
                 await self._persist_transcript(await self._load_messages(), result.text, "", "")
                 return frame

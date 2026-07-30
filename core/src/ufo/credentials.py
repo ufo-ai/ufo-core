@@ -8,6 +8,8 @@ seals which slots the speaking owner will fill, a capable surface prompts for th
 and fulfillment verifies the seal before writing — the plaintext travels member → surface → store,
 never through the transcript or the sandbox."""
 
+import hashlib
+import re
 from dataclasses import dataclass
 from typing import Protocol
 from uuid import UUID
@@ -20,6 +22,29 @@ from ufo.db import workspace_tx
 from ufo.schema import tables
 
 CREDENTIAL_REQUEST_TTL_SECONDS = 900
+NAME_DIGEST_LENGTH = 8
+
+
+def _slug(raw: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", raw.lower()).strip("-")
+
+
+def named_slots(slots: "tuple[DeclaredSlot, ...]") -> "dict[str, DeclaredSlot]":
+    """The `credential` object kind's name for each declared slot — the one naming every read and
+    verb shares, so a portal row and an `object_delete` intent address the same instance. A slug
+    collision across extensions gains a stable digest qualifier."""
+    grouped: dict[str, list[DeclaredSlot]] = {}
+    for slot in slots:
+        grouped.setdefault(_slug(slot.name), []).append(slot)
+    named: dict[str, DeclaredSlot] = {}
+    for plain, group in grouped.items():
+        if len(group) == 1:
+            named[plain] = group[0]
+            continue
+        for slot in group:
+            qualifier = hashlib.sha256(f"{slot.extension}:{slot.name}".encode()).hexdigest()
+            named[f"{plain}-{qualifier[:NAME_DIGEST_LENGTH]}"] = slot
+    return named
 
 
 class CredentialSlotUnset(KeyError):

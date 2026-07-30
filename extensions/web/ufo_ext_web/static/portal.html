@@ -698,46 +698,9 @@ function renderCredentials(agent, state, request) {
   reason.textContent = request.reason;
   panel.appendChild(reason);
   for (const prompt of request.prompts) {
-    const form = document.createElement('form');
-    const label = document.createElement('div');
-    label.textContent = prompt.prompt;
-    const field = document.createElement('input');
-    field.type = 'password';
-    field.autocomplete = 'off';
-    field.placeholder = prompt.slot;
-    const store = document.createElement('button');
-    store.type = 'submit';
-    store.className = 'send';
-    store.textContent = 'Store';
-    form.append(field, store);
-    const row = document.createElement('div');
-    row.append(label, form);
-    panel.appendChild(row);
-    form.addEventListener('submit', async (event) => {
-      event.preventDefault();
-      const value = field.value;
-      if (!value.trim()) return;
-      store.disabled = true;
-      const body = new URLSearchParams(
-        { sealed: request.sealed, slot: prompt.slot, value });
-      let res;
-      try {
-        res = await fetch(BASE + '/credentials',
-          { method: 'POST', body, credentials: 'same-origin' });
-      } catch (err) {
-        label.textContent = prompt.prompt + ' — network error, try again.';
-        store.disabled = false;
-        return;
-      }
-      if (!res.ok) {
-        label.textContent = prompt.prompt + ' — ' + (await res.text()) + '.';
-        store.disabled = false;
-        return;
-      }
-      label.textContent = 'Stored ' + prompt.slot + '.';
-      form.remove();
-      state.handoffs.credentials = pruneCredential(state.handoffs.credentials, prompt.slot);
-    });
+    panel.appendChild(credentialPromptRow(request.sealed, prompt, (slot) => {
+      state.handoffs.credentials = pruneCredential(state.handoffs.credentials, slot);
+    }));
   }
   log.appendChild(panel);
   log.scrollTop = log.scrollHeight;
@@ -790,16 +753,6 @@ const PANELS = {
                      entry.created_by || '—', day(entry.next_run_at) || '—',
                      day(entry.last_run_at) || '—', day(entry.expires_at) || '—'],
     empty: 'No scheduled tasks for this agent.',
-  },
-};
-
-const WORKSPACE_TABLES = {
-  credentials: {
-    key: 'slots',
-    columns: ['slot', 'description', 'extension', 'state'],
-    row: (entry) => [entry.slot, entry.description, entry.extension,
-                     entry.filled ? 'filled' : 'empty'],
-    empty: 'No credential slots are declared.',
   },
 };
 
@@ -1108,7 +1061,6 @@ async function showWorkspace(name, query, notice) {
   const view = document.createElement('div');
   view.className = 'admin-view';
   main.replaceChildren(view);
-  const spec = WORKSPACE_TABLES[name];
   let url = BASE + '/workspace/' + name;
   if (name === 'memory' && query) url += '?q=' + encodeURIComponent(query);
   if (name === 'memory') {
@@ -1140,14 +1092,12 @@ async function showWorkspace(name, query, notice) {
     workspaceEmpty(view, 'Network error — try again.');
     return;
   }
-  if (spec) {
-    const entries = payload[spec.key];
-    if (!entries.length) { workspaceEmpty(view, spec.empty); return; }
-    view.appendChild(table(spec.columns, entries.map((entry) => row(...spec.row(entry)))));
-    return;
-  }
   if (name === 'sources') {
     workspaceSources(view, payload.sources, notice);
+    return;
+  }
+  if (name === 'credentials') {
+    workspaceCredentials(view, payload.slots, notice);
     return;
   }
   if (name === 'memory') {
@@ -1403,8 +1353,106 @@ async function postIntent(agent, body) {
     return { applied: false, message: 'Network error — try again.' };
   }
   const outcome = await res.json().catch(() => null);
-  if (outcome && outcome.message) return outcome;
+  if (outcome && (outcome.message || outcome.credentials)) return outcome;
   return { applied: false, message: 'Error ' + res.status + ' — try again.' };
+}
+
+function credentialPromptRow(sealed, prompt, stored) {
+  const form = document.createElement('form');
+  const label = document.createElement('div');
+  label.textContent = prompt.prompt;
+  const field = document.createElement('input');
+  field.type = 'password';
+  field.autocomplete = 'off';
+  field.placeholder = prompt.slot;
+  const store = document.createElement('button');
+  store.type = 'submit';
+  store.className = 'send';
+  store.textContent = 'Store';
+  form.append(field, store);
+  const line = document.createElement('div');
+  line.append(label, form);
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const value = field.value;
+    if (!value.trim()) return;
+    store.disabled = true;
+    const body = new URLSearchParams({ sealed, slot: prompt.slot, value });
+    let res;
+    try {
+      res = await fetch(BASE + '/credentials',
+        { method: 'POST', body, credentials: 'same-origin' });
+    } catch (err) {
+      label.textContent = prompt.prompt + ' — network error, try again.';
+      store.disabled = false;
+      return;
+    }
+    if (!res.ok) {
+      label.textContent = prompt.prompt + ' — ' + (await res.text()) + '.';
+      store.disabled = false;
+      return;
+    }
+    label.textContent = 'Stored ' + prompt.slot + '.';
+    form.remove();
+    stored(prompt.slot);
+  });
+  return line;
+}
+
+function workspaceCredentials(view, slots, notice) {
+  // A slot's value is never a spec: Set and Replace ask the main agent's lane to mint the same
+  // sealed private prompt a chat turn produces, and the value crosses only in that prompt's
+  // fulfillment. Clear rides the credential kind's own delete verb, admin-gated there.
+  if (!slots.length) {
+    workspaceEmpty(view, 'No credential slots are declared.');
+    return;
+  }
+  const result = document.createElement('div');
+  result.className = 'result mono';
+  if (notice) result.textContent = notice;
+  const prompts = document.createElement('div');
+  const mainAgent = agents.find((agent) => agent.main);
+  async function act(entry, verb, button) {
+    button.disabled = true;
+    const answered = await postIntent(mainAgent, { verb, kind: 'credential', name: entry.name });
+    button.disabled = false;
+    if (answered.credentials) {
+      const reason = document.createElement('div');
+      reason.textContent = answered.credentials.reason;
+      prompts.replaceChildren(reason);
+      for (const prompt of answered.credentials.prompts) {
+        prompts.appendChild(credentialPromptRow(answered.credentials.sealed, prompt, (slot) =>
+          showWorkspace('credentials', undefined, 'Stored ' + slot + '.')));
+      }
+      return;
+    }
+    if (answered.applied) {
+      showWorkspace('credentials', undefined, answered.message);
+      return;
+    }
+    result.textContent = answered.message;
+  }
+  view.appendChild(table(
+    ['slot', 'description', 'extension', 'state', ''],
+    slots.map((entry) => {
+      const line = row(entry.slot, entry.description, entry.extension,
+                       entry.filled ? 'filled' : 'empty');
+      const actions = document.createElement('td');
+      for (const [label, verb] of [
+        [entry.filled ? 'Replace' : 'Set', 'request'],
+        ...(entry.filled ? [['Clear', 'delete']] : []),
+      ]) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = label;
+        button.addEventListener('click', () => act(entry, verb, button));
+        actions.appendChild(button);
+      }
+      line.appendChild(actions);
+      return line;
+    })
+  ));
+  view.append(prompts, result);
 }
 
 function connectHandoff(target, turnId) {
