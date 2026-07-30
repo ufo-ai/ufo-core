@@ -82,6 +82,19 @@
   .meta { font-size: 12px; opacity: 0.6; margin-top: 4px;
           font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
   .bubble a { color: inherit; }
+  .panel { align-self: flex-start; max-width: 70ch; padding: 10px 12px; border-radius: 12px;
+           border: 1px solid color-mix(in srgb, CanvasText 25%, transparent);
+           display: flex; flex-direction: column; gap: 8px; }
+  .panel .options { display: flex; flex-wrap: wrap; gap: 6px; }
+  .panel .options button { padding: 6px 12px; border: 1px solid
+           color-mix(in srgb, CanvasText 35%, transparent); border-radius: 8px;
+           background: none; color: inherit; }
+  .panel .options button:disabled { opacity: 0.4; cursor: default; }
+  .panel form { display: flex; gap: 6px; }
+  .panel input { flex: 1; padding: 6px 10px; border-radius: 8px; font: inherit;
+                 border: 1px solid color-mix(in srgb, CanvasText 25%, transparent);
+                 background: Field; color: FieldText; }
+  .files { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; }
   .empty { margin: auto; max-width: 44ch; text-align: center; opacity: 0.7; }
   #composer { display: flex; gap: 8px; padding: 12px 16px;
               border-top: 1px solid color-mix(in srgb, CanvasText 15%, transparent); }
@@ -91,6 +104,9 @@
   .send, #token-form button { padding: 10px 18px; border: 0; border-radius: 8px;
          background: CanvasText; color: Canvas; font-weight: 600; }
   .send:disabled { opacity: 0.4; cursor: default; }
+  .attach { display: flex; align-items: center; padding: 0 12px; border-radius: 8px;
+            border: 1px solid color-mix(in srgb, CanvasText 25%, transparent); cursor: pointer;
+            font-weight: 600; }
 
   #token-card { grid-column: 1 / -1; margin: auto; width: min(440px, calc(100vw - 32px));
                 border: 1px solid color-mix(in srgb, CanvasText 15%, transparent);
@@ -129,12 +145,12 @@
 </section>
 
 <nav hidden>
-  <div class="brand">u f o</div>
+  <div class="brand">ufo</div>
   <ul id="agents"></ul>
   <footer class="mono">
     <span class="email" id="member-email"></span>
-    <a id="spend" href="/surface/web/spend" hidden>spend</a>
-    <button id="admin" type="button" hidden>administration</button>
+    <a id="spend" href="/surface/web/spend" hidden>Spend</a>
+    <button id="admin" type="button" hidden>Administration</button>
   </footer>
 </nav>
 
@@ -144,6 +160,10 @@
   <div id="log"></div>
   <div id="panel" hidden></div>
   <form id="composer">
+    <label class="attach" title="Attach files">
+      <input id="files" type="file" multiple hidden>
+      +
+    </label>
     <input id="msg" autocomplete="off" placeholder="Message the agent…">
     <button type="submit" class="send">Send</button>
   </form>
@@ -161,7 +181,8 @@ const panel = document.getElementById('panel');
 const log = document.getElementById('log');
 const composer = document.getElementById('composer');
 const input = document.getElementById('msg');
-const send = composer.querySelector('button');
+const files = document.getElementById('files');
+const send = composer.querySelector('button.send');
 let agents = [];
 let member = null;
 let selected = null;
@@ -170,7 +191,7 @@ const chats = new Map();
 function chatState(id) {
   let state = chats.get(id);
   if (!state) {
-    state = { messages: null, busy: false, live: null };
+    state = { messages: null, busy: false, live: null, handoffs: {} };
     chats.set(id, state);
   }
   return state;
@@ -325,6 +346,174 @@ function syncComposer() {
   send.disabled = !state || state.busy || state.messages === null;
 }
 
+function formatSize(bytes) {
+  if (bytes >= 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+  if (bytes >= 1024) return Math.round(bytes / 1024) + ' kB';
+  return bytes + ' B';
+}
+
+function renderFiles(target, files) {
+  const box = document.createElement('div');
+  box.className = 'files';
+  for (const file of files) {
+    const row = document.createElement('div');
+    if (file.url) {
+      const link = document.createElement('a');
+      link.href = file.url;
+      link.textContent = file.filename;
+      if (file.subject) link.title = file.subject;
+      row.appendChild(link);
+    } else {
+      const name = document.createElement('span');
+      name.textContent = file.filename;
+      row.appendChild(name);
+    }
+    const size = document.createElement('span');
+    size.className = 'mono';
+    size.textContent = ' · ' + formatSize(file.size_bytes);
+    row.appendChild(size);
+    box.appendChild(row);
+  }
+  target.appendChild(box);
+  log.scrollTop = log.scrollHeight;
+}
+
+function markAnswered(question, index) {
+  if (!question) return null;
+  const answered = (question.answered || []).concat(index);
+  if (answered.length >= question.questions.length) return null;
+  return { ...question, answered };
+}
+
+const MAX_ANSWER_BUTTONS = 10;
+
+function buttonable(entry) {
+  return Boolean(entry.options && entry.options.length <= MAX_ANSWER_BUTTONS
+    && !entry.multi_select && !entry.free_text_only && !entry.allow_attachments);
+}
+
+function renderQuestion(agent, state, question) {
+  const panel = document.createElement('div');
+  panel.className = 'panel';
+  const title = document.createElement('div');
+  title.textContent = question.title;
+  panel.appendChild(title);
+  question.questions.forEach((entry, index) => {
+    if (question.answered && question.answered.includes(index)) return;
+    const row = document.createElement('div');
+    row.className = 'qrow';
+    const text = document.createElement('div');
+    text.textContent = entry.header
+      ? entry.header + ' — ' + entry.question
+      : entry.question;
+    row.appendChild(text);
+    if (buttonable(entry)) {
+      const options = document.createElement('div');
+      options.className = 'options';
+      for (const option of entry.options) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = option.label;
+        if (option.description) button.title = option.description;
+        const body = question.questions.length === 1
+          ? option.label
+          : option.label + ' · ' + entry.question;
+        button.addEventListener('click', () =>
+          answer(agent, state, question, index, body, panel, row));
+        options.appendChild(button);
+      }
+      row.appendChild(options);
+    } else {
+      for (const option of entry.options || []) {
+        const listed = document.createElement('div');
+        listed.className = 'meta';
+        listed.textContent = option.description
+          ? option.label + ' — ' + option.description
+          : option.label;
+        row.appendChild(listed);
+      }
+      const hint = document.createElement('div');
+      hint.className = 'meta';
+      hint.textContent = entry.multi_select
+        ? 'Select all that apply — answer in the message box below.'
+        : 'Answer in the message box below.';
+      row.appendChild(hint);
+    }
+    panel.appendChild(row);
+  });
+  log.appendChild(panel);
+  log.scrollTop = log.scrollHeight;
+}
+
+function renderCredentials(agent, state, request) {
+  const panel = document.createElement('div');
+  panel.className = 'panel';
+  const reason = document.createElement('div');
+  reason.textContent = request.reason;
+  panel.appendChild(reason);
+  for (const prompt of request.prompts) {
+    const form = document.createElement('form');
+    const label = document.createElement('div');
+    label.textContent = prompt.prompt;
+    const field = document.createElement('input');
+    field.type = 'password';
+    field.autocomplete = 'off';
+    field.placeholder = prompt.slot;
+    const store = document.createElement('button');
+    store.type = 'submit';
+    store.className = 'send';
+    store.textContent = 'Store';
+    form.append(field, store);
+    const row = document.createElement('div');
+    row.append(label, form);
+    panel.appendChild(row);
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const value = field.value;
+      if (!value.trim()) return;
+      store.disabled = true;
+      const body = new URLSearchParams(
+        { sealed: request.sealed, slot: prompt.slot, value });
+      let res;
+      try {
+        res = await fetch(BASE + '/credentials',
+          { method: 'POST', body, credentials: 'same-origin' });
+      } catch (err) {
+        label.textContent = prompt.prompt + ' — network error, try again.';
+        store.disabled = false;
+        return;
+      }
+      if (!res.ok) {
+        label.textContent = prompt.prompt + ' — ' + (await res.text()) + '.';
+        store.disabled = false;
+        return;
+      }
+      label.textContent = 'Stored ' + prompt.slot + '.';
+      form.remove();
+      state.handoffs.credentials = pruneCredential(state.handoffs.credentials, prompt.slot);
+    });
+  }
+  log.appendChild(panel);
+  log.scrollTop = log.scrollHeight;
+}
+
+function pruneCredential(request, slot) {
+  if (!request) return null;
+  const prompts = request.prompts.filter((prompt) => prompt.slot !== slot);
+  return prompts.length ? { ...request, prompts } : null;
+}
+
+function renderHandoffs(agent, state) {
+  const handoffs = state.handoffs;
+  if (handoffs.files && handoffs.files.length) {
+    const bubbles = log.querySelectorAll('.bubble.agent');
+    const target = bubbles.length ? bubbles[bubbles.length - 1] : log;
+    renderFiles(target, handoffs.files);
+  }
+  if (handoffs.credentials) renderCredentials(agent, state, handoffs.credentials);
+  if (handoffs.question) renderQuestion(agent, state, handoffs.question);
+}
+
 function renderChat(agent) {
   const state = chatState(agent.id);
   log.replaceChildren();
@@ -340,6 +529,7 @@ function renderChat(agent) {
     log.appendChild(state.live);
     log.scrollTop = log.scrollHeight;
   }
+  renderHandoffs(agent, state);
   if (!state.messages.length && !state.busy) {
     emptyState('No conversation with ' + agent.name + ' yet.');
   }
@@ -741,8 +931,15 @@ async function select(agent, name, detail) {
   if (tab === 'chat' && state.messages === null) {
     const res = await fetch(BASE + '/agents/' + agent.id + '/transcript',
       { credentials: 'same-origin' });
-    const loaded = res.ok ? (await res.json()).messages : [];
-    if (state.messages === null) state.messages = loaded;
+    const payload = res.ok ? await res.json() : { messages: [] };
+    if (state.messages === null) {
+      state.messages = payload.messages;
+      state.handoffs = {
+        question: payload.question || null,
+        credentials: payload.credentials || null,
+        files: payload.files || null,
+      };
+    }
     if (selected !== agent || tab !== 'chat') return;
     renderChat(agent);
     syncComposer();
@@ -752,7 +949,8 @@ async function select(agent, name, detail) {
 composer.addEventListener('submit', (event) => {
   event.preventDefault();
   const text = input.value.trim();
-  if (!text || !selected) return;
+  const attached = Array.from(files.files || []);
+  if ((!text && !attached.length) || !selected) return;
   const agent = selected;
   const state = chatState(agent.id);
   if (state.busy || state.messages === null) return;
@@ -760,43 +958,102 @@ composer.addEventListener('submit', (event) => {
   state.busy = true;
   syncComposer();
   if (!state.messages.length) log.replaceChildren();
-  state.messages.push({ role: 'user', text });
-  bubble('me', text);
+  const shown = text || attached.map((file) => file.name).join(', ');
+  state.messages.push({ role: 'user', text: shown });
+  bubble('me', shown);
   const reply = bubble('agent', '');
+  let body = text;
+  if (attached.length) {
+    body = new FormData();
+    body.set('message', text);
+    for (const file of attached) body.append('file', file);
+  }
+  files.value = '';
   state.live = reply;
-  run(agent, state, text, reply);
+  run(agent, state, body, reply);
 });
 
-async function run(agent, state, text, reply) {
-  function finish() {
-    state.busy = false;
-    state.live = null;
-    if (selected === agent) {
-      if (!reply.isConnected) renderChat(agent);
-      if (tab === 'chat') input.focus();
-      syncComposer();
-    }
+function finishTurn(agent, state, reply) {
+  state.busy = false;
+  state.live = null;
+  if (selected === agent) {
+    if (!reply.isConnected) renderChat(agent);
+    if (tab === 'chat') input.focus();
+    syncComposer();
   }
+}
+
+async function run(agent, state, body, reply) {
   let res;
   try {
     res = await fetch(BASE + '/agents/' + agent.id + '/chat',
-      { method: 'POST', body: text, credentials: 'same-origin' });
+      { method: 'POST', body, credentials: 'same-origin' });
   } catch (err) {
     state.messages.push({ role: 'error', text: 'Network error — try again.' });
     reply.remove();
-    finish();
+    finishTurn(agent, state, reply);
     return;
   }
   if (!res.ok) {
     state.messages.push({ role: 'error', text: 'Error ' + res.status + ' — try again.' });
     reply.remove();
-    finish();
+    finishTurn(agent, state, reply);
     return;
   }
-  const turnId = (await res.json()).turn_id;
+  streamTurn(agent, state, (await res.json()).turn_id, reply, false);
+}
+
+async function answer(agent, state, question, questionIndex, body, panel, row) {
+  if (state.busy || state.messages === null) return;
+  state.busy = true;
+  syncComposer();
+  const reply = bubble('agent', '');
+  state.live = reply;
+  let res;
+  try {
+    res = await fetch(BASE + '/agents/' + agent.id + '/chat', {
+      method: 'POST',
+      body,
+      credentials: 'same-origin',
+      headers: {
+        'x-ufo-answer-turn': question.turn_id,
+        'x-ufo-answer-question': String(questionIndex),
+      },
+    });
+  } catch (err) {
+    state.messages.push({ role: 'error', text: 'Network error — try again.' });
+    reply.remove();
+    finishTurn(agent, state, reply);
+    return;
+  }
+  if (!res.ok) {
+    state.messages.push({ role: 'error', text: 'Error ' + res.status + ' — try again.' });
+    reply.remove();
+    finishTurn(agent, state, reply);
+    return;
+  }
+  const payload = await res.json();
+  const landed = payload.body || body;
+  state.messages.push({ role: 'user', text: landed });
+  if (reply.isConnected) {
+    const mine = document.createElement('div');
+    mine.className = 'bubble me';
+    mine.textContent = landed;
+    log.insertBefore(mine, reply);
+  }
+  if (state.handoffs.question && state.handoffs.question.turn_id === question.turn_id) {
+    state.handoffs.question = markAnswered(state.handoffs.question, questionIndex);
+  }
+  row.remove();
+  if (!panel.querySelector('.qrow')) panel.remove();
+  streamTurn(agent, state, payload.turn_id, reply, true);
+}
+
+function streamTurn(agent, state, turnId, reply, answering) {
   const source = new EventSource(BASE + '/turns/' + turnId + '/stream');
   const streamedText = document.createTextNode('');
   reply.appendChild(streamedText);
+  let sawFiles = false;
   let meter = null;
   let stalled = 0;
   let activity = null;
@@ -816,13 +1073,24 @@ async function run(agent, state, text, reply) {
   }
   function close() {
     source.close();
-    finish();
+    finishTurn(agent, state, reply);
   }
   source.addEventListener('open', () => { stalled = 0; });
   source.onmessage = (event) => {
     streamedText.textContent += JSON.parse(event.data).text;
     log.scrollTop = log.scrollHeight;
   };
+  source.addEventListener('files', (event) => {
+    const payload = JSON.parse(event.data);
+    sawFiles = true;
+    state.handoffs.files = payload.files;
+    if (selected === agent) renderFiles(reply, payload.files);
+  });
+  source.addEventListener('credentials', (event) => {
+    const payload = JSON.parse(event.data);
+    state.handoffs.credentials = payload;
+    if (selected === agent) renderCredentials(agent, state, payload);
+  });
   source.addEventListener('tool', (event) => {
     const frame = JSON.parse(event.data);
     note(frame.description || (frame.tool + ' ' + frame.preview));
@@ -861,11 +1129,20 @@ async function run(agent, state, text, reply) {
       meta.textContent = frame.model + ' · ' + frame.tokens + ' tok · $'
         + (frame.cost_micro_usd / 1e6).toFixed(6);
       reply.appendChild(meta);
+      if (frame.question) {
+        const question = { turn_id: turnId, ...frame.question };
+        state.handoffs.question = question;
+        if (selected === agent) renderQuestion(agent, state, question);
+      } else if (!answering) {
+        state.handoffs.question = null;
+      }
     } else {
       streamedText.textContent += (streamedText.textContent ? '\n' : '')
         + (frame.text || '(' + frame.status
            + (frame.error_class ? ': ' + frame.error_class : '') + ')');
+      if (!answering) state.handoffs.question = null;
     }
+    if (!sawFiles) state.handoffs.files = null;
     record();
     close();
   });

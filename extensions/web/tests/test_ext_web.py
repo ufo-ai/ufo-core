@@ -17,6 +17,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.store import recall_subjects
+from ufo_ext_web import surface as web_surface
 from ufo_ext_web.audience import AUDIENCE_PREFIX, web_extension
 from ufo_ext_web.manifest import manifest as web_manifest
 from ufo_ext_web.panels import _outcome
@@ -29,6 +30,11 @@ from ufo.bearer import mint_token
 from ufo.blob import FilesystemBlobStore
 from ufo.config import Config
 from ufo.connectors import ConnectorRegistry
+from ufo.credentials import (
+    CredentialRequestState,
+    CredentialStore,
+    seal_credential_request,
+)
 from ufo.db import workspace_tx
 from ufo.ext.loader import skill_registry
 from ufo.grants import ConnectFlow, GrantStore, OAuthAccount, install_connect_flow
@@ -43,7 +49,16 @@ from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import ProxyEndpoint, RunTokenCodec
 from ufo.schema import tables
-from ufo.schema.records import ConnectRequest, TerminalFrame, Usage
+from ufo.schema.records import (
+    AskQuestion,
+    AskUserInput,
+    ConnectRequest,
+    CredentialPrompt,
+    CredentialRequest,
+    QuestionOption,
+    TerminalFrame,
+    Usage,
+)
 from ufo.sdk.audience import conversation_audience
 from ufo.sdk.manifest import CredentialSlot, Manifest
 from ufo.sdk.seats import Seats
@@ -205,6 +220,9 @@ def dbos_runtime(
     loop_queue.reset_runtime()
 
 
+CREDENTIAL_FERNET = Fernet(Fernet.generate_key())
+
+
 @pytest.fixture
 async def web(
     db: None,
@@ -235,13 +253,13 @@ async def web(
     _mount_shared_surfaces(
         app,
         (web_manifest(), slotted),
-        None,
+        CredentialStore(fernet=CREDENTIAL_FERNET),
         blob,
         sandboxes,
         hub,
         dbos_client,
-        "",
-        None,
+        SECRET,
+        "https://web",
         None,
         ("auto", "claude-opus-4-8", "claude-sonnet-5"),
         skills=EMPTY_SKILL_REGISTRY,
@@ -1062,13 +1080,14 @@ async def test_portal_serves_without_a_session_and_posted_token_opens_one(
 
 
 @pytest.mark.parametrize("pasted", ["tok\rnl", "tok\x00x", "tok日", "tok x"])
-async def test_a_token_that_cannot_ride_a_cookie_answers_400(
+async def test_a_token_outside_the_bearer_alphabet_answers_400(
     web: tuple[AsyncClient, UUID, UUID], pasted: str
 ) -> None:
     """A pasted value outside the bearer alphabet is refused before a Set-Cookie header is built —
-    control characters and non-latin-1 raise inside the cookie writer, so without the shape check
-    this exact request was a 500. The live cookie is what routes the request to the handler (a
-    form-only garbage token dies at identify with 401)."""
+    nothing outside it can be a bearer, and the control-character and non-latin-1 cases would
+    raise inside the cookie writer (a 500 without the shape check; a space would merely land
+    quoted). The live cookie is what routes the request to the handler (a form-only garbage token
+    dies at identify with 401)."""
     client, workspace_id, _agent_id = web
     session = mint_token(TOKEN_SECRET, str(workspace_id), "owner@example.com", timedelta(hours=1))
     refused = await client.post(
@@ -1100,6 +1119,810 @@ async def test_an_unverified_bearer_authenticates_nobody(
         headers={"cookie": f"{SESSION_COOKIE}=not-a-signed-bearer"},
     )
     assert refused.status_code == 401
+
+
+async def _seed_web_turn(
+    workspace_id: UUID,
+    agent_id: UUID,
+    member_id: UUID,
+    email: str,
+    terminal: TerminalFrame,
+) -> tuple[UUID, UUID]:
+    conversation_id, turn_id = uuid4(), uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=conversation_id,
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                surface="web",
+                queue_key=f"{agent_id}/{email}",
+                member_id=member_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=turn_id,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=1,
+                status="done",
+                inbound="ask",
+                speaker_member_id=member_id,
+                terminal=terminal.model_dump(mode="json"),
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return conversation_id, turn_id
+
+
+async def _collect_events(
+    client: AsyncClient, token: str, turn_id: UUID
+) -> list[tuple[str, dict[str, object]]]:
+    collected: list[tuple[str, dict[str, object]]] = []
+    async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
+        async with client.stream(
+            "GET",
+            f"/surface/web/turns/{turn_id}/stream",
+            headers={"cookie": f"{SESSION_COOKIE}={token}"},
+        ) as stream:
+            assert stream.status_code == 200
+            event = "message"
+            async for line in stream.aiter_lines():
+                if line.startswith("event:"):
+                    event = line.split(":", 1)[1].strip()
+                elif line.startswith("data:"):
+                    collected.append((event, json.loads(line.split(":", 1)[1].strip())))
+                    if event == "terminal":
+                        return collected
+                elif not line:
+                    event = "message"
+    raise AssertionError("stream ended without a terminal frame")
+
+
+QUESTION = AskUserInput(
+    title="Pick a deploy window",
+    questions=(
+        AskQuestion(
+            question="When should the deploy run?",
+            options=(
+                QuestionOption(label="Now"),
+                QuestionOption(label="Tonight", description="after 22:00 UTC"),
+            ),
+        ),
+        AskQuestion(
+            question="Page the on-call?",
+            options=(
+                QuestionOption(label="Yes"),
+                QuestionOption(label="No"),
+            ),
+        ),
+    ),
+)
+
+
+async def test_question_affordance_admits_the_first_answer_only(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """A turn that ended by asking renders its options on reload, and an answer click admits the
+    answer as the conversation's next turn under a per-question idempotency key — a double click
+    or a second tab joins the turn the first answer won, and the response names the landed body so
+    only the winning click renders as the answer."""
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    _conversation_id, asked_turn = await _seed_web_turn(
+        workspace_id,
+        agent_id,
+        member_id,
+        "owner@example.com",
+        TerminalFrame(status="done", text="one question", question=QUESTION),
+    )
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    loaded = await client.get(f"/surface/web/agents/{agent_id}/transcript", headers=cookie)
+    assert loaded.json()["question"]["turn_id"] == str(asked_turn)
+    assert loaded.json()["question"]["title"] == "Pick a deploy window"
+    answer_headers = {
+        **cookie,
+        "x-ufo-answer-turn": str(asked_turn),
+        "x-ufo-answer-question": "0",
+    }
+    STREAM_GATE.arm()
+    first = await client.post(
+        f"/surface/web/agents/{agent_id}/chat",
+        content="Now · When should the deploy run?".encode(),
+        headers=answer_headers,
+    )
+    assert first.status_code == 200
+    assert first.json()["body"] == "Now · When should the deploy run?"
+    await _consume(client, token, first.json()["turn_id"])
+    second = await client.post(
+        f"/surface/web/agents/{agent_id}/chat",
+        content="Tonight · When should the deploy run?".encode(),
+        headers=answer_headers,
+    )
+    assert second.status_code == 200
+    assert second.json()["turn_id"] == first.json()["turn_id"]
+    assert second.json()["body"] == "Now · When should the deploy run?"
+    STREAM_GATE.arm()
+    sibling = await client.post(
+        f"/surface/web/agents/{agent_id}/chat",
+        content="Yes · Page the on-call?".encode(),
+        headers={**answer_headers, "x-ufo-answer-question": "1"},
+    )
+    assert sibling.status_code == 200
+    assert sibling.json()["turn_id"] != first.json()["turn_id"]
+    assert sibling.json()["body"] == "Yes · Page the on-call?"
+    await _consume(client, token, sibling.json()["turn_id"])
+    async with workspace_tx() as connection:
+        answers = (
+            await connection.execute(
+                sa.select(tables.turn.c.inbound, tables.turn.c.idempotency_key)
+                .where(
+                    tables.turn.c.idempotency_key.is_not(None),
+                    tables.turn.c.workspace_id == workspace_id,
+                )
+                .order_by(tables.turn.c.seq)
+            )
+        ).all()
+    assert [row.inbound for row in answers] == [
+        "Now · When should the deploy run?",
+        "Yes · Page the on-call?",
+    ]
+    assert answers[0].idempotency_key.endswith(":answer:0")
+    assert answers[1].idempotency_key.endswith(":answer:1")
+
+
+async def test_credential_prompts_stream_pending_and_fulfill_privately(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The web leg of the private credential handoff: the stream names only the prompts still
+    awaiting values, a posted value lands through the sealed fulfillment without admitting a turn
+    or touching a transcript, and the seal's member gate refuses anyone but the requester."""
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    sealed = seal_credential_request(
+        CREDENTIAL_FERNET,
+        CredentialRequestState(
+            workspace_id=workspace_id, member_id=member_id, slots=("api_key", "signing_key")
+        ),
+    )
+    request = CredentialRequest(
+        reason="the acme connector needs its keys",
+        prompts=(
+            CredentialPrompt(slot="api_key", prompt="Acme API key"),
+            CredentialPrompt(slot="signing_key", prompt="Acme signing key"),
+        ),
+        sealed=sealed,
+    )
+    _conversation_id, turn_id = await _seed_web_turn(
+        workspace_id,
+        agent_id,
+        member_id,
+        "owner@example.com",
+        TerminalFrame(status="done", text="keys please", credential_request=request),
+    )
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    events = dict(await _collect_events(client, token, turn_id))
+    assert [p["slot"] for p in events["credentials"]["prompts"]] == ["api_key", "signing_key"]
+    _member_b, token_b = await _seed_member(workspace_id, "b@example.com")
+    hijack = await client.post(
+        "/surface/web/credentials",
+        data={"sealed": sealed, "slot": "api_key", "value": "stolen"},
+        headers={"cookie": f"{SESSION_COOKIE}={token_b}"},
+    )
+    assert hijack.status_code == 403
+    stored = await client.post(
+        "/surface/web/credentials",
+        data={"sealed": sealed, "slot": "api_key", "value": "s3cr3t"},
+        headers=cookie,
+    )
+    assert stored.status_code == 200
+    assert stored.json() == {"stored": "api_key"}
+    assert await CredentialStore(fernet=CREDENTIAL_FERNET).get(workspace_id, "api_key") == "s3cr3t"
+    events = dict(await _collect_events(client, token, turn_id))
+    assert [p["slot"] for p in events["credentials"]["prompts"]] == ["signing_key"]
+    loaded = await client.get(f"/surface/web/agents/{agent_id}/transcript", headers=cookie)
+    assert [p["slot"] for p in loaded.json()["credentials"]["prompts"]] == ["signing_key"]
+    async with workspace_tx() as connection:
+        turns = (
+            await connection.execute(
+                sa.select(sa.func.count())
+                .select_from(tables.turn)
+                .where(tables.turn.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+    assert turns == 1
+
+
+async def test_shared_files_stream_and_reload_as_download_links(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    _conversation_id, turn_id = await _seed_web_turn(
+        workspace_id,
+        agent_id,
+        member_id,
+        "owner@example.com",
+        TerminalFrame(status="done", text="here is the report"),
+    )
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.shared_artifact).values(
+                turn_id=turn_id,
+                blob_key="artifacts/x/report.pdf",
+                workspace_id=workspace_id,
+                filename="report.pdf",
+                subject="the report",
+                media_type="application/pdf",
+                size_bytes=3,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    events = dict(await _collect_events(client, token, turn_id))
+    (file,) = events["files"]["files"]
+    assert file["filename"] == "report.pdf"
+    assert file["size_bytes"] == 3
+    assert file["url"].startswith("https://web/artifacts/download?token=")
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    loaded = await client.get(f"/surface/web/agents/{agent_id}/transcript", headers=cookie)
+    assert loaded.json()["files"][0]["url"].startswith("https://web/artifacts/download?token=")
+    assert loaded.json()["files"][0]["size_bytes"] == 3
+
+
+async def test_composer_files_land_in_the_workspace_before_the_turn(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    """A multipart composer submit streams each attached file into the conversation's
+    `web-inbox/` and admits one message naming the saved paths — colliding names get distinct
+    files, and the turn's sandbox mounts them because the write precedes admission."""
+    client, workspace_id, agent_id = web
+    _config, _hub, _blob, sandboxes = dbos_runtime
+    _member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    STREAM_GATE.arm()
+    admitted = await client.post(
+        f"/surface/web/agents/{agent_id}/chat",
+        data={"message": "read these"},
+        files=[
+            ("file", ("notes.txt", b"hello", "text/plain")),
+            ("file", ("notes.txt", b"again", "text/plain")),
+        ],
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    assert admitted.status_code == 200
+    await _consume(client, token, admitted.json()["turn_id"])
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(tables.turn.c.inbound, tables.turn.c.conversation_id).where(
+                    tables.turn.c.id == UUID(admitted.json()["turn_id"])
+                )
+            )
+        ).one()
+    assert row.inbound.startswith("read these")
+    assert "web-inbox/notes.txt" in row.inbound
+    assert "web-inbox/notes-1.txt" in row.inbound
+    inbox = sandboxes.workspace_root / str(row.conversation_id) / "web-inbox"
+    assert (inbox / "notes.txt").read_bytes() == b"hello"
+    assert (inbox / "notes-1.txt").read_bytes() == b"again"
+
+
+async def test_an_oversize_request_is_refused_at_the_door(
+    web: tuple[AsyncClient, UUID, UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every refusal lands before the multipart parse runs, and the body the parser would choke on
+    is what proves it: each request below carries a boundary its body never uses, so a parse that
+    ran would surface as a 400 instead of the door's own status. A chunked body is refused whatever
+    it declares — the server frames by the chunks, so a Content-Length beside them bounds
+    nothing."""
+    client, workspace_id, agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    unparseable = {**cookie, "content-type": "multipart/form-data; boundary=never-used"}
+    monkeypatch.setattr(web_surface, "MAX_REQUEST_BYTES", 4)
+    oversize = await client.post(
+        f"/surface/web/agents/{agent_id}/chat",
+        content=b"not a multipart body at all",
+        headers=unparseable,
+    )
+    assert oversize.status_code == 413
+
+    async def _streamed() -> AsyncIterator[bytes]:
+        yield b"not a multipart body at all"
+
+    chunked = await client.post(
+        f"/surface/web/agents/{agent_id}/chat",
+        content=_streamed(),
+        headers=unparseable,
+    )
+    assert chunked.status_code == 411
+    lying = await client.post(
+        f"/surface/web/agents/{agent_id}/chat",
+        content=b"not a multipart body at all",
+        headers={**unparseable, "transfer-encoding": "chunked"},
+    )
+    assert lying.status_code == 411
+    async with workspace_tx() as connection:
+        turns = (
+            await connection.execute(sa.select(sa.func.count()).select_from(tables.turn))
+        ).scalar_one()
+    assert turns == 0
+
+
+async def test_a_plain_body_is_bounded_by_what_it_consumes(
+    web: tuple[AsyncClient, UUID, UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ordinary composer submit and every answer click take the plain-body path, whose bound is
+    the bytes actually read — so an oversize body is refused on both framings, the honest length
+    and the chunked one that declares none."""
+    client, workspace_id, agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    monkeypatch.setattr(web_surface, "MAX_INBOUND_BYTES", 16)
+    declared = await client.post(
+        f"/surface/web/agents/{agent_id}/chat", content=b"x" * 64, headers=cookie
+    )
+    assert declared.status_code == 413
+
+    async def _streamed() -> AsyncIterator[bytes]:
+        yield b"x" * 64
+
+    chunked = await client.post(
+        f"/surface/web/agents/{agent_id}/chat", content=_streamed(), headers=cookie
+    )
+    assert chunked.status_code == 413
+    async with workspace_tx() as connection:
+        turns = (
+            await connection.execute(sa.select(sa.func.count()).select_from(tables.turn))
+        ).scalar_one()
+    assert turns == 0
+
+
+async def test_a_malformed_multipart_body_is_the_clients_400(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """A multipart body its own boundary never appears in is the client's malformed request —
+    refused like every other malformed shape, never a fault — and admits nothing."""
+    client, workspace_id, agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    refused = await client.post(
+        f"/surface/web/agents/{agent_id}/chat",
+        content=b"not a multipart body at all",
+        headers={
+            "cookie": f"{SESSION_COOKIE}={token}",
+            "content-type": "multipart/form-data; boundary=never-used",
+        },
+    )
+    assert refused.status_code == 400
+    async with workspace_tx() as connection:
+        turns = (
+            await connection.execute(sa.select(sa.func.count()).select_from(tables.turn))
+        ).scalar_one()
+    assert turns == 0
+
+
+async def test_a_body_that_is_not_utf8_is_refused_not_rewritten(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """A plain body that does not decode as UTF-8 is refused whole — the member's bytes are never
+    silently substituted into the admitted turn."""
+    client, workspace_id, agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    refused = await client.post(
+        f"/surface/web/agents/{agent_id}/chat",
+        content=b"caf\xe9 in latin-1",
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    assert refused.status_code == 400
+    async with workspace_tx() as connection:
+        turns = (
+            await connection.execute(sa.select(sa.func.count()).select_from(tables.turn))
+        ).scalar_one()
+    assert turns == 0
+
+
+async def test_a_multipart_message_part_lands_as_the_parsers_decode(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The multipart twin of the strict plain-path refusal, pinning where the guarantee ends: a
+    `message` part arrives already decoded by starlette's form parser (UTF-8, falling back to
+    latin-1), so the same bytes the plain path refuses admit here as that parser's reading —
+    stated in `_parse_inbound`'s docstring and pinned so the paths' divergence is the parser's
+    decode, never a silent drop."""
+    client, workspace_id, agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    body = (
+        b"--frame\r\n"
+        b'Content-Disposition: form-data; name="message"\r\n\r\n'
+        b"caf\xe9 in latin-1\r\n"
+        b"--frame--\r\n"
+    )
+    STREAM_GATE.arm()
+    admitted = await client.post(
+        f"/surface/web/agents/{agent_id}/chat",
+        content=body,
+        headers={
+            "cookie": f"{SESSION_COOKIE}={token}",
+            "content-type": "multipart/form-data; boundary=frame",
+        },
+    )
+    assert admitted.status_code == 200
+    await _consume(client, token, admitted.json()["turn_id"])
+    async with workspace_tx() as connection:
+        inbound = (
+            await connection.execute(
+                sa.select(tables.turn.c.inbound).where(
+                    tables.turn.c.id == UUID(admitted.json()["turn_id"])
+                )
+            )
+        ).scalar_one()
+    assert inbound == b"caf\xe9 in latin-1".decode("latin-1")
+
+
+async def test_a_urlencoded_chat_body_is_unsupported(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The composer posts plain text or multipart, never urlencoded — the odd shape is refused,
+    not parsed."""
+    client, workspace_id, agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    refused = await client.post(
+        f"/surface/web/agents/{agent_id}/chat",
+        data={"message": "hi"},
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    assert refused.status_code == 415
+    async with workspace_tx() as connection:
+        turns = (
+            await connection.execute(sa.select(sa.func.count()).select_from(tables.turn))
+        ).scalar_one()
+    assert turns == 0
+
+
+async def test_the_token_form_reads_are_framed_at_both_doors(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """Both places a token form is parsed — the identify fallback (no resolving cookie) and
+    `open_session` behind one — refuse a chunked body with 411 and an over-limit declared length
+    with 413 before any parse runs. Order is what the last two legs discriminate: each carries a
+    boundary its body never uses, so a door that fired after the parse would answer the parse's
+    own 400 instead of 411 — and `open_session`'s malformed multipart is the parse refusal
+    itself, proving `_form`'s arm at this site."""
+    client, workspace_id, _agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "owner@example.com")
+    urlencoded = {"content-type": "application/x-www-form-urlencoded"}
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}", **urlencoded}
+
+    async def _streamed() -> AsyncIterator[bytes]:
+        yield b"token=x"
+
+    oversized = b"x" * (web_surface.MAX_FORM_BYTES + 1)
+    anonymous_chunked = await client.post("/surface/web", content=_streamed(), headers=urlencoded)
+    assert anonymous_chunked.status_code == 411
+    anonymous_oversize = await client.post("/surface/web", content=oversized, headers=urlencoded)
+    assert anonymous_oversize.status_code == 413
+    session_chunked = await client.post("/surface/web", content=_streamed(), headers=cookie)
+    assert session_chunked.status_code == 411
+    session_oversize = await client.post("/surface/web", content=oversized, headers=cookie)
+    assert session_oversize.status_code == 413
+    unparseable = {
+        "cookie": f"{SESSION_COOKIE}={token}",
+        "content-type": "multipart/form-data; boundary=never-used",
+    }
+
+    async def _streamed_junk() -> AsyncIterator[bytes]:
+        yield b"not a multipart body at all"
+
+    door_before_parse = await client.post(
+        "/surface/web", content=_streamed_junk(), headers=unparseable
+    )
+    assert door_before_parse.status_code == 411
+    parse_refusal = await client.post(
+        "/surface/web", content=b"not a multipart body at all", headers=unparseable
+    )
+    assert parse_refusal.status_code == 400
+
+
+async def test_a_multibyte_message_at_the_char_bound_admits(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The byte door exists to bound the read, not to shrink the message bound: a message of
+    exactly `MAX_INBOUND_CHARS` characters admits even when every character is four bytes — the
+    widest UTF-8 makes — pinning the full 4-byte relationship at the real constants, no
+    stand-ins."""
+    client, workspace_id, agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    text = "\U0001d11e" * web_surface.MAX_INBOUND_CHARS
+    STREAM_GATE.arm()
+    admitted = await client.post(
+        f"/surface/web/agents/{agent_id}/chat",
+        content=text.encode(),
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    assert admitted.status_code == 200
+    await _consume(client, token, admitted.json()["turn_id"])
+    async with workspace_tx() as connection:
+        inbound = (
+            await connection.execute(
+                sa.select(tables.turn.c.inbound).where(
+                    tables.turn.c.id == UUID(admitted.json()["turn_id"])
+                )
+            )
+        ).scalar_one()
+    assert inbound == text
+
+
+async def test_a_client_chosen_filename_is_never_a_path(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    """The content-disposition leaf is untrusted: path components drop, everything outside the
+    safe charset collapses, and an absurd length caps — the note names exactly what landed."""
+    client, workspace_id, agent_id = web
+    _config, _hub, _blob, sandboxes = dbos_runtime
+    _member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    STREAM_GATE.arm()
+    admitted = await client.post(
+        f"/surface/web/agents/{agent_id}/chat",
+        data={"message": "renamed"},
+        files=[
+            ("file", ("../../we ird&name!!.txt", b"safe", "text/plain")),
+            ("file", ("x" * 300 + ".txt", b"capped", "text/plain")),
+        ],
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    assert admitted.status_code == 200
+    await _consume(client, token, admitted.json()["turn_id"])
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(tables.turn.c.inbound, tables.turn.c.conversation_id).where(
+                    tables.turn.c.id == UUID(admitted.json()["turn_id"])
+                )
+            )
+        ).one()
+    assert "web-inbox/we-ird-name--.txt" in row.inbound
+    assert row.inbound.endswith("web-inbox/" + "x" * 80 + "]")
+    inbox = sandboxes.workspace_root / str(row.conversation_id) / "web-inbox"
+    assert (inbox / "we-ird-name--.txt").read_bytes() == b"safe"
+    assert (inbox / ("x" * 80)).read_bytes() == b"capped"
+
+
+async def test_a_files_note_cannot_blow_the_inbound_bound(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bound applies to the admitted body — text plus the attached-files note — and a refusal
+    lands nothing in the member's existing conversation: no new turn, no workspace file."""
+    client, workspace_id, agent_id = web
+    _config, _hub, _blob, sandboxes = dbos_runtime
+    _member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    STREAM_GATE.arm()
+    opened = await client.post(
+        f"/surface/web/agents/{agent_id}/chat", content=b"hi", headers=cookie
+    )
+    await _consume(client, token, opened.json()["turn_id"])
+    monkeypatch.setattr(web_surface, "MAX_INBOUND_CHARS", 64)
+    refused = await client.post(
+        f"/surface/web/agents/{agent_id}/chat",
+        data={"message": "short"},
+        files=[("file", ("long-name-that-pads-the-note.txt", b"x", "text/plain"))],
+        headers=cookie,
+    )
+    assert refused.status_code == 413
+    async with workspace_tx() as connection:
+        turns = (
+            await connection.execute(sa.select(sa.func.count()).select_from(tables.turn))
+        ).scalar_one()
+        conversation_id = (
+            await connection.execute(sa.select(tables.conversation.c.id))
+        ).scalar_one()
+    assert turns == 1
+    stray = (
+        sandboxes.workspace_root
+        / str(conversation_id)
+        / "web-inbox"
+        / "long-name-that-pads-the-note.txt"
+    )
+    assert not stray.exists()
+
+
+async def test_malformed_answer_headers_are_refused(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    client, workspace_id, agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    bad_turn = await client.post(
+        f"/surface/web/agents/{agent_id}/chat",
+        content=b"Now",
+        headers={**cookie, "x-ufo-answer-turn": "not-a-uuid"},
+    )
+    assert bad_turn.status_code == 400
+    bad_index = await client.post(
+        f"/surface/web/agents/{agent_id}/chat",
+        content=b"Now",
+        headers={**cookie, "x-ufo-answer-turn": str(uuid4()), "x-ufo-answer-question": "one"},
+    )
+    assert bad_index.status_code == 400
+    async with workspace_tx() as connection:
+        turns = (
+            await connection.execute(sa.select(sa.func.count()).select_from(tables.turn))
+        ).scalar_one()
+    assert turns == 0
+
+
+async def test_identify_never_parses_a_multipart_body(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The identify token fallback reads only a urlencoded body — a multipart request never
+    carries the session token, so an unauthenticated multipart POST is refused without its parse
+    (and its disk spool) ever running, and a token smuggled as a multipart field authenticates
+    nothing."""
+    client, workspace_id, agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    unparseable = {"content-type": "multipart/form-data; boundary=never-used"}
+    anonymous = await client.post(
+        f"/surface/web/agents/{agent_id}/chat",
+        content=b"not a multipart body at all",
+        headers=unparseable,
+    )
+    assert anonymous.status_code == 401
+    smuggled = await client.post(
+        f"/surface/web/agents/{agent_id}/chat",
+        content=f"token={token}".encode(),
+        headers=unparseable,
+    )
+    assert smuggled.status_code == 401
+    async with workspace_tx() as connection:
+        turns = (
+            await connection.execute(sa.select(sa.func.count()).select_from(tables.turn))
+        ).scalar_one()
+    assert turns == 0
+
+
+async def test_a_message_part_that_is_not_text_is_refused(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """A `message` part carrying a filename parses as a file, not text — refused loud instead of
+    silently dropping the member's words from the admitted turn."""
+    client, workspace_id, agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    refused = await client.post(
+        f"/surface/web/agents/{agent_id}/chat",
+        files=[
+            ("message", ("message.txt", b"typed words", "text/plain")),
+            ("file", ("notes.txt", b"hello", "text/plain")),
+        ],
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    assert refused.status_code == 400
+    async with workspace_tx() as connection:
+        turns = (
+            await connection.execute(sa.select(sa.func.count()).select_from(tables.turn))
+        ).scalar_one()
+    assert turns == 0
+
+
+async def test_credential_fulfillment_refusals(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """Every declared refusal produces: no session 401s, a chunked body 411s (a chunked malformed
+    multipart too — the door fires before any parse could answer its 400), an over-limit declared
+    length 413s, a malformed multipart body 400s (`_form`'s arm at this site), an empty value
+    400s, a non-text field 400s, an over-cap value 413s, a slot the seal never named 403s, and a
+    garbage seal 403s — none of them stores a byte, and the four bodies the portal splices into
+    its member sentence are pinned to the lowercase unpunctuated wire register."""
+    client, workspace_id, _agent_id = web
+    member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    sealed = seal_credential_request(
+        CREDENTIAL_FERNET,
+        CredentialRequestState(workspace_id=workspace_id, member_id=member_id, slots=("api_key",)),
+    )
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    sessionless = await client.post(
+        "/surface/web/credentials",
+        data={"sealed": sealed, "slot": "api_key", "value": "value", "token": token},
+    )
+    assert sessionless.status_code == 401
+
+    async def _streamed() -> AsyncIterator[bytes]:
+        yield b"sealed=x"
+
+    chunked = await client.post(
+        "/surface/web/credentials",
+        content=_streamed(),
+        headers={**cookie, "content-type": "application/x-www-form-urlencoded"},
+    )
+    assert chunked.status_code == 411
+
+    async def _streamed_junk() -> AsyncIterator[bytes]:
+        yield b"not a multipart body at all"
+
+    unparseable = {**cookie, "content-type": "multipart/form-data; boundary=never-used"}
+    door_before_parse = await client.post(
+        "/surface/web/credentials", content=_streamed_junk(), headers=unparseable
+    )
+    assert door_before_parse.status_code == 411
+    malformed = await client.post(
+        "/surface/web/credentials", content=b"not a multipart body at all", headers=unparseable
+    )
+    assert malformed.status_code == 400
+    assert malformed.text == "malformed form body"
+    over_limit = await client.post(
+        "/surface/web/credentials",
+        content=b"x" * (web_surface.MAX_FORM_BYTES + 1),
+        headers={**cookie, "content-type": "application/x-www-form-urlencoded"},
+    )
+    assert over_limit.status_code == 413
+    assert over_limit.text == "request too large"
+    not_text = await client.post(
+        "/surface/web/credentials",
+        data={"slot": "api_key", "value": "value"},
+        files=[("sealed", ("sealed.bin", sealed.encode(), "application/octet-stream"))],
+        headers=cookie,
+    )
+    assert not_text.status_code == 400
+    empty = await client.post(
+        "/surface/web/credentials",
+        data={"sealed": sealed, "slot": "api_key", "value": "  "},
+        headers=cookie,
+    )
+    assert empty.status_code == 400
+    oversize = await client.post(
+        "/surface/web/credentials",
+        data={"sealed": sealed, "slot": "api_key", "value": "x" * 4_097},
+        headers=cookie,
+    )
+    assert oversize.status_code == 413
+    assert oversize.text == "value too large"
+    off_seal = await client.post(
+        "/surface/web/credentials",
+        data={"sealed": sealed, "slot": "unnamed", "value": "value"},
+        headers=cookie,
+    )
+    assert off_seal.status_code == 403
+    assert off_seal.text.startswith("not stored: ")
+    garbage = await client.post(
+        "/surface/web/credentials",
+        data={"sealed": "garbage", "slot": "api_key", "value": "value"},
+        headers=cookie,
+    )
+    assert garbage.status_code == 403
+    async with workspace_tx() as connection:
+        stored = (
+            await connection.execute(sa.select(sa.func.count()).select_from(tables.credential))
+        ).scalar_one()
+    assert stored == 0
+
+
+@pytest.mark.parametrize("pasted", ["tok\rnl", "tok\x00x", "tok日", "tok x"])
+async def test_a_token_that_cannot_ride_a_cookie_answers_400(
+    web: tuple[AsyncClient, UUID, UUID], pasted: str
+) -> None:
+    """A pasted value outside the bearer alphabet is refused before a Set-Cookie header is built —
+    control characters and non-latin-1 raise inside the cookie writer, so without the shape check
+    this exact request was a 500. The live cookie is what routes the request to the handler (a
+    form-only garbage token dies at identify with 401)."""
+    client, workspace_id, _agent_id = web
+    session = mint_token(TOKEN_SECRET, str(workspace_id), "owner@example.com", timedelta(hours=1))
+    refused = await client.post(
+        "/surface/web",
+        data={"token": pasted},
+        headers={"cookie": f"{SESSION_COOKIE}={session}"},
+    )
+    assert refused.status_code == 400
+    assert "set-cookie" not in refused.headers
 
 
 INTENT_BODY = {
@@ -1471,12 +2294,15 @@ async def test_overview_reports_the_deploy_internet_ceiling_when_granted(
 
 
 def test_portal_page_smoke_walks_every_view() -> None:
-    """A reference-level walk of the page's script under a stub DOM — boot (signed in and the 401
-    token-card branch), select, overview, the settings save, the mid-save agent switch, the failed
-    post-save re-read, the memory tab's search bar (its `form.search` class and both style rules
-    scoped to it), admin, select-after-admin — so a deleted declaration or a dangling element
-    reference fails here instead of rendering a blank portal (the class of bug `node --check`
-    cannot see)."""
+    """A reference-level walk of the page's script under a stub DOM (`portal_smoke.mjs`) — boot
+    (signed in and the 401 token-card branch), select, overview, the settings save, the mid-save
+    agent switch, the failed post-save re-read, the memory tab's search bar (its `form.search`
+    class and both style rules scoped to it), admin, select-after-admin, the question render
+    across every `buttonable` condition, the answered chain, the credentials prompts and their
+    refusal arms, an agent switch mid-answer, and a later turn superseding an older turn's
+    question and files — so a deleted declaration, a dangling element reference, or a
+    silently reverted render rule fails here instead of rendering a blank portal (the class of
+    bug `node --check` cannot see)."""
     node = shutil.which("node")
     if node is None:
         pytest.skip("node is not installed")

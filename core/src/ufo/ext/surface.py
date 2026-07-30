@@ -442,14 +442,17 @@ class SurfaceContext:
     """The privileged handle a surface's route handlers receive — one context spanning both delivery
     modes. `blob` and the admit/identity reach are deliberately unscoped for a workspace's trusted
     surface (the distinction from a scoped extension context, which never admits a turn or asserts
-    identity). A **durable** surface (Slack) delivers through the poller and `artifact_link`; a
-    **live** surface (web; core's CLI is the built-in twin) delivers by `tail`-ing the turn's
-    frames off the hub in its own SSE route, reading `turn_owner` to gate a tail, `spend_rollup`
-    for a workspace spend view, and the per-agent projections a portal renders — `list_agent_tasks`,
-    `agent_skills`, `agent_spend`, and `memory_available`/`search_memory`. Each calls only what it
-    needs.
-    `credential` reads the surface workspace's slots in-process (never through the sandbox proxy); a
-    surface declaring no slots holds no store and never calls it."""
+    identity). A **durable** surface (Slack) delivers through the poller; a **live** surface (web;
+    core's CLI is the built-in twin) delivers by `tail`-ing the turn's frames off the hub in its
+    own SSE route, reading `turn_owner` to gate a tail, `spend_rollup` for a workspace spend view,
+    and the per-agent projections a portal renders — `list_agent_tasks`, `agent_skills`,
+    `agent_spend`, and `memory_available`/`search_memory` — and either mode renders a turn's
+    shared files, the poller handing them to `attach` while a live surface reads
+    `shared_artifacts` and links each through `artifact_link`. Each calls only what it needs.
+    `credential` reads the surface workspace's slots in-process (never through the sandbox proxy),
+    and the sealed member handoff (`credential_prompt_pending`, `fulfill_credential_request`)
+    rides the same store — a surface with neither declared slots nor a member credential handoff
+    never calls it."""
 
     workspace_id: UUID
     surface: str
@@ -554,6 +557,40 @@ class SurfaceContext:
         """The deploy's public base (`[connect] public_base_url`), or None when unset — a
         channel's callback URL (Slack's Events request URL) renders from it."""
         return self._public_base_url
+
+    async def shared_artifacts(self, turn_id: UUID) -> tuple[SharedArtifact, ...]:
+        """The files a turn shared, in share order (key-tiebroken within one timestamp) — the rows
+        the writeback poller hands a durable surface's `attach`, read directly by a live surface
+        that renders each as a download link (`artifact_link`) on its own stream."""
+        async with workspace_tx() as connection:
+            rows = (
+                await connection.execute(
+                    sa.select(
+                        tables.shared_artifact.c.blob_key,
+                        tables.shared_artifact.c.filename,
+                        tables.shared_artifact.c.subject,
+                        tables.shared_artifact.c.media_type,
+                        tables.shared_artifact.c.size_bytes,
+                    )
+                    .where(
+                        tables.shared_artifact.c.workspace_id == self.workspace_id,
+                        tables.shared_artifact.c.turn_id == turn_id,
+                    )
+                    .order_by(
+                        tables.shared_artifact.c.created_at, tables.shared_artifact.c.blob_key
+                    )
+                )
+            ).all()
+        return tuple(
+            SharedArtifact(
+                blob_key=row.blob_key,
+                filename=row.filename,
+                subject=row.subject,
+                media_type=row.media_type,
+                size_bytes=row.size_bytes,
+            )
+            for row in rows
+        )
 
     def artifact_link(self, artifact: SharedArtifact) -> str | None:
         """A TTL download link for a shared file the surface cannot upload inline, or None when
@@ -903,8 +940,8 @@ class SurfaceContext:
     async def latest_turn(self, conversation_id: UUID) -> UUID | None:
         """The most recent turn admitted to a conversation, or None when it holds none — the
         turn a live surface resumes tailing when a held stream reconnects to drain an answer that
-        outran the hold, a conversation-keyed poll the web surface never needs because its own
-        stream route carries the turn id."""
+        outran the hold, and the turn whose open handoffs (an unanswered question, pending
+        credential prompts, shared files) a reload re-renders."""
         async with workspace_tx() as connection:
             row = (
                 await connection.execute(
@@ -1980,7 +2017,9 @@ class WritebackPoller:
                         tables.shared_artifact.c.size_bytes,
                     )
                     .where(tables.shared_artifact.c.turn_id == turn_id)
-                    .order_by(tables.shared_artifact.c.created_at)
+                    .order_by(
+                        tables.shared_artifact.c.created_at, tables.shared_artifact.c.blob_key
+                    )
                 )
             ).all()
         terminal = TerminalFrame.model_validate(row.terminal)

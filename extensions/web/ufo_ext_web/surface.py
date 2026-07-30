@@ -29,12 +29,15 @@ from ufo.sdk.audience import audience_subjects, conversation_audience
 from ufo.sdk.bearer import verify_token, workspace_claim
 from ufo.sdk.context import SourceReader
 from ufo.sdk.http import (
+    FormData,
+    FormParserError,
     HTMLResponse,
     JSONResponse,
     RedirectResponse,
     Request,
     Response,
     StreamingResponse,
+    UploadFile,
     set_session_cookie,
 )
 from ufo.sdk.hub import CostTick, LiveFrame, Parked, SkillLoad, Terminal, ToolCall
@@ -42,6 +45,8 @@ from ufo.sdk.models import Message, TextBlock
 from ufo.sdk.seats import Seats
 from ufo.sdk.surfaces import (
     ConnectRequestInvalid,
+    CredentialRequest,
+    CredentialRequestInvalid,
     SurfaceAuth,
     SurfaceContext,
     SurfaceRoute,
@@ -55,6 +60,16 @@ SOURCE = "ufo web"
 SESSION_COOKIE = "ufo_session"
 TOKEN_FIELD = "token"
 MAX_INBOUND_CHARS = 200_000
+MAX_INBOUND_BYTES = 4 * MAX_INBOUND_CHARS
+MAX_REQUEST_BYTES = 25 * 1024 * 1024
+MAX_FORM_BYTES = 64 * 1024
+MAX_SECRET_BYTES = 4_096
+UPLOAD_CHUNK_BYTES = 65_536
+MAX_NAME_CHARS = 80
+UNSAFE_NAME_CHARS = re.compile(r"[^A-Za-z0-9._-]")
+WEB_INBOX_DIR = "web-inbox"
+ANSWER_TURN_HEADER = "x-ufo-answer-turn"
+ANSWER_QUESTION_HEADER = "x-ufo-answer-question"
 MAX_MEMORY_QUERY_CHARS = 500
 SPEND_WINDOW_DEFAULT_SECONDS = 86_400
 MAX_USAGE_WINDOW_SECONDS = 31_536_000
@@ -73,13 +88,24 @@ async def resolve_workspace(request: Request, _auth: SurfaceAuth) -> UUID | Resp
     logs, and browser history. Each fallback keys on the previous credential failing to RESOLVE,
     not merely being absent, so a member whose cookie outlived its bearer's expiry recovers by
     posting a fresh token instead of being locked behind the stale cookie. An unresolved GET of
-    the portal page itself is the one pre-binding response: the same static shell serves, showing
-    its token form because `api/agents` answers 401. The handler re-verifies the same bearer for
-    the member email — workspace here, identity there."""
+    the portal page serves the same static shell, showing its token form because `api/agents`
+    answers 401. Only a urlencoded body is read for the token — the type every token form posts —
+    so an unauthenticated multipart request is rejected without its parse ever running. The
+    handler re-verifies the same bearer for the member email — workspace here, identity there."""
     cookie = request.cookies.get(SESSION_COOKIE, "")
     workspace = workspace_claim(cookie) if cookie else None
-    if workspace is None and request.method == "POST":
-        posted = (await request.form()).get(TOKEN_FIELD, "")
+    if (
+        workspace is None
+        and request.method == "POST"
+        and request.headers.get("content-type", "").startswith("application/x-www-form-urlencoded")
+    ):
+        refused = _framed_length(request, MAX_FORM_BYTES)
+        if refused is not None:
+            return refused
+        form = await _form(request)
+        if isinstance(form, Response):
+            return form
+        posted = form.get(TOKEN_FIELD, "")
         if isinstance(posted, str) and posted.strip():
             workspace = workspace_claim(posted.strip())
     if (
@@ -118,11 +144,18 @@ async def open_session(ctx: SurfaceContext, request: Request) -> Response:
     goes unread and the new bearer lands unverified, which changes nothing, because the cookie is
     verified again on every request that follows (`resolve_workspace`, then `_authenticate`) and one
     that verifies against nothing authenticates nobody. The shape check is transport, not
-    authentication: a pasted value outside the bearer alphabet cannot ride a Set-Cookie header
-    (control characters and non-latin-1 raise inside the cookie writer), so it answers 400 before a
-    header is built. The cookie is `lax`, not `strict`, because arrival IS a cross-site navigation
-    (the gateway's signed-in card posts here) and the redirected GET must already carry it."""
-    posted = (await request.form()).get(TOKEN_FIELD, "")
+    authentication: nothing outside the bearer alphabet can BE a bearer, and the worst of it
+    (control characters, non-latin-1) would raise inside the cookie writer, so it answers 400
+    before a header is built. The cookie is `lax`, not `strict`, because arrival IS a cross-site
+    navigation (the gateway's signed-in card posts here) and the redirected GET must already
+    carry it."""
+    refused = _framed_length(request, MAX_FORM_BYTES)
+    if refused is not None:
+        return refused
+    form = await _form(request)
+    if isinstance(form, Response):
+        return form
+    posted = form.get(TOKEN_FIELD, "")
     if not isinstance(posted, str) or not posted.strip():
         return JSONResponse({"error": "token form field is required"}, status_code=400)
     if not TOKEN_SHAPE.fullmatch(posted.strip()):
@@ -171,6 +204,144 @@ async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
     )
 
 
+def _framed_length(request: Request, limit: int) -> Response | None:
+    """The refusal a whole-body parse must answer before it runs, or None when the request frames
+    its body honestly. A chunked body carries no length a parse can be bounded by — RFC 7230 makes
+    any accompanying Content-Length a lie, and the server frames by the chunks — so a request this
+    route must parse whole (a form) is refused unless it declares a length under the limit and is
+    not chunked."""
+    if "chunked" in request.headers.get("transfer-encoding", "").lower():
+        return Response("length required", status_code=411)
+    declared = request.headers.get("content-length", "").strip()
+    if not declared.isdigit():
+        return Response("length required", status_code=411)
+    if int(declared) > limit:
+        return Response("request too large", status_code=413)
+    return None
+
+
+async def _form(request: Request) -> FormData | Response:
+    """The request's parsed form, or the 400 a malformed body earns. python-multipart's parse
+    errors escape `request.form()` — starlette converts only its own `MultiPartException` — and
+    they are the client's malformed body, refused like every other malformed shape here."""
+    try:
+        return await request.form()
+    except FormParserError:
+        return Response("malformed form body", status_code=400)
+
+
+async def _bounded_body(request: Request, limit: int) -> bytes | Response:
+    """The request body under a hard byte cap: the read stops at the cap, so a mis-declared or
+    chunked length cannot outgrow it — the bound is what was actually consumed, never a header."""
+    body = bytearray()
+    async for chunk in request.stream():
+        body += chunk
+        if len(body) > limit:
+            return Response("request too large", status_code=413)
+    return bytes(body)
+
+
+async def _parse_inbound(request: Request) -> tuple[str, tuple[UploadFile, ...]] | Response:
+    """The composer's message text and attached files. A plain body is read under a hard byte
+    cap, so what bounds it is the bytes consumed rather than a declared length, and it must decode
+    as UTF-8 — bytes that don't are refused, never rewritten. A multipart submit must declare a
+    length and must not be chunked — the parse buffers each part whole (in memory up to
+    starlette's spool threshold, a temp file past it), so it runs only under a length the server
+    itself frames the body by; its `message` text arrives already decoded by that parser (UTF-8,
+    falling back to latin-1), so the strict-UTF-8 refusal is the plain path's — the decoded text
+    is admitted as received. A urlencoded body is not a shape the composer sends, so it is
+    refused."""
+    content_type = request.headers.get("content-type", "")
+    if content_type.startswith("application/x-www-form-urlencoded"):
+        return Response("unsupported body type", status_code=415)
+    if not content_type.startswith("multipart/form-data"):
+        body = await _bounded_body(request, MAX_INBOUND_BYTES)
+        if isinstance(body, Response):
+            return body
+        try:
+            return body.decode("utf-8"), ()
+        except UnicodeDecodeError:
+            return Response("malformed message text", status_code=400)
+    refused = _framed_length(request, MAX_REQUEST_BYTES)
+    if refused is not None:
+        return refused
+    form = await _form(request)
+    if isinstance(form, Response):
+        return form
+    message = form.get("message", "")
+    if not isinstance(message, str):
+        return Response("malformed message part", status_code=400)
+    text = message
+    uploads = tuple(
+        upload
+        for upload in form.getlist("file")
+        if isinstance(upload, UploadFile) and upload.filename
+    )
+    return text, uploads
+
+
+def _inbox_paths(uploads: tuple[UploadFile, ...]) -> tuple[str, ...]:
+    used: set[str] = set()
+    return tuple(
+        f"{WEB_INBOX_DIR}/{_inbox_name(upload.filename or 'file', used)}" for upload in uploads
+    )
+
+
+async def _deliver_uploads(
+    ctx: SurfaceContext,
+    conversation_id: UUID,
+    uploads: tuple[UploadFile, ...],
+    paths: tuple[str, ...],
+) -> None:
+    """Stream each attached file into the conversation's `web-inbox/` before the turn runs, so the
+    sandbox mounts them already present under the paths the admitted text names."""
+    for upload, path in zip(uploads, paths, strict=True):
+        await ctx.write_workspace_file(conversation_id, path, _upload_chunks(upload))
+
+
+def _files_note(text: str, paths: tuple[str, ...]) -> str:
+    """The admitted text naming the saved paths the way Slack's inbound files do."""
+    note = f"[Attached files, saved in the workspace: {', '.join(paths)}]"
+    return f"{text}\n\n{note}" if text.strip() else note
+
+
+def _inbox_name(raw: str, used: set[str]) -> str:
+    """A safe workspace leaf for a client-chosen filename: path components dropped, everything
+    outside a conservative charset collapsed, length capped, dots-only and empty names falling
+    back — the browser's content-disposition is untrusted input, never a path."""
+    leaf = raw.replace("\\", "/").rsplit("/", 1)[-1]
+    leaf = UNSAFE_NAME_CHARS.sub("-", leaf)[:MAX_NAME_CHARS].strip(".")
+    leaf = leaf or "file"
+    name = leaf
+    stem, dot, suffix = leaf.partition(".")
+    index = 1
+    while name in used:
+        name = f"{stem}-{index}{dot}{suffix}"
+        index += 1
+    used.add(name)
+    return name
+
+
+async def _upload_chunks(upload: UploadFile) -> AsyncIterator[bytes]:
+    while chunk := await upload.read(UPLOAD_CHUNK_BYTES):
+        yield chunk
+
+
+def _answer_key(request: Request, queue_key: str) -> str | None | Response:
+    """The idempotency key an answer click admits under — per question, so a double click or a
+    second tab joins the turn the first click won — or None for an ordinary message."""
+    answer_turn = request.headers.get(ANSWER_TURN_HEADER, "").strip()
+    if not answer_turn:
+        return None
+    raw_index = request.headers.get(ANSWER_QUESTION_HEADER, "0").strip()
+    try:
+        asking_turn = UUID(answer_turn)
+        question_index = int(raw_index)
+    except ValueError:
+        return Response("malformed answer headers", status_code=400)
+    return f"{queue_key}:{asking_turn}:answer:{question_index}"
+
+
 async def chat(ctx: SurfaceContext, request: Request) -> Response:
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
@@ -179,21 +350,35 @@ async def chat(ctx: SurfaceContext, request: Request) -> Response:
     agent_id = _agent_param(request)
     if agent_id is None or not audience.allows(agent_id):
         return Response("no such agent", status_code=404)
-    inbound = (await request.body()).decode()
-    if not inbound.strip():
+    parsed = await _parse_inbound(request)
+    if isinstance(parsed, Response):
+        return parsed
+    text, uploads = parsed
+    if not text.strip() and not uploads:
         return Response("empty message", status_code=400)
+    paths = _inbox_paths(uploads)
+    inbound = _files_note(text, paths) if paths else text
     if len(inbound) > MAX_INBOUND_CHARS:
         return Response(f"message exceeds {MAX_INBOUND_CHARS} characters", status_code=413)
+    queue_key = _conversation_key(agent_id, email)
+    key = _answer_key(request, queue_key)
+    if isinstance(key, Response):
+        return key
     conversation_id = await ctx.conversation_for(
-        _conversation_key(agent_id, email), conversation_audience(member_id), agent_id=agent_id
+        queue_key, conversation_audience(member_id), agent_id=agent_id
     )
+    await _deliver_uploads(ctx, conversation_id, uploads, paths)
     admitted = await ctx.admit(
         conversation_id,
         inbound,
         context=TurnContext(sender=email, source=f"{SOURCE} ({email})"),
+        idempotency_key=key,
         speaker_member_id=member_id,
     )
-    return JSONResponse({"turn_id": str(admitted.turn_id)})
+    payload: dict[str, str | None] = {"turn_id": str(admitted.turn_id)}
+    if key is not None:
+        payload["body"] = await ctx.admitted_body(key)
+    return JSONResponse(payload)
 
 
 def _rendered_text(message: Message) -> str:
@@ -224,14 +409,44 @@ async def transcript(ctx: SurfaceContext, request: Request) -> Response:
     if conversation_id is None:
         return JSONResponse({"messages": []})
     recorded = await ctx.read_transcript(conversation_id)
-    if recorded is None:
-        return JSONResponse({"messages": []})
-    rendered = [
-        {"role": message.role, "text": text}
-        for message in recorded.messages
-        if (text := _rendered_text(message))
-    ]
-    return JSONResponse({"messages": rendered})
+    rendered = (
+        []
+        if recorded is None
+        else [
+            {"role": message.role, "text": text}
+            for message in recorded.messages
+            if (text := _rendered_text(message))
+        ]
+    )
+    payload: dict[str, object] = {"messages": rendered}
+    latest = await ctx.latest_turn(conversation_id)
+    if latest is not None:
+        payload.update(await _open_handoffs(ctx, latest))
+    return JSONResponse(payload)
+
+
+async def _open_handoffs(ctx: SurfaceContext, turn_id: UUID) -> dict[str, object]:
+    """What the conversation's newest turn still asks of the member, so a reload re-renders the
+    same affordances the live stream drew: an unanswered question (a later turn would have
+    superseded it), credential prompts still awaiting values, and the turn's shared files."""
+    detail = await ctx.turn_detail(turn_id)
+    if detail is None or detail.turn.terminal is None:
+        return {}
+    terminal = detail.turn.terminal
+    handoffs: dict[str, object] = {}
+    if terminal.question is not None:
+        handoffs["question"] = {
+            "turn_id": str(turn_id),
+            **terminal.question.model_dump(mode="json"),
+        }
+    if terminal.credential_request is not None:
+        prompts = await _pending_prompts(ctx, terminal.credential_request)
+        if prompts is not None:
+            handoffs["credentials"] = prompts
+    files = await _turn_files(ctx, turn_id)
+    if files:
+        handoffs["files"] = files
+    return handoffs
 
 
 async def _panel_gate(
@@ -449,24 +664,92 @@ async def stream(ctx: SurfaceContext, request: Request) -> Response:
     )
 
 
+def _event(name: str, payload: dict[str, object]) -> bytes:
+    return f"event: {name}\ndata: ".encode() + json.dumps(payload).encode() + b"\n\n"
+
+
+async def _pending_prompts(
+    ctx: SurfaceContext, request_: CredentialRequest
+) -> dict[str, object] | None:
+    """The credential prompts of a terminal request still awaiting values, as the page renders
+    them — the same per-slot gate the terminal shell uses, so a fulfilled or expired prompt never
+    re-renders on reconnect while an unanswered sibling keeps asking."""
+    pending = [
+        {"slot": prompt.slot, "prompt": prompt.prompt}
+        for prompt in request_.prompts
+        if await ctx.credential_prompt_pending(request_.sealed, prompt.slot)
+    ]
+    if not pending:
+        return None
+    return {"reason": request_.reason, "sealed": request_.sealed, "prompts": pending}
+
+
+async def _turn_files(ctx: SurfaceContext, turn_id: UUID) -> list[dict[str, object]]:
+    return [
+        {
+            "filename": artifact.filename,
+            "subject": artifact.subject,
+            "size_bytes": artifact.size_bytes,
+            "url": ctx.artifact_link(artifact),
+        }
+        for artifact in await ctx.shared_artifacts(turn_id)
+    ]
+
+
 async def _events(
     ctx: SurfaceContext, turn_id: UUID, member_id: UUID, since: str
 ) -> AsyncIterator[bytes]:
     async for cursor, frame in ctx.tail(turn_id, since):
-        if isinstance(frame, Terminal) and frame.frame.connect_request is not None:
-            try:
-                url = await ctx.connect_url(turn_id, member_id)
-            except ConnectRequestInvalid:
-                yield (
-                    b"event: connect_error\ndata: "
-                    + json.dumps(
-                        {"message": "Connection request unavailable; ask me to connect again."}
-                    ).encode()
-                    + b"\n\n"
-                )
-            else:
-                yield b"event: connect\ndata: " + json.dumps({"url": url}).encode() + b"\n\n"
+        if isinstance(frame, Terminal):
+            if frame.frame.connect_request is not None:
+                try:
+                    url = await ctx.connect_url(turn_id, member_id)
+                except ConnectRequestInvalid:
+                    yield _event(
+                        "connect_error",
+                        {"message": "Connection request unavailable; ask me to connect again."},
+                    )
+                else:
+                    yield _event("connect", {"url": url})
+            if frame.frame.credential_request is not None:
+                prompts = await _pending_prompts(ctx, frame.frame.credential_request)
+                if prompts is not None:
+                    yield _event("credentials", prompts)
+            files = await _turn_files(ctx, turn_id)
+            if files:
+                yield _event("files", {"files": files})
         yield _sse(cursor, frame)
+
+
+async def fulfill_credential(ctx: SurfaceContext, request: Request) -> Response:
+    """Land one privately-entered credential value — the web leg of the same handoff the terminal
+    shell and Slack run. The value crosses only in the form body, becomes no message, and reaches
+    no transcript; the privileged fulfillment verifies the seal (workspace, requesting member,
+    named slot, freshness) before the encrypted store takes it."""
+    auth = await _authenticate(ctx, request)
+    if auth is None:
+        return Response("missing or unknown session cookie", status_code=401)
+    member_id, _email = auth
+    refused = _framed_length(request, MAX_FORM_BYTES)
+    if refused is not None:
+        return refused
+    form = await _form(request)
+    if isinstance(form, Response):
+        return form
+    sealed = form.get("sealed", "")
+    slot = form.get("slot", "")
+    value = form.get("value", "")
+    if not isinstance(sealed, str) or not isinstance(slot, str) or not isinstance(value, str):
+        return Response("sealed, slot, and value are required", status_code=400)
+    if not sealed or not slot or not value.strip():
+        return Response("sealed, slot, and value are required", status_code=400)
+    if len(value.encode()) > MAX_SECRET_BYTES:
+        return Response("value too large", status_code=413)
+    try:
+        await ctx.fulfill_credential_request(sealed, slot, value.strip(), member_id)
+    except CredentialRequestInvalid as error:
+        return Response(f"not stored: {error}", status_code=403)
+    return JSONResponse({"stored": slot})
 
 
 async def admin_index(ctx: SurfaceContext, request: Request) -> Response:
@@ -616,5 +899,6 @@ ROUTES = (
     SurfaceRoute(method="GET", path="agents/{agent_id}/memory", handler=memory),
     SurfaceRoute(method="GET", path="agents/{agent_id}/usage", handler=usage),
     SurfaceRoute(method="GET", path="turns/{turn_id}/stream", handler=stream),
+    SurfaceRoute(method="POST", path="credentials", handler=fulfill_credential),
     SurfaceRoute(method="GET", path="spend", handler=spend),
 )

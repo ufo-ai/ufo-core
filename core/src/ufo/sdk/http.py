@@ -1,10 +1,16 @@
 """The route ABI: a route handler receives a Request and returns a Response, built with one of the
 concrete response classes re-exported here — so an extension serving routes never reaches past
 `ufo.sdk` for its HTTP types. A live surface serves a page as an `HTMLResponse` and its hub
-tail as a `StreamingResponse`."""
+tail as a `StreamingResponse`; `UploadFile` is the inbound type a multipart form's file parts
+arrive as; `FormParserError` is what a malformed form body raises out of `Request.form()`
+(starlette converts only its own `MultiPartException`), so a route that parses a form catches it
+and answers the client's 400."""
 
 from typing import Literal
 
+from python_multipart.exceptions import FormParserError as FormParserError
+from starlette.datastructures import FormData as FormData
+from starlette.datastructures import UploadFile as UploadFile
 from starlette.requests import Request as Request
 from starlette.responses import HTMLResponse as HTMLResponse
 from starlette.responses import JSONResponse as JSONResponse

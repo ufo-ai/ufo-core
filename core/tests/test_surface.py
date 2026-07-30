@@ -1104,6 +1104,58 @@ async def test_poller_delivers_a_done_turn_and_attaches_its_files(db: None, tmp_
     assert surface.attached == [(turn_id, "C5:9.9", ("report.pdf",))]
 
 
+async def test_poller_attaches_same_instant_files_in_key_order(db: None, tmp_path) -> None:
+    """The poller's artifact read carries the same `(created_at, blob_key)` order as
+    `shared_artifacts`, so two files sharing one timestamp reach a durable surface's `attach`
+    deterministically — the identity both docstrings claim."""
+    workspace_id, _, _ = await _seed()
+    blob = FilesystemBlobStore(root=tmp_path)
+    await blob.put("artifacts/x/report.pdf", b"PDF")
+    await blob.put("artifacts/x/data.csv", b"CSV")
+    report = SharedArtifact(
+        blob_key="artifacts/x/report.pdf",
+        filename="report.pdf",
+        subject=None,
+        media_type="application/pdf",
+        size_bytes=3,
+    )
+    data = SharedArtifact(
+        blob_key="artifacts/x/data.csv",
+        filename="data.csv",
+        subject=None,
+        media_type="text/csv",
+        size_bytes=3,
+    )
+    turn_id = await _seed_turn(workspace_id, "C7:1.0", "done", "files", artifacts=(report, data))
+    poller, surface = _poller(workspace_id, RecordingSurface(ref="C7:9.9"), blob)
+    await poller.drain()
+    assert surface.attached == [(turn_id, "C7:9.9", ("data.csv", "report.pdf"))]
+
+
+async def test_shared_artifacts_reads_a_turns_files_deterministically(db: None, tmp_path) -> None:
+    workspace_id, _, _ = await _seed()
+    report = SharedArtifact(
+        blob_key="artifacts/x/report.pdf",
+        filename="report.pdf",
+        subject="the report",
+        media_type="application/pdf",
+        size_bytes=3,
+    )
+    data = SharedArtifact(
+        blob_key="artifacts/x/data.csv",
+        filename="data.csv",
+        subject=None,
+        media_type="text/csv",
+        size_bytes=9,
+    )
+    turn_id = await _seed_turn(workspace_id, "C6:1.0", "done", "files", artifacts=(report, data))
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+    assert await context.shared_artifacts(turn_id) == (data, report)
+    assert await context.shared_artifacts(uuid4()) == ()
+    foreign = _context(uuid4(), StubDbos(), FilesystemBlobStore(root=tmp_path))
+    assert await foreign.shared_artifacts(turn_id) == ()
+
+
 async def test_workspace_candidates_rotate_and_recover_from_cursor_deletion_and_restart(
     db: None,
 ) -> None:

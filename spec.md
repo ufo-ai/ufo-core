@@ -382,7 +382,12 @@ allocation, delivery registration, and enqueue recovery remain one implementatio
 - **Live** (web; core's CLI is the built-in twin) — the member's connection is held open, so
   admission registers nothing and the surface delivers by `tail`-ing the turn's frames off the hub
   over SSE in its own route. The poller only processes turns that registered a writeback, so it is a
-  no-op for a live surface — the efficient downgrade, not a second seam.
+  no-op for a live surface — the efficient downgrade, not a second seam. The same terminal handoffs
+  ride the live stream that the writeback carries: a turn that ended by asking renders its options
+  as the surface's own answer affordance under the same idempotent admit (first answer wins,
+  `admitted_body` confirming which landed), credential prompts collect privately through the
+  sealed handoff gated per slot by `credential_prompt_pending`, and the turn's shared files
+  deliver as TTL `artifact_link` downloads read off `shared_artifacts`.
 
 | Surface | Home | Delivery | Identity | Conversation key |
 |---|---|---|---|---|
@@ -422,10 +427,16 @@ workspace files, a live SSE tail); the memory explorer reads its durable memory 
 recall-decay signals recall itself applies. Each surface reads only its owning extension's data, so
 neither reaches a core internal nor the other extension's tables.
 
-Two-way attachments stream end to end, never buffering a whole file: an inbound Slack file streams
-from `url_private` into the conversation's workspace before the turn runs; a shared file
-(`share_file` → a `shared_artifact` record) streams from the blob store to Slack's chunked
-external-upload API, into the conversation's thread (Slack forbids threading on a reply's ts). `surface_identity` and `conversation.surface`
+Two-way attachments cross under explicit bounds at every hop: an inbound Slack file streams from
+`url_private` in bounded chunks into the conversation's workspace before the turn runs; a shared
+file (`share_file` → a `shared_artifact` record) streams from the blob store to Slack's chunked
+external-upload API, into the conversation's thread (Slack forbids threading on a reply's ts). The
+web composer's inbound files are refused unless the request declares a length the server frames
+the body by — a chunked body, whose length no header can state, is refused rather than parsed — and
+only then does the parse buffer each part within that length (in memory up to the parser's spool
+threshold, a temp file past it); a plain text body is instead bounded by the bytes actually read,
+and the workspace write accumulates one size-capped body per file before the turn runs. Outbound, the portal renders `artifact_link` downloads instead of
+an upload. `surface_identity` and `conversation.surface`
 are open namespaces validated by surface registration, not a fixed enum.
 Slack renders terminal accounting and model metadata as the reply's final context block only in
 the operator's own workspace — the one whose first member's email domain is `OPERATOR_EMAIL_DOMAIN`, the
