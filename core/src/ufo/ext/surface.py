@@ -122,6 +122,7 @@ from ufo.workspace import ws, ws_current
 
 if TYPE_CHECKING:
     from ufo.ext.context import SourceReader
+    from ufo.listings import ListingCursor, ListingPage
     from ufo.memory import MemoryMatch, MemorySearch
     from ufo.objects import BoundKind, ObjectPage
 
@@ -1231,14 +1232,27 @@ class SurfaceContext:
         return await self._memory.search(reader, queries)
 
     async def recent_memory(
-        self, subjects: frozenset[str], limit: int
-    ) -> "tuple[MemoryMatch, ...]":
-        """The newest live memory items the subjects may read — the browse half of the memory
-        seam, for the portal's listing: no query, no similarity, source pages stay search-only.
+        self,
+        subjects: frozenset[str],
+        limit: int,
+        kinds: "frozenset[str] | None" = None,
+        cursor: "ListingCursor | None" = None,
+    ) -> "ListingPage[MemoryMatch]":
+        """One page of the live memory items the subjects may read, newest first — the browse half
+        of the memory seam, for the portal's listing: no query, no similarity, source pages stay
+        search-only. Keyset-paged through `cursor` and narrowable to item classes through `kinds`.
         Gates on `memory_available` like `search_memory`."""
         if self._memory is None:
             raise RuntimeError("no memory-search provider is installed — gate on memory_available")
-        return await self._memory.list_recent(subjects, limit)
+        return await self._memory.list_recent(subjects, limit, kinds, cursor)
+
+    @property
+    def memory_kinds(self) -> tuple[str, ...]:
+        """The item classes the installed provider writes — the closed set the portal's filter
+        offers, so a class the provider adds cannot go missing from it."""
+        if self._memory is None:
+            raise RuntimeError("no memory-search provider is installed — gate on memory_available")
+        return self._memory.listable_kinds()
 
     async def agent_spend(self, agent_id: UUID, window_seconds: int) -> AgentSpendReport:
         """One agent's rolling-window spend and its agent-scoped caps — the member-visible slice,

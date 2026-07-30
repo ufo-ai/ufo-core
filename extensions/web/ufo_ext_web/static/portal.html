@@ -110,6 +110,8 @@
                font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
   #panel .result { margin-top: 10px; }
   #panel h2 { font-size: 13px; opacity: 0.7; margin: 14px 0 4px; }
+  .filter { display: flex; gap: 6px; margin: 0 0 12px; }
+  .filter button[aria-current="true"] { font-weight: 600; text-decoration: underline; }
   form.correct { display: flex; gap: 8px; margin: 12px 0; }
   form.correct input { flex: 1; padding: 8px 10px; border-radius: 8px; font: inherit;
                       border: 1px solid color-mix(in srgb, CanvasText 25%, transparent);
@@ -912,18 +914,42 @@ async function renderSkills(agent, load, notice) {
   panel.appendChild(result);
 }
 
-function memoryRow(match, result, query) {
+function memoryFilter(payload, place) {
+  const bar = document.createElement('div');
+  bar.className = 'filter';
+  for (const kind of ['all'].concat(payload.kinds)) {
+    const chosen = kind === 'all' ? !place.kind : place.kind === kind;
+    const button = actionButton(kind, () =>
+      showWorkspace('memory', undefined, { kind: kind === 'all' ? undefined : kind }));
+    button.setAttribute('aria-current', chosen);
+    bar.appendChild(button);
+  }
+  return bar;
+}
+
+function pageControls(view, payload, place) {
+  const bar = document.createElement('div');
+  bar.className = 'filter';
+  for (const [label, cursor] of [['Newer', payload.newer], ['Older', payload.older]]) {
+    if (!cursor) continue;
+    bar.appendChild(actionButton(label, () =>
+      showWorkspace(view, undefined, { kind: place.kind, after: cursor })));
+  }
+  return bar;
+}
+
+function memoryRow(match, result, query, place) {
   const el = row(match.text, match.kind, match.ref, day(match.created_at));
   const correctable = typeof match.ref === 'string' && match.ref.startsWith('memory/');
   el.appendChild(
     correctable
-      ? actionCell(actionButton('Correct', () => correctMemory(match, result, query)))
+      ? actionCell(actionButton('Correct', () => correctMemory(match, result, query, place)))
       : cell(null)
   );
   return el;
 }
 
-function correctMemory(match, result, query) {
+function correctMemory(match, result, query, place) {
   const mainAgent = agents.find((agent) => agent.main);
   const form = document.createElement('form');
   form.className = 'correct';
@@ -948,7 +974,7 @@ function correctMemory(match, result, query) {
       body: body.value.trim(),
     });
     if (outcome.applied) {
-      showWorkspace('memory', query);
+      showWorkspace('memory', query, place);
       return;
     }
     result.replaceChildren(form, document.createTextNode(outcome.message));
@@ -1108,7 +1134,7 @@ function workspaceSources(view, entries, notice) {
       ? outcome.message
       : 'Error ' + res.status + ' — try again.';
     if (outcome && outcome.applied) {
-      showWorkspace('sources', undefined, message);
+      showWorkspace('sources', undefined, { notice: message });
       return;
     }
     result.textContent = message;
@@ -1174,16 +1200,26 @@ function workspaceSources(view, entries, notice) {
   view.appendChild(result);
 }
 
-async function showWorkspace(name, query, notice) {
+async function showWorkspace(name, query, placement) {
+  // `placement` carries where a view opens: the keyset cursor and filter a paged listing walks
+  // with, and the outcome a mutation left behind for the refreshed view to state.
   selected = null;
   panelLoad += 1;
+  const place = placement || {};
   location.hash = '#/workspace/' + name;
   markWorkspace(name);
   const view = document.createElement('div');
   view.className = 'admin-view';
   main.replaceChildren(view);
   let url = BASE + '/workspace/' + name;
-  if (name === 'memory' && query) url += '?q=' + encodeURIComponent(query);
+  const params = new URLSearchParams();
+  if (name === 'memory' && query) params.set('q', query);
+  else {
+    if (place.kind) params.set('kind', place.kind);
+    if (place.after) params.set('after', place.after);
+  }
+  const search = params.toString();
+  if (search) url += '?' + search;
   if (name === 'memory') {
     const form = document.createElement('form');
     form.className = 'search';
@@ -1214,11 +1250,11 @@ async function showWorkspace(name, query, notice) {
     return;
   }
   if (name === 'sources') {
-    workspaceSources(view, payload.sources, notice);
+    workspaceSources(view, payload.sources, place.notice);
     return;
   }
   if (name === 'credentials') {
-    workspaceCredentials(view, payload.slots, notice);
+    workspaceCredentials(view, payload.slots, place.notice);
     return;
   }
   if (name === 'memory') {
@@ -1226,16 +1262,21 @@ async function showWorkspace(name, query, notice) {
       workspaceEmpty(view, 'This deploy has no memory extension.');
       return;
     }
+    if (!query) view.appendChild(memoryFilter(payload, place));
     if (!payload.matches.length) {
-      workspaceEmpty(view, query ? 'No matches.' : 'No memories yet.');
+      workspaceEmpty(view, query
+        ? 'No matches.'
+        : (place.kind ? 'No ' + place.kind + ' memories on this page.' : 'No memories yet.'));
+      if (!query) view.appendChild(pageControls('memory', payload, place));
       return;
     }
     const result = document.createElement('div');
     result.className = 'result mono';
     view.appendChild(table(
       ['memory', 'kind', 'ref', 'date', ''],
-      payload.matches.map((match) => memoryRow(match, result, query))
+      payload.matches.map((match) => memoryRow(match, result, query, place))
     ));
+    if (!query) view.appendChild(pageControls('memory', payload, place));
     view.appendChild(result);
     return;
   }
@@ -1548,12 +1589,12 @@ function workspaceCredentials(view, slots, notice) {
       prompts.replaceChildren(reason);
       for (const prompt of answered.credentials.prompts) {
         prompts.appendChild(credentialPromptRow(answered.credentials.sealed, prompt, (slot) =>
-          showWorkspace('credentials', undefined, 'Stored ' + slot + '.')));
+          showWorkspace('credentials', undefined, { notice: 'Stored ' + slot + '.' })));
       }
       return;
     }
     if (answered.applied) {
-      showWorkspace('credentials', undefined, answered.message);
+      showWorkspace('credentials', undefined, { notice: answered.message });
       return;
     }
     result.textContent = answered.message;

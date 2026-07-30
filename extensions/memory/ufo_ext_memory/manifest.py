@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from itertools import zip_longest
 from pathlib import Path
+from typing import get_args
 from uuid import UUID
 
 import sqlalchemy as sa
@@ -26,6 +27,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from ufo.sdk.context import ExtensionContext, SourceReader
 from ufo.sdk.index import TextChunker
 from ufo.sdk.jobs import JobSpec, owner_candidates
+from ufo.sdk.listings import ListingCursor, ListingPage, page_of, page_query
 from ufo.sdk.manifest import (
     HookContext,
     HookOutcome,
@@ -232,36 +234,58 @@ class MemorySearchService:
             for match in list(sources.values())[:MEMORY_SEARCH_LIMIT]
         )
 
-    async def list_recent(self, subjects: frozenset[str], limit: int) -> tuple[MemoryMatch, ...]:
-        """The newest live memory items the subjects may read — the browse half of the seam: a
-        bounded index-backed scan, no query, no similarity, superseded rows excluded. Source pages
-        are search's alone; a listing of everything synced would be a page dump, not memory."""
+    def listable_kinds(self) -> tuple[str, ...]:
+        """The item classes this store writes, read off `ItemClass` itself so a class added there
+        reaches a consumer's filter without a second list to remember."""
+        return get_args(ItemClass)
+
+    async def list_recent(
+        self,
+        subjects: frozenset[str],
+        limit: int,
+        kinds: frozenset[str] | None = None,
+        cursor: ListingCursor | None = None,
+    ) -> ListingPage[MemoryMatch]:
+        """One page of the live memory items the subjects may read, newest first — the browse half
+        of the seam: no query, no similarity, superseded rows excluded. Source pages are search's
+        alone; a listing of everything synced would be a page dump, not memory. The paging is the
+        portal's shared keyset walk (`ufo.sdk.listings`), so this listing and every other page the
+        same way."""
+        query = sa.select(
+            memory_item.c.id,
+            memory_item.c.body,
+            memory_item.c.item_class,
+            memory_item.c.created_at,
+        ).where(
+            memory_item.c.workspace_id == self.ctx.store.workspace_id,
+            memory_item.c.subject.in_(subjects),
+            memory_item.c.superseded_by.is_(None),
+        )
+        if kinds is not None:
+            query = query.where(memory_item.c.item_class.in_(kinds))
         async with self.ctx.transaction() as connection:
             rows = (
                 await connection.execute(
-                    sa.select(
-                        memory_item.c.id,
-                        memory_item.c.body,
-                        memory_item.c.item_class,
-                        memory_item.c.created_at,
+                    page_query(
+                        query,
+                        cursor,
+                        limit,
+                        created_at=memory_item.c.created_at,
+                        ident=memory_item.c.id,
                     )
-                    .where(
-                        memory_item.c.workspace_id == self.ctx.store.workspace_id,
-                        memory_item.c.subject.in_(subjects),
-                        memory_item.c.superseded_by.is_(None),
-                    )
-                    .order_by(memory_item.c.created_at.desc(), memory_item.c.id)
-                    .limit(limit)
                 )
             ).all()
-        return tuple(
-            MemoryMatch(
+        return page_of(
+            rows,
+            cursor,
+            limit,
+            render=lambda row: MemoryMatch(
                 kind=row.item_class,
                 text=row.body,
                 ref=ObjectRef(kind=MEMORY_KIND, name=str(row.id)),
                 created_at=_aware(row.created_at),
-            )
-            for row in rows
+            ),
+            position=lambda row: (_aware(row.created_at), str(row.id)),
         )
 
 

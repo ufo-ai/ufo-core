@@ -70,6 +70,7 @@ from ufo.grants import GrantStore
 from ufo.hub import InProcessHub
 from ufo.indexing import OWNER_KIND_MEMORY_ITEM, Chunk, TextChunker
 from ufo.jobs import JobRunner, bindings_from
+from ufo.listings import ListingCursor
 from ufo.loop.prompts.render import render_system_prompt
 from ufo.loop.subagents import FINISH_CONTRACT, SubagentRegistry, subagent_system_prompt
 from ufo.loop.transcript import Transcript
@@ -121,6 +122,8 @@ def _credential_store() -> CredentialStore:
 
 
 TOKEN_SECRET = "conformance-token-secret"
+CURSOR_STAMP = datetime(2026, 7, 30, 12, 0, tzinfo=UTC)
+CURSOR_ITEM = "11111111-1111-4111-8111-111111111111"
 
 
 def _bearer(workspace_id: UUID) -> dict[str, str]:
@@ -563,8 +566,32 @@ async def test_sample_memory_search_provider_receives_the_exact_subjects(db: Non
     with ws(workspace_id):
         listed = await access.list_recent(audience_subjects(audience), 25)
         browsed = await ScopedStore(extension=sample.NAME).get(sample.MEMORY_RECENT_KEY)
-    assert listed[0].text == sample.SAMPLE_MEMORY_TEXT
-    assert browsed == {"subjects": sorted(audience_subjects(audience)), "limit": 25}
+        narrowed = await access.list_recent(
+            audience_subjects(audience),
+            25,
+            frozenset({sample.SAMPLE_MEMORY_KIND}),
+            ListingCursor(created_at=CURSOR_STAMP, item_id=CURSOR_ITEM, newer=True),
+        )
+        walked = await ScopedStore(extension=sample.NAME).get(sample.MEMORY_RECENT_KEY)
+    assert listed.rows[0].text == sample.SAMPLE_MEMORY_TEXT
+    assert browsed == {
+        "subjects": sorted(audience_subjects(audience)),
+        "limit": 25,
+        "kinds": None,
+        "cursor": None,
+    }
+    assert narrowed.rows[0].text == sample.SAMPLE_MEMORY_TEXT
+    assert access.listable_kinds() == (sample.SAMPLE_MEMORY_KIND,)
+    assert walked == {
+        "subjects": sorted(audience_subjects(audience)),
+        "limit": 25,
+        "kinds": [sample.SAMPLE_MEMORY_KIND],
+        "cursor": {
+            "created_at": CURSOR_STAMP.isoformat(),
+            "item_id": CURSOR_ITEM,
+            "newer": True,
+        },
+    }
 
 
 def test_memory_search_registration_is_unique_and_required() -> None:

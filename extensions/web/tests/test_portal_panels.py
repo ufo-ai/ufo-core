@@ -8,6 +8,7 @@ the dependencies are real, only the DBOS client is a stand-in nothing here dispa
 
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from urllib.parse import quote
 from uuid import UUID, uuid4
 
 import pytest
@@ -21,6 +22,7 @@ from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.store import MemoryIndexer, MemoryStore, MemoryWrite, mem_page, memory_item
 from ufo_ext_skill_create.manifest import manifest as skill_create_manifest
 from ufo_ext_skill_create.store import UserSkillStore
+from ufo_ext_web import surface as web_surface
 from ufo_ext_web.audience import AUDIENCE_PREFIX, web_extension
 from ufo_ext_web.manifest import manifest as web_manifest
 from ufo_ext_web.surface import MAX_USAGE_WINDOW_SECONDS, MEMORY_RECENT_LIMIT
@@ -685,3 +687,221 @@ async def test_usage_answers_empty_for_a_spend_free_agent(portal) -> None:
     assert report["total_micro_usd"] == 0
     assert report["by_dimension"] == []
     assert report["caps"] == []
+
+
+async def _seed_notes(
+    workspace_id: UUID,
+    member_id: UUID,
+    bodies: tuple[tuple[str, str], ...],
+    stamps: dict[str, datetime],
+) -> None:
+    """Commit one memory item per body under the member's own subject, then stamp each so the
+    browse ordering is the test's to state rather than the clock's."""
+    index = DefaultIndex(transaction=workspace_tx)
+    embed = StubEmbed()
+    with ws(workspace_id):
+        extension = context_for("memory", frozenset(), index=index, embed=embed)
+        store = MemoryStore(
+            index=index,
+            embed=embed,
+            transaction=workspace_tx,
+            workspace_id=workspace_id,
+            page_states=extension.page_states,
+        )
+        for body, item_class in bodies:
+            await store.commit(
+                MemoryWrite(subject=member_subject(member_id), body=body, item_class=item_class)
+            )
+    async with workspace_tx() as connection:
+        for body, stamp in stamps.items():
+            await connection.execute(
+                sa.update(memory_item).where(memory_item.c.body == body).values(created_at=stamp)
+            )
+
+
+def _texts(payload: dict) -> list[str]:
+    return [match["text"] for match in payload["matches"]]
+
+
+async def _walk_older(client: AsyncClient, path: str, headers: dict[str, str]) -> list[str]:
+    """Every item the Older control reaches, in the order the pages render them."""
+    walked: list[str] = []
+    payload = (await client.get(path, headers=headers)).json()
+    walked.extend(_texts(payload))
+    while payload["older"]:
+        joiner = "&" if "?" in path else "?"
+        payload = (
+            await client.get(f"{path}{joiner}after={quote(payload['older'])}", headers=headers)
+        ).json()
+        walked.extend(_texts(payload))
+    return walked
+
+
+async def test_memory_listing_walks_pages_without_repeating_or_skipping(
+    portal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The keyset walk: Older reaches every item exactly once and Newer returns the page it came
+    from, with each page's boundary cursors saying which controls exist. The page size is patched
+    small so the walk's own arithmetic is what the assertions read — the real
+    `MEMORY_RECENT_LIMIT` is pinned by the bounded-listing test."""
+    client, workspace_id, _agent_a, _agent_b = portal
+    member_id, headers = await _seed_member(workspace_id, CREATOR_EMAIL)
+    base = datetime(2026, 7, 1, tzinfo=UTC)
+    bodies = tuple((f"note {index}", "fact") for index in range(5))
+    stamps = {f"note {index}": base + timedelta(minutes=index) for index in range(5)}
+    await _seed_notes(workspace_id, member_id, bodies, stamps)
+    monkeypatch.setattr(web_surface, "MEMORY_RECENT_LIMIT", 3)
+    path = "/surface/web/workspace/memory"
+
+    first = (await client.get(path, headers=headers)).json()
+    assert _texts(first) == ["note 4", "note 3", "note 2"]
+    assert first["newer"] is None
+    assert first["older"] is not None
+
+    second = (await client.get(f"{path}?after={quote(first['older'])}", headers=headers)).json()
+    assert _texts(second) == ["note 1", "note 0"]
+    assert second["older"] is None
+    assert second["newer"] is not None
+    assert set(_texts(first)).isdisjoint(_texts(second))
+
+    back = (await client.get(f"{path}?after={quote(second['newer'])}", headers=headers)).json()
+    assert _texts(back) == _texts(first)
+    assert back["newer"] is None
+
+
+async def test_memory_paging_breaks_a_shared_timestamp_at_the_boundary(
+    portal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two items minted in the same instant land either side of a page boundary: the cursor
+    carries the item id beside the timestamp, so neither repeats and neither is skipped — a
+    timestamp-only cursor loses exactly one of them."""
+    client, workspace_id, _agent_a, _agent_b = portal
+    member_id, headers = await _seed_member(workspace_id, CREATOR_EMAIL)
+    tie = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    bodies = (("tied a", "fact"), ("tied b", "fact"), ("older one", "fact"))
+    stamps = {"tied a": tie, "tied b": tie, "older one": tie - timedelta(minutes=1)}
+    await _seed_notes(workspace_id, member_id, bodies, stamps)
+    monkeypatch.setattr(web_surface, "MEMORY_RECENT_LIMIT", 1)
+
+    walked = await _walk_older(client, "/surface/web/workspace/memory", headers)
+    assert sorted(walked) == ["older one", "tied a", "tied b"]
+    assert len(walked) == len(set(walked))
+
+
+async def test_memory_paging_is_stable_across_a_concurrent_write(
+    portal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An item landing while a member reads shifts no page boundary: the cursor names a row, not
+    an offset, so the second page is exactly what it would have been. Offset paging repeats the
+    row the insert displaced."""
+    client, workspace_id, _agent_a, _agent_b = portal
+    member_id, headers = await _seed_member(workspace_id, CREATOR_EMAIL)
+    base = datetime(2026, 7, 1, tzinfo=UTC)
+    bodies = tuple((f"note {index}", "fact") for index in range(4))
+    stamps = {f"note {index}": base + timedelta(minutes=index) for index in range(4)}
+    await _seed_notes(workspace_id, member_id, bodies, stamps)
+    monkeypatch.setattr(web_surface, "MEMORY_RECENT_LIMIT", 2)
+    path = "/surface/web/workspace/memory"
+
+    first = (await client.get(path, headers=headers)).json()
+    assert _texts(first) == ["note 3", "note 2"]
+    await _seed_notes(
+        workspace_id,
+        member_id,
+        (("landed mid-read", "fact"),),
+        {"landed mid-read": base + timedelta(hours=1)},
+    )
+    second = (await client.get(f"{path}?after={quote(first['older'])}", headers=headers)).json()
+    assert _texts(second) == ["note 1", "note 0"]
+
+
+async def test_a_cursor_this_surface_never_minted_is_refused(portal) -> None:
+    """A token naming no position is refused rather than silently answering the newest page — a
+    stale or hand-edited link tells the member instead of quietly moving them."""
+    client, workspace_id, _agent_a, _agent_b = portal
+    _member_id, headers = await _seed_member(workspace_id, CREATOR_EMAIL)
+    path = "/surface/web/workspace/memory"
+    for token in (
+        "garbage",
+        "older|not-a-timestamp|11111111-1111-4111-8111-111111111111",
+        "older|2026-07-01T00:00:00+00:00|not-a-uuid",
+        "sideways|2026-07-01T00:00:00+00:00|11111111-1111-4111-8111-111111111111",
+        "older|2026-07-01T00:00:00+00:00",
+    ):
+        refused = await client.get(f"{path}?after={quote(token)}", headers=headers)
+        assert refused.status_code == 400, token
+
+
+async def test_memory_filter_narrows_to_one_class_and_composes_with_paging(
+    portal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The filter offers exactly the provider's own classes and narrows the listing to one of
+    them; a page walked under a filter stays inside it, a class nothing wrote lists empty, and a
+    class the provider does not write is refused."""
+    client, workspace_id, _agent_a, _agent_b = portal
+    member_id, headers = await _seed_member(workspace_id, CREATOR_EMAIL)
+    base = datetime(2026, 7, 1, tzinfo=UTC)
+    bodies = (
+        ("a fact", "fact"),
+        ("an episode", "episodic"),
+        ("another fact", "fact"),
+        ("a third fact", "fact"),
+    )
+    stamps = {
+        "a fact": base + timedelta(minutes=1),
+        "an episode": base + timedelta(minutes=2),
+        "another fact": base + timedelta(minutes=3),
+        "a third fact": base + timedelta(minutes=4),
+    }
+    await _seed_notes(workspace_id, member_id, bodies, stamps)
+    path = "/surface/web/workspace/memory"
+
+    unfiltered = (await client.get(path, headers=headers)).json()
+    assert set(unfiltered["kinds"]) == {"fact", "episodic", "semantic"}
+    assert unfiltered["kind"] is None
+    assert "an episode" in _texts(unfiltered)
+
+    facts = (await client.get(f"{path}?kind=fact", headers=headers)).json()
+    assert facts["kind"] == "fact"
+    assert _texts(facts) == ["a third fact", "another fact", "a fact"]
+    assert {match["kind"] for match in facts["matches"]} == {"fact"}
+
+    monkeypatch.setattr(web_surface, "MEMORY_RECENT_LIMIT", 2)
+    page = (await client.get(f"{path}?kind=fact", headers=headers)).json()
+    assert _texts(page) == ["a third fact", "another fact"]
+    rest = (
+        await client.get(f"{path}?kind=fact&after={quote(page['older'])}", headers=headers)
+    ).json()
+    assert _texts(rest) == ["a fact"]
+
+    empty = (await client.get(f"{path}?kind=semantic", headers=headers)).json()
+    assert empty["matches"] == []
+    unknown = await client.get(f"{path}?kind=invented", headers=headers)
+    assert unknown.status_code == 400
+
+
+async def test_the_subject_fence_holds_on_every_page(
+    portal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Another member's private item is absent from every page of the walk — paging narrows the
+    window, never the fence."""
+    client, workspace_id, _agent_a, _agent_b = portal
+    member_id, headers = await _seed_member(workspace_id, CREATOR_EMAIL)
+    other_id, _other_headers = await _seed_member(workspace_id, OTHER_EMAIL)
+    base = datetime(2026, 7, 1, tzinfo=UTC)
+    await _seed_notes(
+        workspace_id,
+        member_id,
+        tuple((f"mine {index}", "fact") for index in range(3)),
+        {f"mine {index}": base + timedelta(minutes=index) for index in range(3)},
+    )
+    await _seed_notes(
+        workspace_id,
+        other_id,
+        (("theirs alone", "fact"),),
+        {"theirs alone": base + timedelta(minutes=1, seconds=30)},
+    )
+    monkeypatch.setattr(web_surface, "MEMORY_RECENT_LIMIT", 1)
+
+    walked = await _walk_older(client, "/surface/web/workspace/memory", headers)
+    assert sorted(walked) == ["mine 0", "mine 1", "mine 2"]

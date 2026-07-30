@@ -422,10 +422,14 @@ bindings, the deploy's member-fillable credential slots, memory, shared files, h
 usage. The usage view answers every member their own window — the ledger rows their
 conversations' turns wrote, the join a `member` cap binds on, beside their member-scoped caps —
 and adds the workspace rollup for an admin, so a non-admin's payload names no other member and no
-agent. Memory with no query lists the newest
-100 live items under the viewer's own subjects; a query searches every agent the member reaches,
-one per-agent reader each, unioned and deduped — so source-derived pages stay fenced by that
-agent's source grants (the same reader a turn's tools search under). Shared files are the
+agent. Memory with no query lists 100 live items under the viewer's own subjects at a time,
+newest first and narrowable to one item class the provider itself declares; a query searches every
+agent the member reaches, one per-agent reader each, unioned and deduped — so source-derived pages
+stay fenced by that agent's source grants (the same reader a turn's tools search under). A listing
+pages by keyset, never by offset: one shared cursor (`created_at` with the row id breaking its
+ties) and one page envelope carrying the positions its Newer and Older controls walk to, so a row
+landing mid-read shifts no boundary and every listing pages identically. A cursor the surface
+never minted is refused rather than answered with some other page. Shared files are the
 member's own conversations' artifacts, every conversation's for an admin, each carrying the
 signed TTL link a delivery would; opening one pins a viewer over the listing that renders what
 the page honestly can — an image inline, text up to a bounded read, and a plain refusal to

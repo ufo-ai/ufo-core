@@ -44,6 +44,7 @@ from ufo.sdk.http import (
     set_session_cookie,
 )
 from ufo.sdk.hub import CostTick, LiveFrame, Parked, SkillLoad, Terminal, ToolCall
+from ufo.sdk.listings import ListingCursor, MalformedCursor
 from ufo.sdk.memory import MemoryMatch
 from ufo.sdk.models import Message, TextBlock
 from ufo.sdk.seats import Seats
@@ -540,11 +541,14 @@ async def skills(ctx: SurfaceContext, request: Request) -> Response:
 
 
 async def workspace_memory(ctx: SurfaceContext, request: Request) -> Response:
-    """The member's memory across every agent they reach. With no query, the newest
-    `MEMORY_RECENT_LIMIT` live items under the viewer's own subject plus shared — a listing, not
-    a recall. With a query, one search per reachable agent unioned and deduped by ref: the reader
-    contract stays per-agent, so source-page fencing becomes "any agent the member reaches" —
-    live reachability, the same authority chat's tools exercise agent by agent."""
+    """The member's memory across every agent they reach. With no query, one keyset page of the
+    live items under the viewer's own subject plus shared, newest first — a listing, not a recall,
+    narrowable to an item class and walked by the page's own boundary cursors, so an item landing
+    mid-read shifts no boundary. With a query, one search per reachable agent unioned and deduped
+    by ref: the reader contract stays per-agent, so source-page fencing becomes "any agent the
+    member reaches" — live reachability, the same authority chat's tools exercise agent by agent.
+    The filter is the listing's alone: recall ranks by similarity and mixes in source pages, which
+    carry no item class to narrow on."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
@@ -554,8 +558,33 @@ async def workspace_memory(ctx: SurfaceContext, request: Request) -> Response:
     subjects = audience_subjects(conversation_audience(member_id))
     query = request.query_params.get("q", "").strip()
     if not query:
-        found = await ctx.recent_memory(subjects, MEMORY_RECENT_LIMIT)
-        return JSONResponse({"available": True, "matches": _memory_rows(found)})
+        offered = ctx.memory_kinds
+        selected = request.query_params.get("kind", "").strip()
+        if selected and selected not in offered:
+            return Response("no such memory kind", status_code=400)
+        raw_cursor = request.query_params.get("after", "").strip()
+        cursor: ListingCursor | None = None
+        if raw_cursor:
+            try:
+                cursor = ListingCursor.decode(raw_cursor)
+            except MalformedCursor:
+                return Response("malformed listing cursor", status_code=400)
+        page = await ctx.recent_memory(
+            subjects,
+            MEMORY_RECENT_LIMIT,
+            frozenset({selected}) if selected else None,
+            cursor,
+        )
+        return JSONResponse(
+            {
+                "available": True,
+                "matches": _memory_rows(page.rows),
+                "kinds": list(offered),
+                "kind": selected or None,
+                "older": None if page.older is None else page.older.encode(),
+                "newer": None if page.newer is None else page.newer.encode(),
+            }
+        )
     legs = await asyncio.gather(
         *(
             ctx.search_memory(

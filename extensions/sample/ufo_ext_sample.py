@@ -44,6 +44,7 @@ from ufo.sdk.http import (
 from ufo.sdk.hub import InProcessHub
 from ufo.sdk.index import Chunk, Hit, IndexScope
 from ufo.sdk.jobs import JobSpec, owner_candidates
+from ufo.sdk.listings import ListingCursor, ListingPage
 from ufo.sdk.manifest import (
     CdpProviderSpec,
     ConnectorProvider,
@@ -199,6 +200,7 @@ SAMPLE_SEARCH_TITLE = "Sample result"
 SAMPLE_SEARCH_TEXT = "the sample search backend answers a canned hit"
 SAMPLE_SEARCH_ANSWER = "the sample search backend answers directly"
 SAMPLE_MEMORY_TEXT = "the sample memory provider returns a scoped result"
+SAMPLE_MEMORY_KIND = "fact"
 MEMORY_SEARCH_KEY = "memory_search"
 MEMORY_RECENT_KEY = "memory_recent"
 MEMORY_SEARCH_PROVIDER = "sample"
@@ -1004,12 +1006,38 @@ class SampleMemorySearch:
                 "end": None if end is None else end.isoformat(),
             },
         )
-        return (MemoryMatch(kind="fact", text=SAMPLE_MEMORY_TEXT),)
+        return (MemoryMatch(kind=SAMPLE_MEMORY_KIND, text=SAMPLE_MEMORY_TEXT),)
 
-    async def list_recent(self, subjects: frozenset[str], limit: int) -> tuple[MemoryMatch, ...]:
+    def listable_kinds(self) -> tuple[str, ...]:
+        return (SAMPLE_MEMORY_KIND,)
+
+    async def list_recent(
+        self,
+        subjects: frozenset[str],
+        limit: int,
+        kinds: frozenset[str] | None = None,
+        cursor: ListingCursor | None = None,
+    ) -> ListingPage[MemoryMatch]:
         subject_values: list[JsonValue] = [subject for subject in sorted(subjects)]
-        await self.ctx.store.put(MEMORY_RECENT_KEY, {"subjects": subject_values, "limit": limit})
-        return (MemoryMatch(kind="fact", text=SAMPLE_MEMORY_TEXT),)
+        kind_values: list[JsonValue] | None = (
+            None if kinds is None else [kind for kind in sorted(kinds)]
+        )
+        await self.ctx.store.put(
+            MEMORY_RECENT_KEY,
+            {
+                "subjects": subject_values,
+                "limit": limit,
+                "kinds": kind_values,
+                "cursor": None
+                if cursor is None
+                else {
+                    "created_at": cursor.created_at.isoformat(),
+                    "item_id": cursor.item_id,
+                    "newer": cursor.newer,
+                },
+            },
+        )
+        return ListingPage(rows=(MemoryMatch(kind=SAMPLE_MEMORY_KIND, text=SAMPLE_MEMORY_TEXT),))
 
 
 class SampleCarrier:

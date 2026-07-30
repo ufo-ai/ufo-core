@@ -315,8 +315,34 @@ const wire = {
     ],
   },
   memoryQueries: [],
+  memoryRequests: [],
   memory: {
     available: true,
+    kinds: ["fact", "episodic", "semantic"],
+    get pages() {
+      // An empty page carries no boundary cursors, exactly as the server answers one.
+      const bound = (matches, cursors) =>
+        matches.length ? { matches, ...cursors } : { matches, older: null, newer: null };
+      return {
+        first: bound(this.recent, { older: "older|2026-07-29T09:00:00+00:00|9", newer: null }),
+        "older|2026-07-29T09:00:00+00:00|9": bound(this.older, {
+          older: null,
+          newer: "newer|2026-07-28T08:00:00+00:00|4",
+        }),
+        "newer|2026-07-28T08:00:00+00:00|4": bound(this.recent, {
+          older: "older|2026-07-29T09:00:00+00:00|9",
+          newer: null,
+        }),
+      };
+    },
+    older: [
+      {
+        kind: "episodic",
+        text: "the deploy ran on tuesday",
+        ref: "memory/4",
+        created_at: "2026-07-28T08:00:00+00:00",
+      },
+    ],
     recent: [
       {
         kind: "fact",
@@ -618,16 +644,38 @@ const sandbox = {
         throw new TypeError("network down");
       }
       if (view.startsWith("memory")) {
-        const query = view.includes("?q=")
-          ? decodeURIComponent(view.split("?q=")[1])
-          : null;
+        const params = new URLSearchParams(view.split("?")[1] || "");
+        const query = params.get("q");
         wire.memoryQueries.push(query);
+        wire.memoryRequests.push({
+          q: query,
+          kind: params.get("kind"),
+          after: params.get("after"),
+        });
+        if (query) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              available: wire.memory.available,
+              matches: structuredClone(wire.memory.searched),
+            }),
+          };
+        }
+        const page = wire.memory.pages[params.get("after") || "first"];
+        const kind = params.get("kind");
         return {
           ok: true,
           status: 200,
           json: async () => ({
             available: wire.memory.available,
-            matches: structuredClone(query ? wire.memory.searched : wire.memory.recent),
+            matches: structuredClone(
+              kind ? page.matches.filter((match) => match.kind === kind) : page.matches
+            ),
+            kinds: structuredClone(wire.memory.kinds),
+            kind,
+            older: page.older,
+            newer: page.newer,
           }),
         };
       }
@@ -1224,6 +1272,73 @@ try {
     throw new Error(`a refused correction reads "${viewText()}"`);
   }
   wire.intentRefuses = false;
+  await workspaceNamed("Memory").fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const filterBar = body.querySelector(".admin-view").querySelector(".filter");
+  if (texts(filterBar.querySelectorAll("button")).join("|") !== "all|fact|episodic|semantic") {
+    throw new Error(`the memory filter offers ${JSON.stringify(texts(filterBar.querySelectorAll("button")))}`);
+  }
+  const allButton = filterBar.querySelectorAll("button").find((b) => b.textContent === "all");
+  if (allButton.attributes["aria-current"] !== "true") {
+    throw new Error("an unfiltered listing marks no filter current");
+  }
+  const pagerButtons = () =>
+    body
+      .querySelector(".admin-view")
+      .querySelectorAll(".filter")
+      .at(-1)
+      .querySelectorAll("button");
+  if (texts(pagerButtons()).join("|") !== "Older") {
+    throw new Error(`the newest memory page offers ${JSON.stringify(texts(pagerButtons()))}`);
+  }
+  const newestPage = viewCells().join("|");
+  await pagerButtons().find((button) => button.textContent === "Older").fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  if (wire.memoryRequests.at(-1).after !== "older|2026-07-29T09:00:00+00:00|9") {
+    throw new Error(`Older sent after=${JSON.stringify(wire.memoryRequests.at(-1).after)}`);
+  }
+  if (!viewCells().includes("the deploy ran on tuesday")) {
+    throw new Error(`the second memory page reads ${JSON.stringify(viewCells())}`);
+  }
+  if (texts(pagerButtons()).join("|") !== "Newer") {
+    throw new Error(`the oldest memory page offers ${JSON.stringify(texts(pagerButtons()))}`);
+  }
+  await pagerButtons().find((button) => button.textContent === "Newer").fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  if (wire.memoryRequests.at(-1).after !== "newer|2026-07-28T08:00:00+00:00|4") {
+    throw new Error(`Newer sent after=${JSON.stringify(wire.memoryRequests.at(-1).after)}`);
+  }
+  if (viewCells().join("|") !== newestPage) {
+    throw new Error("Newer returned " + JSON.stringify(viewCells()));
+  }
+  const factButton = body
+    .querySelector(".admin-view")
+    .querySelector(".filter")
+    .querySelectorAll("button")
+    .find((button) => button.textContent === "fact");
+  await factButton.fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const filtered = wire.memoryRequests.at(-1);
+  if (filtered.kind !== "fact" || filtered.after !== null) {
+    throw new Error(`the filter sent ${JSON.stringify(filtered)}`);
+  }
+  if (viewCells().some((cell) => cell === "source")) {
+    throw new Error(`a filtered listing rendered another class: ${JSON.stringify(viewCells())}`);
+  }
+  const currentFact = body
+    .querySelector(".admin-view")
+    .querySelector(".filter")
+    .querySelectorAll("button")
+    .find((button) => button.textContent === "fact");
+  if (currentFact.attributes["aria-current"] !== "true") {
+    throw new Error("the chosen filter carries no aria-current stamp");
+  }
+  await pagerButtons().find((button) => button.textContent === "Older").fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const composed = wire.memoryRequests.at(-1);
+  if (composed.kind !== "fact" || !composed.after) {
+    throw new Error(`a page walked under a filter sent ${JSON.stringify(composed)}`);
+  }
   await workspaceNamed("Memory").fire("click");
   await new Promise((resolve) => setTimeout(resolve, 0));
   const searchField = searchForm.querySelector("input");

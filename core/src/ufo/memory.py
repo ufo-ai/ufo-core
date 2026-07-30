@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Protocol
 
 from ufo.ext.context import SourceReader
+from ufo.listings import ListingCursor, ListingPage
 from ufo.objects import ObjectRef
 
 DEFAULT_MEMORY_SEARCH_PROVIDER = "default"
@@ -25,8 +26,12 @@ class MemoryMatch:
 
 class MemorySearchProvider(Protocol):
     """A memory extension's workspace-ambient search implementation. `list_recent` is the
-    browse half: the newest live memory items a subject set may read, no query and no
-    similarity — source pages stay search-only, so it takes subjects rather than a reader."""
+    browse half: the live memory items a subject set may read in recency order, no query and no
+    similarity — source pages stay search-only, so it takes subjects rather than a reader. It
+    pages by keyset (`cursor`), never by offset: items land while a member reads, and an offset
+    would repeat or skip a row across that write. `kinds` narrows to item classes, and
+    `listable_kinds` is the closed set a consumer offers — the provider's own classes, so a
+    class it starts writing cannot go missing from the filter."""
 
     async def search(
         self,
@@ -37,8 +42,14 @@ class MemorySearchProvider(Protocol):
     ) -> tuple[MemoryMatch, ...]: ...
 
     async def list_recent(
-        self, subjects: frozenset[str], limit: int
-    ) -> tuple[MemoryMatch, ...]: ...
+        self,
+        subjects: frozenset[str],
+        limit: int,
+        kinds: frozenset[str] | None = None,
+        cursor: ListingCursor | None = None,
+    ) -> ListingPage[MemoryMatch]: ...
+
+    def listable_kinds(self) -> tuple[str, ...]: ...
 
 
 @dataclass(frozen=True)
@@ -56,5 +67,14 @@ class MemorySearch:
     ) -> tuple[MemoryMatch, ...]:
         return await self.provider.search(queries, reader, start, end)
 
-    async def list_recent(self, subjects: frozenset[str], limit: int) -> tuple[MemoryMatch, ...]:
-        return await self.provider.list_recent(subjects, limit)
+    async def list_recent(
+        self,
+        subjects: frozenset[str],
+        limit: int,
+        kinds: frozenset[str] | None = None,
+        cursor: ListingCursor | None = None,
+    ) -> ListingPage[MemoryMatch]:
+        return await self.provider.list_recent(subjects, limit, kinds, cursor)
+
+    def listable_kinds(self) -> tuple[str, ...]:
+        return self.provider.listable_kinds()
