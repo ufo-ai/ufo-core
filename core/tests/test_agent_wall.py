@@ -213,6 +213,7 @@ async def test_scheduled_fire_refuses_a_task_bound_to_another_agent(db: None) ->
             origin_seq=None,
             resume_turn_id=None,
             claim_id="claim-1",
+            paused=False,
             created_at=fire_at,
             updated_at=fire_at,
             created_by_member_id=None,

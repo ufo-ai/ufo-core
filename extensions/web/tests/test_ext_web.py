@@ -19,6 +19,7 @@ from httpx import ASGITransport, AsyncClient
 from ufo_ext_connectors.manifest import manifest as connectors_manifest
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.store import recall_subjects
+from ufo_ext_scheduled_tasks.tools import SCHEDULED_TASK_OBJECT
 from ufo_ext_sites.manifest import manifest as sites_manifest
 from ufo_ext_sites.store import HostedSites
 from ufo_ext_skill_create.manifest import manifest as skill_create_manifest
@@ -33,6 +34,7 @@ from ufo_testsupport.stream_gate import GatingHub, StreamGate, release_when_runn
 from ufo_testsupport.surfaces import EMPTY_SKILL_REGISTRY, no_user_skills
 
 from ufo.accounting import record_egress_request, record_turn_usage
+from ufo.agent_scope import agent as bind_agent
 from ufo.bearer import mint_token
 from ufo.blob import FilesystemBlobStore
 from ufo.config import Config
@@ -62,6 +64,7 @@ from ufo.models.registry import ModelRegistry
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import ProxyEndpoint, RunTokenCodec
+from ufo.scheduling import ScheduleStore
 from ufo.schema import tables
 from ufo.schema.records import (
     AskQuestion,
@@ -82,6 +85,11 @@ from ufo.surfaces import hub_tail
 from ufo.workspace import ws
 
 SECRET = "artifact-signing-secret"
+SCHEDULED_TASK_KIND_ONLY = Manifest(
+    name="scheduled_tasks",
+    version="0.1.0",
+    objects=(SCHEDULED_TASK_OBJECT,),
+)
 SLOTTED = Manifest(
     name="stub",
     version="0",
@@ -238,6 +246,7 @@ def dbos_runtime(
             manifests=(
                 web_manifest(),
                 connectors_manifest(),
+                SCHEDULED_TASK_KIND_ONLY,
                 skill_create_manifest(),
                 sources_manifest(),
                 SLOTTED,
@@ -272,7 +281,7 @@ async def web(
     app = FastAPI()
     _mount_shared_surfaces(
         app,
-        (web_manifest(), SLOTTED),
+        (web_manifest(), SCHEDULED_TASK_KIND_ONLY, SLOTTED),
         CredentialStore(fernet=CREDENTIAL_FERNET),
         blob,
         sandboxes,
@@ -1541,7 +1550,11 @@ async def test_admin_view_reads_the_workspace_shape(
     assert [
         (entry["name"], entry["version"], entry["sandbox_internet"])
         for entry in payload["deploy"]["extensions"]
-    ] == [("stub", "0", False), ("web", "0.1.0", False)]
+    ] == [
+        ("scheduled_tasks", "0.1.0", False),
+        ("stub", "0", False),
+        ("web", "0.1.0", False),
+    ]
 
 
 async def test_admin_view_reports_ungated_seats(
@@ -2503,6 +2516,184 @@ async def _agent_row(agent_id: UUID) -> sa.Row:
         ).one()
 
 
+async def _task_row(workspace_id: UUID, name: str) -> sa.Row | None:
+    async with workspace_tx() as connection:
+        return (
+            await connection.execute(
+                sa.select(tables.scheduled_task).where(
+                    tables.scheduled_task.c.workspace_id == workspace_id,
+                    tables.scheduled_task.c.name == name,
+                )
+            )
+        ).one_or_none()
+
+
+async def test_a_task_intent_creates_pauses_resumes_and_deletes(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    """The tasks panel's whole mutation surface through the one intent lane: a create lands the
+    exact spec as a durable row, `paused: true` stops the schedule from claiming without losing
+    the task, `paused: false` resumes it from the next cron fire, and a delete removes the row —
+    each mutation a turn, each outcome the kind's own."""
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "creator@example.com")
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    created = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json={
+            "verb": "apply",
+            "kind": "scheduled_task",
+            "name": "daily-brief",
+            "spec": {"schedule": "0 9 * * *", "prompt": "write the daily brief"},
+        },
+        headers=cookie,
+    )
+    assert created.status_code == 200
+    assert created.json()["applied"] is True
+    row = await _task_row(workspace_id, "daily-brief")
+    assert row is not None
+    assert row.schedule == "0 9 * * *"
+    assert row.prompt == "write the daily brief"
+    assert row.created_by_member_id == member_id
+    assert row.paused is False
+
+    paused = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json={
+            "verb": "apply",
+            "kind": "scheduled_task",
+            "name": "daily-brief",
+            "spec": {"paused": True},
+        },
+        headers=cookie,
+    )
+    assert paused.json()["applied"] is True
+    row = await _task_row(workspace_id, "daily-brief")
+    assert row.paused is True
+    assert row.prompt == "write the daily brief"
+    with ws(workspace_id), bind_agent(agent_id):
+        due_at = row.next_run_at.replace(tzinfo=UTC) + timedelta(seconds=1)
+        assert await ScheduleStore().claim_due(due_at, 300) == ()
+
+    resumed = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json={
+            "verb": "apply",
+            "kind": "scheduled_task",
+            "name": "daily-brief",
+            "spec": {"paused": False},
+        },
+        headers=cookie,
+    )
+    assert resumed.json()["applied"] is True
+    row = await _task_row(workspace_id, "daily-brief")
+    assert row.paused is False
+    with ws(workspace_id), bind_agent(agent_id):
+        due_at = row.next_run_at.replace(tzinfo=UTC) + timedelta(seconds=1)
+        [claimed] = await ScheduleStore().claim_due(due_at, 300)
+        assert claimed.name == "daily-brief"
+
+    removed = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json={"verb": "delete", "kind": "scheduled_task", "name": "daily-brief"},
+        headers=cookie,
+    )
+    assert removed.json()["applied"] is True
+    assert await _task_row(workspace_id, "daily-brief") is None
+
+
+async def test_anothers_task_content_refuses_but_its_cadence_is_the_admins(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    """The kind's own authority answers the lane: another member cannot even see the task (the
+    kind answers not-found, never a hint it exists), an admin's prompt edit refuses on the
+    content gate — the row keeps every submitted-over value — and the same admin's pause
+    applies, because cadence is management and content is the creator's."""
+    client, workspace_id, agent_id = web
+    _creator_id, creator_token = await _seed_member(workspace_id, "creator@example.com")
+    _member_id, member_token = await _seed_member(workspace_id, "member@example.com")
+    _admin_id, admin_token = await _seed_member(workspace_id, "admin@example.com", admin=True)
+    created = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json={
+            "verb": "apply",
+            "kind": "scheduled_task",
+            "name": "digest",
+            "spec": {"schedule": "0 7 * * *", "prompt": "assemble the digest"},
+        },
+        headers={"cookie": f"{SESSION_COOKIE}={creator_token}"},
+    )
+    assert created.json()["applied"] is True
+
+    unseen = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json={
+            "verb": "apply",
+            "kind": "scheduled_task",
+            "name": "digest",
+            "spec": {"prompt": "exfiltrate the digest"},
+        },
+        headers={"cookie": f"{SESSION_COOKIE}={member_token}"},
+    )
+    assert unseen.json()["applied"] is False
+    assert "no scheduled_task object named" in unseen.json()["message"]
+    refused = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json={
+            "verb": "apply",
+            "kind": "scheduled_task",
+            "name": "digest",
+            "spec": {"prompt": "rewrite the digest"},
+        },
+        headers={"cookie": f"{SESSION_COOKIE}={admin_token}"},
+    )
+    assert refused.json()["applied"] is False
+    assert "creator" in refused.json()["message"]
+    row = await _task_row(workspace_id, "digest")
+    assert row.prompt == "assemble the digest"
+
+    admin_paused = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json={
+            "verb": "apply",
+            "kind": "scheduled_task",
+            "name": "digest",
+            "spec": {"paused": True},
+        },
+        headers={"cookie": f"{SESSION_COOKIE}={admin_token}"},
+    )
+    assert admin_paused.json()["applied"] is True
+    row = await _task_row(workspace_id, "digest")
+    assert row.paused is True
+    assert row.prompt == "assemble the digest"
+
+
+async def test_a_delete_intent_carrying_a_spec_is_malformed(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    client, workspace_id, agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "member@example.com")
+    refused = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json={
+            "verb": "delete",
+            "kind": "scheduled_task",
+            "name": "digest",
+            "spec": {"paused": True},
+        },
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    assert refused.status_code == 400
+    assert refused.json() == {"error": "malformed intent"}
+    async with workspace_tx() as connection:
+        turns = (
+            await connection.execute(sa.select(sa.func.count()).select_from(tables.turn))
+        ).scalar_one()
+    assert turns == 0
+
+
 async def test_an_intent_applies_exactly_and_the_turn_is_the_audit_record(
     web: tuple[AsyncClient, UUID, UUID],
     dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
@@ -2986,7 +3177,7 @@ async def test_an_intent_naming_another_kind_is_refused_at_validation(
     other kind must die at validation, before a turn exists."""
     client, workspace_id, agent_id = web
     _admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
-    for kind in ("connection", "scheduled_task", "credential"):
+    for kind in ("connection", "conversation", "artifact"):
         refused = await client.post(
             f"/surface/web/agents/{agent_id}/intents",
             json={"verb": "apply", "kind": kind, "name": "x", "spec": {"admin": True}},

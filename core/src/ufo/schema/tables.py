@@ -525,6 +525,7 @@ scheduled_task = sa.Table(
     sa.Column("last_turn_id", sa.Uuid, nullable=True),
     sa.Column("claimed_by", sa.Text, nullable=True),
     sa.Column("claim_expires_at", sa.DateTime(timezone=True), nullable=True),
+    sa.Column("paused", sa.Boolean, nullable=False, server_default=sa.false()),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     sa.UniqueConstraint("workspace_id", "agent_id", "name", name="scheduled_task_name"),

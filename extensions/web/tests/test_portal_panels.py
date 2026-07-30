@@ -20,6 +20,7 @@ from httpx import ASGITransport, AsyncClient
 from ufo_ext_embed_openai import EMBED_DIM
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.store import MemoryIndexer, MemoryStore, MemoryWrite, mem_page, memory_item
+from ufo_ext_scheduled_tasks.tools import SCHEDULED_TASK_OBJECT
 from ufo_ext_skill_create.manifest import manifest as skill_create_manifest
 from ufo_ext_skill_create.store import UserSkillStore
 from ufo_ext_web import surface as web_surface
@@ -45,6 +46,7 @@ from ufo.scheduling import ScheduleStore
 from ufo.schema import tables
 from ufo.schema.records import TerminalFrame, Usage
 from ufo.sdk.index import OWNER_KIND_PAGE, Chunk
+from ufo.sdk.manifest import Manifest
 from ufo.serve import _mount_shared_surfaces
 from ufo.skills.runtime import RuntimeSkill
 from ufo.subjects import member_subject
@@ -163,10 +165,22 @@ CHILD_SKILL = RuntimeSkill(
 DEPLOY_SKILLS = skill_registry((web_manifest(), memory_manifest_module.manifest()), (CHILD_SKILL,))
 
 
+SCHEDULED_TASK_KIND_ONLY = Manifest(
+    name="scheduled_tasks",
+    version="0.1.0",
+    objects=(SCHEDULED_TASK_OBJECT,),
+)
+
+
 def _mount_portal(tmp_path: Path, *, with_memory: bool) -> FastAPI:
     index = DefaultIndex(transaction=workspace_tx)
     embed = StubEmbed()
-    manifests = (web_manifest(), skill_create_manifest(), memory_manifest_module.manifest())
+    manifests = (
+        web_manifest(),
+        skill_create_manifest(),
+        SCHEDULED_TASK_KIND_ONLY,
+        memory_manifest_module.manifest(),
+    )
     credentials = CredentialStore(fernet=Fernet(Fernet.generate_key()))
     app = FastAPI()
     _mount_shared_surfaces(
@@ -232,8 +246,16 @@ async def test_tasks_shape_by_viewer_and_wall_by_agent(portal) -> None:
             )
         await _stamp_last_run(workspace_id, "daily-brief", LAST_RUN)
     creator_view = await client.get(f"/surface/web/agents/{agent_a}/tasks", headers=creator_headers)
+    assert set(creator_view.json()["spec_schema"]["properties"]) == {
+        "schedule",
+        "prompt",
+        "description",
+        "expires_at",
+        "paused",
+    }
     (task,) = creator_view.json()["tasks"]
     assert task["name"] == "daily-brief"
+    assert task["paused"] is False
     assert task["prompt"] == "write the daily brief"
     assert task["created_by"] == CREATOR_EMAIL
     assert task["next_run_at"] == NEXT_RUN.isoformat()
@@ -250,12 +272,12 @@ async def test_tasks_shape_by_viewer_and_wall_by_agent(portal) -> None:
     assert creatorless["prompt"] == "sweep the queue"
     assert creatorless["created_by"] is None
     other_view = await client.get(f"/surface/web/agents/{agent_a}/tasks", headers=other_headers)
-    assert other_view.json() == {"tasks": []}
+    assert other_view.json()["tasks"] == []
     crossed = await client.get(f"/surface/web/agents/{agent_b}/tasks", headers=creator_headers)
     assert crossed.status_code == 404
     assert (await client.get(f"/surface/web/agents/{agent_b}/tasks")).status_code == 401
     empty_wall = await client.get(f"/surface/web/agents/{agent_b}/tasks", headers=admin_headers)
-    assert empty_wall.json() == {"tasks": []}
+    assert empty_wall.json()["tasks"] == []
 
 
 async def test_skills_list_the_agents_own_and_the_deploys(portal) -> None:

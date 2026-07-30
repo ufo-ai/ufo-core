@@ -47,6 +47,7 @@ class ScheduledTask:
     origin_seq: int | None
     resume_turn_id: UUID | None
     claim_id: str | None
+    paused: bool
     created_at: datetime
     updated_at: datetime
     created_by_member_id: UUID | None = None
@@ -86,6 +87,7 @@ _COLUMNS = (
     tables.scheduled_task.c.origin_seq,
     tables.scheduled_task.c.resume_turn_id,
     tables.scheduled_task.c.claimed_by,
+    tables.scheduled_task.c.paused,
     tables.scheduled_task.c.created_at,
     tables.scheduled_task.c.updated_at,
 )
@@ -139,6 +141,7 @@ def _task(row: sa.RowMapping) -> ScheduledTask:
         origin_seq=row["origin_seq"],
         resume_turn_id=row["resume_turn_id"],
         claim_id=row["claimed_by"],
+        paused=row["paused"],
         created_at=_utc(row["created_at"]),
         updated_at=_utc(row["updated_at"]),
     )
@@ -163,7 +166,10 @@ def due_task_workspaces() -> WorkspaceCandidates:
                         claim_available,
                         sa.or_(
                             expired,
-                            tables.scheduled_task.c.next_run_at <= now,
+                            sa.and_(
+                                sa.not_(tables.scheduled_task.c.paused),
+                                tables.scheduled_task.c.next_run_at <= now,
+                            ),
                         ),
                     )
                     .distinct()
@@ -205,6 +211,7 @@ class ScheduleStore:
         next_run_at: datetime,
         created_by_member_id: UUID | None = None,
         expires_at: datetime | None = None,
+        paused: bool = False,
     ) -> ScheduledTask:
         """Create one recurring task with immutable executor, reporter, and creator."""
         if schedule == ONE_TIME_SCHEDULE:
@@ -251,6 +258,7 @@ class ScheduleStore:
                             resume_turn_id=None,
                             claimed_by=None,
                             claim_expires_at=None,
+                            paused=paused,
                             created_at=sa.func.now(),
                             updated_at=sa.func.now(),
                         )
@@ -279,8 +287,11 @@ class ScheduleStore:
         description: str,
         next_run_at: datetime,
         expires_at: datetime | None = None,
+        *,
+        paused: bool,
     ) -> ScheduledTask:
-        """Update one exact recurring task without changing its immutable identity."""
+        """Update one exact recurring task without changing its immutable identity — `paused` has
+        no preserving default, so every caller states whether the task keeps firing."""
         if schedule == ONE_TIME_SCHEDULE:
             raise ValueError("one-time workflow pauses cannot be updated as recurring tasks")
         if expected.name.startswith(PAUSE_NAME_PREFIX):
@@ -318,6 +329,7 @@ class ScheduleStore:
                             resume_turn_id=None,
                             claimed_by=None,
                             claim_expires_at=None,
+                            paused=paused,
                             updated_at=sa.func.now(),
                         )
                         .returning(*_COLUMNS)
@@ -489,6 +501,7 @@ class ScheduleStore:
             origin_seq=origin_seq,
             resume_turn_id=resume_turn_id,
             claim_id=None,
+            paused=False,
             created_at=_utc(row.created_at),
             updated_at=_utc(row.updated_at),
         )
@@ -554,6 +567,7 @@ class ScheduleStore:
             .where(
                 tables.scheduled_task.c.workspace_id == self.workspace_id,
                 tables.scheduled_task.c.next_run_at <= now,
+                sa.not_(tables.scheduled_task.c.paused),
                 sa.not_(expired),
                 claim_available,
             )
@@ -578,6 +592,7 @@ class ScheduleStore:
                             tables.scheduled_task.c.id.in_(sa.select(due.c.id)),
                             tables.scheduled_task.c.workspace_id == self.workspace_id,
                             tables.scheduled_task.c.next_run_at <= now,
+                            sa.not_(tables.scheduled_task.c.paused),
                             sa.not_(expired),
                             claim_available,
                         )

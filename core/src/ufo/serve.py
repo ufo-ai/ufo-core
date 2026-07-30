@@ -34,8 +34,10 @@ from ufo.credentials import (
 from ufo.db import current_workspace, init_db, init_owner_db
 from ufo.ext.context import CredentialAccess, context_for
 from ufo.ext.loader import (
+    CORE_OBJECT_KINDS,
     NotRegisteredError,
     connector_clis,
+    core_object_kinds,
     durable_surfaces,
     embed_backend,
     index_backend,
@@ -770,6 +772,14 @@ def _mount_shared_surfaces(
         for manifest in sorted(manifests, key=lambda manifest: manifest.name)
     )
     slots = declared_slots(manifests)
+    kind_schemas = {
+        bound.kind.name: bound.kind.spec_model.model_json_schema()
+        for bound in (*CORE_OBJECT_KINDS, *core_object_kinds(manifests, credentials))
+    } | {
+        kind.name: kind.spec_model.model_json_schema()
+        for manifest in manifests
+        for kind in manifest.objects
+    }
 
     def context_for(workspace_id: UUID, surface: str) -> SurfaceContext:
         return SurfaceContext(
@@ -789,6 +799,7 @@ def _mount_shared_surfaces(
             _skills=skills,
             _user_skills=user_skills,
             _declared_slots=slots,
+            _object_schemas=kind_schemas,
             _memory=memory,
             _objects=objects or {},
         )

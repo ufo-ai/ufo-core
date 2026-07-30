@@ -499,7 +499,8 @@ def _window_param(request: Request) -> int | Response:
 async def tasks(ctx: SurfaceContext, request: Request) -> Response:
     """The selected agent's recurring tasks, shaped for the viewer in the core read: creators see
     their tasks whole, an admin sees every task's management metadata with private content elided,
-    anyone else sees none of it."""
+    anyone else sees none of it. `spec_schema` is the scheduled_task kind's own spec schema — the
+    panel's create and edit forms render their fields from it, never a parallel description."""
     gated = await _panel_gate(ctx, request)
     if isinstance(gated, Response):
         return gated
@@ -514,12 +515,14 @@ async def tasks(ctx: SurfaceContext, request: Request) -> Response:
                     "prompt": task.prompt,
                     "description": task.description,
                     "created_by": task.created_by_email,
+                    "paused": task.paused,
                     "next_run_at": _iso(task.next_run_at),
                     "last_run_at": _iso(task.last_run_at),
                     "expires_at": _iso(task.expires_at),
                 }
                 for task in listed
-            ]
+            ],
+            "spec_schema": ctx.object_spec_schema("scheduled_task"),
         }
     )
 

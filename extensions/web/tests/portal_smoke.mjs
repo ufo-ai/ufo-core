@@ -99,6 +99,18 @@ class StubElement {
   setAttribute(name, value) {
     this.attributes[name] = String(value);
   }
+  createTHead() {
+    return this.appendChild(new StubElement("thead"));
+  }
+  createTBody() {
+    return this.appendChild(new StubElement("tbody"));
+  }
+  insertRow() {
+    return this.appendChild(new StubElement("tr"));
+  }
+  insertCell() {
+    return this.appendChild(new StubElement("td"));
+  }
   focus() {
     focused = this;
   }
@@ -255,6 +267,41 @@ const wire = {
   },
   answered: [],
   credentialPosts: [],
+  tasks: {
+    tasks: [
+      {
+        name: "daily-brief",
+        schedule: "0 9 * * *",
+        prompt: "summarize the inbox",
+        description: "Morning summary",
+        created_by: "admin@example.com",
+        paused: false,
+        next_run_at: "2026-07-31T09:00:00+00:00",
+        last_run_at: null,
+        expires_at: null,
+      },
+      {
+        name: "their-task",
+        schedule: "0 6 * * *",
+        prompt: null,
+        description: null,
+        created_by: "member@example.com",
+        paused: true,
+        next_run_at: "2026-07-31T06:00:00+00:00",
+        last_run_at: null,
+        expires_at: null,
+      },
+    ],
+    spec_schema: {
+      properties: {
+        schedule: { anyOf: [{ type: "string" }, { type: "null" }] },
+        prompt: { anyOf: [{ type: "string" }, { type: "null" }] },
+        description: { anyOf: [{ type: "string" }, { type: "null" }] },
+        expires_at: { anyOf: [{ type: "string" }, { type: "null" }] },
+        paused: { anyOf: [{ type: "boolean" }, { type: "null" }] },
+      },
+    },
+  },
   artifactChunks: ["the handoff notes"],
   artifactCancels: 0,
   artifactReads: 0,
@@ -711,6 +758,9 @@ const sandbox = {
     if (url.includes("/agents/") && url.endsWith("/usage")) {
       return { ok: false, status: 404, json: async () => ({}) };
     }
+    if (url.endsWith("/tasks")) {
+      return { ok: true, status: 200, json: async () => structuredClone(wire.tasks) };
+    }
     if (url.endsWith("/connections")) {
       return { ok: true, status: 200, json: async () => structuredClone(wire.connections) };
     }
@@ -1054,6 +1104,83 @@ try {
       throw new Error(`failed re-read panel reads "${panelText}", expected "${expected}"`);
     }
     await tabNamed("overview").fire("click");
+  }
+  await tabNamed("tasks").fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const taskRows = byId.panel.querySelectorAll("tr").slice(1);
+  if (taskRows.length !== 2) throw new Error(`tasks table built ${taskRows.length} rows`);
+  const stateOf = (row) => row.childNodes[4].textContent;
+  if (stateOf(taskRows[0]) !== "scheduled" || stateOf(taskRows[1]) !== "paused") {
+    throw new Error("the state column does not read scheduled/paused");
+  }
+  const rowButtons = (row) => row.childNodes[8].querySelectorAll("button");
+  if (texts(rowButtons(taskRows[0])).join("|") !== "Edit|Pause|Delete"
+      || texts(rowButtons(taskRows[1])).join("|") !== "Edit|Resume|Delete") {
+    throw new Error("task rows lost their action buttons");
+  }
+  const taskCreateForm = byId.panel.querySelectorAll("form").at(-1);
+  const createKeys = taskCreateForm.querySelectorAll("input[data-key]")
+    .map((widget) => widget.dataset.key);
+  if (createKeys.join("|") !== "schedule|prompt|description|expires_at") {
+    throw new Error(`the create form derives ${JSON.stringify(createKeys)} from the schema`);
+  }
+  taskCreateForm.childNodes[0].value = "standup-notes";
+  for (const widget of taskCreateForm.querySelectorAll("input[data-key]")) {
+    if (widget.dataset.key === "schedule") widget.value = "30 8 * * 1";
+    if (widget.dataset.key === "prompt") widget.value = "collect standup notes";
+  }
+  await taskCreateForm.fire("submit");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const created = wire.posted.at(-1);
+  if (JSON.stringify(created) !== JSON.stringify({
+    verb: "apply",
+    kind: "scheduled_task",
+    name: "standup-notes",
+    spec: { schedule: "30 8 * * 1", prompt: "collect standup notes" },
+  })) {
+    throw new Error(`create posted ${JSON.stringify(created)}`);
+  }
+  const savedNotice = byId.panel
+    .querySelectorAll("*")
+    .find((node) => node.className.includes("result") && node.textContent === "Saved.");
+  if (!savedNotice) throw new Error("the task outcome did not render on the refreshed panel");
+  const refreshedRows = byId.panel.querySelectorAll("tr").slice(1);
+  await rowButtons(refreshedRows[1])[1].fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const resumed = wire.posted.at(-1);
+  if (JSON.stringify(resumed) !== JSON.stringify({
+    verb: "apply",
+    kind: "scheduled_task",
+    name: "their-task",
+    spec: { paused: false },
+  })) {
+    throw new Error(`resume posted ${JSON.stringify(resumed)}`);
+  }
+  const pausedRows = byId.panel.querySelectorAll("tr").slice(1);
+  await rowButtons(pausedRows[0])[1].fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const pausedEnvelope = wire.posted.at(-1);
+  if (JSON.stringify(pausedEnvelope.spec) !== JSON.stringify({ paused: true })) {
+    throw new Error(`pause posted ${JSON.stringify(pausedEnvelope)}`);
+  }
+  const deleteRows = byId.panel.querySelectorAll("tr").slice(1);
+  await rowButtons(deleteRows[0])[2].fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const removed = wire.posted.at(-1);
+  if (JSON.stringify(removed) !== JSON.stringify({
+    verb: "delete",
+    kind: "scheduled_task",
+    name: "daily-brief",
+  })) {
+    throw new Error(`delete posted ${JSON.stringify(removed)}`);
+  }
+  const editRows = byId.panel.querySelectorAll("tr").slice(1);
+  await rowButtons(editRows[1])[0].fire("click");
+  const editForm = byId.panel.querySelectorAll("form")[0];
+  const editKeys = editForm.querySelectorAll("input[data-key]")
+    .map((widget) => widget.dataset.key);
+  if (editKeys.join("|") !== "schedule|expires_at") {
+    throw new Error(`a content-hidden task's edit form renders ${JSON.stringify(editKeys)}`);
   }
   await tabNamed("skills").fire("click");
   const skillForm = byId.panel.querySelectorAll("form").at(-1);

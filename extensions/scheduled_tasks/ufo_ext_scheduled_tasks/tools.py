@@ -69,6 +69,13 @@ class ScheduledTaskSpec(BaseModel):
         default=None,
         description="UTC expiry. Omit on update to preserve it; null clears it.",
     )
+    paused: bool | None = Field(
+        default=None,
+        description=(
+            "True stops the schedule from firing without losing the task; false resumes it from "
+            "the next cron fire. Omitted on update preserves it; a new task defaults to running."
+        ),
+    )
 
     @field_validator("expires_at")
     @classmethod
@@ -124,6 +131,8 @@ class ScheduledTaskObjects(MemberOwnedObjects[ScheduledTaskSpec, GeneratedObject
     delete_gate: ClassVar[str] = DELETE_GATE
 
     def _admin_can_apply(self, _old: ScheduledTaskSpec, spec: ScheduledTaskSpec) -> bool:
+        """Cadence management — schedule, expiry, pause — is an admin's; content is the
+        creator's."""
         return not {"prompt", "description"}.intersection(spec.model_fields_set)
 
     async def _owned_rows(self, ctx: ToolContext) -> tuple[OwnedRow[GeneratedObjectOwner], ...]:
@@ -156,6 +165,7 @@ class ScheduledTaskObjects(MemberOwnedObjects[ScheduledTaskSpec, GeneratedObject
                 prompt=task.prompt,
                 description=task.description,
                 expires_at=task.expires_at,
+                paused=task.paused,
             ),
             created_at=task.created_at,
             updated_at=task.updated_at,
@@ -190,6 +200,7 @@ class ScheduledTaskObjects(MemberOwnedObjects[ScheduledTaskSpec, GeneratedObject
                     else inspection.last_response[:RESPONSE_EXCERPT_MAX]
                 )
         return {
+            "paused": task.paused,
             "next_run_at": inspection.next_run_at.isoformat(),
             "last_run_at": (
                 None if inspection.last_run_at is None else inspection.last_run_at.isoformat()
@@ -230,6 +241,7 @@ class ScheduledTaskObjects(MemberOwnedObjects[ScheduledTaskSpec, GeneratedObject
                 next_run_at=next_fire(validated_schedule, datetime.now(UTC)),
                 created_by_member_id=acting_member,
                 expires_at=spec.expires_at,
+                paused=bool(spec.paused),
             )
             return
         if existing is None or existing.id != owner.generation or old is None:
@@ -249,6 +261,7 @@ class ScheduledTaskObjects(MemberOwnedObjects[ScheduledTaskSpec, GeneratedObject
             expires_at=(
                 spec.expires_at if "expires_at" in spec.model_fields_set else existing.expires_at
             ),
+            paused=existing.paused if spec.paused is None else spec.paused,
         )
 
     async def _delete_owned(self, ctx: ToolContext, name: str, owner: GeneratedObjectOwner) -> None:
@@ -274,8 +287,9 @@ SCHEDULED_TASK_OBJECT = ObjectKind(
         "A durable recurring task: a 5-field UTC cron schedule that re-invokes the agent with "
         "the spec's prompt, reporting into the conversation that created it. Private to its "
         "creator — the creator may read, update, or delete it; an admin may list its management "
-        "metadata, change cadence or expiry, or delete it without reading its content; "
-        "a fire acts on the creator's behalf. One-shot scheduling is not supported."
+        "metadata, change cadence, expiry, or pause, or delete it without reading its content; "
+        "a fire acts on the creator's behalf. Applying `paused: true` stops fires without losing "
+        "the task; false resumes from the next cron fire. One-shot scheduling is not supported."
     ),
     guidance=(
         "Apply a manifest to schedule a recurring task for yourself: give a 5-field cron "

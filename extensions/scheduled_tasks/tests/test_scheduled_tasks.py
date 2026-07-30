@@ -1277,6 +1277,81 @@ def test_pause_and_wait_bounds_the_timer(wait_minutes: int) -> None:
         )
 
 
+async def test_paused_task_neither_fires_nor_reopens_its_workspace(db: None) -> None:
+    """Applying `paused: true` stops the schedule without losing the task: the row never claims,
+    its workspace never re-enters the runner's candidates on the due arm, and spec and status
+    both say so; `paused: false` resumes from the next cron fire. Omitting `paused` on an
+    ordinary update preserves the pause."""
+    workspace_id, agent_id, conversation_id = await _seed()
+    creator = await _member(workspace_id)
+    ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=creator)
+    with ws(workspace_id), agent(agent_id):
+        await _dispatch(
+            _object_tool("object_apply"),
+            ctx,
+            manifest=_task_manifest("digest", DAILY_9AM, "assemble the digest"),
+        )
+        await _dispatch(
+            _object_tool("object_apply"),
+            ctx,
+            manifest=yaml.safe_dump(
+                {"kind": SCHEDULED_TASK_KIND, "name": "digest", "spec": {"paused": True}}
+            ),
+        )
+        [task] = await ScheduleStore().list()
+        assert task.paused is True
+        assert task.prompt == "assemble the digest"
+        fetched = yaml.safe_load(
+            await _dispatch(
+                _object_tool("object_get"), ctx, kind=SCHEDULED_TASK_KIND, name="digest"
+            )
+        )
+        assert fetched["spec"]["paused"] is True
+        assert fetched["status"]["paused"] is True
+        due_at = task.next_run_at + timedelta(seconds=1)
+        assert await ScheduleStore().claim_due(due_at, 300) == ()
+        await _dispatch(
+            _object_tool("object_apply"),
+            ctx,
+            manifest=yaml.safe_dump(
+                {
+                    "kind": SCHEDULED_TASK_KIND,
+                    "name": "digest",
+                    "spec": {"description": "kept while paused"},
+                }
+            ),
+        )
+        [still_paused] = await ScheduleStore().list()
+        assert still_paused.paused is True
+        overdue = datetime.now(UTC) - timedelta(minutes=5)
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.scheduled_task)
+                .values(next_run_at=overdue)
+                .where(tables.scheduled_task.c.id == still_paused.id)
+            )
+    assert workspace_id not in await due_task_workspaces()()
+    with ws(workspace_id), agent(agent_id):
+        await _dispatch(
+            _object_tool("object_apply"),
+            ctx,
+            manifest=yaml.safe_dump(
+                {"kind": SCHEDULED_TASK_KIND, "name": "digest", "spec": {"paused": False}}
+            ),
+        )
+        [resumed] = await ScheduleStore().list()
+        assert resumed.paused is False
+        [claimed] = await ScheduleStore().claim_due(resumed.next_run_at + timedelta(seconds=1), 300)
+        assert claimed.name == "digest"
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.scheduled_task)
+                .values(next_run_at=overdue, claimed_by=None, claim_expires_at=None)
+                .where(tables.scheduled_task.c.id == resumed.id)
+            )
+    assert workspace_id in await due_task_workspaces()()
+
+
 async def test_reapplied_name_updates_in_place(db: None) -> None:
     workspace_id, agent_id, conversation_id = await _seed()
     creator = await _member(workspace_id)
@@ -1911,6 +1986,7 @@ async def test_bounded_daily_eval_rejects_open_ended_and_accepts_ten_fires(db: N
             "McCarren Park events",
             first_fire,
             expires_at=expires_at,
+            paused=False,
         )
         assert not (await _graded_bounded_daily(CapabilityOutput("", ()))).passed
         await store.update(
@@ -1920,6 +1996,7 @@ async def test_bounded_daily_eval_rejects_open_ended_and_accepts_ten_fires(db: N
             "McCarren Park events",
             first_fire,
             expires_at=expires_at,
+            paused=False,
         )
         assert (await _graded_bounded_daily(CapabilityOutput("", ()))).passed
 
@@ -1945,6 +2022,7 @@ async def test_operational_eval_requires_an_open_ended_task(db: None) -> None:
             "Refresh integration credentials so synchronization keeps access.",
             "Credential refresh",
             first_fire,
+            paused=False,
         )
         assert (await _graded_operational_task_stays_open(CapabilityOutput("", ()))).passed
 
@@ -2481,6 +2559,7 @@ async def test_update_preserves_the_original_creator(db: None) -> None:
             "v2",
             "v2",
             when,
+            paused=False,
         )
         tasks = await store.list()
     assert first.id == second.id
@@ -2509,6 +2588,8 @@ async def test_update_cannot_overwrite_a_task_recreated_after_authorization(
         description: str,
         next_run_at: datetime,
         expires_at: datetime | None = None,
+        *,
+        paused: bool,
     ) -> ScheduledTask:
         entered.set()
         await release.wait()
@@ -2520,6 +2601,7 @@ async def test_update_cannot_overwrite_a_task_recreated_after_authorization(
             description,
             next_run_at,
             expires_at,
+            paused=paused,
         )
 
     monkeypatch.setattr(ScheduleStore, "update", blocked_update)

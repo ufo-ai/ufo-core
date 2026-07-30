@@ -31,10 +31,10 @@ import hashlib
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
@@ -291,6 +291,7 @@ class PortalTask:
     prompt: str | None
     description: str | None
     created_by_email: str | None
+    paused: bool
     next_run_at: datetime
     last_run_at: datetime | None
     expires_at: datetime | None
@@ -571,6 +572,7 @@ class SurfaceContext:
     _skills: SkillRegistry
     _user_skills: Callable[[], Awaitable[tuple[RuntimeSkill, ...]]]
     _declared_slots: tuple[DeclaredSlot, ...]
+    _object_schemas: Mapping[str, dict[str, Any]] = field(default_factory=dict)
     _deploy_extensions: tuple[DeployExtensionView, ...] = ()
     _memory: "MemorySearch | None" = None
     _objects: "Mapping[str, BoundKind]" = MappingProxyType({})
@@ -1220,12 +1222,19 @@ class SurfaceContext:
                         if task.created_by_member_id is None
                         else emails.get(task.created_by_member_id)
                     ),
+                    paused=task.paused,
                     next_run_at=task.next_run_at,
                     last_run_at=task.last_run_at,
                     expires_at=task.expires_at,
                 )
             )
         return tuple(shaped)
+
+    def object_spec_schema(self, kind: str) -> dict[str, Any] | None:
+        """The named object kind's spec schema, or None when this deploy registers no such kind —
+        a portal form renders its fields from the same schema `object_explain` reports, never a
+        parallel description."""
+        return self._object_schemas.get(kind)
 
     async def agent_skills(self, agent_id: UUID) -> tuple[PortalSkill, ...]:
         """The selected agent's loadable skills — exactly the composition a turn loads (the deploy

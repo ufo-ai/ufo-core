@@ -39,11 +39,19 @@ class ApplyIntent(BaseModel):
     `connect_account` leaves — the URL rides the turn's terminal and is minted per speaking member
     at stream time, never in a transcript or an intent response — so it pairs with the `connection`
     kind exactly, both ways. The `credential` kind pairs the other way: a slot's value is a secret
-    a private prompt collects, so only `delete` (clear) names it here."""
+    a private prompt collects, so only `delete` (clear) names it here. A delete names its object
+    and carries no spec."""
 
     verb: Literal["apply", "delete", "connect"]
     kind: Literal[
-        "agent", "member", "skill", "connector_grant", "connection", "source", "credential"
+        "agent",
+        "member",
+        "scheduled_task",
+        "skill",
+        "connector_grant",
+        "connection",
+        "source",
+        "credential",
     ]
     name: str
     spec: dict[str, JsonValue] | None = None
@@ -56,6 +64,8 @@ class ApplyIntent(BaseModel):
             raise ValueError(
                 "a credential slot's value is set through its private prompt, never a spec"
             )
+        if self.verb == "delete" and self.spec is not None:
+            raise ValueError("a delete intent carries no spec")
         return self
 
 
