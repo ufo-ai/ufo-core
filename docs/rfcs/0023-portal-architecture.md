@@ -7,7 +7,7 @@ date: 2026-07-30
 
 # Portal architecture — a view kernel, declared views, and one design system
 
-> The portal's every view is written by hand into one 2,382-line page against one 2,291-line test
+> The portal's every view is written by hand into one 2,722-line page against one 2,418-line test
 > harness, so ten parallel units spent more effort merging than building and each new view
 > re-implements the same fetch-fence-render-empty-error-notice shape. Split it: a small kernel
 > owning navigation, the request fence, and a fixed component set styled from tokens; views that
@@ -23,11 +23,11 @@ What that cost, counted on `main`:
 
 | | |
 |---|---|
-| `static/portal.html` | 2,382 lines — 181 CSS, one `<script>`, **74 functions** |
-| `tests/portal_smoke.mjs` | 2,291 lines — one stub DOM, one sequential walk |
-| `ufo_ext_web/surface.py` | 1,240 lines, 25 routes |
-| churn in two days | 20 commits to `portal.html`, **+2,115 / −321** |
-| the fence, hand-threaded | `load !== panelLoad` written out **17 times** |
+| `static/portal.html` | 2,722 lines — 181 CSS, one `<script>`, **81 functions** |
+| `tests/portal_smoke.mjs` | 2,418 lines — one stub DOM, one sequential walk |
+| `ufo_ext_web/surface.py` | 1,243 lines, 25 routes |
+| churn in two days | 21 commits to `portal.html`, **+2,488 / −354** |
+| the fence, hand-threaded | `load !== panelLoad` written out **19 times** |
 
 Every unit edited the same three files. The merge cost was not incidental — it was the dominant
 cost, and it produced defects of its own:
@@ -52,14 +52,22 @@ providing one file to write it in.
 
 Constraints that stay, because they are load-bearing:
 
-- **No build step, no dependency, no CDN.** `test_portal_page_is_self_contained` forbids any
-  literal external URL. One process serves the portal; a bundler would add a build to a repo that
-  has none.
+- **No build step, no dependency, no CDN in the portal's path.** `test_portal_page_is_self_contained`
+  forbids any literal external URL, and one process serves the page as static files. The repo does
+  run npm builds elsewhere (`ci.yaml:30`, `:35-36` — the edge module and the debugger's React app),
+  which is exactly the precedent argued against below: the debugger's build is what makes it awkward
+  to change, and the portal is not to acquire one.
 - **Mutations are audited turns** through the prepared-intent lane; reads are projections. RFC 0022
   proposes the declaration that removes the surface's duplicate copy of the callable set — this RFC
   assumes it and completes the other half (how the control is *rendered*).
-- **No page-source assertions in tests.** Behaviour is proven by the stub-DOM walk with mutation
-  checks, not by grepping markup.
+- **Behaviour is proven by the stub-DOM walk with mutation checks**, not by asserting rendered
+  markup in pytest. The harness does read the page source in three places, and each is a coupling
+  the split must answer rather than inherit: the walk extracts the one inline script
+  (`portal_smoke.mjs:919`), the CSS-scoping legs grep rule text (`:1648`, `:1650`, `:1678`), and
+  `test_portal_page_is_self_contained` (`test_ext_web.py:1606-1611`) asserts against the page whole.
+  Modules break the first, tokens and components make the second unnecessary, and unit 1 replaces
+  the third with an origin gate — so this is a constraint the proposal *changes*, budgeted in unit 1,
+  not one it inherits untouched.
 
 ## Proposal
 
@@ -103,9 +111,10 @@ Small and owned centrally, because these are exactly the things that must not be
   member was.
 - **The request fence** — one `load()` helper that owns the monotonic token, the abort of a
   superseded read, the error arm, and the empty arm. A view never writes `load !== panelLoad`
-  again; the 17 hand-written copies become one.
+  again; the 19 hand-written copies become one.
 - **The primitives** — `table`, `row`, `cell`, `emptyState`, `errorLine`, `notice`, `pageControls`
-  (RFC-0022-shaped `ListingCursor`), `drawer` (the artifact viewer's pinned panel, reusable),
+  (`ListingCursor`, already on `main` at `core/src/ufo/listings.py` and re-exported through
+  `ufo.sdk.listings`), `drawer` (the artifact viewer's pinned panel, reusable),
   `formFromSchema` (generalizing `specField`, `portal.html:1440-1467` — which today builds a
   `<select>` only when its caller passes an options list, never reads `prop.enum` or
   `prop.description`, and labels a field with its raw key, so the kernel builds those), `confirm`.
@@ -139,10 +148,11 @@ register(listing({
 `actions` names RFC 0022 `MemberAction` declarations; the kernel renders each control, derives its
 form from the action's `submit_model`, submits the intent, and renders the callee's outcome
 verbatim.
-Sources, credentials, memory, artifacts, sites, tasks, skills, connections, and usage all collapse
-to declarations of this shape. Chat, the conversations debugger, the artifact viewer, and the
-administration view stay hand-written modules — their value *is* layout — and register identically,
-so the kernel does not care which kind a view is.
+Sources, credentials, artifacts, sites, tasks, skills, connections, and usage all collapse to
+declarations of this shape. Memory does not: RFC 0022 places its paging on the hand-written side and
+this RFC follows. So the hand-written set is chat, the conversations debugger, the artifact viewer,
+memory, and the administration view — their value *is* layout — and each registers identically, so
+the kernel does not care which kind a view is.
 
 The payoff is in the predictable changes: **a new column** is one line; **a new action** is one
 declaration on the kind (RFC 0022) plus one name here; **a new listing view** is one declaration
@@ -275,7 +285,7 @@ served.
   precedent *for* an operator tool, not for the member portal — and its build is exactly what makes
   it awkward to change.
 - **Keep one file, add discipline.** Rejected on evidence: discipline is what we applied this wave,
-  with review rounds catching selector and slot collisions after the fact, and the file grew 2,115
+  with review rounds catching selector and slot collisions after the fact, and the file grew 2,488
   lines in two days.
 - **Server-rendered HTML per view.** Rejected: the portal's live behaviour (SSE turn streaming,
   optimistic composer state, the drawer) is client state; server rendering would split it in two.
@@ -314,6 +324,14 @@ served.
 4. **The remaining declared views**, one per PR, mechanical once unit 3 lands.
 5. **`portal_views` in the manifest**, boot validation, and sites moving from a special case to a
    declaration — the proof that an extension can contribute a view without touching the portal.
+   **The sample extension must declare one too**: `gates.py:221-223` requires the sample's non-empty
+   Manifest points to equal the Manifest's point fields, so adding `portal_views` fails CI as
+   `conformance: sample does not register Manifest point 'portal_views'` until
+   `extensions/sample/ufo_ext_sample.py` exercises it. That is not bookkeeping — the sample's view
+   renders in every deploy that loads it, which forces this unit to answer whether a declared view
+   is placement-gated, audience-gated, or unconditionally rendered. `PortalView` as sketched in
+   section 5 has no field for any of that, so the gate is what makes the question unavoidable, and
+   the answer belongs in this unit rather than after it.
 
 Units 1–2 are worth doing whether or not 3–5 follow: they remove the merge bottleneck and the
 most-copied defect surface. Unit 5 depends on RFC 0022's `MemberAction` for its actions half; the
