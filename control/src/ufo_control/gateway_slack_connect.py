@@ -285,7 +285,7 @@ class SlackConnectClient:
             raise SlackTerminalError(f"recipient email exceeds {MAX_EMAIL_CHARS} characters")
         payload = await self._call(
             "conversations.inviteShared",
-            {"channel": channel_id, "emails": email, "external_limited": "true"},
+            {"channel": channel_id, "emails": email, "external_limited": "false"},
         )
         return self._text(payload, "invite_id")
 

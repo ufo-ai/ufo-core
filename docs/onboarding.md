@@ -171,7 +171,7 @@ completed invite-wall claim
   +-- auth.test     the token must name UFO_CONTROL_SLACK_CONNECT_TEAM_ID, else the row fails
   +-- create        the deterministic channel; name_taken resolves by exact-name lookup
   +-- reconcile     only when invite_attempted_at is set: outgoing invite, else channel sharing
-  +-- inviteShared  the claim's email, external_limited=true — a private, post-only channel
+  +-- inviteShared  the claim's email, external_limited=false — Post and invite, not post-only
   +-- delivered     invitation id persisted, then the row settles
 ```
 

@@ -201,7 +201,7 @@ async def test_a_completed_invite_wall_claim_earns_one_channel_and_one_invitatio
     assert slack.authorizations == {f"Bearer {BOT_TOKEN}"}
     assert slack.forms("conversations.create") == [{"name": channel_name}]
     assert slack.forms("conversations.inviteShared") == [
-        {"channel": CHANNEL_ID, "emails": "founder@acme.io", "external_limited": "true"}
+        {"channel": CHANNEL_ID, "emails": "founder@acme.io", "external_limited": "false"}
     ]
     assert slack.forms("conversations.listConnectInvites") == []
 
@@ -319,7 +319,7 @@ async def test_a_crash_after_channel_creation_recovers_the_exact_channel(
     assert row["state"] == "delivered"
     assert row["channel_id"] == CHANNEL_ID
     assert slack.forms("conversations.inviteShared") == [
-        {"channel": CHANNEL_ID, "emails": "founder@retryco.io", "external_limited": "true"}
+        {"channel": CHANNEL_ID, "emails": "founder@retryco.io", "external_limited": "false"}
     ]
 
 
