@@ -12,6 +12,7 @@ its own — the same lifecycle boundary the real process has between `serve` and
 
 import asyncio
 import os
+import shutil
 import socket
 import threading
 import time
@@ -28,6 +29,7 @@ from click.testing import CliRunner
 from cryptography.fernet import Fernet
 from dbos import DBOSClient
 from fastapi import FastAPI
+from sqlalchemy.engine import make_url
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_ufo.manifest import manifest as ufo_manifest
 from ufo_testsupport.surfaces import EMPTY_SKILL_REGISTRY, no_user_skills
@@ -36,7 +38,7 @@ from ufo_testsupport.tables import reset_workspace_data
 from ufo import cli
 from ufo.bearer import mint_token
 from ufo.blob import FilesystemBlobStore
-from ufo.config import Config, load_config
+from ufo.config import Config, DatabaseConfig, load_config
 from ufo.connectors import ConnectorRegistry
 from ufo.credentials import CredentialSlotUnset, CredentialStore
 from ufo.db import dispose_db, init_db, workspace_tx
@@ -460,8 +462,23 @@ def chat_server(
     session DBOS worker and a StandIn-model runtime, on an ephemeral port the written config names.
     The verb reaches it exactly as it reaches the hosted fleet — a signed member bearer to
     `/surface/ufo/{channel}` — so this exercises the real client wire, not a dedicated shortcut.
-    Yields the runner and the config path so verbs run against this same SQLite database."""
-    config = dbos_launched_cli
+    Yields the runner and the config path so verbs run against this same SQLite database. The
+    app database is this fixture's own copy of the session template (writing the template would
+    leak this server's rows into every later test's copy); the DBOS system database stays the
+    session worker's own."""
+    session_config = dbos_launched_cli
+    config = session_config
+    if session_config.database.url.startswith("sqlite"):
+        private = tmp_path / "private.db"
+        shutil.copy(make_url(session_config.database.url).database, private)
+        config = session_config.model_copy(
+            update={
+                "database": DatabaseConfig(
+                    url=f"sqlite+aiosqlite:///{private}",
+                    system_url=session_config.database.system_url,
+                )
+            }
+        )
     monkeypatch.setenv("UFO_TOKEN_SECRET", TOKEN_SECRET)
     init_db(config.database.url)
     server = None

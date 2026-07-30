@@ -13,8 +13,10 @@ dependency gate it needs."""
 import asyncio
 import hashlib
 import os
+import shutil
 import socket
 from collections.abc import AsyncIterator, Iterator
+from pathlib import Path
 
 import asyncpg
 import pytest
@@ -98,12 +100,25 @@ def _reset_workspace_credentials() -> Iterator[None]:
 
 
 @pytest.fixture
-async def db(database_url: str) -> AsyncIterator[None]:
-    """One initialized engine per test, disposed however the test ends: `init_db` guards a process
-    global, so the dispose is in a `finally`. The wipe between it and the `yield` can raise — a
-    SQLite `begin immediate` that cannot take the write lock inside its busy timeout does — and a
-    setup that raised without disposing would poison every later test in the process with 'db
-    already initialized', one flaky failure amplified into a red shard."""
+async def db(database_url: str, tmp_path: Path) -> AsyncIterator[None]:
+    """One initialized engine per test over the test's own database, disposed however the test
+    ends (`init_db` guards a process global, so the dispose is in a `finally`).
+
+    SQLite holds one writer slot per file, so the session file would couple every test to every
+    background writer the process still carries — a turn workflow a previous test left running on
+    the session DBOS worker holds that slot across this test's `begin immediate`, and its late
+    rows land in tables the wipe just reset. Each test instead gets its own copy of the session's
+    migrated template: the copy's writer population is this test alone, and no wipe is needed.
+    Postgres (MVCC, one database per xdist worker) keeps the shared database and the wipe."""
+    if database_url.startswith("sqlite"):
+        private = tmp_path / "private.db"
+        shutil.copy(make_url(database_url).database, private)
+        init_db(f"sqlite+aiosqlite:///{private}")
+        try:
+            yield
+        finally:
+            await dispose_db()
+        return
     init_db(database_url)
     try:
         async with workspace_tx() as connection:
