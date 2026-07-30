@@ -793,15 +793,6 @@ const PANELS = {
 };
 
 const WORKSPACE_TABLES = {
-  sources: {
-    key: 'sources',
-    columns: ['backend', 'owner', 'access', 'errors', 'next sync'],
-    row: (entry) => [entry.backend, entry.owner_email || '—',
-                     entry.shared ? 'shared' : 'private',
-                     String(entry.consecutive_errors),
-                     entry.next_sync_at.replace('T', ' ').slice(0, 16)],
-    empty: 'No sources are registered.',
-  },
   credentials: {
     key: 'slots',
     columns: ['slot', 'description', 'extension', 'state'],
@@ -1007,7 +998,108 @@ function markWorkspace(name) {
   }
 }
 
-async function showWorkspace(name, query) {
+function workspaceSources(view, entries, notice) {
+  // A source binding is the unit the `source` kind mutates: its streams share one provider,
+  // account, and tenant URL, so the rows group by the kind's own binding name and each act
+  // submits that binding's current spec. A row the kind does not manage (a config-registered
+  // folder, a feed) carries no name and offers no acts.
+  const result = document.createElement('div');
+  result.className = 'result mono';
+  if (notice) result.textContent = notice;
+  const mainAgent = agents.find((agent) => agent.main);
+  const bindings = new Map();
+  const plain = [];
+  for (const entry of entries) {
+    if (entry.name === null) { plain.push(entry); continue; }
+    if (!bindings.has(entry.name)) bindings.set(entry.name, []);
+    bindings.get(entry.name).push(entry);
+  }
+  async function act(envelope, button) {
+    button.disabled = true;
+    let res;
+    try {
+      res = await fetch(BASE + '/agents/' + mainAgent.id + '/intents', {
+        method: 'POST',
+        credentials: 'same-origin',
+        body: JSON.stringify(envelope),
+      });
+    } catch (err) {
+      result.textContent = 'Network error — try again.';
+      button.disabled = false;
+      return;
+    }
+    const outcome = await res.json().catch(() => null);
+    const message = outcome && outcome.message
+      ? outcome.message
+      : 'Error ' + res.status + ' — try again.';
+    if (outcome && outcome.applied) {
+      showWorkspace('sources', undefined, message);
+      return;
+    }
+    result.textContent = message;
+    button.disabled = false;
+  }
+  const rows = [];
+  for (const [name, streams] of bindings) {
+    const first = streams[0];
+    const spec = {
+      provider: first.backend,
+      streams: streams.map((entry) => entry.stream).sort(),
+      account_id: first.account_id,
+      base_url: first.base_url,
+      shared: first.shared,
+    };
+    const actions = document.createElement('td');
+    for (const [label, envelope] of [
+      ['Resync', { verb: 'apply', kind: 'source', name, spec: { ...spec, resync: true } }],
+      ...(first.shared ? [] : [
+        ['Share', { verb: 'apply', kind: 'source', name, spec: { ...spec, shared: true } }],
+      ]),
+      ['Remove', { verb: 'delete', kind: 'source', name }],
+    ]) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = label;
+      button.addEventListener('click', () => act(envelope, button));
+      actions.appendChild(button);
+    }
+    const line = row(
+      first.backend,
+      streams.map((entry) => entry.stream).sort().join(', '),
+      first.owner_email || '—',
+      first.shared ? 'shared' : 'private',
+      String(streams.reduce((total, entry) => total + entry.consecutive_errors, 0)),
+      streams.map((entry) => entry.next_sync_at).sort()[0].replace('T', ' ').slice(0, 16)
+    );
+    line.appendChild(actions);
+    rows.push(line);
+  }
+  for (const entry of plain) {
+    const line = row(
+      entry.backend,
+      '—',
+      entry.owner_email || '—',
+      entry.shared ? 'shared' : 'private',
+      String(entry.consecutive_errors),
+      entry.next_sync_at.replace('T', ' ').slice(0, 16)
+    );
+    line.appendChild(document.createElement('td'));
+    rows.push(line);
+  }
+  if (!rows.length) {
+    workspaceEmpty(view, 'No sources are registered. Register one in chat — the agent connects '
+      + 'the account or credential it needs as part of the request.');
+    view.appendChild(result);
+    return;
+  }
+  view.appendChild(table(
+    ['source', 'streams', 'owner', 'access', 'errors', 'next sync', ''],
+    rows
+  ));
+  view.appendChild(result);
+}
+
+async function showWorkspace(name, query, notice) {
   selected = null;
   panelLoad += 1;
   location.hash = '#/workspace/' + name;
@@ -1051,6 +1143,10 @@ async function showWorkspace(name, query) {
     const entries = payload[spec.key];
     if (!entries.length) { workspaceEmpty(view, spec.empty); return; }
     view.appendChild(table(spec.columns, entries.map((entry) => row(...spec.row(entry)))));
+    return;
+  }
+  if (name === 'sources') {
+    workspaceSources(view, payload.sources, notice);
     return;
   }
   if (name === 'memory') {

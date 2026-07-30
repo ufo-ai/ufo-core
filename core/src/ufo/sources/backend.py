@@ -81,6 +81,22 @@ class _BackfillEnvelope(BaseModel):
     watermark: str | None
 
 
+BINDING_NAME_DIGEST_HEX = 8
+
+
+def binding_name(provider: str, account: str, base_url: str | None) -> str:
+    """The source kind's one identity rule: a binding's object name derives from what it
+    authenticates as — provider, resolved account handle, and tenant URL — so the same binding
+    answers to the same name wherever it is named (the object verbs, the portal's per-row
+    actions, page attribution)."""
+    digest = hashlib.sha256(
+        json.dumps(
+            {"account": account, "base_url": base_url, "provider": provider}, sort_keys=True
+        ).encode()
+    ).hexdigest()[:BINDING_NAME_DIGEST_HEX]
+    return f"{provider.replace('_', '-')}-{digest}"
+
+
 class ConnectorSourceConfig(BaseModel):
     """Which account + stream one connector source row syncs. `account` is the handle the registry
     routes the credential on (a broker connected-account id under Composio, `DIRECT_ACCOUNT` under

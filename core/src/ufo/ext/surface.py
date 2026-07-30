@@ -39,7 +39,7 @@ from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, JsonValue, ValidationError, field_validator
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -56,6 +56,7 @@ from ufo.artifact_token import (
 from ufo.audience import Audience, audience_member, narrow_audience, parse_audience
 from ufo.blob import BlobNotFound, BlobStore
 from ufo.candidates import WorkspaceCandidates, owner_candidates
+from ufo.connectors import DIRECT_ACCOUNT
 from ufo.credentials import (
     CREDENTIAL_REQUEST_PURPOSE,
     CredentialRequestInvalid,
@@ -107,6 +108,7 @@ from ufo.schema.records import (
 )
 from ufo.seats import create_member
 from ufo.skills.runtime import RuntimeSkill, SkillRegistry
+from ufo.sources.backend import ConnectorSourceConfig, binding_name
 from ufo.subjects import SHARED_SUBJECT
 from ufo.transcript import (
     CompactionRecord,
@@ -347,17 +349,40 @@ class CredentialSlotView(BaseModel):
     filled: bool
 
 
+def _binding_fields(backend: str, config: dict[str, JsonValue]) -> dict[str, str | None]:
+    """The `source` kind's identity for one row, from the stored connector config — the binding
+    name plus the spec fields a panel act echoes back. A row whose config is not a connector's
+    (a config-registered folder, a feed) is not kind-managed and carries None throughout."""
+    try:
+        parsed = ConnectorSourceConfig.model_validate(config)
+    except ValidationError:
+        return {"name": None, "stream": None, "account_id": None, "base_url": None}
+    return {
+        "name": binding_name(backend, parsed.account, parsed.base_url),
+        "stream": parsed.stream,
+        "account_id": "" if parsed.account == DIRECT_ACCOUNT else parsed.account,
+        "base_url": parsed.base_url or "",
+    }
+
+
 class SourceView(BaseModel):
-    """One live source binding as the portal lists it: the backend, its disclosure subject
+    """One live source stream as the portal lists it: the backend, its disclosure subject
     (member-private pages stay gated to their member; `shared` means the agent's audience), the
     registering owner (named only to an admin or the owner — None is also a source with no owner
-    member), and sync health."""
+    member), sync health, and — for a connector-registered row — the `source` kind's binding
+    name plus the spec fields that reconstruct the binding, so the panel's per-binding acts
+    (resync, share, remove) submit the same object the chat verbs mutate. A config- or
+    feed-registered row is not kind-managed and carries None."""
 
     backend: str
     shared: bool
     owner_email: str | None
     consecutive_errors: int
     next_sync_at: datetime
+    name: str | None = None
+    stream: str | None = None
+    account_id: str | None = None
+    base_url: str | None = None
 
     @field_validator("next_sync_at")
     @classmethod
@@ -1377,6 +1402,7 @@ class SurfaceContext:
                 tables.source.c.owner_member_id,
                 tables.source.c.consecutive_errors,
                 tables.source.c.next_sync_at,
+                tables.source.c.config,
             )
             .select_from(
                 tables.source.outerjoin(
@@ -1405,6 +1431,7 @@ class SurfaceContext:
                 owner_email=row.email if admin or row.owner_member_id == member_id else None,
                 consecutive_errors=row.consecutive_errors,
                 next_sync_at=row.next_sync_at,
+                **_binding_fields(row.backend, row.config),
             )
             for row in rows
         )

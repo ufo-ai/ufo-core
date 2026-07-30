@@ -140,18 +140,6 @@ class StubElement {
   set htmlFor(value) {
     this.attributes.for = value;
   }
-  createTHead() {
-    return this.appendChild(new StubElement("thead"));
-  }
-  createTBody() {
-    return this.appendChild(new StubElement("tbody"));
-  }
-  insertRow() {
-    return this.appendChild(new StubElement("tr"));
-  }
-  insertCell() {
-    return this.appendChild(new StubElement("td"));
-  }
   set type(value) {
     this.attributes.type = value;
   }
@@ -352,9 +340,35 @@ const wire = {
         {
           backend: "gmail",
           owner_email: "admin@example.com",
+          shared: false,
+          consecutive_errors: 1,
+          next_sync_at: "2026-07-30T13:00:00+00:00",
+          name: "gmail-1a2b3c4d",
+          stream: "messages",
+          account_id: "acct-1",
+          base_url: "",
+        },
+        {
+          backend: "gmail",
+          owner_email: "admin@example.com",
+          shared: false,
+          consecutive_errors: 0,
+          next_sync_at: "2026-07-30T12:00:00+00:00",
+          name: "gmail-1a2b3c4d",
+          stream: "threads",
+          account_id: "acct-1",
+          base_url: "",
+        },
+        {
+          backend: "folder",
+          owner_email: null,
           shared: true,
           consecutive_errors: 0,
-          next_sync_at: "2026-07-30T13:00:00+00:00",
+          next_sync_at: "2026-07-30T11:00:00+00:00",
+          name: null,
+          stream: null,
+          account_id: null,
+          base_url: null,
         },
       ],
     },
@@ -879,11 +893,80 @@ try {
   await new Promise((resolve) => setTimeout(resolve, 0));
   const sourceCells = viewCells();
   const expectedSources = [
-    "backend", "owner", "access", "errors", "next sync",
-    "gmail", "admin@example.com", "shared", "0", "2026-07-30 13:00",
+    "source", "streams", "owner", "access", "errors", "next sync", "",
+    "gmail", "messages, threads", "admin@example.com", "private", "1", "2026-07-30 12:00", "",
+    "folder", "—", "—", "shared", "0", "2026-07-30 11:00", "",
   ];
   if (sourceCells.join("|") !== expectedSources.join("|")) {
     throw new Error(`the sources view reads ${JSON.stringify(sourceCells)}`);
+  }
+  const sourceRows = body.querySelector(".admin-view").querySelectorAll("tr").slice(1);
+  const acts = sourceRows[0].querySelectorAll("button");
+  if (texts(acts).join("|") !== "Resync|Share|Remove") {
+    throw new Error(`binding actions are ${texts(acts).join("|")}`);
+  }
+  if (sourceRows[1].querySelectorAll("button").length !== 0) {
+    throw new Error("a source the kind does not manage offered acts");
+  }
+  wire.workspace.sources.sources = wire.workspace.sources.sources.map(
+    (entry) => (entry.name === null ? entry : { ...entry, shared: true })
+  );
+  await workspaceNamed("Sources").fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const sharedActs = body.querySelector(".admin-view").querySelectorAll("tr")[1]
+    .querySelectorAll("button");
+  if (texts(sharedActs).join("|") !== "Resync|Remove") {
+    throw new Error(`an already-shared binding offers ${texts(sharedActs).join("|")}`);
+  }
+  wire.workspace.sources.sources = wire.workspace.sources.sources.map(
+    (entry) => (entry.name === null ? entry : { ...entry, shared: false })
+  );
+  await workspaceNamed("Sources").fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const liveActs = body.querySelector(".admin-view").querySelectorAll("tr")[1]
+    .querySelectorAll("button");
+  const sourceActsBefore = wire.posted.length;
+  const bindingSpec = {
+    provider: "gmail",
+    streams: ["messages", "threads"],
+    account_id: "acct-1",
+    base_url: "",
+    shared: false,
+  };
+  await liveActs[0].fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  if (JSON.stringify(wire.posted[sourceActsBefore]) !== JSON.stringify({
+    verb: "apply", kind: "source", name: "gmail-1a2b3c4d",
+    spec: { ...bindingSpec, resync: true },
+  })) {
+    throw new Error(`resync posted ${JSON.stringify(wire.posted[sourceActsBefore])}`);
+  }
+  if (!wire.intentUrls[sourceActsBefore].includes(AGENT_A)) {
+    throw new Error("a workspace source act did not ride the main agent's lane");
+  }
+  const shareButton = body.querySelector(".admin-view").querySelectorAll("button")
+    .find((node) => node.textContent === "Share");
+  await shareButton.fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  if (JSON.stringify(wire.posted[sourceActsBefore + 1]) !== JSON.stringify({
+    verb: "apply", kind: "source", name: "gmail-1a2b3c4d",
+    spec: { ...bindingSpec, shared: true },
+  })) {
+    throw new Error(`share posted ${JSON.stringify(wire.posted[sourceActsBefore + 1])}`);
+  }
+  const removeButton = body.querySelector(".admin-view").querySelectorAll("button")
+    .find((node) => node.textContent === "Remove");
+  await removeButton.fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  if (JSON.stringify(wire.posted[sourceActsBefore + 2]) !== JSON.stringify({
+    verb: "delete", kind: "source", name: "gmail-1a2b3c4d",
+  })) {
+    throw new Error(`remove posted ${JSON.stringify(wire.posted[sourceActsBefore + 2])}`);
+  }
+  const sourcesOutcome = body.querySelector(".admin-view").querySelectorAll("*")
+    .find((node) => node.className.includes("result"));
+  if (!sourcesOutcome || sourcesOutcome.textContent !== "Saved.") {
+    throw new Error(`the sources outcome reads "${sourcesOutcome?.textContent}"`);
   }
   if (sandbox.location.hash !== "#/workspace/sources") {
     throw new Error(`a workspace view left the hash at "${sandbox.location.hash}"`);
@@ -898,7 +981,9 @@ try {
   wire.workspace.sources.sources = [];
   await workspaceNamed("Sources").fire("click");
   await new Promise((resolve) => setTimeout(resolve, 0));
-  if (viewText() !== "No sources are registered.") {
+  const emptySources = 'No sources are registered. Register one in chat — the agent connects '
+    + 'the account or credential it needs as part of the request.';
+  if (viewText() !== emptySources) {
     throw new Error(`the empty sources view reads "${viewText()}"`);
   }
 

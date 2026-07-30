@@ -25,7 +25,6 @@ from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.store import PageIndexer
 from ufo_ext_sources.direct import DirectAuthProxy
 from ufo_ext_sources.klaviyo import KLAVIYO_REVISION, KlaviyoConnector
-from ufo_ext_sources.registry import binding_name
 from ufo_ext_sources.tools import SourceObjects, SourceSpec
 
 from ufo.agent_scope import agent
@@ -46,6 +45,7 @@ from ufo.indexing import TextChunker
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience
+from ufo.sdk.sources import binding_name
 from ufo.serve import _select_auth_proxy, _source_backends
 from ufo.sources.sync import CorePageFeed, SyncDriver
 from ufo.tools.context import ToolContext

@@ -25,7 +25,7 @@ from ufo_ext_memory.manifest import manifest as memory_manifest
 from ufo_ext_memory.objects import MEMORY_KIND, MEMORY_OBJECT
 from ufo_ext_memory.store import memory_item, store_for
 from ufo_ext_sources.pages import PAGE_KIND, PAGE_OBJECT
-from ufo_ext_sources.registry import SOURCE_KIND, binding_name
+from ufo_ext_sources.registry import SOURCE_KIND
 from ufo_ext_sources.tools import SOURCE_OBJECT
 
 from ufo.agent_scope import agent
@@ -46,6 +46,7 @@ from ufo.objects import (
 )
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
+from ufo.sdk.sources import binding_name
 from ufo.sources.sync import PageChange
 from ufo.subjects import SHARED_SUBJECT, member_subject
 from ufo.tools.context import SpawnResult, TextContent, ToolContext, ToolResult

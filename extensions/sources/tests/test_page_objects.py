@@ -21,7 +21,7 @@ import yaml
 from cryptography.fernet import Fernet
 from ufo_ext_sources.manifest import NAME, manifest
 from ufo_ext_sources.pages import PAGE_BODY_MAX_BYTES, PAGE_KIND, PageObjects, _page_timestamp
-from ufo_ext_sources.registry import CONNECTORS, binding_name
+from ufo_ext_sources.registry import CONNECTORS
 
 from ufo.blob import BlobStore, FilesystemBlobStore
 from ufo.credentials import CredentialStore
@@ -33,7 +33,7 @@ from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import Audience, conversation_audience, foreign_room_audience, room_audience
 from ufo.sdk.connectors import ConnectorRegistry
 from ufo.sdk.objects import AdminRequired, VerbNotSupported
-from ufo.sdk.sources import ConnectorSourceConfig, Page, SourceAuth, SyncResult
+from ufo.sdk.sources import ConnectorSourceConfig, Page, SourceAuth, SyncResult, binding_name
 from ufo.sdk.tools import ToolContext
 from ufo.sources.sync import SyncDriver
 from ufo.subjects import member_subject

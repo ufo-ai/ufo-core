@@ -244,6 +244,12 @@ async def _chunk_count() -> int:
         return (await connection.execute(sa.text("select count(*) from chunk"))).scalar_one()
 
 
+async def _claims(driver: SyncDriver) -> tuple[UUID, ...]:
+    """Which sources the driver's next pass would claim, through its own due-selection — so a test
+    asserts what the driver will actually do next rather than re-deriving the rule."""
+    return tuple(claimed.source_id for claimed in await driver._claim_due("probe"))
+
+
 async def _make_due() -> None:
     """Simulate the sync interval elapsing so the next `run()` re-claims the source."""
     async with workspace_tx() as connection:
@@ -1311,6 +1317,26 @@ class _ScriptedSource:
 
 
 @dataclass
+class _ResyncingSource:
+    """A backend that requests a resync of its own source from inside `fetch` — the live shape of
+    a member clicking Resync while that source's sync already holds the claim. The request goes
+    through the sanctioned API, so what the driver's completing writer must not clobber is exactly
+    what production writes."""
+
+    source_id: UUID
+    workspace_id: UUID
+    outcome: SyncResult | Exception
+    config_model: ClassVar[type[SourceConfig]] = SourceConfig
+
+    async def fetch(self, config: SourceConfig, cursor: str | None, auth: SourceAuth) -> SyncResult:
+        with ws(self.workspace_id):
+            await context_for("sources", frozenset()).schedule_source_sync((self.source_id,))
+        if isinstance(self.outcome, Exception):
+            raise self.outcome
+        return self.outcome
+
+
+@dataclass
 class _BlockingSource:
     result: SyncResult
     config_model: ClassVar[type[SourceConfig]] = SourceConfig
@@ -1871,6 +1897,56 @@ async def test_consecutive_errors_back_off_and_a_success_resets_the_counter(
     await _make_due()
     await _sync(driver)
     assert (await _source_state(source_id))["consecutive_errors"] == 0
+
+
+async def test_a_resync_requested_during_a_sync_survives_the_completing_writer(
+    db: None, database_url: str, tmp_path: Path
+) -> None:
+    """The panel's Resync is honoured even when it lands mid-sync: the request writes
+    `next_sync_at=now` while the claim is held, and the writer that finishes reschedules only the
+    sync it ran, so the driver's very next pass claims the source again. Both completion paths that
+    reschedule a claim they still hold are covered — the success interval and the error backoff the
+    `errors` column invites a member to resync past — and each releases its claim either way."""
+    workspace_id = await _workspace()
+    for outcome, expected_errors in ((SyncResult(pages=()), 0), (RuntimeError("provider 500"), 1)):
+        source_id = await _seed_scripted_source(workspace_id, None)
+        driver = SyncDriver(
+            backends={
+                SCRIPTED_BACKEND: _ResyncingSource(
+                    source_id=source_id, workspace_id=workspace_id, outcome=outcome
+                )
+            },
+            blob=FilesystemBlobStore(root=tmp_path / "blobs"),
+            postgres=database_url.startswith("postgresql"),
+        )
+
+        await _sync(driver)
+
+        assert (await _source_state(source_id))["consecutive_errors"] == expected_errors
+        async with workspace_tx() as connection:
+            claim = (
+                await connection.execute(
+                    sa.select(tables.source.c.claimed_by).where(tables.source.c.id == source_id)
+                )
+            ).scalar_one()
+        assert claim is None  # the lease is still released on both paths
+        assert await _claims(driver) == (source_id,)  # the request stands: due again immediately
+
+
+async def test_an_undisturbed_sync_still_reschedules_itself(
+    db: None, database_url: str, tmp_path: Path
+) -> None:
+    """The other polarity of the same writer: with no request landing under the claim, a completed
+    sync pushes `next_sync_at` out to its own interval and a failed one to its backoff, so the
+    driver does not re-claim a source it just finished."""
+    workspace_id = await _workspace()
+    for outcome in (SyncResult(pages=()), RuntimeError("provider 500")):
+        await _seed_scripted_source(workspace_id, None)
+        driver, _ = _scripted_driver([outcome], database_url, tmp_path / "blobs")
+
+        await _sync(driver)
+
+        assert await _claims(driver) == ()  # rescheduled out to its own interval or backoff
 
 
 async def test_delta_delete_tombstones_only_named_page_never_blanket_sweeps(

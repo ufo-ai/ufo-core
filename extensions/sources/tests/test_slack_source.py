@@ -12,6 +12,7 @@ the run records a skip, not a failure."""
 
 import json
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -300,6 +301,7 @@ async def test_sync_driver_resolves_the_current_surface_user_each_fetch(tmp_path
         connection_id=None,
         cursor=None,
         consecutive_errors=0,
+        claimed_at=datetime.now(UTC),
     )
 
     first = await driver._fetch(source)

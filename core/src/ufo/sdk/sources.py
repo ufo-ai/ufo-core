@@ -29,6 +29,9 @@ from ufo.sources.backend import (
 from ufo.sources.backend import (
     ConnectorSourceConfig as ConnectorSourceConfig,
 )
+from ufo.sources.backend import (
+    binding_name as binding_name,
+)
 from ufo.sources.connector import (
     Connector as Connector,
 )

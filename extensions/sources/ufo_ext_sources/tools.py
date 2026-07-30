@@ -44,10 +44,16 @@ from ufo.sdk.objects import (
     UnknownObject,
     VerbNotSupported,
 )
-from ufo.sdk.sources import SHARED_SUBJECT, ConnectorSourceConfig, PageChange, member_subject
+from ufo.sdk.sources import (
+    SHARED_SUBJECT,
+    ConnectorSourceConfig,
+    PageChange,
+    binding_name,
+    member_subject,
+)
 from ufo.sdk.tools import ConnectUnavailable, ToolContext
 from ufo_ext_sources.pages import PAGE_KIND
-from ufo_ext_sources.registry import CONNECTORS, SOURCE_KIND, binding_name
+from ufo_ext_sources.registry import CONNECTORS, SOURCE_KIND
 
 SUMMARY_MAX = 120
 SUBSCRIBERS_PREFIX = "subscribers:"
@@ -129,6 +135,12 @@ class SourceSpec(BaseModel):
         description="Conversation ids alerted when this source's synced content changes. Add or "
         "remove only your own id (shown as status.subscriber_id) to subscribe or unsubscribe; "
         "this is the one field an apply may change on an existing source you can see.",
+    )
+    resync: bool = Field(
+        default=False,
+        description="Set true to schedule an immediate sync of this binding's streams — an act, "
+        "not state: it changes nothing else, ignores subscribers, always reads back false, and "
+        "is the registering member's or a workspace admin's.",
     )
 
 
@@ -270,6 +282,7 @@ SHARE_GATE = (
     "only the registering member may change a source; workspace admins may inspect or remove it"
 )
 DELETE_GATE = "only the registering member or a workspace admin may remove a source"
+RESYNC_GATE = "only the registering member or a workspace admin may resync a source"
 
 
 @dataclass(frozen=True)
@@ -298,8 +311,13 @@ class SourceObjects(MemberOwnedObjects[SourceSpec, ObjectOwner]):
     ) -> None:
         """A subscribers-only edit on a source the caller can already see (`old` is non-None only
         for a visible source, since the base `get` hides the rest) is gated on visibility, not
-        ownership: any member who sees the source may add or remove their own conversation. Every
-        other apply — register, share-flip, recreate — goes through the base's member/admin gate."""
+        ownership: any member who sees the source may add or remove their own conversation. A
+        resync is the registering member's or an admin's, changes nothing else, and ignores
+        subscribers. Every other apply — register, share-flip, recreate — goes through the base's
+        member/admin gate."""
+        if spec.resync:
+            await self._resync(ctx, name, spec, old)
+            return
         if old is not None and _binding_identity(spec) == _binding_identity(old):
             caller = ctx.turn.conversation_id.hex
             owner = await self._owner(ctx, name)
@@ -311,6 +329,32 @@ class SourceObjects(MemberOwnedObjects[SourceSpec, ObjectOwner]):
             await self._edit_subscribers(ctx, name, spec.subscribers, caller, ctx.turn.agent_id)
             return
         await super().apply(ctx, name, spec, old, expected_generation=expected_generation)
+
+    async def _resync(
+        self, ctx: ToolContext, name: str, spec: SourceSpec, old: SourceSpec | None
+    ) -> None:
+        """Schedule an immediate sync of the binding's streams: the act rides `apply` with
+        `resync` set and the binding's current spec, so a submit that also edits what identifies
+        the binding — provider, streams, account, tenant URL, or disclosure — is refused whole
+        rather than half-applied, and subscribers ride their own act. The gate is the delete
+        gate's population — a resync drives connector traffic on the registering member's
+        credential, so seeing a shared source is not enough to spend it."""
+        if old is None or _binding_identity(spec) != _binding_identity(old):
+            raise VerbNotSupported(
+                "a resync changes nothing else — apply the binding's current spec with resync set"
+            )
+        owner = await self._owner(ctx, name)
+        is_admin = await ctx.speaker_is_admin()
+        if owner is None or not self._visible(owner, ctx.acting_member_id, is_admin):
+            raise UnknownObject(f"no {SOURCE_KIND} object named {name!r}")
+        if not self._owned(owner, ctx.acting_member_id) and not is_admin:
+            raise AdminRequired(RESYNC_GATE)
+        binding = await self._find(ctx, name)
+        if binding is None:
+            raise UnknownObject(f"no {SOURCE_KIND} object named {name!r}")
+        await _require_ext(ctx).schedule_source_sync(
+            tuple(stream.source_id for stream in binding.streams)
+        )
 
     async def _edit_subscribers(
         self, ctx: ToolContext, name: str, desired: tuple[str, ...], caller: str, agent: UUID

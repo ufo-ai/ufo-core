@@ -20,7 +20,7 @@ from cryptography.fernet import Fernet
 from ufo_ext_sources.direct import DirectAuthProxy
 from ufo_ext_sources.manifest import NAME, manifest
 from ufo_ext_sources.pages import PAGE_KIND
-from ufo_ext_sources.registry import CONNECTORS, binding_name
+from ufo_ext_sources.registry import CONNECTORS
 from ufo_ext_sources.tools import (
     CHANGE_LOG_DIR,
     SOURCE_KIND,
@@ -48,7 +48,7 @@ from ufo.sdk.authproxy import DIRECT_ACCOUNT
 from ufo.sdk.connectors import ConnectorEntry, ConnectorRegistry
 from ufo.sdk.manifest import HookContext, PageChangeBatch
 from ufo.sdk.objects import AdminRequired, VerbNotSupported
-from ufo.sdk.sources import ConnectorSourceConfig, PageChange
+from ufo.sdk.sources import ConnectorSourceConfig, PageChange, binding_name
 from ufo.sdk.tools import ToolContext
 from ufo.sources.sync import SyncDriver
 from ufo.subjects import SHARED_SUBJECT, member_subject
@@ -224,6 +224,7 @@ def _manifest_text(
     base_url: str = "",
     shared: bool = False,
     subscribers: tuple[str, ...] = (),
+    resync: bool = False,
 ) -> str:
     spec: dict[str, object] = {"provider": provider, "streams": list(streams)}
     if account_id:
@@ -234,6 +235,8 @@ def _manifest_text(
         spec["shared"] = shared
     if subscribers:
         spec["subscribers"] = list(subscribers)
+    if resync:
+        spec["resync"] = resync
     return yaml.safe_dump({"kind": SOURCE_KIND, "name": name, "spec": spec})
 
 
@@ -332,6 +335,7 @@ async def test_owner_applies_a_binding_and_reads_it_back(db: None) -> None:
         "base_url": "",
         "shared": False,
         "subscribers": [],
+        "resync": False,
     }
     assert set(fetched["status"]["streams"]) == {"projects", "workspaces"}
     assert datetime.fromisoformat(fetched["created_at"]).replace(tzinfo=UTC) == datetime(
@@ -752,6 +756,111 @@ async def test_changing_streams_is_refused_as_an_update(db: None) -> None:
             await tool.handler(ctx, args)
     rows = await _rows(state, ASANA)
     assert [row["config"]["stream"] for row in rows] == ["workspaces"]
+
+
+async def test_resync_pulls_the_bindings_next_sync_to_now(db: None) -> None:
+    """A resync apply — the binding's current spec with `resync` set — schedules every stream
+    row now, changes nothing else, and always reads back false; a resync that also edits the
+    binding is refused whole."""
+    state = await _workspace()
+    grants = GrantStore()
+    await _grant(state, grants, ASANA, "acct-one")
+    ctx = _context(state, grants, brokered=(ASANA,))
+    name = binding_name(ASANA, "acct-one", None)
+    with ws(state.workspace_id), agent(state.agent_id):
+        await _apply(ctx, _manifest_text(ASANA, ("workspaces", "projects"), name))
+        future = datetime(2027, 1, 1, tzinfo=UTC)
+        async with workspace_tx() as connection:
+            await connection.execute(sa.update(tables.source).values(next_sync_at=future))
+        before = datetime.now(UTC)
+        resynced = await _apply(
+            ctx,
+            _manifest_text(
+                ASANA, ("workspaces", "projects"), name, account_id="acct-one", resync=True
+            ),
+        )
+        assert resynced == {"kind": SOURCE_KIND, "name": name, "result": "updated"}
+        get_tool = _TOOLS["object_get"]
+        fetched = yaml.safe_load(
+            (
+                await get_tool.handler(
+                    ctx,
+                    get_tool.input_model.model_validate(
+                        {"user_description": TOOL_NARRATION, "kind": SOURCE_KIND, "name": name}
+                    ),
+                )
+            )
+            .content[0]
+            .text
+        )
+        assert fetched["spec"]["resync"] is False
+        with pytest.raises(VerbNotSupported, match="a resync changes nothing else"):
+            await _apply(
+                ctx,
+                _manifest_text(ASANA, ("workspaces",), name, account_id="acct-one", resync=True),
+            )
+    rows = await _rows(state, ASANA)
+    assert len(rows) == 2
+    for row in rows:
+        scheduled = row["next_sync_at"]
+        if scheduled.tzinfo is None:
+            scheduled = scheduled.replace(tzinfo=UTC)
+        assert before - timedelta(seconds=5) <= scheduled <= datetime.now(UTC)
+
+
+async def test_resync_is_registrar_or_admin(db: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The resync gate is the delete gate's population, across all three members it
+    distinguishes: the registering member may resync their own binding even without admin, a
+    member who merely sees the shared source is refused — a resync drives connector traffic on the
+    registrar's credential, so seeing it is not enough to spend it — and a workspace admin who
+    registered nothing may resync it."""
+    monkeypatch.setenv("GREENHOUSE", "secret")
+    state = await _workspace()
+    stranger_id = await _stranger(state)
+    member_ctx = _context(state, None, speaker_id=state.member_id)
+    stranger_ctx = _context(state, None, speaker_id=stranger_id)
+    owner_ctx = _context(state, None)
+    name = binding_name(GREENHOUSE, DIRECT_ACCOUNT, None)
+    with ws(state.workspace_id), agent(state.agent_id):
+        await _apply(member_ctx, _manifest_text(GREENHOUSE, ("jobs",), name, shared=True))
+        registrar = await _apply(
+            member_ctx, _manifest_text(GREENHOUSE, ("jobs",), name, shared=True, resync=True)
+        )
+        assert registrar == {"kind": SOURCE_KIND, "name": name, "result": "updated"}
+        with pytest.raises(AdminRequired, match="may resync a source"):
+            await _apply(
+                stranger_ctx,
+                _manifest_text(GREENHOUSE, ("jobs",), name, shared=True, resync=True),
+            )
+        resynced = await _apply(
+            owner_ctx, _manifest_text(GREENHOUSE, ("jobs",), name, shared=True, resync=True)
+        )
+        assert resynced == {"kind": SOURCE_KIND, "name": name, "result": "updated"}
+        carried = await _apply(
+            owner_ctx,
+            _manifest_text(
+                GREENHOUSE,
+                ("jobs",),
+                name,
+                shared=True,
+                resync=True,
+                subscribers=(uuid4().hex,),
+            ),
+        )
+        assert carried == {"kind": SOURCE_KIND, "name": name, "result": "updated"}
+        stored = yaml.safe_load(
+            (
+                await _TOOLS["object_get"].handler(
+                    owner_ctx,
+                    _TOOLS["object_get"].input_model.model_validate(
+                        {"user_description": TOOL_NARRATION, "kind": SOURCE_KIND, "name": name}
+                    ),
+                )
+            )
+            .content[0]
+            .text
+        )
+        assert stored["spec"].get("subscribers", []) == []  # a resync ignores subscribers
 
 
 async def test_delete_marks_rows_removed_tombstones_pages_and_revives(db: None) -> None:

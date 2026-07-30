@@ -309,6 +309,21 @@ class ClaimedSource:
     connection_id: UUID | None
     cursor: str | None
     consecutive_errors: int
+    claimed_at: datetime
+
+
+def _rescheduled(claimed: ClaimedSource, when: datetime) -> sa.Case[datetime]:
+    """The completing writer's `next_sync_at`: `when`, unless a resync was requested while this
+    claim held the row. `schedule_source_sync` writes `next_sync_at=now` under a live claim by
+    design — the lease serializes concurrent *syncs*, not the scheduling of the next one — so any
+    value now later than the moment this claim was taken is a request this run never covered, and
+    pushing it out to an interval or an error backoff would strand it. Requests are recognized by
+    that ordering rather than by a second column, so `next_sync_at` stays the one truth about when
+    a source is due."""
+    return sa.case(
+        (tables.source.c.next_sync_at <= claimed.claimed_at, when),
+        else_=tables.source.c.next_sync_at,
+    )
 
 
 @dataclass(frozen=True)
@@ -436,6 +451,7 @@ class SyncDriver:
                 connection_id=row["connection_id"],
                 cursor=row["cursor"],
                 consecutive_errors=row["consecutive_errors"],
+                claimed_at=now,
             )
             for row in rows
         )
@@ -640,7 +656,9 @@ class SyncDriver:
                 sa.update(tables.source)
                 .values(
                     cursor=next_cursor,
-                    next_sync_at=now + timedelta(seconds=SOURCE_SYNC_INTERVAL_SECONDS),
+                    next_sync_at=_rescheduled(
+                        source, now + timedelta(seconds=SOURCE_SYNC_INTERVAL_SECONDS)
+                    ),
                     consecutive_errors=0,
                     claimed_by=None,
                     claim_expires_at=None,
@@ -657,9 +675,11 @@ class SyncDriver:
         """Free a source whose fetch or commit raised: clear its claim, count the error, and push
         next_sync_at forward by a bounded exponential backoff (base interval doubling per
         consecutive error, capped) so a persistently-failing source neither blocks its siblings this
-        run nor hammers its provider every lease cycle. On `CursorExpired` the stored cursor is
-        cleared so the next run refetches from scratch; otherwise it resumes where it left off. A
-        successful sync resets the counter and the interval in `_write`."""
+        run nor hammers its provider every lease cycle — the backoff is this driver's own
+        rescheduling, so a resync requested while the failing sync ran stands instead
+        (`_rescheduled`). On `CursorExpired` the stored cursor is cleared so the next run refetches
+        from scratch; otherwise it resumes where it left off. A successful sync resets the counter
+        and the interval in `_write`."""
         errors = source.consecutive_errors + 1
         backoff = min(
             SOURCE_SYNC_INTERVAL_SECONDS * 2 ** (errors - 1), SOURCE_ERROR_BACKOFF_CAP_SECONDS
@@ -670,7 +690,7 @@ class SyncDriver:
                 sa.update(tables.source)
                 .values(
                     cursor=None if cursor_reset else source.cursor,
-                    next_sync_at=now + timedelta(seconds=backoff),
+                    next_sync_at=_rescheduled(source, now + timedelta(seconds=backoff)),
                     consecutive_errors=errors,
                     claimed_by=None,
                     claim_expires_at=None,
@@ -693,7 +713,9 @@ class SyncDriver:
             await connection.execute(
                 sa.update(tables.source)
                 .values(
-                    next_sync_at=now + timedelta(seconds=SOURCE_SYNC_INTERVAL_SECONDS),
+                    next_sync_at=_rescheduled(
+                        source, now + timedelta(seconds=SOURCE_SYNC_INTERVAL_SECONDS)
+                    ),
                     consecutive_errors=0,
                     claimed_by=None,
                     claim_expires_at=None,

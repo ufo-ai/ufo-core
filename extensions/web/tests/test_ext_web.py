@@ -5,7 +5,7 @@ import shutil
 import subprocess
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, replace
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -22,6 +22,7 @@ from ufo_ext_sites.manifest import manifest as sites_manifest
 from ufo_ext_sites.store import HostedSites
 from ufo_ext_skill_create.manifest import manifest as skill_create_manifest
 from ufo_ext_skill_create.store import user_skill
+from ufo_ext_sources.manifest import manifest as sources_manifest
 from ufo_ext_web import surface as web_surface
 from ufo_ext_web.audience import AUDIENCE_PREFIX, web_extension
 from ufo_ext_web.manifest import manifest as web_manifest
@@ -219,7 +220,12 @@ def dbos_runtime(
             dbos=dbos_client,
             subagents=SubagentRegistry(()),
             subagent_grants={},
-            manifests=(web_manifest(), connectors_manifest(), skill_create_manifest()),
+            manifests=(
+                web_manifest(),
+                connectors_manifest(),
+                skill_create_manifest(),
+                sources_manifest(),
+            ),
             registry=STANDIN_REGISTRY,
             skills=skill_registry(()),
             credentials=CredentialStore(fernet=CREDENTIAL_FERNET),
@@ -2381,6 +2387,98 @@ async def test_an_out_of_audience_agent_takes_no_intent(
     assert "admin" in outcome["message"]
 
 
+async def test_a_source_intent_reaches_the_source_kind(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    """The panel's own envelope, reconstructed from the projection the panel reads, reaching the
+    real `source` kind: Resync pulls the binding's next sync to now through the kind's registrar
+    gate, and Remove takes the rows out. The envelope is built from `workspace/sources` exactly as
+    `renderSources` builds it, so the projection's binding fields and the kind's `SourceSpec`
+    cannot drift apart without this failing — and a source apply carries no model, so the
+    agent-spec registry precheck must not swallow it."""
+    client, workspace_id, agent_id = web
+    admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
+    source_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.source).values(
+                id=source_id,
+                workspace_id=workspace_id,
+                backend="asana",
+                config={"account": "acct-7", "stream": "workspaces"},
+                subject=SHARED_SUBJECT,
+                owner_member_id=admin_id,
+                next_sync_at=datetime.now(UTC) + timedelta(hours=6),
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    listed = await client.get("/surface/web/workspace/sources", headers=cookie)
+    [projected] = listed.json()["sources"]
+    spec = {
+        "provider": projected["backend"],
+        "streams": [projected["stream"]],
+        "account_id": projected["account_id"],
+        "base_url": projected["base_url"],
+        "shared": projected["shared"],
+    }
+
+    resynced = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json={
+            "verb": "apply",
+            "kind": "source",
+            "name": projected["name"],
+            "spec": {**spec, "resync": True},
+        },
+        headers=cookie,
+    )
+
+    assert resynced.status_code == 200
+    outcome = resynced.json()
+    assert outcome["applied"] is True, outcome["message"]
+    assert "No model named" not in outcome["message"]
+    async with workspace_tx() as connection:
+        due = (
+            await connection.execute(
+                sa.select(tables.source.c.next_sync_at).where(tables.source.c.id == source_id)
+            )
+        ).scalar_one()
+    assert due <= datetime.now(UTC).replace(tzinfo=due.tzinfo)  # the kind pulled it forward
+
+    removed = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json={"verb": "delete", "kind": "source", "name": projected["name"]},
+        headers=cookie,
+    )
+
+    assert removed.status_code == 200
+    assert removed.json()["applied"] is True, removed.json()["message"]
+    async with workspace_tx() as connection:
+        live = (
+            await connection.execute(
+                sa.select(sa.func.count())
+                .select_from(tables.source)
+                .where(tables.source.c.id == source_id, tables.source.c.removed_at.is_(None))
+            )
+        ).scalar_one()
+    assert live == 0
+    async with workspace_tx() as connection:
+        inbound = (
+            (
+                await connection.execute(
+                    sa.select(tables.turn.c.inbound).order_by(tables.turn.c.created_at)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert [json.loads(entry)["tool"] for entry in inbound] == ["object_apply", "object_delete"]
+    assert projected["name"] in json.loads(inbound[1])["input"]["name"]
+
+
 async def test_grant_intents_flip_and_revoke_under_the_owner_gate(
     web: tuple[AsyncClient, UUID, UUID],
     dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
@@ -2805,8 +2903,10 @@ def test_portal_page_smoke_walks_every_view() -> None:
     (signed in and the 401 token-card branch), select, overview, the settings save, the mid-save
     agent switch, the failed post-save re-read, the memory tab's search bar (its `form.search`
     class and both style rules scoped to it), the connections panel (owner-gated flip and revoke
-    envelopes, the connect intent and its private consent link off the stream), admin,
-    select-after-admin, the question render
+    envelopes, the connect intent and its private consent link off the stream), the workspace
+    sources view (per-binding grouping, the summed errors and earliest next-sync cells, the
+    resync/share/remove envelopes on the main agent's lane, Share suppressed once shared, and the
+    empty state), admin, select-after-admin, the question render
     across every `buttonable` condition, the answered chain, the credentials prompts and their
     refusal arms, an agent switch mid-answer, and a later turn superseding an older turn's
     question and files — so a deleted declaration, a dangling element reference, or a

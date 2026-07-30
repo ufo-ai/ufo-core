@@ -41,7 +41,7 @@ class ApplyIntent(BaseModel):
     kind exactly, both ways."""
 
     verb: Literal["apply", "delete", "connect"]
-    kind: Literal["agent", "member", "skill", "connector_grant", "connection"]
+    kind: Literal["agent", "member", "skill", "connector_grant", "connection", "source"]
     name: str
     spec: dict[str, JsonValue] | None = None
 

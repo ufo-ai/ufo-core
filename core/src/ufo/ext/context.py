@@ -1001,6 +1001,25 @@ class ExtensionContext:
                 )
             )
 
+    async def schedule_source_sync(self, source_ids: tuple[UUID, ...]) -> None:
+        """Pull live sources' next sync to now, so the sync driver claims them on its next pass —
+        the one sanctioned way to resync on demand. The claim lease serializes concurrent syncs of
+        one source, and a request landing while a sync holds that lease survives it: the completing
+        writer reschedules only the sync it actually ran (`sources.sync._rescheduled`). Fails loud
+        when no live source matched."""
+        async with workspace_tx() as connection:
+            updated = await connection.execute(
+                sa.update(tables.source)
+                .values(next_sync_at=datetime.now(UTC), updated_at=sa.func.now())
+                .where(
+                    tables.source.c.id.in_(source_ids),
+                    tables.source.c.workspace_id == self.store.workspace_id,
+                    tables.source.c.removed_at.is_(None),
+                )
+            )
+            if updated.rowcount == 0:
+                raise ValueError(f"no live sources {source_ids} in this workspace")
+
     async def propose_change(self, change: AgentChange) -> ProposalRef:
         """Open a governed proposal against an agent's prompt, stamped with this extension as the
         proposer — never a direct write to agent config; approval re-checks the digest and applies

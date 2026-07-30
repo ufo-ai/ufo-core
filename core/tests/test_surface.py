@@ -28,6 +28,7 @@ from ufo.audience import (
 )
 from ufo.bearer import UFO_TOKEN_SECRET_ENV
 from ufo.blob import FilesystemBlobStore
+from ufo.connectors import DIRECT_ACCOUNT
 from ufo.credentials import (
     CredentialRequestInvalid,
     CredentialRequestState,
@@ -69,6 +70,8 @@ from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import ProxyEndpoint
 from ufo.schema import tables
 from ufo.schema.records import WRITEBACK_PENDING, TerminalFrame, ToolIntent, TurnContext
+from ufo.sources.backend import binding_name
+from ufo.subjects import SHARED_SUBJECT
 from ufo.surfaces.admission import Admission, MemberAdmission
 from ufo.surfaces.hub_tail import HubTailer
 from ufo.transcript import (
@@ -724,6 +727,45 @@ async def test_sources_gate_on_subject_and_skip_removed(db: None, tmp_path) -> N
     assert [view.backend for view in peer_view] == ["folder"]
     admin_view = await context.list_sources(peer, admin=True)
     assert [view.backend for view in admin_view] == ["folder", "github"]
+
+
+async def test_a_connector_row_carries_the_binding_the_kind_names(db: None, tmp_path) -> None:
+    """A connector-registered row projects the `source` kind's own identity, so the panel's acts
+    name the object the chat verbs mutate: the binding name is `binding_name`'s digest over
+    exactly what the row authenticates as, and the spec fields round-trip — a brokered account
+    verbatim, `DIRECT_ACCOUNT` as the empty account the kind's spec uses, and an absent tenant URL
+    as the empty string. A row whose config is not a connector's stays unmanaged, which the
+    subject-gating test above covers at the None polarity."""
+    workspace_id, _, _ = await _seed()
+    async with workspace_tx() as connection:
+        for backend, config in (
+            ("asana", {"account": "acct-7", "stream": "tasks"}),
+            ("fresh_desk", {"account": DIRECT_ACCOUNT, "stream": "tickets", "base_url": "t.io"}),
+        ):
+            await connection.execute(
+                sa.insert(tables.source).values(
+                    id=uuid4(),
+                    workspace_id=workspace_id,
+                    backend=backend,
+                    config=config,
+                    subject=SHARED_SUBJECT,
+                    owner_member_id=None,
+                    next_sync_at=sa.func.now(),
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+
+    listed = await context.list_sources(uuid4(), admin=True)
+
+    brokered = next(view for view in listed if view.backend == "asana")
+    assert brokered.name == binding_name("asana", "acct-7", None)
+    assert (brokered.stream, brokered.account_id, brokered.base_url) == ("tasks", "acct-7", "")
+    direct = next(view for view in listed if view.backend == "fresh_desk")
+    assert direct.name == binding_name("fresh_desk", DIRECT_ACCOUNT, "t.io")
+    assert direct.name.startswith("fresh-desk-")  # the kind's name never carries an underscore
+    assert (direct.stream, direct.account_id, direct.base_url) == ("tickets", "", "t.io")
 
 
 async def test_list_installations_orders_by_surface(db: None, tmp_path) -> None:

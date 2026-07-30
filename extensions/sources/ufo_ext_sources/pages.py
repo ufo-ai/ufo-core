@@ -31,9 +31,9 @@ from ufo.sdk.objects import (
     VerbNotSupported,
     object_page,
 )
-from ufo.sdk.sources import ConnectorSourceConfig
+from ufo.sdk.sources import ConnectorSourceConfig, binding_name
 from ufo.sdk.tools import ToolContext
-from ufo_ext_sources.registry import CONNECTORS, SOURCE_KIND, binding_name
+from ufo_ext_sources.registry import CONNECTORS, SOURCE_KIND
 
 PAGE_KIND = "page"
 PAGES_ARE_SYNCED = (
