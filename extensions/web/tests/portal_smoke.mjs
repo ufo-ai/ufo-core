@@ -238,6 +238,19 @@ const wire = {
     ],
     members: [{ email: "admin@example.com", admin: true, seated: true }],
     seats: { limit: null, included: null },
+    caps: [
+      {
+        scope: "agent",
+        subject: "assistant",
+        window_seconds: 86400,
+        limit_micro_usd: 5000000,
+        on_breach: "park",
+      },
+    ],
+    deploy: {
+      sandbox_internet: false,
+      extensions: [{ name: "web", version: "0.1.0", sandbox_internet: false }],
+    },
   },
   posted: [],
   overview: {
@@ -557,6 +570,23 @@ try {
   const adminCells = body.querySelectorAll("td").map((cell) => cell.textContent);
   if (!adminCells.includes("every member")) {
     throw new Error("the admin view does not state the main agent's audience as every member");
+  }
+  for (const cell of ["assistant", "24h", "$5.00", "park"]) {
+    if (!adminCells.includes(cell)) {
+      throw new Error(`the billing caps table misses "${cell}"`);
+    }
+  }
+  const adminLines = body.querySelectorAll("div").map((node) => node.textContent);
+  if (!adminLines.includes(
+    "The plan, invoices, and payment methods are managed with the agent in chat."
+  )) {
+    throw new Error("the billing section misses the plan-and-invoices line");
+  }
+  if (!adminLines.includes("Sandbox public internet: blocked")) {
+    throw new Error("the deploy section misses the sandbox ceiling line");
+  }
+  if (!adminCells.includes("web") || !adminCells.includes("0.1.0")) {
+    throw new Error("the deploy extensions table misses the manifest row");
   }
   const freshButtons = byId.agents.querySelectorAll("button");
   await freshButtons[1].fire("click");

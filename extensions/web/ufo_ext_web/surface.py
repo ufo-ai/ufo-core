@@ -760,9 +760,12 @@ async def fulfill_credential(ctx: SurfaceContext, request: Request) -> Response:
 
 async def admin_index(ctx: SurfaceContext, request: Request) -> Response:
     """One of the two workspace-shaped reads (this view and the spend rollup — spec.md names
-    both): every agent with its policy, surface installations, and web-audience grants, plus
-    members and seat state. The workspace's shape answers a workspace admin only and is not-found
-    for everyone else. Reads only; every mutation stays a chat act."""
+    both): every agent with its policy, surface installations, and web-audience grants; members
+    and seat state; every spend cap with its subject named; and the deploy's shape — installed
+    extensions and the sandbox public-internet ceiling. The workspace's shape answers a workspace
+    admin only and is not-found for everyone else. Reads only; every mutation stays a chat act —
+    caps are the deploy operators' today (no object kind owns them), and the plan, invoices, and
+    payment methods are managed with the agent in chat (`manage_billing`)."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
@@ -794,6 +797,11 @@ async def admin_index(ctx: SurfaceContext, request: Request) -> Response:
                 for entry in snapshot.members
             ],
             "seats": {"limit": snapshot.limit, "included": snapshot.included},
+            "caps": [entry.model_dump(mode="json") for entry in await ctx.spend_caps()],
+            "deploy": {
+                "sandbox_internet": ctx.deploy_sandbox_internet,
+                "extensions": [entry.model_dump(mode="json") for entry in ctx.deploy_extensions],
+            },
         }
     )
 

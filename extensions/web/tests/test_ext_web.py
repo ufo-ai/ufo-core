@@ -998,7 +998,9 @@ async def test_admin_view_reads_the_workspace_shape(
     """The administration read end to end: agents carry their policy, surface installations, and
     the exact web-audience grants written through the extension's store — the main agent carries
     none, and its `main` flag is what the portal renders as "every member"; members and seat
-    state are `Seats.snapshot`'s answer."""
+    state are `Seats.snapshot`'s answer; every spend cap arrives with its subject named for the
+    reader; and the deploy reports its installed extensions and public-internet ceiling from the
+    mounted manifest set."""
     client, workspace_id, _agent_id = web
     second_agent = uuid4()
     async with workspace_tx() as connection:
@@ -1038,6 +1040,24 @@ async def test_admin_view_reads_the_workspace_shape(
             .values(seated_at=sa.func.now())
             .where(tables.member.c.id == member_id)
         )
+        for scope, subject, window in (
+            ("workspace", None, 86_400),
+            ("agent", second_agent, 3_600),
+            ("member", member_id, 86_400),
+        ):
+            await connection.execute(
+                sa.insert(tables.spend_cap).values(
+                    id=uuid4(),
+                    workspace_id=workspace_id,
+                    scope=scope,
+                    subject_id=subject,
+                    window_seconds=window,
+                    limit_micro_usd=5_000_000,
+                    on_breach="park",
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
     view = await client.get(
         "/surface/web/api/admin", headers={"cookie": f"{SESSION_COOKIE}={admin_token}"}
     )
@@ -1055,6 +1075,25 @@ async def test_admin_view_reads_the_workspace_shape(
         ("member@example.com", False, True),
     }
     assert payload["seats"] == {"limit": 5, "included": 2}
+    assert [
+        (
+            cap["scope"],
+            cap["subject"],
+            cap["window_seconds"],
+            cap["limit_micro_usd"],
+            cap["on_breach"],
+        )
+        for cap in payload["caps"]
+    ] == [
+        ("agent", "ops", 3_600, 5_000_000, "park"),
+        ("member", "member@example.com", 86_400, 5_000_000, "park"),
+        ("workspace", None, 86_400, 5_000_000, "park"),
+    ]
+    assert payload["deploy"]["sandbox_internet"] is False
+    assert [
+        (entry["name"], entry["version"], entry["sandbox_internet"])
+        for entry in payload["deploy"]["extensions"]
+    ] == [("stub", "0", False), ("web", "0.1.0", False)]
 
 
 async def test_admin_view_reports_ungated_seats(

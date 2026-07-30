@@ -405,8 +405,11 @@ member — grants kept in the web extension's own store, granted and revoked in 
 while a workspace admin reaches and administers every agent. An out-of-audience agent is
 not-found on every portal route, the workspace-shaped reads — the spend rollup and the
 administration view (agents with their policy, installations, and web-audience grants; members
-and seats) — answer a workspace admin only, and the signed bearer enters as a session cookie
-through one POST (the gateway's signed-in card), never a URL. Beside chat, each selected agent
+and seats; spend caps with their subjects named; the deploy's installed extensions and
+public-internet ceiling) — answer a workspace admin only, and the signed bearer enters as a
+session cookie through one POST (the gateway's signed-in card), never a URL. The plan,
+invoices, and payment methods stay chat acts (`manage_billing`), and caps have no object kind
+yet, so the billing view is a read. Beside chat, each selected agent
 carries read projections shaped by the same contracts chat enforces: its scheduled tasks
 (creator sees content, an admin management metadata, others nothing), its loadable skills (the
 composition a turn loads), memory search under the viewer's own subjects with source-derived

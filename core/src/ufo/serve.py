@@ -57,6 +57,7 @@ from ufo.ext.manifest import (
     open_connector_namespace,
 )
 from ufo.ext.surface import (
+    DeployExtensionView,
     SurfaceAuth,
     SurfaceContext,
     SurfaceIdentityContext,
@@ -758,6 +759,12 @@ def _mount_shared_surfaces(
     registered: dict[str, SurfaceSpec] = {}
 
     deploy_sandbox_internet = any(manifest.sandbox_internet for manifest in manifests)
+    deploy_extensions = tuple(
+        DeployExtensionView(
+            name=manifest.name, version=manifest.version, sandbox_internet=manifest.sandbox_internet
+        )
+        for manifest in sorted(manifests, key=lambda manifest: manifest.name)
+    )
     slots = declared_slots(manifests)
 
     def context_for(workspace_id: UUID, surface: str) -> SurfaceContext:
@@ -773,6 +780,7 @@ def _mount_shared_surfaces(
             _public_base_url=public_base_url,
             _ingress_public_url=ingress_public_url,
             _deploy_sandbox_internet=deploy_sandbox_internet,
+            _deploy_extensions=deploy_extensions,
             _models=models,
             _skills=skills,
             _user_skills=user_skills,

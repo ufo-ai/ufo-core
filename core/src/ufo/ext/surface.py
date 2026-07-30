@@ -297,6 +297,28 @@ class ConnectionView(BaseModel):
         return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
+class SpendCapView(BaseModel):
+    """One spend cap as the administration view lists it: the scope, its subject named for the
+    reader (an agent's name, a member's email, nothing for the workspace's own cap), the window,
+    the limit, and what a breach does."""
+
+    scope: str
+    subject: str | None
+    window_seconds: int
+    limit_micro_usd: int
+    on_breach: str
+
+
+class DeployExtensionView(BaseModel):
+    """One installed extension as the administration view lists it: the manifest's name and
+    version, and whether its sandbox tools require metered public egress — deploy shape only,
+    never an agent's resources or secrets."""
+
+    name: str
+    version: str
+    sandbox_internet: bool
+
+
 class CredentialSlotView(BaseModel):
     """One declared BYOK slot and whether the workspace holds a value for it — never the value.
     Slots come from installed manifests, the same declarations the `credential` object kind
@@ -473,7 +495,14 @@ class SurfaceContext:
     _skills: SkillRegistry
     _user_skills: Callable[[], Awaitable[tuple[RuntimeSkill, ...]]]
     _declared_slots: tuple[DeclaredSlot, ...]
+    _deploy_extensions: tuple[DeployExtensionView, ...] = ()
     _memory: "MemorySearch | None" = None
+
+    @property
+    def deploy_extensions(self) -> tuple[DeployExtensionView, ...]:
+        """The deploy's installed extensions — the administration view's deploy-status read,
+        fixed at boot from the manifest set the process loaded."""
+        return self._deploy_extensions
 
     @property
     def deploy_sandbox_internet(self) -> bool:
@@ -1285,6 +1314,56 @@ class SurfaceContext:
                 owner_email=row.email if admin or row.owner_member_id == member_id else None,
                 consecutive_errors=row.consecutive_errors,
                 next_sync_at=row.next_sync_at,
+            )
+            for row in rows
+        )
+
+    async def spend_caps(self) -> tuple[SpendCapView, ...]:
+        """Every spend cap of this workspace with its subject named for the reader — the
+        workspace-administration read behind the portal's billing view. Caps are set by the
+        deploy's operators today; no object kind owns them, so this stays a read."""
+        async with workspace_tx() as connection:
+            rows = (
+                await connection.execute(
+                    sa.select(
+                        tables.spend_cap.c.scope,
+                        tables.spend_cap.c.subject_id,
+                        tables.spend_cap.c.window_seconds,
+                        tables.spend_cap.c.limit_micro_usd,
+                        tables.spend_cap.c.on_breach,
+                        tables.agent.c.name.label("agent_name"),
+                        tables.member.c.email.label("member_email"),
+                    )
+                    .select_from(
+                        tables.spend_cap.outerjoin(
+                            tables.agent,
+                            sa.and_(
+                                tables.spend_cap.c.scope == "agent",
+                                tables.spend_cap.c.subject_id == tables.agent.c.id,
+                            ),
+                        ).outerjoin(
+                            tables.member,
+                            sa.and_(
+                                tables.spend_cap.c.scope == "member",
+                                tables.spend_cap.c.subject_id == tables.member.c.id,
+                            ),
+                        )
+                    )
+                    .where(tables.spend_cap.c.workspace_id == self.workspace_id)
+                    .order_by(
+                        tables.spend_cap.c.scope,
+                        tables.spend_cap.c.subject_id,
+                        tables.spend_cap.c.window_seconds,
+                    )
+                )
+            ).all()
+        return tuple(
+            SpendCapView(
+                scope=row.scope,
+                subject=row.agent_name if row.scope == "agent" else row.member_email,
+                window_seconds=row.window_seconds,
+                limit_micro_usd=row.limit_micro_usd,
+                on_breach=row.on_breach,
             )
             for row in rows
         )
