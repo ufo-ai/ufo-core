@@ -151,8 +151,6 @@ kind: ServiceAccount
 metadata:
   name: ufo-sandbox-proxy
   namespace: ${namespace}
-  annotations:
-    eks.amazonaws.com/role-arn: ${proxy_role_arn}
 ---
 apiVersion: apps/v1
 kind: Deployment

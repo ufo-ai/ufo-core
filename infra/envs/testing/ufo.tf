@@ -194,7 +194,6 @@ data "kubectl_file_documents" "hosted" {
     ingress_class                    = "nginx"
     bundle_image                     = local.bundle_image
     serve_role_arn                   = module.platform.app_s3_role_arn
-    proxy_role_arn                   = module.platform.sandbox_proxy_role_arn
     prestop_seconds                  = local.prestop_seconds
     termination_grace_period_seconds = local.prestop_seconds + local.request_shutdown_seconds + local.graceful_shutdown_seconds + 60
 

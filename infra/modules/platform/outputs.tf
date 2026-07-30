@@ -48,11 +48,6 @@ output "app_s3_role_arn" {
   value       = module.irsa_app_s3.iam_role_arn
 }
 
-output "sandbox_proxy_role_arn" {
-  description = "IRSA role annotated on the sandbox proxy ServiceAccount for scoped credential minting."
-  value       = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${local.name}-sandbox-proxy"
-}
-
 output "gateway_ses_role_arn" {
   description = "Deterministic ufo-gateway IRSA ARN; hosted manifest keys must be plan-known."
   value       = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${local.gateway_ses_role_name}"

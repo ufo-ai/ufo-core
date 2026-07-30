@@ -9,7 +9,6 @@ CLUSTER_SERVICES_TEMPLATE = (
     Path(__file__).resolve().parents[2] / "infra/templates/cluster-services.yaml.tpl"
 )
 PLATFORM_SECRETS = Path(__file__).resolve().parents[2] / "infra/modules/platform/secrets.tf"
-PLATFORM_OUTPUTS = Path(__file__).resolve().parents[2] / "infra/modules/platform/outputs.tf"
 APP_S3_MODULE = IAM_MODULE.read_text().split('module "irsa_app_s3" {', maxsplit=1)[1]
 APP_S3_POLICY = (
     IAM_MODULE.read_text()
@@ -48,11 +47,6 @@ def test_sandbox_proxy_identity_can_only_assume_the_mount_role() -> None:
     assert "s3:" not in SANDBOX_PROXY_POLICY
     assert 'namespace_service_accounts = ["ufo-*:ufo-sandbox-proxy"]' in SANDBOX_PROXY_IRSA
     assert "identifiers = [module.irsa_sandbox_proxy.iam_role_arn]" in IAM_MODULE.read_text()
-    proxy_output = PLATFORM_OUTPUTS.read_text().split(
-        'output "sandbox_proxy_role_arn" {', maxsplit=1
-    )[1]
-    assert 'role/${local.name}-sandbox-proxy"' in proxy_output
-    assert "module.irsa_sandbox_proxy.iam_role_arn" not in proxy_output
 
 
 def test_hosted_serve_receives_the_bedrock_region() -> None:
@@ -173,9 +167,16 @@ def test_hosted_proxy_has_resource_bounds() -> None:
     assert 'limits: {cpu: "2", memory: 768Mi}' in PROXY_DEPLOYMENT
 
 
-def test_hosted_proxy_runs_under_its_irsa_identity() -> None:
+def test_hosted_proxy_carries_no_aws_identity() -> None:
+    """The proxy pod holds no cloud role: artifact PUTs are presigned serve-side and travel on
+    their own URL authority, so the proxy's service account carries no role-arn annotation and
+    the rendered template needs no role input for it."""
     assert "serviceAccountName: ufo-sandbox-proxy" in PROXY_DEPLOYMENT
-    assert "eks.amazonaws.com/role-arn: ${proxy_role_arn}" in HOSTED_TEMPLATE.read_text()
+    assert "proxy_role_arn" not in HOSTED_TEMPLATE.read_text()
+    proxy_account = HOSTED_TEMPLATE.read_text().split(
+        "kind: ServiceAccount\nmetadata:\n  name: ufo-sandbox-proxy", maxsplit=1
+    )[1]
+    assert "role-arn" not in proxy_account.split("---", maxsplit=1)[0]
 
 
 def test_hosted_proxy_and_serve_share_the_rendered_config() -> None:
