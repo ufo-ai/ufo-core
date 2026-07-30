@@ -10,17 +10,6 @@ CLUSTER_SERVICES_TEMPLATE = (
 )
 PLATFORM_SECRETS = Path(__file__).resolve().parents[2] / "infra/modules/platform/secrets.tf"
 APP_S3_MODULE = IAM_MODULE.read_text().split('module "irsa_app_s3" {', maxsplit=1)[1]
-APP_S3_POLICY = (
-    IAM_MODULE.read_text()
-    .split('data "aws_iam_policy_document" "app_s3" {', maxsplit=1)[1]
-    .split('data "aws_iam_policy_document" "sandbox_fs_trust"', maxsplit=1)[0]
-)
-SANDBOX_PROXY_POLICY = (
-    IAM_MODULE.read_text()
-    .split('data "aws_iam_policy_document" "sandbox_proxy" {', maxsplit=1)[1]
-    .split('resource "aws_iam_policy" "sandbox_proxy"', maxsplit=1)[0]
-)
-SANDBOX_PROXY_IRSA = IAM_MODULE.read_text().split('module "irsa_sandbox_proxy" {', maxsplit=1)[1]
 PROXY_DEPLOYMENT = (
     HOSTED_TEMPLATE.read_text()
     .split("kind: Deployment\nmetadata:\n  name: ufo-sandbox-proxy", maxsplit=1)[1]
@@ -38,15 +27,16 @@ PROD_CONFIG = Path(__file__).resolve().parents[2] / "infra/envs/prod/ufo.tf"
 def test_app_s3_trusts_serve_in_every_ufo_namespace() -> None:
     assert 'assume_role_condition_test = "StringLike"' in APP_S3_MODULE
     assert 'namespace_service_accounts = ["ufo-*:ufo-serve"]' in APP_S3_MODULE
-    assert "sts:AssumeRole" not in APP_S3_POLICY
 
 
-def test_sandbox_proxy_identity_can_only_assume_the_mount_role() -> None:
-    assert 'actions   = ["sts:AssumeRole"]' in SANDBOX_PROXY_POLICY
-    assert "role/${local.name}-sandbox-fs" in SANDBOX_PROXY_POLICY
-    assert "s3:" not in SANDBOX_PROXY_POLICY
-    assert 'namespace_service_accounts = ["ufo-*:ufo-sandbox-proxy"]' in SANDBOX_PROXY_IRSA
-    assert "identifiers = [module.irsa_sandbox_proxy.iam_role_arn]" in IAM_MODULE.read_text()
+def test_platform_iam_grants_no_sandbox_identity() -> None:
+    """The sandbox reaches nothing under a cloud role: the workspace lives on the carrier's own
+    filesystem and artifact PUTs are presigned serve-side, so the platform carries no sandbox-fs
+    role, no proxy AssumeRole policy, and no proxy IRSA identity."""
+    module = IAM_MODULE.read_text()
+    assert "sandbox_fs" not in module
+    assert "sandbox_proxy" not in module
+    assert not re.search(r"sts:AssumeRole\b", module)
 
 
 def test_hosted_serve_receives_the_bedrock_region() -> None:
