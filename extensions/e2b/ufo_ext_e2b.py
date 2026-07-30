@@ -136,10 +136,6 @@ def _egress_env(proxy: ProxyEndpoint, run_token: str) -> dict[str, str]:
     }
 
 
-def _live_id(lease: "_Lease | None") -> str | None:
-    return None if lease is None else lease.sandbox.sandbox_id
-
-
 class E2BCommandResult(Protocol):
     stdout: str
     stderr: str
@@ -243,7 +239,13 @@ class E2BCarrier:
         egress_env = _egress_env(spec.proxy, spec.run_token)
         self._evict_expired()
         live = self._live.get(spec.conversation_id)
-        resume_id = spec.resume_id if spec.resume_id is not None else _live_id(live)
+        resume_id = (
+            spec.resume_id
+            if spec.resume_id is not None
+            else live.sandbox.sandbox_id
+            if live is not None
+            else None
+        )
         opened = self.clock()
         sandbox = await self._resume_or_open(spec, resume_id)
         self._live[spec.conversation_id] = _Lease(sandbox, opened + SANDBOX_LEASE_SECONDS)
@@ -265,17 +267,12 @@ class E2BCarrier:
         conversation whose sandbox is gone answers absent rather than opening an empty one and
         persisting its id over the stored handle. No egress env — a read runs `sbxfs` and `cat`,
         nothing that leaves the box."""
-        resume_id = (
-            spec.resume_id
-            if spec.resume_id is not None
-            else _live_id(self._live.get(spec.conversation_id))
-        )
-        if resume_id is None:
+        if spec.resume_id is None:
             return None
         opened = self.clock()
         try:
             sandbox = await self.sdk.connect(
-                resume_id, timeout=SANDBOX_LEASE_SECONDS, api_key=self.api_key
+                spec.resume_id, timeout=SANDBOX_LEASE_SECONDS, api_key=self.api_key
             )
         except SandboxNotFoundException:
             self._live.pop(spec.conversation_id, None)
@@ -450,13 +447,7 @@ class E2BCarrier:
             return lease.sandbox
         self._live.pop(handle.conversation_id, None)
         span = max(SANDBOX_LEASE_SECONDS, needed_seconds)
-        try:
-            sandbox = await self.sdk.connect(
-                handle.container_id, timeout=span, api_key=self.api_key
-            )
-        except SandboxNotFoundException:
-            self._drop(handle.conversation_id, "connect")
-            raise
+        sandbox = await self.sdk.connect(handle.container_id, timeout=span, api_key=self.api_key)
         self._live[handle.conversation_id] = _Lease(sandbox, renewed + span)
         log(
             "sandbox.e2b.leased",

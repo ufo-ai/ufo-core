@@ -2,9 +2,9 @@
 
 The e2b service is not reachable from CI, so a fake plays the provider — it records the calls the
 carrier makes and returns canned results in the SDK's exact shape (a create/connect factory whose
-sandboxes carry `commands`, `files`, and `pause`). Every assertion is the carrier's own behavior:
-the handle it returns, the ExecResult it maps a run, a non-zero exit, and a timeout into, the bytes
-it exports, the create-or-resume it picks, and that `serve`'s `[sandbox] backend = "e2b"` resolves
+sandboxes carry `commands` and `files`). Every assertion is the carrier's own behavior: the handle
+it returns, the ExecResult it maps a run, a non-zero exit, and a timeout into, the bytes it reads
+out, the create-or-resume it picks, and that `serve`'s `[sandbox] backend = "e2b"` resolves
 this extension-contributed carrier — never the fake, which is only the dependency it stands in for.
 The exceptions raised are the real e2b and transport types, so the mapping is exercised against the
 classes the live SDK throws, and the fake keeps each sandbox's lease on the same clock the carrier
@@ -201,12 +201,7 @@ class _Sandbox:
     provider: _Provider
     commands: _Commands
     files: _Files
-    paused: int = 0
     traffic_access_token: str | None = "traffic-tok"
-
-    async def pause(self, **opts: object) -> bool:
-        self.paused += 1
-        return True
 
     def get_host(self, port: int) -> str:
         return f"{port}-{self.sandbox_id}.e2b.test"
@@ -912,9 +907,9 @@ async def test_spec_env_joins_the_exec_env() -> None:
 
 
 async def test_create_provisions_ca_then_workspace_as_root_on_every_branch() -> None:
-    """is ensured as root after the CA lands, on the fresh, resumed, and reconnected
-    paths alike — the first process to touch a sandbox is not always the one that created it, and
-    the sandbox user can neither create nor own a directory under root's ."""
+    """create ensures `/workspace` as root after the CA lands, on the fresh, resumed, and
+    reconnected paths alike — the first process to touch a sandbox is not always the one that
+    created it, and the sandbox user can neither create nor own a directory under root's `/`."""
     sdk = _Sdk()
     carrier = E2BCarrier(api_key="k", template="t", sdk=sdk)
     conversation = uuid4()
@@ -1073,3 +1068,35 @@ async def test_a_lease_renewal_on_a_lost_sandbox_sheds_the_lease_and_raises() ->
         await carrier.exec(handle, ("bash", "-lc", "true"), 30)
 
     assert conversation not in carrier._live
+
+
+async def test_attach_connects_to_the_named_id_even_when_the_cache_holds_another() -> None:
+    """attach answers for the id the stored handle names — the provider's own connect against
+    that id — even while this process's cache still leases a different sandbox of the same
+    conversation."""
+    sdk = _Sdk()
+    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk)
+    conversation = uuid4()
+    cached = await carrier.create(_spec(conversation))
+    named = await E2BCarrier(api_key="k", template="t", sdk=sdk).create(_spec(conversation))
+    assert cached.container_id != named.container_id
+
+    attached = await carrier.attach(replace(_spec(conversation), resume_id=named.container_id))
+
+    assert attached is not None
+    assert attached.container_id == named.container_id
+    assert sdk.connected[-1] == named.container_id
+
+
+async def test_attach_without_a_named_id_answers_none_never_the_cache() -> None:
+    """A conversation whose row holds no handle has no sandbox to read, even while this process's
+    cache still leases one — the row is the authority, and answering off the cache would hand a
+    reader a sandbox no row references."""
+    sdk = _Sdk()
+    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk)
+    conversation = uuid4()
+    await carrier.create(_spec(conversation))
+    connects = len(sdk.connected)
+
+    assert await carrier.attach(replace(_spec(conversation), resume_id=None)) is None
+    assert len(sdk.connected) == connects

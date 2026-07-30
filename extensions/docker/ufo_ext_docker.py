@@ -2,9 +2,10 @@
 
 Core's default is the local carrier; a deploy that sets `[sandbox] backend = "docker"` runs its
 sandboxes as sibling containers. `/workspace` is a host bind mount, so this carrier reclaims its
-own idle containers by stopping them on each create — memory is the contended resource, and a
-stopped container with its workspace persists for any later touch to start again, so a
-conversation whose turn was merely quiet survives its own reclaim at the cost of one restart. Core
+own idle containers by stopping them on each create — memory and bridge subnets are the contended
+resources, so the stop releases the conversation's network with it, and a stopped container with
+its workspace persists for any later touch to reconnect and start again: a conversation whose
+turn was merely quiet survives its own reclaim at the cost of one restart. Core
 reclaims nothing, because for a carrier whose `/workspace` lives inside its sandbox the container
 *is* the workspace. Every command runs through `docker exec`
 under its turn's egress env: HTTP(S)_PROXY points at the egress proxy running on the host, reached
@@ -16,8 +17,8 @@ later turn must not run under an earlier turn's token."""
 
 import asyncio
 import time
-from collections import Counter
-from collections.abc import AsyncIterator, Callable
+from collections import Counter, defaultdict
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from dataclasses import dataclass, field
 from uuid import UUID
 
@@ -41,8 +42,10 @@ IDLE_RECLAIM_SECONDS = 1800
 NAME_CONFLICT_MARKER = "is already in use"
 NOT_RUNNING_MARKER = "is not running"
 NETWORK_EXISTS_MARKER = "already exists"
+NO_SUCH_NETWORK_MARKER = "not found"
 STOP_TIMEOUT_SECONDS = 30
 START_TIMEOUT_SECONDS = 30
+UUID_NAME_PATTERN = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 DEFAULT_NETWORK = "ufo-sandbox"
 HOST_GATEWAY_NAME = "host.docker.internal"
 HOST_GATEWAY_MAPPING = f"{HOST_GATEWAY_NAME}:host-gateway"
@@ -72,6 +75,9 @@ class DockerCarrier:
     clock: Callable[[], float] = time.monotonic
     _touched: dict[UUID, float] = field(default_factory=dict)
     _inflight: Counter[UUID] = field(default_factory=Counter)
+    _lifecycle: defaultdict[UUID, asyncio.Lock] = field(
+        default_factory=lambda: defaultdict(asyncio.Lock)
+    )
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         """Create-or-attach the conversation's container. The egress env is never baked into the
@@ -173,13 +179,21 @@ class DockerCarrier:
 
     async def attach(self, spec: SandboxSpec) -> SandboxHandle | None:
         """The conversation's container when one exists — started again if reclaim stopped it, the
-        same shape as resuming a provider-paused sandbox — else None, never a fresh one. No egress
-        env: a read runs `sbxfs` and `cat`, nothing that leaves the box."""
+        same shape as resuming a provider-paused sandbox — else None, never a fresh one, and None
+        again whenever the revive cannot deliver a running container, refused or raising: a read
+        promises absence, never an error. No egress env: a read runs `sbxfs` and `cat`, nothing
+        that leaves the box."""
         name = f"{CONTAINER_NAME_PREFIX}{spec.conversation_id}"
         running = await self._running_id(name)
         if running is None:
             stopped = await self._stopped_id(name)
-            if stopped is None or not await self._revive(spec.conversation_id, stopped):
+            if stopped is None:
+                return None
+            try:
+                revived = await self._revive(spec.conversation_id, stopped)
+            except RuntimeError:
+                return None
+            if not revived:
                 return None
             running = stopped
         return SandboxHandle(
@@ -190,38 +204,54 @@ class DockerCarrier:
         )
 
     async def _reclaim_idle(self, opening: UUID) -> None:
-        """Stop the containers not touched for `IDLE_RECLAIM_SECONDS`, adopting any this process
-        does not know.
+        """Release the conversations not touched for `IDLE_RECLAIM_SECONDS`, adopting any this
+        process does not know: the `ufo-sbx-*` containers the daemon lists as up — running or
+        paused, both holding memory — and the per-conversation networks (the bridge subnets), all
+        left by a process that restarted or by this one's own crash. Release is terminal — a
+        stopped container holds neither resource and appears in neither scan, so nothing is ever
+        adopted twice — and each conversation's touch entry leaves with its release, so the map
+        stays bounded by what actually holds a resource.
 
         A stop, never a removal: the carrier has no view of turn liveness, so a conversation whose
         turn is merely quiet — long reasoning, a round of subagent orchestration — must survive its
-        own reclaim. Stopping frees the memory an idle container holds (the contended resource)
-        while the container and its bind-mounted workspace persist, and every later touch — the
-        next create, a mid-turn exec/write/read, a browse — starts it again and continues. The
+        own reclaim. The container and its bind-mounted workspace persist, and every later touch —
+        the next create, a mid-turn exec/write/read, a browse — starts it again and continues. The
         worst a wrong reclaim can cost is one restart, never a failed tool call.
 
         A create is the trigger rather than an interval because the unit of idleness here is a
-        container on this host, not a workspace — the shape a scheduled job fans out over. It is a
+        resource on this host, not a workspace — the shape a scheduled job fans out over. It is a
         safe trigger: the conversation being opened is touched before anything else, so this never
-        fires on its own work. A running `ufo-sbx-*` container this process has no touch for — left
-        by a process that restarted — is adopted at the current clock and stopped one idle span
-        later; one already stopped needs nothing. Concurrent creates race this scan, so each
-        candidate's staleness is re-checked after every await (a touch that landed meanwhile wins),
-        the synchronous delete before the stop is the reservation that makes the stop
-        exactly-once, and a failed stop puts the stale entry back so the next create retries it
-        instead of granting a fresh idle span."""
+        fires on its own work. Concurrent creates race this scan, so each candidate's staleness is
+        re-checked after every await (a touch that landed meanwhile wins), the synchronous delete
+        before the release is the reservation that makes the release exactly-once, the lifecycle
+        lock orders it whole against any revive, and a release that failed anywhere puts the stale
+        entry back so the next create retries it instead of leaving a subnet held with no
+        record."""
         self._touched[opening] = self.clock()
         code, stdout, stderr = await _docker(
-            "ps", "--filter", f"name=^{CONTAINER_NAME_PREFIX}", "--format", "{{.Names}}"
+            "ps",
+            "--filter",
+            f"name=^{CONTAINER_NAME_PREFIX}{UUID_NAME_PATTERN}$",
+            "--format",
+            "{{.Names}}",
         )
         if code != 0:
             raise RuntimeError(f"docker ps failed: {stderr.decode().strip()}")
-        for name in stdout.decode().split():
-            try:
-                conversation_id = UUID(name.removeprefix(CONTAINER_NAME_PREFIX))
-            except ValueError:
-                continue
-            self._touched.setdefault(conversation_id, self.clock())
+        held = [(stdout, CONTAINER_NAME_PREFIX)]
+        code, stdout, stderr = await _docker(
+            "network",
+            "ls",
+            "--filter",
+            f"name=^{self.network}-[0-9a-f]{{32}}$",
+            "--format",
+            "{{.Name}}",
+        )
+        if code != 0:
+            raise RuntimeError(f"docker network ls failed: {stderr.decode().strip()}")
+        held.append((stdout, f"{self.network}-"))
+        for listing, prefix in held:
+            for name in listing.decode().split():
+                self._touched.setdefault(UUID(name.removeprefix(prefix)), self.clock())
         stale = [
             conversation_id
             for conversation_id, touched in self._touched.items()
@@ -229,7 +259,7 @@ class DockerCarrier:
             and self.clock() - touched >= IDLE_RECLAIM_SECONDS
         ]
         for conversation_id in stale:
-            container_id = await self._running_id(f"{CONTAINER_NAME_PREFIX}{conversation_id}")
+            container_id = await self._held_id(f"{CONTAINER_NAME_PREFIX}{conversation_id}")
             touched = self._touched.get(conversation_id)
             if (
                 touched is None
@@ -238,14 +268,10 @@ class DockerCarrier:
             ):
                 continue
             del self._touched[conversation_id]
-            if container_id is not None:
-                code, _, _ = await _docker("stop", container_id, timeout_s=STOP_TIMEOUT_SECONDS)
-                if code != 0:
-                    self._touched.setdefault(conversation_id, touched)
-                    continue
-                network = self._network_name(conversation_id)
-                await _docker("network", "disconnect", network, container_id)
-                await _docker("network", "rm", network)
+            async with self._lifecycle[conversation_id]:
+                released = await self._release(conversation_id, container_id)
+            if not released:
+                self._touched.setdefault(conversation_id, touched)
 
     async def exec(
         self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
@@ -321,8 +347,8 @@ class DockerCarrier:
         container fails before the first byte, so a revive-and-restream never repeats a chunk."""
         self._inflight[handle.conversation_id] += 1
         self._touched[handle.conversation_id] = self.clock()
+        chunks, detail = self._read_started(handle, path)
         try:
-            chunks, detail = self._read_started(handle, path)
             async for chunk in chunks:
                 yield chunk
             if detail and NOT_RUNNING_MARKER in detail[0]:
@@ -333,18 +359,24 @@ class DockerCarrier:
             if detail:
                 raise FileNotFoundError(detail[0] or f"cannot read {path}")
         finally:
+            await chunks.aclose()
             self._inflight[handle.conversation_id] -= 1
             self._touched[handle.conversation_id] = self.clock()
 
     def _read_started(
         self, handle: SandboxHandle, path: str
-    ) -> tuple[AsyncIterator[bytes], list[str]]:
+    ) -> tuple[AsyncGenerator[bytes], list[str]]:
         """One `cat` attempt: the chunk stream, and a failure list one error lands in after the
         stream is drained — empty on success. Split so `read` can revive a stopped container and
-        re-stream without an async generator ever crossing its own retry."""
+        re-stream without an async generator ever crossing its own retry.
+
+        The kill belongs to abandonment alone. `docker exec` closes its pipes a beat before it
+        exits, so a drained stream can find the exit status not yet observed; killing there reaps
+        the status out from under the loop's watcher — `Popen.send_signal` polls first — which
+        reads back as exit 255 (measured), a successful cat turned into a phantom read failure."""
         failure: list[str] = []
 
-        async def stream() -> AsyncIterator[bytes]:
+        async def stream() -> AsyncGenerator[bytes]:
             process = await asyncio.create_subprocess_exec(
                 "docker",
                 "exec",
@@ -363,9 +395,11 @@ class DockerCarrier:
                 while chunk := await stdout.read(READ_CHUNK_BYTES):
                     yield chunk
                 detail = (await stderr.read()).decode(errors="replace").strip()
-            finally:
+            except BaseException:
                 if process.returncode is None:
                     process.kill()
+                raise
+            finally:
                 await process.wait()
             if process.returncode != 0:
                 failure.append(detail)
@@ -381,21 +415,53 @@ class DockerCarrier:
             "through a remote carrier (e2b)"
         )
 
+    async def _release(self, conversation_id: UUID, container_id: str | None) -> bool:
+        """Stop the container and free its network, reporting whether everything released — bridge
+        subnets are the host's finite resource (the daemon's default pools hold ~30), so a release
+        that failed anywhere is retried by the next create rather than leaving a subnet held with
+        no record. Runs under the conversation's lifecycle lock, so a revive can never interleave
+        between the stop and the removal and be left running with no network. The stop is what
+        frees the endpoint: the daemon removes a network out from under a stopped container, even
+        one a revive connected while stopped (measured), so no disconnect is needed, and a network
+        already gone is the state the removal was after."""
+        if container_id is not None:
+            code, _, _ = await _docker("stop", container_id, timeout_s=STOP_TIMEOUT_SECONDS)
+            if code != 0:
+                return False
+        code, _, stderr = await _docker("network", "rm", self._network_name(conversation_id))
+        return code == 0 or NO_SUCH_NETWORK_MARKER in stderr.decode()
+
     async def _revive(self, conversation_id: UUID, container_id: str) -> bool:
         """Start a container reclaim stopped, reporting whether it runs again — the recovery every
         touch of a stopped container shares: the next create, a mid-turn exec/write/read whose
         container was stopped underneath it, a browse. Reclaim released the conversation's network
-        with the stop (bridge subnets are the host's finite resource — the daemon's default pools
-        hold ~30), so the revive re-ensures it and reconnects before starting; a connect answering
-        already-connected is the state it was after. False (a container removed or corrupted out of
-        band) leaves the caller's own failure to surface."""
-        network = self._network_name(conversation_id)
-        await self._ensure_network(network)
-        code, _, stderr = await _docker("network", "connect", network, container_id)
-        if code != 0 and NETWORK_EXISTS_MARKER not in stderr.decode():
-            return False
-        code, _, _ = await _docker("start", container_id, timeout_s=START_TIMEOUT_SECONDS)
-        return code == 0
+        with the stop, so the revive re-ensures it and reconnects before starting; a connect
+        answering already-connected is the state it was after. False — the connect or the start
+        refused, the shape of a container removed or corrupted out of band — leaves the caller's
+        own failure to surface; a daemon that cannot give the network back raises instead, and
+        `attach` alone converts that to absence, because only the read path promises None over an
+        error. The conversation's lifecycle lock orders
+        this whole sequence against reclaim's stop-and-release, so neither ever interleaves inside
+        the other."""
+        async with self._lifecycle[conversation_id]:
+            self._touched[conversation_id] = self.clock()
+            network = self._network_name(conversation_id)
+            await self._ensure_network(network)
+            code, _, stderr = await _docker("network", "connect", network, container_id)
+            if code != 0 and NETWORK_EXISTS_MARKER not in stderr.decode():
+                return False
+            code, _, _ = await _docker("start", container_id, timeout_s=START_TIMEOUT_SECONDS)
+            return code == 0
+
+    async def _held_id(self, name: str) -> str | None:
+        """The id holding `name` in any state — running, paused, exited — else None: what a release
+        must stop before its network can go, whatever state reclaim finds it in (`docker stop`
+        handles a paused container, measured)."""
+        code, stdout, stderr = await _docker("ps", "-aq", "--filter", f"name=^{name}$")
+        if code != 0:
+            raise RuntimeError(f"docker ps failed: {stderr.decode().strip()}")
+        found = stdout.decode().strip()
+        return found or None
 
     async def _stopped_id(self, name: str) -> str | None:
         """The id of `name`'s exited container, else None — what reclaim leaves behind, and what a
