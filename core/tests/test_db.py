@@ -172,7 +172,7 @@ def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None
         heads = scripts.get_heads()
     assert scripts.get_revision("memory_0008").dependencies == "0049"
     assert {
-        "0059",
+        "0060",
         "index_default_0002",
         "memory_0012",
         "sample_ext_note_0001",
@@ -216,8 +216,61 @@ def test_one_memory_surface_advances_both_old_heads(tmp_path: Path, graph_instal
             row[0] for row in connection.execute("select version_num from alembic_version")
         }
     assert not {"graph_entity", "graph_edge"} & tables
-    assert "0059" in revisions
+    assert "0060" in revisions
     assert "knowledge_graph_0001" not in revisions
+
+
+def test_intent_admission_downgrade_rewrites_to_internal(tmp_path: Path) -> None:
+    """0060's downgrade parks intent turns on the inert source: 'internal' matches no member-turn
+    projection and no seat gate, so a machine envelope never renders as a member's message."""
+    database_path = tmp_path / "intent-downgrade.db"
+    url = f"sqlite+aiosqlite:///{database_path}"
+    config = Config()
+    config.set_main_option("script_location", str(MIGRATIONS_DIR))
+    config.set_main_option("version_locations", str(MIGRATIONS_DIR / "versions"))
+    config.set_main_option("path_separator", "os")
+    config.set_main_option("sqlalchemy.url", url)
+    command.upgrade(config, "0060")
+    workspace_id, agent_id, conversation_id, turn_id = uuid4(), uuid4(), uuid4(), uuid4()
+    now = datetime(2026, 7, 29, tzinfo=UTC).isoformat()
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "insert into workspace (id, created_at, updated_at) values (?, ?, ?)",
+            (workspace_id.hex, now, now),
+        )
+        connection.execute(
+            "insert into agent (id, workspace_id, name, prompt, model, is_main, created_at, "
+            "updated_at) values (?, ?, 'assistant', 'p', 'auto', 1, ?, ?)",
+            (agent_id.hex, workspace_id.hex, now, now),
+        )
+        connection.execute(
+            "insert into conversation (id, workspace_id, agent_id, surface, queue_key, "
+            "created_at, updated_at) values (?, ?, ?, 'web', 'intent/a/b', ?, ?)",
+            (conversation_id.hex, workspace_id.hex, agent_id.hex, now, now),
+        )
+        connection.execute(
+            "insert into turn (id, workspace_id, conversation_id, agent_id, seq, status, "
+            "inbound, admission_source, created_at, updated_at) "
+            "values (?, ?, ?, ?, 1, 'queued', '{}', 'intent', ?, ?)",
+            (turn_id.hex, workspace_id.hex, conversation_id.hex, agent_id.hex, now, now),
+        )
+    command.downgrade(config, "0058")
+    with sqlite3.connect(database_path) as connection:
+        source = connection.execute(
+            "select admission_source from turn where id = ?", (turn_id.hex,)
+        ).fetchone()[0]
+        refused = False
+        try:
+            connection.execute(
+                "insert into turn (id, workspace_id, conversation_id, agent_id, seq, status, "
+                "inbound, admission_source, created_at, updated_at) "
+                "values (?, ?, ?, ?, 2, 'queued', '{}', 'intent', ?, ?)",
+                (uuid4().hex, workspace_id.hex, conversation_id.hex, agent_id.hex, now, now),
+            )
+        except sqlite3.IntegrityError:
+            refused = True
+    assert source == "internal"
+    assert refused
 
 
 def test_memory_as_of_migration_repairs_page_derived_rows(tmp_path: Path) -> None:

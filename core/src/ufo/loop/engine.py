@@ -93,6 +93,7 @@ from ufo.schema.records import (
     ReasoningEffort,
     TerminalFrame,
     TerminalStatus,
+    ToolIntent,
     Turn,
     TurnContext,
     Usage,
@@ -403,6 +404,12 @@ class TurnParked(Exception):
     def __init__(self, message: str) -> None:
         super().__init__(message)
         self.message = message
+
+
+class IntentRefused(Exception):
+    """A prepared intent's tool dispatch answered with an error result — the kind's own refusal
+    (admin gate, validation, unknown name) — so the intent applied nothing. Carries the refusal
+    text into the terminal frame's error_message for the submitting panel."""
 
 
 def _dispatch_segments(
@@ -851,6 +858,75 @@ class TurnEngine:
                 await self._commit("failed", usage_events, error=error)
                 await self._release_unabsorbed(tuple(absorbed_ids))
                 await self._persist_inbound(tuple(arrival_log), founding_denial)
+                raise
+            finally:
+                await context.cleanup.drain()
+
+    async def run_intent(self) -> TerminalFrame | None:
+        """Run a prepared-intent turn: dispatch the one tool call the inbound envelope names,
+        verbatim, and commit its result — no model round, so the submitted values apply exactly or
+        the kind's refusal returns, never a paraphrase. The dispatch is the same guarded step a
+        model call takes: `pre_tool_use` may deny or fold arguments, `post_tool_use`/
+        `post_tool_use_failure` fire on the result, member authority binds through the founding
+        message, and the step memoizes across crash recovery. The turn-shaped hooks do not fire —
+        `user_prompt_submit` polices member prose and the inbound is a machine envelope; `stop`
+        observes a model's answer and none exists; the compaction pair has no window. Spend is
+        enforced at admission, where a capped member's intent parks — a running intent makes no
+        model call, so it never crosses the per-round check. Arrivals cannot exist: an intent
+        admission never folds into a live turn, so this turn's queue is empty by construction and
+        the per-conversation partition runs a member's intents one at a time in order."""
+        with turn_span(self.turn.id, self.turn.conversation_id, self.turn.traceparent):
+            emit_metric("turn_started_total")
+            log("turn.started", turn_id=str(self.turn.id), seq=self.turn.seq, prompt_digest="")
+            usage_events: list[Usage] = []
+            context = ToolContext(
+                sandbox=self.sandbox,
+                blob=self.blob,
+                turn=self.turn,
+                agent=self.agent,
+                spawn=self.spawn,
+                subagents=self.subagents,
+                speaker_member_id=None,
+                audience=self.audience,
+                on_behalf_of_member_id=self.turn.on_behalf_of_member_id,
+                artifact_token_secret=self.artifact_token_secret,
+                grants=self.grants,
+                skills=self.skills,
+                loaded_skills=self.compaction.loaded_skills,
+                cdp_provider=self.cdp_provider,
+                search_provider=self.search_provider,
+                connectors=self.connectors,
+                requestable_credentials=self.requestable_credentials,
+                public_base_url=self.public_base_url,
+            )
+            try:
+                if not await self._mark_running():
+                    return await self._resolve_unclaimed()
+                intent = ToolIntent.model_validate_json(self.turn.inbound)
+                call = ToolUseBlock(
+                    id=f"intent-{self.turn.id.hex[:12]}",
+                    name=intent.tool,
+                    input={**intent.input, REQUESTED_BY: str(self.turn.id)},
+                )
+                requesters = {
+                    self.turn.id: ActiveMessage(
+                        member_id=self.turn.speaker_member_id, rendered=self.turn.inbound
+                    )
+                }
+                bound_context, bound_call = await self._bind_requester(context, call, requesters)
+                result = await self._dispatch_step(bound_context, bound_call)
+                if result.is_error:
+                    frame = await self._commit(
+                        "failed", usage_events, error=IntentRefused(result.text)
+                    )
+                else:
+                    frame = await self._commit("done", usage_events, answer=result.text)
+                await self._persist_transcript(await self._load_messages(), result.text, "", "")
+                return frame
+            except (DBOSWorkflowCancelledError, asyncio.CancelledError):
+                raise
+            except Exception as error:
+                await self._commit("failed", usage_events, error=error)
                 raise
             finally:
                 await context.cleanup.drain()

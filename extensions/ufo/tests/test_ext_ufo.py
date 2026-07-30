@@ -437,6 +437,7 @@ async def ufo(
         dbos_client,
         "",
         None,
+        ("auto", "claude-opus-4-8", "claude-sonnet-5"),
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
     )
@@ -467,6 +468,7 @@ async def shared_ufo(
         dbos_client,
         "",
         None,
+        ("auto", "claude-opus-4-8", "claude-sonnet-5"),
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
     )
@@ -735,6 +737,7 @@ async def test_secret_fulfillment_lands_in_the_store_never_the_transcript(
         dbos_client,
         "",
         None,
+        ("auto", "claude-opus-4-8", "claude-sonnet-5"),
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
     )

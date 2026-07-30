@@ -57,7 +57,7 @@ from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import ProxyEndpoint
 from ufo.schema import tables
-from ufo.schema.records import WRITEBACK_PENDING, TerminalFrame, TurnContext
+from ufo.schema.records import WRITEBACK_PENDING, TerminalFrame, ToolIntent, TurnContext
 from ufo.surfaces.admission import Admission, MemberAdmission
 from ufo.surfaces.hub_tail import HubTailer
 from ufo.transcript import (
@@ -217,6 +217,8 @@ def _context(
         _skills=EMPTY_SKILL_REGISTRY,
         _user_skills=no_user_skills,
         _public_base_url="https://ufo.example.test",
+        _deploy_sandbox_internet=False,
+        _models=("auto", "claude-opus-4-8", "claude-sonnet-5"),
     )
 
 
@@ -777,6 +779,46 @@ async def test_conversation_for_refuses_a_foreign_agent(db: None, tmp_path) -> N
     with pytest.raises(ValueError, match="not an agent of this workspace"):
         await context.conversation_for("stray-key", SHARED_AUDIENCE, agent_id=foreign_agent)
     assert await context.find_conversation("stray-key") is None
+
+
+async def test_an_intent_admission_stamps_the_turn_and_requires_a_speaker(
+    db: None, tmp_path
+) -> None:
+    """Both ends of the intent admission: the turn row carries the 'intent' source with the
+    envelope as its inbound (the audit record the engine dispatches verbatim); a speakerless
+    intent and a body disagreeing with the envelope are both refused, and neither refusal admits
+    a turn."""
+    workspace_id, _, member_id = await _seed(member_email="bee@example.com")
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+    conversation_id = await context.conversation_for("intent/one", conversation_audience(member_id))
+    intent = ToolIntent(
+        tool="object_apply",
+        input={"manifest": "kind: agent", "user_description": "apply settings"},
+    )
+    admitted = await context.admit(
+        conversation_id, intent.model_dump_json(), speaker_member_id=member_id, intent=intent
+    )
+    turn, _, _ = await _load_turn(admitted.turn_id)
+    assert turn.admission_source == "intent"
+    assert turn.speaker_member_id == member_id
+    assert ToolIntent.model_validate_json(turn.inbound) == intent
+
+    async def turn_count() -> int:
+        async with workspace_tx() as connection:
+            return (
+                await connection.execute(sa.select(sa.func.count()).select_from(tables.turn))
+            ).scalar_one()
+
+    admitted_turns = await turn_count()
+    with pytest.raises(ValueError, match="requires a speaking member"):
+        await context.admit(
+            conversation_id, intent.model_dump_json(), speaker_member_id=None, intent=intent
+        )
+    with pytest.raises(ValueError, match="body and intent disagree"):
+        await context.admit(
+            conversation_id, "member prose", speaker_member_id=member_id, intent=intent
+        )
+    assert await turn_count() == admitted_turns
 
 
 async def test_admitted_context_round_trips_to_the_loaded_turn(db: None, tmp_path) -> None:

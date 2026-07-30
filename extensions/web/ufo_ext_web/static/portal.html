@@ -53,9 +53,24 @@
                          vertical-align: baseline; }
   #panel th { font-size: 12px; opacity: 0.6; font-weight: 600; }
   #panel .empty { display: block; margin: 40px auto; }
+  #panel section { margin-bottom: 22px; max-width: 76ch; }
+  #panel section h2 { font-size: 13px; margin: 0 0 6px; opacity: 0.7; }
+  #panel .field { margin-bottom: 12px; }
+  #panel .field label { display: block; font-weight: 600; margin-bottom: 2px; }
+  #panel .hint { font-size: 12px; opacity: 0.6; margin: 4px 0 12px; max-width: 64ch; }
+  #panel select { max-width: 40ch; padding: 8px 10px; border-radius: 8px; font: inherit;
+                 background: Field; color: FieldText;
+                 border: 1px solid color-mix(in srgb, CanvasText 25%, transparent); }
+  #panel input[type="text"] { width: 100%; max-width: 40ch; padding: 8px 10px;
+                 border-radius: 8px; font: inherit; background: Field; color: FieldText;
+                 border: 1px solid color-mix(in srgb, CanvasText 25%, transparent); }
+  #panel pre { overflow-x: auto; padding: 12px; border-radius: 8px; white-space: pre-wrap;
+               background: color-mix(in srgb, CanvasText 6%, transparent);
+               font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  #panel .result { margin-top: 10px; }
   #panel h2 { font-size: 13px; opacity: 0.7; margin: 14px 0 4px; }
-  #panel form { display: flex; gap: 8px; margin-bottom: 12px; }
-  #panel form input { flex: 1; padding: 8px 10px; border-radius: 8px; font: inherit;
+  #panel form.search { display: flex; gap: 8px; margin-bottom: 12px; }
+  #panel form.search input { flex: 1; padding: 8px 10px; border-radius: 8px; font: inherit;
                       border: 1px solid color-mix(in srgb, CanvasText 25%, transparent);
                       background: Field; color: FieldText; }
   #log { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column;
@@ -148,6 +163,7 @@ const composer = document.getElementById('composer');
 const input = document.getElementById('msg');
 const send = composer.querySelector('button');
 let agents = [];
+let member = null;
 let selected = null;
 const chats = new Map();
 
@@ -184,8 +200,8 @@ function emptyState(text) {
   log.appendChild(el);
 }
 
-const TABS = ['chat', 'tasks', 'connections', 'credentials', 'sources', 'skills', 'memory',
-  'usage'];
+const TABS = ['chat', 'overview', 'tasks', 'connections', 'credentials', 'sources', 'skills',
+  'memory', 'usage'];
 let tab = 'chat';
 let panelLoad = 0;
 
@@ -276,13 +292,16 @@ function restoreChatPane() {
   main.replaceChildren(head, tabs, log, panel, composer);
 }
 
-function renderSidebar(member) {
+function wireMemberChrome() {
   document.getElementById('member-email').textContent =
     member.email + (member.admin ? ' · admin' : '');
   document.getElementById('spend').hidden = !member.admin;
   const admin = document.getElementById('admin');
   admin.hidden = !member.admin;
   admin.addEventListener('click', showAdmin);
+}
+
+function renderSidebar() {
   list.replaceChildren(...agents.map((agent) => {
     const item = document.createElement('li');
     const button = document.createElement('button');
@@ -293,6 +312,7 @@ function renderSidebar(member) {
     model.className = 'model mono';
     model.textContent = agent.model;
     button.append(name, model);
+    button.setAttribute('aria-current', selected !== null && selected.id === agent.id);
     button.addEventListener('click', () => select(agent));
     item.appendChild(button);
     item.dataset.id = agent.id;
@@ -373,11 +393,11 @@ function renderTabs() {
   }));
 }
 
-function fail(load, text) {
+function fail(load, text, notice) {
   if (load !== panelLoad) return;
   const failed = document.createElement('span');
   failed.className = 'empty';
-  failed.textContent = text;
+  failed.textContent = notice ? notice + ' The panel could not be re-read: ' + text : text;
   panel.appendChild(failed);
 }
 
@@ -424,6 +444,7 @@ async function renderSkills(agent, load) {
 
 async function renderMemory(agent, load, query) {
   const form = document.createElement('form');
+  form.className = 'search';
   const search = document.createElement('input');
   search.placeholder = 'Search memory…';
   search.value = query || '';
@@ -509,7 +530,7 @@ async function renderUsage(agent, load) {
   }
 }
 
-async function selectTab(name, memoryQuery) {
+async function selectTab(name, detail) {
   tab = name;
   const load = ++panelLoad;
   renderTabs();
@@ -524,8 +545,9 @@ async function selectTab(name, memoryQuery) {
   }
   const agent = selected;
   panel.replaceChildren();
+  if (name === 'overview') { await renderOverview(agent, load, detail); return; }
   if (name === 'skills') { await renderSkills(agent, load); return; }
-  if (name === 'memory') { await renderMemory(agent, load, memoryQuery); return; }
+  if (name === 'memory') { await renderMemory(agent, load, detail); return; }
   if (name === 'usage') { await renderUsage(agent, load); return; }
   const spec = PANELS[name];
   let entries;
@@ -550,12 +572,152 @@ async function selectTab(name, memoryQuery) {
   panel.appendChild(table(spec.columns, entries.map((entry) => row(...spec.row(entry)))));
 }
 
-async function select(agent, name, memoryQuery) {
-  if (!head.isConnected) restoreChatPane();
-  selected = agent;
-  for (const item of list.children) {
-    item.firstChild.setAttribute('aria-current', item.dataset.id === agent.id);
+function panelSection(title) {
+  const section = document.createElement('section');
+  const heading = document.createElement('h2');
+  heading.textContent = title;
+  section.appendChild(heading);
+  panel.appendChild(section);
+  return section;
+}
+
+function specField(key, prop, value, options) {
+  const field = document.createElement('div');
+  field.className = 'field';
+  const label = document.createElement('label');
+  label.textContent = key;
+  field.appendChild(label);
+  let widget;
+  if (options) {
+    widget = document.createElement('select');
+    for (const option of options) {
+      const entry = document.createElement('option');
+      entry.value = entry.textContent = option;
+      entry.selected = option === value;
+      widget.appendChild(entry);
+    }
+  } else if (prop.type === 'boolean') {
+    widget = document.createElement('input');
+    widget.type = 'checkbox';
+    widget.checked = value === true;
+  } else {
+    widget = document.createElement('input');
+    widget.type = 'text';
+    widget.value = value === undefined || value === null ? '' : String(value);
   }
+  widget.dataset.key = key;
+  label.htmlFor = widget.id = 'spec-' + key;
+  field.appendChild(widget);
+  return field;
+}
+
+async function renderOverview(agent, load, notice) {
+  panel.replaceChildren();
+  let data;
+  try {
+    const res = await fetch(BASE + '/agents/' + agent.id + '/overview',
+      { credentials: 'same-origin' });
+    if (load !== panelLoad) return;
+    if (!res.ok) {
+      fail(load, 'Error ' + res.status + ' — reload to retry.', notice);
+      return;
+    }
+    data = await res.json();
+  } catch (err) {
+    fail(load, 'Network error — try again.', notice);
+    return;
+  }
+  if (load !== panelLoad) return;
+  const identity = panelSection('Agent');
+  const facts = document.createElement('div');
+  facts.className = 'mono';
+  facts.textContent = [
+    data.agent.main ? 'main agent' : 'agent',
+    'installations: ' + (data.agent.surfaces.length ? data.agent.surfaces.join(', ') : 'none'),
+    'updated ' + data.agent.updated_at.slice(0, 16).replace('T', ' '),
+  ].join(' · ');
+  identity.appendChild(facts);
+
+  const settings = panelSection('Settings');
+  const form = document.createElement('form');
+  const properties = data.spec_schema.properties || {};
+  for (const key of Object.keys(properties)) {
+    form.appendChild(specField(
+      key, properties[key], data.spec[key], key === 'model' ? data.models : null));
+  }
+  if (!data.deploy.sandbox_internet) {
+    const ceiling = document.createElement('div');
+    ceiling.className = 'hint';
+    ceiling.textContent = 'This deploy grants no sandbox public internet — the agent setting '
+      + 'narrows a capability that is currently off.';
+    form.appendChild(ceiling);
+  }
+  const save = document.createElement('button');
+  save.type = 'submit';
+  save.className = 'send';
+  save.textContent = 'Save';
+  form.appendChild(save);
+  const result = document.createElement('div');
+  result.className = 'result mono';
+  if (notice) result.textContent = notice;
+  form.appendChild(result);
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    save.disabled = true;
+    const spec = {};
+    for (const widget of form.querySelectorAll('input[data-key], select[data-key]')) {
+      spec[widget.dataset.key] = widget.type === 'checkbox' ? widget.checked : widget.value;
+    }
+    let submitted;
+    try {
+      submitted = await fetch(BASE + '/agents/' + agent.id + '/intents', {
+        method: 'POST',
+        credentials: 'same-origin',
+        body: JSON.stringify({ verb: 'apply', kind: 'agent', name: data.agent.name, spec }),
+      });
+    } catch (err) {
+      result.textContent = 'Network error — try again.';
+      save.disabled = false;
+      return;
+    }
+    const outcome = await submitted.json().catch(() => null);
+    result.textContent = outcome && outcome.message
+      ? outcome.message
+      : 'Error ' + submitted.status + ' — try again.';
+    save.disabled = false;
+    if (outcome && outcome.applied) {
+      agent.model = spec.model || agent.model;
+      renderSidebar();
+      if (selected !== agent) return;
+      renderHead(agent);
+      if (tab === 'overview') selectTab('overview', outcome.message);
+    }
+  });
+  settings.appendChild(form);
+
+  const prompt = panelSection('Prompt');
+  const digest = document.createElement('div');
+  digest.className = 'hint mono';
+  digest.textContent = 'digest ' + data.agent.prompt_digest + ' — prompt changes go through the '
+    + 'governed proposal path in chat';
+  prompt.appendChild(digest);
+  const text = document.createElement('pre');
+  text.textContent = data.agent.prompt;
+  prompt.appendChild(text);
+
+  if (data.audience) {
+    const audience = panelSection('Web audience');
+    const emails = document.createElement('div');
+    emails.className = 'mono';
+    emails.textContent = data.audience.length
+      ? data.audience.join(', ')
+      : 'no member grants — admins only';
+    audience.appendChild(emails);
+  }
+}
+
+
+function renderHead(agent) {
   head.replaceChildren();
   const title = document.createElement('h1');
   title.textContent = agent.name;
@@ -563,10 +725,19 @@ async function select(agent, name, memoryQuery) {
   model.className = 'model mono';
   model.textContent = agent.model;
   head.append(title, model);
+}
+
+async function select(agent, name, detail) {
+  if (!head.isConnected) restoreChatPane();
+  selected = agent;
+  for (const item of list.children) {
+    item.firstChild.setAttribute('aria-current', item.dataset.id === agent.id);
+  }
+  renderHead(agent);
   const state = chatState(agent.id);
   renderChat(agent);
   syncComposer();
-  await selectTab(name || 'chat', memoryQuery);
+  await selectTab(name || 'chat', detail);
   if (tab === 'chat' && state.messages === null) {
     const res = await fetch(BASE + '/agents/' + agent.id + '/transcript',
       { credentials: 'same-origin' });
@@ -737,7 +908,9 @@ async function boot() {
   agents = payload.agents;
   nav.hidden = false;
   main.hidden = false;
-  renderSidebar(payload.member);
+  member = payload.member;
+  wireMemberChrome();
+  renderSidebar();
   if (!agents.length) {
     composer.style.display = 'none';
     emptyState('No agents are shared with you yet. Ask a workspace admin for access.');

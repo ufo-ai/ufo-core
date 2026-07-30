@@ -384,7 +384,7 @@ allocation, delivery registration, and enqueue recovery remain one implementatio
 | Surface | Home | Delivery | Identity | Conversation key |
 |---|---|---|---|---|
 | CLI | core | live (hub tail) | member token | session (private) |
-| Web | `extensions/web` | live (hub tail) | web session → member (adopted from CLI) | agent/email (private; one conversation per member per selected agent) |
+| Web | `extensions/web` | live (hub tail) | web session → member (adopted from CLI) | agent/email (private; one chat conversation per member per selected agent) + intent/agent/email (the member's prepared-intent lane to that agent) |
 | Slackbot | `extensions/slack` | durable (writeback) | Slack user → member (linked; a Slack-confirmed same-domain email joins as new) | channel:thread_ts; public = shared, private channel/MPIM = room, DM = member, Slack Connect = foreign |
 | Debug | `extensions/debugger` | live (hub tail) | gateway bearer whose email domain is `OPERATOR_EMAIL_DOMAIN`; `?ws=` re-scopes to any workspace | — (read-only; admits nothing) |
 | Memory explorer | `extensions/memory` | live (page + JSON read) | gateway bearer whose email domain is `OPERATOR_EMAIL_DOMAIN`; `?ws=` re-scopes to any workspace | — (read-only; admits nothing) |
@@ -401,7 +401,12 @@ selected agent carries read projections shaped by the same contracts chat enforc
 tasks (creator sees content, an admin management metadata, others nothing), its loadable skills
 (the composition a turn loads), memory search under the viewer's own subjects with
 source-derived pages fenced by the selected agent's source grants (the same reader a turn's tools
-search under), and its rolling-window spend beside its agent-scoped caps.
+search under), and its rolling-window spend beside its agent-scoped caps. A panel mutation is a
+**prepared intent**: the form's structured intent is admitted as a turn on the member's one
+durable intent conversation with that agent and dispatched verbatim to the typed object verb — no
+model round, no fold into a live chat turn — so a submit applies exactly or returns the kind's
+refusal, the turn is the audit record, and the per-conversation partition runs a member's intents
+one at a time in order.
 
 The debug and memory-explorer surfaces are the operator-audience surfaces — the `ufoctl`-verbs
 audience, not a member action. They share one operator web session (`ufo.sdk.operator`, one

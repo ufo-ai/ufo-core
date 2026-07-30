@@ -245,6 +245,7 @@ def _check_surfaces(manifest: Manifest, store: CredentialStore, tmp_path: Path) 
         _StubDbos(),
         "",
         None,
+        ("auto", "claude-opus-4-8", "claude-sonnet-5"),
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
     )

@@ -79,6 +79,7 @@ from ufo.loop.queue import Runtime, init_runtime
 from ufo.loop.subagents import SubagentRegistry
 from ufo.memory import DEFAULT_MEMORY_SEARCH_PROVIDER, MemorySearch
 from ufo.models.catalog_skill import model_catalog_skill
+from ufo.models.interface import AUTO_MODEL
 from ufo.models.pricing import Pricing
 from ufo.models.registry import model_registry
 from ufo.o11y import init_o11y, log
@@ -263,6 +264,7 @@ def run() -> None:
         dbos_client,
         artifact_secret,
         config.connect.public_base_url,
+        (AUTO_MODEL, *sorted(registry.specs)),
         skills=skills,
         user_skills=lambda: turn_runtime_skills(manifests, credentials, index, embed),
         memory=memory,
@@ -773,6 +775,7 @@ def _mount_shared_surfaces(
     dbos_client: DBOSClient,
     artifact_secret: str,
     public_base_url: str | None,
+    models: tuple[str, ...],
     *,
     skills: SkillRegistry,
     user_skills: "Callable[[], Awaitable[tuple[RuntimeSkill, ...]]]",
@@ -795,6 +798,7 @@ def _mount_shared_surfaces(
     tailer = HubTailer(hub=hub)
     registered: dict[str, SurfaceSpec] = {}
 
+    deploy_sandbox_internet = any(manifest.sandbox_internet for manifest in manifests)
     slots = declared_slots(manifests)
 
     def context_for(workspace_id: UUID, surface: str) -> SurfaceContext:
@@ -808,6 +812,8 @@ def _mount_shared_surfaces(
             _credentials=credentials,
             _artifact_token_secret=artifact_secret,
             _public_base_url=public_base_url,
+            _deploy_sandbox_internet=deploy_sandbox_internet,
+            _models=models,
             _skills=skills,
             _user_skills=user_skills,
             _declared_slots=slots,

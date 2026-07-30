@@ -1,9 +1,12 @@
 import asyncio
 import json
 import secrets
+import shutil
+import subprocess
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, replace
 from datetime import timedelta
+from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
@@ -16,6 +19,7 @@ from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.store import recall_subjects
 from ufo_ext_web.audience import AUDIENCE_PREFIX, web_extension
 from ufo_ext_web.manifest import manifest as web_manifest
+from ufo_ext_web.panels import _outcome
 from ufo_ext_web.surface import PORTAL_HTML, SESSION_COOKIE, _sse
 from ufo_testsupport.stream_gate import GatingHub, StreamGate, release_when_running
 from ufo_testsupport.surfaces import EMPTY_SKILL_REGISTRY, no_user_skills
@@ -31,6 +35,7 @@ from ufo.grants import ConnectFlow, GrantStore, OAuthAccount, install_connect_fl
 from ufo.hub import InProcessHub, SkillLoad, ToolCall
 from ufo.loop import queue as loop_queue
 from ufo.loop.subagents import SubagentRegistry
+from ufo.loop.transcript import Transcript
 from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
 from ufo.models.interface import ModelEvent, ModelRequest, TextDelta
 from ufo.models.registry import ModelRegistry
@@ -237,6 +242,7 @@ async def web(
         dbos_client,
         "",
         None,
+        ("auto", "claude-opus-4-8", "claude-sonnet-5"),
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
     )
@@ -1083,3 +1089,420 @@ async def test_an_unverified_bearer_authenticates_nobody(
         headers={"cookie": f"{SESSION_COOKIE}=not-a-signed-bearer"},
     )
     assert refused.status_code == 401
+
+
+INTENT_BODY = {
+    "verb": "apply",
+    "kind": "agent",
+    "name": "assistant",
+    "spec": {"model": "claude-sonnet-5", "internet_access_allowed": False},
+}
+
+
+async def _agent_row(agent_id: UUID) -> sa.Row:
+    async with workspace_tx() as connection:
+        return (
+            await connection.execute(
+                sa.select(
+                    tables.agent.c.model,
+                    tables.agent.c.internet_access_allowed,
+                ).where(tables.agent.c.id == agent_id)
+            )
+        ).one()
+
+
+async def test_an_intent_applies_exactly_and_the_turn_is_the_audit_record(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    """The panel contract end to end: a form-shaped POST admits a turn that dispatches the object
+    verb verbatim — no model round — so the submitted values land exactly, the terminal frame
+    returns synchronously, and the turn row plus its transcript are the audit record."""
+    client, workspace_id, agent_id = web
+    _config, _hub, blob, _sandboxes = dbos_runtime
+    admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
+    submitted = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json=INTENT_BODY,
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    assert submitted.status_code == 200
+    outcome = submitted.json()
+    assert outcome["applied"] is True
+    row = await _agent_row(agent_id)
+    assert row.model == "claude-sonnet-5"
+    assert row.internet_access_allowed is False
+    async with workspace_tx() as connection:
+        turn = (
+            await connection.execute(
+                sa.select(
+                    tables.turn.c.admission_source,
+                    tables.turn.c.speaker_member_id,
+                    tables.turn.c.inbound,
+                    tables.turn.c.status,
+                    tables.turn.c.conversation_id,
+                    tables.conversation.c.agent_id,
+                    tables.conversation.c.queue_key,
+                )
+                .select_from(tables.turn.join(tables.conversation))
+                .where(tables.turn.c.id == UUID(outcome["turn_id"]))
+            )
+        ).one()
+    assert turn.admission_source == "intent"
+    assert turn.speaker_member_id == admin_id
+    assert turn.status == "done"
+    assert turn.agent_id == agent_id
+    assert turn.queue_key == f"intent/{agent_id}/admin@example.com"
+    assert outcome["message"] == "Saved."
+    assert "claude-sonnet-5" in turn.inbound
+    recorded = await Transcript(blob=blob, conversation_id=turn.conversation_id).read()
+    assert recorded is not None
+    assert len(recorded.messages) == 2
+    assert recorded.messages[-1].role == "assistant"
+
+
+async def test_a_refused_intent_surfaces_the_refusal_and_applies_nothing(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The kind's own admin gate answers the panel: the refusal text returns, the turn commits
+    failed, and the submitted values never land — no partial application."""
+    client, workspace_id, agent_id = web
+    await _seed_member(workspace_id, "admin@example.com", admin=True)
+    _member_id, token = await _seed_member(workspace_id, "member@example.com")
+    await _grant_web_access(workspace_id, agent_id, "member@example.com")
+    before = await _agent_row(agent_id)
+    submitted = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json=INTENT_BODY,
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    assert submitted.status_code == 200
+    outcome = submitted.json()
+    assert outcome["applied"] is False
+    assert "admin" in outcome["message"]
+    assert await _agent_row(agent_id) == before
+    async with workspace_tx() as connection:
+        status = (
+            await connection.execute(
+                sa.select(tables.turn.c.status).where(tables.turn.c.id == UUID(outcome["turn_id"]))
+            )
+        ).scalar_one()
+    assert status == "failed"
+
+
+async def test_an_out_of_audience_agent_takes_no_intent(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    client, workspace_id, agent_id = web
+    _outsider, token = await _seed_member(workspace_id, "outsider@example.com")
+    denied = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json=INTENT_BODY,
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    assert denied.status_code == 404
+    async with workspace_tx() as connection:
+        turns = (
+            await connection.execute(sa.select(sa.func.count()).select_from(tables.turn))
+        ).scalar_one()
+    assert turns == 0
+
+
+async def test_an_intent_naming_another_kind_is_refused_at_validation(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """PanelIntent.kind's Literal is the whole gate keeping this route from becoming a general
+    object_apply endpoint — an admin here is also an admin to the member kind's handlers, so a
+    widened Literal would let a form submit mutate members, credentials, or grants. An intent
+    naming any kind but the panel's own must die at validation, before a turn exists."""
+    client, workspace_id, agent_id = web
+    _admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
+    for kind in ("member", "connection", "scheduled_task"):
+        refused = await client.post(
+            f"/surface/web/agents/{agent_id}/intents",
+            json={"verb": "apply", "kind": kind, "name": "x", "spec": {"admin": True}},
+            headers={"cookie": f"{SESSION_COOKIE}={token}"},
+        )
+        assert refused.status_code == 400
+    async with workspace_tx() as connection:
+        turns = (
+            await connection.execute(sa.select(sa.func.count()).select_from(tables.turn))
+        ).scalar_one()
+    assert turns == 0
+
+
+async def test_a_malformed_intent_answers_400_before_any_turn(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    client, workspace_id, agent_id = web
+    _admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
+    refused = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json={"verb": "rename", "kind": "agent", "name": "assistant"},
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    assert refused.status_code == 400
+    async with workspace_tx() as connection:
+        turns = (
+            await connection.execute(sa.select(sa.func.count()).select_from(tables.turn))
+        ).scalar_one()
+    assert turns == 0
+
+
+async def test_overview_projects_spec_schema_ceiling_and_admin_audience(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The settings panel's read: the agent row beside its prompt digest and bound surfaces, the
+    deploy internet capability as the ceiling, the writable spec's own schema, and — admins only —
+    the web audience this extension grants."""
+    client, workspace_id, agent_id = web
+    _admin_id, admin_token = await _seed_member(workspace_id, "admin@example.com", admin=True)
+    _member_id, member_token = await _seed_member(workspace_id, "member@example.com")
+    await _grant_web_access(workspace_id, agent_id, "member@example.com")
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.surface_installation).values(
+                workspace_id=workspace_id,
+                surface="slack",
+                installation_id="T123",
+                agent_id=agent_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    seen = await client.get(
+        f"/surface/web/agents/{agent_id}/overview",
+        headers={"cookie": f"{SESSION_COOKIE}={admin_token}"},
+    )
+    assert seen.status_code == 200
+    data = seen.json()
+    assert data["agent"]["name"] == "assistant"
+    assert data["agent"]["surfaces"] == ["slack"]
+    assert data["agent"]["prompt"] == "be brief"
+    assert len(data["agent"]["prompt_digest"]) > 8
+    assert data["agent"]["updated_at"].endswith("+00:00")
+    assert data["deploy"]["sandbox_internet"] is False
+    assert data["models"] == ["auto", "claude-opus-4-8", "claude-sonnet-5"]
+    assert data["spec"] == {"model": "claude-opus-4-8", "internet_access_allowed": True}
+    assert set(data["spec_schema"]["properties"]) == {"model", "internet_access_allowed"}
+    assert data["audience"] == ["member@example.com"]
+    member_view = await client.get(
+        f"/surface/web/agents/{agent_id}/overview",
+        headers={"cookie": f"{SESSION_COOKIE}={member_token}"},
+    )
+    assert member_view.json()["audience"] is None
+    stranger = await client.get(
+        f"/surface/web/agents/{uuid4()}/overview",
+        headers={"cookie": f"{SESSION_COOKIE}={admin_token}"},
+    )
+    assert stranger.status_code == 404
+
+
+async def test_concurrent_intents_serialize_on_the_members_intent_conversation(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """Intent admission never folds into a live turn: two racing submits land as two whole turns
+    on the member's one intent conversation with the agent, and the per-conversation partition
+    runs them in order — both answer with their own turn's outcome."""
+    client, workspace_id, agent_id = web
+    await _seed_member(workspace_id, "admin@example.com", admin=True)
+    token = mint_token(TOKEN_SECRET, str(workspace_id), "admin@example.com", timedelta(hours=1))
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    first, second = await asyncio.gather(
+        client.post(f"/surface/web/agents/{agent_id}/intents", json=INTENT_BODY, headers=cookie),
+        client.post(
+            f"/surface/web/agents/{agent_id}/intents",
+            json={
+                "verb": "apply",
+                "kind": "agent",
+                "name": "assistant",
+                "spec": {"model": "auto", "internet_access_allowed": True},
+            },
+            headers=cookie,
+        ),
+    )
+    assert first.status_code == 200 and second.status_code == 200
+    assert first.json()["applied"] is True and second.json()["applied"] is True
+    assert first.json()["turn_id"] != second.json()["turn_id"]
+    async with workspace_tx() as connection:
+        turns = (
+            await connection.execute(
+                sa.select(tables.turn.c.seq, tables.conversation.c.queue_key)
+                .select_from(tables.turn.join(tables.conversation))
+                .where(tables.conversation.c.queue_key.like("intent/%"))
+                .order_by(tables.turn.c.seq)
+            )
+        ).all()
+    assert [turn.seq for turn in turns] == [1, 2]
+    assert {turn.queue_key for turn in turns} == {f"intent/{agent_id}/admin@example.com"}
+
+
+async def test_a_capped_members_intent_parks_and_the_panel_reads_the_reason(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """Spend enforcement runs at admission for intents: a breached park cap holds the turn and the
+    submit answers with the park message instead of applying."""
+    client, workspace_id, agent_id = web
+    admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
+    await _seed_priced_turn(workspace_id, agent_id, admin_id)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.spend_cap).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                scope="workspace",
+                subject_id=None,
+                window_seconds=3600,
+                limit_micro_usd=1,
+                on_breach="park",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    before = await _agent_row(agent_id)
+    submitted = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json=INTENT_BODY,
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    assert submitted.status_code == 200
+    outcome = submitted.json()
+    assert outcome["applied"] is False
+    assert outcome["message"]
+    assert await _agent_row(agent_id) == before
+    async with workspace_tx() as connection:
+        status = (
+            await connection.execute(
+                sa.select(tables.turn.c.status).where(tables.turn.c.id == UUID(outcome["turn_id"]))
+            )
+        ).scalar_one()
+    assert status == "parked"
+
+
+async def test_a_model_outside_the_registry_refuses_before_any_turn(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """A stored unknown model wedges the agent's every later turn at setup, so the submit refuses
+    it before a turn exists."""
+    client, workspace_id, agent_id = web
+    _admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
+    refused = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json={
+            "verb": "apply",
+            "kind": "agent",
+            "name": "assistant",
+            "spec": {"model": "claude-sonnet-5-typo", "internet_access_allowed": False},
+        },
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    assert refused.status_code == 200
+    assert refused.json() == {
+        "applied": False,
+        "message": "No model named 'claude-sonnet-5-typo'.",
+    }
+    async with workspace_tx() as connection:
+        turns = (
+            await connection.execute(sa.select(sa.func.count()).select_from(tables.turn))
+        ).scalar_one()
+    assert turns == 0
+    assert (await _agent_row(agent_id)).model == "claude-opus-4-8"
+
+
+async def test_an_oversized_intent_answers_413(web: tuple[AsyncClient, UUID, UUID]) -> None:
+    client, workspace_id, agent_id = web
+    _admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
+    body = dict(INTENT_BODY, spec={"model": "x" * 20_000, "internet_access_allowed": False})
+    refused = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json=body,
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    assert refused.status_code == 413
+
+
+async def test_overview_reports_the_deploy_internet_ceiling_when_granted(
+    db: None,
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The True direction of the deploy ceiling: a manifest declaring sandbox_internet makes the
+    overview report the capability the agent setting narrows."""
+    config, hub, blob, sandboxes = dbos_runtime
+    monkeypatch.setenv("UFO_TOKEN_SECRET", TOKEN_SECRET)
+    dbos_client = DBOSClient(system_database_url=config.database.system_url)
+    workspace_id, agent_id = await _seed_workspace()
+    _admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
+    app = FastAPI()
+    _mount_shared_surfaces(
+        app,
+        (web_manifest(), Manifest(name="net", version="0.0.1", sandbox_internet=True)),
+        None,
+        blob,
+        sandboxes,
+        hub,
+        dbos_client,
+        "",
+        None,
+        ("auto", "claude-opus-4-8", "claude-sonnet-5"),
+        skills=EMPTY_SKILL_REGISTRY,
+        user_skills=no_user_skills,
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="https://web") as client:
+        seen = await client.get(
+            f"/surface/web/agents/{agent_id}/overview",
+            headers={"cookie": f"{SESSION_COOKIE}={token}"},
+        )
+    dbos_client.destroy()
+    assert seen.status_code == 200
+    assert seen.json()["deploy"]["sandbox_internet"] is True
+
+
+def test_portal_page_smoke_walks_every_view() -> None:
+    """A reference-level walk of the page's script under a stub DOM — boot (signed in and the 401
+    token-card branch), select, overview, the settings save, the mid-save agent switch, the failed
+    post-save re-read, the memory tab's search bar (its `form.search` class and both style rules
+    scoped to it), admin, select-after-admin — so a deleted declaration or a dangling element
+    reference fails here instead of rendering a blank portal (the class of bug `node --check`
+    cannot see)."""
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    tests_dir = Path(__file__).parent
+    page = tests_dir.parent / "ufo_ext_web" / "static" / "portal.html"
+    result = subprocess.run(
+        [node, str(tests_dir / "portal_smoke.mjs"), str(page)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_outcome_strips_the_error_class_and_names_a_bare_status() -> None:
+    """The three outcome transforms members read: a dispatch refusal loses its exception-class
+    prefix but keeps the kind's reason, a frame with neither message nor text reads as
+    `Not applied (<status>).` instead of one bare word, and success is the fixed word, never the
+    tool's JSON."""
+    turn_id = uuid4()
+    refused = json.loads(
+        _outcome(
+            TerminalFrame(
+                status="failed",
+                error_class="IntentRefused",
+                error_message="AdminRequired: editing an agent requires a workspace admin",
+            ),
+            turn_id,
+        ).body
+    )
+    assert refused == {
+        "applied": False,
+        "message": "editing an agent requires a workspace admin",
+        "turn_id": str(turn_id),
+    }
+    bare = json.loads(_outcome(TerminalFrame(status="cancelled"), turn_id).body)
+    assert bare["message"] == "Not applied (cancelled)."
+    saved = json.loads(
+        _outcome(TerminalFrame(status="done", text='{"result": "updated"}'), turn_id).body
+    )
+    assert saved == {"applied": True, "message": "Saved.", "turn_id": str(turn_id)}

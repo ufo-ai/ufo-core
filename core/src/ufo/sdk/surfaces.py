@@ -109,6 +109,9 @@ from ufo.schema.records import (
     TerminalFrame as TerminalFrame,
 )
 from ufo.schema.records import (
+    ToolIntent as ToolIntent,
+)
+from ufo.schema.records import (
     Turn as Turn,
 )
 from ufo.schema.records import (

@@ -384,6 +384,7 @@ async def _mount_transport(
         StubDbos(),
         ARTIFACT_SECRET,
         public_base_url,
+        ("auto", "claude-opus-4-8", "claude-sonnet-5"),
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
     )
@@ -458,6 +459,7 @@ async def test_manifest_workspace_verifies_with_its_own_signing_slot(
         StubDbos(),
         ARTIFACT_SECRET,
         PUBLIC_BASE_URL,
+        ("auto", "claude-opus-4-8", "claude-sonnet-5"),
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
     )
@@ -730,6 +732,7 @@ async def test_shared_handshake_echoes_without_binding_a_workspace(
         StubDbos(),
         ARTIFACT_SECRET,
         PUBLIC_BASE_URL,
+        ("auto", "claude-opus-4-8", "claude-sonnet-5"),
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
     )
@@ -795,6 +798,7 @@ async def test_oauth_callback_installs_the_workspace(db: None, tmp_path, monkeyp
         StubDbos(),
         ARTIFACT_SECRET,
         PUBLIC_BASE_URL,
+        ("auto", "claude-opus-4-8", "claude-sonnet-5"),
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
     )
@@ -851,6 +855,7 @@ async def test_oauth_callback_declined_carries_no_workspace_and_reflects_no_erro
         StubDbos(),
         ARTIFACT_SECRET,
         PUBLIC_BASE_URL,
+        ("auto", "claude-opus-4-8", "claude-sonnet-5"),
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
     )
@@ -885,6 +890,7 @@ async def test_oauth_callback_refuses_a_team_bound_elsewhere(
         StubDbos(),
         ARTIFACT_SECRET,
         PUBLIC_BASE_URL,
+        ("auto", "claude-opus-4-8", "claude-sonnet-5"),
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
     )
@@ -917,6 +923,7 @@ async def test_oauth_callback_refuses_a_tampered_state(db: None, tmp_path, monke
         StubDbos(),
         ARTIFACT_SECRET,
         PUBLIC_BASE_URL,
+        ("auto", "claude-opus-4-8", "claude-sonnet-5"),
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
     )
@@ -959,6 +966,7 @@ async def test_oauth_callback_reports_a_rejected_code(db: None, tmp_path, monkey
         StubDbos(),
         ARTIFACT_SECRET,
         PUBLIC_BASE_URL,
+        ("auto", "claude-opus-4-8", "claude-sonnet-5"),
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
     )
@@ -993,6 +1001,7 @@ async def test_shared_oauth_callback_binds_the_sealed_workspace(
         StubDbos(),
         ARTIFACT_SECRET,
         PUBLIC_BASE_URL,
+        ("auto", "claude-opus-4-8", "claude-sonnet-5"),
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
     )
@@ -2307,6 +2316,7 @@ async def test_shared_slack_rejects_an_unknown_installation_without_binding(
         StubDbos(),
         ARTIFACT_SECRET,
         PUBLIC_BASE_URL,
+        ("auto", "claude-opus-4-8", "claude-sonnet-5"),
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
     )
@@ -2375,6 +2385,7 @@ async def test_shared_slack_routes_two_installations_without_crossing_state(
         StubDbos(),
         ARTIFACT_SECRET,
         PUBLIC_BASE_URL,
+        ("auto", "claude-opus-4-8", "claude-sonnet-5"),
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
     )
@@ -4972,6 +4983,7 @@ async def test_shared_interactive_routes_by_registered_team(
         StubDbos(),
         ARTIFACT_SECRET,
         PUBLIC_BASE_URL,
+        ("auto", "claude-opus-4-8", "claude-sonnet-5"),
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
     )

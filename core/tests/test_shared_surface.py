@@ -86,6 +86,7 @@ def _app(tmp_path: Path) -> FastAPI:
         NoAdmission(),
         "",
         None,
+        ("auto", "claude-opus-4-8", "claude-sonnet-5"),
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
     )
@@ -116,6 +117,7 @@ def _challenge_app(tmp_path: Path) -> FastAPI:
         NoAdmission(),
         "",
         None,
+        ("auto", "claude-opus-4-8", "claude-sonnet-5"),
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
     )

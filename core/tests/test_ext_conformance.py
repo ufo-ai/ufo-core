@@ -1256,6 +1256,7 @@ async def test_sample_surface_admits_links_streams_and_delivers(
         dbos,
         "",
         None,
+        ("auto", "claude-opus-4-8", "claude-sonnet-5"),
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
     )
@@ -1381,6 +1382,7 @@ async def test_sample_surface_live_admit_tails_and_stays_off_writeback(
         dbos,
         "",
         None,
+        ("auto", "claude-opus-4-8", "claude-sonnet-5"),
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
     )

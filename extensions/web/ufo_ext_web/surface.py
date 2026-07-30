@@ -1,9 +1,9 @@
 """The web portal on the core surface seam, in its live mode: the authenticated shell around the
-member's agents — an agent switcher over the surface's own audience, per-agent chat with
-cookie-authenticated turn admission, an SSE tail of each turn's live frames, read projections
-(agents, transcripts, scheduled tasks, skills, memory search, per-agent usage, connections,
-credential slots, sources), and — for workspace admins — the administration view and the spend
-view.
+member's agents — the page and the one POST that opens its session, per-agent chat with
+cookie-authenticated turn admission and an SSE tail of each turn's live frames, read projections
+(the agent index, per-agent transcripts, overviews, scheduled tasks, skills, memory search,
+per-agent usage, connections, credential slots, and sources, and — for workspace admins — the
+administration view and the spend rollup), and prepared intents, the panels' one mutation path.
 
 The `ufo_session` cookie carries the signed HMAC member bearer the gateway or `ufoctl init` mints
 (the `ufo.sdk.bearer` codec over `{ws, email, exp}`), landed by the one POST that opens a session
@@ -42,6 +42,7 @@ from ufo.sdk.models import Message, TextBlock
 from ufo.sdk.seats import Seats
 from ufo.sdk.surfaces import ConnectRequestInvalid, SurfaceAuth, SurfaceContext, SurfaceRoute
 from ufo_ext_web.audience import WebAudience, granted_emails, web_audience, web_extension
+from ufo_ext_web.panels import agent_overview, submit_intent
 
 SURFACE_WEB = "web"
 SESSION_COOKIE = "ufo_session"
@@ -223,18 +224,18 @@ async def transcript(ctx: SurfaceContext, request: Request) -> Response:
 
 async def _panel_gate(
     ctx: SurfaceContext, request: Request
-) -> tuple[UUID, WebAudience, UUID] | Response:
-    """The shared entry of every per-agent panel read: the session's member and audience, plus the
-    path's agent — 404 when the agent is outside the viewer's web audience, like every portal
-    route."""
+) -> tuple[UUID, str, WebAudience, UUID] | Response:
+    """The shared entry of every per-agent panel read and the intent lane: the session's member,
+    their email, and audience, plus the path's agent — 404 when the agent is outside the viewer's
+    web audience, like every portal route."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
-    member_id, _email, audience = resolved
+    member_id, email, audience = resolved
     agent_id = _agent_param(request)
     if agent_id is None or not audience.allows(agent_id):
         return Response("no such agent", status_code=404)
-    return member_id, audience, agent_id
+    return member_id, email, audience, agent_id
 
 
 def _iso(moment: datetime | None) -> str | None:
@@ -263,7 +264,7 @@ async def tasks(ctx: SurfaceContext, request: Request) -> Response:
     gated = await _panel_gate(ctx, request)
     if isinstance(gated, Response):
         return gated
-    member_id, audience, agent_id = gated
+    member_id, _email, audience, agent_id = gated
     listed = await ctx.list_agent_tasks(agent_id, member_id, audience.admin)
     return JSONResponse(
         {
@@ -290,7 +291,7 @@ async def skills(ctx: SurfaceContext, request: Request) -> Response:
     gated = await _panel_gate(ctx, request)
     if isinstance(gated, Response):
         return gated
-    _member_id, _audience, agent_id = gated
+    _member_id, _email, _audience, agent_id = gated
     listed = await ctx.agent_skills(agent_id)
     return JSONResponse(
         {
@@ -311,7 +312,7 @@ async def memory(ctx: SurfaceContext, request: Request) -> Response:
     gated = await _panel_gate(ctx, request)
     if isinstance(gated, Response):
         return gated
-    member_id, _audience, agent_id = gated
+    member_id, _email, _audience, agent_id = gated
     query = request.query_params.get("q", "").strip()
     if not query or not ctx.memory_available:
         return JSONResponse({"available": ctx.memory_available, "matches": []})
@@ -343,7 +344,7 @@ async def usage(ctx: SurfaceContext, request: Request) -> Response:
     gated = await _panel_gate(ctx, request)
     if isinstance(gated, Response):
         return gated
-    _member_id, audience, agent_id = gated
+    _member_id, _email, audience, agent_id = gated
     window = _window_param(request)
     if isinstance(window, Response):
         return window
@@ -380,7 +381,7 @@ async def connections(ctx: SurfaceContext, request: Request) -> Response:
     gated = await _panel_gate(ctx, request)
     if isinstance(gated, Response):
         return gated
-    member_id, audience, agent_id = gated
+    member_id, _email, audience, agent_id = gated
     listed = await ctx.list_agent_connections(agent_id, member_id, admin=audience.admin)
     return JSONResponse({"connections": [entry.model_dump(mode="json") for entry in listed]})
 
@@ -393,7 +394,7 @@ async def credentials(ctx: SurfaceContext, request: Request) -> Response:
     gated = await _panel_gate(ctx, request)
     if isinstance(gated, Response):
         return gated
-    _member_id, _audience, _agent_id = gated
+    _member_id, _email, _audience, _agent_id = gated
     listed = await ctx.list_credential_slots()
     return JSONResponse({"slots": [entry.model_dump(mode="json") for entry in listed]})
 
@@ -405,7 +406,7 @@ async def sources(ctx: SurfaceContext, request: Request) -> Response:
     gated = await _panel_gate(ctx, request)
     if isinstance(gated, Response):
         return gated
-    member_id, audience, _agent_id = gated
+    member_id, _email, audience, _agent_id = gated
     listed = await ctx.list_sources(member_id, admin=audience.admin)
     return JSONResponse({"sources": [entry.model_dump(mode="json") for entry in listed]})
 
@@ -570,6 +571,22 @@ def _spend_page(report: SpendReport) -> str:
     )
 
 
+async def intents(ctx: SurfaceContext, request: Request) -> Response:
+    gated = await _panel_gate(ctx, request)
+    if isinstance(gated, Response):
+        return gated
+    member_id, email, _audience, agent_id = gated
+    return await submit_intent(ctx, request, agent_id, member_id, email)
+
+
+async def overview(ctx: SurfaceContext, request: Request) -> Response:
+    gated = await _panel_gate(ctx, request)
+    if isinstance(gated, Response):
+        return gated
+    _member_id, _email, audience, agent_id = gated
+    return await agent_overview(ctx, agent_id, admin=audience.admin)
+
+
 ROUTES = (
     SurfaceRoute(method="GET", path="", handler=portal_page),
     SurfaceRoute(method="POST", path="", handler=open_session),
@@ -577,6 +594,8 @@ ROUTES = (
     SurfaceRoute(method="GET", path="api/admin", handler=admin_index),
     SurfaceRoute(method="POST", path="agents/{agent_id}/chat", handler=chat),
     SurfaceRoute(method="GET", path="agents/{agent_id}/transcript", handler=transcript),
+    SurfaceRoute(method="GET", path="agents/{agent_id}/overview", handler=overview),
+    SurfaceRoute(method="POST", path="agents/{agent_id}/intents", handler=intents),
     SurfaceRoute(method="GET", path="agents/{agent_id}/tasks", handler=tasks),
     SurfaceRoute(method="GET", path="agents/{agent_id}/connections", handler=connections),
     SurfaceRoute(method="GET", path="agents/{agent_id}/credentials", handler=credentials),

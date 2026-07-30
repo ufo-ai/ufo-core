@@ -61,6 +61,7 @@ from ufo.credentials import (
     open_credential_request,
 )
 from ufo.db import owner_tx, workspace_tx
+from ufo.governance import prompt_digest
 from ufo.grants import (
     ConnectHandoff,
     ConnectRequestInvalid,
@@ -87,6 +88,7 @@ from ufo.schema.records import (
     ReasoningEffort,
     TerminalFrame,
     TerminalStatus,
+    ToolIntent,
     Turn,
     TurnContext,
 )
@@ -134,6 +136,7 @@ class MemberAdmitter(Protocol):
         context: TurnContext | None = None,
         *,
         speaker_member_id: UUID | None,
+        intent: ToolIntent | None = None,
     ) -> Admitted: ...
 
 
@@ -219,6 +222,25 @@ class InstallationSummary(BaseModel):
 
     surface: str
     agent_id: UUID
+
+
+class AgentDetail(BaseModel):
+    """One agent as a portal overview reads it: the row's configuration beside its prompt digest
+    and the chat surfaces whose installations bind to it."""
+
+    name: str
+    main: bool
+    model: str
+    internet_access_allowed: bool
+    prompt: str
+    prompt_digest: str
+    surfaces: tuple[str, ...]
+    updated_at: datetime
+
+    @field_validator("updated_at")
+    @classmethod
+    def _aware_utc(cls, value: datetime) -> datetime:
+        return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
 @dataclass(frozen=True)
@@ -429,10 +451,25 @@ class SurfaceContext:
     _credentials: CredentialStore | None
     _artifact_token_secret: str
     _public_base_url: str | None
+    _deploy_sandbox_internet: bool
+    _models: tuple[str, ...]
     _skills: SkillRegistry
     _user_skills: Callable[[], Awaitable[tuple[RuntimeSkill, ...]]]
     _declared_slots: tuple[DeclaredSlot, ...]
     _memory: "MemorySearch | None" = None
+
+    @property
+    def deploy_sandbox_internet(self) -> bool:
+        """Whether this deploy's active extensions grant sandbox public internet at all — the
+        ceiling a portal shows an agent's `internet_access_allowed` narrowing."""
+        return self._deploy_sandbox_internet
+
+    @property
+    def models(self) -> tuple[str, ...]:
+        """The model ids this deploy's registry serves, `auto` first — the closed set a portal
+        offers where an agent's model is chosen, the same records the runtime routes and bills
+        on."""
+        return self._models
 
     async def credential(self, slot: str) -> str:
         if self._credentials is None:
@@ -754,6 +791,7 @@ class SurfaceContext:
         context: TurnContext | None = None,
         *,
         speaker_member_id: UUID | None,
+        intent: ToolIntent | None = None,
     ) -> Admitted:
         """Admit an inbound message onto the durable turn queue and return its turn, with whether
         this delivery opened that turn's run. The turn executes as the conversation's bound agent —
@@ -762,13 +800,19 @@ class SurfaceContext:
         surface's turn registers nothing and its member tails the hub — the surface supplies only
         the message, its idempotency key, and the ambient `TurnContext` (sender, timezone) the
         engine renders before the inbound. A redelivery deduped to the turn already admitted joins
-        it, as does a follow-up folded into a live one."""
+        it, as does a follow-up folded into a live one. A prepared `intent` (a panel's form submit)
+        admits a turn that dispatches that one tool call verbatim instead of running model rounds —
+        it requires the speaking member, its admission never folds into a live turn (each submit
+        founds its own queued turn on the member's durable intent conversation with the agent, and
+        the per-conversation partition runs them in order), and its `body` must equal the
+        envelope's serialization, which is the turn's inbound."""
         return await self._admitter.admit(
             conversation_id,
             body,
             idempotency_key=idempotency_key,
             context=context,
             speaker_member_id=speaker_member_id,
+            intent=intent,
         )
 
     async def connect_url(self, turn_id: UUID, member_id: UUID) -> str:
@@ -895,6 +939,53 @@ class SurfaceContext:
                 internet_access_allowed=row.internet_access_allowed,
             )
             for row in rows
+        )
+
+    async def agent_detail(self, agent_id: UUID) -> AgentDetail | None:
+        """One agent's configuration for a portal overview — the row beside its prompt digest and
+        bound surfaces, or None when no such agent exists in this workspace. The surface's own
+        audience authority gates who may read it, exactly as `list_agents`."""
+        async with workspace_tx() as connection:
+            row = (
+                await connection.execute(
+                    sa.select(
+                        tables.agent.c.name,
+                        tables.agent.c.is_main,
+                        tables.agent.c.model,
+                        tables.agent.c.internet_access_allowed,
+                        tables.agent.c.prompt,
+                        tables.agent.c.updated_at,
+                    ).where(
+                        tables.agent.c.workspace_id == self.workspace_id,
+                        tables.agent.c.id == agent_id,
+                    )
+                )
+            ).one_or_none()
+            if row is None:
+                return None
+            surfaces = (
+                (
+                    await connection.execute(
+                        sa.select(tables.surface_installation.c.surface)
+                        .where(
+                            tables.surface_installation.c.workspace_id == self.workspace_id,
+                            tables.surface_installation.c.agent_id == agent_id,
+                        )
+                        .order_by(tables.surface_installation.c.surface)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        return AgentDetail(
+            name=row.name,
+            main=row.is_main,
+            model=row.model,
+            internet_access_allowed=row.internet_access_allowed,
+            prompt=row.prompt,
+            prompt_digest=prompt_digest(row.prompt),
+            surfaces=tuple(surfaces),
+            updated_at=row.updated_at,
         )
 
     async def list_agent_tasks(

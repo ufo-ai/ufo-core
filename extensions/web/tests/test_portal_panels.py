@@ -184,6 +184,7 @@ def _mount_portal(tmp_path: Path, *, with_memory: bool) -> FastAPI:
         StubDbos(),
         "",
         None,
+        ("auto", "claude-opus-4-8", "claude-sonnet-5"),
         skills=DEPLOY_SKILLS,
         user_skills=lambda: turn_runtime_skills(manifests, credentials, index, embed),
         memory=memory_search(manifests, None, index, embed) if with_memory else None,

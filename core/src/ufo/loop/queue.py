@@ -58,6 +58,7 @@ from ufo.sandbox.session import (
 from ufo.schema import tables
 from ufo.schema.records import (
     DBOS_APP_VERSION,
+    INTENT_ADMISSION,
     TERMINAL_ERROR_MESSAGE_MAX_CHARS,
     TURN_QUEUE_NAME,
     TURN_WORKFLOW_NAME,
@@ -328,7 +329,9 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             ),
             hub=runtime.hub,
             sandbox=sandbox,
-            sandbox_for=sandbox_authorizer.authorize,
+            sandbox_for=(
+                None if turn.admission_source == INTENT_ADMISSION else sandbox_authorizer.authorize
+            ),
             cdp_provider=runtime.cdp_provider,
             search_provider=runtime.search_provider,
             memory=runtime.memory,
@@ -368,7 +371,8 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             preload=preload,
             output_model=output_model,
         )
-        frame = await engine.run()
+        run = engine.run_intent if turn.admission_source == INTENT_ADMISSION else engine.run
+        frame = await run()
         return "superseded" if frame is None else frame.status
     except TurnParked:
         return "parked"

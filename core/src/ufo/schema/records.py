@@ -6,11 +6,11 @@ from typing import Literal
 from uuid import NAMESPACE_URL, UUID, uuid5
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, JsonValue, field_validator, model_validator
 
 TurnStatus = Literal["queued", "running", "parked", "done", "failed", "cancelled"]
 TerminalStatus = Literal["done", "failed", "cancelled"]
-TurnAdmissionSource = Literal["member", "internal", "scheduled"]
+TurnAdmissionSource = Literal["member", "internal", "scheduled", "intent"]
 ReasoningEffort = Literal["off", "low", "medium", "high"]
 DEFAULT_REASONING_EFFORT: ReasoningEffort = "high"
 NON_TERMINAL_STATUSES: tuple[TurnStatus, ...] = ("queued", "running", "parked")
@@ -25,6 +25,19 @@ CANCELLED: TerminalStatus = "cancelled"
 MEMBER_ADMISSION: TurnAdmissionSource = "member"
 INTERNAL_ADMISSION: TurnAdmissionSource = "internal"
 SCHEDULED_ADMISSION: TurnAdmissionSource = "scheduled"
+INTENT_ADMISSION: TurnAdmissionSource = "intent"
+
+
+class ToolIntent(BaseModel):
+    """A prepared panel mutation: one named tool call the turn dispatches verbatim — no model
+    round, so the submitted values apply exactly or the refusal returns, never a paraphrase. The
+    turn row is the audit record: the intent serializes as its inbound, the speaker is the
+    submitting member, and the result commits as its terminal frame. The Literal is the closed
+    whitelist; a verb joins it with its panel producer, never ahead of one."""
+
+    tool: Literal["object_apply"]
+    input: dict[str, JsonValue]
+
 
 ProposalStatus = Literal["pending", "approved", "rejected"]
 PENDING: ProposalStatus = "pending"

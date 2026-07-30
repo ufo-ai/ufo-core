@@ -52,6 +52,7 @@ from ufo.scheduling import ONE_TIME_SCHEDULE, ScheduledTask, firing_key
 from ufo.schema import tables
 from ufo.schema.records import (
     DBOS_APP_VERSION,
+    INTENT_ADMISSION,
     INTERNAL_ADMISSION,
     MEMBER_ADMISSION,
     NON_TERMINAL_STATUSES,
@@ -62,6 +63,7 @@ from ufo.schema.records import (
     WRITEBACK_PENDING,
     TerminalFrame,
     TerminalStatus,
+    ToolIntent,
     TurnContext,
     TurnStatus,
     turn_id_for,
@@ -95,7 +97,12 @@ class Admission:
         speaker_member_id: UUID | None,
         idempotency_key: str | None = None,
         context: TurnContext | None = None,
+        intent: ToolIntent | None = None,
     ) -> Admitted:
+        if intent is not None and speaker_member_id is None:
+            raise ValueError("a prepared intent requires a speaking member")
+        if intent is not None and body != intent.model_dump_json():
+            raise ValueError("body and intent disagree — the envelope is the turn's inbound")
         return await self._admit(
             workspace_id,
             conversation_id,
@@ -106,6 +113,7 @@ class Admission:
             context,
             _PendingPause(workspace_id, conversation_id),
             None,
+            intent=intent,
         )
 
     async def invoke(
@@ -185,6 +193,7 @@ class Admission:
         pending_pause: _PendingPause | None,
         scheduled_task: ScheduledTask | None,
         on_behalf_of_member_id: UUID | None = None,
+        intent: ToolIntent | None = None,
     ) -> Admitted:
         dispatch_now = False
         opened_run = False
@@ -402,7 +411,7 @@ class Admission:
                                 .where(tables.scheduled_task.c.id == timer_turn.pause_id)
                             )
                             deduped = timer_turn
-            if deduped is None and scheduled_task is None:
+            if deduped is None and scheduled_task is None and intent is None:
                 live_turn = (
                     await connection.execute(
                         sa.select(
@@ -575,7 +584,9 @@ class Admission:
                 turn_seq = seq
                 opened_run = True
                 admission_source = (
-                    MEMBER_ADMISSION
+                    INTENT_ADMISSION
+                    if intent is not None
+                    else MEMBER_ADMISSION
                     if pending_pause is not None
                     else SCHEDULED_ADMISSION
                     if scheduled_task is not None
@@ -809,6 +820,7 @@ class MemberAdmission:
         context: TurnContext | None = None,
         *,
         speaker_member_id: UUID | None,
+        intent: ToolIntent | None = None,
     ) -> Admitted:
         return await self.admission.admit_member(
             self.workspace_id,
@@ -817,4 +829,5 @@ class MemberAdmission:
             speaker_member_id,
             idempotency_key=idempotency_key,
             context=context,
+            intent=intent,
         )

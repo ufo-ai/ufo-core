@@ -14,7 +14,10 @@ core. Every addition to `core/` must name why extensions cannot express it.
 change — a member expresses it in natural conversation and the agent drives it (a tool it calls,
 surfacing any link in its reply); never a slash-command, keyword, or bespoke end-user HTTP
 endpoint. The only endpoints are the chat transport itself, authenticated **read projections** of
-object, status, usage, and audit data (a portal page reads directly; mutations stay chat-only),
+object, status, usage, and audit data (a portal page reads directly), **prepared intents** — a
+portal form's one mutation path: the panel's structured intent is admitted as a turn the engine
+dispatches verbatim to the typed object verb, so the turn IS the chat transport and the audit
+record, the route only prepares and admits, and the panel reads back the typed result or refusal —
 and unavoidable third-party plumbing (e.g. an OAuth callback). The speaker gates the granting
 act; subsequent use is the wire's job. (`ufoctl` CLI verbs are the operator surface — a
 different audience, not member actions.)
