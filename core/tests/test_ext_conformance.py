@@ -560,6 +560,11 @@ async def test_sample_memory_search_provider_receives_the_exact_subjects(db: Non
         "start": None,
         "end": None,
     }
+    with ws(workspace_id):
+        listed = await access.list_recent(audience_subjects(audience), 25)
+        browsed = await ScopedStore(extension=sample.NAME).get(sample.MEMORY_RECENT_KEY)
+    assert listed[0].text == sample.SAMPLE_MEMORY_TEXT
+    assert browsed == {"subjects": sorted(audience_subjects(audience)), "limit": 25}
 
 
 def test_memory_search_registration_is_unique_and_required() -> None:

@@ -18,12 +18,12 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from ufo_ext_embed_openai import EMBED_DIM
 from ufo_ext_index_default import DefaultIndex
-from ufo_ext_memory.store import MemoryIndexer, MemoryStore, MemoryWrite, mem_page
+from ufo_ext_memory.store import MemoryIndexer, MemoryStore, MemoryWrite, mem_page, memory_item
 from ufo_ext_skill_create.manifest import manifest as skill_create_manifest
 from ufo_ext_skill_create.store import UserSkillStore
 from ufo_ext_web.audience import AUDIENCE_PREFIX, web_extension
 from ufo_ext_web.manifest import manifest as web_manifest
-from ufo_ext_web.surface import MAX_USAGE_WINDOW_SECONDS
+from ufo_ext_web.surface import MAX_USAGE_WINDOW_SECONDS, MEMORY_RECENT_LIMIT
 
 from ufo.accounting import record_egress_request, record_sandbox_tokens, record_turn_usage
 from ufo.agent_scope import agent as bind_agent
@@ -289,7 +289,9 @@ async def test_skills_list_the_agents_own_and_the_deploys(portal) -> None:
 
 
 async def test_memory_search_stays_inside_the_viewers_subjects(portal, tmp_path: Path) -> None:
-    client, workspace_id, agent_a, _agent_b = portal
+    """The workspace memory view: search and the no-query listing both answer only the viewer's
+    own subject plus shared — another member's private items never match or list."""
+    client, workspace_id, _agent_a, _agent_b = portal
     member_a, headers_a = await _seed_member(workspace_id, CREATOR_EMAIL)
     member_b, _headers_b = await _seed_member(workspace_id, OTHER_EMAIL)
     index = DefaultIndex(transaction=workspace_tx)
@@ -315,9 +317,7 @@ async def test_memory_search_stays_inside_the_viewers_subjects(portal, tmp_path:
             chunker=TextChunker(),
             page_states=context_for("memory", frozenset(), index=index, embed=embed).page_states,
         ).run()
-    found = await client.get(
-        f"/surface/web/agents/{agent_a}/memory?q=launch codename", headers=headers_a
-    )
+    found = await client.get("/surface/web/workspace/memory?q=launch codename", headers=headers_a)
     payload = found.json()
     assert payload["available"] is True
     texts = " ".join(match["text"] for match in payload["matches"])
@@ -342,15 +342,21 @@ async def test_memory_search_stays_inside_the_viewers_subjects(portal, tmp_path:
         stamped.astimezone(UTC).isoformat()
     ]
     assert [match["kind"] for match in payload["matches"]] == ["fact"]
-    blank = await client.get(f"/surface/web/agents/{agent_a}/memory", headers=headers_a)
-    assert blank.json() == {"available": True, "matches": []}
+    listing = await client.get("/surface/web/workspace/memory", headers=headers_a)
+    listed = listing.json()
+    assert listed["available"] is True
+    assert [match["text"] for match in listed["matches"]] == ["the launch codename is bluebird"]
+    assert [match["created_at"] for match in listed["matches"]] == [
+        stamped.astimezone(UTC).isoformat()
+    ]
 
 
 async def test_memory_panel_fences_source_pages_by_agent_grant(portal) -> None:
-    """The reader is authority, not navigation: a source-derived page answers the panel only under
-    an agent granted its source — or, with no grant, only to the source's own member under the
-    main agent — and the page hit's timestamp rides the wire aware like every other mark."""
-    client, workspace_id, agent_a, agent_b = portal
+    """The workspace memory search unions the member's reachable agents, and source grants stay
+    the fence: a page granted only to a non-main agent answers the member that agent was granted
+    to (their union includes it) and never a member who reaches only the main agent — or, with no
+    grant at all, only the source's own member; the hit's timestamp rides the wire aware."""
+    client, workspace_id, _agent_a, agent_b = portal
     member_id, headers = await _seed_member(workspace_id, CREATOR_EMAIL)
     _other_id, other_headers = await _seed_member(workspace_id, OTHER_EMAIL)
     await _grant(workspace_id, agent_b, CREATOR_EMAIL)
@@ -405,7 +411,7 @@ async def test_memory_panel_fences_source_pages_by_agent_grant(portal) -> None:
             sa.insert(tables.source_grant).values(
                 workspace_id=workspace_id,
                 source_id=source_id,
-                agent_id=agent_a,
+                agent_id=agent_b,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -428,45 +434,83 @@ async def test_memory_panel_fences_source_pages_by_agent_grant(portal) -> None:
     def page_refs(payload: dict) -> list[dict]:
         return [match for match in payload["matches"] if match["ref"] == f"page/{page_id}"]
 
-    granted = (
-        await client.get(f"/surface/web/agents/{agent_a}/memory?q=runway painted", headers=headers)
-    ).json()
+    path = "/surface/web/workspace/memory?q=runway painted"
+    granted = (await client.get(path, headers=headers)).json()
     [hit] = page_refs(granted)
     assert hit["kind"] == "source"
     assert hit["created_at"] == minted_at.isoformat()
-    ungranted = (
-        await client.get(f"/surface/web/agents/{agent_b}/memory?q=runway painted", headers=headers)
-    ).json()
-    assert page_refs(ungranted) == []
+    unreachable = (await client.get(path, headers=other_headers)).json()
+    assert page_refs(unreachable) == []
     async with workspace_tx() as connection:
         await connection.execute(
             sa.delete(tables.source_grant).where(tables.source_grant.c.source_id == source_id)
         )
-    owner_on_main = (
-        await client.get(f"/surface/web/agents/{agent_a}/memory?q=runway painted", headers=headers)
-    ).json()
-    assert len(page_refs(owner_on_main)) == 1
-    stranger_on_main = (
-        await client.get(
-            f"/surface/web/agents/{agent_a}/memory?q=runway painted", headers=other_headers
+    owner_ungranted = (await client.get(path, headers=headers)).json()
+    assert len(page_refs(owner_ungranted)) == 1
+    stranger_ungranted = (await client.get(path, headers=other_headers)).json()
+    assert page_refs(stranger_ungranted) == []
+
+
+async def test_memory_listing_is_newest_first_and_bounded(portal, tmp_path: Path) -> None:
+    """The no-query view lists the newest live items under the viewer's subjects, newest first,
+    capped at the real `MEMORY_RECENT_LIMIT` — a superseded item never lists."""
+    client, workspace_id, _agent_a, _agent_b = portal
+    member_id, headers = await _seed_member(workspace_id, CREATOR_EMAIL)
+    index = DefaultIndex(transaction=workspace_tx)
+    embed = StubEmbed()
+    with ws(workspace_id):
+        extension = context_for("memory", frozenset(), index=index, embed=embed)
+        store = MemoryStore(
+            index=index,
+            embed=embed,
+            transaction=workspace_tx,
+            workspace_id=workspace_id,
+            page_states=extension.page_states,
         )
-    ).json()
-    assert page_refs(stranger_on_main) == []
+        for count in range(MEMORY_RECENT_LIMIT + 3):
+            await store.commit(
+                MemoryWrite(subject=member_subject(member_id), body=f"note {count:03d}")
+            )
+    newest = f"note {MEMORY_RECENT_LIMIT + 2:03d}"
+    async with workspace_tx() as connection:
+        rows = (await connection.execute(sa.select(memory_item.c.id, memory_item.c.body))).all()
+        stamped = datetime(2026, 7, 1, tzinfo=UTC)
+        for row in rows:
+            await connection.execute(
+                sa.update(memory_item)
+                .where(memory_item.c.id == row.id)
+                .values(created_at=stamped + timedelta(minutes=int(row.body.split()[1])))
+            )
+        superseding = next(row.id for row in rows if row.body == f"note {MEMORY_RECENT_LIMIT:03d}")
+        await connection.execute(
+            sa.update(memory_item)
+            .where(memory_item.c.body == newest)
+            .values(superseded_by=superseding)
+        )
+    listing = (await client.get("/surface/web/workspace/memory", headers=headers)).json()
+    assert listing["available"] is True
+    assert len(listing["matches"]) == MEMORY_RECENT_LIMIT
+    stamps = [match["created_at"] for match in listing["matches"]]
+    assert stamps == sorted(stamps, reverse=True)
+    assert stamps[0].endswith("+00:00")
+    listed = {match["text"] for match in listing["matches"]}
+    assert newest not in listed
+    assert f"note {MEMORY_RECENT_LIMIT + 1:03d}" in listed
+    assert "note 002" in listed
+    assert {"note 000", "note 001"}.isdisjoint(listed)
 
 
 async def test_a_memoryless_deploy_never_claims_availability(
     db: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setenv("UFO_TOKEN_SECRET", TOKEN_SECRET)
-    workspace_id, agent_a, _agent_b = await _seed_workspace()
+    workspace_id, _agent_a, _agent_b = await _seed_workspace()
     _member_id, headers = await _seed_member(workspace_id, CREATOR_EMAIL)
     app = _mount_portal(tmp_path, with_memory=False)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="https://web") as client:
-        blank = await client.get(f"/surface/web/agents/{agent_a}/memory", headers=headers)
+        blank = await client.get("/surface/web/workspace/memory", headers=headers)
         assert blank.json() == {"available": False, "matches": []}
-        queried = await client.get(
-            f"/surface/web/agents/{agent_a}/memory?q=anything", headers=headers
-        )
+        queried = await client.get("/surface/web/workspace/memory?q=anything", headers=headers)
         assert queried.json() == {"available": False, "matches": []}
 
 

@@ -200,6 +200,7 @@ SAMPLE_SEARCH_TEXT = "the sample search backend answers a canned hit"
 SAMPLE_SEARCH_ANSWER = "the sample search backend answers directly"
 SAMPLE_MEMORY_TEXT = "the sample memory provider returns a scoped result"
 MEMORY_SEARCH_KEY = "memory_search"
+MEMORY_RECENT_KEY = "memory_recent"
 MEMORY_SEARCH_PROVIDER = "sample"
 SAMPLE_FETCH_TEXT = "the sample search backend fetched a canned page"
 WIDGET_KIND = "sample_widget"
@@ -1003,6 +1004,11 @@ class SampleMemorySearch:
                 "end": None if end is None else end.isoformat(),
             },
         )
+        return (MemoryMatch(kind="fact", text=SAMPLE_MEMORY_TEXT),)
+
+    async def list_recent(self, subjects: frozenset[str], limit: int) -> tuple[MemoryMatch, ...]:
+        subject_values: list[JsonValue] = [subject for subject in sorted(subjects)]
+        await self.ctx.store.put(MEMORY_RECENT_KEY, {"subjects": subject_values, "limit": limit})
         return (MemoryMatch(kind="fact", text=SAMPLE_MEMORY_TEXT),)
 
 

@@ -18,12 +18,17 @@
         border-right: 1px solid color-mix(in srgb, CanvasText 15%, transparent); }
   .brand { padding: 14px 16px; font-weight: 600; letter-spacing: 0.35em; }
   #agents { flex: 1; overflow-y: auto; padding: 4px 0; margin: 0; list-style: none; }
-  #agents button { display: block; width: 100%; text-align: left; padding: 8px 16px 8px 14px;
+  #workspace { padding: 4px 0; margin: 0; list-style: none;
+               border-top: 1px solid color-mix(in srgb, CanvasText 15%, transparent); }
+  #agents button, #workspace button { display: block; width: 100%; text-align: left;
+                   padding: 8px 16px 8px 14px;
                    border: 0; border-left: 2px solid transparent; background: none;
                    color: inherit; }
-  #agents button:hover { background: color-mix(in srgb, CanvasText 8%, transparent); }
-  #agents button[aria-current="true"] { border-left-color: CanvasText;
-                                        background: color-mix(in srgb, CanvasText 6%, transparent); }
+  #agents button:hover, #workspace button:hover {
+    background: color-mix(in srgb, CanvasText 8%, transparent); }
+  #agents button[aria-current="true"], #workspace button[aria-current="true"] {
+    border-left-color: CanvasText;
+    background: color-mix(in srgb, CanvasText 6%, transparent); }
   #agents .model { display: block; opacity: 0.55; }
   nav footer { padding: 12px 16px; display: flex; flex-direction: column; gap: 4px;
                border-top: 1px solid color-mix(in srgb, CanvasText 15%, transparent); }
@@ -87,8 +92,8 @@
                font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
   #panel .result { margin-top: 10px; }
   #panel h2 { font-size: 13px; opacity: 0.7; margin: 14px 0 4px; }
-  #panel form.search { display: flex; gap: 8px; margin-bottom: 12px; }
-  #panel form.search input { flex: 1; padding: 8px 10px; border-radius: 8px; font: inherit;
+  form.search { display: flex; gap: 8px; margin-bottom: 12px; }
+  form.search input { flex: 1; padding: 8px 10px; border-radius: 8px; font: inherit;
                       border: 1px solid color-mix(in srgb, CanvasText 25%, transparent);
                       background: Field; color: FieldText; }
   #log { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column;
@@ -141,10 +146,12 @@
     nav { flex-direction: row; align-items: center; border-right: 0;
           border-bottom: 1px solid color-mix(in srgb, CanvasText 15%, transparent); }
     .brand { padding: 10px 12px; }
-    #agents { display: flex; overflow-x: auto; overflow-y: hidden; padding: 0; }
-    #agents button { width: auto; white-space: nowrap; border-left: 0; border-bottom: 2px solid
-                     transparent; }
-    #agents button[aria-current="true"] { border-bottom-color: CanvasText; }
+    #agents, #workspace { display: flex; overflow-x: auto; overflow-y: hidden; padding: 0;
+                          border-top: 0; }
+    #agents button, #workspace button { width: auto; white-space: nowrap; border-left: 0;
+                     border-bottom: 2px solid transparent; }
+    #agents button[aria-current="true"], #workspace button[aria-current="true"] {
+      border-bottom-color: CanvasText; }
     #agents .model { display: none; }
     nav footer { border-top: 0; margin-left: auto; padding: 10px 12px; }
     nav footer .email { display: none; }
@@ -165,6 +172,7 @@
 <nav hidden>
   <div class="brand">ufo</div>
   <ul id="agents"></ul>
+  <ul id="workspace"></ul>
   <footer class="mono">
     <span class="email" id="member-email"></span>
     <a id="spend" href="/surface/web/spend" hidden>Spend</a>
@@ -193,6 +201,7 @@ const MAX_STREAM_RETRIES = 5;
 const nav = document.querySelector('nav');
 const main = document.querySelector('main');
 const list = document.getElementById('agents');
+const workspaceList = document.getElementById('workspace');
 const head = document.getElementById('agent-head');
 const tabs = document.getElementById('tabs');
 const panel = document.getElementById('panel');
@@ -239,17 +248,29 @@ function emptyState(text) {
   log.appendChild(el);
 }
 
-const TABS = ['chat', 'overview', 'tasks', 'connections', 'credentials', 'sources', 'skills',
-  'memory', 'usage'];
+const TABS = ['chat', 'overview', 'tasks', 'connections', 'skills', 'usage'];
+const WORKSPACE_TABS = ['sources', 'credentials', 'memory', 'artifacts', 'sites'];
+const WORKSPACE_LABELS = {
+  sources: 'Sources',
+  credentials: 'Credentials',
+  memory: 'Memory',
+  artifacts: 'Artifacts',
+  sites: 'Sites',
+};
 let tab = 'chat';
 let panelLoad = 0;
 
 function hashState() {
+  const workspaceMatch = location.hash.match(/^#\/workspace\/(\w+)$/);
+  if (workspaceMatch && WORKSPACE_TABS.includes(workspaceMatch[1])) {
+    return { agent: null, tab: 'chat', workspace: workspaceMatch[1] };
+  }
   const match = location.hash.match(/^#\/agents\/([0-9a-f-]{36})(?:\/(\w+))?$/);
-  if (!match) return { agent: null, tab: 'chat' };
+  if (!match) return { agent: null, tab: 'chat', workspace: null };
   return {
     agent: agents.find((agent) => agent.id === match[1]) || null,
     tab: TABS.includes(match[2]) ? match[2] : 'chat',
+    workspace: null,
   };
 }
 
@@ -547,6 +568,20 @@ function renderSidebar() {
   }));
 }
 
+function renderWorkspaceSidebar() {
+  workspaceList.replaceChildren(...WORKSPACE_TABS.map((name) => {
+    const item = document.createElement('li');
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = WORKSPACE_LABELS[name];
+    button.setAttribute('aria-current', 'false');
+    button.addEventListener('click', () => showWorkspace(name));
+    item.appendChild(button);
+    item.dataset.tab = name;
+    return item;
+  }));
+}
+
 function syncComposer() {
   const state = selected && chatState(selected.id);
   send.disabled = !state || state.busy || state.messages === null;
@@ -742,13 +777,6 @@ function renderChat(agent) {
 }
 
 const PANELS = {
-  credentials: {
-    key: 'slots',
-    columns: ['slot', 'description', 'extension', 'state'],
-    row: (entry) => [entry.slot, entry.description, entry.extension,
-                     entry.filled ? 'filled' : 'empty'],
-    empty: 'No credential slots are declared.',
-  },
   tasks: {
     key: 'tasks',
     columns: ['name', 'schedule', 'task', 'creator', 'next run', 'last run', 'expires'],
@@ -758,6 +786,9 @@ const PANELS = {
                      day(entry.last_run_at) || '—', day(entry.expires_at) || '—'],
     empty: 'No scheduled tasks for this agent.',
   },
+};
+
+const WORKSPACE_TABLES = {
   sources: {
     key: 'sources',
     columns: ['backend', 'owner', 'access', 'errors', 'next sync'],
@@ -766,6 +797,13 @@ const PANELS = {
                      String(entry.consecutive_errors),
                      entry.next_sync_at.replace('T', ' ').slice(0, 16)],
     empty: 'No sources are registered.',
+  },
+  credentials: {
+    key: 'slots',
+    columns: ['slot', 'description', 'extension', 'state'],
+    row: (entry) => [entry.slot, entry.description, entry.extension,
+                     entry.filled ? 'filled' : 'empty'],
+    empty: 'No credential slots are declared.',
   },
 };
 
@@ -907,41 +945,108 @@ async function renderSkills(agent, load, notice) {
   panel.appendChild(result);
 }
 
-async function renderMemory(agent, load, query) {
-  const form = document.createElement('form');
-  form.className = 'search';
-  const search = document.createElement('input');
-  search.placeholder = 'Search memory…';
-  search.value = query || '';
-  const go = document.createElement('button');
-  go.type = 'submit';
-  go.className = 'send';
-  go.textContent = 'Search';
-  form.append(search, go);
-  form.addEventListener('submit', (event) => {
-    event.preventDefault();
-    if (search.value.trim()) selectTab('memory', search.value.trim());
-  });
-  panel.appendChild(form);
-  if (!query) return;
+function workspaceEmpty(view, text) {
+  const el = document.createElement('span');
+  el.className = 'empty';
+  el.textContent = text;
+  view.appendChild(el);
+}
+
+function markWorkspace(name) {
+  for (const item of list.children) item.firstChild.setAttribute('aria-current', 'false');
+  for (const item of workspaceList.children) {
+    item.firstChild.setAttribute('aria-current', item.dataset.tab === name);
+  }
+}
+
+async function showWorkspace(name, query) {
+  selected = null;
+  panelLoad += 1;
+  location.hash = '#/workspace/' + name;
+  markWorkspace(name);
+  const view = document.createElement('div');
+  view.className = 'admin-view';
+  main.replaceChildren(view);
+  const spec = WORKSPACE_TABLES[name];
+  let url = BASE + '/workspace/' + name;
+  if (name === 'memory' && query) url += '?q=' + encodeURIComponent(query);
+  if (name === 'memory') {
+    const form = document.createElement('form');
+    form.className = 'search';
+    const search = document.createElement('input');
+    search.placeholder = 'Search memory…';
+    search.value = query || '';
+    const go = document.createElement('button');
+    go.type = 'submit';
+    go.className = 'send';
+    go.textContent = 'Search';
+    form.append(search, go);
+    form.addEventListener('submit', (event) => {
+      event.preventDefault();
+      showWorkspace('memory', search.value.trim() || undefined);
+    });
+    view.appendChild(form);
+  }
   let payload;
   try {
-    const res = await fetch(
-      BASE + '/agents/' + agent.id + '/memory?q=' + encodeURIComponent(query),
-      { credentials: 'same-origin' });
-    if (load !== panelLoad) return;
-    if (!res.ok) { panelEmpty('Error ' + res.status + ' — reload to retry.'); return; }
+    const res = await fetch(url, { credentials: 'same-origin' });
+    if (!res.ok) {
+      workspaceEmpty(view, 'Error ' + res.status + ' — reload to retry.');
+      return;
+    }
     payload = await res.json();
   } catch (err) {
-    fail(load, 'Network error — try again.');
+    workspaceEmpty(view, 'Network error — try again.');
     return;
   }
-  if (load !== panelLoad) return;
-  if (!payload.available) { panelEmpty('This deploy has no memory extension.'); return; }
-  if (!payload.matches.length) { panelEmpty('No matches.'); return; }
-  panel.appendChild(table(
-    ['memory', 'kind', 'ref', 'date'],
-    payload.matches.map((match) => row(match.text, match.kind, match.ref, day(match.created_at)))
+  if (spec) {
+    const entries = payload[spec.key];
+    if (!entries.length) { workspaceEmpty(view, spec.empty); return; }
+    view.appendChild(table(spec.columns, entries.map((entry) => row(...spec.row(entry)))));
+    return;
+  }
+  if (name === 'memory') {
+    if (!payload.available) {
+      workspaceEmpty(view, 'This deploy has no memory extension.');
+      return;
+    }
+    if (!payload.matches.length) {
+      workspaceEmpty(view, query ? 'No matches.' : 'No memories yet.');
+      return;
+    }
+    view.appendChild(table(
+      ['memory', 'kind', 'ref', 'date'],
+      payload.matches.map((match) => row(match.text, match.kind, match.ref, day(match.created_at)))
+    ));
+    return;
+  }
+  if (name === 'artifacts') {
+    if (!payload.artifacts.length) { workspaceEmpty(view, 'No shared files yet.'); return; }
+    view.appendChild(table(
+      ['file', 'subject', 'type', 'size', 'date'],
+      payload.artifacts.map((entry) => {
+        const line = row(entry.filename, entry.subject, entry.media_type,
+                         formatSize(entry.size_bytes), day(entry.created_at));
+        if (entry.url) {
+          const link = document.createElement('a');
+          link.href = entry.url;
+          link.textContent = entry.filename;
+          line.childNodes[0].textContent = '';
+          line.childNodes[0].appendChild(link);
+        }
+        return line;
+      })
+    ));
+    return;
+  }
+  if (!payload.available) {
+    workspaceEmpty(view, 'No sites extension is installed.');
+    return;
+  }
+  if (!payload.sites.length) { workspaceEmpty(view, 'No sites are hosted.'); return; }
+  view.appendChild(table(
+    ['site', 'summary'],
+    payload.sites.map((site) => row(site.name, site.summary))
   ));
 }
 
@@ -1017,7 +1122,6 @@ async function selectTab(name, detail) {
   if (name === 'overview') { await renderOverview(agent, load, detail); return; }
   if (name === 'connections') { await renderConnections(agent, load, detail); return; }
   if (name === 'skills') { await renderSkills(agent, load, detail); return; }
-  if (name === 'memory') { await renderMemory(agent, load, detail); return; }
   if (name === 'usage') { await renderUsage(agent, load); return; }
   const spec = PANELS[name];
   let entries;
@@ -1348,6 +1452,9 @@ function renderHead(agent) {
 async function select(agent, name, detail) {
   if (!head.isConnected) restoreChatPane();
   selected = agent;
+  for (const item of workspaceList.children) {
+    item.firstChild.setAttribute('aria-current', 'false');
+  }
   for (const item of list.children) {
     item.firstChild.setAttribute('aria-current', item.dataset.id === agent.id);
   }
@@ -1616,11 +1723,16 @@ async function boot() {
   member = payload.member;
   wireMemberChrome();
   renderSidebar();
+  renderWorkspaceSidebar();
   if (location.hash === '#/admin' && payload.member.admin) {
     showAdmin();
     return;
   }
   const opening = hashState();
+  if (opening.workspace) {
+    showWorkspace(opening.workspace);
+    return;
+  }
   select(opening.agent || agents[0], opening.tab);
 }
 

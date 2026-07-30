@@ -33,6 +33,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequenc
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal, Protocol
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
@@ -119,6 +120,7 @@ from ufo.workspace import ws, ws_current
 if TYPE_CHECKING:
     from ufo.ext.context import SourceReader
     from ufo.memory import MemoryMatch, MemorySearch
+    from ufo.objects import BoundKind, ObjectPage
 
 OPERATOR_EMAIL_DOMAIN = "metalcraft.ai"
 
@@ -172,6 +174,15 @@ WRITEBACK_CLAIM_BATCH = 16
 WRITEBACK_WORKSPACE_BATCH = 16
 WRITEBACK_WORKSPACE_CONCURRENCY = 4
 WRITEBACK_WORKSPACE_IN_FLIGHT = WRITEBACK_WORKSPACE_BATCH * 2
+
+
+@dataclass(frozen=True)
+class ListedArtifact:
+    """One row of the portal's artifacts view: the shared file (the exact record the link
+    minter signs) and when its turn shared it."""
+
+    artifact: "SharedArtifact"
+    created_at: datetime
 
 
 @dataclass(frozen=True)
@@ -500,6 +511,7 @@ class SurfaceContext:
     _declared_slots: tuple[DeclaredSlot, ...]
     _deploy_extensions: tuple[DeployExtensionView, ...] = ()
     _memory: "MemorySearch | None" = None
+    _objects: "Mapping[str, BoundKind]" = MappingProxyType({})
 
     @property
     def deploy_extensions(self) -> tuple[DeployExtensionView, ...]:
@@ -1189,6 +1201,16 @@ class SurfaceContext:
             raise RuntimeError("no memory-search provider is installed — gate on memory_available")
         return await self._memory.search(reader, queries)
 
+    async def recent_memory(
+        self, subjects: frozenset[str], limit: int
+    ) -> "tuple[MemoryMatch, ...]":
+        """The newest live memory items the subjects may read — the browse half of the memory
+        seam, for the portal's listing: no query, no similarity, source pages stay search-only.
+        Gates on `memory_available` like `search_memory`."""
+        if self._memory is None:
+            raise RuntimeError("no memory-search provider is installed — gate on memory_available")
+        return await self._memory.list_recent(subjects, limit)
+
     async def agent_spend(self, agent_id: UUID, window_seconds: int) -> AgentSpendReport:
         """One agent's rolling-window spend and its agent-scoped caps — the member-visible slice,
         distinct from the workspace-wide `spend_rollup` an admin reads."""
@@ -1246,6 +1268,71 @@ class SurfaceContext:
                 connected_at=row.created_at,
             )
             for row in rows
+        )
+
+    async def list_artifacts(
+        self, member_id: UUID, *, admin: bool, limit: int
+    ) -> "tuple[ListedArtifact, ...]":
+        """The newest files turns have shared, as the portal's artifacts view lists them: a member
+        sees their own conversations' artifacts, an admin the workspace's — newest first, bounded.
+        Each entry carries the `SharedArtifact` the link minter signs, so the view links exactly
+        what the writeback delivery would."""
+        query = (
+            sa.select(
+                tables.shared_artifact.c.blob_key,
+                tables.shared_artifact.c.filename,
+                tables.shared_artifact.c.subject,
+                tables.shared_artifact.c.media_type,
+                tables.shared_artifact.c.size_bytes,
+                tables.shared_artifact.c.created_at,
+            )
+            .select_from(
+                tables.shared_artifact.join(
+                    tables.turn, tables.shared_artifact.c.turn_id == tables.turn.c.id
+                ).join(
+                    tables.conversation,
+                    tables.turn.c.conversation_id == tables.conversation.c.id,
+                )
+            )
+            .where(tables.shared_artifact.c.workspace_id == self.workspace_id)
+            .order_by(tables.shared_artifact.c.created_at.desc())
+            .limit(limit)
+        )
+        if not admin:
+            query = query.where(tables.conversation.c.member_id == member_id)
+        async with workspace_tx() as connection:
+            rows = (await connection.execute(query)).all()
+        return tuple(
+            ListedArtifact(
+                artifact=SharedArtifact(
+                    blob_key=row.blob_key,
+                    filename=row.filename,
+                    subject=row.subject,
+                    media_type=row.media_type,
+                    size_bytes=row.size_bytes,
+                ),
+                created_at=row.created_at,
+            )
+            for row in rows
+        )
+
+    async def list_member_objects(
+        self, kind: str, member_id: UUID | None, *, admin: bool
+    ) -> "ObjectPage | None":
+        """One object kind's listing for a signed-in member — the portal's projection over the
+        deploy's registry, answering through the kind's own visibility gate (`member_page`), or
+        None when the deploy installs no such kind. Only a member-owned kind lists here; asking
+        for any other kind is a programming error, not an empty page."""
+        from ufo.objects import MemberOwnedObjects, ObjectListQuery
+
+        bound = self._objects.get(kind)
+        if bound is None:
+            return None
+        store = bound.kind.store
+        if not isinstance(store, MemberOwnedObjects):
+            raise RuntimeError(f"object kind {kind!r} does not list for a member")
+        return await store.member_page(
+            bound.context, member_id=member_id, admin=admin, query=ObjectListQuery()
         )
 
     async def list_credential_slots(self) -> tuple[CredentialSlotView, ...]:

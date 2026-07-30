@@ -24,7 +24,9 @@ class MemoryMatch:
 
 
 class MemorySearchProvider(Protocol):
-    """A memory extension's workspace-ambient search implementation."""
+    """A memory extension's workspace-ambient search implementation. `list_recent` is the
+    browse half: the newest live memory items a subject set may read, no query and no
+    similarity — source pages stay search-only, so it takes subjects rather than a reader."""
 
     async def search(
         self,
@@ -32,6 +34,10 @@ class MemorySearchProvider(Protocol):
         reader: SourceReader,
         start: datetime | None = None,
         end: datetime | None = None,
+    ) -> tuple[MemoryMatch, ...]: ...
+
+    async def list_recent(
+        self, subjects: frozenset[str], limit: int
     ) -> tuple[MemoryMatch, ...]: ...
 
 
@@ -49,3 +55,6 @@ class MemorySearch:
         end: datetime | None = None,
     ) -> tuple[MemoryMatch, ...]:
         return await self.provider.search(queries, reader, start, end)
+
+    async def list_recent(self, subjects: frozenset[str], limit: int) -> tuple[MemoryMatch, ...]:
+        return await self.provider.list_recent(subjects, limit)

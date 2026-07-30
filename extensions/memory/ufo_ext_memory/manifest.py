@@ -67,6 +67,7 @@ from ufo_ext_memory.store import (
     PageIndexer,
     Recalled,
     SourceMatch,
+    _aware,
     memory_item,
     recall_subjects,
     store_for,
@@ -229,6 +230,38 @@ class MemorySearchService:
                 created_at=match.created_at,
             )
             for match in list(sources.values())[:MEMORY_SEARCH_LIMIT]
+        )
+
+    async def list_recent(self, subjects: frozenset[str], limit: int) -> tuple[MemoryMatch, ...]:
+        """The newest live memory items the subjects may read — the browse half of the seam: a
+        bounded index-backed scan, no query, no similarity, superseded rows excluded. Source pages
+        are search's alone; a listing of everything synced would be a page dump, not memory."""
+        async with self.ctx.transaction() as connection:
+            rows = (
+                await connection.execute(
+                    sa.select(
+                        memory_item.c.id,
+                        memory_item.c.body,
+                        memory_item.c.item_class,
+                        memory_item.c.created_at,
+                    )
+                    .where(
+                        memory_item.c.workspace_id == self.ctx.store.workspace_id,
+                        memory_item.c.subject.in_(subjects),
+                        memory_item.c.superseded_by.is_(None),
+                    )
+                    .order_by(memory_item.c.created_at.desc(), memory_item.c.id)
+                    .limit(limit)
+                )
+            ).all()
+        return tuple(
+            MemoryMatch(
+                kind=row.item_class,
+                text=row.body,
+                ref=ObjectRef(kind=MEMORY_KIND, name=str(row.id)),
+                created_at=_aware(row.created_at),
+            )
+            for row in rows
         )
 
 

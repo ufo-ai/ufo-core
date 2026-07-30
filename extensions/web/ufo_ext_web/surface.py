@@ -1,9 +1,11 @@
 """The web portal on the core surface seam, in its live mode: the authenticated shell around the
 member's agents — the page and the one POST that opens its session, per-agent chat with
 cookie-authenticated turn admission and an SSE tail of each turn's live frames, read projections
-(the agent index, per-agent transcripts, overviews, scheduled tasks, skills, memory search,
-per-agent usage, connections, credential slots, and sources, and — for workspace admins — the
-administration view and the spend rollup), and prepared intents, the panels' one mutation path.
+(the agent index, per-agent transcripts, overviews, scheduled tasks, skills, per-agent usage,
+and connections) beside the workspace-level views every member holds — sources, credential
+slots, memory (latest first, searched across every reachable agent), shared artifacts, hosted
+sites — plus, for workspace admins, the administration view and the spend rollup, and prepared
+intents, the panels' one mutation path.
 
 The `ufo_session` cookie carries the signed HMAC member bearer the gateway or `ufoctl init` mints
 (the `ufo.sdk.bearer` codec over `{ws, email, exp}`), landed by the one POST that opens a session
@@ -16,6 +18,7 @@ admits without writeback and delivers by tailing the hub over SSE in its own str
 through the writeback poller. Everything web-specific lives here, reaching core only through the
 privileged `SurfaceContext` — the SDK surface a CI gate pins."""
 
+import asyncio
 import html
 import json
 import re
@@ -41,6 +44,7 @@ from ufo.sdk.http import (
     set_session_cookie,
 )
 from ufo.sdk.hub import CostTick, LiveFrame, Parked, SkillLoad, Terminal, ToolCall
+from ufo.sdk.memory import MemoryMatch
 from ufo.sdk.models import Message, TextBlock
 from ufo.sdk.seats import Seats
 from ufo.sdk.surfaces import (
@@ -71,6 +75,10 @@ WEB_INBOX_DIR = "web-inbox"
 ANSWER_TURN_HEADER = "x-ufo-answer-turn"
 ANSWER_QUESTION_HEADER = "x-ufo-answer-question"
 MAX_MEMORY_QUERY_CHARS = 500
+MEMORY_RECENT_LIMIT = 100
+MEMORY_RESULT_LIMIT = 100
+ARTIFACT_LIST_LIMIT = 100
+SITE_KIND = "site"
 SPEND_WINDOW_DEFAULT_SECONDS = 86_400
 MAX_USAGE_WINDOW_SECONDS = 31_536_000
 PORTAL_PATH = "/surface/web"
@@ -531,39 +539,56 @@ async def skills(ctx: SurfaceContext, request: Request) -> Response:
     )
 
 
-async def memory(ctx: SurfaceContext, request: Request) -> Response:
-    """Search the memory the viewer may read — their own subject plus shared, the same atoms
-    recall uses, so another member's private items can never match. The selected agent gates
-    source-derived hits: the reader carries the agent whose source grants fence page results,
-    exactly as a turn's tools search, so the panel and the agent answer identically; member-written
-    items stay subject-scoped."""
-    gated = await _panel_gate(ctx, request)
-    if isinstance(gated, Response):
-        return gated
-    member_id, _email, _audience, agent_id = gated
+async def workspace_memory(ctx: SurfaceContext, request: Request) -> Response:
+    """The member's memory across every agent they reach. With no query, the newest
+    `MEMORY_RECENT_LIMIT` live items under the viewer's own subject plus shared — a listing, not
+    a recall. With a query, one search per reachable agent unioned and deduped by ref: the reader
+    contract stays per-agent, so source-page fencing becomes "any agent the member reaches" —
+    live reachability, the same authority chat's tools exercise agent by agent."""
+    resolved = await _audience_for(ctx, request)
+    if isinstance(resolved, Response):
+        return resolved
+    member_id, _email, audience = resolved
+    if not ctx.memory_available:
+        return JSONResponse({"available": False, "matches": []})
+    subjects = audience_subjects(conversation_audience(member_id))
     query = request.query_params.get("q", "").strip()
-    if not query or not ctx.memory_available:
-        return JSONResponse({"available": ctx.memory_available, "matches": []})
-    reader = SourceReader(
-        agent_id=agent_id,
-        requesting_member_id=member_id,
-        subjects=audience_subjects(conversation_audience(member_id)),
+    if not query:
+        found = await ctx.recent_memory(subjects, MEMORY_RECENT_LIMIT)
+        return JSONResponse({"available": True, "matches": _memory_rows(found)})
+    legs = await asyncio.gather(
+        *(
+            ctx.search_memory(
+                SourceReader(agent_id=agent.id, requesting_member_id=member_id, subjects=subjects),
+                (query[:MAX_MEMORY_QUERY_CHARS],),
+            )
+            for agent in audience.agents
+        )
     )
-    found = await ctx.search_memory(reader, (query[:MAX_MEMORY_QUERY_CHARS],))
-    return JSONResponse(
+    deduped: dict[object, MemoryMatch] = {}
+    for leg in legs:
+        for match in leg:
+            key = (
+                (match.ref.kind, match.ref.name)
+                if match.ref is not None
+                else (match.kind, match.text)
+            )
+            if key not in deduped:
+                deduped[key] = match
+    found = tuple(deduped.values())[:MEMORY_RESULT_LIMIT]
+    return JSONResponse({"available": True, "matches": _memory_rows(found)})
+
+
+def _memory_rows(found: tuple[MemoryMatch, ...]) -> list[dict[str, object]]:
+    return [
         {
-            "available": True,
-            "matches": [
-                {
-                    "kind": match.kind,
-                    "text": match.text,
-                    "ref": None if match.ref is None else f"{match.ref.kind}/{match.ref.name}",
-                    "created_at": _iso(match.created_at),
-                }
-                for match in found
-            ],
+            "kind": match.kind,
+            "text": match.text,
+            "ref": None if match.ref is None else f"{match.ref.kind}/{match.ref.name}",
+            "created_at": _iso(match.created_at),
         }
-    )
+        for match in found
+    ]
 
 
 async def usage(ctx: SurfaceContext, request: Request) -> Response:
@@ -618,30 +643,74 @@ async def connections(ctx: SurfaceContext, request: Request) -> Response:
     return JSONResponse({"connections": [entry.model_dump(mode="json") for entry in listed]})
 
 
-async def credentials(ctx: SurfaceContext, request: Request) -> Response:
+async def workspace_credentials(ctx: SurfaceContext, request: Request) -> Response:
     """Member-fillable declared BYOK slots and their fill state — never a value, and never the
     `member_filled=False` seals the `credential` object kind still lists (deploy machinery, not a
-    member's key). The route rides the agent path only for the panel's navigation, and the
-    audience gate keeps an out-of-audience agent not-found here too."""
-    gated = await _panel_gate(ctx, request)
-    if isinstance(gated, Response):
-        return gated
-    _member_id, _email, _audience, _agent_id = gated
+    member's key). Workspace-scoped: the slots are the deploy's, shared across every agent."""
+    resolved = await _audience_for(ctx, request)
+    if isinstance(resolved, Response):
+        return resolved
     listed = await ctx.list_credential_slots()
     return JSONResponse({"slots": [entry.model_dump(mode="json") for entry in listed]})
 
 
-async def sources(ctx: SurfaceContext, request: Request) -> Response:
+async def workspace_sources(ctx: SurfaceContext, request: Request) -> Response:
     """The live source bindings this member may see — their own registrations plus shared ones,
-    all of them for a workspace admin. A member-subject source's indexed pages stay gated to that
-    member; the panel shows the subject so that stays legible, and the read names a shared
-    source's owner only to an admin or the owner."""
-    gated = await _panel_gate(ctx, request)
-    if isinstance(gated, Response):
-        return gated
-    member_id, _email, audience, _agent_id = gated
+    all of them for a workspace admin. Workspace-scoped: the rows never carried an agent. A
+    member-subject source's indexed pages stay gated to that member; the view shows the subject
+    so that stays legible, and the read names a shared source's owner only to an admin or the
+    owner."""
+    resolved = await _audience_for(ctx, request)
+    if isinstance(resolved, Response):
+        return resolved
+    member_id, _email, audience = resolved
     listed = await ctx.list_sources(member_id, admin=audience.admin)
     return JSONResponse({"sources": [entry.model_dump(mode="json") for entry in listed]})
+
+
+async def workspace_artifacts(ctx: SurfaceContext, request: Request) -> Response:
+    """The newest files turns have shared with this member — their own conversations' artifacts,
+    every conversation's for an admin — each with the same signed TTL download link a delivery
+    would carry, or none when artifact delivery is unconfigured."""
+    resolved = await _audience_for(ctx, request)
+    if isinstance(resolved, Response):
+        return resolved
+    member_id, _email, audience = resolved
+    listed = await ctx.list_artifacts(member_id, admin=audience.admin, limit=ARTIFACT_LIST_LIMIT)
+    return JSONResponse(
+        {
+            "artifacts": [
+                {
+                    "filename": entry.artifact.filename,
+                    "subject": entry.artifact.subject,
+                    "media_type": entry.artifact.media_type,
+                    "size_bytes": entry.artifact.size_bytes,
+                    "created_at": _iso(entry.created_at),
+                    "url": ctx.artifact_link(entry.artifact),
+                }
+                for entry in listed
+            ]
+        }
+    )
+
+
+async def workspace_sites(ctx: SurfaceContext, request: Request) -> Response:
+    """The hosted sites this member may see, answered through the site kind's own visibility gate
+    — shared sites plus their own private ones, every site for an admin — or `available: false`
+    when the deploy installs no sites extension."""
+    resolved = await _audience_for(ctx, request)
+    if isinstance(resolved, Response):
+        return resolved
+    member_id, _email, audience = resolved
+    page = await ctx.list_member_objects(SITE_KIND, member_id, admin=audience.admin)
+    if page is None:
+        return JSONResponse({"available": False, "sites": []})
+    return JSONResponse(
+        {
+            "available": True,
+            "sites": [{"name": row.name, "summary": row.summary} for row in page.rows],
+        }
+    )
 
 
 async def stream(ctx: SurfaceContext, request: Request) -> Response:
@@ -917,11 +986,13 @@ ROUTES = (
     SurfaceRoute(method="POST", path="agents/{agent_id}/intents", handler=intents),
     SurfaceRoute(method="GET", path="agents/{agent_id}/tasks", handler=tasks),
     SurfaceRoute(method="GET", path="agents/{agent_id}/connections", handler=connections),
-    SurfaceRoute(method="GET", path="agents/{agent_id}/credentials", handler=credentials),
-    SurfaceRoute(method="GET", path="agents/{agent_id}/sources", handler=sources),
     SurfaceRoute(method="GET", path="agents/{agent_id}/skills", handler=skills),
-    SurfaceRoute(method="GET", path="agents/{agent_id}/memory", handler=memory),
     SurfaceRoute(method="GET", path="agents/{agent_id}/usage", handler=usage),
+    SurfaceRoute(method="GET", path="workspace/sources", handler=workspace_sources),
+    SurfaceRoute(method="GET", path="workspace/credentials", handler=workspace_credentials),
+    SurfaceRoute(method="GET", path="workspace/memory", handler=workspace_memory),
+    SurfaceRoute(method="GET", path="workspace/artifacts", handler=workspace_artifacts),
+    SurfaceRoute(method="GET", path="workspace/sites", handler=workspace_sites),
     SurfaceRoute(method="GET", path="turns/{turn_id}/stream", handler=stream),
     SurfaceRoute(method="POST", path="credentials", handler=fulfill_credential),
     SurfaceRoute(method="GET", path="spend", handler=spend),

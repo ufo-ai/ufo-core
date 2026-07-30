@@ -184,7 +184,7 @@ const main = element("main");
 const tokenCard = element("section", "token-card");
 body.append(tokenCard, nav, main);
 tokenCard.appendChild(element("form", "token-form"));
-nav.append(element("div"), element("ul", "agents"));
+nav.append(element("div"), element("ul", "agents"), element("ul", "workspace"));
 const footer = element("footer");
 footer.append(element("span", "member-email"), element("a", "spend"), element("button", "admin"));
 nav.appendChild(footer);
@@ -320,6 +320,65 @@ const wire = {
       },
     ],
   },
+  memoryQueries: [],
+  memory: {
+    available: true,
+    recent: [
+      {
+        kind: "fact",
+        text: "the launch codename is bluebird",
+        ref: "memory/1",
+        created_at: "2026-07-29T10:00:00+00:00",
+      },
+    ],
+    searched: [
+      {
+        kind: "fact",
+        text: "the runway is painted",
+        ref: null,
+        created_at: "2026-07-28T09:00:00+00:00",
+      },
+    ],
+  },
+  workspace: {
+    sources: {
+      sources: [
+        {
+          backend: "gmail",
+          owner_email: "admin@example.com",
+          shared: true,
+          consecutive_errors: 0,
+          next_sync_at: "2026-07-30T13:00:00+00:00",
+        },
+      ],
+    },
+    credentials: {
+      slots: [
+        {
+          slot: "api_key",
+          description: "Acme API key",
+          extension: "acme",
+          filled: false,
+        },
+      ],
+    },
+    artifacts: {
+      artifacts: [
+        {
+          filename: "report.pdf",
+          subject: "the quarterly numbers",
+          media_type: "application/pdf",
+          size_bytes: 2048,
+          created_at: "2026-07-29T11:00:00+00:00",
+          url: "https://web/surface/web/artifacts/report.pdf?token=signed",
+        },
+      ],
+    },
+    sites: {
+      available: true,
+      sites: [{ name: "landing-ab12cd34", summary: "port 3000, shared" }],
+    },
+  },
   overview: {
     agent: {
       name: "assistant",
@@ -428,6 +487,33 @@ const sandbox = {
           files: [{ filename: "r.pdf", size_bytes: 3 }],
         }),
       };
+    }
+    if (url.includes("/workspace/")) {
+      const view = url.split("/workspace/")[1];
+      if (wire.workspaceStatus) {
+        return { ok: false, status: wire.workspaceStatus, json: async () => ({}) };
+      }
+      if (wire.workspaceThrows) {
+        wire.workspaceThrows = false;
+        throw new TypeError("network down");
+      }
+      if (view.startsWith("memory")) {
+        const query = view.includes("?q=")
+          ? decodeURIComponent(view.split("?q=")[1])
+          : null;
+        wire.memoryQueries.push(query);
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            available: wire.memory.available,
+            matches: structuredClone(query ? wire.memory.searched : wire.memory.recent),
+          }),
+        };
+      }
+      const stubbed = wire.workspace[view];
+      if (!stubbed) throw new Error(`unstubbed workspace fetch: ${url}`);
+      return { ok: true, status: 200, json: async () => structuredClone(stubbed) };
     }
     const payload = url.endsWith("/overview")
       ? wire.overview
@@ -747,17 +833,217 @@ try {
   }
   if (consentLink.target !== "_blank") throw new Error("consent link must open its own tab");
   wire.connectUrl = null;
-  await tabNamed("memory").fire("click");
-  const searchForm = byId.panel.querySelector("form");
-  if (!searchForm || searchForm.className !== "search") {
-    throw new Error("memory tab built no form.search search bar");
+  const agentTabs = texts(byId.tabs.childNodes);
+  const expectedTabs = ["chat", "overview", "tasks", "connections", "skills", "usage"];
+  if (agentTabs.join("|") !== expectedTabs.join("|")) {
+    throw new Error(`the agent tab strip reads ${JSON.stringify(agentTabs)}`);
   }
-  for (const rule of ["#panel form.search {", "#panel form.search input {"]) {
-    if (!html.includes(rule)) throw new Error(`the page no longer styles ${rule}`);
+  const workspaceButtons = byId.workspace.querySelectorAll("button");
+  const workspaceLabels = texts(workspaceButtons);
+  const expectedWorkspace = ["Sources", "Credentials", "Memory", "Artifacts", "Sites"];
+  if (workspaceLabels.join("|") !== expectedWorkspace.join("|")) {
+    throw new Error(`the workspace sidebar reads ${JSON.stringify(workspaceLabels)}`);
+  }
+  const workspaceNamed = (label) =>
+    workspaceButtons.find((button) => button.textContent === label)
+    ?? (() => { throw new Error(`no ${label} workspace item`); })();
+  const viewText = () =>
+    body
+      .querySelector(".admin-view")
+      .querySelectorAll("*")
+      .map((node) => node.textContent)
+      .filter((line) => line)
+      .join(" | ");
+  const viewCells = () =>
+    texts(
+      body
+        .querySelector(".admin-view")
+        .querySelectorAll("*")
+        .filter((node) => node.tagName === "th" || node.tagName === "td")
+    );
+
+  await workspaceNamed("Sources").fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const sourceCells = viewCells();
+  const expectedSources = [
+    "backend", "owner", "access", "errors", "next sync",
+    "gmail", "admin@example.com", "shared", "0", "2026-07-30 13:00",
+  ];
+  if (sourceCells.join("|") !== expectedSources.join("|")) {
+    throw new Error(`the sources view reads ${JSON.stringify(sourceCells)}`);
+  }
+  if (sandbox.location.hash !== "#/workspace/sources") {
+    throw new Error(`a workspace view left the hash at "${sandbox.location.hash}"`);
+  }
+  if (workspaceNamed("Sources").attributes["aria-current"] !== "true") {
+    throw new Error("the open workspace item carries no aria-current stamp");
+  }
+  if (byId.agents.querySelectorAll("button").some(
+    (button) => button.attributes["aria-current"] === "true")) {
+    throw new Error("an agent stayed marked current under a workspace view");
+  }
+  wire.workspace.sources.sources = [];
+  await workspaceNamed("Sources").fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  if (viewText() !== "No sources are registered.") {
+    throw new Error(`the empty sources view reads "${viewText()}"`);
+  }
+
+  await workspaceNamed("Credentials").fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const slotCells = viewCells();
+  const expectedSlots = [
+    "slot", "description", "extension", "state",
+    "api_key", "Acme API key", "acme", "empty",
+  ];
+  if (slotCells.join("|") !== expectedSlots.join("|")) {
+    throw new Error(`the credentials view reads ${JSON.stringify(slotCells)}`);
+  }
+  wire.workspace.credentials.slots = [];
+  await workspaceNamed("Credentials").fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  if (viewText() !== "No credential slots are declared.") {
+    throw new Error(`the empty credentials view reads "${viewText()}"`);
+  }
+
+  await workspaceNamed("Memory").fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const searchForm = body.querySelector("form.search");
+  if (!searchForm) throw new Error("the memory view built no form.search search bar");
+  for (const rule of ["\n  form.search {", "\n  form.search input {"]) {
+    if (!html.includes(rule)) throw new Error(`the page no longer styles ${rule.trim()}`);
   }
   if (html.includes("#panel form {") || html.includes("#panel form input {")) {
     throw new Error("#panel form styling rescoped past the search bar onto the settings form");
   }
+  if (wire.memoryQueries.at(-1) !== null) {
+    throw new Error(`the memory listing sent q=${wire.memoryQueries.at(-1)}`);
+  }
+  const listingCells = viewCells();
+  const expectedListing = [
+    "memory", "kind", "ref", "date",
+    "the launch codename is bluebird", "fact", "memory/1", "2026-07-29 10:00",
+  ];
+  if (listingCells.join("|") !== expectedListing.join("|")) {
+    throw new Error(`the memory listing reads ${JSON.stringify(listingCells)}`);
+  }
+  const searchField = searchForm.querySelector("input");
+  if (searchField.placeholder !== "Search memory…") {
+    throw new Error(`the memory search field reads "${searchField.placeholder}"`);
+  }
+  if (texts(searchForm.querySelectorAll("button")).join("|") !== "Search") {
+    throw new Error("the memory search bar carries no Search button");
+  }
+  searchField.value = "  runway  ";
+  await searchForm.fire("submit");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  if (wire.memoryQueries.at(-1) !== "runway") {
+    throw new Error(`the memory search sent q=${JSON.stringify(wire.memoryQueries.at(-1))}`);
+  }
+  const searchedCells = viewCells();
+  if (!searchedCells.includes("the runway is painted") || !searchedCells.includes("—")) {
+    throw new Error(`the memory search reads ${JSON.stringify(searchedCells)}`);
+  }
+  if (body.querySelector("form.search").querySelector("input").value !== "runway") {
+    throw new Error("the memory search bar dropped the submitted query");
+  }
+  wire.memory.searched = [];
+  await body.querySelector("form.search").fire("submit");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  if (!viewText().endsWith("No matches.")) {
+    throw new Error(`an empty memory search reads "${viewText()}"`);
+  }
+  wire.memory.recent = [];
+  await workspaceNamed("Memory").fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  if (!viewText().endsWith("No memories yet.")) {
+    throw new Error(`an empty memory listing reads "${viewText()}"`);
+  }
+  wire.memory.available = false;
+  await workspaceNamed("Memory").fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  if (!viewText().endsWith("This deploy has no memory extension.")) {
+    throw new Error(`a memoryless deploy reads "${viewText()}"`);
+  }
+
+  await workspaceNamed("Artifacts").fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const artifactView = body.querySelector(".admin-view");
+  const artifactHeaders = texts(artifactView.querySelectorAll("th"));
+  if (artifactHeaders.join("|") !== "file|subject|type|size|date") {
+    throw new Error(`the artifacts view heads ${JSON.stringify(artifactHeaders)}`);
+  }
+  const download = artifactView.querySelector("a");
+  const shared = wire.workspace.artifacts.artifacts[0];
+  if (!download || download.href !== shared.url || download.textContent !== shared.filename) {
+    throw new Error(`the artifact filename links to "${download?.href}"`);
+  }
+  const [linked, ...artifactCells] = texts(artifactView.querySelectorAll("td"));
+  if (linked !== "") throw new Error(`the linked filename cell also reads "${linked}"`);
+  const expectedArtifacts = [
+    "the quarterly numbers", "application/pdf", "2 kB", "2026-07-29 11:00",
+  ];
+  if (artifactCells.join("|") !== expectedArtifacts.join("|")) {
+    throw new Error(`the artifacts view reads ${JSON.stringify(artifactCells)}`);
+  }
+  shared.url = null;
+  await workspaceNamed("Artifacts").fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const undelivered = body.querySelector(".admin-view");
+  if (undelivered.querySelector("a")) {
+    throw new Error("an artifact with no delivery link still rendered a link");
+  }
+  if (texts(undelivered.querySelectorAll("td"))[0] !== "report.pdf") {
+    throw new Error("an artifact with no delivery link lost its filename");
+  }
+  wire.workspace.artifacts.artifacts = [];
+  await workspaceNamed("Artifacts").fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  if (viewText() !== "No shared files yet.") {
+    throw new Error(`the empty artifacts view reads "${viewText()}"`);
+  }
+
+  await workspaceNamed("Sites").fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const siteCells = viewCells();
+  const expectedSites = ["site", "summary", "landing-ab12cd34", "port 3000, shared"];
+  if (siteCells.join("|") !== expectedSites.join("|")) {
+    throw new Error(`the sites view reads ${JSON.stringify(siteCells)}`);
+  }
+  wire.workspace.sites.sites = [];
+  await workspaceNamed("Sites").fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  if (viewText() !== "No sites are hosted.") {
+    throw new Error(`the empty sites view reads "${viewText()}"`);
+  }
+  wire.workspace.sites.available = false;
+  await workspaceNamed("Sites").fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  if (viewText() !== "No sites extension is installed.") {
+    throw new Error(`a sitesless deploy reads "${viewText()}"`);
+  }
+
+  wire.workspaceStatus = 500;
+  await workspaceNamed("Sites").fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  if (viewText() !== "Error 500 — reload to retry.") {
+    throw new Error(`a failed workspace read reads "${viewText()}"`);
+  }
+  wire.workspaceStatus = null;
+  wire.workspaceThrows = true;
+  await workspaceNamed("Sites").fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  if (viewText() !== "Network error — try again.") {
+    throw new Error(`a dropped workspace read reads "${viewText()}"`);
+  }
+  const restored = byId.agents.querySelectorAll("button");
+  await restored[0].fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  if (!byId["agent-head"].isConnected) throw new Error("chat pane not restored after a workspace view");
+  if (workspaceButtons.some((button) => button.attributes["aria-current"] === "true")) {
+    throw new Error("a workspace item stayed marked current under an agent");
+  }
+  await tabNamed("overview").fire("click");
   await byId.admin.fire("click");
   await new Promise((resolve) => setTimeout(resolve, 0));
   const adminCells = body.querySelectorAll("td").map((cell) => cell.textContent);

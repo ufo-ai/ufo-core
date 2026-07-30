@@ -439,6 +439,40 @@ def turn_tools(
     return tuple(tools), ext_by_tool
 
 
+def member_object_registry(
+    manifests: tuple[Manifest, ...],
+    credential_store: CredentialStore | None = None,
+    index: IndexBackend | None = None,
+    embed: EmbedClient | None = None,
+) -> dict[str, BoundKind]:
+    """The deploy's object kinds bound for member reads outside a turn — the portal's registry.
+    The same kinds and the same boot validation as `turn_tools`, but each extension context is
+    workspace-ambient rather than audience-scoped: a member read carries no conversation."""
+    bound: list[BoundKind] = list(CORE_OBJECT_KINDS)
+    for manifest in manifests:
+        if not manifest.objects:
+            continue
+        declared = frozenset(slot.name for slot in manifest.credentials)
+        if declared and credential_store is None:
+            raise RuntimeError(
+                f"extension {manifest.name!r} declares credential slots {sorted(declared)} "
+                "but no credential key is set"
+            )
+        context = context_for(
+            manifest.name,
+            declared,
+            index,
+            embed,
+            surfaces=frozenset(surface.name for surface in manifest.surfaces),
+        )
+        bound.extend(
+            BoundKind(kind=kind, extension=manifest.name, context=context)
+            for kind in manifest.objects
+        )
+    bound.extend(core_object_kinds(manifests, credential_store))
+    return object_registry(tuple(bound))
+
+
 def core_object_kinds(
     manifests: tuple[Manifest, ...], credential_store: CredentialStore | None = None
 ) -> tuple[BoundKind, ...]:

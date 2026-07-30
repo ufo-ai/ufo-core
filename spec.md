@@ -412,14 +412,21 @@ invoices, and payment methods stay chat acts (`manage_billing`), and caps have n
 yet, so the billing view is a read. Beside chat, each selected agent
 carries read projections shaped by the same contracts chat enforces: its scheduled tasks
 (creator sees content, an admin management metadata, others nothing), its loadable skills (the
-composition a turn loads), memory search under the viewer's own subjects with source-derived
-pages fenced by the selected agent's source grants (the same reader a turn's tools search
-under), its configuration overview (prompt, spec, bound surfaces, the deploy's ceilings —
-answering the agent's whole web audience, with the grant list inside it the admin's), and its
-rolling-window spend beside its agent-scoped caps — the ledger spans every member's turns, so
-spend answers an admin or a member whose explicit grant holds the agent, never the main-agent
-default alone. A shared connection or source names its owner only to an admin or the owner —
-chat resolves no other member's email for a non-admin, so neither does a panel. A panel mutation
+composition a turn loads), its connector accounts, its configuration overview (prompt, spec,
+bound surfaces, the deploy's ceilings — answering the agent's whole web audience, with the grant
+list inside it the admin's), and its rolling-window spend beside its agent-scoped caps — the
+ledger spans every member's turns, so spend answers an admin or a member whose explicit grant
+holds the agent, never the main-agent default alone. What the data never scoped to an agent
+reads beside the agent list instead of under one: source bindings, the deploy's member-fillable
+credential slots, memory, shared files, and hosted sites. Memory with no query lists the newest
+100 live items under the viewer's own subjects; a query searches every agent the member reaches,
+one per-agent reader each, unioned and deduped — so source-derived pages stay fenced by that
+agent's source grants (the same reader a turn's tools search under). Shared files are the
+member's own conversations' artifacts, every conversation's for an admin, each carrying the
+signed TTL link a delivery would. Sites list through the `site` kind's own visibility gate, so
+the portal and chat's `object_list` cannot disagree. A shared connection or source names its
+owner only to an admin or the owner — chat resolves no other member's email for a non-admin, so
+neither does a panel. A panel mutation
 is a **prepared intent**: the form's structured intent is admitted as a turn on the member's one
 durable intent conversation with that agent and dispatched verbatim to the typed object or tool
 action — no model round, no fold into a live chat turn — so a submit applies exactly or returns

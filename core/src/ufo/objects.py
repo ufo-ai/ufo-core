@@ -406,6 +406,28 @@ class MemberOwnedObjects[SpecT: BaseModel, OwnerT: ObjectOwner]:
         )
         return object_page(rows, query)
 
+    async def member_page(
+        self,
+        ext: "ExtensionContext | None",
+        *,
+        member_id: UUID | None,
+        admin: bool,
+        query: ObjectListQuery,
+    ) -> ObjectPage:
+        """The kind's listing for one signed-in member outside a turn — the portal's read
+        projection. The visibility gate is `list`'s, applied to the same rows; a kind opts in by
+        producing its rows from its extension context alone (`_member_rows`), which is also where
+        `_owned_rows` delegates so the two listings can never diverge."""
+        rows = tuple(
+            ObjectRow(name=row.name, summary=row.summary)
+            for row in await self._member_rows(ext)
+            if self._visible(row.owner, member_id, admin)
+        )
+        return object_page(rows, query)
+
+    async def _member_rows(self, ext: "ExtensionContext | None") -> tuple[OwnedRow[OwnerT], ...]:
+        raise NotImplementedError(f"{self.kind_name} rows are readable only inside a turn")
+
     async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[SpecT] | None:
         owner = await self._owner(ctx, name)
         if owner is None or not self._visible(

@@ -41,6 +41,7 @@ from ufo.ext.loader import (
     index_backend,
     injecting_slots,
     load_manifests,
+    member_object_registry,
     memory_search,
     skill_registry,
     turn_runtime_skills,
@@ -84,6 +85,7 @@ from ufo.models.interface import AUTO_MODEL
 from ufo.models.pricing import Pricing
 from ufo.models.registry import model_registry
 from ufo.o11y import init_o11y, log
+from ufo.objects import BoundKind
 from ufo.proxy_serve import OWNER_DSN_ENV, model_rule_base
 from ufo.runtime_instance import (
     CancelReconciler,
@@ -270,6 +272,7 @@ def run() -> None:
         skills=skills,
         user_skills=lambda: turn_runtime_skills(manifests, credentials, index, embed),
         memory=memory,
+        objects=member_object_registry(manifests, credentials, index, embed),
     )
     _assert_no_reserved_routes(app)
     log("serve.started", host=config.serve.host, port=config.serve.port)
@@ -740,6 +743,7 @@ def _mount_shared_surfaces(
     skills: SkillRegistry,
     user_skills: "Callable[[], Awaitable[tuple[RuntimeSkill, ...]]]",
     memory: MemorySearch | None = None,
+    objects: "Mapping[str, BoundKind] | None" = None,
 ) -> None:
     """Install the fleet-wide `WorkspaceScopeBoundary` and mount each shared-fleet-capable
     surface's routes, resolving the workspace per request instead of pinning one at boot:
@@ -786,6 +790,7 @@ def _mount_shared_surfaces(
             _user_skills=user_skills,
             _declared_slots=slots,
             _memory=memory,
+            _objects=objects or {},
         )
 
     for manifest in manifests:

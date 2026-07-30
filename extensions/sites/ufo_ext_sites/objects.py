@@ -94,6 +94,12 @@ class SiteObjects(MemberOwnedObjects[SiteSpec, ObjectOwner]):
         return old.visibility != "private" and spec.visibility == "private"
 
     async def _owned_rows(self, ctx: ToolContext) -> tuple[OwnedRow[ObjectOwner], ...]:
+        return await self._member_rows(_workspace(ctx))
+
+    async def _member_rows(self, ext: ExtensionContext | None) -> tuple[OwnedRow[ObjectOwner], ...]:
+        if ext is None:
+            raise RuntimeError("the site kind reads through its ExtensionContext")
+        sites = HostedSites(ext.store.workspace_id, ext.transaction)
         return tuple(
             OwnedRow(
                 name=name,
@@ -102,7 +108,7 @@ class SiteObjects(MemberOwnedObjects[SiteSpec, ObjectOwner]):
                     member_id=site.creator_member_id, shared=site.visibility != "private"
                 ),
             )
-            for name, site in _named(await _sites(ctx).all()).items()
+            for name, site in _named(await sites.all()).items()
         )
 
     async def _detail(
