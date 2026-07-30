@@ -61,14 +61,35 @@ class AudienceIntent(BaseModel):
     email: str
 
 
+class CorrectionIntent(BaseModel):
+    """One memory correction from the workspace memory view: a corrective memory recorded through
+    `memory_update`, exactly the write chat performs — a new item under the correcting member's own
+    audience, naming the corrected item in `source_ref`. The named item is never edited or removed:
+    the memory kind refuses apply and delete, and consolidation is what ends an item."""
+
+    verb: Literal["record"]
+    kind: Literal["memory"]
+    corrects: UUID
+    body: str = Field(min_length=1)
+
+
 class PanelIntent(BaseModel):
     """What a panel form submits: the closed set of mutations a panel produces today."""
 
-    submitted: ApplyIntent | AudienceIntent = Field(discriminator="verb")
+    submitted: ApplyIntent | AudienceIntent | CorrectionIntent = Field(discriminator="verb")
 
 
-def _tool_intent(submitted: ApplyIntent | AudienceIntent) -> ToolIntent:
+def _tool_intent(submitted: ApplyIntent | AudienceIntent | CorrectionIntent) -> ToolIntent:
     match submitted:
+        case CorrectionIntent():
+            return ToolIntent(
+                tool="memory_update",
+                input={
+                    "body": submitted.body,
+                    "source_ref": f"corrects memory/{submitted.corrects}",
+                    "user_description": "Correct a memory from the portal.",
+                },
+            )
         case AudienceIntent():
             return ToolIntent(
                 tool=submitted.verb,

@@ -988,7 +988,7 @@ function correctMemory(match, result, query) {
       showWorkspace('memory', query);
       return;
     }
-    result.replaceChildren(form, document.createTextNode(outcome.message));
+    result.replaceChildren(form);
     save.disabled = false;
   });
 }

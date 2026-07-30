@@ -981,7 +981,7 @@ function correctMemory(match, result, query) {
     const outcome = await postIntent(mainAgent, {
       verb: 'record',
       kind: 'memory',
-      corrects: match.ref.slice('memory/'.length),
+      corrects: '00000000-0000-4000-8000-000000000000',
       body: body.value.trim(),
     });
     if (outcome.applied) {

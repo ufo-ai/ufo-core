@@ -961,7 +961,7 @@ function memoryRow(match, result, query) {
 }
 
 function correctMemory(match, result, query) {
-  const mainAgent = agents.find((agent) => agent.main);
+  const mainAgent = agents[agents.length - 1];
   const form = document.createElement('form');
   form.className = 'correct';
   const body = document.createElement('input');

@@ -330,10 +330,16 @@ const wire = {
         ref: "memory/1",
         created_at: "2026-07-29T10:00:00+00:00",
       },
+      {
+        kind: "source",
+        text: "the codename page",
+        ref: "page/9",
+        created_at: "2026-07-29T09:00:00+00:00",
+      },
     ],
     searched: [
       {
-        kind: "fact",
+        kind: "source",
         text: "the runway is painted",
         ref: null,
         created_at: "2026-07-28T09:00:00+00:00",
@@ -428,6 +434,13 @@ const sandbox = {
       wire.intentUrls.push(url);
       if (wire.holdPost) await wire.holdPost;
       wire.overview.agent.updated_at = "2026-07-30T12:00:00+00:00";
+      if (wire.intentRefuses) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ applied: false, message: "Not applied.", turn_id: "t" }),
+        };
+      }
       return {
         ok: true,
         status: 200,
@@ -921,12 +934,76 @@ try {
   }
   const listingCells = viewCells();
   const expectedListing = [
-    "memory", "kind", "ref", "date",
-    "the launch codename is bluebird", "fact", "memory/1", "2026-07-29 10:00",
+    "memory", "kind", "ref", "date", "",
+    "the launch codename is bluebird", "fact", "memory/1", "2026-07-29 10:00", "",
+    "the codename page", "source", "page/9", "2026-07-29 09:00", "—",
   ];
   if (listingCells.join("|") !== expectedListing.join("|")) {
     throw new Error(`the memory listing reads ${JSON.stringify(listingCells)}`);
   }
+  const listedCorrect = body
+    .querySelector(".admin-view")
+    .querySelectorAll("button")
+    .filter((button) => button.textContent === "Correct");
+  if (listedCorrect.length !== 1) {
+    throw new Error(
+      `${listedCorrect.length} listed rows offer correction — only the memory item may`
+    );
+  }
+  await listedCorrect[0].fire("click");
+  const correctionForm = body.querySelector("form.correct");
+  if (!correctionForm) throw new Error("the correction control built no form.correct");
+  for (const rule of ["\n  form.correct {", "\n  form.correct input {"]) {
+    if (!html.includes(rule)) throw new Error(`the page no longer styles ${rule.trim()}`);
+  }
+  const correctionBody = correctionForm.querySelector("input");
+  if (correctionBody.value !== "the launch codename is bluebird") {
+    throw new Error(`the correction form prefills "${correctionBody.value}"`);
+  }
+  const intentsBeforeCorrection = wire.posted.length;
+  correctionBody.value = "  the launch codename is redwood  ";
+  wire.memory.recent = [
+    {
+      kind: "fact",
+      text: "the launch codename is redwood",
+      ref: "memory/2",
+      created_at: "2026-07-30T11:00:00+00:00",
+    },
+  ];
+  await correctionForm.fire("submit");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const correction = canonical(wire.posted[intentsBeforeCorrection]);
+  const expectedCorrection = canonical({
+    verb: "record",
+    kind: "memory",
+    corrects: "1",
+    body: "the launch codename is redwood",
+  });
+  if (correction !== expectedCorrection) {
+    throw new Error(`the correction posted ${correction}, expected ${expectedCorrection}`);
+  }
+  if (!wire.intentUrls.at(-1).includes(`/agents/${AGENT_A}/intents`)) {
+    throw new Error(`the correction posted to ${wire.intentUrls.at(-1)}, not the main agent`);
+  }
+  if (!viewCells().includes("the launch codename is redwood")) {
+    throw new Error("an applied correction did not re-read the memory view");
+  }
+  wire.intentRefuses = true;
+  const refusedRow = body
+    .querySelector(".admin-view")
+    .querySelectorAll("button")
+    .find((button) => button.textContent === "Correct");
+  await refusedRow.fire("click");
+  const refusedForm = body.querySelector("form.correct");
+  refusedForm.querySelector("input").value = "refused text";
+  await refusedForm.fire("submit");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  if (!viewText().includes("Not applied.")) {
+    throw new Error(`a refused correction reads "${viewText()}"`);
+  }
+  wire.intentRefuses = false;
+  await workspaceNamed("Memory").fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
   const searchField = searchForm.querySelector("input");
   if (searchField.placeholder !== "Search memory…") {
     throw new Error(`the memory search field reads "${searchField.placeholder}"`);

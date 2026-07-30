@@ -41,6 +41,7 @@ class ToolIntent(BaseModel):
         "connect_account",
         "grant_web_access",
         "revoke_web_access",
+        "memory_update",
     ]
     input: dict[str, JsonValue]
 
