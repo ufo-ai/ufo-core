@@ -95,7 +95,9 @@ class StubElement {
   setAttribute(name, value) {
     this.attributes[name] = String(value);
   }
-  focus() {}
+  focus() {
+    focused = this;
+  }
   matches(selector) {
     if (selector.startsWith("#")) return this.attributes.id === selector.slice(1);
     if (selector.startsWith(".")) {
@@ -151,6 +153,7 @@ class StubElement {
   }
 }
 
+let focused = null;
 const documentRoot = new StubElement("html");
 const body = new StubElement("body");
 documentRoot.appendChild(body);
@@ -244,6 +247,9 @@ const wire = {
   },
   answered: [],
   credentialPosts: [],
+  artifactChunks: ["the handoff notes"],
+  artifactCancels: 0,
+  artifactReads: 0,
   "/api/admin": {
     agents: [
       {
@@ -400,6 +406,22 @@ const wire = {
           created_at: "2026-07-29T11:00:00+00:00",
           url: "https://web/surface/web/artifacts/report.pdf?token=signed",
         },
+        {
+          filename: "chart.png",
+          subject: "the burn curve",
+          media_type: "image/png",
+          size_bytes: 4096,
+          created_at: "2026-07-29T10:00:00+00:00",
+          url: "https://web/surface/web/artifacts/chart.png?token=signed",
+        },
+        {
+          filename: "notes.txt",
+          subject: "the handoff",
+          media_type: "text/plain",
+          size_bytes: 12,
+          created_at: "2026-07-29T09:00:00+00:00",
+          url: "https://web/surface/web/artifacts/notes.txt?token=signed",
+        },
       ],
     },
     sites: {
@@ -449,9 +471,42 @@ const sandbox = {
       return node;
     },
     body,
+    listeners: {},
+    addEventListener(name, handler) {
+      (this.listeners[name] ??= []).push(handler);
+    },
+    async fire(name, event) {
+      for (const handler of this.listeners[name] ?? []) await handler(event);
+    },
   },
+  TextDecoder,
   location: { hash: "" },
   fetch: async (url, options) => {
+    if (url.includes("/artifacts/") && !options?.method) {
+      if (wire.artifactBodyThrows) throw new TypeError("network down");
+      if (wire.artifactBodyStatus) {
+        return { ok: false, status: wire.artifactBodyStatus };
+      }
+      const chunks = wire.artifactChunks.map((chunk) => new TextEncoder().encode(chunk));
+      let index = 0;
+      wire.artifactCancels = 0;
+      wire.artifactReads = 0;
+      return {
+        ok: true,
+        status: 200,
+        body: {
+          getReader: () => ({
+            read: async () => {
+              wire.artifactReads += 1;
+              return index < chunks.length
+                ? { done: false, value: chunks[index++] }
+                : { done: true, value: undefined };
+            },
+            cancel: async () => { wire.artifactCancels += 1; },
+          }),
+        },
+      };
+    }
     if (options?.method === "POST" && url.endsWith("/credentials")) {
       if (wire.credentialThrows) {
         wire.credentialThrows = false;
@@ -614,6 +669,9 @@ const script = html.split("<script>")[1].split("</script>")[0];
 const run = new Function(...Object.keys(sandbox), `"use strict";\n${script}`);
 
 const texts = (nodes) => nodes.map((node) => node.textContent);
+const closeViewer = async () => {
+  await sandbox.document.fire("keydown", { key: "Escape" });
+};
 
 try {
   run(...Object.values(sandbox));
@@ -1214,25 +1272,134 @@ try {
   if (artifactHeaders.join("|") !== "file|subject|type|size|date") {
     throw new Error(`the artifacts view heads ${JSON.stringify(artifactHeaders)}`);
   }
-  const download = artifactView.querySelector("a");
   const shared = wire.workspace.artifacts.artifacts[0];
-  if (!download || download.href !== shared.url || download.textContent !== shared.filename) {
-    throw new Error(`the artifact filename links to "${download?.href}"`);
+  const opener = artifactView.querySelector("button.open");
+  if (!opener || opener.querySelector("span").textContent !== shared.filename) {
+    throw new Error(`the artifact opens through "${opener?.querySelector("span")?.textContent}"`);
   }
-  const [linked, ...artifactCells] = texts(artifactView.querySelectorAll("td"));
-  if (linked !== "") throw new Error(`the linked filename cell also reads "${linked}"`);
+  const [documentRow, imageRow] = artifactView.querySelectorAll("tr").slice(1);
+  const [linked, ...artifactCells] = texts(documentRow.querySelectorAll("td"));
+  if (linked !== "") throw new Error(`the filename cell itself reads "${linked}"`);
   const expectedArtifacts = [
     "the quarterly numbers", "application/pdf", "2 kB", "2026-07-29 11:00",
   ];
   if (artifactCells.join("|") !== expectedArtifacts.join("|")) {
     throw new Error(`the artifacts view reads ${JSON.stringify(artifactCells)}`);
   }
-  shared.url = null;
+  if (documentRow.querySelector("img")) {
+    throw new Error("a non-image artifact rendered a preview");
+  }
+  const previewed = wire.workspace.artifacts.artifacts[1];
+  const preview = imageRow.querySelector("img");
+  if (!preview || preview.src !== previewed.url) {
+    throw new Error(`the image artifact previews "${preview?.src}"`);
+  }
+  if (preview.className !== "thumb" || preview.loading !== "lazy" || preview.alt !== "") {
+    throw new Error("the preview is unbounded, eager, or captioned");
+  }
+  if (texts(imageRow.querySelectorAll("span")).join("") !== previewed.filename) {
+    throw new Error("the previewed row lost its filename");
+  }
+  await preview.fire("error");
+  if (imageRow.querySelector("img")) {
+    throw new Error("a preview that failed to load stayed in the row");
+  }
+
   await workspaceNamed("Artifacts").fire("click");
   await new Promise((resolve) => setTimeout(resolve, 0));
-  const undelivered = body.querySelector(".admin-view");
-  if (undelivered.querySelector("a")) {
+  const rows = body.querySelector(".admin-view").querySelectorAll("tr").slice(1);
+  if (rows.some((line) => line.querySelector("a"))) {
+    throw new Error("an artifact row still navigates straight to the signed link");
+  }
+  const openers = rows.map((line) => line.querySelector("button.open"));
+  if (openers.some((opener) => !opener)) {
+    throw new Error("a delivered artifact has no control to open it");
+  }
+  await openers[1].fire("click");
+  let panel = body.querySelector(".viewer");
+  if (!panel) throw new Error("opening an artifact rendered no viewer");
+  if (!body.querySelector(".admin-view")) {
+    throw new Error("the viewer clobbered the listing behind it");
+  }
+  const full = panel.querySelector("img");
+  if (!full || full.src !== previewed.url || full.className === "thumb") {
+    throw new Error(`the viewer renders the image as "${full?.src}" at thumb scale`);
+  }
+  const grab = panel.querySelector("a");
+  if (!grab || grab.href !== previewed.url || grab.textContent !== "Download") {
+    throw new Error(`the viewer offers download as "${grab?.textContent}"`);
+  }
+  const closer = panel.querySelectorAll("button").filter((el) => el.textContent === "Close");
+  if (closer.length !== 1) throw new Error("the viewer has no Close control");
+  if (focused !== closer[0]) {
+    throw new Error("opening the viewer left focus outside it");
+  }
+  await sandbox.document.fire("keydown", { key: "Escape" });
+  if (body.querySelector(".viewer")) throw new Error("Escape left the viewer open");
+
+  await openers[2].fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  panel = body.querySelector(".viewer");
+  const shownText = panel.querySelector("pre");
+  if (!shownText || shownText.textContent !== "the handoff notes") {
+    throw new Error(`the viewer reads text as "${shownText?.textContent}"`);
+  }
+  if (wire.artifactCancels !== 1) {
+    throw new Error(`the text read cancelled ${wire.artifactCancels} times`);
+  }
+  if (texts(panel.querySelectorAll(".meta")).some((line) => line.includes("shown."))) {
+    throw new Error("a whole small file claimed truncation");
+  }
+  await panel.querySelectorAll("button").find((el) => el.textContent === "Close").fire("click");
+  if (body.querySelector(".viewer")) throw new Error("Close left the viewer open");
+
+  wire.artifactChunks = Array.from({ length: 200 }, () => "x".repeat(1000));
+  await openers[2].fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  panel = body.querySelector(".viewer");
+  if (panel.querySelector("pre").textContent.length !== 65536) {
+    throw new Error("the viewer rendered past its byte bound");
+  }
+  if (wire.artifactReads > 67) {
+    throw new Error(`the viewer read ${wire.artifactReads} chunks past its bound`);
+  }
+  if (wire.artifactCancels !== 1) {
+    throw new Error("the viewer left the bounded read unclosed");
+  }
+  if (!texts(panel.querySelectorAll(".meta")).includes("First 64 kB shown.")) {
+    throw new Error("a truncated read did not say so");
+  }
+  wire.artifactChunks = ["the handoff notes"];
+  closeViewer();
+
+  await openers[0].fire("click");
+  panel = body.querySelector(".viewer");
+  if (panel.querySelector("img") || panel.querySelector("pre")) {
+    throw new Error("an unrenderable artifact pretended to preview");
+  }
+  if (!texts(panel.querySelectorAll("*")).includes(
+    "No preview for this file type. Download it to open it."
+  )) {
+    throw new Error(`the unrenderable viewer reads ${JSON.stringify(texts(panel.querySelectorAll("*")))}`);
+  }
+  closeViewer();
+
+  shared.url = null;
+  previewed.url = null;
+  await workspaceNamed("Artifacts").fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const [undelivered, uncloaked] = body
+    .querySelector(".admin-view")
+    .querySelectorAll("tr")
+    .slice(1);
+  if (undelivered.querySelector("a") || uncloaked.querySelector("a")) {
     throw new Error("an artifact with no delivery link still rendered a link");
+  }
+  if (undelivered.querySelector("img") || uncloaked.querySelector("img")) {
+    throw new Error("an artifact with no delivery link still rendered a preview");
+  }
+  if (undelivered.querySelector("button.open") || uncloaked.querySelector("button.open")) {
+    throw new Error("an artifact with no delivery link still offered to open");
   }
   if (texts(undelivered.querySelectorAll("td"))[0] !== "report.pdf") {
     throw new Error("an artifact with no delivery link lost its filename");

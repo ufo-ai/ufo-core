@@ -427,7 +427,9 @@ agent. Memory with no query lists the newest
 one per-agent reader each, unioned and deduped — so source-derived pages stay fenced by that
 agent's source grants (the same reader a turn's tools search under). Shared files are the
 member's own conversations' artifacts, every conversation's for an admin, each carrying the
-signed TTL link a delivery would. Sites list through the `site` kind's own visibility gate, so
+signed TTL link a delivery would; opening one pins a viewer over the listing that renders what
+the page honestly can — an image inline, text up to a bounded read, and a plain refusal to
+preview anything else — leaving the download an explicit act rather than the click's default. Sites list through the `site` kind's own visibility gate, so
 the portal and chat's `object_list` cannot disagree. A shared connection or source names its
 owner only to an admin or the owner — chat resolves no other member's email for a non-admin, so
 neither does a panel. A panel mutation

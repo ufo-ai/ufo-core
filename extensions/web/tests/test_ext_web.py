@@ -697,36 +697,48 @@ async def test_artifacts_view_lists_own_files_with_links_and_admins_see_all(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
     """The workspace artifacts view: a member reads their own conversations' shared files newest
-    first, each carrying the signed TTL download link; another member's files never list; an
-    admin reads the workspace's."""
+    first, each carrying the signed TTL download link and the media type the page previews an
+    image by; another member's files never list; an admin reads the workspace's."""
     client, workspace_id, agent_id = web
     member_m, token_m = await _seed_member(workspace_id, "m@example.com")
     member_n, token_n = await _seed_member(workspace_id, "n@example.com")
     _admin, token_admin = await _seed_member(workspace_id, "boss@example.com", admin=True)
-    for member_id, email, blob_key, filename in (
-        (member_m, "m@example.com", "artifacts/a/report.pdf", "report.pdf"),
-        (member_n, "n@example.com", "artifacts/b/notes.txt", "notes.txt"),
-    ):
+    minted = datetime(2026, 7, 29, 9, 0, tzinfo=UTC)
+    shared = {
+        "m@example.com": (
+            (member_m, "artifacts/a/report.pdf", "report.pdf", "application/pdf"),
+            (member_m, "artifacts/a/chart.png", "chart.png", "image/png"),
+        ),
+        "n@example.com": ((member_n, "artifacts/b/notes.txt", "notes.txt", "text/plain"),),
+    }
+    minute = 0
+    for email, files in shared.items():
         _conversation, turn_id = await _seed_web_turn(
-            workspace_id, agent_id, member_id, email, TerminalFrame(status="done", text="ok")
+            workspace_id, agent_id, files[0][0], email, TerminalFrame(status="done", text="ok")
         )
-        async with workspace_tx() as connection:
-            await connection.execute(
-                sa.insert(tables.shared_artifact).values(
-                    turn_id=turn_id,
-                    blob_key=blob_key,
-                    workspace_id=workspace_id,
-                    filename=filename,
-                    subject="the file",
-                    media_type="application/octet-stream",
-                    size_bytes=3,
-                    created_at=sa.func.now(),
-                    updated_at=sa.func.now(),
+        for _member_id, blob_key, filename, media_type in files:
+            async with workspace_tx() as connection:
+                await connection.execute(
+                    sa.insert(tables.shared_artifact).values(
+                        turn_id=turn_id,
+                        blob_key=blob_key,
+                        workspace_id=workspace_id,
+                        filename=filename,
+                        subject="the file",
+                        media_type=media_type,
+                        size_bytes=3,
+                        created_at=minted + timedelta(minutes=minute),
+                        updated_at=sa.func.now(),
+                    )
                 )
-            )
+            minute += 1
     path = "/surface/web/workspace/artifacts"
     m_view = (await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_m}"})).json()
-    assert [entry["filename"] for entry in m_view["artifacts"]] == ["report.pdf"]
+    assert [entry["filename"] for entry in m_view["artifacts"]] == ["chart.png", "report.pdf"]
+    assert [entry["media_type"] for entry in m_view["artifacts"]] == [
+        "image/png",
+        "application/pdf",
+    ]
     assert m_view["artifacts"][0]["url"].startswith("https://web/")
     assert "token=" in m_view["artifacts"][0]["url"]
     n_view = (await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_n}"})).json()
@@ -734,10 +746,11 @@ async def test_artifacts_view_lists_own_files_with_links_and_admins_see_all(
     admin_view = (
         await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_admin}"})
     ).json()
-    assert {entry["filename"] for entry in admin_view["artifacts"]} == {
-        "report.pdf",
+    assert [entry["filename"] for entry in admin_view["artifacts"]] == [
         "notes.txt",
-    }
+        "chart.png",
+        "report.pdf",
+    ]
     anonymous = await client.get(path)
     assert anonymous.status_code == 401
 
