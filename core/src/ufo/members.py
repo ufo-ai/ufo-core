@@ -1,4 +1,4 @@
-"""The core-registered `member` object kind: workspace membership and admin role."""
+"""The core-registered `member` object kind: workspace membership, admin role, and seat."""
 
 from dataclasses import dataclass
 from uuid import UUID
@@ -20,19 +20,26 @@ from ufo.objects import (
     object_page,
 )
 from ufo.schema import tables
-from ufo.seats import member_is_admin
+from ufo.seats import Seats, member_is_admin
 from ufo.tools.context import ToolContext
 from ufo.workspace import ws_current
 
 MEMBER_KIND = "member"
 MEMBER_CREATE = "members join through a verified chat surface"
 MEMBER_DELETE = "workspace members cannot be deleted through objects"
-MEMBER_ADMIN_GATE = "admin roles can only be changed by a workspace admin using the main agent"
+MEMBER_ADMIN_GATE = "a member's role or seat is changed by a workspace admin using the main agent"
 
 
 class MemberSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
     admin: bool = Field(description="Whether this member administers the workspace.")
+    seated: bool = Field(
+        description=(
+            "Whether this member holds a seat — an unseated member's messages are refused at "
+            "admission. Seating counts against the workspace's seat limit; the last seated "
+            "admin cannot be unseated."
+        )
+    )
 
 
 @dataclass(frozen=True)
@@ -59,7 +66,7 @@ class MemberObjects:
         if row is None:
             return None
         return ObjectDetail(
-            spec=MemberSpec(admin=row.is_admin),
+            spec=MemberSpec(admin=row.is_admin, seated=row.seated_at is not None),
             created_at=row.created_at,
             updated_at=row.updated_at,
         )
@@ -114,6 +121,7 @@ class MemberObjects:
                 await connection.execute(
                     sa.select(
                         tables.member.c.id,
+                        tables.member.c.email,
                         tables.member.c.is_admin,
                         tables.member.c.seated_at,
                     ).where(
@@ -124,6 +132,12 @@ class MemberObjects:
             ).one_or_none()
             if row is None:
                 raise UnknownObject(f"no member object named {name!r}")
+            if spec.seated != (row.seated_at is not None):
+                seats = Seats(ws_current().workspace_id)
+                if spec.seated:
+                    await seats.grant(connection, row.email)
+                else:
+                    await seats.revoke(connection, row.email)
             if row.is_admin == spec.admin:
                 return
             if not spec.admin:
@@ -137,7 +151,7 @@ class MemberObjects:
                 ).scalar_one()
                 if admins == 1:
                     raise ValueError("a workspace must have at least one admin")
-                if row.seated_at is not None:
+                if spec.seated:
                     seated_admins = (
                         await connection.execute(
                             sa.select(sa.func.count()).where(
@@ -193,13 +207,14 @@ class MemberObjects:
 
 MEMBER_OBJECT = ObjectKind(
     name=MEMBER_KIND,
-    description="A workspace member and their admin role.",
+    description="A workspace member, their admin role, and their seat.",
     guidance=(
-        "List members from the main agent to find stable member ids and manage workspace admins. "
-        "Apply {admin: true|false} to an existing member id; only a speaking admin using the main "
-        "agent may change roles. The "
-        "last admin and last seated admin cannot be removed. Members join through verified chat "
-        "surfaces and cannot be created or deleted here."
+        "List members from the main agent to find stable member ids and manage workspace admins "
+        "and seats. Apply {admin: true|false, seated: true|false} to an existing member id; only "
+        "a speaking admin using the main agent may change either. Unseating removes access at "
+        "admission; seating counts against the seat limit. The last admin and last seated admin "
+        "cannot be removed. Members join through verified chat surfaces and cannot be created or "
+        "deleted here."
     ),
     spec_model=MemberSpec,
     store=MemberObjects(),

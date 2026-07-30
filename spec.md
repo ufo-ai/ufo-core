@@ -426,7 +426,13 @@ action — no model round, no fold into a live chat turn — so a submit applies
 the kind's refusal, the turn is the audit record, and the per-conversation partition runs a
 member's intents one at a time in order. A connect intent leaves the same private OAuth handoff
 chat's connect_account does: the URL rides the turn's terminal and is minted per speaking member
-at stream time, never in a transcript or an intent response.
+at stream time, never in a transcript or an intent response. The administration view mutates
+through the same lane: agent creation (admin-only, on the main agent's lane, taking the initial
+prompt — the one prompt write that is not an edit; copy prefills the form from a read and carries
+configuration only), member role and seat changes through the member kind's guards, and
+web-audience grants riding the target agent's own lane to the same store the chat verbs write.
+Agent delete stays refused — the cascade over an agent's conversations, memory, and resources is
+unbuilt.
 
 The debug and memory-explorer surfaces are the operator-audience surfaces — the `ufoctl`-verbs
 audience, not a member action. They share one operator web session (`ufo.sdk.operator`, one

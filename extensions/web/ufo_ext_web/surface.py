@@ -781,6 +781,7 @@ async def admin_index(ctx: SurfaceContext, request: Request) -> Response:
         {
             "agents": [
                 {
+                    "id": str(agent.id),
                     "name": agent.name,
                     "main": agent.main,
                     "model": agent.model,
@@ -793,9 +794,15 @@ async def admin_index(ctx: SurfaceContext, request: Request) -> Response:
                 for agent in audience.agents
             ],
             "members": [
-                {"email": entry.email, "admin": entry.admin, "seated": entry.seated}
+                {
+                    "id": str(entry.id),
+                    "email": entry.email,
+                    "admin": entry.admin,
+                    "seated": entry.seated,
+                }
                 for entry in snapshot.members
             ],
+            "models": list(ctx.models),
             "seats": {"limit": snapshot.limit, "included": snapshot.included},
             "caps": [entry.model_dump(mode="json") for entry in await ctx.spend_caps()],
             "deploy": {

@@ -259,6 +259,7 @@ const wire = {
   "/api/admin": {
     agents: [
       {
+        id: AGENT_A,
         name: "assistant",
         main: true,
         model: "auto",
@@ -266,8 +267,21 @@ const wire = {
         installations: [],
         web_audience: [],
       },
+      {
+        id: AGENT_B,
+        name: "ops",
+        main: false,
+        model: "claude-sonnet-5",
+        internet_access_allowed: false,
+        installations: [],
+        web_audience: [],
+      },
     ],
-    members: [{ email: "admin@example.com", admin: true, seated: true }],
+    members: [
+      { id: "33333333-3333-4333-8333-333333333333", email: "admin@example.com", admin: true, seated: true },
+      { id: "44444444-4444-4444-8444-444444444444", email: "m@example.com", admin: false, seated: true },
+    ],
+    models: ["auto", "claude-opus-4-8"],
     seats: { limit: null, included: null },
     caps: [
       {
@@ -284,6 +298,7 @@ const wire = {
     },
   },
   posted: [],
+  intentUrls: [],
   connectUrl: null,
   connections: {
     connections: [
@@ -351,6 +366,7 @@ const sandbox = {
     }
     if (options?.method === "POST" && url.endsWith("/intents")) {
       wire.posted.push(JSON.parse(options.body));
+      wire.intentUrls.push(url);
       if (wire.holdPost) await wire.holdPost;
       wire.overview.agent.updated_at = "2026-07-30T12:00:00+00:00";
       return {
@@ -764,6 +780,75 @@ try {
   }
   if (!adminCells.includes("web") || !adminCells.includes("0.1.0")) {
     throw new Error("the deploy extensions table misses the manifest row");
+  }
+  const adminView = () => body.querySelector(".admin-view");
+  const buttonNamed = (label) => {
+    const found = adminView().querySelectorAll("button").find((b) => b.textContent === label);
+    if (!found) throw new Error(`the admin view carries no ${label} control`);
+    return found;
+  };
+  const createForm = adminView().querySelectorAll("form")
+    .find((form) => form.className === "admin-create");
+  if (!createForm) throw new Error("the admin view built no create-agent form");
+  const createInputs = createForm.querySelectorAll("input");
+  const modelSelect = createForm.querySelector("select");
+  if (texts(modelSelect.childNodes).join("|") !== "auto|claude-opus-4-8") {
+    throw new Error("the create form's model choice is not the deploy's model list");
+  }
+  createInputs[0].value = "research";
+  createForm.querySelector("textarea").value = "be curious";
+  const beforeCreate = wire.posted.length;
+  await createForm.fire("submit");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const createEnvelope = wire.posted[beforeCreate];
+  if (JSON.stringify(createEnvelope) !== JSON.stringify({
+    verb: "apply",
+    kind: "agent",
+    name: "research",
+    spec: { model: "auto", internet_access_allowed: true, prompt: "be curious" },
+  })) {
+    throw new Error(`create posted ${JSON.stringify(createEnvelope)}`);
+  }
+  if (!wire.intentUrls[beforeCreate].includes(AGENT_A)) {
+    throw new Error("the create intent did not ride the main agent's lane");
+  }
+  const createResult = adminView().querySelectorAll("*")
+    .find((node) => node.className.includes("result"));
+  if (!createResult || createResult.textContent !== "Created research. Saved.") {
+    throw new Error(`create result reads "${createResult?.textContent}"`);
+  }
+  const memberRow = adminView().querySelectorAll("tr")
+    .find((rowNode) => rowNode.childNodes[0]?.textContent === "m@example.com");
+  if (!memberRow) throw new Error("the members table lists no m@example.com row");
+  const unseat = memberRow.querySelectorAll("button").find((b) => b.textContent === "Unseat");
+  if (!unseat) throw new Error("the m@example.com row carries no Unseat control");
+  await unseat.fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const seatEnvelope = wire.posted[wire.posted.length - 1];
+  if (JSON.stringify(seatEnvelope) !== JSON.stringify({
+    verb: "apply",
+    kind: "member",
+    name: "44444444-4444-4444-8444-444444444444",
+    spec: { admin: false, seated: false },
+  })) {
+    throw new Error(`seat toggle posted ${JSON.stringify(seatEnvelope)}`);
+  }
+  const audienceEmail = adminView().querySelectorAll("td")
+    .flatMap((cellNode) => cellNode.querySelectorAll("input"))
+    .find((input) => input.placeholder === "email@work.com");
+  if (!audienceEmail) throw new Error("the ops row carries no audience email field");
+  audienceEmail.value = "m@example.com";
+  await buttonNamed("Grant").fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const grantEnvelope = wire.posted[wire.posted.length - 1];
+  if (JSON.stringify(grantEnvelope) !== JSON.stringify({
+    verb: "grant_web_access",
+    email: "m@example.com",
+  })) {
+    throw new Error(`grant posted ${JSON.stringify(grantEnvelope)}`);
+  }
+  if (!wire.intentUrls[wire.intentUrls.length - 1].includes(AGENT_B)) {
+    throw new Error("the grant intent did not ride the target agent's lane");
   }
   const freshButtons = byId.agents.querySelectorAll("button");
   await freshButtons[1].fire("click");

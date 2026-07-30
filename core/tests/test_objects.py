@@ -31,7 +31,7 @@ from ufo_ext_sources.tools import SOURCE_OBJECT
 import ufo.artifacts as artifacts
 import ufo.conversations as conversations
 from ufo.agent_scope import agent
-from ufo.agents import AGENT_KIND
+from ufo.agents import AGENT_KIND, AgentObjects, AgentSpec
 from ufo.artifact_token import verify_artifact_token
 from ufo.artifacts import ARTIFACT_KIND, ArtifactObjects, artifact_object_names
 from ufo.audience import (
@@ -826,6 +826,7 @@ async def test_agent_kind_updates_model_admin_gated_and_shows_prompt_readonly(db
         assert fetched["spec"] == {
             "model": "claude-opus-4-8",
             "internet_access_allowed": True,
+            "prompt": None,
         }
         assert fetched["status"]["prompt"] == "be brief"
         assert fetched["status"]["prompt_digest"] == prompt_digest("be brief")
@@ -902,7 +903,7 @@ async def test_agent_kind_updates_model_admin_gated_and_shows_prompt_readonly(db
                 ),
             }
         )
-        with pytest.raises(SpecValidationFailed, match="prompt"):
+        with pytest.raises(VerbNotSupported, match="proposal path"):
             await apply_tool.handler(owner_ctx, prompt_write)
 
 
@@ -929,33 +930,81 @@ async def test_agent_kind_reports_the_model_an_auto_agent_actually_runs(db: None
     assert "auto" not in listing["objects"][0]["summary"]
 
 
-async def test_agent_kind_refuses_create_and_delete(db: None) -> None:
+async def test_agent_kind_creates_admin_gated_on_main_and_refuses_delete(db: None) -> None:
+    """Create is birth, not an edit: an admin on the main agent applies a name no agent holds
+    with a prompt and gets a fresh non-main row that copies nothing; without a prompt, from a
+    non-admin, from a child agent, or under a taken name the create refuses; delete stays
+    refused."""
     workspace_id = await _workspace()
     tools = _object_tools()
     with ws(workspace_id):
         owner = await _member(workspace_id, ADMIN_CREATED_AT)
+        outsider = await _member(workspace_id, JOINER_CREATED_AT)
         agent_id = await _agent_row(workspace_id, is_main=True)
         ctx = _tool_context(
             workspace_id,
             speaker_member_id=owner,
             agent_id=agent_id,
         )
-
         apply_tool = tools["object_apply"]
-        create = apply_tool.input_model.model_validate(
-            {
-                "user_description": OBJECT_NARRATION,
-                "manifest": yaml.safe_dump(
-                    {
-                        "kind": AGENT_KIND,
-                        "name": "second-agent",
-                        "spec": {"model": "m", "internet_access_allowed": True},
-                    }
-                ),
-            }
+
+        def create_input(name: str, spec: dict) -> object:
+            return apply_tool.input_model.model_validate(
+                {
+                    "user_description": OBJECT_NARRATION,
+                    "manifest": yaml.safe_dump({"kind": AGENT_KIND, "name": name, "spec": spec}),
+                }
+            )
+
+        full = {"model": "m2", "internet_access_allowed": False, "prompt": "be second"}
+        with pytest.raises(ValueError, match="requires a prompt"):
+            await apply_tool.handler(
+                ctx, create_input("second-agent", {"model": "m2", "internet_access_allowed": False})
+            )
+        member_ctx = _tool_context(workspace_id, speaker_member_id=outsider, agent_id=agent_id)
+        with pytest.raises(AdminRequired, match="creating an agent"):
+            await apply_tool.handler(member_ctx, create_input("second-agent", full))
+        created = json.loads(
+            await _text(
+                tools,
+                "object_apply",
+                ctx,
+                manifest=yaml.safe_dump({"kind": AGENT_KIND, "name": "second-agent", "spec": full}),
+            )
         )
-        with pytest.raises(VerbNotSupported, match="cannot be created"):
-            await apply_tool.handler(ctx, create)
+        assert created["result"] == "created"
+        async with workspace_tx() as connection:
+            row = (
+                await connection.execute(
+                    sa.select(tables.agent).where(
+                        tables.agent.c.workspace_id == workspace_id,
+                        tables.agent.c.name == "second-agent",
+                    )
+                )
+            ).one()
+        assert row.prompt == "be second"
+        assert row.model == "m2"
+        assert row.internet_access_allowed is False
+        assert row.is_main is False
+        child_ctx = _tool_context(workspace_id, speaker_member_id=owner, agent_id=row.id)
+        with pytest.raises(AdminRequired, match="creating an agent"):
+            await apply_tool.handler(child_ctx, create_input("third-agent", full))
+        with pytest.raises(ValueError, match="already exists"):
+            await AgentObjects().apply(
+                ctx,
+                "second-agent",
+                AgentSpec(model="m2", internet_access_allowed=False, prompt="racer"),
+                None,
+                expected_generation=None,
+            )
+        with pytest.raises(VerbNotSupported, match="proposal path"):
+            await apply_tool.handler(
+                ctx,
+                create_input(
+                    "assistant",
+                    {"model": "m", "internet_access_allowed": True, "prompt": "rewritten"},
+                ),
+            )
 
         delete_tool = tools["object_delete"]
         with pytest.raises(VerbNotSupported, match="cannot be deleted"):

@@ -217,7 +217,7 @@ def dbos_runtime(
             dbos=dbos_client,
             subagents=SubagentRegistry(()),
             subagent_grants={},
-            manifests=(connectors_manifest(), skill_create_manifest()),
+            manifests=(web_manifest(), connectors_manifest(), skill_create_manifest()),
             registry=STANDIN_REGISTRY,
             skills=skill_registry(()),
             credentials=CredentialStore(fernet=CREDENTIAL_FERNET),
@@ -2451,13 +2451,12 @@ async def test_connect_pairs_with_the_connection_kind_exactly(
 async def test_an_intent_naming_another_kind_is_refused_at_validation(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
-    """PanelIntent.kind's Literal is the whole gate keeping this route from becoming a general
-    object_apply endpoint — an admin here is also an admin to the member kind's handlers, so a
-    widened Literal would let a form submit mutate members, credentials, or grants. An intent
-    naming any kind but the panel's own must die at validation, before a turn exists."""
+    """ApplyIntent.kind's Literal is the whole gate keeping this route from becoming a general
+    object_apply endpoint: the panels mutate agents and members today, and an intent naming any
+    other kind must die at validation, before a turn exists."""
     client, workspace_id, agent_id = web
     _admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
-    for kind in ("member", "connection", "scheduled_task"):
+    for kind in ("connection", "scheduled_task", "credential"):
         refused = await client.post(
             f"/surface/web/agents/{agent_id}/intents",
             json={"verb": "apply", "kind": kind, "name": "x", "spec": {"admin": True}},
@@ -2780,3 +2779,242 @@ def test_outcome_strips_the_error_class_and_names_a_bare_status() -> None:
         _outcome(TerminalFrame(status="done", text='{"result": "updated"}'), turn_id).body
     )
     assert saved == {"applied": True, "message": "Saved.", "turn_id": str(turn_id)}
+
+
+async def test_an_admin_creates_an_agent_through_the_intent_lane(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    """The administration view's create rides the same lane as every panel mutation: an admin's
+    create intent on the main agent's lane lands a fresh non-main row with exactly the submitted
+    configuration; without a prompt, under a taken name, or from a non-admin the kind's refusal
+    returns — and nothing is created."""
+    client, workspace_id, agent_id = web
+    _admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
+    _member_id, member_token = await _seed_member(workspace_id, "member@example.com")
+    envelope = {
+        "verb": "apply",
+        "kind": "agent",
+        "name": "research",
+        "spec": {
+            "model": "claude-sonnet-5",
+            "internet_access_allowed": False,
+            "prompt": "be curious",
+        },
+    }
+    created = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json=envelope,
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    assert created.status_code == 200
+    assert created.json()["applied"] is True
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(tables.agent).where(
+                    tables.agent.c.workspace_id == workspace_id,
+                    tables.agent.c.name == "research",
+                )
+            )
+        ).one()
+    assert (row.prompt, row.model, row.internet_access_allowed, row.is_main) == (
+        "be curious",
+        "claude-sonnet-5",
+        False,
+        False,
+    )
+    listed = await client.get(
+        "/surface/web/api/agents", headers={"cookie": f"{SESSION_COOKIE}={token}"}
+    )
+    assert "research" in [agent["name"] for agent in listed.json()["agents"]]
+    duplicate = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json=envelope,
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    assert duplicate.json()["applied"] is False
+    assert "proposal path" in duplicate.json()["message"]
+    promptless = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json={
+            "verb": "apply",
+            "kind": "agent",
+            "name": "second",
+            "spec": {"model": "claude-sonnet-5", "internet_access_allowed": True},
+        },
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    assert promptless.json()["applied"] is False
+    assert "requires a prompt" in promptless.json()["message"]
+    outsider = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json={**envelope, "name": "third"},
+        headers={"cookie": f"{SESSION_COOKIE}={member_token}"},
+    )
+    assert outsider.json()["applied"] is False
+    assert "admin" in outsider.json()["message"]
+    async with workspace_tx() as connection:
+        names = (
+            (
+                await connection.execute(
+                    sa.select(tables.agent.c.name).where(
+                        tables.agent.c.workspace_id == workspace_id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert sorted(names) == ["assistant", "research"]
+
+
+async def test_member_seat_and_role_ride_the_intent_lane(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    """The members table's controls are member-kind applies on the main agent's lane: role and
+    seat changes land exactly, and the kind's own guards answer — the last admin cannot be
+    demoted, the last seated admin cannot be unseated, and a non-admin mutates nobody."""
+    client, workspace_id, agent_id = web
+    admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
+    member_id, member_token = await _seed_member(workspace_id, "member@example.com")
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.member)
+            .values(seated_at=sa.func.now())
+            .where(tables.member.c.id.in_((admin_id, member_id)))
+        )
+
+    def envelope(member: UUID, *, admin: bool, seated: bool) -> dict:
+        return {
+            "verb": "apply",
+            "kind": "member",
+            "name": str(member),
+            "spec": {"admin": admin, "seated": seated},
+        }
+
+    promoted = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json=envelope(member_id, admin=True, seated=True),
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    assert promoted.json()["applied"] is True
+    unseated = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json=envelope(member_id, admin=True, seated=False),
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    assert unseated.json()["applied"] is True
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(tables.member.c.is_admin, tables.member.c.seated_at).where(
+                    tables.member.c.id == member_id
+                )
+            )
+        ).one()
+    assert row.is_admin is True
+    assert row.seated_at is None
+    demote_last_seated = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json=envelope(admin_id, admin=False, seated=True),
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    assert demote_last_seated.json()["applied"] is False
+    assert "seated admin" in demote_last_seated.json()["message"]
+    unseat_last = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json=envelope(admin_id, admin=True, seated=False),
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    assert unseat_last.json()["applied"] is False
+    assert "last seated" in unseat_last.json()["message"]
+    outsider = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json=envelope(admin_id, admin=False, seated=True),
+        headers={"cookie": f"{SESSION_COOKIE}={member_token}"},
+    )
+    assert outsider.json()["applied"] is False
+    assert "admin" in outsider.json()["message"]
+
+
+async def test_audience_intents_write_the_grant_store(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    """The administration view's audience controls ride the target agent's own intent lane and
+    land in the same store the chat verbs write: a grant makes the agent appear in the member's
+    portal, a revoke removes it, and a non-admin changes nothing."""
+    client, workspace_id, _agent_id = web
+    second_agent = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=second_agent,
+                workspace_id=workspace_id,
+                name="ops",
+                prompt="be operational",
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    _admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
+    _member_id, member_token = await _seed_member(workspace_id, "member@example.com")
+    granted = await client.post(
+        f"/surface/web/agents/{second_agent}/intents",
+        json={"verb": "grant_web_access", "email": "member@example.com"},
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    assert granted.status_code == 200
+    assert granted.json()["applied"] is True, granted.json()
+    listed = await client.get(
+        "/surface/web/api/agents", headers={"cookie": f"{SESSION_COOKIE}={member_token}"}
+    )
+    assert "ops" in [agent["name"] for agent in listed.json()["agents"]]
+    revoked = await client.post(
+        f"/surface/web/agents/{second_agent}/intents",
+        json={"verb": "revoke_web_access", "email": "member@example.com"},
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    assert revoked.json()["applied"] is True
+    relisted = await client.get(
+        "/surface/web/api/agents", headers={"cookie": f"{SESSION_COOKIE}={member_token}"}
+    )
+    assert "ops" not in [agent["name"] for agent in relisted.json()["agents"]]
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                email="other@example.com",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    outsider = await client.post(
+        f"/surface/web/agents/{second_agent}/intents",
+        json={"verb": "grant_web_access", "email": "other@example.com"},
+        headers={"cookie": f"{SESSION_COOKIE}={member_token}"},
+    )
+    assert outsider.status_code == 404
+    with ws(workspace_id):
+        assert await web_extension().store.list(AUDIENCE_PREFIX) == ()
+
+
+async def test_admin_payload_names_ids_and_models_for_the_mutation_forms(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The administration view's forms need targets: every agent row carries its id (the intent
+    lane is per-agent), every member row carries the stable member id the member kind applies to,
+    and the create form's model choice is the deploy's own list."""
+    client, workspace_id, agent_id = web
+    admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
+    view = await client.get(
+        "/surface/web/api/admin", headers={"cookie": f"{SESSION_COOKIE}={token}"}
+    )
+    payload = view.json()
+    assert [agent["id"] for agent in payload["agents"]] == [str(agent_id)]
+    assert [entry["id"] for entry in payload["members"]] == [str(admin_id)]
+    assert payload["models"] == ["auto", "claude-opus-4-8", "claude-sonnet-5"]

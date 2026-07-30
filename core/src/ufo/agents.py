@@ -4,14 +4,17 @@ Each agent field has exactly one write path, so this kind and the governance pro
 never conflict. Spec holds the model and public-internet policy, applied directly and admin-gated
 over the `agent` table; `prompt` belongs to `Governance`'s proposal CAS and appears here read-only
 in status beside its digest (the `from_digest` a proposal presents, so `object_get agent` is the
-read half of the proposal flow). The kind is update-only: changes take effect on the next turn.
-Create and delete raise; a non-admin mutation raises `AdminRequired`."""
+read half of the proposal flow) — except at birth: create takes the initial prompt, the one write
+that is not an edit, and every later prompt change goes through the proposal path. Create is
+admin-gated on the main agent's lane and never copies grants, credentials, sources, or derived
+data — a new agent starts empty. Delete raises; a non-admin mutation raises `AdminRequired`."""
 
 from dataclasses import dataclass
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import sqlalchemy as sa
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy.exc import IntegrityError
 
 from ufo.db import workspace_tx
 from ufo.ext.context import JsonValue
@@ -24,6 +27,7 @@ from ufo.objects import (
     ObjectListQuery,
     ObjectPage,
     ObjectRow,
+    UnknownObject,
     VerbNotSupported,
     object_page,
 )
@@ -32,11 +36,15 @@ from ufo.tools.context import ToolContext
 from ufo.workspace import ws_current
 
 AGENT_KIND = "agent"
-AGENT_CREATE = "agents cannot be created through object_apply"
 AGENT_UNDELETABLE = "agents cannot be deleted through objects"
 AGENT_EDIT_GATE = (
     "editing an agent requires a workspace admin; editing another agent also requires "
     "the main agent"
+)
+AGENT_CREATE_GATE = "creating an agent requires a workspace admin, on the main agent"
+AGENT_PROMPT_REQUIRED = "creating an agent requires a prompt"
+AGENT_PROMPT_IS_PROPOSED = (
+    "an existing agent's prompt changes through the governed proposal path, never object_apply"
 )
 
 
@@ -63,6 +71,13 @@ class AgentSpec(BaseModel):
             "Whether this agent may use the deploy's sandbox public-internet capability. False "
             "still permits exact model, credential, connector, and transfer-host egress."
         )
+    )
+    prompt: str | None = Field(
+        default=None,
+        description=(
+            "The agent's system prompt — accepted only when creating an agent. An existing "
+            "agent's prompt changes through the governed proposal path; read it from status."
+        ),
     )
 
 
@@ -142,10 +157,13 @@ class AgentObjects:
         expected_generation: UUID | None,
     ) -> None:
         if old is None:
-            raise VerbNotSupported(AGENT_CREATE)
+            await self._create(ctx, name, spec)
+            return
+        if spec.prompt is not None:
+            raise VerbNotSupported(AGENT_PROMPT_IS_PROPOSED)
         row = await self._row(name)
         if row is None:
-            raise VerbNotSupported(AGENT_CREATE)
+            raise UnknownObject(f"no agent object named {name!r}")
         if not await ctx.speaker_is_admin() or (
             row.id != ctx.turn.agent_id and not await ctx.agent_is_main()
         ):
@@ -163,6 +181,32 @@ class AgentObjects:
                     tables.agent.c.name == name,
                 )
             )
+
+    async def _create(self, ctx: ToolContext, name: str, spec: AgentSpec) -> None:
+        """Insert the agent row — never main, never a copy of anything but the submitted
+        configuration. The (workspace, name) unique constraint arbitrates a concurrent create of
+        the same name; the loser reads back as a name refusal, not a second row."""
+        if not await ctx.speaker_is_admin() or not await ctx.agent_is_main():
+            raise AdminRequired(AGENT_CREATE_GATE)
+        if spec.prompt is None or not spec.prompt.strip():
+            raise ValueError(AGENT_PROMPT_REQUIRED)
+        async with workspace_tx() as connection:
+            try:
+                await connection.execute(
+                    sa.insert(tables.agent).values(
+                        id=uuid4(),
+                        workspace_id=ws_current().workspace_id,
+                        name=name,
+                        prompt=spec.prompt,
+                        model=spec.model,
+                        is_main=False,
+                        internet_access_allowed=spec.internet_access_allowed,
+                        created_at=sa.func.now(),
+                        updated_at=sa.func.now(),
+                    )
+                )
+            except IntegrityError as error:
+                raise ValueError(f"an agent named {name!r} already exists") from error
 
     async def delete(
         self,
@@ -196,17 +240,19 @@ class AgentObjects:
 AGENT_OBJECT = ObjectKind(
     name=AGENT_KIND,
     description=(
-        "A workspace agent: its model and public-internet policy, readable by all members and "
-        "updatable by a workspace admin. It cannot be created or deleted through objects."
+        "A workspace agent: its model and public-internet policy, readable by all members, "
+        "updatable and creatable by a workspace admin. It cannot be deleted through objects."
     ),
     guidance=(
         "A workspace agent as an object. Apply {model, internet_access_allowed} to change "
         "its model or public-internet access — admin only, taking effect on the next "
         "turn. Blocking public internet leaves exact model, credential, connector, and transfer "
-        "hosts available. The system prompt is read-only here: prompt changes use the governed "
-        "proposal path, and status carries its current value and digest. The main agent may manage "
-        "other agents; a child agent may only manage itself. Create and delete are refused. "
-        "Confirm before changing either setting."
+        "hosts available. Applying a name no agent holds creates one — admin only, from the main "
+        "agent, and the spec then requires `prompt`, the one write that is not an edit; a new "
+        "agent starts empty, inheriting no grants, credentials, sources, or memory. An existing "
+        "agent's prompt is read-only here: changes use the governed proposal path, and status "
+        "carries its current value and digest. The main agent may manage other agents; a child "
+        "agent may only manage itself. Delete is refused. Confirm before changing settings."
     ),
     spec_model=AgentSpec,
     store=AgentObjects(),

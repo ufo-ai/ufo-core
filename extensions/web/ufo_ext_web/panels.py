@@ -11,12 +11,13 @@ endpoint exists — the chat transport carries every write, and the overview is 
 like every other portal read."""
 
 import asyncio
+import json
 import re
 from typing import Literal
 from uuid import UUID
 
 import yaml
-from pydantic import BaseModel, JsonValue, ValidationError, model_validator
+from pydantic import BaseModel, Field, JsonValue, ValidationError, model_validator
 
 from ufo.sdk.audience import conversation_audience
 from ufo.sdk.http import JSONResponse, Request, Response
@@ -30,57 +31,88 @@ INTENT_RESULT_TIMEOUT_SECONDS = 120
 ERROR_CLASS_PREFIX = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]*: ")
 
 
-class PanelIntent(BaseModel):
-    """What a panel form submits: one mutation of one object, by kind and name. `verb` and `kind`
-    are the closed sets a panel produces today — the Literals are the gate keeping this route
-    from becoming a general object endpoint, and each object verb's outcome is the kind's own.
-    `connect` is the one verb no kind gates: it names the provider and opens the same private
-    OAuth handoff chat's `connect_account` leaves — the URL rides the turn's terminal and is
-    minted per speaking member at stream time, never in a transcript or an intent response — so
-    it pairs with the `connection` kind exactly, both ways."""
+class ApplyIntent(BaseModel):
+    """One mutation of one object, by kind and name. `verb` and `kind` are the closed sets a panel
+    form produces today — the Literals are the gate keeping this route from becoming a general
+    object endpoint, and each object verb's outcome is the kind's own. `connect` is the one verb no
+    kind gates: it names the provider and opens the same private OAuth handoff chat's
+    `connect_account` leaves — the URL rides the turn's terminal and is minted per speaking member
+    at stream time, never in a transcript or an intent response — so it pairs with the `connection`
+    kind exactly, both ways."""
 
     verb: Literal["apply", "delete", "connect"]
-    kind: Literal["agent", "skill", "connector_grant", "connection"]
+    kind: Literal["agent", "member", "skill", "connector_grant", "connection"]
     name: str
     spec: dict[str, JsonValue] | None = None
 
     @model_validator(mode="after")
-    def _connect_pairs_with_connection(self) -> "PanelIntent":
+    def _connect_pairs_with_connection(self) -> "ApplyIntent":
         if (self.verb == "connect") != (self.kind == "connection"):
             raise ValueError("connect pairs with the connection kind exactly")
         return self
 
 
-def _tool_intent(submitted: PanelIntent) -> ToolIntent:
-    if submitted.verb == "connect":
-        return ToolIntent(
-            tool="connect_account",
-            input={
-                "provider": submitted.name,
-                "shared": bool((submitted.spec or {}).get("shared", False)),
-                "user_description": f"Connect {submitted.name} from the portal.",
-            },
-        )
-    if submitted.verb == "delete":
-        return ToolIntent(
-            tool="object_delete",
-            input={
-                "kind": submitted.kind,
-                "name": submitted.name,
-                "user_description": f"Delete {submitted.kind} {submitted.name} from the portal.",
-            },
-        )
-    manifest = yaml.safe_dump(
-        {"kind": submitted.kind, "name": submitted.name, "spec": submitted.spec or {}},
-        sort_keys=False,
-    )
-    return ToolIntent(
-        tool="object_apply",
-        input={
-            "manifest": manifest,
-            "user_description": f"Apply {submitted.kind} {submitted.name} from the portal.",
-        },
-    )
+class AudienceIntent(BaseModel):
+    """One web-audience change for the intent's agent — the same admin-only chat verbs
+    `grant_web_access`/`revoke_web_access`, prepared by the administration view and dispatched
+    verbatim on the target agent's own intent lane."""
+
+    verb: Literal["grant_web_access", "revoke_web_access"]
+    email: str
+
+
+class PanelIntent(BaseModel):
+    """What a panel form submits: the closed set of mutations a panel produces today."""
+
+    submitted: ApplyIntent | AudienceIntent = Field(discriminator="verb")
+
+
+def _tool_intent(submitted: ApplyIntent | AudienceIntent) -> ToolIntent:
+    match submitted:
+        case AudienceIntent():
+            return ToolIntent(
+                tool=submitted.verb,
+                input={
+                    "email": submitted.email,
+                    "user_description": (
+                        f"{submitted.verb} for {submitted.email} from the portal."
+                    ),
+                },
+            )
+        case ApplyIntent() if submitted.verb == "connect":
+            return ToolIntent(
+                tool="connect_account",
+                input={
+                    "provider": submitted.name,
+                    "shared": bool((submitted.spec or {}).get("shared", False)),
+                    "user_description": f"Connect {submitted.name} from the portal.",
+                },
+            )
+        case ApplyIntent() if submitted.verb == "delete":
+            return ToolIntent(
+                tool="object_delete",
+                input={
+                    "kind": submitted.kind,
+                    "name": submitted.name,
+                    "user_description": (
+                        f"Delete {submitted.kind} {submitted.name} from the portal."
+                    ),
+                },
+            )
+        case ApplyIntent():
+            manifest = yaml.safe_dump(
+                {"kind": submitted.kind, "name": submitted.name, "spec": submitted.spec or {}},
+                sort_keys=False,
+            )
+            return ToolIntent(
+                tool="object_apply",
+                input={
+                    "manifest": manifest,
+                    "user_description": (
+                        f"Apply {submitted.kind} {submitted.name} from the portal."
+                    ),
+                },
+            )
 
 
 def _outcome(frame: TerminalFrame, turn_id: UUID) -> Response:
@@ -105,10 +137,10 @@ async def submit_intent(
     if len(body) > INTENT_MAX_CHARS:
         return Response(f"Intent exceeds {INTENT_MAX_CHARS} characters.", status_code=413)
     try:
-        submitted = PanelIntent.model_validate_json(body)
-    except ValidationError:
+        submitted = PanelIntent.model_validate({"submitted": json.loads(body)}).submitted
+    except (ValidationError, ValueError):
         return JSONResponse({"error": "malformed intent"}, status_code=400)
-    if submitted.kind == "agent" and submitted.spec is not None:
+    if isinstance(submitted, ApplyIntent) and submitted.kind == "agent" and submitted.spec:
         model = submitted.spec.get("model")
         if model not in ctx.models:
             return JSONResponse({"applied": False, "message": f"No model named {model!r}."})
@@ -150,6 +182,17 @@ async def submit_intent(
     raise RuntimeError("the turn's tail ended without a terminal frame")
 
 
+def _update_schema() -> dict[str, JsonValue]:
+    """The settings form's field source: the writable spec schema minus `prompt`, which is
+    create-only — an existing agent's prompt changes through the governed proposal path, and a
+    field the update verb refuses must not render on the update form."""
+    schema = AgentSpec.model_json_schema()
+    schema["properties"] = {
+        key: value for key, value in schema["properties"].items() if key != "prompt"
+    }
+    return schema
+
+
 async def agent_overview(ctx: SurfaceContext, agent_id: UUID, *, admin: bool) -> Response:
     """The overview projection: the agent's configuration and prompt digest, the deploy's public
     internet capability as the ceiling the agent setting narrows, the deploy's model ids for the
@@ -177,8 +220,8 @@ async def agent_overview(ctx: SurfaceContext, agent_id: UUID, *, admin: bool) ->
             "spec": AgentSpec(
                 model=detail.model,
                 internet_access_allowed=detail.internet_access_allowed,
-            ).model_dump(mode="json"),
-            "spec_schema": AgentSpec.model_json_schema(),
+            ).model_dump(mode="json", exclude={"prompt"}),
+            "spec_schema": _update_schema(),
             "audience": audience,
         }
     )

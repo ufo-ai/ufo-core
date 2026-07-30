@@ -33,6 +33,20 @@
   .admin-view { padding: 16px; overflow-y: auto; display: flex; flex-direction: column;
                 gap: 18px; }
   .admin-view h2 { margin: 0; font-size: 14px; }
+  .admin-view td button { margin-right: 6px; padding: 2px 8px; border-radius: 6px;
+        border: 1px solid color-mix(in srgb, CanvasText 25%, transparent);
+        background: none; color: inherit; }
+  .admin-view td input { padding: 2px 6px; margin-right: 6px; border-radius: 6px; font: inherit;
+        border: 1px solid color-mix(in srgb, CanvasText 25%, transparent);
+        background: Field; color: FieldText; }
+  .admin-view form.admin-create { display: flex; flex-direction: column; gap: 8px;
+        max-width: 52ch; }
+  .admin-view form.admin-create input, .admin-view form.admin-create select,
+  .admin-view form.admin-create textarea { padding: 6px 10px; border-radius: 8px; font: inherit;
+        border: 1px solid color-mix(in srgb, CanvasText 25%, transparent);
+        background: Field; color: FieldText; }
+  .admin-view form.admin-create button { align-self: flex-start; }
+  .admin-view .result { min-height: 1em; }
   .admin-view table { border-collapse: collapse; }
   .admin-view th, .admin-view td { text-align: left; padding: 4px 14px 4px 0; vertical-align: top;
         border-bottom: 1px solid color-mix(in srgb, CanvasText 12%, transparent); }
@@ -264,7 +278,160 @@ function table(headers, rows) {
   return el;
 }
 
-async function showAdmin() {
+async function adminIntent(agentId, envelope, result, notice) {
+  result.textContent = '';
+  let res;
+  try {
+    res = await fetch(BASE + '/agents/' + agentId + '/intents', {
+      method: 'POST',
+      credentials: 'same-origin',
+      body: JSON.stringify(envelope),
+    });
+  } catch (err) {
+    result.textContent = 'Network error — try again.';
+    return;
+  }
+  const outcome = await res.json().catch(() => null);
+  const message = outcome && outcome.message
+    ? outcome.message
+    : 'Error ' + res.status + ' — try again.';
+  if (outcome && outcome.applied) {
+    showAdmin(notice ? notice + ' ' + message : message);
+    return;
+  }
+  result.textContent = message;
+}
+
+function actionButton(label, onClick) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.textContent = label;
+  button.addEventListener('click', onClick);
+  return button;
+}
+
+function actionCell(...nodes) {
+  const el = document.createElement('td');
+  el.append(...nodes);
+  return el;
+}
+
+function adminAgentRow(agent, result) {
+  const el = document.createElement('tr');
+  el.append(
+    cell(agent.name + (agent.main ? ' ·' : '')),
+    cell(agent.model),
+    cell(agent.internet_access_allowed ? 'allowed' : 'blocked'),
+    cell(agent.installations.join(', ') || '—'),
+    cell(agent.main ? 'every member' : agent.web_audience.concat('admins').join(', ')),
+  );
+  const actions = [actionButton('Copy', () => prefillCreateForm(agent))];
+  if (!agent.main) {
+    const email = document.createElement('input');
+    email.placeholder = 'email@work.com';
+    const send = (verb) => {
+      if (!email.value.trim()) return;
+      adminIntent(agent.id, { verb, email: email.value.trim() }, result);
+    };
+    actions.push(
+      email,
+      actionButton('Grant', () => send('grant_web_access')),
+      actionButton('Revoke', () => send('revoke_web_access')),
+    );
+  }
+  el.appendChild(actionCell(...actions));
+  return el;
+}
+
+function adminMemberRow(payload, member, gated, result) {
+  const mainAgent = payload.agents.find((agent) => agent.main);
+  const el = document.createElement('tr');
+  el.append(cell(member.email), cell(member.admin ? 'admin' : 'member'));
+  if (gated) el.appendChild(cell(member.seated ? 'seated' : '—'));
+  const apply = (spec) =>
+    adminIntent(mainAgent.id, { verb: 'apply', kind: 'member', name: member.id, spec }, result);
+  el.appendChild(actionCell(
+    actionButton(member.admin ? 'Remove admin' : 'Make admin', () =>
+      apply({ admin: !member.admin, seated: member.seated })),
+    actionButton(member.seated ? 'Unseat' : 'Seat', () =>
+      apply({ admin: member.admin, seated: !member.seated })),
+  ));
+  return el;
+}
+
+let createPrefill = null;
+
+function prefillCreateForm(agent) {
+  createPrefill = agent;
+  showAdmin('Copying ' + agent.name + ' — configuration only.');
+}
+
+function createAgentSection(payload, result) {
+  const section = document.createElement('div');
+  const title = document.createElement('h2');
+  title.textContent = 'Create agent';
+  section.appendChild(title);
+  const form = document.createElement('form');
+  form.className = 'admin-create';
+  const name = document.createElement('input');
+  name.placeholder = 'agent name';
+  const model = document.createElement('select');
+  for (const id of payload.models) {
+    const option = document.createElement('option');
+    option.value = option.textContent = id;
+    model.appendChild(option);
+  }
+  model.value = payload.models[0];
+  const internetLabel = document.createElement('label');
+  const internet = document.createElement('input');
+  internet.type = 'checkbox';
+  internet.checked = true;
+  internetLabel.append(internet, document.createTextNode(' public internet'));
+  const prompt = document.createElement('textarea');
+  prompt.placeholder = 'System prompt';
+  prompt.rows = 4;
+  const submit = document.createElement('button');
+  submit.type = 'submit';
+  submit.className = 'send';
+  submit.textContent = 'Create';
+  form.append(name, model, internetLabel, prompt, submit);
+  section.appendChild(form);
+  const source = createPrefill;
+  createPrefill = null;
+  if (source) {
+    model.value = source.model;
+    internet.checked = source.internet_access_allowed;
+    fetch(BASE + '/agents/' + source.id + '/overview', { credentials: 'same-origin' })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data) prompt.value = data.agent.prompt;
+      })
+      .catch(() => {});
+  }
+  form.addEventListener('submit', (event) => {
+    event.preventDefault();
+    if (!name.value.trim() || !prompt.value.trim()) return;
+    const mainAgent = payload.agents.find((agent) => agent.main);
+    adminIntent(
+      mainAgent.id,
+      {
+        verb: 'apply',
+        kind: 'agent',
+        name: name.value.trim(),
+        spec: {
+          model: model.value,
+          internet_access_allowed: internet.checked,
+          prompt: prompt.value,
+        },
+      },
+      result,
+      'Created ' + name.value.trim() + '.',
+    );
+  });
+  return section;
+}
+
+async function showAdmin(notice) {
   selected = null;
   panelLoad += 1;
   location.hash = '#/admin';
@@ -284,19 +451,18 @@ async function showAdmin() {
     return;
   }
   const payload = await res.json();
+  const result = document.createElement('div');
+  result.className = 'result mono';
+  if (notice) result.textContent = notice;
+  view.appendChild(result);
   const agentsTitle = document.createElement('h2');
   agentsTitle.textContent = 'Agents';
   view.appendChild(agentsTitle);
   view.appendChild(table(
-    ['agent', 'model', 'public internet', 'surfaces', 'web audience'],
-    payload.agents.map((agent) => row(
-      agent.name + (agent.main ? ' ·' : ''),
-      agent.model,
-      agent.internet_access_allowed ? 'allowed' : 'blocked',
-      agent.installations.join(', ') || '—',
-      agent.main ? 'every member' : agent.web_audience.concat('admins').join(', ')
-    ))
+    ['agent', 'model', 'public internet', 'surfaces', 'web audience', ''],
+    payload.agents.map((agent) => adminAgentRow(agent, result)),
   ));
+  view.appendChild(createAgentSection(payload, result));
   const membersTitle = document.createElement('h2');
   const seats = payload.seats;
   const gated = seats.limit !== null || seats.included !== null;
@@ -306,10 +472,8 @@ async function showAdmin() {
     + (seats.included !== null ? ' · ' + seats.included + ' included' : '');
   view.appendChild(membersTitle);
   view.appendChild(table(
-    gated ? ['member', 'role', 'seat'] : ['member', 'role'],
-    payload.members.map((member) => gated
-      ? row(member.email, member.admin ? 'admin' : 'member', member.seated ? 'seated' : '—')
-      : row(member.email, member.admin ? 'admin' : 'member'))
+    gated ? ['member', 'role', 'seat', ''] : ['member', 'role', ''],
+    payload.members.map((member) => adminMemberRow(payload, member, gated, result)),
   ));
   const billingTitle = document.createElement('h2');
   billingTitle.textContent = 'Billing';

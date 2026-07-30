@@ -89,6 +89,7 @@ class LastAdminSeatRevocation(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class SeatEntry:
+    id: UUID
     email: str
     seated: bool
     admin: bool
@@ -169,6 +170,7 @@ class Seats:
         rows = (
             await connection.execute(
                 sa.select(
+                    tables.member.c.id,
                     tables.member.c.email,
                     tables.member.c.seated_at,
                     tables.member.c.is_admin,
@@ -182,6 +184,7 @@ class Seats:
             included=bounds.included_seats,
             members=tuple(
                 SeatEntry(
+                    id=row.id,
                     email=row.email,
                     seated=row.seated_at is not None,
                     admin=row.is_admin,

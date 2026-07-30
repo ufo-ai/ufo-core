@@ -131,12 +131,12 @@ async def _text(tool: ToolDef, ctx: ToolContext, **args: object) -> str:
     return result.content[0].text
 
 
-def _manifest(member_id: UUID, admin: bool) -> str:
+def _manifest(member_id: UUID, admin: bool, seated: bool = True) -> str:
     return yaml.safe_dump(
         {
             "kind": MEMBER_KIND,
             "name": str(member_id),
-            "spec": {"admin": admin},
+            "spec": {"admin": admin, "seated": seated},
         }
     )
 
@@ -197,7 +197,7 @@ async def test_member_get_reports_role_and_seat_and_delete_is_refused(db: None) 
         )
         assert fetched["kind"] == MEMBER_KIND
         assert fetched["name"] == str(member_id)
-        assert fetched["spec"] == {"admin": False}
+        assert fetched["spec"] == {"admin": False, "seated": True}
         assert fetched["status"] == {
             "email": "member@example.com",
             "seated": True,

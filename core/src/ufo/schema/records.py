@@ -35,7 +35,13 @@ class ToolIntent(BaseModel):
     submitting member, and the result commits as its terminal frame. The Literal is the closed
     whitelist; a verb joins it with its panel producer, never ahead of one."""
 
-    tool: Literal["object_apply", "object_delete", "connect_account"]
+    tool: Literal[
+        "object_apply",
+        "object_delete",
+        "connect_account",
+        "grant_web_access",
+        "revoke_web_access",
+    ]
     input: dict[str, JsonValue]
 
 
