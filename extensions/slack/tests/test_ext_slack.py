@@ -3107,6 +3107,12 @@ def _requests_to(recorder: list[httpx.Request], url: str) -> list[httpx.Request]
     return [r for r in recorder if str(r.url).split("?")[0] == url]
 
 
+SLACK_LOADING_MESSAGE_LIMIT = 50
+"""Slack's own ceiling on an `assistant.threads.setStatus` loading message, spelled out here rather
+than read off the surface's constant: a line of 51 characters or more is refused with
+`invalid_arguments`, so the number the code caps at is the thing under test."""
+
+
 async def test_status_follows_the_turn_pins_the_text_and_clears_at_terminal(
     db: None, tmp_path, monkeypatch, caplog
 ) -> None:
@@ -3227,6 +3233,75 @@ async def test_the_status_holds_whatever_prose_the_model_gave_it(
 
     assert len(overlong) > slack.STATUS_TEXT_LIMIT
     assert len(cut) == slack.STATUS_TEXT_LIMIT
+    assert cut.endswith("…")
+
+
+async def test_every_status_line_stays_inside_slacks_character_limit(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """Slack refuses a `loading_messages` entry of 51 characters or more, and refuses the whole call
+    with it, so a line over the limit reaches nobody. Every value the templates interpolate is
+    unbounded upstream — the model's own `user_description`, a skill name, a tool slug — so each arm
+    of the follower is driven with one too long for the limit and the string Slack is handed is
+    measured, the cut prose still carrying the ellipsis that marks it unfinished."""
+    workspace_id, _ = await _seed()
+    monkeypatch.setattr(slack, "STATUS_UPDATE_MIN_SECONDS", 0.0)
+    recorder: list[httpx.Request] = []
+    hub = InProcessHub()
+    _, client, _ = await _mount(monkeypatch, workspace_id, tmp_path, recorder, hub=hub)
+    mention = _event_body(
+        type="app_mention", user="U1", channel="C1", ts="100.5", text="<@UBOT00000> hi"
+    )
+    async with client:
+        response = await client.post(
+            EVENTS_PATH, content=mention, headers=_sign(mention, int(time.time()))
+        )
+    assert response.status_code == 200
+    async with workspace_tx() as connection:
+        turn_id = (
+            await connection.execute(
+                sa.select(tables.turn.c.id).where(tables.turn.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+    task = slack._STATUS_TASKS[turn_id]
+
+    def _sent() -> list[str]:
+        return [
+            json.loads(r.content)["status"]
+            for r in _requests_to(recorder, slack.SLACK_ASSISTANT_STATUS_URL)
+        ]
+
+    async def _until(status: str, frame: LiveFrame) -> None:
+        deadline = time.monotonic() + 5
+        while status not in _sent():
+            assert time.monotonic() < deadline, f"{status!r} never reached Slack"
+            await hub.publish(turn_id, frame)
+            await asyncio.sleep(0.01)
+
+    described = "Handing the Star City Games collector fix to a coding agent"
+    cut = f"{described[: slack.STATUS_DESCRIPTION_LIMIT]}…"
+    await _until(cut, ToolCall(tool="spawn_subagent", preview="{}", description=described))
+    slug = "reconcile_every_invoice_line_against_the_ledger"
+    await _until(
+        slack.STATUS_WORKING_TEXT.format(tool=slug)[: slack.STATUS_TEXT_LIMIT],
+        ToolCall(tool=slug, preview="{}", description=""),
+    )
+    skill = "postgres/migrations-for-the-billing-ledger"
+    await _until(
+        slack.STATUS_SKILL_TEXT.format(skill=skill)[: slack.STATUS_TEXT_LIMIT],
+        SkillLoad(skill=skill),
+    )
+    await hub.publish(turn_id, Terminal(frame=TerminalFrame(status="done", text="hi")))
+    await task
+
+    assert len(described) > SLACK_LOADING_MESSAGE_LIMIT
+    assert len(slack.STATUS_WORKING_TEXT.format(tool=slug)) > SLACK_LOADING_MESSAGE_LIMIT
+    assert len(slack.STATUS_SKILL_TEXT.format(skill=skill)) > SLACK_LOADING_MESSAGE_LIMIT
+    sent = _sent()
+    assert len(sent) > 3
+    assert all(len(status) <= SLACK_LOADING_MESSAGE_LIMIT for status in sent), sent
+    assert cut in sent
+    assert len(cut) == SLACK_LOADING_MESSAGE_LIMIT
     assert cut.endswith("…")
 
 

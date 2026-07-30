@@ -622,7 +622,11 @@ STATUS_WORKING_TEXT = "Working… ({tool})"
 STATUS_SKILL_TEXT = "Loading skill {skill}…"
 STATUS_GENERATING_TEXT = "Generating…"
 STATUS_CLEAR_TEXT = ""
-STATUS_TEXT_LIMIT = 200
+STATUS_TEXT_LIMIT = 50
+"""Slack's own ceiling on `assistant.threads.setStatus`, not a display choice: an entry of
+`loading_messages` must be under 51 characters or the call is refused whole with
+`invalid_arguments`, so a longer line reaches nobody. Raising it drops status updates instead of
+lengthening them."""
 STATUS_DESCRIPTION_LIMIT = STATUS_TEXT_LIMIT - len(STATUS_DESCRIBED_TEXT.format(description=""))
 STATUS_UPDATE_MIN_SECONDS = 1.0
 STATUS_REFRESH_SECONDS = 90.0
@@ -1561,9 +1565,10 @@ class ThreadStatus:
     ellipsis is the only mark a cut line gets.
     Slack's agent UI renders its own canned phrases over a bare `status` string, so every non-clear
     write pins the display through a one-element `loading_messages` rotation — the field the client
-    shows verbatim. The clear at turn end is always ours: a reply never ends the status (a DM reply
-    posts top-level, outside the status thread), so Terminal, Parked, and a dead stream all clear
-    alike.
+    shows verbatim, and the field Slack measures against STATUS_TEXT_LIMIT: over it the whole call
+    is refused, so every line the follower builds is bounded before the send, not only the model's
+    prose. The clear at turn end is always ours: a reply never ends the status (a DM reply posts
+    top-level, outside the status thread), so Terminal, Parked, and a dead stream all clear alike.
     The status is state on the thread, not a message, and the thread has one writer — the newest
     turn (`_THREAD_WRITERS`) — so an
     outrun sibling's writes, its clear included, are skipped rather than blanking the status the
