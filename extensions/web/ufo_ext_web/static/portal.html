@@ -1070,10 +1070,6 @@ async function renderOverview(agent, load, notice) {
     const res = await fetch(BASE + '/agents/' + agent.id + '/overview',
       { credentials: 'same-origin' });
     if (load !== panelLoad) return;
-    if (res.status === 404) {
-      fail(load, 'The overview for this agent is not shared with you.', notice);
-      return;
-    }
     if (!res.ok) {
       fail(load, 'Error ' + res.status + ' — reload to retry.', notice);
       return;

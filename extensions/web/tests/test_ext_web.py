@@ -2495,8 +2495,8 @@ async def test_overview_projects_spec_schema_ceiling_and_admin_audience(
     """The settings panel's read: the agent row beside its prompt digest and bound surfaces, the
     deploy internet capability as the ceiling, the writable spec's own schema, and — admins only —
     the web audience this extension grants (empty for the main agent, which no grant ever holds).
-    The read answers an admin or a granted member; the main-agent default alone is not-found,
-    because surfaces and the deploy ceiling reach a member through no chat projection."""
+    The read answers the agent's whole web audience — every member on the main agent — while
+    the audience list itself stays the admin's."""
     client, workspace_id, agent_id = web
     _admin_id, admin_token = await _seed_member(workspace_id, "admin@example.com", admin=True)
     _member_id, member_token = await _seed_member(workspace_id, "member@example.com")
@@ -2556,7 +2556,9 @@ async def test_overview_projects_spec_schema_ceiling_and_admin_audience(
         f"/surface/web/agents/{agent_id}/overview",
         headers={"cookie": f"{SESSION_COOKIE}={member_token}"},
     )
-    assert ungranted_main.status_code == 404
+    assert ungranted_main.status_code == 200
+    assert ungranted_main.json()["agent"]["name"] == "assistant"
+    assert ungranted_main.json()["audience"] is None
     stranger = await client.get(
         f"/surface/web/agents/{uuid4()}/overview",
         headers={"cookie": f"{SESSION_COOKIE}={admin_token}"},

@@ -890,15 +890,12 @@ async def intents(ctx: SurfaceContext, request: Request) -> Response:
 
 async def overview(ctx: SurfaceContext, request: Request) -> Response:
     """The selected agent's configuration read — its prompt, spec, bound surfaces, and the
-    deploy's ceilings. Surfaces and the deploy ceiling reach a member through no chat projection,
-    so like usage this answers an admin or a member whose explicit grant holds the agent; the
-    main-agent default alone opens nothing here."""
+    deploy's ceilings — answering the agent's whole web audience, so every member reads the main
+    agent's overview; the web-audience grant list inside it stays the admin's."""
     gated = await _panel_gate(ctx, request)
     if isinstance(gated, Response):
         return gated
     _member_id, _email, audience, agent_id = gated
-    if not audience.granted(agent_id):
-        return Response("no such agent", status_code=404)
     return await agent_overview(ctx, agent_id, admin=audience.admin)
 
 

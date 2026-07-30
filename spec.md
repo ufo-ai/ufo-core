@@ -414,10 +414,11 @@ carries read projections shaped by the same contracts chat enforces: its schedul
 (creator sees content, an admin management metadata, others nothing), its loadable skills (the
 composition a turn loads), memory search under the viewer's own subjects with source-derived
 pages fenced by the selected agent's source grants (the same reader a turn's tools search
-under), its rolling-window spend beside its agent-scoped caps, and its configuration overview
-(prompt, spec, bound surfaces, the deploy's ceilings) — the last two carry the agent's whole
-ledger and the deploy's shape, which chat projects to no member, so each answers an admin or a
-member whose explicit grant holds the agent, never the main-agent default alone. A shared connection or source names its owner only to an admin or the owner —
+under), its configuration overview (prompt, spec, bound surfaces, the deploy's ceilings —
+answering the agent's whole web audience, with the grant list inside it the admin's), and its
+rolling-window spend beside its agent-scoped caps — the ledger spans every member's turns, so
+spend answers an admin or a member whose explicit grant holds the agent, never the main-agent
+default alone. A shared connection or source names its owner only to an admin or the owner —
 chat resolves no other member's email for a non-admin, so neither does a panel. A panel mutation
 is a **prepared intent**: the form's structured intent is admitted as a turn on the member's one
 durable intent conversation with that agent and dispatched verbatim to the typed object or tool
