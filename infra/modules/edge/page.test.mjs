@@ -99,18 +99,35 @@ test("a craft opens the panel even though the morph redraws it mid-click", async
   await page.close();
 });
 
+// The sky moves while the hand does: craft drift under the speed cap (300 px/s), the press's own
+// pointermove pulls them toward the cursor, and a cloaked craft is pointer-events:none — invisible
+// to elementFromPoint — yet fades back in where it stands. So "empty" is measured as distance from
+// every craft's box (cloaked included) and the hail button, with a margin no craft can close inside
+// the ~150 ms between the hit-test and the release: 300 px/s × 0.15 s ≈ 45 px, taken ×3.
+const EMPTY_KEEPOUT_PX = 130;
+
 test("empty sky is not a door", async () => {
   const page = await open(2);
   for (let attempt = 0; attempt < 8; attempt++) {
-    const empty = await page.evaluate(() => {
+    const empty = await page.evaluate((keepout) => {
+      const boxes = [...document.querySelectorAll(".craft"), document.getElementById("hail")].map(
+        (el) => el.getBoundingClientRect(),
+      );
+      const clear = (x, y) =>
+        boxes.every(
+          (b) =>
+            x < b.left - keepout ||
+            x > b.right + keepout ||
+            y < b.top - keepout ||
+            y > b.bottom + keepout,
+        );
       for (let tries = 0; tries < 500; tries++) {
         const x = 40 + Math.random() * 1120;
         const y = 40 + Math.random() * 600;
-        const el = document.elementFromPoint(x, y);
-        if (el && !el.closest(".craft") && el.id !== "hail") return { x, y };
+        if (clear(x, y)) return { x, y };
       }
       return null;
-    });
+    }, EMPTY_KEEPOUT_PX);
     if (!empty) continue;
     await press(page, empty.x, empty.y, 90);
     assert.equal(await isOpen(page), false);
