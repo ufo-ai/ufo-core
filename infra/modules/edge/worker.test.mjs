@@ -445,8 +445,12 @@ const BANNED_METAPHOR =
   /\bbeam\w*|\btransmit\w*|\bsignals?\b|\bsaucers?\b|\bmothership\b|\bcraft\b|\bfleets?\b|\babduct\w*|\b(un)?identified\b|\bidentification\b|\bobjects?\b/i;
 
 // Standard typography: a sentence never opens lowercase unless it opens with a literal —
-// a command, an address, a header name. Lines split into sentences first so every sentence is
-// anchored, and glyph-only tokens (✓, ›, art) are skipped so the word behind them is inspected.
+// a command, an address, a header name. Lines split into sentences on a spaced terminator, and
+// glyph-only tokens (✓, ›, art) are skipped so the word behind them is inspected. A terminator
+// fused to its next word (`Done.try`, `Sent!check`) goes unjudged: the dot form is the same
+// shape as a cased dotted literal (`Node.js`, `README.md`) and `?` rides in URLs, so with two
+// of the three terminators ambiguous, fused terminators are uniformly out of scope — the
+// accept list pins all three fused shapes as accepted.
 function assertStandardCase(surface) {
   for (const line of surface.split("\n")) {
     for (const sentence of line.split(/[.?!]\s+/)) {
@@ -475,6 +479,13 @@ test("the case gate anchors every sentence and sees past glyphs", () => {
   for (const plain of [
     "✓ Installed ufo (/x/bin/ufo)",
     "#1 on the waitlist. We will email you when access opens.",
+    "gmail.com is not a work email domain.",
+    "Gmail.com is not a work email domain.",
+    "Read README.md for the format.",
+    "Node.js is required.",
+    "Done.try again",
+    "Sent!check your inbox.",
+    "Done?try again",
     "curl -fsSL https://flyingobject.ai/ufo | sh",
   ]) {
     assertStandardCase(plain);

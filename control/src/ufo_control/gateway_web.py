@@ -103,7 +103,7 @@ LOGIN_PAGE = r"""<!doctype html>
     <div class="hint"><code id="member-email"></code> · <code id="workspace-url"></code></div>
     <form id="portal-row" method="post">
       <input type="hidden" name="token" id="portal-token">
-      <button type="submit">Open your workspace →</button>
+      <button type="submit">Open your workspace</button>
     </form>
     <div class="hint" style="margin-top:10px">From your terminal:</div>
     <pre id="curl-line"></pre>

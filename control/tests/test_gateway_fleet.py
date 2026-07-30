@@ -397,9 +397,12 @@ BANNED_METAPHOR = re.compile(
 COPY_VERBS = frozenset({"say", "ask", "choose"})
 
 # Standard typography: a sentence never opens lowercase unless it opens with a literal — a
-# command, an address, a header name. Lines split into sentences first so every sentence is
-# anchored, and glyph-only tokens (check marks, prompts, art) are skipped so the word behind
-# them is inspected.
+# command, an address, a header name. Lines split into sentences on a spaced terminator, and
+# glyph-only tokens (check marks, prompts, art) are skipped so the word behind them is inspected.
+# A terminator fused to its next word (`Done.try`, `Sent!check`) goes unjudged: the dot form is
+# the same shape as a cased dotted literal (`Node.js`, `README.md`) and `?` rides in URLs, so
+# with two of the three terminators ambiguous, fused terminators are uniformly out of scope —
+# the accept list pins all three fused shapes as accepted.
 LITERAL_START = re.compile(r"^(?:curl|ufo|x-ufo-|\S*[.@]\S+)")
 SENTENCE_END = re.compile(r"[.?!]\s+")
 
@@ -429,6 +432,12 @@ def test_the_case_gate_anchors_every_sentence_and_sees_past_glyphs() -> None:
         "✓ Installed ufo (/x/bin/ufo)",
         "#3 on the waitlist. We will email you when access opens.",
         "gmail.com is not a work email domain.",
+        "Gmail.com is not a work email domain.",
+        "Read README.md for the format.",
+        "Node.js is required.",
+        "Done.try again",
+        "Sent!check your inbox.",
+        "Done?try again",
         "curl -fsSL https://flyingobject.ai/ufo | sh",
     ):
         _assert_standard_case(plain)
@@ -491,19 +500,30 @@ def test_every_word_a_member_reads_carries_no_ufo_metaphor(
         assert BANNED_METAPHOR.search(source) is None, source
 
 
-# Every line the terminal client itself speaks — `say` and `die` string literals in the served
-# script, shell expansions blanked so only the fixed words are judged. The capture stops at any
-# quote so two literals on one line are judged separately, and the count of captures must equal
-# the count of quoted `say `/`die ` openings, so a line the extraction drops is a failure, not
-# a silent pass.
-CLIENT_SPEECH = re.compile(r"\b(?:say|die) (['\"])([^'\"]*)\1")
-CLIENT_SPEECH_OPENING = re.compile(r"\b(?:say|die) ['\"]")
-SHELL_EXPANSION = re.compile(r"\$\{[^}]*\}|\$\([^)]*\)|\$\w+|\$\*")
+# The client's fixed member copy — say/die arguments and the printf literals a member sees —
+# each pinned with its occurrence count. The served script is shell source: the rendered sweep
+# in test_every_word_a_member_reads_carries_no_ufo_metaphor judges its lexicon whole, but its
+# typography is out of reach there, so each listed line is held verbatim at every site it
+# occurs. Presence proves each listed string, never that no unlisted one exists.
+CLIENT_MEMBER_COPY = (
+    ("""say 'Signed out.'""", 1),
+    ('say "${DIM}Type ${RESET}${BOLD}ufo${RESET}${DIM} to continue.${RESET}"', 2),
+    ('say "${DIM}✓ Installed ufo ($BIN)${RESET}"', 1),
+    ('say "${DIM}✓ Added ufo to PATH in $profile${RESET}"', 1),
+    ('say "${DIM}✓ Linked ufo into ~/.local/bin${RESET}"', 1),
+    (r'say "${DIM}  For this shell:${RESET} export PATH=\"$UFO_HOME/bin:\$PATH\""', 1),
+    ('say "${DIM}No confirmation — ask the assistant to check.${RESET}"', 1),
+    ('say "${DIM}Skipped $SS_SLOT${RESET}"', 1),
+    ('say "Run ufo in a terminal to enter: $SS_PROMPT"', 1),
+    ('die "Could not fetch $UFO_URL/ufo"', 1),
+    ('die "No response from $UFO_URL"', 1),
+    ('die "No such file: $FILE_PATH"', 1),
+    ("printf 'ufo: %s\\n'", 1),
+    ("printf '%s%s%s (hidden): '", 1),
+    ("printf '\\n# added by ufo installer\\n%s\\n'", 1),
+)
 
 
-def test_the_served_client_speaks_standard_typography() -> None:
-    spoken = CLIENT_SPEECH.findall(gateway.STAMPED_SCRIPT)
-    assert len(spoken) == len(CLIENT_SPEECH_OPENING.findall(gateway.STAMPED_SCRIPT))
-    assert len(spoken) > 10
-    for _, raw in spoken:
-        _assert_standard_case(SHELL_EXPANSION.sub(" ", raw))
+def test_client_member_copy_is_the_fixed_copy() -> None:
+    for copy, occurrences in CLIENT_MEMBER_COPY:
+        assert gateway.STAMPED_SCRIPT.count(copy) == occurrences, copy

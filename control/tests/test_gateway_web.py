@@ -103,8 +103,9 @@ def test_login_page_is_self_contained_and_targets_the_web_wire() -> None:
 
 
 def test_login_page_member_copy_is_the_fixed_copy() -> None:
-    """Every string the sign-in page shows a member, pinned — the page is source, so the rendered
-    sweep in test_every_word_a_member_reads_carries_no_ufo_metaphor cannot judge its typography."""
+    """The sign-in page's fixed member strings, each pinned present — the page is source, so the
+    rendered sweep in test_every_word_a_member_reads_carries_no_ufo_metaphor cannot judge its
+    typography. Presence proves each listed string, never that no unlisted string exists."""
     for copy in (
         "<title>ufo</title>",
         "<header>ufo</header>",
@@ -112,6 +113,7 @@ def test_login_page_member_copy_is_the_fixed_copy() -> None:
         "Use your work email.",
         ">Continue</button>",
         "<h1>Signed in</h1>",
+        ">Open your workspace</button>",
         "From your terminal:",
         ">Session debugger</button>",
         "'Network error — retrying…'",
