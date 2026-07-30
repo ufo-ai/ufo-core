@@ -22,8 +22,11 @@ The argument is the pull request URL. Do not modify its branch.
 5. Read any nested `AGENTS.md` or `CLAUDE.md` whose directory contains a changed file.
 6. Save `python3 .github/scripts/prior_findings.py <owner/repo> <number>` under `$RUNNER_TEMP` and
    read it. It returns every finding Claude published on an earlier head with the replies on each
-   thread, and a `round` of `first`, `follow_up`, or `undetermined`. `undetermined` means the fetch
-   failed: treat it as a follow-up over every changed file, never as a first review.
+   thread, every earlier round's verdict summary under `verdicts`, and `rounds` — how many rounds
+   this pull request has already had. `0` is a first review; `N` makes this round `N + 1`; `null`
+   means the fetch failed, so treat it as a follow-up over every changed file, never as a first
+   review. Read the `verdicts` bodies before deriving anything: they say what each earlier round
+   closed, re-published, and settled, and a round that skips them argues with itself.
 
 Use Bash directly and deliberately. Combine related reads when that reduces calls, but never repeat
 an equivalent command that failed without changing the mechanism.
@@ -59,14 +62,16 @@ bills for.
   that satisfies the finding and breaks what the finding did not mention is the finding's defect.
 - **Close new code the round it appears.** Code a follow-up commit introduces has never been
   reviewed: every lens reports on it now, to the same closure a first review gives. A mechanism
-  audited one aspect per round is one finding spread over three.
+  audited one aspect per round is one finding spread over three. This is what a settling diff needs
+  and what a growing one exploits — the round count below is its limit.
 
-On a `follow_up` round, give each agent the findings and replies from step 6 and bound its work to
-two things: verify each earlier finding is actually fixed at this head, and audit what the new
-commits changed. Step 6 returns `anchor_sha`, the head the newest earlier finding anchored to: when
-it is set, capture `git diff <anchor_sha>..<head sha>` under `$RUNNER_TEMP` and give agents that
-path alongside the cumulative diff, naming which is which. A null `anchor_sha` leaves no range, so
-audit the cumulative diff instead and still verify each earlier finding. Re-derive a finding on
+On a follow-up round — `rounds` is anything but `0` — give each agent the findings and replies from
+step 6 and bound its work to two things: verify each earlier finding is actually fixed at this head,
+and audit what the new commits changed. Step 6 returns `anchor_sha`, the head the newest earlier
+finding anchored to: when it is set, capture `git diff <anchor_sha>..<head sha>` under
+`$RUNNER_TEMP` and give agents that path alongside the cumulative diff, naming which is which. A
+null `anchor_sha` leaves no range, so audit the cumulative diff instead and still verify each
+earlier finding. Re-derive a finding on
 unchanged code only when an earlier finding's fix exposed it, and with a range in hand never on code
 no commit since `anchor_sha` has touched.
 
@@ -88,6 +93,24 @@ that reverses a disposition an earlier round settled — that is the review cont
 and it costs the author two rounds to arrive back where the diff already was. Publish it only by
 stating which earlier finding was wrong and why.
 
+### When the round count stops falling
+
+`rounds` is the one number that says whether this review is converging. Closing every lens on new
+code is right while the diff is settling; it never terminates on a diff that grows a mechanism every
+round, because each fix then arrives as its own first review and the blocking count holds flat.
+
+So read the count against what the ranges brought. When `rounds` is 3 or more and the recent ranges
+each introduced a mechanism the pull request did not open with — a field on a shared type, a gate, a
+validator, a relocated write path — the fixes are outgrowing the findings, and another full-lens
+round buys nothing. Say that in the verdict body: name the mechanisms that arrived as fixes, name
+the split that would let each be reviewed once, and quote `CLAUDE.md`'s "Split into independently
+reviewable units". That is a blocking finding of the second kind, and it is the only finding that
+gets a round to itself.
+
+Nothing here licenses a softer review of what is in front of you. Verify the earlier findings and
+audit the new range as usual; the count changes what the verdict asks for, never how the diff is
+read.
+
 ### Blocking and advisory findings
 
 Sort every kept finding into one of three buckets.
@@ -106,10 +129,24 @@ inline comment and do not let it hold the verdict.
 When every remaining finding is advisory, approve and name those findings in the approval body so
 the author answers them in a reply, without a new head.
 
+A prose finding asks for the sentence's **deletion**, never its correction. Name the words to cut,
+and if the claim is load-bearing, name the assertion that must carry it instead. A sentence you ask
+the author to rewrite comes back as a different sentence, which is a new claim you have to read
+again — the finding then belongs to the wording, not to the code, and nothing ends it.
+
+So one sentence gets one prose finding. On a sentence an earlier round already raised, ask for the
+deletion once and no further: a sentence that outlasts that has cost the review more than it is
+worth — drop it and leave it to the author.
+
 ## Publish the verdict
 
 Re-read `headRefOid` immediately before writing. If it changed, do not comment on or review the new
 head from stale evidence.
+
+Open the verdict body with `Round <rounds + 1>.`, or `Round unknown.` where `rounds` came back
+`null` — the count is what makes a cycling review visible to the author and to the human who has to
+break it, and neither can see it from the inline list. The self-review marker below is the one
+verdict that carries no body, so a round published that way carries no count.
 
 For each validated issue, blocking or advisory, create one inline comment with
 `mcp__github_inline_comment__create_inline_comment`. Then submit exactly one decisive review:
@@ -136,8 +173,10 @@ Finish only after GitHub records the verdict as a decisive review or the exact s
 | Git history or an object appears missing | Check the full-history checkout before fetching. Never clone the repository. |
 | The head changes during review | Discard stale findings and stop without publishing them. |
 | The action is green but no verdict exists | The review is incomplete until `gh pr review` succeeds. |
-| Step 6 reports `undetermined` | The fetch failed; that is not evidence of a first review. Review every changed file rather than assume there is nothing to verify. |
-| A `follow_up` round carries a null `anchor_sha` | No prior finding named a head, so there is no range. Audit the cumulative diff and verify the earlier findings anyway; never skip the round for want of a range. |
+| Step 6 reports a null `rounds` | The fetch failed; that is not evidence of a first review. Review every changed file rather than assume there is nothing to verify. |
+| About to publish a prose finding on a sentence an earlier round already raised | Ask for the deletion, once. If an earlier round already asked for it, drop it — the sentence has outlasted its worth. Never negotiate a wording. |
+| `rounds` is 3 or more and each recent range brought a new mechanism | The fixes are outgrowing the findings. Name the split, quote the written rule, and spend the round on that. |
+| A follow-up round carries a null `anchor_sha` | No prior finding named a head, so there is no range. Audit the cumulative diff and verify the earlier findings anyway; never skip the round for want of a range. |
 | Tempted to read prior findings with `gh pr view` or a filtered `gh api` | `gh pr view` returns no inline comments, and `gh api --paginate -q` applies the filter per page, keeping only page one. Run the script. |
 | Only wording, comment, or docstring issues remain | Approve and list them as advisory. Requesting changes for prose costs the author a full review round. |
 | A structural or design finding fits neither blocking bucket | It is blocking only with a written rule quoted from `CLAUDE.md`, `AGENTS.md`, `spec.md`, or an existing local contract. Without one it is a preference: drop it. |

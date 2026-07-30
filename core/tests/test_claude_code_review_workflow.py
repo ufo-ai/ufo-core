@@ -67,26 +67,28 @@ def test_claude_code_review_skill_keeps_prose_findings_out_of_the_gate() -> None
 
 
 def test_claude_code_review_skill_verifies_prior_rounds_instead_of_re_deriving() -> None:
-    skill = SKILL.read_text()
+    prose = " ".join(SKILL.read_text().split())
 
-    assert "python3 .github/scripts/prior_findings.py" in skill
-    assert "`first`, `follow_up`, or `undetermined`" in skill
-    assert "never as a first review" in skill
-    assert "Step 6 reports `undetermined`" in skill
-    assert "Tempted to read prior findings with `gh pr view` or a filtered `gh api`" in skill
-    assert "Each agent finishes a changed file within its own lens" in skill
-    assert "Closure across all three" in skill
-    assert "On a `follow_up` round" in skill
-    assert "verify each earlier finding is actually fixed at this head" in skill
-    assert "`git diff <anchor_sha>..<head sha>`" in skill
-    assert "A null `anchor_sha` leaves no range" in skill
-    assert "A `follow_up` round carries a null `anchor_sha`" in skill
-    assert "never on code\nno commit since `anchor_sha` has touched" in skill
+    assert "python3 .github/scripts/prior_findings.py" in prose
+    assert "`0` is a first review; `N` makes this round `N + 1`; `null`" in prose
+    assert "never as a first review" in prose
+    assert "Step 6 reports a null `rounds`" in prose
+    assert "Read the `verdicts` bodies before deriving anything" in prose
+    assert "a round that skips them argues with itself" in prose
+    assert "Tempted to read prior findings with `gh pr view` or a filtered `gh api`" in prose
+    assert "Each agent finishes a changed file within its own lens" in prose
+    assert "Closure across all three" in prose
+    assert "On a follow-up round — `rounds` is anything but `0`" in prose
+    assert "verify each earlier finding is actually fixed at this head" in prose
+    assert "`git diff <anchor_sha>..<head sha>`" in prose
+    assert "A null `anchor_sha` leaves no range" in prose
+    assert "A follow-up round carries a null `anchor_sha`" in prose
+    assert "never on code no commit since `anchor_sha` has touched" in prose
     assert (
-        "The reply decides how much work verifying costs, never whether the finding holds" in skill
+        "The reply decides how much work verifying costs, never whether the finding holds" in prose
     )
-    assert "only the code at this head settles it" in skill
-    assert skill.index("prior_findings.py") < skill.index("## Review")
+    assert "only the code at this head settles it" in prose
+    assert prose.index("prior_findings.py") < prose.index("## Review")
 
 
 def test_claude_code_review_skill_spends_one_round_per_subject() -> None:
@@ -100,8 +102,9 @@ def test_claude_code_review_skill_spends_one_round_per_subject() -> None:
     assert "breaks what the finding did not mention is the finding's defect" in prose
     assert "**Close new code the round it appears.**" in prose
     assert "one finding spread over three" in prose
+    assert "the round count below is its limit" in prose
     assert prose.index("### Write each finding to be the last one on its subject") < prose.index(
-        "On a `follow_up` round"
+        "On a follow-up round"
     )
 
     for gotcha in (
@@ -135,20 +138,100 @@ def test_claude_code_review_skill_drops_findings_that_buy_a_round() -> None:
     )
 
 
-def test_every_round_the_script_emits_has_an_instruction_in_the_skill() -> None:
-    skill = SKILL.read_text()
+def test_every_round_count_the_script_emits_has_an_instruction_in_the_skill() -> None:
+    prose = " ".join(SKILL.read_text().split())
     claude = prior.comment({"id": 1, "user": {"login": "claude[bot]"}, "path": "a.py", "body": ""})
-    unanchored = prior.prior_round((claude,))
-    rounds = {
-        prior.prior_round(()).round,
-        unanchored.round,
-        prior.UNDETERMINED.round,
-    }
+    unanchored = prior.prior_round((claude,), (), ())
 
-    assert rounds == {"first", "follow_up", "undetermined"}
-    for name in rounds:
-        assert f"`{name}`" in skill
+    assert prior.prior_round((), (), ()).rounds == 0
+    assert "`0` is a first review" in prose
+
+    assert unanchored.rounds == 1
+    assert "`N` makes this round `N + 1`" in prose
+
+    assert prior.UNDETERMINED.rounds is None
+    assert "`null` means the fetch failed" in prose
+    assert "Step 6 reports a null `rounds`" in prose
 
     assert unanchored.anchor_sha is None
-    assert "A null `anchor_sha` leaves no range" in skill
-    assert "A `follow_up` round carries a null `anchor_sha`" in skill
+    assert "A null `anchor_sha` leaves no range" in prose
+    assert "A follow-up round carries a null `anchor_sha`" in prose
+
+
+def test_every_verdict_the_script_emits_is_read_by_the_skill() -> None:
+    prose = " ".join(SKILL.read_text().split())
+    body = "Round 3. Four blocking findings."
+    emitted = prior.prior_round(
+        (),
+        (
+            prior.review(
+                {"user": {"login": "claude[bot]"}, "state": "CHANGES_REQUESTED", "body": body}
+            ),
+        ),
+        (),
+    ).verdicts
+
+    assert emitted == (body,)
+    assert "every earlier round's verdict summary under `verdicts`" in prose
+    assert "they say what each earlier round closed, re-published, and settled" in prose
+
+
+def test_a_marker_round_is_counted_and_carries_no_summary() -> None:
+    prose = " ".join(SKILL.read_text().split())
+    marker = f"<!-- claude-review-verdict head={'a' * 40} verdict=APPROVED -->"
+    result = prior.prior_round(
+        (), (), (prior.issue_comment({"user": {"login": "claude[bot]"}, "body": marker}),)
+    )
+
+    assert (result.rounds, result.verdicts) == (1, ())
+    assert "or `Round unknown.` where `rounds` came back `null`" in prose
+    assert (
+        "the one verdict that carries no body, so a round published that way carries no count"
+        in prose
+    )
+
+
+def test_claude_code_review_skill_asks_prose_to_be_deleted_not_reworded() -> None:
+    prose = " ".join(SKILL.read_text().split())
+
+    assert "A prose finding asks for the sentence's **deletion**, never its correction." in prose
+    assert "Name the words to cut" in prose
+    assert "name the assertion that must carry it instead" in prose
+    assert (
+        "comes back as a different sentence, which is a new claim you have to read again" in prose
+    )
+    assert "So one sentence gets one prose finding." in prose
+    assert "ask for the deletion once and no further" in prose
+    assert "drop it and leave it to the author" in prose
+    assert "About to publish a prose finding on a sentence an earlier round already raised" in prose
+    assert "Never negotiate a wording." in prose
+    assert prose.index("Advisory: a comment, docstring, or prose inaccuracy") < prose.index(
+        "A prose finding asks for the sentence's **deletion**"
+    )
+
+
+def test_claude_code_review_skill_names_the_split_when_the_round_count_stops_falling() -> None:
+    prose = " ".join(SKILL.read_text().split())
+
+    assert "### When the round count stops falling" in prose
+    assert "`rounds` is the one number that says whether this review is converging" in prose
+    assert "it never terminates on a diff that grows a mechanism every round" in prose
+    assert (
+        "each fix then arrives as its own first review and the blocking count holds flat" in prose
+    )
+    assert "When `rounds` is 3 or more and the recent ranges each introduced a mechanism" in prose
+    assert 'quote `CLAUDE.md`\'s "Split into independently reviewable units"' in prose
+    assert "That is a blocking finding of the second kind" in prose
+    assert "Nothing here licenses a softer review of what is in front of you" in prose
+    assert "the count changes what the verdict asks for, never how the diff is read" in prose
+    assert "`rounds` is 3 or more and each recent range brought a new mechanism" in prose
+
+    assert "Open the verdict body with `Round <rounds + 1>.`" in prose
+    assert "or `Round unknown.` where `rounds` came back `null`" in prose
+    assert "makes a cycling review visible to the author and to the human" in prose
+    assert prose.index("### When the round count stops falling") < prose.index(
+        "### Blocking and advisory findings"
+    )
+    assert prose.index("Open the verdict body with `Round <rounds + 1>.`") < prose.index(
+        "For each validated issue, blocking or advisory"
+    )

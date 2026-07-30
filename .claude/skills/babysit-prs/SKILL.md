@@ -44,15 +44,24 @@ What is left is a preference with no rule behind it: wording, a name the repo do
 a test's name, a reviewer's "consider". Answer those in a reply and resolve them; a commit spends a whole
 review round, and a preference is never worth one.
 
-A prose finding therefore has exactly two ends and no third: a written rule backs it, so it is a defect and
-its sentence goes in **this** round's push; or nothing backs it, so the reply says the sentence stands and
-the thread resolves. Never a deletion promised for a later push — a thread resolves only once the pushed
-head carries the fix.
+A prose finding therefore has exactly two ends and no third, and both are decided in **this** round.
+
+**The sentence goes**, by deletion, in this round's push: whenever a written rule backs the finding, whatever
+verdict this head carries, and whenever the sentence is false at a head no `APPROVED` verdict has reached.
+**Or the sentence stays** and one reply says why, and only where no written rule backs it: it is true, or this
+head is already approved and the cut is worth less than the approval it would spend. Never a deletion promised
+for a later push — a thread resolves only once the pushed head carries the fix, so a sentence left standing is
+left standing for a stated reason, not owed.
+
+A false sentence is not a wording problem, and "advisory" is not a licence to negotiate it. The code is the
+documentation: the sentence had one job and does not do it, so it goes unless it is the one case above, an
+unbacked sentence at an approved head.
 
 When the sentence does go, it goes by **deletion** wherever the code reads without it (CLAUDE.md: no
 comments; enforce, don't document), keeping only a public API's docstring, in the fewest words that are
 true. A reworded claim is a new claim for the next round to re-litigate; the deletion, or a test that makes
-the claim true, ends the class.
+the claim true, ends the class. Count the wordings you have shipped of one sentence: at two, the sentence
+is not carrying its keep — cut it and let the code say it.
 
 ## One push per round, and it fixes the class
 
@@ -77,15 +86,29 @@ Close the class rather than the line. The reviewer's line number is one example,
 A next round that says *the other half of your fix has no test*, *the injection moved the hole*, or *the
 new drain stacks a second window* is the sweep you skipped, not a nitpick.
 
+## A fix that needs a new mechanism is a scope call, not a push
+
+Closing a finding sometimes takes something the diff does not have yet — a field on a shared type, a stamp
+on a write path, a gate, a validator, a new call site on a seam. Pushing it here does not close the round.
+Nothing has reviewed it, so it lands as a first review layered on a diff already under review: the next
+round closes every lens on it, finds its own findings, and your fix earns a fix. One mechanism per round is
+how a one-file change becomes fifteen files and eight rounds, with the blocking count flat the whole way.
+
+Size the fix before you write it. A branch, a parameter, a state, or an assertion inside the shape the diff
+already has is this round's push, and it carries its own test. A mechanism is a unit of its own: **surface
+it** — name the finding, the mechanism it needs, and that reviewing it here costs a fresh full round.
+Whether it stacks as its own pull request or this one grows is the human's call, and pushing it is making
+that call silently.
+
 ## An approval is not spent on an advisory
 
 Once a head carries an `APPROVED` verdict, no advisory earns a push of its own: the findings the approval
 body names, and any thread still open on taste, are answered by reply and resolved, because a push to
 satisfy them throws the approval away and buys a fresh round for nothing.
 
-The approval body's advisory list is answered the same way, because it holds only prose no written rule backs
-— the second end above, every entry: one reply saying the sentence stands, then resolve. No entry waits on a
-later push.
+The approval body's advisory list is answered the same way, every entry: one reply, then resolve. That is the
+second end above — an entry whose sentence merely stands says so, and an entry whose sentence is false says
+that, because an approved head is the ground that end already names. No entry waits on a later push.
 
 A push the rest of this file requires is still owed at an approved head — a red required check, a `dirty`
 merge state, a rule-backed finding, a defect the approval missed. Take that round deliberately. A thread you
@@ -107,8 +130,10 @@ Claude's head-anchored verdict is the one that controls the **AI Review Gate**; 
 ## Respond to review
 
 - Triage from the review **summary**, not the inline list — the review re-anchors every prior finding to each new head, including ones the last push already fixed. The summary names the genuinely new findings.
+- A summary opens with its round number, where the round had a summary to write — a marker-only verdict carries no body and so no count. Read the number as a measurement of your own loop: a count that climbs while the blocking count holds flat means each push is buying the next round rather than ending one. The causes are yours — a mechanism in every push, a class fixed at one site, a reply the code does not back. Name which one it is and surface it; another push is not the answer to it.
 - Fix a valid finding at the root, reply on its thread, then resolve it — but only after the pushed head contains the fix (GraphQL `resolveReviewThread`; thread ids from `pullRequest.reviewThreads`).
 - A reply is at most two sentences: what changed, and the test that holds it. Never restate the finding, thank the reviewer, narrate agreeing, or transcribe your reasoning — the evidence belongs in the code and the test, where the next reader is. Reply on the thread, never as a new PR-level comment.
+- A reply claiming a fix names a check you **ran at the pushed head** and its result — the focused test with its counts, or the mutation you reverted to watch it fail. Never `Fixed` from the edit you believe you made: the reviewer settles it against the code, so a claim the head does not carry re-publishes the finding and burns the round that reply was meant to close. Unrun means unfixed — say what you changed and that it is unverified.
 - A finding you disagree with, or a reviewer preference that is not a correctness issue or a repo rule: reply with the evidence and resolve — never churn the branch to satisfy taste, never silently leave it open.
 - A finding that exposes a design gap is not patched shut to clear the thread. Surface it.
 
@@ -135,7 +160,11 @@ Report that state; do not merge and do not arm auto-merge yourself. If auto-merg
 | No PR named in the invocation | Only the PRs this session opened or pushed to. None → say so and stop; a wider sweep clobbers another session's branch mid-flight. |
 | `APPROVED` head whose only open findings are advisory | Reply and resolve; no push. A push here would trade a green gate for another full round. |
 | `APPROVED` head with a red check, a `dirty` merge state, or a rule-backed finding | Fix and push — the approval was never a bar to that. |
-| A round raises only wording or docstrings with no written rule behind them | Reply that the sentence stands, and resolve. Nothing is owed, so nothing is promised for a later push. |
+| A round raises only wording or docstrings with no written rule behind them, and the sentences are true | Reply that the sentence stands, and resolve. Nothing is owed, so nothing is promised for a later push. |
+| The sentence the finding names is false at this head | Cut it in this round's push. Where no written rule backs it and this head is approved, reply that it is false and resolve instead — the cut is not worth the approval. Never reword it: a second wording is a second claim, and the class only closes on the cut. |
+| You are about to reply `Fixed` | Name the check you ran at this pushed head and its result. A reply the code does not back costs the whole round. |
+| Closing the finding needs a field, stamp, gate, validator, or call site the diff does not have | That is a unit, not a push. Surface the scope call; pushing it layers a first review onto a diff already under review. |
+| The verdict's round number climbs while the blocking count holds flat | Your pushes are buying rounds. Find which cause it is — a mechanism per push, an instance fix, an unbacked reply — and surface it instead of pushing again. |
 | A new finding lands while this head's fix is still unpushed | Fold it into that same push; one push per round. |
 | The finding names one line, one call site, one test | That line is an example, not the inventory. Fix the cause that let it exist and every sibling it already reached; an instance fix comes back as the next round's finding. |
 | Your fix adds a surface — a branch, parameter, state, event, window, column | Unproven behavior. Its test lands in the same push, or the next round files it as untested and you pay the round. |
