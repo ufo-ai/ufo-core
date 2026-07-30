@@ -786,6 +786,7 @@ async def _agent_row(
     prompt: str = "be brief",
     model: str = "claude-opus-4-8",
     internet_access_allowed: bool = True,
+    reasoning: str = "high",
     *,
     is_main: bool = False,
 ) -> UUID:
@@ -800,6 +801,7 @@ async def _agent_row(
                 model=model,
                 is_main=is_main,
                 internet_access_allowed=internet_access_allowed,
+                reasoning=reasoning,
                 created_at=datetime(2026, 7, 1, tzinfo=UTC),
                 updated_at=datetime(2026, 7, 2, tzinfo=UTC),
             )
@@ -826,6 +828,7 @@ async def test_agent_kind_updates_model_admin_gated_and_shows_prompt_readonly(db
         assert fetched["spec"] == {
             "model": "claude-opus-4-8",
             "internet_access_allowed": True,
+            "reasoning": "high",
             "prompt": None,
         }
         assert fetched["status"]["prompt"] == "be brief"
@@ -844,6 +847,7 @@ async def test_agent_kind_updates_model_admin_gated_and_shows_prompt_readonly(db
                 "spec": {
                     "model": "claude-fable-5",
                     "internet_access_allowed": False,
+                    "reasoning": "low",
                 },
             }
         )
@@ -856,13 +860,15 @@ async def test_agent_kind_updates_model_admin_gated_and_shows_prompt_readonly(db
                         tables.agent.c.prompt,
                         tables.agent.c.model,
                         tables.agent.c.internet_access_allowed,
+                        tables.agent.c.reasoning,
                     ).where(tables.agent.c.workspace_id == workspace_id)
                 )
             ).one()
-        assert (row.prompt, row.model, row.internet_access_allowed) == (
+        assert (row.prompt, row.model, row.internet_access_allowed, row.reasoning) == (
             "be brief",
             "claude-fable-5",
             False,
+            "low",
         )
 
         listing = json.loads(await _text(tools, "object_list", owner_ctx, kind=AGENT_KIND))
@@ -898,6 +904,7 @@ async def test_agent_kind_updates_model_admin_gated_and_shows_prompt_readonly(db
                             "prompt": "injected",
                             "model": "claude-fable-5",
                             "internet_access_allowed": False,
+                            "reasoning": "high",
                         },
                     }
                 ),
@@ -905,6 +912,43 @@ async def test_agent_kind_updates_model_admin_gated_and_shows_prompt_readonly(db
         )
         with pytest.raises(VerbNotSupported, match="proposal path"):
             await apply_tool.handler(owner_ctx, prompt_write)
+
+
+async def test_agent_kind_refuses_an_effort_outside_the_enum(db: None) -> None:
+    """The spec is the member-facing gate on the effort: a level the enum does not name is refused
+    before any write, and the stored value stands."""
+    workspace_id = await _workspace()
+    tools = _object_tools()
+    with ws(workspace_id):
+        owner = await _member(workspace_id, ADMIN_CREATED_AT)
+        agent_id = await _agent_row(workspace_id, is_main=True)
+        ctx = _tool_context(workspace_id, speaker_member_id=owner, agent_id=agent_id)
+        apply_tool = tools["object_apply"]
+        args = apply_tool.input_model.model_validate(
+            {
+                "user_description": OBJECT_NARRATION,
+                "manifest": yaml.safe_dump(
+                    {
+                        "kind": AGENT_KIND,
+                        "name": "assistant",
+                        "spec": {
+                            "model": "claude-opus-4-8",
+                            "internet_access_allowed": True,
+                            "reasoning": "turbo",
+                        },
+                    }
+                ),
+            }
+        )
+        with pytest.raises(SpecValidationFailed, match="reasoning"):
+            await apply_tool.handler(ctx, args)
+        async with workspace_tx() as connection:
+            stored = (
+                await connection.execute(
+                    sa.select(tables.agent.c.reasoning).where(tables.agent.c.id == agent_id)
+                )
+            ).scalar_one()
+        assert stored == "high"
 
 
 async def test_agent_kind_reports_the_model_an_auto_agent_actually_runs(db: None) -> None:
@@ -956,10 +1000,19 @@ async def test_agent_kind_creates_admin_gated_on_main_and_refuses_delete(db: Non
                 }
             )
 
-        full = {"model": "m2", "internet_access_allowed": False, "prompt": "be second"}
+        full = {
+            "model": "m2",
+            "internet_access_allowed": False,
+            "reasoning": "low",
+            "prompt": "be second",
+        }
         with pytest.raises(ValueError, match="requires a prompt"):
             await apply_tool.handler(
-                ctx, create_input("second-agent", {"model": "m2", "internet_access_allowed": False})
+                ctx,
+                create_input(
+                    "second-agent",
+                    {"model": "m2", "internet_access_allowed": False, "reasoning": "low"},
+                ),
             )
         member_ctx = _tool_context(workspace_id, speaker_member_id=outsider, agent_id=agent_id)
         with pytest.raises(AdminRequired, match="creating an agent"):
@@ -985,6 +1038,7 @@ async def test_agent_kind_creates_admin_gated_on_main_and_refuses_delete(db: Non
         assert row.prompt == "be second"
         assert row.model == "m2"
         assert row.internet_access_allowed is False
+        assert row.reasoning == "low"
         assert row.is_main is False
         child_ctx = _tool_context(workspace_id, speaker_member_id=owner, agent_id=row.id)
         with pytest.raises(AdminRequired, match="creating an agent"):
@@ -993,7 +1047,12 @@ async def test_agent_kind_creates_admin_gated_on_main_and_refuses_delete(db: Non
             await AgentObjects().apply(
                 ctx,
                 "second-agent",
-                AgentSpec(model="m2", internet_access_allowed=False, prompt="racer"),
+                AgentSpec(
+                    model="m2",
+                    internet_access_allowed=False,
+                    reasoning="low",
+                    prompt="racer",
+                ),
                 None,
                 expected_generation=None,
             )
@@ -1002,7 +1061,12 @@ async def test_agent_kind_creates_admin_gated_on_main_and_refuses_delete(db: Non
                 ctx,
                 create_input(
                     "assistant",
-                    {"model": "m", "internet_access_allowed": True, "prompt": "rewritten"},
+                    {
+                        "model": "m",
+                        "internet_access_allowed": True,
+                        "reasoning": "auto",
+                        "prompt": "rewritten",
+                    },
                 ),
             )
 
@@ -1049,6 +1113,7 @@ async def test_agent_apply_and_pending_proposal_write_disjoint_fields(db: None) 
                     "spec": {
                         "model": "claude-fable-5",
                         "internet_access_allowed": True,
+                        "reasoning": "high",
                     },
                 }
             ),
@@ -1100,6 +1165,7 @@ async def test_main_agent_controls_children_and_a_child_controls_only_itself(db:
                         "spec": {
                             "model": model,
                             "internet_access_allowed": True,
+                            "reasoning": "high",
                         },
                     }
                 ),

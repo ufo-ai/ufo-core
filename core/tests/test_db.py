@@ -172,7 +172,7 @@ def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None
         heads = scripts.get_heads()
     assert scripts.get_revision("memory_0008").dependencies == "0049"
     assert {
-        "0061",
+        "0062",
         "index_default_0002",
         "memory_0012",
         "sample_ext_note_0001",
@@ -217,7 +217,7 @@ def test_one_memory_surface_advances_both_old_heads(tmp_path: Path, graph_instal
             row[0] for row in connection.execute("select version_num from alembic_version")
         }
     assert not {"graph_entity", "graph_edge"} & tables
-    assert "0061" in revisions
+    assert "0062" in revisions
     assert "knowledge_graph_0001" not in revisions
 
 
@@ -853,6 +853,47 @@ def test_the_unavailable_count_is_a_registered_metric() -> None:
     count exists to report — the instrumentation destroying the error it was added to surface. The
     test above mocks the emit away to read its arguments, so this is what holds the name."""
     o11y.emit_metric("db_tx_unavailable_total", path="workspace", error_class="TimeoutError")
+
+
+async def test_agent_reasoning_is_constrained(db: None) -> None:
+    """The column is the last gate on the effort a turn runs at: a value outside the enum is
+    refused by the database, so a writer that bypasses the spec cannot seat `turbo` in a row the
+    engine then hands the provider."""
+    async with workspace_tx() as connection:
+        workspace_id = uuid4()
+        await connection.execute(
+            sa.insert(tables.workspace).values(
+                id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
+            )
+        )
+        with pytest.raises(sa.exc.IntegrityError):
+            async with connection.begin_nested():
+                await connection.execute(
+                    sa.insert(tables.agent).values(
+                        id=uuid4(),
+                        workspace_id=workspace_id,
+                        name="assistant",
+                        prompt="p",
+                        model="m",
+                        reasoning="turbo",
+                        created_at=sa.func.now(),
+                        updated_at=sa.func.now(),
+                    )
+                )
+        seated = await connection.execute(
+            sa.insert(tables.agent)
+            .values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                name="defaulted",
+                prompt="p",
+                model="m",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+            .returning(tables.agent.c.reasoning)
+        )
+        assert seated.scalar_one() == "auto"
 
 
 async def test_turn_protocol_state_is_constrained(db: None) -> None:

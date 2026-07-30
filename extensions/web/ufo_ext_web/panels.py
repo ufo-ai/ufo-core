@@ -256,6 +256,13 @@ async def submit_intent(
     raise RuntimeError("the turn's tail ended without a terminal frame")
 
 
+def reasoning_levels() -> list[JsonValue]:
+    """The reasoning efforts a create form offers, read off the spec's own enum so the portal's two
+    write lanes cannot drift from each other or from what the kind accepts."""
+    enum = AgentSpec.model_json_schema()["properties"]["reasoning"]["enum"]
+    return list(enum)
+
+
 def _update_schema() -> dict[str, JsonValue]:
     """The settings form's field source: the writable spec schema minus `prompt`, which is
     create-only — an existing agent's prompt changes through the governed proposal path, and a
@@ -294,6 +301,7 @@ async def agent_overview(ctx: SurfaceContext, agent_id: UUID, *, admin: bool) ->
             "spec": AgentSpec(
                 model=detail.model,
                 internet_access_allowed=detail.internet_access_allowed,
+                reasoning=detail.reasoning,
             ).model_dump(mode="json", exclude={"prompt"}),
             "spec_schema": _update_schema(),
             "audience": audience,

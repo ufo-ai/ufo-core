@@ -83,10 +83,14 @@ agent = sa.Table(
     sa.Column("name", sa.Text, nullable=False),
     sa.Column("prompt", sa.Text, nullable=False),
     sa.Column("model", sa.Text, nullable=False),
+    sa.Column("reasoning", sa.Text, nullable=False, server_default=sa.text("'auto'")),
     sa.Column("is_main", sa.Boolean, nullable=False, server_default=sa.false()),
     sa.Column("internet_access_allowed", sa.Boolean, nullable=False, server_default=sa.true()),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+    sa.CheckConstraint(
+        "reasoning in ('auto', 'off', 'low', 'medium', 'high')", name="agent_reasoning"
+    ),
     sa.UniqueConstraint("workspace_id", "name"),
     sa.UniqueConstraint("workspace_id", "id", name="agent_workspace_identity"),
     sa.Index(

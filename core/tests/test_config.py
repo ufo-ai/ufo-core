@@ -138,29 +138,18 @@ def test_unknown_hub_key_rejected(tmp_path: Path) -> None:
         load_config(path)
 
 
-def test_models_reasoning_and_auto_default(tmp_path: Path) -> None:
+def test_models_auto_default(tmp_path: Path) -> None:
     path = tmp_path / "ufo.toml"
     path.write_text(VALID)
     config = load_config(path)
-    assert config.models.reasoning_effort == "high"
     assert config.models.auto_model == "claude-opus-5"
 
 
-def test_models_reasoning_and_auto_parse(tmp_path: Path) -> None:
+def test_models_auto_parse(tmp_path: Path) -> None:
     path = tmp_path / "ufo.toml"
-    path.write_text(
-        VALID + '\n[models]\nreasoning_effort = "off"\nauto_model = "claude-sonnet-5"\n'
-    )
+    path.write_text(VALID + '\n[models]\nauto_model = "claude-sonnet-5"\n')
     config = load_config(path)
-    assert config.models.reasoning_effort == "off"
     assert config.models.auto_model == "claude-sonnet-5"
-
-
-def test_unknown_reasoning_effort_rejected(tmp_path: Path) -> None:
-    path = tmp_path / "ufo.toml"
-    path.write_text(VALID + '\n[models]\nreasoning_effort = "turbo"\n')
-    with pytest.raises(ValidationError):
-        load_config(path)
 
 
 def test_auto_model_rejects_the_auto_sentinel(tmp_path: Path) -> None:

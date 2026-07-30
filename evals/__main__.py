@@ -504,9 +504,13 @@ async def _run(
                 workspace_id, agent_name = await seed_candidate_agent(
                     candidate_proposal, workspace_id
                 )
-            workspace_id, agent_id, agent_prompt, agent_model = await resolve_workspace_and_agent(
-                agent_name, workspace_id
-            )
+            (
+                workspace_id,
+                agent_id,
+                agent_prompt,
+                agent_model,
+                agent_reasoning,
+            ) = await resolve_workspace_and_agent(agent_name, workspace_id)
             blob = blob_store_for(config.blob)
             dbos = DBOSClient(system_database_url=config.database.system_url)
             driver = WorkspaceDriver(
@@ -562,6 +566,7 @@ async def _run(
                         tasks,
                         agent_prompt,
                         agent_model,
+                        agent_reasoning,
                         mcp_atlas_url,
                         mcp_atlas_external_url,
                     ),
@@ -620,7 +625,7 @@ async def _run(
                                 if task.simulator_model is not None
                                 else {}
                             ),
-                            "reasoning": config.models.reasoning_effort,
+                            "reasoning": agent_reasoning,
                             "searchProvider": config.research.search_provider,
                             "cdpProvider": config.browser.cdp_provider,
                         }
@@ -684,6 +689,7 @@ async def _mcp_atlas_target(
     tasks: tuple[EvalTask, ...],
     agent_prompt: str,
     agent_model: str,
+    agent_reasoning: ReasoningEffort,
     url: str | None,
     external_url: str | None,
 ) -> McpAtlasTarget | None:
@@ -733,7 +739,7 @@ async def _mcp_atlas_target(
         target_context.model,
         resolved_model,
         system,
-        config.models.reasoning_effort,
+        agent_reasoning,
         external_client,
     )
 

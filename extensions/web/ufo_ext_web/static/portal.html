@@ -433,6 +433,13 @@ function createAgentSection(payload, result) {
     model.appendChild(option);
   }
   model.value = payload.models[0];
+  const reasoning = document.createElement('select');
+  for (const level of payload.reasoning_levels) {
+    const option = document.createElement('option');
+    option.value = option.textContent = level;
+    reasoning.appendChild(option);
+  }
+  reasoning.value = payload.reasoning_levels[0];
   const internetLabel = document.createElement('label');
   const internet = document.createElement('input');
   internet.type = 'checkbox';
@@ -445,7 +452,7 @@ function createAgentSection(payload, result) {
   submit.type = 'submit';
   submit.className = 'send';
   submit.textContent = 'Create';
-  form.append(name, model, internetLabel, prompt, submit);
+  form.append(name, model, reasoning, internetLabel, prompt, submit);
   section.appendChild(form);
   const source = createPrefill;
   createPrefill = null;
@@ -455,7 +462,9 @@ function createAgentSection(payload, result) {
     fetch(BASE + '/agents/' + source.id + '/overview', { credentials: 'same-origin' })
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
-        if (data) prompt.value = data.agent.prompt;
+        if (!data) return;
+        prompt.value = data.agent.prompt;
+        reasoning.value = data.spec.reasoning;
       })
       .catch(() => {});
   }
@@ -472,6 +481,7 @@ function createAgentSection(payload, result) {
         spec: {
           model: model.value,
           internet_access_allowed: internet.checked,
+          reasoning: reasoning.value,
           prompt: prompt.value,
         },
       },
@@ -1688,9 +1698,10 @@ function specField(key, prop, value, options) {
   label.textContent = key;
   field.appendChild(label);
   let widget;
-  if (options) {
+  const choices = options || prop.enum;
+  if (choices) {
     widget = document.createElement('select');
-    for (const option of options) {
+    for (const option of choices) {
       const entry = document.createElement('option');
       entry.value = entry.textContent = option;
       entry.selected = option === value;

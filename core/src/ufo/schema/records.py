@@ -11,8 +11,8 @@ from pydantic import BaseModel, Field, JsonValue, field_validator, model_validat
 TurnStatus = Literal["queued", "running", "parked", "done", "failed", "cancelled"]
 TerminalStatus = Literal["done", "failed", "cancelled"]
 TurnAdmissionSource = Literal["member", "internal", "scheduled", "intent"]
-ReasoningEffort = Literal["off", "low", "medium", "high"]
-DEFAULT_REASONING_EFFORT: ReasoningEffort = "high"
+ReasoningEffort = Literal["auto", "off", "low", "medium", "high"]
+DEFAULT_REASONING_EFFORT: ReasoningEffort = "auto"
 NON_TERMINAL_STATUSES: tuple[TurnStatus, ...] = ("queued", "running", "parked")
 WritebackStatus = Literal["pending", "claimed", "delivered", "failed"]
 WRITEBACK_PENDING: WritebackStatus = "pending"
@@ -171,6 +171,7 @@ class TerminalFrame(BaseModel):
 class Agent(BaseModel):
     prompt: str
     model: str
+    reasoning: ReasoningEffort = DEFAULT_REASONING_EFFORT
 
 
 class TurnContext(BaseModel):

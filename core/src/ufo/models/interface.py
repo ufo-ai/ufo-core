@@ -71,9 +71,12 @@ class ModelRequest(BaseModel):
     """`reasoning` is the extended-thinking depth each client renders in its provider's shape — the
     Anthropic `thinking` block plus `output_config.effort`, the OpenAI/OpenRouter `reasoning`/effort
     param. `max_tokens` is reasoning-inclusive: thinking draws from it, so the visible answer gets
-    what thinking leaves. `off` omits the thinking parameters entirely. `tool_choice` compels the
-    named tool as the round's single act — it must name an offered tool, and the request runs with
-    reasoning off (Anthropic rejects a forced tool choice under extended thinking)."""
+    what thinking leaves. `auto` sends Anthropic's adaptive thinking with no effort parameter, so
+    the model calibrates depth per request; the OpenAI-wire clients have no such mode, so there
+    `auto` renders as the same parameter-free request `off` does — the provider's own default.
+    `off` omits the thinking parameters entirely. `tool_choice` compels the named tool as the
+    round's single act — it must name an offered tool, and the request runs with reasoning off
+    (Anthropic rejects a forced tool choice under extended thinking)."""
 
     model: str
     system: str

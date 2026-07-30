@@ -56,7 +56,7 @@ from ufo.sandbox.conversation import (
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import ProxyEndpoint, RunTokenCodec
 from ufo.schema import tables
-from ufo.schema.records import TerminalFrame, Turn, Usage
+from ufo.schema.records import ReasoningEffort, TerminalFrame, Turn, Usage
 from ufo.surfaces import hub_tail
 from ufo.surfaces.admission import Admission, AdmissionInvoker, MemberAdmission
 from ufo.tools.context import TextContent, ToolContext, ToolResult
@@ -71,6 +71,7 @@ TRUNCATION_MESSAGE = (
 STREAM_GATE = StreamGate()
 SEEN_SYSTEM_PROMPTS: list[str] = []
 SEEN_TOOLS: list[tuple[str, ...]] = []
+SEEN_REASONING: list[ReasoningEffort] = []
 
 
 @dataclass(frozen=True)
@@ -184,6 +185,7 @@ class StandInModel:
     async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
         SEEN_SYSTEM_PROMPTS.append(request.system)
         SEEN_TOOLS.append(tuple(tool.name for tool in request.tools))
+        SEEN_REASONING.append(request.reasoning)
         if "ROUNDTRIP" in request.system:
             if request.messages[-1].content == FOLLOWUP_INBOUND:
                 yield ToolCallStart(id="r2", name=FINISH_TOOL)
@@ -448,7 +450,7 @@ async def surface(
     yield Turns(hub=hub, admission=admission)
 
 
-async def _bootstrap(model: str = "claude-opus-4-8") -> Seed:
+async def _bootstrap(model: str = "claude-opus-4-8", reasoning: ReasoningEffort = "low") -> Seed:
     workspace_id, member_id, agent_id, conversation_id = uuid4(), uuid4(), uuid4(), uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
@@ -472,6 +474,7 @@ async def _bootstrap(model: str = "claude-opus-4-8") -> Seed:
                 name="assistant",
                 prompt="be brief",
                 model=model,
+                reasoning=reasoning,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -550,6 +553,7 @@ async def test_workspace_host_path_is_absolute_for_a_relative_workspace_root(
 
 async def test_turn_round_trip_bills_and_persists(surface: Turns) -> None:
     seed = await _bootstrap()
+    SEEN_REASONING.clear()
     STREAM_GATE.arm()
     turn_id = await surface.admit(seed, "ping")
     streamed, terminal = await surface.consume(seed, turn_id)
@@ -559,7 +563,8 @@ async def test_turn_round_trip_bills_and_persists(surface: Turns) -> None:
     assert terminal["cost_micro_usd"] == 110
     assert terminal["cache_percent"] == 0
     assert terminal["model"] == "claude-opus-4-8"
-    assert terminal["reasoning"] == "high"
+    assert terminal["reasoning"] == "low"
+    assert SEEN_REASONING == ["low"]
     status, conversation_id = await _turn_row(turn_id)
     assert status == "done"
     async with workspace_tx() as connection:
@@ -1212,6 +1217,18 @@ async def test_typed_subagent_round_trips_schema(surface: Turns) -> None:
     )
     assert RoundTripOutput.model_validate_json(tool_result.content).echoed == 21
     assert tool_result.is_error is False
+
+
+async def test_subagent_runs_at_the_parent_agents_reasoning_effort(surface: Turns) -> None:
+    """A profile names a model but never an effort, so the child inherits the parent agent's row —
+    every round of both turns asks the model for the seeded effort, not the record default."""
+    seed = await _bootstrap(reasoning="medium")
+    SEEN_REASONING.clear()
+    parent = await surface.admit(seed, "spawn-subagent")
+    _, terminal = await surface.consume(seed, parent)
+    assert terminal["status"] == "done"
+    assert SEEN_REASONING
+    assert set(SEEN_REASONING) == {"medium"}
 
 
 async def test_subagent_exhausting_its_round_budget_does_not_detonate_its_parent(

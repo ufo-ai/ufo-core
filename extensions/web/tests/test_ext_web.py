@@ -168,6 +168,7 @@ async def _seed_workspace() -> tuple[UUID, UUID]:
                 name="assistant",
                 prompt="be brief",
                 model="claude-opus-4-8",
+                reasoning="high",
                 is_main=True,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
@@ -2485,7 +2486,7 @@ INTENT_BODY = {
     "verb": "apply",
     "kind": "agent",
     "name": "assistant",
-    "spec": {"model": "claude-sonnet-5", "internet_access_allowed": False},
+    "spec": {"model": "claude-sonnet-5", "internet_access_allowed": False, "reasoning": "medium"},
 }
 
 
@@ -2496,6 +2497,7 @@ async def _agent_row(agent_id: UUID) -> sa.Row:
                 sa.select(
                     tables.agent.c.model,
                     tables.agent.c.internet_access_allowed,
+                    tables.agent.c.reasoning,
                 ).where(tables.agent.c.id == agent_id)
             )
         ).one()
@@ -2522,6 +2524,7 @@ async def test_an_intent_applies_exactly_and_the_turn_is_the_audit_record(
     row = await _agent_row(agent_id)
     assert row.model == "claude-sonnet-5"
     assert row.internet_access_allowed is False
+    assert row.reasoning == "medium"
     async with workspace_tx() as connection:
         turn = (
             await connection.execute(
@@ -3189,8 +3192,16 @@ async def test_overview_projects_spec_schema_ceiling_and_admin_audience(
     assert data["agent"]["updated_at"].endswith("+00:00")
     assert data["deploy"]["sandbox_internet"] is False
     assert data["models"] == ["auto", "claude-opus-4-8", "claude-sonnet-5"]
-    assert data["spec"] == {"model": "claude-opus-4-8", "internet_access_allowed": True}
-    assert set(data["spec_schema"]["properties"]) == {"model", "internet_access_allowed"}
+    assert data["spec"] == {
+        "model": "claude-opus-4-8",
+        "internet_access_allowed": True,
+        "reasoning": "high",
+    }
+    assert set(data["spec_schema"]["properties"]) == {
+        "model",
+        "internet_access_allowed",
+        "reasoning",
+    }
     assert data["audience"] == []
     granted_view = await client.get(
         f"/surface/web/agents/{second_agent}/overview",
@@ -3235,7 +3246,7 @@ async def test_concurrent_intents_serialize_on_the_members_intent_conversation(
                 "verb": "apply",
                 "kind": "agent",
                 "name": "assistant",
-                "spec": {"model": "auto", "internet_access_allowed": True},
+                "spec": {"model": "auto", "internet_access_allowed": True, "reasoning": "auto"},
             },
             headers=cookie,
         ),
@@ -3453,6 +3464,7 @@ async def test_an_admin_creates_an_agent_through_the_intent_lane(
         "spec": {
             "model": "claude-sonnet-5",
             "internet_access_allowed": False,
+            "reasoning": "medium",
             "prompt": "be curious",
         },
     }
@@ -3472,10 +3484,11 @@ async def test_an_admin_creates_an_agent_through_the_intent_lane(
                 )
             )
         ).one()
-    assert (row.prompt, row.model, row.internet_access_allowed, row.is_main) == (
+    assert (row.prompt, row.model, row.internet_access_allowed, row.reasoning, row.is_main) == (
         "be curious",
         "claude-sonnet-5",
         False,
+        "medium",
         False,
     )
     listed = await client.get(
@@ -3495,7 +3508,11 @@ async def test_an_admin_creates_an_agent_through_the_intent_lane(
             "verb": "apply",
             "kind": "agent",
             "name": "second",
-            "spec": {"model": "claude-sonnet-5", "internet_access_allowed": True},
+            "spec": {
+                "model": "claude-sonnet-5",
+                "internet_access_allowed": True,
+                "reasoning": "auto",
+            },
         },
         headers={"cookie": f"{SESSION_COOKIE}={token}"},
     )
@@ -3672,6 +3689,7 @@ async def test_admin_payload_names_ids_and_models_for_the_mutation_forms(
     assert [agent["id"] for agent in payload["agents"]] == [str(agent_id)]
     assert [entry["id"] for entry in payload["members"]] == [str(admin_id)]
     assert payload["models"] == ["auto", "claude-opus-4-8", "claude-sonnet-5"]
+    assert payload["reasoning_levels"] == ["auto", "off", "low", "medium", "high"]
 
 
 async def _seed_agent_conversation(

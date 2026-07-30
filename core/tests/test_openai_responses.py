@@ -281,7 +281,7 @@ def test_responses_request_preserves_input_controls_and_disables_storage() -> No
     kwargs = responses_request(request)
     assert kwargs["instructions"] == "be terse"
     assert kwargs["store"] is False
-    assert kwargs["reasoning"] == {"effort": "high"}
+    assert "reasoning" not in kwargs
     assert kwargs["input"] == [
         {
             "role": "user",

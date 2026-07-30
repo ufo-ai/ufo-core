@@ -172,7 +172,7 @@ class OpenRouterModelClient:
     ) -> dict[str, Any]:
         extra_body: dict[str, Any] = {}
         effort = self.spec.default_reasoning(request.reasoning, request.tools)
-        if effort != "off":
+        if effort not in ("off", "auto"):
             extra_body["reasoning"] = {"effort": effort}
         if ignore_providers:
             extra_body["provider"] = {"ignore": sorted(ignore_providers)}

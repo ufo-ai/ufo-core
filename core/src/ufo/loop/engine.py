@@ -80,7 +80,6 @@ from ufo.o11y import emit_metric, log, turn_span
 from ufo.sandbox.session import TOOL_OUTPUT_DIR, SandboxSession
 from ufo.schema import tables
 from ufo.schema.records import (
-    DEFAULT_REASONING_EFFORT,
     NON_TERMINAL_STATUSES,
     PARKED,
     RUNNING,
@@ -90,7 +89,6 @@ from ufo.schema.records import (
     AskUserInput,
     ConnectRequest,
     CredentialRequest,
-    ReasoningEffort,
     TerminalFrame,
     TerminalStatus,
     ToolIntent,
@@ -682,7 +680,6 @@ class TurnEngine:
     memory: MemorySearch | None = None
     public_base_url: str | None = None
     pricing: Pricing = CORE_PRICING
-    reasoning: ReasoningEffort = DEFAULT_REASONING_EFFORT
     subagents: SubagentControl | None = None
     attempt: str = ""
     max_rounds: int = MAIN_ROUND_LIMIT
@@ -1508,7 +1505,7 @@ class TurnEngine:
             max_tokens=MAX_OUTPUT_TOKENS,
             tools=tools,
             tool_choice=FINISH_TOOL if force_finish else None,
-            reasoning="off" if force_finish else self.reasoning,
+            reasoning="off" if force_finish else self.agent.reasoning,
         )
         parts: list[str] = []
         buffer: list[str] = []
@@ -2017,7 +2014,7 @@ class TurnEngine:
                     round(100 * usage.cache_read_tokens / prompt_tokens) if prompt_tokens else 0
                 ),
                 model=model,
-                reasoning=self.reasoning if model else None,
+                reasoning=self.agent.reasoning if model else None,
                 question=question,
                 credential_request=credential_request,
                 connect_request=connect_request,

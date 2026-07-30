@@ -268,6 +268,7 @@ class AgentDetail(BaseModel):
     main: bool
     model: str
     internet_access_allowed: bool
+    reasoning: ReasoningEffort
     prompt: str
     prompt_digest: str
     surfaces: tuple[str, ...]
@@ -1133,6 +1134,7 @@ class SurfaceContext:
                         tables.agent.c.is_main,
                         tables.agent.c.model,
                         tables.agent.c.internet_access_allowed,
+                        tables.agent.c.reasoning,
                         tables.agent.c.prompt,
                         tables.agent.c.updated_at,
                     ).where(
@@ -1162,6 +1164,7 @@ class SurfaceContext:
             main=row.is_main,
             model=row.model,
             internet_access_allowed=row.internet_access_allowed,
+            reasoning=row.reasoning,
             prompt=row.prompt,
             prompt_digest=prompt_digest(row.prompt),
             surfaces=tuple(surfaces),

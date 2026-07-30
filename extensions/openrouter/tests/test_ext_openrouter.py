@@ -100,7 +100,7 @@ def test_openrouter_slug_maps_bare_ids_and_passes_slugs_through() -> None:
     assert openrouter.openrouter_slug("grok-2") == "grok-2"
 
 
-async def test_complete_streams_text_then_usage_with_the_reasoning_budget() -> None:
+async def test_complete_streams_text_then_usage_without_an_auto_reasoning_budget() -> None:
     create = ScriptedCreate(
         [_chunk(content="ok"), _chunk(finish="stop"), _chunk(usage=_usage(3, 2))]
     )
@@ -109,7 +109,7 @@ async def test_complete_streams_text_then_usage_with_the_reasoning_budget() -> N
     assert events[-1] == Usage(input_tokens=3, output_tokens=2)
     kwargs = create.calls[0]
     assert kwargs["model"] == "google/gemini-2.5-pro"
-    assert kwargs["extra_body"] == {"reasoning": {"effort": "high"}}
+    assert kwargs["extra_body"] == {}
     assert kwargs["stream_options"] == {"include_usage": True}
 
 

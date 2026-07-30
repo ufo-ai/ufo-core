@@ -1,13 +1,14 @@
 """The core-registered `agent` object kind: the workspace's agent as a workspace object.
 
 Each agent field has exactly one write path, so this kind and the governance proposal path can
-never conflict. Spec holds the model and public-internet policy, applied directly and admin-gated
-over the `agent` table; `prompt` belongs to `Governance`'s proposal CAS and appears here read-only
-in status beside its digest (the `from_digest` a proposal presents, so `object_get agent` is the
-read half of the proposal flow) — except at birth: create takes the initial prompt, the one write
-that is not an edit, and every later prompt change goes through the proposal path. Create is
-admin-gated on the main agent's lane and never copies grants, credentials, sources, or derived
-data — a new agent starts empty. Delete raises; a non-admin mutation raises `AdminRequired`."""
+never conflict. Spec holds the model, reasoning effort, and public-internet policy, applied
+directly and admin-gated over the `agent` table; `prompt` belongs to `Governance`'s proposal CAS
+and appears here read-only in status beside its digest (the `from_digest` a proposal presents, so
+`object_get agent` is the read half of the proposal flow) — except at birth: create takes the
+initial prompt, the one write that is not an edit, and every later prompt change goes through the
+proposal path. Create is admin-gated on the main agent's lane and never copies grants,
+credentials, sources, or derived data — a new agent starts empty. Delete raises; a non-admin
+mutation raises `AdminRequired`."""
 
 from dataclasses import dataclass
 from uuid import UUID, uuid4
@@ -32,6 +33,7 @@ from ufo.objects import (
     object_page,
 )
 from ufo.schema import tables
+from ufo.schema.records import ReasoningEffort
 from ufo.tools.context import ToolContext
 from ufo.workspace import ws_current
 
@@ -72,6 +74,13 @@ class AgentSpec(BaseModel):
             "still permits exact model, credential, connector, and transfer-host egress."
         )
     )
+    reasoning: ReasoningEffort = Field(
+        description=(
+            "Reasoning effort for the agent's turns: a fixed level ('low', 'medium', 'high'), "
+            "'off', or 'auto' — an Anthropic model sets its own depth per request; other "
+            "providers run auto and off at their default."
+        ),
+    )
     prompt: str | None = Field(
         default=None,
         description=(
@@ -83,8 +92,9 @@ class AgentSpec(BaseModel):
 
 @dataclass(frozen=True)
 class AgentObjects:
-    """Update-only handlers over the `agent` table: apply rewrites the model and internet policy
-    in place, admin-gated; the prompt is proposal-owned and rendered read-only in status."""
+    """Handlers over the `agent` table: apply rewrites the model, reasoning effort, and internet
+    policy in place and creates a missing agent, admin-gated; past birth the prompt is
+    proposal-owned and rendered read-only in status."""
 
     async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage:
         async with workspace_tx() as connection:
@@ -124,6 +134,7 @@ class AgentObjects:
                 spec=AgentSpec(
                     model=row.model,
                     internet_access_allowed=row.internet_access_allowed,
+                    reasoning=row.reasoning,
                 ),
                 created_at=row.created_at,
                 updated_at=row.updated_at,
@@ -174,6 +185,7 @@ class AgentObjects:
                 .values(
                     model=spec.model,
                     internet_access_allowed=spec.internet_access_allowed,
+                    reasoning=spec.reasoning,
                     updated_at=sa.func.now(),
                 )
                 .where(
@@ -201,6 +213,7 @@ class AgentObjects:
                         model=spec.model,
                         is_main=False,
                         internet_access_allowed=spec.internet_access_allowed,
+                        reasoning=spec.reasoning,
                         created_at=sa.func.now(),
                         updated_at=sa.func.now(),
                     )
@@ -227,6 +240,7 @@ class AgentObjects:
                         tables.agent.c.model,
                         tables.agent.c.is_main,
                         tables.agent.c.internet_access_allowed,
+                        tables.agent.c.reasoning,
                         tables.agent.c.created_at,
                         tables.agent.c.updated_at,
                     ).where(
@@ -240,19 +254,23 @@ class AgentObjects:
 AGENT_OBJECT = ObjectKind(
     name=AGENT_KIND,
     description=(
-        "A workspace agent: its model and public-internet policy, readable by all members, "
-        "updatable and creatable by a workspace admin. It cannot be deleted through objects."
+        "A workspace agent: its model, reasoning effort, and public-internet policy, readable by "
+        "all members, updatable and creatable by a workspace admin. It cannot be deleted through "
+        "objects."
     ),
     guidance=(
-        "A workspace agent as an object. Apply {model, internet_access_allowed} to change "
-        "its model or public-internet access — admin only, taking effect on the next "
-        "turn. Blocking public internet leaves exact model, credential, connector, and transfer "
-        "hosts available. Applying a name no agent holds creates one — admin only, from the main "
-        "agent, and the spec then requires `prompt`, the one write that is not an edit; a new "
-        "agent starts empty, inheriting no grants, credentials, sources, or memory. An existing "
-        "agent's prompt is read-only here: changes use the governed proposal path, and status "
-        "carries its current value and digest. The main agent may manage other agents; a child "
-        "agent may only manage itself. Delete is refused. Confirm before changing settings."
+        "A workspace agent as an object. Apply {model, internet_access_allowed, reasoning} to "
+        "change its model, public-internet access, or reasoning effort — admin only, taking "
+        "effect on the next turn. Blocking public internet leaves exact model, credential, "
+        "connector, and transfer hosts available. Reasoning 'auto' lets an Anthropic model set "
+        "its own thinking depth per request and falls to the provider default elsewhere; a "
+        "fixed level pins it. Applying a name no agent holds "
+        "creates one — admin only, from the main agent, and the spec then requires `prompt`, the "
+        "one write that is not an edit; a new agent starts empty, inheriting no grants, "
+        "credentials, sources, or memory. An existing agent's prompt is read-only here: changes "
+        "use the governed proposal path, and status carries its current value and digest. The "
+        "main agent may manage other agents; a child agent may only manage itself. Delete is "
+        "refused. Confirm before changing settings."
     ),
     spec_model=AgentSpec,
     store=AgentObjects(),

@@ -27,7 +27,7 @@ from ufo.db import workspace_tx
 from ufo.ext.context import Trajectory
 from ufo.governance import prompt_digest
 from ufo.schema import tables
-from ufo.schema.records import PENDING
+from ufo.schema.records import PENDING, ReasoningEffort
 from ufo.sdk.models import Message, TextBlock, ToolResultBlock, ToolUseBlock
 from ufo.transcript import Conversation, TranscriptDecodeError, decode, encode, transcript_key
 from ufo.workspace import ws
@@ -43,7 +43,7 @@ FAILED_WORKFLOW_STATUSES = frozenset({"ERROR", "MAX_RECOVERY_ATTEMPTS_EXCEEDED",
 
 async def resolve_workspace_and_agent(
     agent_name: str, workspace_id: UUID | None = None
-) -> tuple[UUID, UUID, str, str]:
+) -> tuple[UUID, UUID, str, str, ReasoningEffort]:
     """Resolve the named target agent in an explicit workspace or the dedicated workspace."""
     if workspace_id is None:
         async with workspace_tx() as connection:
@@ -52,24 +52,30 @@ async def resolve_workspace_and_agent(
         async with workspace_tx() as connection:
             agent = (
                 await connection.execute(
-                    sa.select(tables.agent.c.id, tables.agent.c.prompt, tables.agent.c.model).where(
+                    sa.select(
+                        tables.agent.c.id,
+                        tables.agent.c.prompt,
+                        tables.agent.c.model,
+                        tables.agent.c.reasoning,
+                    ).where(
                         tables.agent.c.workspace_id == workspace_id,
                         tables.agent.c.name == agent_name,
                     )
                 )
             ).one()
-    return workspace_id, agent.id, agent.prompt, agent.model
+    return workspace_id, agent.id, agent.prompt, agent.model, agent.reasoning
 
 
 async def seed_candidate_agent(
     proposal_id: UUID, workspace_id: UUID | None = None
 ) -> tuple[UUID, str]:
     """Seed a disposable scratch agent carrying a pending proposal's candidate prompt and its base
-    agent's model, and return the workspace and the scratch agent's name — the arm the harness runs
-    to measure a self-improvement proposal's cross-suite impact. The candidate varies only the
-    prompt body; model, workspace, and the suites stay fixed against the baseline run, so the
-    before/after diff isolates the proposal. Upsert by name: a re-run against the same proposal
-    reseeds one stable `candidate:<proposal>` agent rather than accreting rows."""
+    agent's model and reasoning effort, and return the workspace and the scratch agent's name — the
+    arm the harness runs to measure a self-improvement proposal's cross-suite impact. The candidate
+    varies only the prompt body; model, reasoning effort, workspace, and the suites stay fixed
+    against the baseline run, so the before/after diff isolates the proposal. Upsert by name: a
+    re-run against the same proposal reseeds one stable `candidate:<proposal>` agent rather than
+    accreting rows."""
     if workspace_id is None:
         async with workspace_tx() as connection:
             workspace_id = (await connection.execute(sa.select(tables.workspace.c.id))).scalar_one()
@@ -95,14 +101,14 @@ async def seed_candidate_agent(
             prompt = proposal.body.get("prompt")
             if not isinstance(prompt, str) or not prompt:
                 raise ValueError(f"proposal {proposal_id} carries no prompt body")
-            model = (
+            base = (
                 await connection.execute(
-                    sa.select(tables.agent.c.model).where(
+                    sa.select(tables.agent.c.model, tables.agent.c.reasoning).where(
                         tables.agent.c.workspace_id == workspace_id,
                         tables.agent.c.id == proposal.agent_id,
                     )
                 )
-            ).scalar_one()
+            ).one()
             existing = (
                 await connection.execute(
                     sa.select(tables.agent.c.id).where(
@@ -118,7 +124,8 @@ async def seed_candidate_agent(
                         workspace_id=workspace_id,
                         name=name,
                         prompt=prompt,
-                        model=model,
+                        model=base.model,
+                        reasoning=base.reasoning,
                         created_at=sa.func.now(),
                         updated_at=sa.func.now(),
                     )
@@ -126,7 +133,12 @@ async def seed_candidate_agent(
             else:
                 await connection.execute(
                     sa.update(tables.agent)
-                    .values(prompt=prompt, model=model, updated_at=sa.func.now())
+                    .values(
+                        prompt=prompt,
+                        model=base.model,
+                        reasoning=base.reasoning,
+                        updated_at=sa.func.now(),
+                    )
                     .where(tables.agent.c.id == existing)
                 )
     return workspace_id, name

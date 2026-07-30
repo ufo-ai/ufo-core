@@ -237,7 +237,7 @@ def responses_request(request: ModelRequest) -> dict[str, Any]:
         "store": False,
         "stream": True,
     }
-    if request.reasoning != "off":
+    if request.reasoning not in ("off", "auto"):
         kwargs["reasoning"] = {"effort": request.reasoning}
     if request.tools:
         kwargs["tools"] = [
@@ -279,7 +279,7 @@ class OpenAIClient:
             "stream_options": {"include_usage": True},
         }
         effort = self.spec.default_reasoning(request.reasoning, request.tools)
-        if effort != "off":
+        if effort not in ("off", "auto"):
             create_kwargs["reasoning_effort"] = effort
         if request.tools:
             create_kwargs["tools"] = [

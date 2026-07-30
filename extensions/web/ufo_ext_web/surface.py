@@ -59,7 +59,7 @@ from ufo.sdk.surfaces import (
     TurnContext,
 )
 from ufo_ext_web.audience import WebAudience, granted_emails, web_audience, web_extension
-from ufo_ext_web.panels import agent_overview, submit_intent
+from ufo_ext_web.panels import agent_overview, reasoning_levels, submit_intent
 
 SURFACE_WEB = "web"
 SOURCE = "ufo web"
@@ -1095,6 +1095,7 @@ async def admin_index(ctx: SurfaceContext, request: Request) -> Response:
                 for entry in snapshot.members
             ],
             "models": list(ctx.models),
+            "reasoning_levels": reasoning_levels(),
             "seats": {"limit": snapshot.limit, "included": snapshot.included},
             "caps": [entry.model_dump(mode="json") for entry in await ctx.spend_caps()],
             "deploy": {

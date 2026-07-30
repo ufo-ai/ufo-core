@@ -790,12 +790,24 @@ def test_sdk_client_factories_disable_sdk_retries() -> None:
     assert openai_sdk.max_retries == 0
 
 
-async def test_anthropic_default_request_enables_adaptive_thinking_at_high_effort() -> None:
+async def test_anthropic_default_request_enables_adaptive_thinking_without_effort() -> None:
     create = CapturingCreate(
         ([anthropic_message_start(input_tokens=1), anthropic_text("ok"), anthropic_output(1)], None)
     )
     async for _ in AnthropicClient(client=anthropic_sdk(create), spec=ANTHROPIC_SPEC).complete(
         REQUEST
+    ):
+        pass
+    assert create.kwargs["thinking"] == {"type": "adaptive"}
+    assert "output_config" not in create.kwargs
+
+
+async def test_anthropic_fixed_effort_pins_output_config() -> None:
+    create = CapturingCreate(
+        ([anthropic_message_start(input_tokens=1), anthropic_text("ok"), anthropic_output(1)], None)
+    )
+    async for _ in AnthropicClient(client=anthropic_sdk(create), spec=ANTHROPIC_SPEC).complete(
+        REQUEST.model_copy(update={"reasoning": "high"})
     ):
         pass
     assert create.kwargs["thinking"] == {"type": "adaptive"}
@@ -814,11 +826,11 @@ async def test_anthropic_reasoning_off_omits_the_thinking_block() -> None:
     assert "output_config" not in create.kwargs
 
 
-async def test_openai_default_request_carries_reasoning_effort() -> None:
+async def test_openai_default_request_omits_reasoning_effort() -> None:
     create = CapturingCreate(([openai_text("ok"), openai_usage(prompt=1, completion=1)], None))
     async for _ in OpenAIClient(client=openai_sdk(create), spec=OPENAI_SPEC).complete(REQUEST):
         pass
-    assert create.kwargs["reasoning_effort"] == "high"
+    assert "reasoning_effort" not in create.kwargs
 
 
 async def test_openai_reasoning_off_omits_reasoning_effort() -> None:
@@ -920,6 +932,11 @@ def test_responses_request_carries_tools_and_reasoning_together() -> None:
     kwargs = responses_request(request)
     assert kwargs["reasoning"] == {"effort": "high"}
     assert [tool["name"] for tool in kwargs["tools"]] == ["t"]
+
+
+def test_responses_request_auto_omits_reasoning() -> None:
+    kwargs = responses_request(REQUEST.model_copy(update={"model": "gpt-5.6-terra"}))
+    assert "reasoning" not in kwargs
 
 
 async def test_chat_drops_reasoning_with_tools_when_the_model_forbids_the_pair() -> None:

@@ -40,6 +40,10 @@ class StubElement {
     child.remove();
     child.parentNode = this;
     this.childNodes.push(child);
+    if (child.selectedFlag) {
+      this.selectedOptions?.push(child);
+      this.value = child.value;
+    }
     return child;
   }
   append(...nodes) {
@@ -149,7 +153,11 @@ class StubElement {
     return this.attributes.type ?? "";
   }
   set selected(value) {
-    if (value) this.parentNode?.selectedOptions?.push(this);
+    this.selectedFlag = value;
+    if (value && this.parentNode) {
+      this.parentNode.selectedOptions?.push(this);
+      this.parentNode.value = this.value;
+    }
   }
 }
 
@@ -279,6 +287,7 @@ const wire = {
       { id: "44444444-4444-4444-8444-444444444444", email: "m@example.com", admin: false, seated: true },
     ],
     models: ["auto", "claude-opus-4-8"],
+    reasoning_levels: ["auto", "off", "low", "medium", "high"],
     seats: { limit: null, included: null },
     caps: [
       {
@@ -565,9 +574,13 @@ const wire = {
     },
     deploy: { sandbox_internet: false },
     models: ["auto", "claude-opus-4-8"],
-    spec: { model: "auto", internet_access_allowed: true },
+    spec: { model: "auto", internet_access_allowed: true, reasoning: "low" },
     spec_schema: {
-      properties: { model: { type: "string" }, internet_access_allowed: { type: "boolean" } },
+      properties: {
+        model: { type: "string" },
+        internet_access_allowed: { type: "boolean" },
+        reasoning: { type: "string", enum: ["auto", "off", "low", "medium", "high"] },
+      },
     },
     audience: [],
   },
@@ -938,6 +951,17 @@ try {
   const target = model.childNodes.find((option) => option.value === "claude-opus-4-8");
   if (!target) throw new Error("model select carries no claude-opus-4-8 option");
   model.value = target.value;
+  const reasoning = form
+    .querySelectorAll("select")
+    .find((widget) => widget.dataset.key === "reasoning");
+  if (!reasoning) throw new Error("overview built no reasoning select");
+  const reasoningOptions = reasoning.childNodes.map((option) => option.value).join("|");
+  if (reasoningOptions !== "auto|off|low|medium|high") {
+    throw new Error(`reasoning select carries options ${reasoningOptions}`);
+  }
+  if (reasoning.value !== "low") {
+    throw new Error(`reasoning select reads "${reasoning.value}", not the stored low`);
+  }
   await form.fire("submit");
   await new Promise((resolve) => setTimeout(resolve, 0));
   if (wire.posted.length !== 1) throw new Error(`save posted ${wire.posted.length} intents`);
@@ -951,7 +975,7 @@ try {
     verb: "apply",
     kind: "agent",
     name: "assistant",
-    spec: { model: "claude-opus-4-8", internet_access_allowed: true },
+    spec: { model: "claude-opus-4-8", internet_access_allowed: true, reasoning: "low" },
   });
   if (envelope !== expected) {
     throw new Error(`save posted ${envelope}, expected ${expected}`);
@@ -2057,8 +2081,16 @@ try {
   if (texts(modelSelect.childNodes).join("|") !== "auto|claude-opus-4-8") {
     throw new Error("the create form's model choice is not the deploy's model list");
   }
+  const createReasoning = createForm
+    .querySelectorAll("select")
+    .find((widget) => widget !== modelSelect);
+  if (!createReasoning) throw new Error("the create form built no reasoning control");
+  if (texts(createReasoning.childNodes).join("|") !== "auto|off|low|medium|high") {
+    throw new Error("the create form's reasoning choice is not the projected enum");
+  }
   createInputs[0].value = "research";
   createForm.querySelector("textarea").value = "be curious";
+  createReasoning.value = "medium";
   const beforeCreate = wire.posted.length;
   await createForm.fire("submit");
   await new Promise((resolve) => setTimeout(resolve, 0));
@@ -2067,7 +2099,12 @@ try {
     verb: "apply",
     kind: "agent",
     name: "research",
-    spec: { model: "auto", internet_access_allowed: true, prompt: "be curious" },
+    spec: {
+      model: "auto",
+      internet_access_allowed: true,
+      reasoning: "medium",
+      prompt: "be curious",
+    },
   })) {
     throw new Error(`create posted ${JSON.stringify(createEnvelope)}`);
   }
@@ -2078,6 +2115,22 @@ try {
     .find((node) => node.className.includes("result"));
   if (!createResult || createResult.textContent !== "Created research. Saved.") {
     throw new Error(`create result reads "${createResult?.textContent}"`);
+  }
+  await buttonNamed("Copy").fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const copiedForm = adminView().querySelectorAll("form")
+    .find((form) => form.className === "admin-create");
+  const copiedReasoning = copiedForm
+    .querySelectorAll("select")
+    .find((widget) => widget.childNodes.some((option) => option.value === "medium"));
+  if (!copiedReasoning || copiedReasoning.value !== wire.overview.spec.reasoning) {
+    throw new Error(
+      `Copy seated reasoning "${copiedReasoning?.value}", not the source's ` +
+      `"${wire.overview.spec.reasoning}"`);
+  }
+  if (copiedForm.querySelector("textarea").value !== wire.overview.agent.prompt) {
+    throw new Error("Copy did not carry the source agent's prompt");
   }
   const memberRow = adminView().querySelectorAll("tr")
     .find((rowNode) => rowNode.childNodes[0]?.textContent === "m@example.com");

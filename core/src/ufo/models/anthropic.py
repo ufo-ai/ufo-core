@@ -144,7 +144,8 @@ class AnthropicClient:
             effort = self.spec.default_reasoning(request.reasoning, request.tools)
             if effort != "off":
                 create_kwargs["thinking"] = {"type": "adaptive"}
-                create_kwargs["output_config"] = {"effort": effort}
+                if effort != "auto":
+                    create_kwargs["output_config"] = {"effort": effort}
             if request.tools:
                 create_kwargs["tools"] = [
                     {"name": t.name, "description": t.description, "input_schema": t.input_schema}

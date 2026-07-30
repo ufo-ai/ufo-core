@@ -278,6 +278,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             resolved = Agent(
                 prompt=subagent_system_prompt(profile, skills=skills.index(), preload=preload),
                 model=runtime.registry.resolve(profile.model or agent.model),
+                reasoning=agent.reasoning,
             )
             allowed = set(profile.tool_names) | runtime.subagent_grants.get(
                 profile.name, frozenset()
@@ -364,7 +365,6 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             artifact_token_secret=runtime.artifact_token_secret,
             grants=grants,
             pricing=runtime.registry.pricing,
-            reasoning=runtime.config.models.reasoning_effort,
             attempt=attempt,
             max_rounds=max_rounds,
             skills=skills,
@@ -448,6 +448,7 @@ async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, Audience]:
                     tables.turn.c.traceparent,
                     tables.agent.c.prompt,
                     tables.agent.c.model,
+                    tables.agent.c.reasoning,
                     tables.conversation.c.audience,
                 )
                 .select_from(
@@ -480,7 +481,11 @@ async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, Audience]:
         subagent_profile=row.subagent_profile,
         traceparent=row.traceparent,
     )
-    return turn, Agent(prompt=row.prompt, model=row.model), parse_audience(row.audience)
+    return (
+        turn,
+        Agent(prompt=row.prompt, model=row.model, reasoning=row.reasoning),
+        parse_audience(row.audience),
+    )
 
 
 async def _open_sandbox(

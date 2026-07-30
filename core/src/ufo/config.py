@@ -9,7 +9,6 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ufo.models.interface import AUTO_MODEL
-from ufo.schema.records import DEFAULT_REASONING_EFFORT, ReasoningEffort
 
 CONFIG_PATH_ENV = "UFO_CONFIG"
 DEFAULT_CONFIG_PATH = Path("ufo.toml")
@@ -75,14 +74,12 @@ class BlobConfig(BaseModel):
 
 
 class ModelsConfig(BaseModel):
-    """`reasoning_effort` is the extended-thinking depth every agent turn requests (`off` disables
-    it); `auto_model` is the concrete model an agent authored with `model = "auto"` resolves to at
+    """`auto_model` is the concrete model an agent authored with `model = "auto"` resolves to at
     turn time, so an agent stays model-agnostic and the deploy pins the backend."""
 
     model_config = ConfigDict(extra="forbid")
     anthropic_api_key_env: str = "ANTHROPIC_API_KEY"
     openai_api_key_env: str = "OPENAI_API_KEY"
-    reasoning_effort: ReasoningEffort = DEFAULT_REASONING_EFFORT
     auto_model: str = DEFAULT_AUTO_MODEL
 
     @model_validator(mode="after")

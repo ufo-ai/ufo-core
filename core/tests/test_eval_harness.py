@@ -157,6 +157,7 @@ from ufo.transcript import (
 from ufo.workspace import ws
 
 MODEL = "claude-opus-4-8"
+AGENT_REASONING = "high"
 PROMPT = "You are a helpful assistant."
 EXTENSION = "evals"
 TURN_EVENT = "memory.pre_response_recall"
@@ -438,12 +439,27 @@ async def test_seed_candidate_agent_arms_a_pending_proposals_prompt(db: None) ->
     assert resolved_workspace == workspace_id
     assert name == CANDIDATE_AGENT_NAME.format(proposal_id=proposal_id)
 
-    _, scratch_id, scratch_prompt, scratch_model = await resolve_workspace_and_agent(
-        name, workspace_id
-    )
+    (
+        _,
+        scratch_id,
+        scratch_prompt,
+        scratch_model,
+        scratch_reasoning,
+    ) = await resolve_workspace_and_agent(name, workspace_id)
     assert scratch_id != base_agent
     assert scratch_prompt == candidate_prompt
     assert scratch_model == MODEL
+    assert scratch_reasoning == AGENT_REASONING
+
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.agent)
+            .values(reasoning="off", model="drifted", updated_at=sa.func.now())
+            .where(tables.agent.c.id == scratch_id)
+        )
+    await seed_candidate_agent(proposal_id, workspace_id)
+    reseeded = await resolve_workspace_and_agent(name, workspace_id)
+    assert (reseeded[3], reseeded[4]) == (MODEL, AGENT_REASONING)
 
     await seed_candidate_agent(proposal_id, workspace_id)
     async with workspace_tx() as connection:
@@ -461,6 +477,7 @@ async def test_seed_candidate_agent_arms_a_pending_proposals_prompt(db: None) ->
         base_agent,
         PROMPT,
         MODEL,
+        AGENT_REASONING,
     )
 
 
@@ -905,6 +922,7 @@ async def _seed_agent(workspace_id: UUID) -> UUID:
                 name="assistant",
                 prompt=PROMPT,
                 model=MODEL,
+                reasoning=AGENT_REASONING,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -3179,7 +3197,7 @@ async def test_resolve_workspace_and_agent_accepts_an_explicit_workspace(db: Non
 
     resolved = await resolve_workspace_and_agent("assistant", workspace_id)
 
-    assert resolved == (workspace_id, agent_id, PROMPT, MODEL)
+    assert resolved == (workspace_id, agent_id, PROMPT, MODEL, AGENT_REASONING)
 
 
 def _debug_evidence(response: str, tools: tuple[str, ...] = ()) -> dict[str, object]:
@@ -3878,7 +3896,7 @@ async def test_eval_run_pins_model_metadata_on_boundary_report(tmp_path, monkeyp
     report = EvalReport(name="suite", suite="capability", digest="sha256:abc", cases=())
 
     async def resolve(*_args):
-        return workspace_id, agent_id, "prompt", MODEL
+        return workspace_id, agent_id, "prompt", MODEL, "auto"
 
     async def run(target, slots) -> EvalReport:
         assert isinstance(slots, asyncio.Semaphore)
@@ -3944,7 +3962,7 @@ async def test_run_builds_the_compaction_client_inside_the_workspace_scope(
     seen: dict[str, object] = {}
 
     async def resolve(*_args):
-        return workspace_id, agent_id, "prompt", MODEL
+        return workspace_id, agent_id, "prompt", MODEL, "auto"
 
     async def run(target, _slots) -> EvalReport:
         seen["compaction"] = target.compaction
