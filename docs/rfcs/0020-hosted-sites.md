@@ -147,20 +147,32 @@ cookie; `SurfaceSpec.identify` must return the workspace before any DB binding).
 `core/src/ufo/surface_token.py` + `ufo.sdk.surface_token`: `mint_surface_token(surface, payload)` /
 `verify_surface_token(surface, token)`, HMAC over `UFO_TOKEN_SECRET` resolved inside core exactly
 as `ufo.bearer` does, namespaced by surface so one surface's token never replays at another. The
-site link is `{public_base_url}/surface/sites/{site_token}` with payload `{ws, site}` — an
-address, not an authorization, so it never expires; every request still passes the visibility gate.
+site link is `{public_base_url}/surface/sites/{site_token}` with payload `{ws, conversation, name}` —
+the site's own identity, so the link is derivable wherever a site is registered and a re-deploy
+reproduces it exactly. It is an address, not an authorization: it never expires, and every request
+still passes the visibility gate.
 
 ### The sites pack (everything else)
 
 **`hosted_site` table** (extension-owned, own migration, like `user_skill`):
 `(workspace_id, conversation_id, name)` identity, plus `port`, `visibility`,
-`creator_member_id`, timestamps. Re-deploying upserts the row and bumps `updated_at`.
+`creator_member_id`, timestamps. Re-deploying upserts the row and bumps `updated_at`. The
+member-supplied name is slugged to the object-name grammar on the way in, bounded so the `site`
+object name that carries it stays addressable.
 
-**Registration**: `deploy_website` and `publish_website`, after their readiness probe, upsert the
-row and return `site_url` beside the sandbox-local `url`. A port serves one origin, so
-registering retires any other site row on the same `(conversation, port)` — otherwise an older
-name would silently serve the newer deploy's content. Creator is `ctx.acting_member_id`
-(raise without one — a site needs an owner). Default visibility from `ctx.audience`:
+**Registration**: `deploy_website` and `publish_website`, after their readiness probe, mint the
+link, upsert the row, and return `site_url` beside the sandbox-local `url` — in that order, so a
+deploy that cannot address a site (no `[connect] public_base_url`) writes nothing rather than leaving
+a row no verb can read. `start_server` registers nothing; a scratch server is not a deliverable.
+Creator is `ctx.acting_member_id` (raise without one — a site needs an owner), and a subagent turn
+cannot register at all: its conversation, sandbox, and workspace are its own, so a link into them
+dies with the turn.
+
+A port serves one origin, so registering retires any other site row on the same
+`(conversation, port)` — otherwise an older name would silently serve the newer deploy's content.
+Retiring is unhosting, so it carries the unhost rule rather than riding in behind a deploy: the
+port's current site must be the acting member's own, and a speakerless turn cannot take a port from
+any site, its own included. Default visibility from `ctx.audience`:
 
 | audience | default |
 |---|---|
@@ -170,7 +182,12 @@ name would silently serve the newer deploy's content. Creator is `ctx.acting_mem
 | `foreign:<surface>:<room>` | `private` |
 
 `foreign` is doctrine, not taste: a sealed external room must never default a site into the whole
-company. An explicit `visibility` argument (the chat directive, e.g. "make it public") overrides.
+company. An explicit `visibility` argument (the chat directive, e.g. "make it public") overrides the
+default — for the site's creator, on a turn with a live speaker. The column has one authorization
+rule, a re-deploy is not a second door to it, and choosing who can open a site is a granting act, so
+a scheduled turn acting on the creator's behalf may re-deploy but never re-gate. Without an explicit
+argument a site that already exists keeps the visibility it has, so a teammate re-deploying never
+re-opens or re-closes what its creator set.
 
 **Visibility levels**: `private` (creator member only) · `workspace` (any authenticated member of
 the workspace) · `public` (anyone with the link).
@@ -178,19 +195,33 @@ the workspace) · `public` (anyone with the link).
 **Frame** (`/surface/sites/{site_token}`, main serve): verifies the token, authenticates the
 viewer from the `ufo_session` cookie (public sites skip it), gates on visibility, then renders
 header + iframe with a fresh view token. Creator sees a live selector; another authorized member
-sees a read-only badge ("ask in chat to change it"); no cookie on a non-public site gets a sign-in
-page linking a plain `/login`, after which the member reopens the site link (the return-to that
-would have spared them is withdrawn, below); everything else is a uniform 404 — no existence
-oracle.
-Because the frame page (app origin) and the site (ingress origin) are cross-origin, the embedded
-site's scripts cannot reach the selector, the session cookie, or any app endpoint; the visibility
-`POST` still carries a CSRF token bound to the session cookie.
+sees a read-only badge naming the level ("Visible to workspace members"); no cookie on a non-public
+site gets a page saying so and linking `/login`, which the shared host routes to the onboarding
+gateway — same origin as the frame, and the walk it starts ends on a card whose one button posts the
+member's bearer into the portal, binding `ufo_session`. Signing in is the whole recovery: a member
+needs nothing widened to see a site their workspace already may. The portal is not the link, since
+reached cold it can only ask for a token the viewer does not have. Everything else is a uniform 404 — no existence oracle, and an unverifiable token answers with that
+same 404 from `identify` rather than a 401. The iframe's address is minted per render and never
+stored — the view token is a bearer credential until its short TTL passes, traded on first load for
+the origin's own session cookie — and a deploy with no ingress configured renders the frame saying so
+rather than framing a dead origin. Because the frame page (app origin) and the site (ingress origin)
+are cross-origin, the embedded site's scripts cannot reach the selector, the session cookie, or any
+app endpoint, and the iframe's `sandbox` withholds `allow-top-navigation` so a site cannot navigate
+the member's tab away; the visibility `POST` still carries a CSRF token bound to the session cookie
+(a surface token signed over the cookie's digest — an attacker holds neither the HttpOnly cookie nor
+the deploy secret), and `referrerpolicy=no-referrer` keeps the frame's address out of the embedded
+site's requests.
 
 **Visibility changes — both ends of one column**: the in-frame selector `POST`s to the sites
 surface (creator + CSRF gated), and a `site` object kind gives chat the same act —
-`object_apply` flips `visibility`, `object_delete` unregisters the site; create/update-by-spec
-are refused naming `deploy_website`, the `artifact` kind's pattern. The read path lists this
-agent's audience-visible sites.
+`object_apply` flips `visibility`, `object_delete` unregisters the site; create and any other spec
+change are refused naming `deploy_website`, the `artifact` kind's pattern. The kind is a
+`MemberOwnedObjects` over the same column: the creator owns the row, a non-private site is shared,
+so a private site is invisible to every other member and only its creator may re-gate it — on a turn
+with a live speaker, since disclosure is a granting act. A workspace admin may narrow a shared site
+to private but never widen one, the `connector_grant` rule. Object names are
+`<site-name>-<conversation-digest>` (carried in the deploy result), because two conversations may
+each host a `dashboard`.
 
 **Prompt section**: `sites_section.md` gains the hosted link — the deliverable becomes the
 `site_url`, with `share_file` for a downloadable copy.
@@ -200,18 +231,30 @@ agent's audience-visible sites.
 | unit | ships | proof |
 |---|---|---|
 | U1 sandbox ingress | `ingress_token`, `Carrier.dial` (e2b/docker/local), `ufoctl ingress`, infra Deployment, e2b `allow_public_traffic=False` | token → bytes stream from a live sandbox port; tampered/expired → 403; cleared handle → 503 |
-| U2 sites pack | `hosted_site` + migration, tool registration + audience defaults, `surface_token` seam, frame + selector + sign-in, visibility POST, `site` object kind, prompt section, `ingress_public_url` knob, `SurfaceContext.ingress_url`, ingress host-label addressing + per-site session cookie | site built in a DM: creator 200, other member 404; flip to `workspace`: other member 200; foreign room defaults private; two sites never share an origin |
+| U2 sites pack | `hosted_site` + migration, tool registration + audience defaults, `surface_token` seam, frame + selector + the not-signed-in page, visibility POST, `site` object kind, prompt section, `ingress_public_url` knob, `SurfaceContext.ingress_url`, ingress host-label addressing + per-site session cookie | site built in a DM: creator 200, other member 404; flip to `workspace`: other member 200; foreign room defaults private; two sites never share an origin |
 
 U1 has no sites knowledge and U2 consumes it. A third unit — a `?next=` return-to on `/login`, so a
 coworker bounced to sign in lands back on the site — was built and withdrawn (PR #839): the gateway
 sets no browser credential, so the redirect arrived anonymous, took a 401, and destroyed the token
 the page was holding, restarting the email-code walk it was meant to shorten. A working return-to
 has to end on a workspace-host URL that binds the cookie before forwarding, which spans the gateway,
-the web surface, and the edge worker — its own unit, not this RFC's. Until then the frame links a
-plain `/login` and the member reopens the site link.
+the web surface, and the edge worker — its own unit, not this RFC's. Until then an unauthenticated
+viewer of a non-public site is told that this browser is not signed in to the hosting workspace and
+sent to `/login`; after that walk and the one button on its card they hold a session, and the
+permanent link opens.
 
 ## Dependencies and named risks
 
+- **A site is registered by the conversation that deploys it, and a subagent turn cannot register
+  one.** The link resolves a conversation to the sandbox serving it, and a subagent runs in its own
+  conversation with its own disposable sandbox and workspace, keyed to the single parent turn that
+  spawned it: a site hosted there would die with that sandbox and a rebuild would mint a different
+  link. So the website-building subagent holds no hosting tool — it builds, brings the site up
+  locally, validates it, and `share_file`s the built output — the only way anything leaves that
+  subtree, since the parent's sandbox cannot read it either. What the pack does not do is turn that
+  shared file back into a deploy: materializing it through the `artifact` kind and serving it from
+  the parent's workspace would be its own unit, unproven here. So a site the member can open is one
+  the parent agent built in the member's own conversation.
 - **The idle reaper (being moved to the docker extension in a separate change).** Today
   `SandboxReaper` (`core/src/ufo/jobs.py:280`) destroys idle sandboxes on *any* backend at 30
   minutes and clears `sandbox_handle` — which kills a hosted site. Until that change lands, a
@@ -268,8 +311,10 @@ plain `/login` and the member reopens the site link.
   `document.cookie = "ufo_session=…; domain=<parent>"` from the site's own origin is accepted by the
   browser and never passes through the ingress at all. The app host reads `ufo_session` at face
   value, so under `public` visibility — where a site's author and its viewer can be in different
-  workspaces — that is cross-tenant session fixation. Nothing in the tree stops the script today: no
-  CSP, no iframe `sandbox`. The two candidate closes are a separate registrable domain for the sites
+  workspaces — that is cross-tenant session fixation. Nothing in the tree stops the script: the frame
+  does sandbox the iframe, but the flags a site is promised — `allow-scripts` with
+  `allow-same-origin` — are exactly what leave `document.cookie` writable from its own origin, and
+  there is no CSP. The two candidate closes are a separate registrable domain for the sites
   base (the browser then treats a site as a different site and `domain=` cannot reach the app host)
   and refusing a request that carries more than one `ufo_session`; neither is decided, and the
   scrubbing above is not a substitute for whichever lands. `ufo.sdk.http.set_session_cookie`

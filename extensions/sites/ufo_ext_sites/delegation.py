@@ -1,7 +1,10 @@
 """Website delegation tool: hand a build objective to the website-building subagent.
 
-`build_website` spawns one `website_building` child turn for a full build-and-serve session and
-returns its summary. It reaches the child through `ctx.spawn` — the same Spawn seam
+`build_website` spawns one `website_building` child turn for a build-and-validate session and
+returns its summary. The child cannot host what it builds — its conversation, sandbox, and workspace
+subtree are its own, so the parent's `deploy_website` cannot reach the child's files either; the
+child's output leaves through `share_file`, and a site the member is meant to open is built in the
+member's own conversation. It reaches the child through `ctx.spawn` — the same Spawn seam
 `spawn_subagent` uses — so a delegated build is scoped to the profile's tools, never a raw sites
 handle. Its typed input carries the two per-build knobs the generic `spawn_subagent` payload can't
 describe to the spawning agent: `preload_skills`, which seeds the child's context with a skill's
@@ -15,9 +18,11 @@ from ufo_ext_sites.subagent import WEBSITE_BUILDING_NAME
 
 BUILD_WEBSITE_TOOL = "build_website"
 BUILD_WEBSITE_DESCRIPTION = (
-    "Delegates a full website, web app, dashboard, or web game build to a focused subagent that "
-    "builds, serves, and validates the site in the sandbox and returns a summary. Include ALL "
-    "context in the objective — the child has no conversation history."
+    "Delegates a website, web app, dashboard, or web game build to a focused subagent that builds "
+    "it, brings it up in its own sandbox, validates it, and shares the built output as a file. The "
+    "child's sandbox and workspace are its own, so its build cannot be hosted from here — use this "
+    "to get a validated build and a file for the member, and build in this conversation whatever "
+    "you intend to host. Include ALL context in the objective — the child has no history."
 )
 
 

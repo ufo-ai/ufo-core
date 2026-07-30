@@ -99,9 +99,11 @@ def _reset_workspace_credentials() -> Iterator[None]:
 
 @pytest.fixture
 async def db(database_url: str) -> AsyncIterator[None]:
-    """One initialized engine per test, disposed however the test ends: `init_db` guards a
-    process global, so a setup failure that skipped disposal would poison every later test in
-    the process with 'db already initialized' — one flaky failure amplified into a red shard."""
+    """One initialized engine per test, disposed however the test ends: `init_db` guards a process
+    global, so the dispose is in a `finally`. The wipe between it and the `yield` can raise — a
+    SQLite `begin immediate` that cannot take the write lock inside its busy timeout does — and a
+    setup that raised without disposing would poison every later test in the process with 'db
+    already initialized', one flaky failure amplified into a red shard."""
     init_db(database_url)
     try:
         async with workspace_tx() as connection:

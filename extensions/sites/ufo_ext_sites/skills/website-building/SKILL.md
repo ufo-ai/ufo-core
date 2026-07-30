@@ -4,7 +4,7 @@ description: Load before writing any HTML or frontend code or building a website
 ---
 # Website Building
 
-Build distinctive, production-grade websites that avoid generic "AI slop" aesthetics. Every choice — type, color, motion, layout — must be intentional. Build the site in the sandbox workspace, then serve it with `deploy_website` at a reachable `http://localhost:8000` URL inside the sandbox.
+Build distinctive, production-grade websites that avoid generic "AI slop" aesthetics. Every choice — type, color, motion, layout — must be intentional. Build the site in the sandbox workspace, then serve it with `deploy_website`: it comes up at `http://localhost:8000` inside the sandbox, where you validate it, and is hosted at a `site_url` the user opens.
 
 **This skill covers everything for web projects.** When loaded via `load_skill(name="website-building")`, all files mount under `.skills/website-building/`. Read sub-files as needed based on your project type. For web applications, load the child skill: `load_skill(name="website-building/webapp")`.
 
@@ -26,11 +26,15 @@ Use `read` with the path relative to this skill, e.g. `shared/01-design-tokens.m
 
 If the user says just "website" or "site" with no detail, ask what type or default to informational.
 
-**Serving and sharing.** Build in the sandbox workspace, then make the site reachable. All three tools return a `http://localhost:<port>` URL reachable inside the sandbox — there is no separate permanent host beyond the sandbox route. The user sees the result through `share_file`, so share the built output as the deliverable rather than only naming a local path:
+**Serving and sharing.** Build in the sandbox workspace, then make the site reachable. All three tools return a `http://localhost:<port>` URL reachable inside the sandbox, which is how you validate the page. `deploy_website` and `publish_website` also host that port and return `site_url` — the permanent link the user opens, gated on who may see it — so hand `site_url` back as the deliverable, with `share_file` when a downloadable copy is useful:
 
-- `deploy_website(project_path=…, site_name=…, entry_point="index.html")` — serve a built static folder. Re-deploy the same `project_path` to update it in place. This is the default for previews and sharing.
-- `publish_website(project_path=…, dist_path=…, app_name=…, install_command=…, run_command=…)` — for web apps that need a build/install step or a running backend: installs dependencies, serves `dist_path`, and runs `run_command` for the backend.
-- `start_server(command=…, project_path=…)` — run a dev/app server in the background during the build to test locally before serving.
+- `deploy_website(project_path=…, site_name=…, entry_point="index.html", visibility=…)` — serve a built static folder and host it. Re-deploy the same `site_name` to update the site behind the same link. This is the default for previews and sharing.
+- `publish_website(project_path=…, dist_path=…, app_name=…, install_command=…, run_command=…, visibility=…)` — for web apps that need a build/install step or a running backend: installs dependencies, serves `dist_path`, and runs `run_command` for the backend.
+- `start_server(command=…, project_path=…)` — run a dev/app server in the background during the build to test locally before serving; it hosts nothing.
+
+Pass `visibility` (`private`, `workspace`, `public`) only when the user asked for one: a new site defaults from where it was built (a direct conversation is private, a workspace room is workspace-wide) and an existing one keeps what it has.
+
+**If you are a website-building subagent** (no `deploy_website` in your tool set), you host nothing: bring the site up with `start_server`, validate it, `share_file` the built output, and report what you built. Hosting belongs to the conversation the member is in.
 
 ---
 
@@ -79,7 +83,7 @@ All paths above are relative to this skill's mounted directory (`.skills/website
 1. **Design Direction**: Clarify purpose, pick aesthetic direction
 2. **Version Control**: Run `git init` in the project directory after scaffolding. Commit after each major milestone with a short message.
 3. **Build**: Build the site page by page, taking screenshots via Playwright (`js_repl`) for visual QA
-4. **Preview**: Commit all changes, then `deploy_website()` serves the folder and returns a reachable `http://localhost:8000` URL, and `share_file` hands the built output to the user
+4. **Preview**: Commit all changes, then `deploy_website()` serves the folder, returns `http://localhost:8000` to validate it against, and hosts it at the `site_url` you hand the user
 
 ---
 
@@ -166,6 +170,6 @@ See `shared/08-standards.md` for the full anti-patterns list.
 
 ## Step 2: Preview
 
-Call `deploy_website()` with the project path, site name, and entry point. It serves the folder and returns a reachable `http://localhost:8000` URL inside the sandbox. To update, edit the local files and re-deploy with the same `project_path`. See `shared/09-technical.md` for the exact call and examples.
+Call `deploy_website()` with the project path, site name, and entry point. It serves the folder at `http://localhost:8000` inside the sandbox — where you validate it — and hosts that port at `site_url`, the link the user opens. To update, edit the local files and re-deploy with the same `site_name`. See `shared/09-technical.md` for the exact call and examples.
 
-After `deploy_website()` succeeds, the user-facing final answer should give the URL, `share_file` the built output, briefly say the website is ready, and prompt for a next action — keep iterating (re-deploy the same path to update), or, for an app that needs a build/install step or a backend, `publish_website`.
+After `deploy_website()` succeeds, the user-facing final answer should give `site_url` and who can open it, briefly say the website is ready, and prompt for a next action — keep iterating (re-deploy the same `site_name` to update the site behind that link), or, for an app that needs a build/install step or a backend, `publish_website`. The sandbox-local `http://localhost:8000` is yours for validation and never the user's; `share_file` the built output only when they want a copy to keep.

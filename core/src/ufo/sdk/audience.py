@@ -1,5 +1,6 @@
 """Public conversation-audience value and boundary helpers."""
 
+from ufo.audience import FOREIGN_AUDIENCE_PREFIX as FOREIGN_AUDIENCE_PREFIX
 from ufo.audience import SHARED_AUDIENCE as SHARED_AUDIENCE
 from ufo.audience import Audience as Audience
 from ufo.audience import audience_member as audience_member

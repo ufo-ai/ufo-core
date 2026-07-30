@@ -139,7 +139,7 @@ If the subject gives no clear color signal AND the user provided no direction af
 
 ## Frontend
 
-- CRITICAL: You MUST wrap `<Switch>` inside `<Router hook={useHashLocation}>` — the `hook` prop goes on `<Router>`, NOT on `<Switch>`. Without this, all routing breaks after deployment (sites are served inside iframes where path-based routing breaks). The correct pattern:
+- CRITICAL: You MUST wrap `<Switch>` inside `<Router hook={useHashLocation}>` — the `hook` prop goes on `<Router>`, NOT on `<Switch>`. Put it on `<Switch>` and every route silently 404s. Hash routing is required, and a hosted site does not remove that: the site's origin serves whatever the sandbox serves, so a path like `/candidates/3` survives a reload only if the app's own server falls back to `index.html` — a static folder under `deploy_website` never does. Hash routing needs no fallback anywhere. The correct pattern:
 
   ```tsx
   import { Switch, Route, Router } from 'wouter';

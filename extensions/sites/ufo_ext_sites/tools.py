@@ -1,13 +1,20 @@
-"""The website tools: build a site, and serve one in the sandbox with port cleanup and a readiness
-probe.
+"""The website tools: build a site, serve one in the sandbox with port cleanup and a readiness
+probe, and host the served port at a permanent link.
 
 Each tool runs through `ctx.sandbox`, so the container's mount and egress scoping hold. `website`
 runs a build command and lists what it produced. `start_server`, `deploy_website`, and
 `publish_website` bring a server up in the background: they free the port, launch the command under
 `nohup`, and poll until the port is listening before returning — so the tool returns a running,
 reachable server rather than a race. The served URL is `http://localhost:<port>` inside the sandbox,
-which the browser tools and js_repl reach to validate the page; the built files leave the sandbox
-only through `share_file`."""
+which the browser tools and js_repl reach to validate the page.
+
+`deploy_website` and `publish_website` then register that port as a hosted site and return its
+`site_url` — the frame a member opens, gated on the site's visibility. Hosting a site is registering
+the port the readiness probe just proved, so nothing moves: a re-deploy of the same name updates the
+port in place and the link never changes. Visibility defaults from the conversation's audience; an
+explicit argument overrides that default, but only for the site's creator and only on a turn with a
+live speaker, because choosing who can open a site is a disclosure act. `start_server` registers
+nothing, since a scratch server is not a deliverable."""
 
 import json
 import shlex
@@ -15,6 +22,9 @@ import shlex
 from pydantic import BaseModel, Field, model_validator
 
 from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
+from ufo_ext_sites.objects import site_object_name
+from ufo_ext_sites.store import HostedSites, Visibility, site_name
+from ufo_ext_sites.surface import site_url
 
 WEBSITE_TOOL = "website"
 START_SERVER_TOOL = "start_server"
@@ -33,12 +43,29 @@ START_SERVER_DESCRIPTION = (
     "this instead of bash for servers — it polls until the port is listening and returns the route."
 )
 DEPLOY_WEBSITE_DESCRIPTION = (
-    "Serve a website folder from the workspace at a route the user can reach. Pass the directory "
-    "containing the built static output (index.html). Re-deploying the same path updates the site."
+    "Serve a website folder and host it at a permanent link the member can open. Pass the "
+    "directory containing the built static output (index.html). Returns site_url — the deliverable "
+    "— beside the sandbox-local url. Re-deploying the same site_name updates it behind that link."
 )
 PUBLISH_WEBSITE_DESCRIPTION = (
     "Publish a web app: install dependencies, serve the built output (and backend run_command if "
-    "any) from the sandbox, and return its route. Static files come from dist_path."
+    "any) from the sandbox, and host it at a permanent link. Returns site_url — the deliverable — "
+    "beside the sandbox-local url. Static files come from dist_path."
+)
+VISIBILITY_NEEDS_A_SPEAKER = (
+    "changing who can open a site is a disclosure act and needs a live member: re-deploy without a "
+    "visibility argument, or have the member say what it should be"
+)
+SUBAGENT_CANNOT_HOST = (
+    "a subagent turn cannot host a site: its sandbox and workspace are its own and a link into "
+    "them dies with them, and the parent cannot reach these files either. Bring the site up with "
+    "start_server, validate it, and share_file the built output — whatever the member is meant to "
+    "open is built in the member's own conversation."
+)
+VISIBILITY_DESCRIPTION = (
+    "Who may open the hosted link: private (you alone), workspace (any member), or public (anyone "
+    "with the link). Omit unless the member asked — a new site defaults from where it was built, "
+    "and an existing one keeps the visibility it has."
 )
 
 
@@ -77,8 +104,9 @@ class DeployWebsiteInput(BaseModel):
     project_path: str = Field(
         description="Directory containing the built static output (index.html)."
     )
-    site_name: str = Field(description="A name for the served site.")
+    site_name: str = Field(description="A name for the served site; it names the hosted link.")
     entry_point: str = Field(description="The entry file to serve, e.g. index.html.")
+    visibility: Visibility | None = Field(default=None, description=VISIBILITY_DESCRIPTION)
     user_description: str = Field(
         description="Which site you are putting online, in plain language for the activity "
         "timeline."
@@ -88,7 +116,8 @@ class DeployWebsiteInput(BaseModel):
 class PublishWebsiteInput(BaseModel):
     project_path: str = Field(description="The web app project directory.")
     dist_path: str = Field(description="Directory of the built static output to serve.")
-    app_name: str = Field(description="A name for the published app.")
+    app_name: str = Field(description="A name for the published app; it names the hosted link.")
+    visibility: Visibility | None = Field(default=None, description=VISIBILITY_DESCRIPTION)
     run_command: str | None = Field(
         default=None, description="Optional backend command to run alongside the static files."
     )
@@ -144,6 +173,48 @@ async def _serve(
     return {"url": f"http://localhost:{port}", "port": port, "log": log}
 
 
+async def _host(
+    ctx: ToolContext, raw_name: str, port: int, visibility: Visibility | None
+) -> dict[str, object]:
+    """Register the running port as a hosted site and describe the link it now answers on. Nothing
+    is written until the link exists and every refusal has fired: a site needs an owner, so a turn
+    with no acting member cannot host one; a turn acting for a member hosts as that member, whoever
+    queued it, but only a turn with a live speaker may name a `visibility` — the column is a
+    disclosure decision and a background turn never makes one.
+
+    A subagent turn cannot host at all. The link resolves a conversation to the sandbox serving it,
+    and a subagent runs in its own conversation with its own sandbox and its own workspace, derived
+    from the one parent turn that spawned it — so a site registered there dies with that sandbox and
+    a rebuild mints a different link. Hosting belongs to the conversation the member is in."""
+    if ctx.ext is None:
+        raise RuntimeError("the website tools dispatched without their ExtensionContext")
+    if ctx.turn.subagent_profile is not None:
+        raise RuntimeError(SUBAGENT_CANNOT_HOST)
+    creator_member_id = ctx.acting_member_id
+    if creator_member_id is None:
+        raise RuntimeError("a hosted site needs an owner: no member is acting on this turn")
+    if visibility is not None and ctx.speaker_member_id is None:
+        raise RuntimeError(VISIBILITY_NEEDS_A_SPEAKER)
+    workspace_id = ctx.ext.store.workspace_id
+    name = site_name(raw_name)
+    link = site_url(ctx.public_base_url, workspace_id, ctx.turn.conversation_id, name)
+    site = await HostedSites(workspace_id, ctx.ext.transaction).register(
+        ctx.turn.conversation_id,
+        name,
+        port,
+        creator_member_id,
+        ctx.speaker_member_id,
+        visibility,
+        ctx.audience,
+    )
+    return {
+        "site_name": site.name,
+        "visibility": site.visibility,
+        "site": site_object_name(site.conversation_id, site.name),
+        "site_url": link,
+    }
+
+
 async def website(ctx: ToolContext, args: WebsiteInput) -> ToolResult:
     project = args.project_path or WORKSPACE_DIR
     result = await ctx.sandbox.bash(
@@ -167,7 +238,8 @@ async def deploy_website(ctx: ToolContext, args: DeployWebsiteInput) -> ToolResu
     command = f"python3 -m http.server {APP_SERVE_PORT} --bind 0.0.0.0"
     log = f"/tmp/deploy-{APP_SERVE_PORT}.log"
     served = await _serve(ctx, command, args.project_path, APP_SERVE_PORT, log)
-    return _json_result({**served, "site_name": args.site_name, "entry_point": args.entry_point})
+    hosted = await _host(ctx, args.site_name, APP_SERVE_PORT, args.visibility)
+    return _json_result({**served, **hosted, "entry_point": args.entry_point})
 
 
 async def publish_website(ctx: ToolContext, args: PublishWebsiteInput) -> ToolResult:
@@ -182,7 +254,8 @@ async def publish_website(ctx: ToolContext, args: PublishWebsiteInput) -> ToolRe
     project = args.project_path if args.run_command else args.dist_path
     log = f"/tmp/publish-{APP_SERVE_PORT}.log"
     served = await _serve(ctx, command, project, APP_SERVE_PORT, log)
-    return _json_result({**served, "app_name": args.app_name})
+    hosted = await _host(ctx, args.app_name, APP_SERVE_PORT, args.visibility)
+    return _json_result({**served, **hosted})
 
 
 SITES_TOOLS: tuple[ToolDef, ...] = (
@@ -213,3 +286,7 @@ SITES_TOOLS: tuple[ToolDef, ...] = (
 )
 
 SITES_TOOL_NAMES: tuple[str, ...] = tuple(tool.name for tool in SITES_TOOLS)
+HOSTING_TOOL_NAMES: tuple[str, ...] = (DEPLOY_WEBSITE_TOOL, PUBLISH_WEBSITE_TOOL)
+BUILD_ONLY_TOOL_NAMES: tuple[str, ...] = tuple(
+    name for name in SITES_TOOL_NAMES if name not in HOSTING_TOOL_NAMES
+)

@@ -30,6 +30,7 @@ import asyncio
 import hashlib
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Literal, Protocol
@@ -40,6 +41,7 @@ import sqlalchemy as sa
 from pydantic import BaseModel, field_validator
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.ext.asyncio import AsyncConnection
 from starlette.requests import Request
 from starlette.responses import Response
 
@@ -1493,6 +1495,18 @@ class SurfaceContext:
                 )
             ).one_or_none()
         return None if row is None else row.installation_id
+
+    @asynccontextmanager
+    async def transaction(self) -> AsyncIterator[AsyncConnection]:
+        """A transaction over the tables the surface's own extension shipped a migration for — the
+        same raw whole-database connection `ExtensionContext.transaction` yields, under the
+        workspace this request already resolved. A surface that renders its extension's rows (the
+        sites frame reading a `hosted_site`) has no turn and so no `ExtensionContext` to reach them
+        through. Scoping every query to `workspace_id` is the surface's responsibility exactly as
+        it is a tool handler's: the SDK import boundary is a static gate over imports, never over
+        runtime SQL. Commits on exit, rolls back on error."""
+        async with workspace_tx() as connection:
+            yield connection
 
     async def _owned_conversation(self, conversation_id: UUID) -> bool:
         async with workspace_tx() as connection:

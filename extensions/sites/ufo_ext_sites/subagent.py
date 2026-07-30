@@ -2,15 +2,18 @@
 
 Its prompt is the website-building instructions; the core subagent shell wraps the shared citation
 and output discipline around it, so this profile carries only the workflow that is distinct to
-building and serving a site. Its tool subset is the core file builtins it edits with, the sites
-tools it builds and serves through, and the Node REPL it uses to drive and verify a running page."""
+building and validating a site. Its tool subset is the core file builtins it edits with, the build
+and local-serve tools, and the Node REPL it uses to drive and verify a running page — but not
+`deploy_website` or `publish_website`: those host a site at a permanent link, and a link into a
+subagent's own disposable sandbox dies with it, so hosting stays in the conversation the member is
+in."""
 
 from pathlib import Path
 
 from pydantic import BaseModel
 
 from ufo.sdk.manifest import SubagentProfile
-from ufo_ext_sites.tools import SITES_TOOL_NAMES
+from ufo_ext_sites.tools import BUILD_ONLY_TOOL_NAMES
 
 WEBSITE_BUILDING_NAME = "website_building"
 WEBSITE_BUILDING_PROMPT = (
@@ -26,7 +29,7 @@ WEBSITE_BUILDING_TOOL_NAMES = (
     "grep",
     "share_file",
     "load_skill",
-    *SITES_TOOL_NAMES,
+    *BUILD_ONLY_TOOL_NAMES,
     "js_repl",
     # Web reference-gathering (source website_building set); resolves if research is installed.
     "search_web",

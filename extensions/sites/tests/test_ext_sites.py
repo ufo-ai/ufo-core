@@ -7,16 +7,13 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 from ufo_ext_sites import manifest as sites_manifest
-from ufo_ext_sites import tools as sites_tools
 from ufo_ext_sites.delegation import BuildWebsiteInput, _build_website
+from ufo_ext_sites.objects import CONVERSATION_DIGEST_HEX, site_object_name
+from ufo_ext_sites.store import SITE_NAME_MAX, InvalidSiteName, site_name
 from ufo_ext_sites.subagent import WEBSITE_BUILDING_PROFILE, WebsiteBuildingResult
 from ufo_ext_sites.tools import (
-    DeployWebsiteInput,
-    PublishWebsiteInput,
     StartServerInput,
     WebsiteInput,
-    deploy_website,
-    publish_website,
     start_server,
     website,
 )
@@ -24,6 +21,7 @@ from ufo_ext_sites.tools import (
 from ufo.blob import FilesystemBlobStore
 from ufo.ext.loader import skill_registry
 from ufo.loop.subagents import subagent_system_prompt
+from ufo.objects import OBJECT_NAME_MAX_LENGTH
 from ufo.sandbox.session import ExecResult
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience
@@ -96,13 +94,20 @@ def test_manifest_declares_the_tools_the_profile_and_the_section() -> None:
         "build_website",
     }
     deploy = next(tool for tool in manifest.tools if tool.name == "deploy_website")
-    assert deploy.description.startswith("Serve a website folder from the workspace")
+    assert deploy.description.startswith("Serve a website folder and host it")
+    assert "visibility" in deploy.input_model.model_json_schema()["properties"]
+    (kind,) = manifest.objects
+    assert kind.name == "site"
+    (surface,) = manifest.surfaces
+    assert surface.name == "sites"
     build = next(tool for tool in manifest.tools if tool.name == "build_website")
     assert {"objective", "preload_skills", "extended_context"} <= set(
         build.input_model.model_json_schema()["properties"]
     )
     (profile,) = manifest.subagents
     assert profile.name == "website_building"
+    assert not {"deploy_website", "publish_website"} & set(profile.tool_names)
+    assert "cannot be hosted from here" in build.description
     (section,) = manifest.prompt_sections
     assert section.name == "sites" and "<sites>" in section.body
 
@@ -203,7 +208,7 @@ async def test_the_webapp_child_declares_its_parent_and_mounts_it_nested() -> No
 
 def test_the_website_building_profile_names_only_meaningful_tools() -> None:
     names = set(WEBSITE_BUILDING_PROFILE.tool_names)
-    assert {"deploy_website", "publish_website", "write", "share_file"} <= names
+    assert {"website", "start_server", "write", "share_file", "js_repl"} <= names
     assert WEBSITE_BUILDING_PROFILE.input_model.model_validate(
         {"user_description": TOOL_NARRATION, "objective": "build a landing page"}
     ).objective
@@ -240,26 +245,6 @@ async def test_website_build_failure_fails_loud(tmp_path: Path) -> None:
         )
 
 
-async def test_deploy_website_serves_static_output_and_returns_the_route(tmp_path: Path) -> None:
-    sandbox = FakeSandbox()
-    ctx = _context(sandbox, tmp_path)
-    result = await deploy_website(
-        ctx,
-        DeployWebsiteInput(
-            user_description=TOOL_NARRATION,
-            project_path="/workspace/dist",
-            site_name="marketing",
-            entry_point="index.html",
-        ),
-    )
-    payload = json.loads(result.content[0].text)
-    assert payload["url"] == f"http://localhost:{sites_tools.APP_SERVE_PORT}"
-    assert payload["site_name"] == "marketing"
-    serve_command = next(command for command in sandbox.commands if "http.server" in command)
-    assert "/workspace/dist" in serve_command
-    assert "nohup" in serve_command
-
-
 async def test_start_server_reports_a_serve_failure_from_the_log(tmp_path: Path) -> None:
     sandbox = FakeSandbox(
         scripted={
@@ -277,22 +262,20 @@ async def test_start_server_reports_a_serve_failure_from_the_log(tmp_path: Path)
         )
 
 
-async def test_publish_website_installs_before_serving(tmp_path: Path) -> None:
-    sandbox = FakeSandbox()
-    ctx = _context(sandbox, tmp_path)
-    result = await publish_website(
-        ctx,
-        PublishWebsiteInput(
-            user_description=TOOL_NARRATION,
-            project_path="/workspace/app",
-            dist_path="/workspace/app/dist",
-            app_name="dashboard",
-            install_command="npm ci",
-        ),
+def test_site_name_slugs_bounds_and_refuses_a_nameless_site() -> None:
+    """The name is the site's identity, half its link, and its object name, so a name that slugs to
+    nothing is refused rather than stored as one — and the bound leaves room for the conversation
+    digest the object name appends."""
+    assert site_name("My Marketing Site!") == "my-marketing-site"
+    assert site_name("Q3  --  Report") == "q3-report"
+    assert site_name("x" * 80) == "x" * SITE_NAME_MAX
+    assert SITE_NAME_MAX + len("-") + CONVERSATION_DIGEST_HEX <= OBJECT_NAME_MAX_LENGTH, (
+        "a site's longest name plus its object suffix must stay addressable from chat"
     )
-    payload = json.loads(result.content[0].text)
-    assert payload["app_name"] == "dashboard"
-    assert any("npm ci" in command for command in sandbox.commands)
+    assert len(site_object_name(uuid4(), site_name("x" * 80))) <= OBJECT_NAME_MAX_LENGTH
+    for nameless in ("---", "   ", "🌱🌱", "!!!"):
+        with pytest.raises(InvalidSiteName, match="letters or digits"):
+            site_name(nameless)
 
 
 def test_start_server_rejects_an_out_of_range_port() -> None:

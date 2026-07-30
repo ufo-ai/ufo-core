@@ -12,8 +12,8 @@ It kills any existing process on the port, starts the server in background, and 
 
 ## Deployment Constraints
 
-- The site is served at `http://localhost:<port>` inside the sandbox, so `localStorage`, `sessionStorage`, cookies, the Fullscreen/Pointer Lock APIs, and `alert()`/`confirm()`/`prompt()` all work normally
-- The template uses hash-based routing (`useHashLocation` from wouter); path-based routing also works on the direct serve
+- The site is served at `http://localhost:<port>` inside the sandbox and, once `deploy_website`/`publish_website` host it, at its own hosted origin — one origin per site — so `localStorage`, `sessionStorage`, cookies, the Fullscreen/Pointer Lock APIs, and `alert()`/`confirm()`/`prompt()` all work normally and never collide with another site's
+- The template uses hash-based routing (`useHashLocation` from wouter), so a shared deep link and a reload work wherever the site is served; a path-routed SPA survives a reload only if its own server falls back to `index.html`, which a static `deploy_website` folder does not
 - Vite is configured with `base: "./"` for relative asset paths — do not change this to absolute paths
 - `fetch()`, the HTML `download` attribute, and binary assets (`<img>`, `<video>`, `<audio>`) all work same-origin. A backend (`shared/19-backend.md`) is only needed for server-side logic or a forced `Content-Disposition: attachment`
 - For images, prefer authoring originals (inline SVG, CSS gradients) or dropping assets the user provided (or real images you fetched into the workspace) into `client/public/` over hotlinking external URLs (Wikipedia, Imgur, etc.) — external hosts may block hotlinking or lack CORS headers
@@ -96,7 +96,7 @@ After copying the template, run `npm install` before starting the dev server. Th
 
 - `date-fns` — date formatting and manipulation
 - `react-day-picker` — calendar date picker
-- `wouter` — routing (with `useHashLocation` for iframe compatibility)
+- `wouter` — routing (with `useHashLocation` so a deep link survives a reload on any serving path)
 
 ### Build Tools
 

@@ -49,22 +49,22 @@ Build the site page by page. Screenshot each page via Playwright at desktop (128
 ```
 deploy_website(
   project_path="project-name",
-  site_name="Project Name",
+  site_name="project-name",
   entry_point="index.html"
 )
 ```
 
-Serves the folder and returns a reachable `http://localhost:8000` URL inside the sandbox. Give that URL to the user, and `share_file` the built output so they can see it.
+Serves the folder at `http://localhost:8000` inside the sandbox — that URL is yours for validation and unreachable for the user — and hosts it at `site_url`, the link to give them. `share_file` the built output only when they want a copy to keep.
 
 ### Updating a Previewed Website
 
-To update a site, edit the local workspace files (same `project-name/` directory from the original build) and call `deploy_website` again with the same `project_path`.
+To update a site, edit the local workspace files (same `project-name/` directory from the original build) and call `deploy_website` again with the same `site_name` — that name is the site's identity, so the member's link keeps resolving. A different `site_name` on the same port retires the old registration and its link stops working.
 
 ---
 
 ## Examples
 
-**Landing page:** `index.html`, `base.css`, `style.css`, assets. **Multi-page:** `index.html` links to `pages/*.html`, shared CSS/JS. **Dashboard:** same structure + `app.js`. **React/Vite:** create source → `npm install && npm run build` → `deploy_website(project_path="app/dist", site_name="App", entry_point="index.html")`.
+**Landing page:** `index.html`, `base.css`, `style.css`, assets. **Multi-page:** `index.html` links to `pages/*.html`, shared CSS/JS. **Dashboard:** same structure + `app.js`. **React/Vite:** create source → `npm install && npm run build` → `deploy_website(project_path="app/dist", site_name="app", entry_point="index.html")`.
 
 ---
 
