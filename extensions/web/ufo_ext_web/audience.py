@@ -6,7 +6,9 @@ Grants live in the extension's own store, one row per `(agent, email)` — the e
 surface's identity axis, the claim its bearer proves. `grant_web_access`/`revoke_web_access` are
 the chat verbs: admin-only, applying to the executing agent, so granting access to an agent
 happens in that agent's own conversation — which a workspace admin can always open, because an
-admin reaches every agent. Everyone else reaches exactly the agents granted to their email."""
+admin reaches every agent. Everyone else reaches the workspace's main agent — the agent every
+surface routes an unbound member to, so the portal answers a member the way the CLI and an
+unbound Slack install already do — plus exactly the non-main agents granted to their email."""
 
 from dataclasses import dataclass
 from uuid import UUID
@@ -59,13 +61,20 @@ async def _granted_agent_ids(store: ScopedStore, email: str) -> frozenset[UUID]:
 @dataclass(frozen=True)
 class WebAudience:
     """One member's view of the portal: whether they administer the workspace (and so see every
-    agent) and the agents their web audience holds."""
+    agent), the agents their web audience holds, and the subset an explicit grant put there
+    (empty for an admin, who reaches every agent regardless) — the main agent reaches every
+    member by construction, so a read only an admin's choice may open (the usage panel) gates on
+    `granted`, never on `allows`."""
 
     admin: bool
     agents: tuple[AgentSummary, ...]
+    granted_ids: frozenset[UUID]
 
     def allows(self, agent_id: UUID) -> bool:
         return any(agent.id == agent_id for agent in self.agents)
+
+    def granted(self, agent_id: UUID) -> bool:
+        return self.admin or agent_id in self.granted_ids
 
 
 async def web_audience(
@@ -79,9 +88,13 @@ async def web_audience(
     )
     agents = await surface.list_agents()
     if admin:
-        return WebAudience(admin=True, agents=agents)
+        return WebAudience(admin=True, agents=agents, granted_ids=frozenset())
     granted = await _granted_agent_ids(extension.store, lowered)
-    return WebAudience(admin=False, agents=tuple(a for a in agents if a.id in granted))
+    return WebAudience(
+        admin=False,
+        agents=tuple(a for a in agents if a.main or a.id in granted),
+        granted_ids=granted,
+    )
 
 
 class WebAccessInput(BaseModel):
@@ -123,6 +136,12 @@ async def _grant(ctx: ToolContext, args: WebAccessInput) -> ToolResult:
     refused = await _gate(ctx, ctx.ext, args)
     if refused is not None:
         return refused
+    if await ctx.agent_is_main():
+        return ToolResult(
+            content=(
+                TextContent(text="The main agent already answers every member in the portal."),
+            )
+        )
     await ctx.ext.store.put(
         _grant_key(ctx.turn.agent_id, args.email),
         {"granted_by": str(ctx.speaker_member_id)},
@@ -143,6 +162,15 @@ async def _revoke(ctx: ToolContext, args: WebAccessInput) -> ToolResult:
     if refused is not None:
         return refused
     await ctx.ext.store.delete(_grant_key(ctx.turn.agent_id, args.email))
+    if await ctx.agent_is_main():
+        return ToolResult(
+            content=(
+                TextContent(
+                    text="The main agent answers every member — "
+                    f"{args.email.strip().lower()} still reaches it in the portal."
+                ),
+            )
+        )
     return ToolResult(
         content=(
             TextContent(
@@ -157,7 +185,8 @@ WEB_ACCESS_TOOLS = (
         name="grant_web_access",
         description=(
             "Give a workspace member access to this agent in the web portal — workspace admins "
-            "only. The member is named by email and must already exist in the workspace."
+            "only. The member is named by email and must already exist in the workspace. The "
+            "main agent needs no grant: it answers every member."
         ),
         input_model=WebAccessInput,
         handler=_grant,
@@ -167,7 +196,8 @@ WEB_ACCESS_TOOLS = (
         name="revoke_web_access",
         description=(
             "Remove a workspace member's access to this agent in the web portal — workspace "
-            "admins only. Admins keep reaching every agent regardless of grants."
+            "admins only. Admins keep reaching every agent, and the main agent answers every "
+            "member regardless of grants."
         ),
         input_model=WebAccessInput,
         handler=_revoke,

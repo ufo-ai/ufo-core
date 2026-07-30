@@ -290,7 +290,7 @@ async function showAdmin() {
       agent.model,
       agent.internet_access_allowed ? 'allowed' : 'blocked',
       agent.installations.join(', ') || '—',
-      agent.web_audience.concat('admins').join(', ')
+      agent.main ? 'every member' : agent.web_audience.concat('admins').join(', ')
     ))
   ));
   const membersTitle = document.createElement('h2');
@@ -676,6 +676,10 @@ async function renderUsage(agent, load) {
     const res = await fetch(BASE + '/agents/' + agent.id + '/usage',
       { credentials: 'same-origin' });
     if (load !== panelLoad) return;
+    if (res.status === 404) {
+      panelEmpty('Usage for this agent is not shared with you.');
+      return;
+    }
     if (!res.ok) { panelEmpty('Error ' + res.status + ' — reload to retry.'); return; }
     report = await res.json();
   } catch (err) {
@@ -808,6 +812,10 @@ async function renderOverview(agent, load, notice) {
     const res = await fetch(BASE + '/agents/' + agent.id + '/overview',
       { credentials: 'same-origin' });
     if (load !== panelLoad) return;
+    if (res.status === 404) {
+      fail(load, 'The overview for this agent is not shared with you.', notice);
+      return;
+    }
     if (!res.ok) {
       fail(load, 'Error ' + res.status + ' — reload to retry.', notice);
       return;
@@ -899,9 +907,11 @@ async function renderOverview(agent, load, notice) {
     const audience = panelSection('Web audience');
     const emails = document.createElement('div');
     emails.className = 'mono';
-    emails.textContent = data.audience.length
-      ? data.audience.join(', ')
-      : 'no member grants — admins only';
+    emails.textContent = data.agent.main
+      ? 'every member'
+      : data.audience.length
+        ? data.audience.join(', ')
+        : 'no member grants — admins only';
     audience.appendChild(emails);
   }
 }
@@ -1188,11 +1198,6 @@ async function boot() {
   member = payload.member;
   wireMemberChrome();
   renderSidebar();
-  if (!agents.length) {
-    composer.style.display = 'none';
-    emptyState('No agents are shared with you yet. Ask a workspace admin for access.');
-    return;
-  }
   if (location.hash === '#/admin' && payload.member.admin) {
     showAdmin();
     return;

@@ -280,11 +280,12 @@ class PortalSkill:
 
 class ConnectionView(BaseModel):
     """One connector account reaching one agent, as the portal's connections panel lists it: the
-    provider identity, the consenting owner, the edge's disclosure, and when the grant landed."""
+    provider identity, the consenting owner (named only to an admin or the owner), the edge's
+    disclosure, and when the grant landed."""
 
     provider: str
     account_id: str
-    owner_email: str
+    owner_email: str | None
     shared: bool
     connected_at: datetime
 
@@ -311,7 +312,8 @@ class CredentialSlotView(BaseModel):
 class SourceView(BaseModel):
     """One live source binding as the portal lists it: the backend, its disclosure subject
     (member-private pages stay gated to their member; `shared` means the agent's audience), the
-    registering owner, and sync health."""
+    registering owner (named only to an admin or the owner — None is also a source with no owner
+    member), and sync health."""
 
     backend: str
     shared: bool
@@ -1167,12 +1169,15 @@ class SurfaceContext:
         """The connector accounts granted to one agent that this member may see — the member gate
         in the query, never the caller: an admin sees every edge, everyone else their own private
         grants plus agent-shared ones (#645's resolution rule, read-side). The wall stays the
-        query's `agent_id`; another agent's edges are simply absent."""
+        query's `agent_id`; another agent's edges are simply absent. A shared edge names its
+        owner only to an admin or the owner — chat resolves no other member's email for a
+        non-admin, so neither does this read."""
         query = (
             sa.select(
                 tables.connection.c.provider,
                 tables.connection.c.account_id,
                 tables.member.c.email,
+                tables.connection.c.owner_member_id,
                 tables.connector_grant.c.shared,
                 tables.connector_grant.c.created_at,
             )
@@ -1201,7 +1206,7 @@ class SurfaceContext:
             ConnectionView(
                 provider=row.provider,
                 account_id=row.account_id,
-                owner_email=row.email,
+                owner_email=row.email if admin or row.owner_member_id == member_id else None,
                 shared=row.shared,
                 connected_at=row.created_at,
             )
@@ -1239,12 +1244,15 @@ class SurfaceContext:
     async def list_sources(self, member_id: UUID, *, admin: bool) -> tuple[SourceView, ...]:
         """The live source bindings this member may see — an admin all of them, everyone else
         their own registrations plus shared ones. Removed sources stay gone; a member-subject
-        source's pages remain gated to that member wherever they land."""
+        source's pages remain gated to that member wherever they land. A shared source names its
+        owner only to an admin or the owner — chat omits a shared source's owner entirely, so a
+        non-admin learns no other member's email through either surface."""
         query = (
             sa.select(
                 tables.source.c.backend,
                 tables.source.c.subject,
                 tables.member.c.email,
+                tables.source.c.owner_member_id,
                 tables.source.c.consecutive_errors,
                 tables.source.c.next_sync_at,
             )
@@ -1272,7 +1280,7 @@ class SurfaceContext:
             SourceView(
                 backend=row.backend,
                 shared=row.subject == SHARED_SUBJECT,
-                owner_email=row.email,
+                owner_email=row.email if admin or row.owner_member_id == member_id else None,
                 consecutive_errors=row.consecutive_errors,
                 next_sync_at=row.next_sync_at,
             )

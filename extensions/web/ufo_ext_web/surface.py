@@ -188,7 +188,8 @@ async def _audience_for(
 
 async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
     """The portal's first read: the signed-in member and the agents their web audience holds —
-    every agent for a workspace admin, exactly the granted set for everyone else."""
+    every agent for a workspace admin, the main agent plus the granted non-main agents for
+    everyone else."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
@@ -566,12 +567,16 @@ async def memory(ctx: SurfaceContext, request: Request) -> Response:
 
 
 async def usage(ctx: SurfaceContext, request: Request) -> Response:
-    """The selected agent's rolling-window spend and its agent-scoped caps — visible to every
-    member of the agent's audience; the workspace-wide rollup stays the admin's spend page."""
+    """The selected agent's rolling-window spend and its agent-scoped caps — the agent's whole
+    ledger across every member's turns, so it answers an admin or a member whose explicit grant
+    put the agent in front of them, and the main-agent default alone opens nothing here (chat
+    projects no spend to a member); the workspace-wide rollup stays the admin's spend page."""
     gated = await _panel_gate(ctx, request)
     if isinstance(gated, Response):
         return gated
     _member_id, _email, audience, agent_id = gated
+    if not audience.granted(agent_id):
+        return Response("no such agent", status_code=404)
     window = _window_param(request)
     if isinstance(window, Response):
         return window
@@ -604,7 +609,7 @@ async def usage(ctx: SurfaceContext, request: Request) -> Response:
 async def connections(ctx: SurfaceContext, request: Request) -> Response:
     """The selected agent's connector accounts this member may see — their own private grants plus
     agent-shared ones, every edge for a workspace admin. The member gate is the query's, the wall
-    is the agent id, and the panel only renders what the read returned."""
+    is the agent id, and the read names a shared edge's owner only to an admin or the owner."""
     gated = await _panel_gate(ctx, request)
     if isinstance(gated, Response):
         return gated
@@ -629,7 +634,8 @@ async def credentials(ctx: SurfaceContext, request: Request) -> Response:
 async def sources(ctx: SurfaceContext, request: Request) -> Response:
     """The live source bindings this member may see — their own registrations plus shared ones,
     all of them for a workspace admin. A member-subject source's indexed pages stay gated to that
-    member; the panel shows the subject so that stays legible."""
+    member; the panel shows the subject so that stays legible, and the read names a shared
+    source's owner only to an admin or the owner."""
     gated = await _panel_gate(ctx, request)
     if isinstance(gated, Response):
         return gated
@@ -875,10 +881,16 @@ async def intents(ctx: SurfaceContext, request: Request) -> Response:
 
 
 async def overview(ctx: SurfaceContext, request: Request) -> Response:
+    """The selected agent's configuration read — its prompt, spec, bound surfaces, and the
+    deploy's ceilings. Surfaces and the deploy ceiling reach a member through no chat projection,
+    so like usage this answers an admin or a member whose explicit grant holds the agent; the
+    main-agent default alone opens nothing here."""
     gated = await _panel_gate(ctx, request)
     if isinstance(gated, Response):
         return gated
     _member_id, _email, audience, agent_id = gated
+    if not audience.granted(agent_id):
+        return Response("no such agent", status_code=404)
     return await agent_overview(ctx, agent_id, admin=audience.admin)
 
 

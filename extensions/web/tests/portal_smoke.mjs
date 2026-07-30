@@ -307,6 +307,9 @@ const sandbox = {
     if (url.endsWith("/api/agents") && wire.signedOut) {
       return { ok: false, status: 401, json: async () => ({}) };
     }
+    if (url.endsWith("/usage")) {
+      return { ok: false, status: 404, json: async () => ({}) };
+    }
     if (url.endsWith("/overview") && wire.overviewThrows) throw new TypeError("network down");
     if (url.endsWith("/overview") && wire.overviewStatus) {
       return { ok: false, status: wire.overviewStatus, json: async () => ({}) };
@@ -425,6 +428,12 @@ try {
     throw new Error("answered row did not retire");
   }
   await tabNamed("overview").fire("click");
+  const audienceLine = byId.panel
+    .querySelectorAll("*")
+    .find((node) => node.className.includes("mono") && node.textContent === "every member");
+  if (!audienceLine) {
+    throw new Error("the main agent's overview does not state its audience as every member");
+  }
   const form = byId.panel.querySelector("form");
   if (!form) throw new Error("overview built no form");
   if (form.className) throw new Error(`settings form carries class "${form.className}"`);
@@ -526,6 +535,12 @@ try {
     }
     await tabNamed("overview").fire("click");
   }
+  await tabNamed("usage").fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const usageWall = byId.panel
+    .querySelectorAll("*")
+    .find((node) => node.textContent === "Usage for this agent is not shared with you.");
+  if (!usageWall) throw new Error("the usage 404 renders no member line");
   await tabNamed("memory").fire("click");
   const searchForm = byId.panel.querySelector("form");
   if (!searchForm || searchForm.className !== "search") {
@@ -538,6 +553,11 @@ try {
     throw new Error("#panel form styling rescoped past the search bar onto the settings form");
   }
   await byId.admin.fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const adminCells = body.querySelectorAll("td").map((cell) => cell.textContent);
+  if (!adminCells.includes("every member")) {
+    throw new Error("the admin view does not state the main agent's audience as every member");
+  }
   const freshButtons = byId.agents.querySelectorAll("button");
   await freshButtons[1].fire("click");
   await tabNamed("overview").fire("click");

@@ -152,7 +152,8 @@ async def _seed_workspace() -> tuple[UUID, UUID]:
 async def _seed_member(workspace_id: UUID, email: str, *, admin: bool = False) -> tuple[UUID, str]:
     """Seed a member and mint the signed bearer the gateway or `ufoctl init` would — the value the
     `ufo_session` cookie carries; the web surface resolves the workspace and the member email from
-    it. An admin reaches every agent; anyone else reaches only what the web audience grants."""
+    it. An admin reaches every agent; anyone else reaches the main agent plus the non-main agents
+    the web audience grants."""
     member_id = uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
@@ -380,36 +381,63 @@ async def test_unknown_session_token_is_rejected(web: tuple[AsyncClient, UUID, U
     assert missing.status_code == 401
 
 
-async def test_agents_outside_the_web_audience_are_not_found(
+async def test_ungranted_member_reaches_the_main_agent_and_nothing_else(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
-    """The strict audience contract: a member without a grant sees no agent — the index is empty
-    and chat, transcript, and a guessed identifier all fail closed as not-found, so changing a URL
-    proves nothing exists (#624 acceptance)."""
+    """Every member reaches the workspace's main agent — the portal answers the way every other
+    surface routes an unbound member — while a non-main agent without a grant fails closed as
+    not-found on every route, including a guessed identifier (#624 acceptance)."""
     client, workspace_id, agent_id = web
+    second_agent = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=second_agent,
+                workspace_id=workspace_id,
+                name="ops",
+                prompt="be operational",
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
     _member_id, token = await _seed_member(workspace_id, "outsider@example.com")
     cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
     index = await client.get("/surface/web/api/agents", headers=cookie)
     assert index.status_code == 200
     assert index.json() == {
         "member": {"email": "outsider@example.com", "admin": False},
-        "agents": [],
+        "agents": [
+            {"id": str(agent_id), "name": "assistant", "main": True, "model": "claude-opus-4-8"}
+        ],
     }
-    denied = await client.post(
+    reachable = await client.get(f"/surface/web/agents/{agent_id}/transcript", headers=cookie)
+    assert reachable.status_code == 200
+    assert reachable.json() == {"messages": []}
+    STREAM_GATE.arm()
+    admitted = await client.post(
         f"/surface/web/agents/{agent_id}/chat", content=b"hi", headers=cookie
     )
-    assert denied.status_code == 404
-    transcript = await client.get(f"/surface/web/agents/{agent_id}/transcript", headers=cookie)
+    assert admitted.status_code == 200
+    await _consume(client, token, admitted.json()["turn_id"])
+    for path in (f"agents/{second_agent}/chat", f"agents/{uuid4()}/chat"):
+        denied = await client.post(f"/surface/web/{path}", content=b"hi", headers=cookie)
+        assert denied.status_code == 404
+    transcript = await client.get(f"/surface/web/agents/{second_agent}/transcript", headers=cookie)
     assert transcript.status_code == 404
-    guessed = await client.post(
-        f"/surface/web/agents/{uuid4()}/chat", content=b"hi", headers=cookie
-    )
-    assert guessed.status_code == 404
     async with workspace_tx() as connection:
-        conversations = (
-            await connection.execute(sa.select(sa.func.count()).select_from(tables.conversation))
-        ).scalar_one()
-    assert conversations == 0
+        bound = (
+            (
+                await connection.execute(
+                    sa.select(tables.conversation.c.agent_id).where(
+                        tables.conversation.c.surface == "web"
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert bound == [agent_id]
 
 
 async def test_agents_index_filters_by_grant_and_widens_for_admins(
@@ -444,13 +472,15 @@ async def test_agents_index_filters_by_grant_and_widens_for_admins(
         "/surface/web/api/agents", headers={"cookie": f"{SESSION_COOKIE}={member_token}"}
     )
     assert member_view.json()["member"] == {"email": "member@example.com", "admin": False}
-    assert [a["id"] for a in member_view.json()["agents"]] == [str(second_agent)]
-    denied = await client.post(
-        f"/surface/web/agents/{agent_id}/chat",
-        content=b"hi",
+    assert [a["id"] for a in member_view.json()["agents"]] == [
+        str(agent_id),
+        str(second_agent),
+    ]
+    reachable = await client.get(
+        f"/surface/web/agents/{agent_id}/transcript",
         headers={"cookie": f"{SESSION_COOKIE}={member_token}"},
     )
-    assert denied.status_code == 404
+    assert reachable.status_code == 200
 
 
 async def _seed_connection(
@@ -500,8 +530,9 @@ async def test_connections_panel_holds_the_member_gate_and_the_wall(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
     """#624 acceptance, read-side: inside one agent, member M's private connector never appears in
-    member N's panel while agent-shared ones appear to both; another agent's grants are absent; an
-    out-of-audience agent is not-found; a workspace admin sees every edge."""
+    member N's panel while agent-shared ones appear to both — a shared edge naming its owner only
+    to an admin or the owner; another agent's grants are absent; an out-of-audience agent is
+    not-found; a workspace admin sees every edge."""
     client, workspace_id, agent_id = web
     second_agent = uuid4()
     async with workspace_tx() as connection:
@@ -519,21 +550,26 @@ async def test_connections_panel_holds_the_member_gate_and_the_wall(
     member_m, token_m = await _seed_member(workspace_id, "m@example.com")
     member_n, token_n = await _seed_member(workspace_id, "n@example.com")
     _admin, token_admin = await _seed_member(workspace_id, "boss@example.com", admin=True)
-    await _grant_web_access(workspace_id, agent_id, "m@example.com")
-    await _grant_web_access(workspace_id, agent_id, "n@example.com")
     await _seed_connection(workspace_id, agent_id, member_m, "github", shared=False)
     await _seed_connection(workspace_id, agent_id, member_n, "slack", shared=True)
     await _seed_connection(workspace_id, second_agent, member_m, "asana", shared=True)
     path = f"/surface/web/agents/{agent_id}/connections"
     m_view = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_m}"})
-    assert [(c["provider"], c["shared"]) for c in m_view.json()["connections"]] == [
-        ("github", False),
-        ("slack", True),
+    assert [
+        (c["provider"], c["shared"], c["owner_email"]) for c in m_view.json()["connections"]
+    ] == [
+        ("github", False, "m@example.com"),
+        ("slack", True, None),
     ]
     n_view = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_n}"})
-    assert [c["provider"] for c in n_view.json()["connections"]] == ["slack"]
+    assert [(c["provider"], c["owner_email"]) for c in n_view.json()["connections"]] == [
+        ("slack", "n@example.com")
+    ]
     admin_view = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_admin}"})
-    assert [c["provider"] for c in admin_view.json()["connections"]] == ["github", "slack"]
+    assert [(c["provider"], c["owner_email"]) for c in admin_view.json()["connections"]] == [
+        ("github", "m@example.com"),
+        ("slack", "n@example.com"),
+    ]
     other = await client.get(
         f"/surface/web/agents/{second_agent}/connections",
         headers={"cookie": f"{SESSION_COOKIE}={token_admin}"},
@@ -546,16 +582,29 @@ async def test_connections_panel_holds_the_member_gate_and_the_wall(
     assert walled.status_code == 404
 
 
-async def test_credentials_panel_is_not_found_without_a_grant(
+async def test_credentials_panel_is_not_found_on_a_walled_agent(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
-    """The audience gate holds for credentials like every panel: an authenticated member with no
-    grant cannot enumerate the deploy's declared BYOK slots — the agent, and everything under it,
-    is not-found."""
-    client, workspace_id, agent_id = web
+    """The audience gate holds for credentials like every panel: an out-of-audience agent's URL is
+    not-found. The payload itself is workspace-wide member-fillable slots — the same list chat's
+    `credential` object kind answers any member — so the wall here is the route, not the slots."""
+    client, workspace_id, _agent_id = web
+    walled_agent = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=walled_agent,
+                workspace_id=workspace_id,
+                name="ops",
+                prompt="be operational",
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
     _member, token = await _seed_member(workspace_id, "outsider@example.com")
     denied = await client.get(
-        f"/surface/web/agents/{agent_id}/credentials",
+        f"/surface/web/agents/{walled_agent}/credentials",
         headers={"cookie": f"{SESSION_COOKIE}={token}"},
     )
     assert denied.status_code == 404
@@ -567,7 +616,6 @@ async def test_credentials_panel_reports_slots_and_never_values(
 ) -> None:
     client, workspace_id, agent_id = web
     _member, token = await _seed_member(workspace_id, "m@example.com")
-    await _grant_web_access(workspace_id, agent_id, "m@example.com")
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.credential).values(
@@ -596,15 +644,17 @@ async def test_credentials_panel_reports_slots_and_never_values(
 
 
 async def test_sources_panel_gates_on_subject(web: tuple[AsyncClient, UUID, UUID]) -> None:
+    """A member sees shared sources plus their own registrations, a shared source names its owner
+    only to an admin or the owner (a source with no owner member names nobody), and a guessed
+    agent is not-found."""
     client, workspace_id, agent_id = web
     member_m, token_m = await _seed_member(workspace_id, "m@example.com")
-    _member_n, token_n = await _seed_member(workspace_id, "n@example.com")
-    await _grant_web_access(workspace_id, agent_id, "m@example.com")
-    await _grant_web_access(workspace_id, agent_id, "n@example.com")
+    member_n, token_n = await _seed_member(workspace_id, "n@example.com")
     async with workspace_tx() as connection:
         for backend, subject, owner in (
             ("folder", "shared", None),
             ("github", f"member:{member_m}", member_m),
+            ("notion", "shared", member_n),
         ):
             await connection.execute(
                 sa.insert(tables.source).values(
@@ -621,12 +671,23 @@ async def test_sources_panel_gates_on_subject(web: tuple[AsyncClient, UUID, UUID
             )
     path = f"/surface/web/agents/{agent_id}/sources"
     m_view = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_m}"})
-    assert [(s["backend"], s["shared"]) for s in m_view.json()["sources"]] == [
-        ("folder", True),
-        ("github", False),
+    assert [(s["backend"], s["shared"], s["owner_email"]) for s in m_view.json()["sources"]] == [
+        ("folder", True, None),
+        ("github", False, "m@example.com"),
+        ("notion", True, None),
     ]
     n_view = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_n}"})
-    assert [s["backend"] for s in n_view.json()["sources"]] == [("folder")]
+    assert [(s["backend"], s["owner_email"]) for s in n_view.json()["sources"]] == [
+        ("folder", None),
+        ("notion", "n@example.com"),
+    ]
+    _admin_id, token_admin = await _seed_member(workspace_id, "boss@example.com", admin=True)
+    admin_view = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_admin}"})
+    assert [(s["backend"], s["owner_email"]) for s in admin_view.json()["sources"]] == [
+        ("folder", None),
+        ("github", "m@example.com"),
+        ("notion", "n@example.com"),
+    ]
     guessed = await client.get(
         f"/surface/web/agents/{uuid4()}/sources",
         headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
@@ -640,7 +701,20 @@ async def test_revoking_web_access_ends_streaming_too(
     """A revocation closes every portal route, including the tail of a turn admitted while the
     grant was live — the member owns the turn, but its agent left their audience, so the stream
     is not-found like chat and transcript."""
-    client, workspace_id, agent_id = web
+    client, workspace_id, _agent_id = web
+    agent_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=agent_id,
+                workspace_id=workspace_id,
+                name="ops",
+                prompt="be operational",
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
     member_id, token = await _seed_member(workspace_id, "member@example.com")
     await _grant_web_access(workspace_id, agent_id, "member@example.com")
     conversation_id, turn_id = uuid4(), uuid4()
@@ -750,9 +824,8 @@ async def test_one_member_holds_a_conversation_per_agent(
 async def test_web_stream_privately_opens_the_speakers_connect_handoff(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
-    client, workspace_id, agent_id = web
+    client, workspace_id, _agent_id = web
     member_id, token = await _seed_member(workspace_id, "owner@example.com")
-    await _grant_web_access(workspace_id, agent_id, "owner@example.com")
     flow = ConnectFlow(
         providers={"github": ConnectProvider()},
         fernet=Fernet(Fernet.generate_key()),
@@ -826,8 +899,6 @@ async def test_two_web_members_get_isolated_subjects_and_cannot_cross(
     client, workspace_id, agent_id = web
     member_a, token_a = await _seed_member(workspace_id, "a@example.com")
     member_b, token_b = await _seed_member(workspace_id, "b@example.com")
-    await _grant_web_access(workspace_id, agent_id, "a@example.com")
-    await _grant_web_access(workspace_id, agent_id, "b@example.com")
     turn_a = (
         await client.post(
             f"/surface/web/agents/{agent_id}/chat",
@@ -925,8 +996,9 @@ async def test_admin_view_reads_the_workspace_shape(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
     """The administration read end to end: agents carry their policy, surface installations, and
-    the exact web-audience grants written through the extension's store; members and seat state
-    are `Seats.snapshot`'s answer."""
+    the exact web-audience grants written through the extension's store — the main agent carries
+    none, and its `main` flag is what the portal renders as "every member"; members and seat
+    state are `Seats.snapshot`'s answer."""
     client, workspace_id, _agent_id = web
     second_agent = uuid4()
     async with workspace_tx() as connection:
@@ -1012,10 +1084,9 @@ async def test_admin_view_reports_ungated_seats(
 async def test_a_non_admin_is_not_found_on_the_admin_view(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
-    client, workspace_id, agent_id = web
+    client, workspace_id, _agent_id = web
     await _seed_member(workspace_id, "admin@example.com", admin=True)
     _member_id, token = await _seed_member(workspace_id, "member@example.com")
-    await _grant_web_access(workspace_id, agent_id, "member@example.com")
     denied = await client.get(
         "/surface/web/api/admin", headers={"cookie": f"{SESSION_COOKIE}={token}"}
     )
@@ -1026,15 +1097,14 @@ async def test_a_non_admin_is_not_found_on_the_admin_view(
 async def test_a_non_admin_is_not_found_on_the_spend_view(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
-    """The rollup is the workspace's financial state — every agent by name and every member's burn —
-    so it answers an admin only. A member granted an agent reaches that agent's chat and still
-    cannot read the workspace's spend, and the page is not-found rather than refused so it never
+    """The rollup is the workspace's financial state — every agent by name and every member's
+    burn — so it answers an admin only. A member who reaches the main agent's chat still cannot
+    read the workspace's spend, and the page is not-found rather than refused so it never
     confirms what it holds."""
     client, workspace_id, agent_id = web
     admin_id, _admin_token = await _seed_member(workspace_id, "owner@example.com", admin=True)
     await _seed_priced_turn(workspace_id, agent_id, admin_id)
     _member_id, token = await _seed_member(workspace_id, "member@example.com")
-    await _grant_web_access(workspace_id, agent_id, "member@example.com")
     reached = await client.get(
         f"/surface/web/agents/{agent_id}/transcript",
         headers={"cookie": f"{SESSION_COOKIE}={token}"},
@@ -2003,7 +2073,6 @@ async def test_a_refused_intent_surfaces_the_refusal_and_applies_nothing(
     client, workspace_id, agent_id = web
     await _seed_member(workspace_id, "admin@example.com", admin=True)
     _member_id, token = await _seed_member(workspace_id, "member@example.com")
-    await _grant_web_access(workspace_id, agent_id, "member@example.com")
     before = await _agent_row(agent_id)
     submitted = await client.post(
         f"/surface/web/agents/{agent_id}/intents",
@@ -2027,10 +2096,26 @@ async def test_a_refused_intent_surfaces_the_refusal_and_applies_nothing(
 async def test_an_out_of_audience_agent_takes_no_intent(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
+    """A walled agent's intent lane is not-found like every portal route, writing nothing — while
+    the main agent, which every member reaches, admits the turn and answers with the object
+    verb's own refusal: the panel mutates exactly what chat would."""
     client, workspace_id, agent_id = web
+    walled_agent = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=walled_agent,
+                workspace_id=workspace_id,
+                name="ops",
+                prompt="be operational",
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
     _outsider, token = await _seed_member(workspace_id, "outsider@example.com")
     denied = await client.post(
-        f"/surface/web/agents/{agent_id}/intents",
+        f"/surface/web/agents/{walled_agent}/intents",
         json=INTENT_BODY,
         headers={"cookie": f"{SESSION_COOKIE}={token}"},
     )
@@ -2040,6 +2125,15 @@ async def test_an_out_of_audience_agent_takes_no_intent(
             await connection.execute(sa.select(sa.func.count()).select_from(tables.turn))
         ).scalar_one()
     assert turns == 0
+    refused = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json=INTENT_BODY,
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    assert refused.status_code == 200
+    outcome = refused.json()
+    assert outcome["applied"] is False
+    assert "admin" in outcome["message"]
 
 
 async def test_an_intent_naming_another_kind_is_refused_at_validation(
@@ -2088,11 +2182,26 @@ async def test_overview_projects_spec_schema_ceiling_and_admin_audience(
 ) -> None:
     """The settings panel's read: the agent row beside its prompt digest and bound surfaces, the
     deploy internet capability as the ceiling, the writable spec's own schema, and — admins only —
-    the web audience this extension grants."""
+    the web audience this extension grants (empty for the main agent, which no grant ever holds).
+    The read answers an admin or a granted member; the main-agent default alone is not-found,
+    because surfaces and the deploy ceiling reach a member through no chat projection."""
     client, workspace_id, agent_id = web
     _admin_id, admin_token = await _seed_member(workspace_id, "admin@example.com", admin=True)
     _member_id, member_token = await _seed_member(workspace_id, "member@example.com")
-    await _grant_web_access(workspace_id, agent_id, "member@example.com")
+    second_agent = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=second_agent,
+                workspace_id=workspace_id,
+                name="ops",
+                prompt="be operational",
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    await _grant_web_access(workspace_id, second_agent, "member@example.com")
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.surface_installation).values(
@@ -2119,12 +2228,23 @@ async def test_overview_projects_spec_schema_ceiling_and_admin_audience(
     assert data["models"] == ["auto", "claude-opus-4-8", "claude-sonnet-5"]
     assert data["spec"] == {"model": "claude-opus-4-8", "internet_access_allowed": True}
     assert set(data["spec_schema"]["properties"]) == {"model", "internet_access_allowed"}
-    assert data["audience"] == ["member@example.com"]
+    assert data["audience"] == []
+    granted_view = await client.get(
+        f"/surface/web/agents/{second_agent}/overview",
+        headers={"cookie": f"{SESSION_COOKIE}={admin_token}"},
+    )
+    assert granted_view.json()["audience"] == ["member@example.com"]
     member_view = await client.get(
+        f"/surface/web/agents/{second_agent}/overview",
+        headers={"cookie": f"{SESSION_COOKIE}={member_token}"},
+    )
+    assert member_view.status_code == 200
+    assert member_view.json()["audience"] is None
+    ungranted_main = await client.get(
         f"/surface/web/agents/{agent_id}/overview",
         headers={"cookie": f"{SESSION_COOKIE}={member_token}"},
     )
-    assert member_view.json()["audience"] is None
+    assert ungranted_main.status_code == 404
     stranger = await client.get(
         f"/surface/web/agents/{uuid4()}/overview",
         headers={"cookie": f"{SESSION_COOKIE}={admin_token}"},

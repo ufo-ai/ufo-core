@@ -397,24 +397,30 @@ allocation, delivery registration, and enqueue recovery remain one implementatio
 | Debug | `extensions/debugger` | live (hub tail) | gateway bearer whose email domain is `OPERATOR_EMAIL_DOMAIN`; `?ws=` re-scopes to any workspace | — (read-only; admits nothing) |
 | Memory explorer | `extensions/memory` | live (page + JSON read) | gateway bearer whose email domain is `OPERATOR_EMAIL_DOMAIN`; `?ws=` re-scopes to any workspace | — (read-only; admits nothing) |
 
-The web surface is the member portal and its own audience authority: it lists and admits exactly
-the agents whose web audience holds the signed-in member — grants kept in the web extension's own
-store, granted and revoked in chat (`grant_web_access`/`revoke_web_access`, admin-only, applying
-to the conversation's agent) — while a workspace admin reaches and administers every agent. An
-out-of-audience agent is not-found on every portal route, the workspace-shaped reads — the spend
-rollup and the administration view (agents with their policy, installations, and web-audience
-grants; members and seats) — answer a workspace admin only, and the signed bearer enters as a
-session cookie through one POST (the gateway's signed-in card), never a URL. Beside chat, each
-selected agent carries read projections shaped by the same contracts chat enforces: its scheduled
-tasks (creator sees content, an admin management metadata, others nothing), its loadable skills
-(the composition a turn loads), memory search under the viewer's own subjects with
-source-derived pages fenced by the selected agent's source grants (the same reader a turn's tools
-search under), and its rolling-window spend beside its agent-scoped caps. A panel mutation is a
-**prepared intent**: the form's structured intent is admitted as a turn on the member's one
-durable intent conversation with that agent and dispatched verbatim to the typed object verb — no
-model round, no fold into a live chat turn — so a submit applies exactly or returns the kind's
-refusal, the turn is the audit record, and the per-conversation partition runs a member's intents
-one at a time in order.
+The web surface is the member portal and its own audience authority: every member reaches the
+workspace's main agent — the agent every surface routes an unbound member to — and beyond it the
+portal lists and admits exactly the non-main agents whose web audience holds the signed-in
+member — grants kept in the web extension's own store, granted and revoked in chat
+(`grant_web_access`/`revoke_web_access`, admin-only, applying to the conversation's agent) —
+while a workspace admin reaches and administers every agent. An out-of-audience agent is
+not-found on every portal route, the workspace-shaped reads — the spend rollup and the
+administration view (agents with their policy, installations, and web-audience grants; members
+and seats) — answer a workspace admin only, and the signed bearer enters as a session cookie
+through one POST (the gateway's signed-in card), never a URL. Beside chat, each selected agent
+carries read projections shaped by the same contracts chat enforces: its scheduled tasks
+(creator sees content, an admin management metadata, others nothing), its loadable skills (the
+composition a turn loads), memory search under the viewer's own subjects with source-derived
+pages fenced by the selected agent's source grants (the same reader a turn's tools search
+under), its rolling-window spend beside its agent-scoped caps, and its configuration overview
+(prompt, spec, bound surfaces, the deploy's ceilings) — the last two carry the agent's whole
+ledger and the deploy's shape, which chat projects to no member, so each answers an admin or a
+member whose explicit grant holds the agent, never the main-agent default alone. A shared connection or source names its owner only to an admin or the owner —
+chat resolves no other member's email for a non-admin, so neither does a panel. A panel mutation
+is a **prepared intent**: the form's structured intent is admitted as a turn on the member's one
+durable intent conversation with that agent and dispatched verbatim to the typed object verb —
+no model round, no fold into a live chat turn — so a submit applies exactly or returns the
+kind's refusal, the turn is the audit record, and the per-conversation partition runs a member's
+intents one at a time in order.
 
 The debug and memory-explorer surfaces are the operator-audience surfaces — the `ufoctl`-verbs
 audience, not a member action. They share one operator web session (`ufo.sdk.operator`, one

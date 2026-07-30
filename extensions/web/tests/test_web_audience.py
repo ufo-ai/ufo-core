@@ -1,6 +1,6 @@
 """The web surface's audience authority: the grant/revoke chat verbs writing the extension's own
-store, and the resolution the portal reads — admins see every agent, everyone else exactly the
-agents granted to their email."""
+store, and the resolution the portal reads — admins see every agent, everyone else the main agent
+plus exactly the non-main agents granted to their email."""
 
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 import pytest
 import sqlalchemy as sa
 from ufo_ext_web.audience import (
+    AUDIENCE_PREFIX,
     WEB_ACCESS_TOOLS,
     WebAccessInput,
     granted_emails,
@@ -142,7 +143,20 @@ def _surface(workspace_id: UUID, tmp_path) -> SurfaceContext:
 async def test_granted_emails_groups_per_agent_and_sorts(db: None, tmp_path) -> None:
     """The administration view's read over the grant rows: grants group under their agent, emails
     sort within a group, and one agent's grants never bleed into another's."""
-    workspace_id, main_agent, second_agent = await _seed()
+    workspace_id, _main_agent, second_agent = await _seed()
+    third_agent = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=third_agent,
+                workspace_id=workspace_id,
+                name="research",
+                prompt="be thorough",
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
     admin_id = await _member(workspace_id, ADMIN_EMAIL, admin=True)
     await _member(workspace_id, MEMBER_EMAIL)
     await _member(workspace_id, "zed@example.com")
@@ -150,7 +164,7 @@ async def test_granted_emails_groups_per_agent_and_sorts(db: None, tmp_path) -> 
         for agent_id, email in (
             (second_agent, "zed@example.com"),
             (second_agent, MEMBER_EMAIL),
-            (main_agent, "zed@example.com"),
+            (third_agent, "zed@example.com"),
         ):
             granted = await GRANT.handler(
                 _tool_ctx(workspace_id, agent_id, admin_id),
@@ -160,7 +174,7 @@ async def test_granted_emails_groups_per_agent_and_sorts(db: None, tmp_path) -> 
         grants = await granted_emails(web_extension().store)
     assert grants == {
         second_agent: (MEMBER_EMAIL, "zed@example.com"),
-        main_agent: ("zed@example.com",),
+        third_agent: ("zed@example.com",),
     }
 
 
@@ -178,8 +192,8 @@ async def test_admin_grant_and_revoke_shape_the_member_audience(db: None, tmp_pa
         assert not granted.is_error
         audience = await web_audience(surface, extension, MEMBER_EMAIL)
         assert not audience.admin
-        assert [agent.id for agent in audience.agents] == [second_agent]
-        assert audience.allows(second_agent) and not audience.allows(main_agent)
+        assert [agent.id for agent in audience.agents] == [main_agent, second_agent]
+        assert audience.allows(second_agent) and audience.allows(main_agent)
         admin_view = await web_audience(surface, extension, ADMIN_EMAIL)
         assert admin_view.admin
         assert [agent.id for agent in admin_view.agents] == [main_agent, second_agent]
@@ -188,7 +202,42 @@ async def test_admin_grant_and_revoke_shape_the_member_audience(db: None, tmp_pa
             WebAccessInput(email=MEMBER_EMAIL, user_description="revoking access"),
         )
         assert not revoked.is_error
-        assert (await web_audience(surface, extension, MEMBER_EMAIL)).agents == ()
+        remaining = await web_audience(surface, extension, MEMBER_EMAIL)
+        assert [agent.id for agent in remaining.agents] == [main_agent]
+
+
+async def test_the_main_agent_needs_no_grant_and_revocation_only_clears_stale_rows(
+    db: None, tmp_path
+) -> None:
+    """The main agent answers every member: granting it is a stated no-op that writes no row, and
+    revoking it deletes any stale grant row without narrowing the audience — the default is by
+    construction, not a deletable grant — while the revoke reply says the member still reaches
+    the agent."""
+    workspace_id, main_agent, _second_agent = await _seed()
+    admin_id = await _member(workspace_id, ADMIN_EMAIL, admin=True)
+    await _member(workspace_id, MEMBER_EMAIL)
+    with ws(workspace_id):
+        extension = context_for(NAME, frozenset())
+        granted = await GRANT.handler(
+            _tool_ctx(workspace_id, main_agent, admin_id),
+            WebAccessInput(email=MEMBER_EMAIL, user_description="granting access"),
+        )
+        assert not granted.is_error
+        assert "already answers every member" in granted.content[0].text
+        assert await extension.store.list(AUDIENCE_PREFIX) == ()
+        await extension.store.put(
+            f"{AUDIENCE_PREFIX}{main_agent}/{MEMBER_EMAIL}", {"granted_by": str(admin_id)}
+        )
+        revoked = await REVOKE.handler(
+            _tool_ctx(workspace_id, main_agent, admin_id),
+            WebAccessInput(email=MEMBER_EMAIL, user_description="revoking access"),
+        )
+        assert not revoked.is_error
+        assert "still reaches it in the portal" in revoked.content[0].text
+        assert "no longer reaches" not in revoked.content[0].text
+        assert await extension.store.list(AUDIENCE_PREFIX) == ()
+        audience = await web_audience(_surface(workspace_id, tmp_path), extension, MEMBER_EMAIL)
+        assert main_agent in {agent.id for agent in audience.agents}
 
 
 async def test_non_admin_speaker_cannot_change_web_access(db: None, tmp_path) -> None:
@@ -203,7 +252,7 @@ async def test_non_admin_speaker_cannot_change_web_access(db: None, tmp_path) ->
         assert refused.is_error
         extension = context_for(NAME, frozenset())
         audience = await web_audience(_surface(workspace_id, tmp_path), extension, MEMBER_EMAIL)
-        assert audience.agents == ()
+        assert second_agent not in {agent.id for agent in audience.agents}
 
 
 async def test_grant_requires_an_existing_member(db: None, tmp_path) -> None:

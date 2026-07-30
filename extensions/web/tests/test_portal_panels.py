@@ -207,8 +207,6 @@ async def test_tasks_shape_by_viewer_and_wall_by_agent(portal) -> None:
     _admin_id, admin_headers = await _seed_member(workspace_id, ADMIN_EMAIL, admin=True)
     creator_id, creator_headers = await _seed_member(workspace_id, CREATOR_EMAIL)
     _other_id, other_headers = await _seed_member(workspace_id, OTHER_EMAIL)
-    for email in (CREATOR_EMAIL, OTHER_EMAIL):
-        await _grant(workspace_id, agent_a, email)
     with ws(workspace_id):
         conversation_id = await _seed_conversation(workspace_id, agent_a)
         with bind_agent(agent_a):
@@ -261,7 +259,6 @@ async def test_tasks_shape_by_viewer_and_wall_by_agent(portal) -> None:
 async def test_skills_list_the_agents_own_and_the_deploys(portal) -> None:
     client, workspace_id, agent_a, agent_b = portal
     _member_id, headers = await _seed_member(workspace_id, CREATOR_EMAIL)
-    await _grant(workspace_id, agent_a, CREATOR_EMAIL)
     await _grant(workspace_id, agent_b, CREATOR_EMAIL)
     skill_md = (
         b"---\nname: release-notes\ndescription: How this team writes release notes.\n---\n"
@@ -295,8 +292,6 @@ async def test_memory_search_stays_inside_the_viewers_subjects(portal, tmp_path:
     client, workspace_id, agent_a, _agent_b = portal
     member_a, headers_a = await _seed_member(workspace_id, CREATOR_EMAIL)
     member_b, _headers_b = await _seed_member(workspace_id, OTHER_EMAIL)
-    await _grant(workspace_id, agent_a, CREATOR_EMAIL)
-    await _grant(workspace_id, agent_a, OTHER_EMAIL)
     index = DefaultIndex(transaction=workspace_tx)
     embed = StubEmbed()
     with ws(workspace_id):
@@ -358,8 +353,6 @@ async def test_memory_panel_fences_source_pages_by_agent_grant(portal) -> None:
     client, workspace_id, agent_a, agent_b = portal
     member_id, headers = await _seed_member(workspace_id, CREATOR_EMAIL)
     _other_id, other_headers = await _seed_member(workspace_id, OTHER_EMAIL)
-    for email in (CREATOR_EMAIL, OTHER_EMAIL):
-        await _grant(workspace_id, agent_a, email)
     await _grant(workspace_id, agent_b, CREATOR_EMAIL)
     page_id, source_id = uuid4(), uuid4()
     minted_at = datetime(2026, 7, 1, 8, 30, tzinfo=UTC)
@@ -467,7 +460,6 @@ async def test_a_memoryless_deploy_never_claims_availability(
     monkeypatch.setenv("UFO_TOKEN_SECRET", TOKEN_SECRET)
     workspace_id, agent_a, _agent_b = await _seed_workspace()
     _member_id, headers = await _seed_member(workspace_id, CREATOR_EMAIL)
-    await _grant(workspace_id, agent_a, CREATOR_EMAIL)
     app = _mount_portal(tmp_path, with_memory=False)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="https://web") as client:
         blank = await client.get(f"/surface/web/agents/{agent_a}/memory", headers=headers)
@@ -479,13 +471,15 @@ async def test_a_memoryless_deploy_never_claims_availability(
 
 
 async def test_usage_sums_only_the_selected_agents_ledger(portal) -> None:
+    """The granted agent's whole ledger, windowed, beside its agent-scoped caps — and the wall:
+    the main agent answers the member's chat but not its ledger, because no grant holds it."""
     client, workspace_id, agent_a, agent_b = portal
     _member_id, headers = await _seed_member(workspace_id, CREATOR_EMAIL)
     _admin_id, admin_headers = await _seed_member(workspace_id, ADMIN_EMAIL, admin=True)
-    await _grant(workspace_id, agent_a, CREATOR_EMAIL)
+    await _grant(workspace_id, agent_b, CREATOR_EMAIL)
     async with workspace_tx() as connection:
-        conversation_a: UUID | None = None
-        for agent_id, tokens in ((agent_a, 1000), (agent_b, 7777)):
+        rich_conversation: UUID | None = None
+        for agent_id, tokens in ((agent_b, 1000), (agent_a, 7777)):
             conversation_id, turn_id = uuid4(), uuid4()
             await connection.execute(
                 sa.insert(tables.conversation).values(
@@ -519,8 +513,8 @@ async def test_usage_sums_only_the_selected_agents_ledger(portal) -> None:
                 "claude-opus-4-8",
                 Usage(input_tokens=tokens, output_tokens=2000),
             )
-            if agent_id == agent_a:
-                conversation_a = conversation_id
+            if agent_id == agent_b:
+                rich_conversation = conversation_id
                 await record_egress_request(connection, workspace_id, turn_id)
                 await record_sandbox_tokens(
                     connection,
@@ -529,7 +523,7 @@ async def test_usage_sums_only_the_selected_agents_ledger(portal) -> None:
                     "claude-opus-4-8",
                     Usage(input_tokens=100, output_tokens=100),
                 )
-        assert conversation_a is not None
+        assert rich_conversation is not None
         second_turn, mid_turn, stale_turn = uuid4(), uuid4(), uuid4()
         for seq, turn_id, usage in (
             (2, second_turn, Usage(input_tokens=500, output_tokens=1500)),
@@ -540,8 +534,8 @@ async def test_usage_sums_only_the_selected_agents_ledger(portal) -> None:
                 sa.insert(tables.turn).values(
                     id=turn_id,
                     workspace_id=workspace_id,
-                    conversation_id=conversation_a,
-                    agent_id=agent_a,
+                    conversation_id=rich_conversation,
+                    agent_id=agent_b,
                     seq=seq,
                     status="done",
                     inbound="x",
@@ -558,10 +552,10 @@ async def test_usage_sums_only_the_selected_agents_ledger(portal) -> None:
                 .where(tables.ledger.c.turn_id == turn_id)
             )
         for scope, subject, window in (
-            ("agent", agent_a, 86_400),
-            ("agent", agent_a, 3_600),
             ("agent", agent_b, 86_400),
-            ("member", agent_a, 86_400),
+            ("agent", agent_b, 3_600),
+            ("agent", agent_a, 86_400),
+            ("member", agent_b, 86_400),
             ("member", _member_id, 86_400),
             ("workspace", None, 86_400),
         ):
@@ -586,7 +580,7 @@ async def test_usage_sums_only_the_selected_agents_ledger(portal) -> None:
             (66, Usage(input_tokens=22, output_tokens=44)),
         )
     }
-    mine = await client.get(f"/surface/web/agents/{agent_a}/usage", headers=headers)
+    mine = await client.get(f"/surface/web/agents/{agent_b}/usage", headers=headers)
     report = mine.json()
     lines = {line["dimension"]: line for line in report["by_dimension"]}
     assert report["window_seconds"] == 86_400
@@ -599,7 +593,7 @@ async def test_usage_sums_only_the_selected_agents_ledger(portal) -> None:
     assert report["total_micro_usd"] == sum(line["priced_micro_usd"] for line in lines.values())
     hour = (
         await client.get(
-            f"/surface/web/agents/{agent_a}/usage?window_seconds=3600", headers=headers
+            f"/surface/web/agents/{agent_b}/usage?window_seconds=3600", headers=headers
         )
     ).json()
     hour_lines = {line["dimension"]: line for line in hour["by_dimension"]}
@@ -612,7 +606,7 @@ async def test_usage_sums_only_the_selected_agents_ledger(portal) -> None:
         {"window_seconds": 86_400, "limit_micro_usd": 5_000_000, "on_breach": "park"},
     ]
     assert report["workspace_spend"] is False
-    admin_report = await client.get(f"/surface/web/agents/{agent_a}/usage", headers=admin_headers)
+    admin_report = await client.get(f"/surface/web/agents/{agent_b}/usage", headers=admin_headers)
     assert admin_report.json()["workspace_spend"] is True
     async with workspace_tx() as connection:
         workspace_tokens = (
@@ -624,9 +618,11 @@ async def test_usage_sums_only_the_selected_agents_ledger(portal) -> None:
             )
         ).scalar_one()
     assert int(workspace_tokens) == 3000 + 2000 + 66 + 33 + 9777
+    walled = await client.get(f"/surface/web/agents/{agent_a}/usage", headers=headers)
+    assert walled.status_code == 404
     for bad_window in ("abc", "-5", "0", str(MAX_USAGE_WINDOW_SECONDS + 1), "9" * 30):
         refused = await client.get(
-            f"/surface/web/agents/{agent_a}/usage?window_seconds={bad_window}", headers=headers
+            f"/surface/web/agents/{agent_b}/usage?window_seconds={bad_window}", headers=headers
         )
         assert refused.status_code == 400
         rollup_refused = await client.get(
