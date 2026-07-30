@@ -16,6 +16,7 @@ from ufo_ext_web.audience import (
 )
 from ufo_ext_web.manifest import NAME
 from ufo_ext_web.surface import SURFACE_WEB
+from ufo_testsupport.surfaces import EMPTY_SKILL_REGISTRY, no_user_skills
 
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
@@ -129,6 +130,8 @@ def _surface(workspace_id: UUID, tmp_path) -> SurfaceContext:
         _credentials=None,
         _declared_slots=(),
         _artifact_token_secret="",
+        _skills=EMPTY_SKILL_REGISTRY,
+        _user_skills=no_user_skills,
         _public_base_url=None,
     )
 

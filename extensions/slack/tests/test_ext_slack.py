@@ -30,6 +30,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from starlette.requests import Request as StarletteRequest
 from ufo_ext_slack.manifest import manifest as slack_manifest
+from ufo_testsupport.surfaces import EMPTY_SKILL_REGISTRY, no_user_skills
 
 import ufo.surfaces.hub_tail as hub_tail
 from ufo.artifact_token import verify_artifact_token
@@ -383,6 +384,8 @@ async def _mount_transport(
         StubDbos(),
         ARTIFACT_SECRET,
         public_base_url,
+        skills=EMPTY_SKILL_REGISTRY,
+        user_skills=no_user_skills,
     )
     client = AsyncClient(transport=ASGITransport(app=app), base_url="http://slack")
     return app, client, blob
@@ -455,6 +458,8 @@ async def test_manifest_workspace_verifies_with_its_own_signing_slot(
         StubDbos(),
         ARTIFACT_SECRET,
         PUBLIC_BASE_URL,
+        skills=EMPTY_SKILL_REGISTRY,
+        user_skills=no_user_skills,
     )
     body = _event_body(
         type="app_mention", user="U1", channel="C1", ts="100.5", text=f"<@{BOT_USER_ID}> hi"
@@ -725,6 +730,8 @@ async def test_shared_handshake_echoes_without_binding_a_workspace(
         StubDbos(),
         ARTIFACT_SECRET,
         PUBLIC_BASE_URL,
+        skills=EMPTY_SKILL_REGISTRY,
+        user_skills=no_user_skills,
     )
     handshake = json.dumps({"type": "url_verification", "challenge": "shared-c"}).encode()
     event = _event_body(type="app_mention", user="U1", channel="C1", ts="1.0", text="hi")
@@ -788,6 +795,8 @@ async def test_oauth_callback_installs_the_workspace(db: None, tmp_path, monkeyp
         StubDbos(),
         ARTIFACT_SECRET,
         PUBLIC_BASE_URL,
+        skills=EMPTY_SKILL_REGISTRY,
+        user_skills=no_user_skills,
     )
     sealed = _install_state(store, workspace_id, member_id)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://slack") as client:
@@ -842,6 +851,8 @@ async def test_oauth_callback_declined_carries_no_workspace_and_reflects_no_erro
         StubDbos(),
         ARTIFACT_SECRET,
         PUBLIC_BASE_URL,
+        skills=EMPTY_SKILL_REGISTRY,
+        user_skills=no_user_skills,
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://slack") as client:
         response = await client.get(
@@ -874,6 +885,8 @@ async def test_oauth_callback_refuses_a_team_bound_elsewhere(
         StubDbos(),
         ARTIFACT_SECRET,
         PUBLIC_BASE_URL,
+        skills=EMPTY_SKILL_REGISTRY,
+        user_skills=no_user_skills,
     )
     sealed = _install_state(store, workspace_id, member_id)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://slack") as client:
@@ -904,6 +917,8 @@ async def test_oauth_callback_refuses_a_tampered_state(db: None, tmp_path, monke
         StubDbos(),
         ARTIFACT_SECRET,
         PUBLIC_BASE_URL,
+        skills=EMPTY_SKILL_REGISTRY,
+        user_skills=no_user_skills,
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://slack") as client:
         response = await client.get(
@@ -944,6 +959,8 @@ async def test_oauth_callback_reports_a_rejected_code(db: None, tmp_path, monkey
         StubDbos(),
         ARTIFACT_SECRET,
         PUBLIC_BASE_URL,
+        skills=EMPTY_SKILL_REGISTRY,
+        user_skills=no_user_skills,
     )
     sealed = _install_state(store, workspace_id, member_id)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://slack") as client:
@@ -976,6 +993,8 @@ async def test_shared_oauth_callback_binds_the_sealed_workspace(
         StubDbos(),
         ARTIFACT_SECRET,
         PUBLIC_BASE_URL,
+        skills=EMPTY_SKILL_REGISTRY,
+        user_skills=no_user_skills,
     )
     sealed = _install_state(store, workspace_id, member_id)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://fleet") as client:
@@ -2288,6 +2307,8 @@ async def test_shared_slack_rejects_an_unknown_installation_without_binding(
         StubDbos(),
         ARTIFACT_SECRET,
         PUBLIC_BASE_URL,
+        skills=EMPTY_SKILL_REGISTRY,
+        user_skills=no_user_skills,
     )
     body = _event_body(
         type="message",
@@ -2354,6 +2375,8 @@ async def test_shared_slack_routes_two_installations_without_crossing_state(
         StubDbos(),
         ARTIFACT_SECRET,
         PUBLIC_BASE_URL,
+        skills=EMPTY_SKILL_REGISTRY,
+        user_skills=no_user_skills,
     )
     body_a = json.dumps(
         {
@@ -4949,6 +4972,8 @@ async def test_shared_interactive_routes_by_registered_team(
         StubDbos(),
         ARTIFACT_SECRET,
         PUBLIC_BASE_URL,
+        skills=EMPTY_SKILL_REGISTRY,
+        user_skills=no_user_skills,
     )
     click = _click_body()
     unknown = urlencode(

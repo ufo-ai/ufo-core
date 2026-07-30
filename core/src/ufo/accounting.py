@@ -618,6 +618,25 @@ class SpendReport:
     by_price_digest: tuple[PriceDigestTotal, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class SpendCapLine:
+    window_seconds: int
+    limit_micro_usd: int
+    on_breach: OnBreach
+
+
+@dataclass(frozen=True, slots=True)
+class AgentSpendReport:
+    """One agent's slice of the same window: the total and per-dimension sums of ledger rows whose
+    turns ran as this agent, beside the agent-scoped caps that bound it — the member-visible
+    per-agent view, distinct from the workspace-wide `SpendReport` an admin reads."""
+
+    window_seconds: int
+    total_micro_usd: int
+    by_dimension: tuple[DimensionTotal, ...]
+    caps: tuple[SpendCapLine, ...]
+
+
 @dataclass(frozen=True)
 class SpendRollup:
     """Sum the workspace's ledger over a rolling window for the `ufoctl spend` CLI and the web
@@ -706,4 +725,54 @@ class SpendRollup:
         )
         return SpendReport(
             window_seconds, total, by_dimension, by_member, by_agent, by_price_digest
+        )
+
+    async def read_agent(
+        self, connection: AsyncConnection, agent_id: UUID, window_seconds: int
+    ) -> AgentSpendReport:
+        """One agent's rolling-window spend plus its agent-scoped caps. Ledger rows reach an agent
+        through their turn, so a turn-less row (`record_workspace_usage` writes them) drops out of
+        the agent view rather than misattribute — it still counts in the workspace rollup."""
+        cutoff = datetime.now(UTC) - timedelta(seconds=window_seconds)
+        window = (
+            (tables.ledger.c.workspace_id == self.workspace_id)
+            & (tables.ledger.c.created_at >= cutoff)
+            & (tables.turn.c.agent_id == agent_id)
+        )
+        joined = tables.ledger.join(tables.turn)
+        by_dimension = tuple(
+            DimensionTotal(row.dimension, int(row.amount), int(row.priced))
+            for row in await connection.execute(
+                sa.select(
+                    tables.ledger.c.dimension,
+                    sa.func.sum(tables.ledger.c.amount).label("amount"),
+                    sa.func.sum(tables.ledger.c.priced_micro_usd).label("priced"),
+                )
+                .select_from(joined)
+                .where(window)
+                .group_by(tables.ledger.c.dimension)
+                .order_by(tables.ledger.c.dimension)
+            )
+        )
+        caps = tuple(
+            SpendCapLine(int(row.window_seconds), int(row.limit_micro_usd), row.on_breach)
+            for row in await connection.execute(
+                sa.select(
+                    tables.spend_cap.c.window_seconds,
+                    tables.spend_cap.c.limit_micro_usd,
+                    tables.spend_cap.c.on_breach,
+                )
+                .where(
+                    tables.spend_cap.c.workspace_id == self.workspace_id,
+                    tables.spend_cap.c.scope == AGENT_SCOPE,
+                    tables.spend_cap.c.subject_id == agent_id,
+                )
+                .order_by(tables.spend_cap.c.window_seconds)
+            )
+        )
+        return AgentSpendReport(
+            window_seconds,
+            sum(line.priced_micro_usd for line in by_dimension),
+            by_dimension,
+            caps,
         )

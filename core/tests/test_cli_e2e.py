@@ -30,6 +30,7 @@ from dbos import DBOSClient
 from fastapi import FastAPI
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_ufo.manifest import manifest as ufo_manifest
+from ufo_testsupport.surfaces import EMPTY_SKILL_REGISTRY, no_user_skills
 from ufo_testsupport.tables import reset_workspace_data
 
 from ufo import cli
@@ -503,7 +504,17 @@ def chat_server(
     port = _free_port()
     app = FastAPI()
     _mount_shared_surfaces(
-        app, (ufo_manifest(),), None, blob, sandboxes, hub, dbos_client, "", None
+        app,
+        (ufo_manifest(),),
+        None,
+        blob,
+        sandboxes,
+        hub,
+        dbos_client,
+        "",
+        None,
+        skills=EMPTY_SKILL_REGISTRY,
+        user_skills=no_user_skills,
     )
     server = _ThreadedServer(app, port)
     server.start()

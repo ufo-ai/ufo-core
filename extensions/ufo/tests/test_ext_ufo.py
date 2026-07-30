@@ -25,6 +25,7 @@ from ufo_ext_ufo.surface import (
     resolve_workspace,
     stream_directives,
 )
+from ufo_testsupport.surfaces import EMPTY_SKILL_REGISTRY, no_user_skills
 
 from ufo.blob import FilesystemBlobStore
 from ufo.config import Config
@@ -427,7 +428,17 @@ async def ufo(
     workspace_id = await _seed_workspace()
     app = FastAPI()
     _mount_shared_surfaces(
-        app, (ufo_manifest(),), None, blob, sandboxes, hub, dbos_client, "", None
+        app,
+        (ufo_manifest(),),
+        None,
+        blob,
+        sandboxes,
+        hub,
+        dbos_client,
+        "",
+        None,
+        skills=EMPTY_SKILL_REGISTRY,
+        user_skills=no_user_skills,
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://ufo") as client:
         yield client, workspace_id
@@ -447,7 +458,17 @@ async def shared_ufo(
     dbos_client = DBOSClient(system_database_url=config.database.system_url)
     app = FastAPI()
     _mount_shared_surfaces(
-        app, (ufo_manifest(),), None, blob, sandboxes, hub, dbos_client, "", None
+        app,
+        (ufo_manifest(),),
+        None,
+        blob,
+        sandboxes,
+        hub,
+        dbos_client,
+        "",
+        None,
+        skills=EMPTY_SKILL_REGISTRY,
+        user_skills=no_user_skills,
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://fleet") as client:
         yield client
@@ -705,7 +726,17 @@ async def test_secret_fulfillment_lands_in_the_store_never_the_transcript(
     )
     app = FastAPI()
     _mount_shared_surfaces(
-        app, (ufo_manifest(),), store, blob, sandboxes, hub, dbos_client, "", None
+        app,
+        (ufo_manifest(),),
+        store,
+        blob,
+        sandboxes,
+        hub,
+        dbos_client,
+        "",
+        None,
+        skills=EMPTY_SKILL_REGISTRY,
+        user_skills=no_user_skills,
     )
     token = _mint(SECRET, workspace_id, "owner@example.com", _future())
     foreign = _mint(SECRET, workspace_id, "late@example.com", _future())

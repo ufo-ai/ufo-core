@@ -1,8 +1,9 @@
 """The web portal on the core surface seam, in its live mode: the authenticated shell around the
 member's agents — an agent switcher over the surface's own audience, per-agent chat with
 cookie-authenticated turn admission, an SSE tail of each turn's live frames, read projections
-(agents, transcripts, connections, credential slots, sources), and — for workspace admins — the
-administration view and the spend view.
+(agents, transcripts, scheduled tasks, skills, memory search, per-agent usage, connections,
+credential slots, sources), and — for workspace admins — the administration view and the spend
+view.
 
 The `ufo_session` cookie carries the signed HMAC member bearer the gateway or `ufoctl init` mints
 (the `ufo.sdk.bearer` codec over `{ws, email, exp}`), landed by the one POST that opens a session
@@ -19,12 +20,14 @@ import html
 import json
 import re
 from collections.abc import AsyncIterator
+from datetime import datetime
 from pathlib import Path
 from uuid import UUID
 
 from ufo.sdk.accounting import MICRO_USD_PER_USD, SpendReport, SubjectTotal
-from ufo.sdk.audience import conversation_audience
+from ufo.sdk.audience import audience_subjects, conversation_audience
 from ufo.sdk.bearer import verify_token, workspace_claim
+from ufo.sdk.context import SourceReader
 from ufo.sdk.http import (
     HTMLResponse,
     JSONResponse,
@@ -44,7 +47,9 @@ SURFACE_WEB = "web"
 SESSION_COOKIE = "ufo_session"
 TOKEN_FIELD = "token"
 MAX_INBOUND_CHARS = 200_000
+MAX_MEMORY_QUERY_CHARS = 500
 SPEND_WINDOW_DEFAULT_SECONDS = 86_400
+MAX_USAGE_WINDOW_SECONDS = 31_536_000
 PORTAL_PATH = "/surface/web"
 PORTAL_FILE = Path(__file__).parent / "static" / "portal.html"
 PORTAL_HTML = PORTAL_FILE.read_text()
@@ -216,10 +221,12 @@ async def transcript(ctx: SurfaceContext, request: Request) -> Response:
     return JSONResponse({"messages": rendered})
 
 
-async def connections(ctx: SurfaceContext, request: Request) -> Response:
-    """The selected agent's connector accounts this member may see — their own private grants plus
-    agent-shared ones, every edge for a workspace admin. The member gate is the query's, the wall
-    is the agent id, and the panel only renders what the read returned."""
+async def _panel_gate(
+    ctx: SurfaceContext, request: Request
+) -> tuple[UUID, WebAudience, UUID] | Response:
+    """The shared entry of every per-agent panel read: the session's member and audience, plus the
+    path's agent — 404 when the agent is outside the viewer's web audience, like every portal
+    route."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
@@ -227,6 +234,153 @@ async def connections(ctx: SurfaceContext, request: Request) -> Response:
     agent_id = _agent_param(request)
     if agent_id is None or not audience.allows(agent_id):
         return Response("no such agent", status_code=404)
+    return member_id, audience, agent_id
+
+
+def _iso(moment: datetime | None) -> str | None:
+    return None if moment is None else moment.isoformat()
+
+
+def _window_param(request: Request) -> int | Response:
+    """The `window_seconds` a spend read covers, or the 400 a bad value earns — non-integer,
+    non-positive, or beyond the year that bounds what these views present."""
+    raw = request.query_params.get("window_seconds", str(SPEND_WINDOW_DEFAULT_SECONDS))
+    try:
+        window = int(raw)
+    except ValueError:
+        return Response("window_seconds must be a whole number of seconds", status_code=400)
+    if not 0 < window <= MAX_USAGE_WINDOW_SECONDS:
+        return Response(
+            f"window_seconds must be between 1 and {MAX_USAGE_WINDOW_SECONDS}", status_code=400
+        )
+    return window
+
+
+async def tasks(ctx: SurfaceContext, request: Request) -> Response:
+    """The selected agent's recurring tasks, shaped for the viewer in the core read: creators see
+    their tasks whole, an admin sees every task's management metadata with private content elided,
+    anyone else sees none of it."""
+    gated = await _panel_gate(ctx, request)
+    if isinstance(gated, Response):
+        return gated
+    member_id, audience, agent_id = gated
+    listed = await ctx.list_agent_tasks(agent_id, member_id, audience.admin)
+    return JSONResponse(
+        {
+            "tasks": [
+                {
+                    "name": task.name,
+                    "schedule": task.schedule,
+                    "prompt": task.prompt,
+                    "description": task.description,
+                    "created_by": task.created_by_email,
+                    "next_run_at": _iso(task.next_run_at),
+                    "last_run_at": _iso(task.last_run_at),
+                    "expires_at": _iso(task.expires_at),
+                }
+                for task in listed
+            ]
+        }
+    )
+
+
+async def skills(ctx: SurfaceContext, request: Request) -> Response:
+    """The selected agent's loadable skills: its own member-authored ones and the deploy's shared
+    set."""
+    gated = await _panel_gate(ctx, request)
+    if isinstance(gated, Response):
+        return gated
+    _member_id, _audience, agent_id = gated
+    listed = await ctx.agent_skills(agent_id)
+    return JSONResponse(
+        {
+            "skills": [
+                {"name": skill.name, "description": skill.description, "origin": skill.origin}
+                for skill in listed
+            ]
+        }
+    )
+
+
+async def memory(ctx: SurfaceContext, request: Request) -> Response:
+    """Search the memory the viewer may read — their own subject plus shared, the same atoms
+    recall uses, so another member's private items can never match. The selected agent gates
+    source-derived hits: the reader carries the agent whose source grants fence page results,
+    exactly as a turn's tools search, so the panel and the agent answer identically; member-written
+    items stay subject-scoped."""
+    gated = await _panel_gate(ctx, request)
+    if isinstance(gated, Response):
+        return gated
+    member_id, _audience, agent_id = gated
+    query = request.query_params.get("q", "").strip()
+    if not query or not ctx.memory_available:
+        return JSONResponse({"available": ctx.memory_available, "matches": []})
+    reader = SourceReader(
+        agent_id=agent_id,
+        requesting_member_id=member_id,
+        subjects=audience_subjects(conversation_audience(member_id)),
+    )
+    found = await ctx.search_memory(reader, (query[:MAX_MEMORY_QUERY_CHARS],))
+    return JSONResponse(
+        {
+            "available": True,
+            "matches": [
+                {
+                    "kind": match.kind,
+                    "text": match.text,
+                    "ref": None if match.ref is None else f"{match.ref.kind}/{match.ref.name}",
+                    "created_at": _iso(match.created_at),
+                }
+                for match in found
+            ],
+        }
+    )
+
+
+async def usage(ctx: SurfaceContext, request: Request) -> Response:
+    """The selected agent's rolling-window spend and its agent-scoped caps — visible to every
+    member of the agent's audience; the workspace-wide rollup stays the admin's spend page."""
+    gated = await _panel_gate(ctx, request)
+    if isinstance(gated, Response):
+        return gated
+    _member_id, audience, agent_id = gated
+    window = _window_param(request)
+    if isinstance(window, Response):
+        return window
+    report = await ctx.agent_spend(agent_id, window)
+    return JSONResponse(
+        {
+            "window_seconds": report.window_seconds,
+            "total_micro_usd": report.total_micro_usd,
+            "by_dimension": [
+                {
+                    "dimension": line.dimension,
+                    "amount": line.amount,
+                    "priced_micro_usd": line.priced_micro_usd,
+                }
+                for line in report.by_dimension
+            ],
+            "caps": [
+                {
+                    "window_seconds": cap.window_seconds,
+                    "limit_micro_usd": cap.limit_micro_usd,
+                    "on_breach": cap.on_breach,
+                }
+                for cap in report.caps
+            ],
+            "workspace_spend": audience.admin,
+        }
+    )
+
+
+async def connections(ctx: SurfaceContext, request: Request) -> Response:
+    """The selected agent's connector accounts this member may see — their own private grants plus
+    agent-shared ones, every edge for a workspace admin. The member gate is the query's, the wall
+    is the agent id, and the panel only renders what the read returned."""
+    gated = await _panel_gate(ctx, request)
+    if isinstance(gated, Response):
+        return gated
+    member_id, audience, agent_id = gated
     listed = await ctx.list_agent_connections(agent_id, member_id, admin=audience.admin)
     return JSONResponse({"connections": [entry.model_dump(mode="json") for entry in listed]})
 
@@ -236,13 +390,10 @@ async def credentials(ctx: SurfaceContext, request: Request) -> Response:
     `member_filled=False` seals the `credential` object kind still lists (deploy machinery, not a
     member's key). The route rides the agent path only for the panel's navigation, and the
     audience gate keeps an out-of-audience agent not-found here too."""
-    resolved = await _audience_for(ctx, request)
-    if isinstance(resolved, Response):
-        return resolved
-    _member_id, _email, audience = resolved
-    agent_id = _agent_param(request)
-    if agent_id is None or not audience.allows(agent_id):
-        return Response("no such agent", status_code=404)
+    gated = await _panel_gate(ctx, request)
+    if isinstance(gated, Response):
+        return gated
+    _member_id, _audience, _agent_id = gated
     listed = await ctx.list_credential_slots()
     return JSONResponse({"slots": [entry.model_dump(mode="json") for entry in listed]})
 
@@ -251,13 +402,10 @@ async def sources(ctx: SurfaceContext, request: Request) -> Response:
     """The live source bindings this member may see — their own registrations plus shared ones,
     all of them for a workspace admin. A member-subject source's indexed pages stay gated to that
     member; the panel shows the subject so that stays legible."""
-    resolved = await _audience_for(ctx, request)
-    if isinstance(resolved, Response):
-        return resolved
-    member_id, _email, audience = resolved
-    agent_id = _agent_param(request)
-    if agent_id is None or not audience.allows(agent_id):
-        return Response("no such agent", status_code=404)
+    gated = await _panel_gate(ctx, request)
+    if isinstance(gated, Response):
+        return gated
+    member_id, audience, _agent_id = gated
     listed = await ctx.list_sources(member_id, admin=audience.admin)
     return JSONResponse({"sources": [entry.model_dump(mode="json") for entry in listed]})
 
@@ -360,7 +508,9 @@ async def spend(ctx: SurfaceContext, request: Request) -> Response:
     _member_id, _email, audience = resolved
     if not audience.admin:
         return Response("no such page", status_code=404)
-    window = int(request.query_params.get("window_seconds", SPEND_WINDOW_DEFAULT_SECONDS))
+    window = _window_param(request)
+    if isinstance(window, Response):
+        return window
     report = await ctx.spend_rollup(window)
     return HTMLResponse(_spend_page(report))
 
@@ -427,9 +577,13 @@ ROUTES = (
     SurfaceRoute(method="GET", path="api/admin", handler=admin_index),
     SurfaceRoute(method="POST", path="agents/{agent_id}/chat", handler=chat),
     SurfaceRoute(method="GET", path="agents/{agent_id}/transcript", handler=transcript),
+    SurfaceRoute(method="GET", path="agents/{agent_id}/tasks", handler=tasks),
     SurfaceRoute(method="GET", path="agents/{agent_id}/connections", handler=connections),
     SurfaceRoute(method="GET", path="agents/{agent_id}/credentials", handler=credentials),
     SurfaceRoute(method="GET", path="agents/{agent_id}/sources", handler=sources),
+    SurfaceRoute(method="GET", path="agents/{agent_id}/skills", handler=skills),
+    SurfaceRoute(method="GET", path="agents/{agent_id}/memory", handler=memory),
+    SurfaceRoute(method="GET", path="agents/{agent_id}/usage", handler=usage),
     SurfaceRoute(method="GET", path="turns/{turn_id}/stream", handler=stream),
     SurfaceRoute(method="GET", path="spend", handler=spend),
 )

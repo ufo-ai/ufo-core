@@ -9,6 +9,7 @@ from fastapi import FastAPI, HTTPException
 from httpx import ASGITransport, AsyncClient
 from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse
+from ufo_testsupport.surfaces import EMPTY_SKILL_REGISTRY, no_user_skills
 
 from ufo.blob import blob_store_for
 from ufo.config import BlobConfig
@@ -85,6 +86,8 @@ def _app(tmp_path: Path) -> FastAPI:
         NoAdmission(),
         "",
         None,
+        skills=EMPTY_SKILL_REGISTRY,
+        user_skills=no_user_skills,
     )
     return app
 
@@ -113,6 +116,8 @@ def _challenge_app(tmp_path: Path) -> FastAPI:
         NoAdmission(),
         "",
         None,
+        skills=EMPTY_SKILL_REGISTRY,
+        user_skills=no_user_skills,
     )
     return app
 

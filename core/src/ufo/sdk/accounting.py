@@ -8,7 +8,13 @@ from ufo.accounting import (
     MICRO_USD_PER_USD as MICRO_USD_PER_USD,
 )
 from ufo.accounting import (
+    AgentSpendReport as AgentSpendReport,
+)
+from ufo.accounting import (
     DimensionTotal as DimensionTotal,
+)
+from ufo.accounting import (
+    SpendCapLine as SpendCapLine,
 )
 from ufo.accounting import (
     SpendReport as SpendReport,

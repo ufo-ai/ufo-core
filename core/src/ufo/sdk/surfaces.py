@@ -40,6 +40,12 @@ from ufo.ext.surface import (
     LedgerEntry as LedgerEntry,
 )
 from ufo.ext.surface import (
+    PortalSkill as PortalSkill,
+)
+from ufo.ext.surface import (
+    PortalTask as PortalTask,
+)
+from ufo.ext.surface import (
     SharedArtifact as SharedArtifact,
 )
 from ufo.ext.surface import (

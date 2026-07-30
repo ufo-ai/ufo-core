@@ -32,7 +32,7 @@ import json
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Literal, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
@@ -42,7 +42,8 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from starlette.requests import Request
 from starlette.responses import Response
 
-from ufo.accounting import SpendReport, SpendRollup
+from ufo.accounting import AgentSpendReport, SpendReport, SpendRollup
+from ufo.agent_scope import agent as bind_agent
 from ufo.artifact_token import (
     ARTIFACT_DOWNLOAD_PATH,
     ARTIFACT_TOKEN_TTL_SECONDS,
@@ -73,6 +74,7 @@ from ufo.sandbox.conversation import (
     ConversationSandbox,
     WorkspaceFile,
 )
+from ufo.scheduling import ScheduleStore
 from ufo.schema import tables
 from ufo.schema.records import (
     WRITEBACK_CLAIMED,
@@ -89,6 +91,7 @@ from ufo.schema.records import (
     TurnContext,
 )
 from ufo.seats import create_member
+from ufo.skills.runtime import RuntimeSkill, SkillRegistry
 from ufo.subjects import SHARED_SUBJECT
 from ufo.transcript import (
     CompactionRecord,
@@ -98,6 +101,10 @@ from ufo.transcript import (
     transcript_key,
 )
 from ufo.workspace import ws, ws_current
+
+if TYPE_CHECKING:
+    from ufo.ext.context import SourceReader
+    from ufo.memory import MemoryMatch, MemorySearch
 
 OPERATOR_EMAIL_DOMAIN = "metalcraft.ai"
 
@@ -212,6 +219,32 @@ class InstallationSummary(BaseModel):
 
     surface: str
     agent_id: UUID
+
+
+@dataclass(frozen=True)
+class PortalTask:
+    """One recurring task as the portal lists it, already shaped for its viewer: `prompt` and
+    `description` are None when the viewer may not read the task's content. A value object — the
+    web surface renders it and nothing persists it."""
+
+    name: str
+    schedule: str
+    prompt: str | None
+    description: str | None
+    created_by_email: str | None
+    next_run_at: datetime
+    last_run_at: datetime | None
+    expires_at: datetime | None
+
+
+@dataclass(frozen=True)
+class PortalSkill:
+    """One skill as the portal lists it: a member-authored skill of the selected agent
+    (`origin="member"`) or a deploy-provided loadable skill (`origin="deploy"`)."""
+
+    name: str
+    description: str
+    origin: Literal["member", "deploy"]
 
 
 class ConnectionView(BaseModel):
@@ -380,8 +413,10 @@ class SurfaceContext:
     surface (the distinction from a scoped extension context, which never admits a turn or asserts
     identity). A **durable** surface (Slack) delivers through the poller and `artifact_link`; a
     **live** surface (web; core's CLI is the built-in twin) delivers by `tail`-ing the turn's
-    frames off the hub in its own SSE route, reading
-    `turn_owner` to gate a tail and `spend_rollup` for a spend view. Each calls only what it needs.
+    frames off the hub in its own SSE route, reading `turn_owner` to gate a tail, `spend_rollup`
+    for a workspace spend view, and the per-agent projections a portal renders — `list_agent_tasks`,
+    `agent_skills`, `agent_spend`, and `memory_available`/`search_memory`. Each calls only what it
+    needs.
     `credential` reads the surface workspace's slots in-process (never through the sandbox proxy); a
     surface declaring no slots holds no store and never calls it."""
 
@@ -394,7 +429,10 @@ class SurfaceContext:
     _credentials: CredentialStore | None
     _artifact_token_secret: str
     _public_base_url: str | None
+    _skills: SkillRegistry
+    _user_skills: Callable[[], Awaitable[tuple[RuntimeSkill, ...]]]
     _declared_slots: tuple[DeclaredSlot, ...]
+    _memory: "MemorySearch | None" = None
 
     async def credential(self, slot: str) -> str:
         if self._credentials is None:
@@ -858,6 +896,108 @@ class SurfaceContext:
             )
             for row in rows
         )
+
+    async def list_agent_tasks(
+        self, agent_id: UUID, viewer_member_id: UUID, viewer_is_admin: bool
+    ) -> tuple[PortalTask, ...]:
+        """The selected agent's recurring tasks, shaped for the viewer by the same contract the
+        scheduled_task object kind enforces in chat (`MemberOwnedObjects._visible` +
+        `_content_visible`): a task is visible to its creator or a workspace admin — a creatorless
+        task only to an admin — and its content, prompt and description, only to its creator, or
+        to an admin when it has no creator. Everyone else sees nothing."""
+        with bind_agent(agent_id):
+            tasks = await ScheduleStore().list()
+        visible = tuple(
+            task
+            for task in tasks
+            if viewer_is_admin
+            or (
+                task.created_by_member_id is not None
+                and task.created_by_member_id == viewer_member_id
+            )
+        )
+        creators = {task.created_by_member_id for task in visible} - {None}
+        emails: dict[UUID, str] = {}
+        if creators:
+            async with workspace_tx() as connection:
+                emails = {
+                    row.id: row.email
+                    for row in await connection.execute(
+                        sa.select(tables.member.c.id, tables.member.c.email).where(
+                            tables.member.c.workspace_id == self.workspace_id,
+                            tables.member.c.id.in_(creators),
+                        )
+                    )
+                }
+
+        shaped: list[PortalTask] = []
+        for task in visible:
+            content = (
+                task.created_by_member_id is None or task.created_by_member_id == viewer_member_id
+            )
+            shaped.append(
+                PortalTask(
+                    name=task.name,
+                    schedule=task.schedule,
+                    prompt=task.prompt if content else None,
+                    description=task.description if content else None,
+                    created_by_email=(
+                        None
+                        if task.created_by_member_id is None
+                        else emails.get(task.created_by_member_id)
+                    ),
+                    next_run_at=task.next_run_at,
+                    last_run_at=task.last_run_at,
+                    expires_at=task.expires_at,
+                )
+            )
+        return tuple(shaped)
+
+    async def agent_skills(self, agent_id: UUID) -> tuple[PortalSkill, ...]:
+        """The selected agent's loadable skills — exactly the composition a turn loads (the deploy
+        registry merged with the agent's saved skills, base winning on a name collision) as the
+        system prompt's `{{skill_index}}` renders it: top-level skills in registration order,
+        member-authored ones appended last. One answer to "what skills does this agent load", never
+        a second derivation."""
+        with bind_agent(agent_id):
+            merged = self._skills.merged_with(await self._user_skills())
+        deploy_names = frozenset(self._skills.by_name)
+        return tuple(
+            PortalSkill(
+                name=skill.name,
+                description=skill.description,
+                origin="deploy" if skill.name in deploy_names else "member",
+            )
+            for skill in merged.by_name.values()
+            if skill.parent is None
+        )
+
+    @property
+    def memory_available(self) -> bool:
+        """Whether this deploy resolved a memory-search provider — the surface's render gate for
+        its memory view, answered the same on every path so a provider-less deploy never claims
+        otherwise."""
+        return self._memory is not None
+
+    async def search_memory(
+        self, reader: "SourceReader", queries: tuple[str, ...]
+    ) -> "tuple[MemoryMatch, ...]":
+        """Search the memory a reader may see: the selected agent, the requesting member, and
+        exactly the readable subjects — the same reader shape a turn's tools search under, so
+        source-gated pages answer the portal and the agent identically. Gates on
+        `memory_available` first: searching a deploy that resolved no provider is a programming
+        error, not an empty result."""
+        if self._memory is None:
+            raise RuntimeError("no memory-search provider is installed — gate on memory_available")
+        return await self._memory.search(reader, queries)
+
+    async def agent_spend(self, agent_id: UUID, window_seconds: int) -> AgentSpendReport:
+        """One agent's rolling-window spend and its agent-scoped caps — the member-visible slice,
+        distinct from the workspace-wide `spend_rollup` an admin reads."""
+        async with workspace_tx() as connection:
+            return await SpendRollup(workspace_id=self.workspace_id).read_agent(
+                connection, agent_id, window_seconds
+            )
 
     async def list_agent_connections(
         self, agent_id: UUID, member_id: UUID, *, admin: bool

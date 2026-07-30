@@ -292,7 +292,24 @@ async def test_applied_task_writes_durable_row_bound_to_the_turn(db: None) -> No
     assert tasks[0].agent_id == agent_id
     assert fetched["spec"]["schedule"] == DAILY_9AM
     assert fetched["status"]["next_run_at"] == tasks[0].next_run_at.isoformat()
+    assert fetched["status"]["next_run_at"].endswith("+00:00")
     assert fetched["status"]["last_run_at"] is None
+    assert fetched["created_at"].endswith("+00:00")
+    assert fetched["updated_at"].endswith("+00:00")
+    fired_at = datetime(2026, 12, 25, 9, 0, tzinfo=UTC)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.scheduled_task)
+            .values(last_run_at=fired_at)
+            .where(tables.scheduled_task.c.id == tasks[0].id)
+        )
+    with ws(workspace_id), agent(agent_id):
+        refetched = yaml.safe_load(
+            await _dispatch(
+                _object_tool("object_get"), ctx, kind=SCHEDULED_TASK_KIND, name="investor-replies"
+            )
+        )
+    assert refetched["status"]["last_run_at"] == fired_at.isoformat()
 
 
 async def test_applied_task_requires_a_member_requester(db: None) -> None:

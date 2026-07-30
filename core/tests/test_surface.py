@@ -16,6 +16,7 @@ import lz4.frame
 import pytest
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
+from ufo_testsupport.surfaces import EMPTY_SKILL_REGISTRY, no_user_skills
 
 import ufo.ext.surface as surface_module
 from ufo.audience import (
@@ -213,6 +214,8 @@ def _context(
         _credentials=store,
         _declared_slots=(),
         _artifact_token_secret="artifact-token-secret",
+        _skills=EMPTY_SKILL_REGISTRY,
+        _user_skills=no_user_skills,
         _public_base_url="https://ufo.example.test",
     )
 

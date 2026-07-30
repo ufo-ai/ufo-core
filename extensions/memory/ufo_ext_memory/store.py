@@ -795,7 +795,7 @@ class MemoryStore:
                 subject=by_id[UUID(hit.owner_id)]["subject"],
                 text=hit.text,
                 score=hit.score,
-                created_at=by_id[UUID(hit.owner_id)]["created_at"],
+                created_at=_aware(by_id[UUID(hit.owner_id)]["created_at"]),
             )
             for hit in fused
             if UUID(hit.owner_id) in by_id
@@ -959,7 +959,7 @@ class MemoryStore:
                 score=hit.score,
                 memory_kind=by_id[UUID(hit.owner_id)]["memory_kind"],
                 confidence=by_id[UUID(hit.owner_id)]["confidence"],
-                created_at=by_id[UUID(hit.owner_id)]["created_at"],
+                created_at=_aware(by_id[UUID(hit.owner_id)]["created_at"]),
                 as_of=by_id[UUID(hit.owner_id)]["as_of"],
             )
             for hit in fused

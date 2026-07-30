@@ -3,7 +3,7 @@
 import asyncio
 import os
 import threading
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from urllib.parse import urlparse
@@ -43,6 +43,7 @@ from ufo.ext.loader import (
     load_manifests,
     memory_search,
     skill_registry,
+    turn_runtime_skills,
     turn_subagent_grants,
     turn_subagents,
     validate_ext_tools,
@@ -76,7 +77,7 @@ from ufo.jobs import (
 from ufo.loop.profiles import CORE_SUBAGENT_PROFILES
 from ufo.loop.queue import Runtime, init_runtime
 from ufo.loop.subagents import SubagentRegistry
-from ufo.memory import DEFAULT_MEMORY_SEARCH_PROVIDER
+from ufo.memory import DEFAULT_MEMORY_SEARCH_PROVIDER, MemorySearch
 from ufo.models.catalog_skill import model_catalog_skill
 from ufo.models.pricing import Pricing
 from ufo.models.registry import model_registry
@@ -99,6 +100,7 @@ from ufo.sandbox.proxy.server import EgressProxy, PerAgentRules, generate_ca
 from ufo.sandbox.session import EGRESS_CA_CERT_ENV, Carrier, ProxyEndpoint, RunTokenCodec
 from ufo.schema.records import DBOS_APP_NAME, DBOS_APP_VERSION, DBOS_MAX_EXECUTOR_THREADS
 from ufo.search import SearchProvider
+from ufo.skills.runtime import RuntimeSkill, SkillRegistry
 from ufo.sources.sync import (
     FOLDER_BACKEND,
     CorePageFeed,
@@ -169,6 +171,7 @@ def run() -> None:
     embed = embed_backend(manifests, config.memory.embed_backend, credentials)
     index = index_backend(manifests, config.memory.index_backend, credentials)
     memory = memory_search(manifests, credentials, index, embed)
+    skills = skill_registry(manifests, (model_catalog_skill(registry),))
     connectors = _connector_registry(config, manifests, credentials)
     run_tokens = RunTokenCodec.from_env()
     runtime = Runtime(
@@ -194,7 +197,7 @@ def run() -> None:
         subagent_grants=turn_subagent_grants(manifests),
         manifests=manifests,
         registry=registry,
-        skills=skill_registry(manifests, (model_catalog_skill(registry),)),
+        skills=skills,
         credentials=credentials,
         index=index,
         embed=embed,
@@ -260,6 +263,9 @@ def run() -> None:
         dbos_client,
         artifact_secret,
         config.connect.public_base_url,
+        skills=skills,
+        user_skills=lambda: turn_runtime_skills(manifests, credentials, index, embed),
+        memory=memory,
     )
     _assert_no_reserved_routes(app)
     log("serve.started", host=config.serve.host, port=config.serve.port)
@@ -767,6 +773,10 @@ def _mount_shared_surfaces(
     dbos_client: DBOSClient,
     artifact_secret: str,
     public_base_url: str | None,
+    *,
+    skills: SkillRegistry,
+    user_skills: "Callable[[], Awaitable[tuple[RuntimeSkill, ...]]]",
+    memory: MemorySearch | None = None,
 ) -> None:
     """Install the fleet-wide `WorkspaceScopeBoundary` and mount each shared-fleet-capable
     surface's routes, resolving the workspace per request instead of pinning one at boot:
@@ -798,7 +808,10 @@ def _mount_shared_surfaces(
             _credentials=credentials,
             _artifact_token_secret=artifact_secret,
             _public_base_url=public_base_url,
+            _skills=skills,
+            _user_skills=user_skills,
             _declared_slots=slots,
+            _memory=memory,
         )
 
     for manifest in manifests:

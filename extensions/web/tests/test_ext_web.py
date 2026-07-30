@@ -18,6 +18,7 @@ from ufo_ext_web.audience import AUDIENCE_PREFIX, web_extension
 from ufo_ext_web.manifest import manifest as web_manifest
 from ufo_ext_web.surface import PORTAL_HTML, SESSION_COOKIE, _sse
 from ufo_testsupport.stream_gate import GatingHub, StreamGate, release_when_running
+from ufo_testsupport.surfaces import EMPTY_SKILL_REGISTRY, no_user_skills
 
 from ufo.accounting import record_egress_request, record_turn_usage
 from ufo.bearer import mint_token
@@ -227,7 +228,17 @@ async def web(
         ),
     )
     _mount_shared_surfaces(
-        app, (web_manifest(), slotted), None, blob, sandboxes, hub, dbos_client, "", None
+        app,
+        (web_manifest(), slotted),
+        None,
+        blob,
+        sandboxes,
+        hub,
+        dbos_client,
+        "",
+        None,
+        skills=EMPTY_SKILL_REGISTRY,
+        user_skills=no_user_skills,
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="https://web") as client:
         yield client, workspace_id, agent_id

@@ -91,10 +91,20 @@ _COLUMNS = (
 )
 
 
-def _utc(value: datetime | None) -> datetime | None:
-    if value is None or value.tzinfo is not None:
-        return value
-    return value.replace(tzinfo=UTC)
+def _utc(value: datetime) -> datetime:
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+def _utc_opt(value: datetime | None) -> datetime | None:
+    return None if value is None else _utc(value)
+
+
+def firing_key(task_id: UUID, next_run_at: datetime) -> str:
+    """The idempotency key one scheduled fire admits under, canonical UTC-aware — the ONE
+    derivation for both writers and matchers, so a naive row read and the store's aware task can
+    never disagree about the same fire (the pause-takeover matcher rebuilds this key from a raw
+    row and must land on the byte-identical string `invoke_scheduled` stored)."""
+    return f"{task_id}:{_utc(next_run_at).astimezone(UTC).isoformat()}"
 
 
 def _claim_available(now: datetime) -> sa.ColumnElement[bool]:
@@ -112,6 +122,8 @@ def _expired(now: datetime) -> sa.ColumnElement[bool]:
 
 
 def _task(row: sa.RowMapping) -> ScheduledTask:
+    """The one builder every `ScheduleStore` read funnels through — SQLite hands naive datetimes
+    back, so every timing mark leaves here aware UTC and no consumer re-normalizes."""
     return ScheduledTask(
         id=row["id"],
         conversation_id=row["conversation_id"],
@@ -121,14 +133,14 @@ def _task(row: sa.RowMapping) -> ScheduledTask:
         schedule=row["schedule"],
         prompt=row["prompt"],
         description=row["description"],
-        next_run_at=row["next_run_at"],
-        last_run_at=row["last_run_at"],
-        expires_at=_utc(row["expires_at"]),
+        next_run_at=_utc(row["next_run_at"]),
+        last_run_at=_utc_opt(row["last_run_at"]),
+        expires_at=_utc_opt(row["expires_at"]),
         origin_seq=row["origin_seq"],
         resume_turn_id=row["resume_turn_id"],
         claim_id=row["claimed_by"],
-        created_at=row["created_at"],
-        updated_at=row["updated_at"],
+        created_at=_utc(row["created_at"]),
+        updated_at=_utc(row["updated_at"]),
     )
 
 
@@ -477,8 +489,8 @@ class ScheduleStore:
             origin_seq=origin_seq,
             resume_turn_id=resume_turn_id,
             claim_id=None,
-            created_at=row.created_at,
-            updated_at=row.updated_at,
+            created_at=_utc(row.created_at),
+            updated_at=_utc(row.updated_at),
         )
 
     async def cancel(self, expected: ScheduledTask) -> None:
@@ -666,9 +678,9 @@ class ScheduleStore:
             return None
         terminal = row["terminal"]
         return TaskInspection(
-            next_run_at=row["next_run_at"],
-            last_run_at=row["last_run_at"],
-            expires_at=_utc(row["expires_at"]),
+            next_run_at=_utc(row["next_run_at"]),
+            last_run_at=_utc_opt(row["last_run_at"]),
+            expires_at=_utc_opt(row["expires_at"]),
             last_turn_id=row["last_turn_id"],
             last_turn_status=row["turn_status"],
             last_response=(terminal or {}).get("text") if terminal else None,

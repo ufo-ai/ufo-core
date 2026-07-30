@@ -7,8 +7,7 @@
 <style>
   :root { color-scheme: light dark; }
   * { box-sizing: border-box; }
-  [hidden] { display: none; }
-  #log[hidden], #composer[hidden] { display: none; }
+  [hidden] { display: none !important; }
   body { margin: 0; font: 15px/1.5 system-ui, sans-serif; background: Canvas; color: CanvasText;
          height: 100vh; display: grid; grid-template-columns: 240px 1fr; }
   button { font: inherit; cursor: pointer; }
@@ -48,12 +47,17 @@
   #tabs button[aria-selected="true"] { border-bottom-color: CanvasText; opacity: 1;
                                        font-weight: 600; }
   #panel { flex: 1; overflow-y: auto; padding: 16px; }
-  #panel table { border-collapse: collapse; width: 100%; }
+  #panel table { border-collapse: collapse; width: 100%; margin: 0 0 20px; }
   #panel th, #panel td { text-align: left; padding: 6px 10px;
                          border-bottom: 1px solid color-mix(in srgb, CanvasText 12%, transparent);
                          vertical-align: baseline; }
   #panel th { font-size: 12px; opacity: 0.6; font-weight: 600; }
   #panel .empty { display: block; margin: 40px auto; }
+  #panel h2 { font-size: 13px; opacity: 0.7; margin: 14px 0 4px; }
+  #panel form { display: flex; gap: 8px; margin-bottom: 12px; }
+  #panel form input { flex: 1; padding: 8px 10px; border-radius: 8px; font: inherit;
+                      border: 1px solid color-mix(in srgb, CanvasText 25%, transparent);
+                      background: Field; color: FieldText; }
   #log { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column;
          gap: 10px; }
   .bubble { max-width: 70ch; padding: 8px 12px; border-radius: 12px; white-space: pre-wrap;
@@ -132,6 +136,7 @@
 
 <script>
 const BASE = '/surface/web';
+const MAX_STREAM_RETRIES = 5;
 const nav = document.querySelector('nav');
 const main = document.querySelector('main');
 const list = document.getElementById('agents');
@@ -149,7 +154,7 @@ const chats = new Map();
 function chatState(id) {
   let state = chats.get(id);
   if (!state) {
-    state = { messages: null, busy: false };
+    state = { messages: null, busy: false, live: null };
     chats.set(id, state);
   }
   return state;
@@ -164,6 +169,14 @@ function bubble(cls, text) {
   return el;
 }
 
+function errorLine(text) {
+  const line = document.createElement('div');
+  line.className = 'meta';
+  line.textContent = text;
+  log.appendChild(line);
+  log.scrollTop = log.scrollHeight;
+}
+
 function emptyState(text) {
   const el = document.createElement('div');
   el.className = 'empty';
@@ -171,9 +184,23 @@ function emptyState(text) {
   log.appendChild(el);
 }
 
+const TABS = ['chat', 'tasks', 'connections', 'credentials', 'sources', 'skills', 'memory',
+  'usage'];
+let tab = 'chat';
+let panelLoad = 0;
+
+function hashState() {
+  const match = location.hash.match(/^#\/agents\/([0-9a-f-]{36})(?:\/(\w+))?$/);
+  if (!match) return { agent: null, tab: 'chat' };
+  return {
+    agent: agents.find((agent) => agent.id === match[1]) || null,
+    tab: TABS.includes(match[2]) ? match[2] : 'chat',
+  };
+}
+
 function cell(text) {
   const el = document.createElement('td');
-  el.textContent = text;
+  el.textContent = text == null ? '\u2014' : text;
   return el;
 }
 
@@ -198,6 +225,7 @@ function table(headers, rows) {
 
 async function showAdmin() {
   selected = null;
+  panelLoad += 1;
   location.hash = '#/admin';
   for (const item of list.children) item.firstChild.setAttribute('aria-current', 'false');
   const view = document.createElement('div');
@@ -248,11 +276,6 @@ function restoreChatPane() {
   main.replaceChildren(head, tabs, log, panel, composer);
 }
 
-function agentFromHash() {
-  const match = location.hash.match(/^#\/agents\/([0-9a-f-]{36})$/);
-  return match && agents.find((agent) => agent.id === match[1]);
-}
-
 function renderSidebar(member) {
   document.getElementById('member-email').textContent =
     member.email + (member.admin ? ' · admin' : '');
@@ -287,7 +310,15 @@ function renderChat(agent) {
   log.replaceChildren();
   if (state.messages === null) return;
   for (const message of state.messages) {
-    bubble(message.role === 'user' ? 'me' : 'agent', message.text);
+    if (message.role === 'error') {
+      errorLine(message.text);
+    } else {
+      bubble(message.role === 'user' ? 'me' : 'agent', message.text);
+    }
+  }
+  if (state.live) {
+    log.appendChild(state.live);
+    log.scrollTop = log.scrollHeight;
   }
   if (!state.messages.length && !state.busy) {
     emptyState('No conversation with ' + agent.name + ' yet.');
@@ -310,6 +341,15 @@ const PANELS = {
                      entry.filled ? 'filled' : 'empty'],
     empty: 'No credential slots are declared.',
   },
+  tasks: {
+    key: 'tasks',
+    columns: ['name', 'schedule', 'task', 'creator', 'next run', 'last run', 'expires'],
+    row: (entry) => [entry.name, entry.schedule,
+                     entry.description || entry.prompt || 'private member task',
+                     entry.created_by || '—', day(entry.next_run_at) || '—',
+                     day(entry.last_run_at) || '—', day(entry.expires_at) || '—'],
+    empty: 'No scheduled tasks for this agent.',
+  },
   sources: {
     key: 'sources',
     columns: ['backend', 'owner', 'access', 'errors', 'next sync'],
@@ -320,11 +360,9 @@ const PANELS = {
     empty: 'No sources are registered.',
   },
 };
-let tab = 'chat';
-let panelLoad = 0;
 
 function renderTabs() {
-  tabs.replaceChildren(...['chat', 'connections', 'credentials', 'sources'].map((name) => {
+  tabs.replaceChildren(...TABS.map((name) => {
     const button = document.createElement('button');
     button.type = 'button';
     button.setAttribute('role', 'tab');
@@ -335,10 +373,147 @@ function renderTabs() {
   }));
 }
 
-async function selectTab(name) {
+function fail(load, text) {
+  if (load !== panelLoad) return;
+  const failed = document.createElement('span');
+  failed.className = 'empty';
+  failed.textContent = text;
+  panel.appendChild(failed);
+}
+
+function panelEmpty(text) {
+  const el = document.createElement('span');
+  el.className = 'empty';
+  el.textContent = text;
+  panel.appendChild(el);
+}
+
+function day(iso) {
+  return iso == null ? null : iso.slice(0, 16).replace('T', ' ');
+}
+
+async function renderSkills(agent, load) {
+  let listed;
+  try {
+    const res = await fetch(BASE + '/agents/' + agent.id + '/skills',
+      { credentials: 'same-origin' });
+    if (load !== panelLoad) return;
+    if (!res.ok) { panelEmpty('Error ' + res.status + ' — reload to retry.'); return; }
+    listed = (await res.json()).skills;
+  } catch (err) {
+    fail(load, 'Network error — try again.');
+    return;
+  }
+  if (load !== panelLoad) return;
+  const custom = listed.filter((skill) => skill.origin === 'member');
+  const deploy = listed.filter((skill) => skill.origin === 'deploy');
+  for (const [title, group, empty] of [
+    ["This agent's skills", custom, 'No member-authored skills for ' + agent.name + '.'],
+    ['Deploy skills', deploy, 'No deploy skills.'],
+  ]) {
+    const heading = document.createElement('h2');
+    heading.textContent = title;
+    panel.appendChild(heading);
+    if (!group.length) { panelEmpty(empty); continue; }
+    panel.appendChild(table(
+      ['name', 'description'],
+      group.map((skill) => row(skill.name, skill.description))
+    ));
+  }
+}
+
+async function renderMemory(agent, load, query) {
+  const form = document.createElement('form');
+  const search = document.createElement('input');
+  search.placeholder = 'Search memory…';
+  search.value = query || '';
+  const go = document.createElement('button');
+  go.type = 'submit';
+  go.className = 'send';
+  go.textContent = 'Search';
+  form.append(search, go);
+  form.addEventListener('submit', (event) => {
+    event.preventDefault();
+    if (search.value.trim()) selectTab('memory', search.value.trim());
+  });
+  panel.appendChild(form);
+  if (!query) return;
+  let payload;
+  try {
+    const res = await fetch(
+      BASE + '/agents/' + agent.id + '/memory?q=' + encodeURIComponent(query),
+      { credentials: 'same-origin' });
+    if (load !== panelLoad) return;
+    if (!res.ok) { panelEmpty('Error ' + res.status + ' — reload to retry.'); return; }
+    payload = await res.json();
+  } catch (err) {
+    fail(load, 'Network error — try again.');
+    return;
+  }
+  if (load !== panelLoad) return;
+  if (!payload.available) { panelEmpty('This deploy has no memory extension.'); return; }
+  if (!payload.matches.length) { panelEmpty('No matches.'); return; }
+  panel.appendChild(table(
+    ['memory', 'kind', 'ref', 'date'],
+    payload.matches.map((match) => row(match.text, match.kind, match.ref, day(match.created_at)))
+  ));
+}
+
+async function renderUsage(agent, load) {
+  let report;
+  try {
+    const res = await fetch(BASE + '/agents/' + agent.id + '/usage',
+      { credentials: 'same-origin' });
+    if (load !== panelLoad) return;
+    if (!res.ok) { panelEmpty('Error ' + res.status + ' — reload to retry.'); return; }
+    report = await res.json();
+  } catch (err) {
+    fail(load, 'Network error — try again.');
+    return;
+  }
+  if (load !== panelLoad) return;
+  const heading = document.createElement('h2');
+  heading.textContent = 'Last ' + (report.window_seconds / 3600) + 'h · $'
+    + (report.total_micro_usd / 1e6).toFixed(6);
+  panel.appendChild(heading);
+  if (!report.by_dimension.length) panelEmpty('No spend in window for ' + agent.name + '.');
+  else {
+    panel.appendChild(table(
+      ['dimension', 'units', 'cost'],
+      report.by_dimension.map((line) => row(
+        line.dimension,
+        line.amount.toLocaleString(),
+        '$' + (line.priced_micro_usd / 1e6).toFixed(6)
+      ))
+    ));
+  }
+  const caps = document.createElement('h2');
+  caps.textContent = 'Caps for this agent';
+  panel.appendChild(caps);
+  if (!report.caps.length) panelEmpty('No agent-scoped caps.');
+  else {
+    panel.appendChild(table(
+      ['window', 'limit', 'on breach'],
+      report.caps.map((cap) => row(
+        (cap.window_seconds / 3600) + 'h',
+        '$' + (cap.limit_micro_usd / 1e6).toFixed(2),
+        cap.on_breach
+      ))
+    ));
+  }
+  if (report.workspace_spend) {
+    const link = document.createElement('a');
+    link.href = BASE + '/spend';
+    link.textContent = 'workspace totals';
+    panel.appendChild(link);
+  }
+}
+
+async function selectTab(name, memoryQuery) {
   tab = name;
   const load = ++panelLoad;
   renderTabs();
+  location.hash = '#/agents/' + selected.id + (name === 'chat' ? '' : '/' + name);
   const chatting = name === 'chat';
   log.hidden = !chatting;
   composer.hidden = !chatting;
@@ -348,79 +523,59 @@ async function selectTab(name) {
     return;
   }
   const agent = selected;
-  const spec = PANELS[name];
   panel.replaceChildren();
-  function fail(text) {
-    const failed = document.createElement('span');
-    failed.className = 'empty';
-    failed.textContent = text;
-    panel.appendChild(failed);
-  }
+  if (name === 'skills') { await renderSkills(agent, load); return; }
+  if (name === 'memory') { await renderMemory(agent, load, memoryQuery); return; }
+  if (name === 'usage') { await renderUsage(agent, load); return; }
+  const spec = PANELS[name];
   let entries;
   try {
     const res = await fetch(BASE + '/agents/' + agent.id + '/' + name,
       { credentials: 'same-origin' });
     if (load !== panelLoad) return;
     if (!res.ok) {
-      fail('Error ' + res.status + ' — reload to retry.');
+      fail(load, 'Error ' + res.status + ' — reload to retry.');
       return;
     }
     entries = (await res.json())[spec.key];
   } catch (err) {
-    if (load === panelLoad) fail('Network error — try again.');
+    fail(load, 'Network error — try again.');
     return;
   }
   if (load !== panelLoad) return;
   if (!entries.length) {
-    const none = document.createElement('span');
-    none.className = 'empty';
-    none.textContent = spec.empty;
-    panel.appendChild(none);
+    panelEmpty(spec.empty);
     return;
   }
-  const table = document.createElement('table');
-  const header = table.createTHead().insertRow();
-  for (const column of spec.columns) {
-    const cell = document.createElement('th');
-    cell.textContent = column;
-    header.appendChild(cell);
-  }
-  const body = table.createTBody();
-  for (const entry of entries) {
-    const row = body.insertRow();
-    for (const value of spec.row(entry)) row.insertCell().textContent = value;
-  }
-  panel.appendChild(table);
+  panel.appendChild(table(spec.columns, entries.map((entry) => row(...spec.row(entry)))));
 }
 
-async function select(agent) {
+async function select(agent, name, memoryQuery) {
   if (!head.isConnected) restoreChatPane();
   selected = agent;
-  location.hash = '#/agents/' + agent.id;
   for (const item of list.children) {
     item.firstChild.setAttribute('aria-current', item.dataset.id === agent.id);
   }
   head.replaceChildren();
-  const name = document.createElement('h1');
-  name.textContent = agent.name;
+  const title = document.createElement('h1');
+  title.textContent = agent.name;
   const model = document.createElement('span');
   model.className = 'model mono';
   model.textContent = agent.model;
-  head.append(name, model);
+  head.append(title, model);
   const state = chatState(agent.id);
   renderChat(agent);
   syncComposer();
-  selectTab('chat');
-  if (state.messages === null) {
+  await selectTab(name || 'chat', memoryQuery);
+  if (tab === 'chat' && state.messages === null) {
     const res = await fetch(BASE + '/agents/' + agent.id + '/transcript',
       { credentials: 'same-origin' });
     const loaded = res.ok ? (await res.json()).messages : [];
     if (state.messages === null) state.messages = loaded;
-    if (selected !== agent) return;
+    if (selected !== agent || tab !== 'chat') return;
     renderChat(agent);
     syncComposer();
   }
-  input.focus();
 }
 
 composer.addEventListener('submit', (event) => {
@@ -437,16 +592,18 @@ composer.addEventListener('submit', (event) => {
   state.messages.push({ role: 'user', text });
   bubble('me', text);
   const reply = bubble('agent', '');
+  state.live = reply;
   run(agent, state, text, reply);
 });
 
 async function run(agent, state, text, reply) {
   function finish() {
     state.busy = false;
+    state.live = null;
     if (selected === agent) {
       if (!reply.isConnected) renderChat(agent);
+      if (tab === 'chat') input.focus();
       syncComposer();
-      input.focus();
     }
   }
   let res;
@@ -454,12 +611,14 @@ async function run(agent, state, text, reply) {
     res = await fetch(BASE + '/agents/' + agent.id + '/chat',
       { method: 'POST', body: text, credentials: 'same-origin' });
   } catch (err) {
-    reply.textContent = 'Network error — try again.';
+    state.messages.push({ role: 'error', text: 'Network error — try again.' });
+    reply.remove();
     finish();
     return;
   }
   if (!res.ok) {
-    reply.textContent = 'Error ' + res.status + ' — try again.';
+    state.messages.push({ role: 'error', text: 'Error ' + res.status + ' — try again.' });
+    reply.remove();
     finish();
     return;
   }
@@ -468,6 +627,7 @@ async function run(agent, state, text, reply) {
   const streamedText = document.createTextNode('');
   reply.appendChild(streamedText);
   let meter = null;
+  let stalled = 0;
   let activity = null;
   function note(text) {
     if (!activity) {
@@ -487,6 +647,7 @@ async function run(agent, state, text, reply) {
     source.close();
     finish();
   }
+  source.addEventListener('open', () => { stalled = 0; });
   source.onmessage = (event) => {
     streamedText.textContent += JSON.parse(event.data).text;
     log.scrollTop = log.scrollHeight;
@@ -543,7 +704,14 @@ async function run(agent, state, text, reply) {
     record();
     close();
   });
-  source.onerror = () => close();
+  source.onerror = () => {
+    stalled += 1;
+    if (source.readyState !== EventSource.CLOSED && stalled < MAX_STREAM_RETRIES) return;
+    record();
+    state.messages.push({ role: 'error', text: 'Connection lost — reload to see the reply.' });
+    reply.remove();
+    close();
+  };
 }
 
 async function boot() {
@@ -579,7 +747,8 @@ async function boot() {
     showAdmin();
     return;
   }
-  select(agentFromHash() || agents[0]);
+  const opening = hashState();
+  select(opening.agent || agents[0], opening.tab);
 }
 
 boot();

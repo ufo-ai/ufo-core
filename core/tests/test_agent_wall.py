@@ -11,6 +11,7 @@ import pytest
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
 from pydantic import BaseModel
+from ufo_testsupport.surfaces import EMPTY_SKILL_REGISTRY, no_user_skills
 
 from ufo.audience import conversation_audience
 from ufo.blob import FilesystemBlobStore
@@ -84,6 +85,8 @@ def _context(workspace_id: UUID, surface: str) -> SurfaceContext:
         _credentials=CredentialStore(fernet=Fernet(Fernet.generate_key())),
         _declared_slots=(),
         _artifact_token_secret="",
+        _skills=EMPTY_SKILL_REGISTRY,
+        _user_skills=no_user_skills,
         _public_base_url=None,
     )
 

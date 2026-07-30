@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 from cryptography.fernet import Fernet
 from fastapi import FastAPI
+from ufo_testsupport.surfaces import EMPTY_SKILL_REGISTRY, no_user_skills
 
 from ufo.audience import conversation_audience
 from ufo.blob import FilesystemBlobStore
@@ -244,6 +245,8 @@ def _check_surfaces(manifest: Manifest, store: CredentialStore, tmp_path: Path) 
         _StubDbos(),
         "",
         None,
+        skills=EMPTY_SKILL_REGISTRY,
+        user_skills=no_user_skills,
     )
     mounted = {route.path for route in app.routes}
     for spec in manifest.surfaces:

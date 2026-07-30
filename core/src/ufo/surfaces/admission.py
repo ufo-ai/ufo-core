@@ -48,7 +48,7 @@ from ufo.accounting import ALLOW, SpendEvaluator
 from ufo.db import workspace_tx
 from ufo.ext.surface import Admitted
 from ufo.o11y import log
-from ufo.scheduling import ONE_TIME_SCHEDULE, ScheduledTask
+from ufo.scheduling import ONE_TIME_SCHEDULE, ScheduledTask, firing_key
 from ufo.schema import tables
 from ufo.schema.records import (
     DBOS_APP_VERSION,
@@ -140,11 +140,8 @@ class Admission:
             raise ValueError("an unclaimed scheduled task cannot be invoked")
         if task.schedule == ONE_TIME_SCHEDULE and runtime_instruction is not None:
             raise ValueError("a one-time workflow pause cannot carry a runtime instruction")
-        scheduled_fire = task.next_run_at
-        if scheduled_fire.tzinfo is None:
-            scheduled_fire = scheduled_fire.replace(tzinfo=UTC)
-        scheduled_fire_iso = scheduled_fire.astimezone(UTC).isoformat().replace("+00:00", "Z")
-        firing_key = f"{task.id}:{task.next_run_at.isoformat()}"
+        scheduled_fire_iso = task.next_run_at.astimezone(UTC).isoformat().replace("+00:00", "Z")
+        fire_key = firing_key(task.id, task.next_run_at)
         inbound = task.prompt
         if task.schedule != ONE_TIME_SCHEDULE:
             inbound = (
@@ -166,7 +163,7 @@ class Admission:
                 task.agent_id,
                 inbound,
                 None,
-                firing_key,
+                fire_key,
                 None,
                 None,
                 task,
@@ -367,7 +364,7 @@ class Admission:
                     )
                 ).one_or_none()
                 if timer_turn is not None:
-                    timer_key = f"{timer_turn.pause_id}:{timer_turn.pause_due_at.isoformat()}"
+                    timer_key = firing_key(timer_turn.pause_id, timer_turn.pause_due_at)
                     if timer_turn.idempotency_key == timer_key and (
                         await Seats(workspace_id).admits(connection, speaker_member_id)
                         if speaker_member_id is not None

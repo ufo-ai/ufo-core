@@ -349,7 +349,9 @@ across all speakers — **identity** resolution (an external id → member + con
 linking a `surface_identity` on first contact — `join_member` also creates the member when a
 channel-verified email matches the workspace's own domain, the first member's vetted email domain,
 so only that initial member onboards through provisioning — and `adopt_identity` to span a member across
-surfaces), plus `tail`/`turn_owner`/`spend_rollup` for a live view. An extension registers a
+surfaces), plus the reads a live view serves: `tail`/`turn_owner`, the admin-shaped
+`spend_rollup`, and the per-agent projections — `list_agent_tasks`, `agent_skills`,
+`agent_spend`, and `memory_available`/`search_memory`. An extension registers a
 `surfaces` Manifest point; core mounts its `SurfaceRoute`s under `/surface/<name>`, each bound to the
 one context. The seam supports two delivery modes; a surface uses only the subset it needs:
 
@@ -394,7 +396,12 @@ to the conversation's agent) — while a workspace admin reaches and administers
 out-of-audience agent is not-found on every portal route, the workspace-shaped reads — the spend
 rollup and the administration view (agents with their policy, installations, and web-audience
 grants; members and seats) — answer a workspace admin only, and the signed bearer enters as a
-session cookie through one POST (the gateway's signed-in card), never a URL.
+session cookie through one POST (the gateway's signed-in card), never a URL. Beside chat, each
+selected agent carries read projections shaped by the same contracts chat enforces: its scheduled
+tasks (creator sees content, an admin management metadata, others nothing), its loadable skills
+(the composition a turn loads), memory search under the viewer's own subjects with
+source-derived pages fenced by the selected agent's source grants (the same reader a turn's tools
+search under), and its rolling-window spend beside its agent-scoped caps.
 
 The debug and memory-explorer surfaces are the operator-audience surfaces — the `ufoctl`-verbs
 audience, not a member action. They share one operator web session (`ufo.sdk.operator`, one
