@@ -16,6 +16,8 @@ The env is per-exec, never baked into the container — a container outlives its
 later turn must not run under an earlier turn's token."""
 
 import asyncio
+import errno
+import os
 import time
 from collections import Counter, defaultdict
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
@@ -43,7 +45,9 @@ READ_CHUNK_BYTES = 1024 * 1024
 IDLE_RECLAIM_SECONDS = 1800
 NAME_CONFLICT_MARKER = "is already in use"
 NOT_RUNNING_MARKER = "is not running"
+REASON_ERRNO: dict[str, int] = {os.strerror(code): code for code in errno.errorcode}
 NETWORK_EXISTS_MARKER = "already exists"
+INSPECT_TIMEOUT_SECONDS = 10
 NO_SUCH_NETWORK_MARKER = "not found"
 STOP_TIMEOUT_SECONDS = 30
 START_TIMEOUT_SECONDS = 30
@@ -344,22 +348,33 @@ class DockerCarrier:
         """`docker exec` gives the container a real stdout, so the bytes stream out over it in
         bounded chunks and the host process never holds the file whole. `cat` is run through the
         container rather than off the bind mount so a caller reads what the sandbox sees, whatever
-        the carrier's storage happens to be. A missing file leaves stdout empty and exits non-zero,
-        which the drain surfaces as FileNotFoundError rather than a silent empty read. A stopped
-        container fails before the first byte, so a revive-and-restream never repeats a chunk."""
+        the carrier's storage happens to be. A failure names its true cause: cat's reason segment
+        (stderr's last line after its final separator, never the whole message, so a caller-chosen
+        filename cannot impersonate a reason) resolves through strerror to the OSError its errno
+        names — the same class and errno the local carrier's open() raises for the same path — a
+        container stopped before the first byte revives and re-streams from the start, and
+        anything else — including a `cat` killed mid-stream, which exits non-zero with empty
+        stderr — raises with the exit code and the container's own reported state rather than
+        masquerading as a filesystem refusal."""
         self._inflight[handle.conversation_id] += 1
         self._touched[handle.conversation_id] = self.clock()
         chunks, detail = self._read_started(handle, path)
         try:
             async for chunk in chunks:
                 yield chunk
-            if detail and NOT_RUNNING_MARKER in detail[0]:
+            if detail and NOT_RUNNING_MARKER in detail[0][1]:
                 if await self._revive(handle.conversation_id, handle.container_id):
                     chunks, detail = self._read_started(handle, path)
                     async for chunk in chunks:
                         yield chunk
             if detail:
-                raise FileNotFoundError(detail[0] or f"cannot read {path}")
+                code, stderr_text = detail[0]
+                reason = stderr_text.splitlines()[-1].rsplit(": ", 1)[-1] if stderr_text else ""
+                refused = REASON_ERRNO.get(reason)
+                if refused is not None:
+                    raise OSError(refused, stderr_text)
+                cause = f": {stderr_text}" if stderr_text else await self._death_report(handle)
+                raise RuntimeError(f"read of {path} died: cat exited {code}{cause}")
         finally:
             await chunks.aclose()
             self._inflight[handle.conversation_id] -= 1
@@ -367,16 +382,18 @@ class DockerCarrier:
 
     def _read_started(
         self, handle: SandboxHandle, path: str
-    ) -> tuple[AsyncGenerator[bytes], list[str]]:
-        """One `cat` attempt: the chunk stream, and a failure list one error lands in after the
-        stream is drained — empty on success. Split so `read` can revive a stopped container and
-        re-stream without an async generator ever crossing its own retry.
-
-        The kill belongs to abandonment alone. `docker exec` closes its pipes a beat before it
-        exits, so a drained stream can find the exit status not yet observed; killing there reaps
-        the status out from under the loop's watcher — `Popen.send_signal` polls first — which
-        reads back as exit 255 (measured), a successful cat turned into a phantom read failure."""
-        failure: list[str] = []
+    ) -> tuple[AsyncGenerator[bytes], list[tuple[int, str]]]:
+        """One `cat` attempt: the chunk stream, and a failure list one `(exit_code, stderr)` lands
+        in after the stream is drained — empty on success. Split so `read` can revive a stopped
+        container and re-stream without an async generator ever crossing its own retry. The drained
+        path only ever WAITS: after stdout's EOF the child's exit status can be unreaped, and
+        signalling it there reaps the real status out from under the loop's watcher
+        (`Popen.send_signal` polls first) and reports asyncio's 255 placeholder — a successful
+        read classified as a death. The kill belongs solely to the abandoned path, where a caller
+        broke off mid-stream and the exec must not outlive its generator; the reap there is
+        `communicate`, which drains both pipes to EOF first — a paused stdout transport never
+        disconnects, and `wait` alone would wait on that disconnect forever."""
+        failure: list[tuple[int, str]] = []
 
         async def stream() -> AsyncGenerator[bytes]:
             process = await asyncio.create_subprocess_exec(
@@ -397,16 +414,35 @@ class DockerCarrier:
                 while chunk := await stdout.read(READ_CHUNK_BYTES):
                     yield chunk
                 detail = (await stderr.read()).decode(errors="replace").strip()
-            except BaseException:
+                code = await process.wait()
+                if code != 0:
+                    failure.append((code, detail))
+            finally:
                 if process.returncode is None:
                     process.kill()
-                raise
-            finally:
-                await process.wait()
-            if process.returncode != 0:
-                failure.append(detail)
+                    await process.communicate()
 
         return stream(), failure
+
+    async def _death_report(self, handle: SandboxHandle) -> str:
+        """The container's own reported state, appended to an empty-stderr read death so the next
+        investigation starts from facts. The fields are the CONTAINER's — a dead exec leaves no
+        state of its own, so a running container here means the exec alone was killed or its exit
+        status was lost, while an exited or absent container names a stop, an OOM of the main
+        process, or a removal — the report states provenance and lets the fields speak. A failed
+        inspect reports its own exit and stderr rather than answering a lifecycle claim it could
+        not establish."""
+        code, stdout, stderr = await _docker(
+            "inspect",
+            "--format",
+            "{{.State.Status}} exit={{.State.ExitCode}} oom-killed={{.State.OOMKilled}}",
+            handle.container_id,
+            timeout_s=INSPECT_TIMEOUT_SECONDS,
+        )
+        if code != 0:
+            inspected = stderr.decode(errors="replace").strip()
+            return f" with no stderr — docker inspect exited {code}: {inspected}"
+        return f" with no stderr — its container reports: {stdout.decode().strip()}"
 
     async def dial(self, handle: SandboxHandle, port: int) -> DialTarget:
         """The docker carrier publishes no per-port host, so an in-sandbox service (a browser's CDP

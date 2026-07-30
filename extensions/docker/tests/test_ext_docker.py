@@ -1077,6 +1077,12 @@ class _FakeCat:
             self.returncode = self._code
         return self.returncode
 
+    async def communicate(self) -> tuple[bytes, bytes]:
+        out = await self.stdout.read()
+        err = await self.stderr.read()
+        await self.wait()
+        return out, err
+
 
 async def test_a_read_revives_a_stopped_container_and_restreams(
     monkeypatch: pytest.MonkeyPatch,

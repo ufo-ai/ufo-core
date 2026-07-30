@@ -6,8 +6,10 @@ a fake."""
 
 import asyncio
 import base64
+import errno
 import hashlib
 import json
+import re
 import struct
 import zlib
 from collections.abc import AsyncIterator, Iterator
@@ -892,3 +894,216 @@ async def test_carrier_read_streams_container_bytes_byte_exact(
     assert b"".join(chunks) == payload
     with pytest.raises(FileNotFoundError):
         [chunk async for chunk in carrier.read(handle, "/workspace/absent.bin")]
+
+
+async def _docker_cli(*argv: str) -> str:
+    """One checked docker CLI call for container-lifecycle tests: asserts success with stderr in
+    the failure, so a no-op stop or a failed create can never produce a vacuous pass."""
+    process = await asyncio.create_subprocess_exec(
+        "docker",
+        *argv,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    out, err = await process.communicate()
+    assert process.returncode == 0, err.decode(errors="replace")
+    return out.decode().strip()
+
+
+async def _docker_cleanup(*argv: str) -> None:
+    """Best-effort teardown for the one target a failed body may never have created (the network
+    the carrier's revive builds) — never for `rm -f`, whose failure is the leak these teardowns
+    exist to prevent and which already tolerates an absent container."""
+    process = await asyncio.create_subprocess_exec(
+        "docker",
+        *argv,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    await process.wait()
+
+
+async def _sibling_container(ctx: ToolContext, workspace: Path) -> str:
+    """A persistent (non `--rm`) container over the fixture's workspace mount — the state the
+    carrier's own containers hold, which the fixture's autoremoving container cannot reach."""
+    image = await _docker_cli(
+        "inspect", "--format", "{{.Config.Image}}", ctx.sandbox.handle.container_id
+    )
+    return await _docker_cli("run", "-d", "-v", f"{workspace}:/workspace", image)
+
+
+async def test_carrier_read_killed_mid_stream_names_the_kill_not_the_file(
+    file_ctx: tuple[ToolContext, Path],
+) -> None:
+    """A container stopped under an in-flight read surfaces as what it is: `cat` killed mid-stream
+    exits non-zero with empty stderr, and the drain raises RuntimeError carrying the exit and the
+    container's own reported state — never FileNotFoundError, whose name would send the debugging
+    at a file-lifecycle bug instead of the kill. The container persists past its stop, so the
+    report's fields are deterministic."""
+    ctx, workspace = file_ctx
+    payload = bytes(range(256)) * 262_144
+    await ctx.sandbox.write_file("big.bin", payload)
+    carrier = ctx.sandbox.carrier
+    container = await _sibling_container(ctx, workspace)
+    handle = SandboxHandle(conversation_id=uuid4(), container_id=container)
+    try:
+        stream = carrier.read(handle, "/workspace/big.bin")
+        expected = (
+            r"read of /workspace/big\.bin died: cat exited \d+ with no stderr — "
+            r"its container reports: exited exit=137 oom-killed=false"
+        )
+        with pytest.raises(RuntimeError, match=expected):
+            got_first = False
+            async for _ in stream:
+                if not got_first:
+                    got_first = True
+                    await _docker_cli("stop", "-t", "0", container)
+        assert got_first
+    finally:
+        await _docker_cli("rm", "-f", container)
+
+
+async def test_death_report_of_a_gone_container_reports_the_failed_inspect(
+    file_ctx: tuple[ToolContext, Path],
+) -> None:
+    """A container gone by inspect time yields docker inspect's own exit and stderr — never a
+    lifecycle claim the inspect could not establish. Proven against the real daemon directly:
+    reaching this branch through `read` needs autoremoval to win a race against the drain (a
+    removal under a live exec answers on stderr and takes the stderr path instead), so the step is
+    driven with the gone-container state it classifies."""
+    ctx, _ = file_ctx
+    carrier = ctx.sandbox.carrier
+    gone = SandboxHandle(conversation_id=uuid4(), container_id=f"ufo-gone-{uuid4().hex}")
+
+    report = await carrier._death_report(gone)
+
+    assert re.search(r"^ with no stderr — docker inspect exited \d+: ", report)
+    assert "no such object" in report.lower()
+    assert "container reports" not in report
+
+
+async def test_carrier_read_classifies_by_reason_not_by_filename(
+    file_ctx: tuple[ToolContext, Path],
+) -> None:
+    """Classification reads cat's reason segment, never the caller's path: a DIRECTORY literally
+    named with the missing-file phrase raises IsADirectoryError (a whole-stderr substring test
+    reports it missing), a root-owned mode-000 file refuses the non-root exec user with
+    PermissionError (on the container's own filesystem — a Docker Desktop bind mount does not
+    enforce host ownership modes), a path through a plain file raises NotADirectoryError, a
+    symlink cycle raises the base OSError carrying ELOOP, and only a genuinely absent path raises
+    FileNotFoundError — the class and errno the local carrier's open() gives for the same
+    paths."""
+    ctx, _ = file_ctx
+    carrier = ctx.sandbox.carrier
+    handle = ctx.sandbox.handle
+    tricky = "No such file or directory"
+    await _docker_cli("exec", handle.container_id, "mkdir", f"/workspace/{tricky}")
+    await _docker_cli(
+        "exec",
+        "-u",
+        "0",
+        handle.container_id,
+        "install",
+        "-m",
+        "000",
+        "/dev/null",
+        "/tmp/sealed",
+    )
+    await ctx.sandbox.write_file("plain.txt", b"plain")
+
+    with pytest.raises(IsADirectoryError):
+        [chunk async for chunk in carrier.read(handle, f"/workspace/{tricky}")]
+    with pytest.raises(PermissionError):
+        [chunk async for chunk in carrier.read(handle, "/tmp/sealed")]
+    with pytest.raises(NotADirectoryError):
+        [chunk async for chunk in carrier.read(handle, "/workspace/plain.txt/inside")]
+    await _docker_cli(
+        "exec", handle.container_id, "ln", "-s", "/workspace/loopb", "/workspace/loopa"
+    )
+    await _docker_cli(
+        "exec", handle.container_id, "ln", "-s", "/workspace/loopa", "/workspace/loopb"
+    )
+    with pytest.raises(OSError) as looped:
+        [chunk async for chunk in carrier.read(handle, "/workspace/loopa")]
+    assert type(looped.value) is OSError
+    assert looped.value.errno == errno.ELOOP
+    with pytest.raises(FileNotFoundError):
+        [chunk async for chunk in carrier.read(handle, "/workspace/absent No such file.txt")]
+
+
+async def test_carrier_read_never_fails_a_successful_read(
+    file_ctx: tuple[ToolContext, Path],
+) -> None:
+    """A successful read never reports a death. The regression this gates on misclassifies a
+    clean read per-read and independently — signalling a finished child reaps its real exit
+    status, so `read` sees asyncio's 255 placeholder (`_read_started`'s docstring holds the
+    mechanism) — at about 3% per read for this payload. The count sizes the gate: at that rate,
+    350 clean reads let the regression slip through green fewer than once in ten thousand runs."""
+    ctx, _ = file_ctx
+    payload = bytes(range(256)) * 512
+    await ctx.sandbox.write_file("steady.bin", payload)
+    carrier = ctx.sandbox.carrier
+    handle = ctx.sandbox.handle
+
+    for _ in range(350):
+        chunks = [chunk async for chunk in carrier.read(handle, "/workspace/steady.bin")]
+        assert b"".join(chunks) == payload
+
+
+async def test_carrier_read_abandoned_mid_stream_leaves_no_exec_behind(
+    file_ctx: tuple[ToolContext, Path],
+) -> None:
+    """Closing the generator mid-stream is the abandoned path — a member cancelling a
+    workspace-file download aborts the surface's iteration — and the exec must die with its
+    generator: an orphaned `cat` blocks on the full pipe and lives for the container's lifetime,
+    and these containers are per-conversation and long-lived. Abandonment must land strictly
+    before EOF (payload beyond one chunk, a single `__anext__`) and after the consumer has
+    awaited since the last chunk — every real consumer awaits per chunk, which pauses the stdout
+    transport over its high-water mark, and a paused pipe never disconnects, so a reap that waits
+    on pipe EOF wedges forever. The bounded `aclose` turns that wedge into a named failure."""
+    ctx, _ = file_ctx
+    carrier = ctx.sandbox.carrier
+    handle = ctx.sandbox.handle
+    await _docker_cli(
+        "exec",
+        handle.container_id,
+        "sh",
+        "-c",
+        "dd if=/dev/zero of=/workspace/abandoned.bin bs=1M count=64 status=none",
+    )
+    stream = carrier.read(handle, "/workspace/abandoned.bin")
+    assert await stream.__anext__()
+    await asyncio.sleep(0.05)
+    await asyncio.wait_for(stream.aclose(), timeout=10)
+    procs = ""
+    for _ in range(50):
+        procs = await _docker_cli("exec", handle.container_id, "ps", "-eo", "args")
+        if "abandoned.bin" not in procs:
+            break
+        await asyncio.sleep(0.1)
+    assert "abandoned.bin" not in procs
+
+
+async def test_carrier_read_revives_a_stopped_container_and_streams(
+    file_ctx: tuple[ToolContext, Path],
+) -> None:
+    """A container stopped before the first byte revives and re-streams from the start — the
+    read's third failure consumer, which classifies docker's own is-not-running stderr before any
+    byte lands. The fixture's container is `--rm` (a stop removes it), so the stopped-but-present
+    state the carrier's own persistent containers reach comes from a dedicated container over the
+    same workspace mount."""
+    ctx, workspace = file_ctx
+    payload = bytes(range(256)) * 64
+    await ctx.sandbox.write_file("revive.bin", payload)
+    carrier = ctx.sandbox.carrier
+    container = await _sibling_container(ctx, workspace)
+    handle = SandboxHandle(conversation_id=uuid4(), container_id=container)
+    try:
+        await _docker_cli("stop", "-t", "0", container)
+
+        chunks = [chunk async for chunk in carrier.read(handle, "/workspace/revive.bin")]
+
+        assert b"".join(chunks) == payload
+    finally:
+        await _docker_cli("rm", "-f", container)
+        await _docker_cleanup("network", "rm", f"ufo-sandbox-{handle.conversation_id.hex}")

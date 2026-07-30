@@ -202,7 +202,11 @@ class Carrier(Protocol):
         """Stream the workspace file at `path` out of the container in bounded chunks, never
         buffering it whole in the host process — the copy-out that pairs with `write`. Each carrier
         supplies its own (e2b streams from its filesystem API, docker over a real stdout, the local
-        carrier off the host directory). Raises FileNotFoundError for a path holding no file."""
+        carrier off the host directory). A missing path raises FileNotFoundError on every carrier;
+        the local and docker carriers raise each filesystem refusal as the OSError its errno names
+        (docker resolves cat's reason through strerror, so the two agree class-for-class and
+        errno-for-errno) while e2b surfaces its SDK's exception; a read that dies for a
+        non-filesystem reason raises the carrier's own error naming what is known."""
         ...
 
     async def dial(self, handle: SandboxHandle, port: int) -> DialTarget:
