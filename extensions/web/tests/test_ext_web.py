@@ -17,6 +17,8 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.store import recall_subjects
+from ufo_ext_skill_create.manifest import manifest as skill_create_manifest
+from ufo_ext_skill_create.store import user_skill
 from ufo_ext_web import surface as web_surface
 from ufo_ext_web.audience import AUDIENCE_PREFIX, web_extension
 from ufo_ext_web.manifest import manifest as web_manifest
@@ -36,7 +38,7 @@ from ufo.credentials import (
     seal_credential_request,
 )
 from ufo.db import workspace_tx
-from ufo.ext.loader import skill_registry
+from ufo.ext.loader import skill_registry, turn_runtime_skills
 from ufo.grants import ConnectFlow, GrantStore, OAuthAccount, install_connect_flow
 from ufo.hub import InProcessHub, SkillLoad, ToolCall
 from ufo.loop import queue as loop_queue
@@ -71,6 +73,7 @@ SECRET = "artifact-signing-secret"
 TOKEN_SECRET = "web-token-secret"
 STREAM_TIMEOUT_SECONDS = 30
 STREAM_GATE = StreamGate()
+CREDENTIAL_FERNET = Fernet(Fernet.generate_key())
 
 
 def test_sse_tags_tool_and_skill_activity_frames() -> None:
@@ -207,10 +210,10 @@ def dbos_runtime(
             dbos=dbos_client,
             subagents=SubagentRegistry(()),
             subagent_grants={},
-            manifests=(),
+            manifests=(skill_create_manifest(),),
             registry=STANDIN_REGISTRY,
             skills=skill_registry(()),
-            credentials=None,
+            credentials=CredentialStore(fernet=CREDENTIAL_FERNET),
             index=DefaultIndex(transaction=workspace_tx),
             embed=StubEmbed(),
             artifact_token_secret=SECRET,
@@ -219,9 +222,6 @@ def dbos_runtime(
     yield config, hub, blob, sandboxes
     dbos_client.destroy()
     loop_queue.reset_runtime()
-
-
-CREDENTIAL_FERNET = Fernet(Fernet.generate_key())
 
 
 @pytest.fixture
@@ -264,7 +264,12 @@ async def web(
         None,
         ("auto", "claude-opus-4-8", "claude-sonnet-5"),
         skills=EMPTY_SKILL_REGISTRY,
-        user_skills=no_user_skills,
+        user_skills=lambda: turn_runtime_skills(
+            (skill_create_manifest(),),
+            CredentialStore(fernet=CREDENTIAL_FERNET),
+            DefaultIndex(transaction=workspace_tx),
+            StubEmbed(),
+        ),
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="https://web") as client:
         yield client, workspace_id, agent_id
@@ -2102,6 +2107,126 @@ async def test_an_intent_applies_exactly_and_the_turn_is_the_audit_record(
     assert recorded is not None
     assert len(recorded.messages) == 2
     assert recorded.messages[-1].role == "assistant"
+
+
+SKILL_MD = "---\nname: release-notes\ndescription: How release notes read.\n---\nWrite tersely.\n"
+
+
+async def test_a_skill_intent_creates_replaces_and_deletes(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The skill kind rides the intent lane end to end for any member: apply creates a skill the
+    skills projection lists as member-authored, a second apply on the same name replaces it,
+    delete tears it out whole — the projection forgets it and the store holds no rows — and a
+    walled agent's lane stays not-found for the same body."""
+    client, workspace_id, agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "member@example.com")
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+
+    async def listed() -> dict[str, dict[str, str]]:
+        answer = await client.get(f"/surface/web/agents/{agent_id}/skills", headers=cookie)
+        assert answer.status_code == 200
+        return {skill["name"]: skill for skill in answer.json()["skills"]}
+
+    created = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json={
+            "verb": "apply",
+            "kind": "skill",
+            "name": "release-notes",
+            "spec": {"files": {"SKILL.md": SKILL_MD}},
+        },
+        headers=cookie,
+    )
+    assert created.status_code == 200
+    assert created.json()["applied"] is True, created.json()
+    saved = (await listed())["release-notes"]
+    assert saved["description"] == "How release notes read."
+    assert saved["origin"] == "member"
+    replaced = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json={
+            "verb": "apply",
+            "kind": "skill",
+            "name": "release-notes",
+            "spec": {
+                "files": {
+                    "SKILL.md": SKILL_MD.replace("How release notes read.", "Terse and dated.")
+                }
+            },
+        },
+        headers=cookie,
+    )
+    assert replaced.json()["applied"] is True
+    assert (await listed())["release-notes"]["description"] == "Terse and dated."
+    deleted = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json={"verb": "delete", "kind": "skill", "name": "release-notes"},
+        headers=cookie,
+    )
+    assert deleted.json()["applied"] is True
+    assert "release-notes" not in await listed()
+    async with workspace_tx() as connection:
+        rows = (
+            await connection.execute(sa.select(sa.func.count()).select_from(user_skill))
+        ).scalar_one()
+    assert rows == 0
+    walled = await client.post(
+        f"/surface/web/agents/{uuid4()}/intents",
+        json={"verb": "delete", "kind": "skill", "name": "release-notes"},
+        headers=cookie,
+    )
+    assert walled.status_code == 404
+
+
+async def test_a_refused_skill_intent_surfaces_the_kinds_error_and_writes_nothing(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """A SKILL.md whose frontmatter name does not match the object name is the kind's own
+    refusal: the outcome carries it, no skill lands, and no store row exists."""
+    client, workspace_id, agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "member@example.com")
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    refused = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json={
+            "verb": "apply",
+            "kind": "skill",
+            "name": "other-name",
+            "spec": {"files": {"SKILL.md": SKILL_MD}},
+        },
+        headers=cookie,
+    )
+    assert refused.status_code == 200
+    outcome = refused.json()
+    assert outcome["applied"] is False
+    assert outcome["message"]
+    skills = await client.get(f"/surface/web/agents/{agent_id}/skills", headers=cookie)
+    assert skills.json()["skills"] == []
+    async with workspace_tx() as connection:
+        rows = (
+            await connection.execute(sa.select(sa.func.count()).select_from(user_skill))
+        ).scalar_one()
+    assert rows == 0
+
+
+async def test_an_agent_delete_intent_surfaces_the_kinds_refusal(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The widened verb Literal admits `delete` for the agent kind too, and the kind itself is
+    the gate: agents are undeletable through objects, so the outcome is the refusal and the row
+    survives — the same answer chat gives."""
+    client, workspace_id, agent_id = web
+    _admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
+    refused = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json={"verb": "delete", "kind": "agent", "name": "assistant"},
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    assert refused.status_code == 200
+    assert refused.json()["applied"] is False
+    row = await _agent_row(agent_id)
+    assert row.model == "claude-opus-4-8"
 
 
 async def test_a_refused_intent_surfaces_the_refusal_and_applies_nothing(

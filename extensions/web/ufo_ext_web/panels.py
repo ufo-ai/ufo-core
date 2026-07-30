@@ -31,16 +31,26 @@ ERROR_CLASS_PREFIX = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]*: ")
 
 
 class PanelIntent(BaseModel):
-    """What a panel form submits: one mutation of one object, by kind and name. `verb` is the
-    closed set of mutations a panel produces today."""
+    """What a panel form submits: one mutation of one object, by kind and name. `verb` and `kind`
+    are the closed sets a panel produces today — the Literals are the gate keeping this route
+    from becoming a general object endpoint."""
 
-    verb: Literal["apply"]
-    kind: Literal["agent"]
+    verb: Literal["apply", "delete"]
+    kind: Literal["agent", "skill"]
     name: str
     spec: dict[str, JsonValue] | None = None
 
 
 def _tool_intent(submitted: PanelIntent) -> ToolIntent:
+    if submitted.verb == "delete":
+        return ToolIntent(
+            tool="object_delete",
+            input={
+                "kind": submitted.kind,
+                "name": submitted.name,
+                "user_description": f"Delete {submitted.kind} {submitted.name} from the portal.",
+            },
+        )
     manifest = yaml.safe_dump(
         {"kind": submitted.kind, "name": submitted.name, "spec": submitted.spec or {}},
         sort_keys=False,
@@ -79,7 +89,7 @@ async def submit_intent(
         submitted = PanelIntent.model_validate_json(body)
     except ValidationError:
         return JSONResponse({"error": "malformed intent"}, status_code=400)
-    if submitted.spec is not None:
+    if submitted.kind == "agent" and submitted.spec is not None:
         model = submitted.spec.get("model")
         if model not in ctx.models:
             return JSONResponse({"applied": False, "message": f"No model named {model!r}."})

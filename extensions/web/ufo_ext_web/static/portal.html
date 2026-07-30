@@ -64,6 +64,10 @@
   #panel input[type="text"] { width: 100%; max-width: 40ch; padding: 8px 10px;
                  border-radius: 8px; font: inherit; background: Field; color: FieldText;
                  border: 1px solid color-mix(in srgb, CanvasText 25%, transparent); }
+  #panel textarea { width: 100%; max-width: 76ch; min-height: 12em; padding: 8px 10px;
+                 border-radius: 8px; background: Field; color: FieldText;
+                 font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+                 border: 1px solid color-mix(in srgb, CanvasText 25%, transparent); }
   #panel pre { overflow-x: auto; padding: 12px; border-radius: 8px; white-space: pre-wrap;
                background: color-mix(in srgb, CanvasText 6%, transparent);
                font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
@@ -640,7 +644,7 @@ function day(iso) {
   return iso == null ? null : iso.slice(0, 16).replace('T', ' ');
 }
 
-async function renderSkills(agent, load) {
+async function renderSkills(agent, load, notice) {
   let listed;
   try {
     const res = await fetch(BASE + '/agents/' + agent.id + '/skills',
@@ -649,25 +653,102 @@ async function renderSkills(agent, load) {
     if (!res.ok) { panelEmpty('Error ' + res.status + ' — reload to retry.'); return; }
     listed = (await res.json()).skills;
   } catch (err) {
-    fail(load, 'Network error — try again.');
+    fail(load, 'Network error — try again.', notice);
     return;
   }
   if (load !== panelLoad) return;
+  const result = document.createElement('div');
+  result.className = 'result mono';
+  if (notice) result.textContent = notice;
+  async function submitIntent(intent, control) {
+    control.disabled = true;
+    let submitted;
+    try {
+      submitted = await fetch(BASE + '/agents/' + agent.id + '/intents', {
+        method: 'POST',
+        credentials: 'same-origin',
+        body: JSON.stringify(intent),
+      });
+    } catch (err) {
+      result.textContent = 'Network error — try again.';
+      control.disabled = false;
+      return;
+    }
+    const outcome = await submitted.json().catch(() => null);
+    result.textContent = outcome && outcome.message
+      ? outcome.message
+      : 'Error ' + submitted.status + ' — try again.';
+    control.disabled = false;
+    if (outcome && outcome.applied && selected === agent && tab === 'skills') {
+      selectTab('skills', outcome.message);
+    }
+  }
   const custom = listed.filter((skill) => skill.origin === 'member');
   const deploy = listed.filter((skill) => skill.origin === 'deploy');
-  for (const [title, group, empty] of [
-    ["This agent's skills", custom, 'No member-authored skills for ' + agent.name + '.'],
-    ['Deploy skills', deploy, 'No deploy skills.'],
-  ]) {
-    const heading = document.createElement('h2');
-    heading.textContent = title;
-    panel.appendChild(heading);
-    if (!group.length) { panelEmpty(empty); continue; }
+  const customTitle = document.createElement('h2');
+  customTitle.textContent = "This agent's skills";
+  panel.appendChild(customTitle);
+  if (!custom.length) {
+    panelEmpty('No member-authored skills for ' + agent.name + '.');
+  } else {
+    const listing = document.createElement('table');
+    const heading = listing.createTHead().insertRow();
+    for (const column of ['name', 'description', '']) {
+      const cell = document.createElement('th');
+      cell.textContent = column;
+      heading.appendChild(cell);
+    }
+    const body = listing.createTBody();
+    for (const skill of custom) {
+      const entry = body.insertRow();
+      entry.insertCell().textContent = skill.name;
+      entry.insertCell().textContent = skill.description;
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.textContent = 'Delete';
+      remove.addEventListener('click', () =>
+        submitIntent({ verb: 'delete', kind: 'skill', name: skill.name }, remove));
+      entry.insertCell().appendChild(remove);
+    }
+    panel.appendChild(listing);
+  }
+  const deployTitle = document.createElement('h2');
+  deployTitle.textContent = 'Deploy skills';
+  panel.appendChild(deployTitle);
+  if (!deploy.length) {
+    panelEmpty('No deploy skills.');
+  } else {
     panel.appendChild(table(
       ['name', 'description'],
-      group.map((skill) => row(skill.name, skill.description))
+      deploy.map((skill) => row(skill.name, skill.description))
     ));
   }
+  const formTitle = document.createElement('h2');
+  formTitle.textContent = 'Save a skill';
+  panel.appendChild(formTitle);
+  const form = document.createElement('form');
+  const name = document.createElement('input');
+  name.type = 'text';
+  name.placeholder = 'skill-name';
+  const content = document.createElement('textarea');
+  content.placeholder = '---\nname: skill-name\ndescription: …\n---\n';
+  const save = document.createElement('button');
+  save.type = 'submit';
+  save.className = 'send';
+  save.textContent = 'Save';
+  form.append(name, content, save);
+  form.addEventListener('submit', (event) => {
+    event.preventDefault();
+    if (!name.value.trim() || !content.value.trim()) return;
+    submitIntent({
+      verb: 'apply',
+      kind: 'skill',
+      name: name.value.trim(),
+      spec: { files: { 'SKILL.md': content.value } },
+    }, save);
+  });
+  panel.appendChild(form);
+  panel.appendChild(result);
 }
 
 async function renderMemory(agent, load, query) {
@@ -778,7 +859,7 @@ async function selectTab(name, detail) {
   const agent = selected;
   panel.replaceChildren();
   if (name === 'overview') { await renderOverview(agent, load, detail); return; }
-  if (name === 'skills') { await renderSkills(agent, load); return; }
+  if (name === 'skills') { await renderSkills(agent, load, detail); return; }
   if (name === 'memory') { await renderMemory(agent, load, detail); return; }
   if (name === 'usage') { await renderUsage(agent, load); return; }
   const spec = PANELS[name];

@@ -121,6 +121,18 @@ class StubElement {
   set htmlFor(value) {
     this.attributes.for = value;
   }
+  createTHead() {
+    return this.appendChild(new StubElement("thead"));
+  }
+  createTBody() {
+    return this.appendChild(new StubElement("tbody"));
+  }
+  insertRow() {
+    return this.appendChild(new StubElement("tr"));
+  }
+  insertCell() {
+    return this.appendChild(new StubElement("td"));
+  }
   set type(value) {
     this.attributes.type = value;
   }
@@ -319,6 +331,18 @@ const sandbox = {
     }
     if (url.endsWith("/api/agents") && wire.signedOut) {
       return { ok: false, status: 401, json: async () => ({}) };
+    }
+    if (url.endsWith("/skills")) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          skills: [
+            { name: "release-notes", description: "How release notes read.", origin: "member" },
+            { name: "memory", description: "Recall and store.", origin: "deploy" },
+          ],
+        }),
+      };
     }
     if (url.endsWith("/usage")) {
       return { ok: false, status: 404, json: async () => ({}) };
@@ -547,6 +571,48 @@ try {
       throw new Error(`failed re-read panel reads "${panelText}", expected "${expected}"`);
     }
     await tabNamed("overview").fire("click");
+  }
+  await tabNamed("skills").fire("click");
+  const skillForm = byId.panel.querySelectorAll("form").at(-1);
+  if (!skillForm) throw new Error("skills tab built no save form");
+  const skillName = skillForm.querySelector("input");
+  const skillContent = skillForm.querySelector("textarea");
+  if (!skillName || !skillContent) throw new Error("skill form lost its name or content field");
+  const intentsBefore = wire.posted.length;
+  skillName.value = "release-notes";
+  skillContent.value = "---\nname: release-notes\ndescription: d\n---\nWrite tersely.";
+  await skillForm.fire("submit");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const savedEnvelope = canonical(wire.posted[intentsBefore]);
+  const expectedSave = canonical({
+    verb: "apply",
+    kind: "skill",
+    name: "release-notes",
+    spec: { files: { "SKILL.md": skillContent.value } },
+  });
+  if (savedEnvelope !== expectedSave) {
+    throw new Error(`skill save posted ${savedEnvelope}, expected ${expectedSave}`);
+  }
+  const skillOutcome = byId.panel
+    .querySelectorAll("*")
+    .find((node) => node.className.includes("result"));
+  if (!skillOutcome || !skillOutcome.isConnected || skillOutcome.textContent !== "Saved.") {
+    throw new Error("skill save outcome not rendered on the refreshed panel");
+  }
+  const refreshedName = byId.panel.querySelectorAll("form").at(-1).querySelector("input");
+  if (refreshedName.value !== "") {
+    throw new Error("the skills panel did not re-read after the save");
+  }
+  const deleteButton = byId.panel
+    .querySelectorAll("button")
+    .find((node) => node.textContent === "Delete");
+  if (!deleteButton) throw new Error("the member skill row carries no Delete control");
+  await deleteButton.fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const deleteEnvelope = canonical(wire.posted[intentsBefore + 1]);
+  const expectedDelete = canonical({ verb: "delete", kind: "skill", name: "release-notes" });
+  if (deleteEnvelope !== expectedDelete) {
+    throw new Error(`skill delete posted ${deleteEnvelope}, expected ${expectedDelete}`);
   }
   await tabNamed("usage").fire("click");
   await new Promise((resolve) => setTimeout(resolve, 0));
