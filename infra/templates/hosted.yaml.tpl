@@ -339,14 +339,15 @@ spec:
 ---
 # Every hosted site answers at its own subdomain of ${sites_host}, so one wildcard record and one
 # wildcard certificate cover all of them and each site is its own browser origin — which is what
-# keeps one site's cookies and storage away from the next. The record is proxied, like every other
-# hosted host, so site bytes get the same DDoS/WAF edge and the NLB address stays unpublished.
-# Proxying a wildcard is available on every Cloudflare plan, and this zone's edge certificate must
-# carry a `*.${sites_host}` SAN: a wildcard SAN matches exactly one label, so `*.<apex>` does not
-# cover a site's deeper name. Our own certificate needs no proxied record — cert-manager issues it
-# over DNS-01. The edge SAN's coverage is the open question the RFC's risks track.
-# Every proxied response carries `Cache-Control: private, no-store` from the ingress, since a shared
-# cache that stored a site's bytes would answer later requests without the cookie check.
+# keeps one site's cookies and storage away from the next. The record is published DNS-only
+# (`cloudflare-proxied: "false"`), so site bytes reach the shared NLB directly rather than through
+# the proxy every other hosted host sits behind. Not a plan limit — every Cloudflare plan proxies a
+# wildcard record. It is the edge certificate: Universal SSL covers the apex and first-level
+# subdomains only, and a site sits deeper (`<label>.sites.<apex>`). Measured with the record proxied:
+# `probe.sites.testing.flyingobject.ai` resolved to Cloudflare and the handshake was refused
+# outright — no certificate the edge could serve, so every site was unreachable. Flipping this back
+# to "true" waits on `*.${sites_host}` joining the zone's ACM certificate. Our own certificate is
+# unaffected either way: cert-manager issues it over DNS-01, which needs no proxied record.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -355,7 +356,7 @@ metadata:
   annotations:
     cert-manager.io/cluster-issuer: ${cluster_issuer}
     external-dns.alpha.kubernetes.io/hostname: "*.${sites_host}"
-    external-dns.alpha.kubernetes.io/cloudflare-proxied: "true"
+    external-dns.alpha.kubernetes.io/cloudflare-proxied: "false"
 spec:
   ingressClassName: ${ingress_class}
   tls:

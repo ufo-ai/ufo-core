@@ -246,21 +246,18 @@ plain `/login` and the member reopens the site link.
 - **No WebSocket proxying.** The ingress forwards HTTP methods only, so a dev server's live
   reload (Vite HMR) never connects; a `publish_website` app that needs a socket at runtime does
   not work through the frame either.
-- **The sites wildcard is proxied, and one certificate fact is unverified until it applies.**
-  Proxying a wildcard is available on every Cloudflare plan, and measured against the live testing
-  host the zone already serves a free Let's Encrypt edge certificate whose SANs are
-  `flyingobject.ai`, `*.flyingobject.ai`, `*.testing.flyingobject.ai` — a second-level wildcard that
-  plain Universal SSL would never carry, so Advanced Certificate Manager is already active here and
-  nothing needs buying. What is *not* established is depth: a wildcard SAN matches exactly one
-  label, so `*.testing.flyingobject.ai` covers `sites.testing.flyingobject.ai` but not
-  `<label>.sites.testing.flyingobject.ai`. Whether the edge already answers for that depth is
-  unknown from outside — the record has to exist to test it, and the deploy's Cloudflare token is
-  `Zone:Read + DNS:Edit`, with no SSL scope to read or edit the certificate. So the first apply is
-  the experiment: check TLS on a real deep label, not on `sites.<apex>`. If it fails, add
-  `*.sites.<apex>` to that certificate (a request against machinery already in place), or set
-  `cloudflare-proxied` back to `"false"` to serve DNS-only meanwhile — at the cost of site bytes
-  bypassing the DDoS/WAF edge and publishing the NLB address for that name. Our own certificate is
-  unaffected either way; cert-manager issues it over DNS-01, which needs no proxied record.
+- **The sites wildcard is published DNS-only, and the reason is measured.** Proxying a wildcard is
+  available on every Cloudflare plan, so that was never the limit; the zone already serves a free
+  Let's Encrypt edge certificate carrying `*.testing.flyingobject.ai`, so ACM is active on it too.
+  The limit is depth: a wildcard SAN matches exactly one label, so nothing on that certificate
+  covers `<label>.sites.<apex>`. Measured with the record proxied on the first deploy —
+  `probe.sites.testing.flyingobject.ai` resolved to Cloudflare addresses and the TLS handshake was
+  refused outright (`SSLV3_ALERT_HANDSHAKE_FAILURE`), so every site was unreachable. DNS-only
+  restores hosting: nginx terminates with the cert-manager wildcard, which DNS-01 issues whatever
+  the record's proxy state. The cost is that site bytes alone reach the shared NLB directly, without
+  proxy-side DDoS absorption, WAF, or origin-IP concealment. Adding `*.sites.<apex>` to the zone's
+  ACM certificate is what lets `cloudflare-proxied` flip back to `"true"`, and that is the only
+  change needed then.
 - **The sites base is a sibling subdomain of the app host, so a site's scripts can still plant a
   cookie on it. Scrubbing covers the header path only.** `sites.<domain>` shares a registrable domain
   with `app.<domain>`, and that shared parent is what the browser computes `Domain=`-scoped cookies
