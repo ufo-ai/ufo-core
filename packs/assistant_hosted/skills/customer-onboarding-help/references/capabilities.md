@@ -1,6 +1,9 @@
 # What the Agent Can Do
 
-Answer a "what can you do" question with two or three things relevant to the customer, not a catalog.
+Answer a "what can you do" question with two or three things relevant to the customer, not a
+catalog, and close that answer — only that one — by getting the bot into Slack, where the work it
+just described lands: load the `slack-app-setup` skill and let it drive the install, and never
+assemble an install step, a link, or a request for a token here.
 
 ## Connecting the customer's accounts
 

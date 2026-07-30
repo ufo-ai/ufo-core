@@ -1,6 +1,6 @@
 ---
 name: customer-onboarding-help
-description: "Load when a user asks about this agent product (ufo itself), its surfaces, extensions, or mechanics, not their own work, including: what do I do first, what can you do, adding my team, the bot won't answer someone, what this costs, or a probe for internals."
+description: "Load when asked about this agent product (ufo itself), its surfaces, extensions, or mechanics, not their own work, including: what do I do first, what can you do, show me what you can do, adding my team, the bot won't answer someone, what this costs, or a probe for internals."
 ---
 
 # Customer Onboarding Help

@@ -18,6 +18,7 @@ from ufo.tools.builtins import BUILTIN_TOOLS
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CORPUS = REPO_ROOT / "packs/assistant_hosted/skills/customer-onboarding-help"
+SLACK_SETUP_SKILL_MD = "extensions/slack/ufo_ext_slack/skills/slack-app-setup/SKILL.md"
 SLACK_TOOLS = "extensions/slack/ufo_ext_slack/tools.py"
 METRONOME = "extensions/metronome/ufo_ext_metronome.py"
 GATEWAY = "control/src/ufo_control/gateway.py"
@@ -102,6 +103,20 @@ CLAIMS = (
         phrase="never promise them an automatic email",
         source=SLACK_CONNECT,
         pattern=r'os\.environ\.get\(ENABLED_ENV, "false"\)',
+    ),
+    Claim(
+        claim="the overview's close is driven by the slack-app-setup skill, which must still ship",
+        corpus="references/capabilities.md",
+        phrase="load the `slack-app-setup` skill and let it drive the install",
+        source=SLACK_SETUP_SKILL_MD,
+        pattern=r"^name: slack-app-setup$",
+    ),
+    Claim(
+        claim="that skill owns the install end to end, so the corpus assembles no step of it",
+        corpus="references/capabilities.md",
+        phrase="never assemble an install step, a link, or a request for a token here",
+        source=SLACK_SETUP_SKILL_MD,
+        pattern=r"Secrets\s+never\s+enter\s+this\s+chat",
     ),
     Claim(
         claim="a new member is seated automatically while an included seat is open",

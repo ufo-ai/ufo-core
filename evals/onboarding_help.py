@@ -23,6 +23,22 @@ the 17 cases that round held; the shipped description — which names the produc
 before the questions a customer literally types — routes all but one or two rounds of the cases
 that measurement covered.
 
+"Show me what you can do" is the overview a customer opens with, and it is an imperative — the frame
+this suite already knows does not route on topic alone — so the description carries its literal
+tokens too. Not instead of the question's: the imperative inverts "can you" into "you can", so "what
+can you do" is *not* inside "show me what you can do" and a description carrying only one of them
+abandons the other phrasing. Both are spelled out, which is what puts the description exactly on its
+word cap. Widening a trigger toward "show me what X can do" also invites it to fire on a customer
+asking for a demo script for their own product, so `own-demo-script` is the control that keeps the
+widening honest. It carries the imperative frame and the tail — "Show me", "what it can do" — where
+`you` is the agent and `it` is their app.
+
+The overview answer also closes by getting the bot into Slack, graded as a load of
+`slack-app-setup` and nothing beyond it: grading the answer's text would pass a fluent sentence
+about installing over an install under way, and grading what the install then reports would put
+this suite inside a live Slack handshake it has no business asserting. Both overview phrasings are
+unmeasured — the hillclimb that shaped this description predates them.
+
 A case whose point is that the agent *does* something carries `samples=3`, because routing measures
 about nine rounds in ten, so at one sample a suite this size would pass whole only about a third of
 the time — a clean run would say more about luck than about the corpus. A case whose point is that
@@ -152,6 +168,31 @@ def catalog_scorer() -> Grader:
     )
 
 
+SLACK_SETUP_SKILL = "slack-app-setup"
+
+
+def slack_setup_scorer() -> Grader:
+    """The close is a load of `slack-app-setup` and nothing further: a judge reading the answer
+    cannot tell an install under way from a fluent sentence about installing, and what the install
+    then does with Slack is that skill's business, not this suite's."""
+
+    async def grade(output: CapabilityOutput) -> CapabilityVerdict:
+        loads = [
+            call
+            for call in output.calls
+            if call.name == SKILL_LOAD_TOOL and call.input.get("name") == SLACK_SETUP_SKILL
+        ]
+        if any(call.succeeded for call in loads):
+            return CapabilityVerdict(True, f"loaded {SLACK_SETUP_SKILL!r} to drive the install")
+        if loads:
+            return CapabilityVerdict(
+                False, f"{SLACK_SETUP_SKILL!r} never mounted: {loads[0].result[:120]}"
+            )
+        return CapabilityVerdict(False, f"never loaded {SLACK_SETUP_SKILL!r}")
+
+    return DescribedGrader(f"the {SLACK_SETUP_SKILL!r} skill loads to drive the install", grade)
+
+
 def own_work_scorer() -> Grader:
     """The negative loading control: a question about the customer's own work must not reach the
     product corpus, however many of its trigger words it carries."""
@@ -176,9 +217,20 @@ CASES = (
     CapabilityCase(
         "what-can-you-do",
         "What can you do?",
-        corpus_scorer("capabilities.md"),
+        combine(corpus_scorer("capabilities.md"), slack_setup_scorer()),
         samples=3,
         digest_tag="onboarding:what-can-you-do",
+        rubric=(
+            "The answer names a few concrete things this agent can do rather than reciting a "
+            "catalog of everything.",
+        ),
+    ),
+    CapabilityCase(
+        "show-me-what-you-can-do",
+        "show me what you can do",
+        combine(corpus_scorer("capabilities.md"), slack_setup_scorer()),
+        samples=3,
+        digest_tag="onboarding:show-me-what-you-can-do",
         rubric=(
             "The answer names a few concrete things this agent can do rather than reciting a "
             "catalog of everything.",
@@ -357,6 +409,17 @@ CASES = (
         "Pull our billing export and tell me which plan drove it.",
         own_work_scorer(),
         digest_tag="onboarding:own-billing-analysis",
+    ),
+    CapabilityCase(
+        "own-demo-script",
+        "We're recording a demo of our own app on Thursday. Show me a draft script for the part "
+        "where it shows a customer what it can do.",
+        own_work_scorer(),
+        digest_tag="onboarding:own-demo-script",
+        rubric=(
+            "The answer is a demo script for the customer's own app, not about what this agent can "
+            "do.",
+        ),
     ),
     CapabilityCase(
         "own-onboarding-project",
