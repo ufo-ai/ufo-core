@@ -739,6 +739,73 @@ async def test_artifacts_view_lists_own_files_with_links_and_admins_see_all(
     assert anonymous.status_code == 401
 
 
+async def test_workspace_usage_answers_a_member_their_own_and_an_admin_the_rollup(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """A member's own burn is theirs to read, so the workspace usage view answers every member —
+    unlike the admin-only rollup page. A non-admin's payload carries only their own sums and their
+    own member-scoped caps, naming no other member and no agent; an admin additionally receives the
+    rollup they already read on the spend page."""
+    client, workspace_id, agent_id = web
+    member_m, token_m = await _seed_member(workspace_id, "m@example.com")
+    member_n, token_n = await _seed_member(workspace_id, "n@example.com")
+    _admin_id, token_admin = await _seed_member(workspace_id, "boss@example.com", admin=True)
+    await _seed_priced_turn(workspace_id, agent_id, member_m)
+    await _seed_priced_turn(workspace_id, agent_id, member_n)
+    async with workspace_tx() as connection:
+        for subject, limit in ((member_m, 5_000_000), (member_n, 9_000_000)):
+            await connection.execute(
+                sa.insert(tables.spend_cap).values(
+                    id=uuid4(),
+                    workspace_id=workspace_id,
+                    scope="member",
+                    subject_id=subject,
+                    window_seconds=3_600,
+                    limit_micro_usd=limit,
+                    on_breach="park",
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+    path = "/surface/web/workspace/usage"
+    mine = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_m}"})
+    assert mine.status_code == 200
+    payload = mine.json()
+    assert payload["workspace"] is None
+    assert payload["window_seconds"] == 86_400
+    assert {line["dimension"] for line in payload["by_dimension"]} == {"egress", "tokens"}
+    assert payload["total_micro_usd"] == 55_000
+    assert [cap["limit_micro_usd"] for cap in payload["caps"]] == [5_000_000]
+    body = mine.text
+    assert "n@example.com" not in body
+    assert "assistant" not in body
+    theirs = (await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_n}"})).json()
+    assert [cap["limit_micro_usd"] for cap in theirs["caps"]] == [9_000_000]
+    rolled = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_admin}"})
+    workspace = rolled.json()["workspace"]
+    assert rolled.json()["total_micro_usd"] == 0
+    assert workspace["total_micro_usd"] == 110_000
+    assert {entry["label"] for entry in workspace["by_member"]} == {
+        "m@example.com",
+        "n@example.com",
+    }
+    assert [entry["label"] for entry in workspace["by_agent"]] == ["assistant"]
+    assert {line["dimension"] for line in workspace["by_dimension"]} == {"egress", "tokens"}
+    windowed = (
+        await client.get(
+            f"{path}?window_seconds=3600", headers={"cookie": f"{SESSION_COOKIE}={token_m}"}
+        )
+    ).json()
+    assert windowed["window_seconds"] == 3_600
+    for bad in ("abc", "-5", "0", str(web_surface.MAX_USAGE_WINDOW_SECONDS + 1)):
+        refused = await client.get(
+            f"{path}?window_seconds={bad}", headers={"cookie": f"{SESSION_COOKIE}={token_m}"}
+        )
+        assert refused.status_code == 400
+    anonymous = await client.get(path)
+    assert anonymous.status_code == 401
+
+
 async def test_sites_view_answers_through_the_kinds_own_gate(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:

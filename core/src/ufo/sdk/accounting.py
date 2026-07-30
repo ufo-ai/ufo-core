@@ -14,6 +14,9 @@ from ufo.accounting import (
     DimensionTotal as DimensionTotal,
 )
 from ufo.accounting import (
+    MemberSpendReport as MemberSpendReport,
+)
+from ufo.accounting import (
     SpendCapLine as SpendCapLine,
 )
 from ufo.accounting import (

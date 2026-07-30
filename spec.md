@@ -418,7 +418,10 @@ list inside it the admin's), and its rolling-window spend beside its agent-scope
 ledger spans every member's turns, so spend answers an admin or a member whose explicit grant
 holds the agent, never the main-agent default alone. What the data never scoped to an agent
 reads beside the agent list instead of under one: source bindings, the deploy's member-fillable
-credential slots, memory, shared files, and hosted sites. Memory with no query lists the newest
+credential slots, memory, shared files, hosted sites, and usage. The usage view answers every
+member their own window — the ledger rows their conversations' turns wrote, the join a `member`
+cap binds on, beside their member-scoped caps — and adds the workspace rollup for an admin, so a
+non-admin's payload names no other member and no agent. Memory with no query lists the newest
 100 live items under the viewer's own subjects; a query searches every agent the member reaches,
 one per-agent reader each, unioned and deduped — so source-derived pages stay fenced by that
 agent's source grants (the same reader a turn's tools search under). Shared files are the

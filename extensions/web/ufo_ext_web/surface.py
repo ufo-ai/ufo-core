@@ -694,6 +694,65 @@ async def workspace_artifacts(ctx: SurfaceContext, request: Request) -> Response
     )
 
 
+async def workspace_usage(ctx: SurfaceContext, request: Request) -> Response:
+    """The reader's own rolling-window spend and their member-scoped caps — a member's own burn is
+    theirs to read, so this answers every member rather than 404ing like the workspace rollup. An
+    admin additionally receives that rollup (totals by dimension, member, and agent) in the same
+    payload, because they already read it on the spend page; a non-admin's payload names no other
+    member and no agent."""
+    resolved = await _audience_for(ctx, request)
+    if isinstance(resolved, Response):
+        return resolved
+    member_id, _email, audience = resolved
+    window = _window_param(request)
+    if isinstance(window, Response):
+        return window
+    own = await ctx.member_spend(member_id, window)
+    payload: dict[str, object] = {
+        "window_seconds": own.window_seconds,
+        "total_micro_usd": own.total_micro_usd,
+        "by_dimension": [
+            {
+                "dimension": line.dimension,
+                "amount": line.amount,
+                "priced_micro_usd": line.priced_micro_usd,
+            }
+            for line in own.by_dimension
+        ],
+        "caps": [
+            {
+                "window_seconds": cap.window_seconds,
+                "limit_micro_usd": cap.limit_micro_usd,
+                "on_breach": cap.on_breach,
+            }
+            for cap in own.caps
+        ],
+        "workspace": None,
+    }
+    if audience.admin:
+        rollup = await ctx.spend_rollup(window)
+        payload["workspace"] = {
+            "total_micro_usd": rollup.total_micro_usd,
+            "by_dimension": [
+                {
+                    "dimension": line.dimension,
+                    "amount": line.amount,
+                    "priced_micro_usd": line.priced_micro_usd,
+                }
+                for line in rollup.by_dimension
+            ],
+            "by_member": [
+                {"label": subject.label, "priced_micro_usd": subject.priced_micro_usd}
+                for subject in rollup.by_member
+            ],
+            "by_agent": [
+                {"label": subject.label, "priced_micro_usd": subject.priced_micro_usd}
+                for subject in rollup.by_agent
+            ],
+        }
+    return JSONResponse(payload)
+
+
 async def workspace_sites(ctx: SurfaceContext, request: Request) -> Response:
     """The hosted sites this member may see, answered through the site kind's own visibility gate
     — shared sites plus their own private ones, every site for an admin — or `available: false`
@@ -993,6 +1052,7 @@ ROUTES = (
     SurfaceRoute(method="GET", path="workspace/memory", handler=workspace_memory),
     SurfaceRoute(method="GET", path="workspace/artifacts", handler=workspace_artifacts),
     SurfaceRoute(method="GET", path="workspace/sites", handler=workspace_sites),
+    SurfaceRoute(method="GET", path="workspace/usage", handler=workspace_usage),
     SurfaceRoute(method="GET", path="turns/{turn_id}/stream", handler=stream),
     SurfaceRoute(method="POST", path="credentials", handler=fulfill_credential),
     SurfaceRoute(method="GET", path="spend", handler=spend),

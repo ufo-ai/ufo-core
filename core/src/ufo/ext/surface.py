@@ -46,7 +46,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from starlette.requests import Request
 from starlette.responses import Response
 
-from ufo.accounting import AgentSpendReport, SpendReport, SpendRollup
+from ufo.accounting import AgentSpendReport, MemberSpendReport, SpendReport, SpendRollup
 from ufo.agent_scope import agent as bind_agent
 from ufo.artifact_token import (
     ARTIFACT_DOWNLOAD_PATH,
@@ -509,9 +509,10 @@ class SurfaceContext:
     surface (the distinction from a scoped extension context, which never admits a turn or asserts
     identity). A **durable** surface (Slack) delivers through the poller; a **live** surface (web;
     core's CLI is the built-in twin) delivers by `tail`-ing the turn's frames off the hub in its
-    own SSE route, reading `turn_owner` to gate a tail, `spend_rollup` for a workspace spend view,
-    and the per-agent projections a portal renders — `list_agent_tasks`, `agent_skills`,
-    `agent_spend`, and `memory_available`/`search_memory` — and either mode renders a turn's
+    own SSE route, reading `turn_owner` to gate a tail, `spend_rollup` for a workspace spend view
+    and `member_spend` for the reader's own, and the per-agent projections a portal renders —
+    `list_agent_tasks`, `agent_skills`, `agent_spend`, and `memory_available`/`search_memory` —
+    and either mode renders a turn's
     shared files, the poller handing them to `attach` while a live surface reads
     `shared_artifacts` and links each through `artifact_link`. Each calls only what it needs.
     `credential` reads the surface workspace's slots in-process (never through the sandbox proxy),
@@ -1242,6 +1243,15 @@ class SurfaceContext:
         async with workspace_tx() as connection:
             return await SpendRollup(workspace_id=self.workspace_id).read_agent(
                 connection, agent_id, window_seconds
+            )
+
+    async def member_spend(self, member_id: UUID, window_seconds: int) -> MemberSpendReport:
+        """One member's own rolling-window spend and their member-scoped caps — what a member may
+        read about their own burn, naming no other member and no agent, so a surface answers it to
+        the member themself without the admin gate `spend_rollup` carries."""
+        async with workspace_tx() as connection:
+            return await SpendRollup(workspace_id=self.workspace_id).read_member(
+                connection, member_id, window_seconds
             )
 
     async def list_agent_connections(

@@ -637,6 +637,18 @@ class AgentSpendReport:
     caps: tuple[SpendCapLine, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class MemberSpendReport:
+    """One member's own slice of the same window: the total and per-dimension sums of ledger rows
+    whose turns ran in that member's conversations, beside the member-scoped caps that bound them —
+    what a member may read about their own burn, naming no other member and no agent."""
+
+    window_seconds: int
+    total_micro_usd: int
+    by_dimension: tuple[DimensionTotal, ...]
+    caps: tuple[SpendCapLine, ...]
+
+
 @dataclass(frozen=True)
 class SpendRollup:
     """Sum the workspace's ledger over a rolling window for the `ufoctl spend` CLI and the web
@@ -771,6 +783,61 @@ class SpendRollup:
             )
         )
         return AgentSpendReport(
+            window_seconds,
+            sum(line.priced_micro_usd for line in by_dimension),
+            by_dimension,
+            caps,
+        )
+
+    async def read_member(
+        self, connection: AsyncConnection, member_id: UUID, window_seconds: int
+    ) -> MemberSpendReport:
+        """One member's own rolling-window spend plus their member-scoped caps. A ledger row reaches
+        a member through its turn's conversation — the same join `SpendEvaluator` sums a member cap
+        over and `read`'s per-member breakdown groups by — so a member's own number here and the
+        number their cap binds on are one truth. A turn-less or memberless row (a subagent
+        conversation's) drops out rather than misattribute; it still counts in the workspace
+        rollup."""
+        cutoff = datetime.now(UTC) - timedelta(seconds=window_seconds)
+        joined = tables.ledger.join(tables.turn).join(
+            tables.conversation, tables.turn.c.conversation_id == tables.conversation.c.id
+        )
+        window = (
+            (tables.ledger.c.workspace_id == self.workspace_id)
+            & (tables.ledger.c.created_at >= cutoff)
+            & (tables.conversation.c.member_id == member_id)
+        )
+        by_dimension = tuple(
+            DimensionTotal(row.dimension, int(row.amount), int(row.priced))
+            for row in await connection.execute(
+                sa.select(
+                    tables.ledger.c.dimension,
+                    sa.func.sum(tables.ledger.c.amount).label("amount"),
+                    sa.func.sum(tables.ledger.c.priced_micro_usd).label("priced"),
+                )
+                .select_from(joined)
+                .where(window)
+                .group_by(tables.ledger.c.dimension)
+                .order_by(tables.ledger.c.dimension)
+            )
+        )
+        caps = tuple(
+            SpendCapLine(int(row.window_seconds), int(row.limit_micro_usd), row.on_breach)
+            for row in await connection.execute(
+                sa.select(
+                    tables.spend_cap.c.window_seconds,
+                    tables.spend_cap.c.limit_micro_usd,
+                    tables.spend_cap.c.on_breach,
+                )
+                .where(
+                    tables.spend_cap.c.workspace_id == self.workspace_id,
+                    tables.spend_cap.c.scope == MEMBER_SCOPE,
+                    tables.spend_cap.c.subject_id == member_id,
+                )
+                .order_by(tables.spend_cap.c.window_seconds)
+            )
+        )
+        return MemberSpendReport(
             window_seconds,
             sum(line.priced_micro_usd for line in by_dimension),
             by_dimension,

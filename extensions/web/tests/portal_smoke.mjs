@@ -398,6 +398,18 @@ const wire = {
       available: true,
       sites: [{ name: "landing-ab12cd34", summary: "port 3000, shared" }],
     },
+    usage: {
+      window_seconds: 86400,
+      total_micro_usd: 1500000,
+      by_dimension: [{ dimension: "tokens", amount: 4200, priced_micro_usd: 1500000 }],
+      caps: [{ window_seconds: 3600, limit_micro_usd: 5000000, on_breach: "park" }],
+      workspace: {
+        total_micro_usd: 9000000,
+        by_dimension: [{ dimension: "egress", amount: 7, priced_micro_usd: 9000000 }],
+        by_member: [{ label: "admin@example.com", priced_micro_usd: 9000000 }],
+        by_agent: [{ label: "assistant", priced_micro_usd: 9000000 }],
+      },
+    },
   },
   overview: {
     agent: {
@@ -486,7 +498,7 @@ const sandbox = {
         }),
       };
     }
-    if (url.endsWith("/usage")) {
+    if (url.includes("/agents/") && url.endsWith("/usage")) {
       return { ok: false, status: 404, json: async () => ({}) };
     }
     if (url.endsWith("/connections")) {
@@ -867,7 +879,9 @@ try {
   }
   const workspaceButtons = byId.workspace.querySelectorAll("button");
   const workspaceLabels = texts(workspaceButtons);
-  const expectedWorkspace = ["Sources", "Credentials", "Memory", "Artifacts", "Sites"];
+  const expectedWorkspace = [
+    "Sources", "Credentials", "Memory", "Artifacts", "Sites", "Usage",
+  ];
   if (workspaceLabels.join("|") !== expectedWorkspace.join("|")) {
     throw new Error(`the workspace sidebar reads ${JSON.stringify(workspaceLabels)}`);
   }
@@ -1183,6 +1197,43 @@ try {
   await new Promise((resolve) => setTimeout(resolve, 0));
   if (viewText() !== "No sites extension is installed.") {
     throw new Error(`a sitesless deploy reads "${viewText()}"`);
+  }
+
+  await workspaceNamed("Usage").fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const adminUsage = viewText();
+  const expectedAdminUsage = [
+    "Your spend · last 24h · $1.500000",
+    "dimension | units | cost | tokens | 4,200 | $1.500000",
+    "Your caps",
+    "window | limit | on breach | 1h | $5.00 | park",
+    "Workspace · $9.000000",
+    "dimension | units | cost | egress | 7 | $9.000000",
+    "By member",
+    "subject | cost | admin@example.com | $9.000000",
+    "By agent",
+    "subject | cost | assistant | $9.000000",
+  ].join(" | ");
+  if (adminUsage !== expectedAdminUsage) {
+    throw new Error(`the admin usage view reads "${adminUsage}"`);
+  }
+  wire.workspace.usage.workspace = null;
+  wire.workspace.usage.by_dimension = [];
+  wire.workspace.usage.caps = [];
+  await workspaceNamed("Usage").fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const memberUsage = viewText();
+  const expectedMemberUsage = [
+    "Your spend · last 24h · $1.500000",
+    "No spend of yours in window.",
+    "Your caps",
+    "No caps are set on you.",
+  ].join(" | ");
+  if (memberUsage !== expectedMemberUsage) {
+    throw new Error(`a non-admin usage view reads "${memberUsage}"`);
+  }
+  if (memberUsage.includes("@") || memberUsage.includes("assistant")) {
+    throw new Error("a non-admin usage view named another subject");
   }
 
   wire.workspaceStatus = 500;

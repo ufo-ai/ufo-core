@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ufo import accounting
 from ufo.accounting import (
+    MEMBER_SCOPE,
     SpendRollup,
     read_turn_cost,
     record_egress_request,
@@ -477,6 +478,132 @@ async def test_spend_rollup_excludes_ledger_outside_the_window(db: None) -> None
     assert report.total_micro_usd == 0
     assert report.by_dimension == ()
     assert report.by_member == ()
+
+
+async def test_member_spend_reads_only_that_members_turns_and_caps(db: None) -> None:
+    """A member's own slice sums the ledger rows their conversations' turns wrote — the same
+    ledger→turn→conversation join a `member` cap binds on — so the number a member reads and the
+    number their cap is measured against are one truth. Another member's turn, a memberless
+    subagent conversation's turn, and another member's cap all stay out."""
+    async with workspace_tx() as connection:
+        workspace_id, mine = await _seed_turn(connection)
+        member_id = (
+            await connection.execute(
+                sa.select(tables.conversation.c.member_id).where(
+                    tables.conversation.c.workspace_id == workspace_id
+                )
+            )
+        ).scalar_one()
+        agent_id = (
+            await connection.execute(
+                sa.select(tables.agent.c.id).where(tables.agent.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+        stranger_id, stranger_conversation, theirs = uuid4(), uuid4(), uuid4()
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=stranger_id,
+                workspace_id=workspace_id,
+                email="n@b.c",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        subagent_conversation, subagent_turn = uuid4(), uuid4()
+        for conversation_id, turn_id, owner in (
+            (stranger_conversation, theirs, stranger_id),
+            (subagent_conversation, subagent_turn, None),
+        ):
+            await connection.execute(
+                sa.insert(tables.conversation).values(
+                    id=conversation_id,
+                    workspace_id=workspace_id,
+                    agent_id=agent_id,
+                    surface="cli",
+                    queue_key=uuid4().hex,
+                    member_id=owner,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+            await connection.execute(
+                sa.insert(tables.turn).values(
+                    id=turn_id,
+                    workspace_id=workspace_id,
+                    conversation_id=conversation_id,
+                    agent_id=agent_id,
+                    seq=1,
+                    status="queued",
+                    inbound="hi",
+                    terminal=None,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+        await record_turn_usage(connection, workspace_id, mine, "claude-opus-4-8", FULL_USAGE)
+        await record_egress_request(connection, workspace_id, mine)
+        await record_turn_usage(connection, workspace_id, theirs, "claude-opus-4-8", FULL_USAGE)
+        await record_turn_usage(
+            connection, workspace_id, subagent_turn, "claude-opus-4-8", FULL_USAGE
+        )
+        await record_workspace_usage(connection, workspace_id, "claude-opus-4-8", FULL_USAGE)
+        for subject_id, limit in ((member_id, 5_000_000), (stranger_id, 9_000_000)):
+            await connection.execute(
+                sa.insert(tables.spend_cap).values(
+                    id=uuid4(),
+                    workspace_id=workspace_id,
+                    scope=MEMBER_SCOPE,
+                    subject_id=subject_id,
+                    window_seconds=3600,
+                    limit_micro_usd=limit,
+                    on_breach="park",
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+    async with workspace_tx() as connection:
+        report = await SpendRollup(workspace_id).read_member(connection, member_id, 3600)
+        rollup = await SpendRollup(workspace_id).read(connection, 3600)
+    assert {d.dimension: (d.amount, d.priced_micro_usd) for d in report.by_dimension} == {
+        "egress": (1, 0),
+        "tokens": (10_000, 96_500),
+    }
+    assert report.total_micro_usd == 96_500
+    assert report.window_seconds == 3600
+    assert [(c.window_seconds, c.limit_micro_usd, c.on_breach) for c in report.caps] == [
+        (3600, 5_000_000, "park")
+    ]
+    assert rollup.total_micro_usd == 96_500 * 4
+
+
+async def test_member_spend_excludes_ledger_outside_the_window(db: None) -> None:
+    old = datetime.now(UTC) - timedelta(hours=2)
+    async with workspace_tx() as connection:
+        workspace_id, turn_id = await _seed_turn(connection)
+        member_id = (
+            await connection.execute(
+                sa.select(tables.conversation.c.member_id).where(
+                    tables.conversation.c.workspace_id == workspace_id
+                )
+            )
+        ).scalar_one()
+        await connection.execute(
+            sa.insert(tables.ledger).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                turn_id=turn_id,
+                dimension="tokens",
+                amount=10,
+                priced_micro_usd=100,
+                model="claude-opus-4-8",
+                created_at=old,
+                updated_at=sa.func.now(),
+            )
+        )
+    async with workspace_tx() as connection:
+        report = await SpendRollup(workspace_id).read_member(connection, member_id, 3600)
+    assert report.total_micro_usd == 0
+    assert report.by_dimension == ()
 
 
 CONSUMER = "metronome"

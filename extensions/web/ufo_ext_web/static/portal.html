@@ -253,13 +253,14 @@ function emptyState(text) {
 }
 
 const TABS = ['chat', 'overview', 'tasks', 'connections', 'skills', 'usage'];
-const WORKSPACE_TABS = ['sources', 'credentials', 'memory', 'artifacts', 'sites'];
+const WORKSPACE_TABS = ['sources', 'credentials', 'memory', 'artifacts', 'sites', 'usage'];
 const WORKSPACE_LABELS = {
   sources: 'Sources',
   credentials: 'Credentials',
   memory: 'Memory',
   artifacts: 'Artifacts',
   sites: 'Sites',
+  usage: 'Usage',
 };
 let tab = 'chat';
 let panelLoad = 0;
@@ -1186,6 +1187,10 @@ async function showWorkspace(name, query, notice) {
     ));
     return;
   }
+  if (name === 'usage') {
+    renderWorkspaceUsage(view, payload);
+    return;
+  }
   if (!payload.available) {
     workspaceEmpty(view, 'No sites extension is installed.');
     return;
@@ -1195,6 +1200,60 @@ async function showWorkspace(name, query, notice) {
     ['site', 'summary'],
     payload.sites.map((site) => row(site.name, site.summary))
   ));
+}
+
+function money(micro) {
+  return '$' + (micro / 1e6).toFixed(6);
+}
+
+function usageSection(view, title) {
+  const heading = document.createElement('h2');
+  heading.textContent = title;
+  view.appendChild(heading);
+}
+
+function usageDimensions(view, lines, empty) {
+  if (!lines.length) { workspaceEmpty(view, empty); return; }
+  view.appendChild(table(
+    ['dimension', 'units', 'cost'],
+    lines.map((line) => row(
+      line.dimension, line.amount.toLocaleString(), money(line.priced_micro_usd)
+    ))
+  ));
+}
+
+function renderWorkspaceUsage(view, payload) {
+  usageSection(view, 'Your spend · last ' + (payload.window_seconds / 3600) + 'h · '
+    + money(payload.total_micro_usd));
+  usageDimensions(view, payload.by_dimension, 'No spend of yours in window.');
+  usageSection(view, 'Your caps');
+  if (!payload.caps.length) workspaceEmpty(view, 'No caps are set on you.');
+  else {
+    view.appendChild(table(
+      ['window', 'limit', 'on breach'],
+      payload.caps.map((cap) => row(
+        (cap.window_seconds / 3600) + 'h',
+        '$' + (cap.limit_micro_usd / 1e6).toFixed(2),
+        cap.on_breach
+      ))
+    ));
+  }
+  if (!payload.workspace) return;
+  usageSection(view, 'Workspace · ' + money(payload.workspace.total_micro_usd));
+  usageDimensions(view, payload.workspace.by_dimension, 'No workspace spend in window.');
+  for (const [title, rows] of [
+    ['By member', payload.workspace.by_member],
+    ['By agent', payload.workspace.by_agent],
+  ]) {
+    usageSection(view, title);
+    if (!rows.length) workspaceEmpty(view, 'None in window.');
+    else {
+      view.appendChild(table(
+        ['subject', 'cost'],
+        rows.map((entry) => row(entry.label, money(entry.priced_micro_usd)))
+      ));
+    }
+  }
 }
 
 async function renderUsage(agent, load) {
