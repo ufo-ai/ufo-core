@@ -380,7 +380,7 @@ def ingress_base_host(configured: str | None) -> str:
     if not host:
         raise RuntimeError(
             "sandbox.ingress_public_url must be set to the wildcard base every site is a subdomain "
-            "of (e.g. https://sites.example.com) — the ingress resolves each request's site from it"
+            "of (e.g. https://example.com) — the ingress resolves each request's site from it"
         )
     return host
 

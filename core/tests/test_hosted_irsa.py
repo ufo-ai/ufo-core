@@ -169,6 +169,32 @@ def test_hosted_proxy_carries_no_aws_identity() -> None:
     assert "role-arn" not in proxy_account.split("---", maxsplit=1)[0]
 
 
+def test_sites_answer_one_label_under_the_apex_behind_the_proxy() -> None:
+    """Two deploy facts decide a site's address, and both are unforgiving.
+
+    The NLB admits only `cloudflare_ipv4_ranges`, so a site address that resolves straight to it is
+    dropped on every port — proxying is the only way a site is reachable at all. And a wildcard TLS
+    SAN matches exactly one label, so the zone's edge certificate (`*.<apex>`) covers a site one
+    label under the apex and covers nothing beneath a `sites.` prefix. A deeper host satisfies
+    neither: proxied it fails the handshake, DNS-only it fails to connect. Pinning the depth, the
+    proxy annotation, and the source-range restriction together keeps the three from drifting into
+    a combination that publishes site addresses no browser can open."""
+    sites_ingress = next(
+        block
+        for block in HOSTED_TEMPLATE.read_text().split("kind: Ingress")
+        if "name: ufo-ingress" in block.split("---", maxsplit=1)[0]
+    ).split("---", maxsplit=1)[0]
+    assert 'external-dns.alpha.kubernetes.io/hostname: "*.${apex_host}"' in sites_ingress
+    assert 'external-dns.alpha.kubernetes.io/cloudflare-proxied: "true"' in sites_ingress
+    assert '- hosts: ["*.${apex_host}"]' in sites_ingress
+    assert '- host: "*.${apex_host}"' in sites_ingress
+    assert "sites." not in sites_ingress.replace("`sites.` prefix", "")
+    for env in (TESTING_CONFIG, PROD_CONFIG):
+        config = env.read_text()
+        assert '    ingress_public_url = "https://${module.platform.hostname}"' in config
+        assert "loadBalancerSourceRanges = local.cloudflare_ipv4_ranges" in config
+
+
 def test_hosted_proxy_and_serve_share_the_rendered_config() -> None:
     config_mount = "{name: config, mountPath: /app/ufo.toml, subPath: ufo.toml}"
     for deployment in (PROXY_DEPLOYMENT, SERVE_DEPLOYMENT):

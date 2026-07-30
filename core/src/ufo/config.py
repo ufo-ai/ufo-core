@@ -150,7 +150,7 @@ class SandboxConfig(BaseModel):
     proxy URL — open, unmetered egress is never a silent default.
 
     `ingress_port` is the stable port the sandbox ingress binds. `ingress_public_url` is the
-    wildcard base every served sandbox port is a subdomain of (`https://sites.example.com`, backed
+    wildcard base every served sandbox port is a subdomain of (`https://example.com`, backed
     by a wildcard DNS record and cert): the ingress resolves each request's site from the label
     under it, and `SurfaceContext.ingress_url` mints links against it. `https` and a host, with an
     optional port and nothing more — a site's session cookie is `Secure`. Unset, a surface mints no
@@ -180,13 +180,13 @@ class SandboxConfig(BaseModel):
         if base.scheme != "https" or not base.hostname:
             raise ValueError(
                 "sandbox.ingress_public_url must be an https base with a host "
-                "(e.g. https://sites.example.com) — a site's session cookie is `Secure`, so a "
+                "(e.g. https://example.com) — a site's session cookie is `Secure`, so a "
                 "plain-http origin can never carry one"
             )
         if base.path or base.query or base.fragment or base.username or base.password:
             raise ValueError(
                 "sandbox.ingress_public_url is a scheme and a host only, with no path, query, "
-                "fragment, or credentials (e.g. https://sites.example.com) — every site's address "
+                "fragment, or credentials (e.g. https://example.com) — every site's address "
                 "is a label put in front of that host"
             )
         return self

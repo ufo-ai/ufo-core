@@ -337,17 +337,19 @@ spec:
   ports:
     - {name: ingress, port: 8100, targetPort: ingress}
 ---
-# Every hosted site answers at its own subdomain of ${sites_host}, so one wildcard record and one
+# Every hosted site answers at its own subdomain of ${apex_host}, so one wildcard record and one
 # wildcard certificate cover all of them and each site is its own browser origin — which is what
-# keeps one site's cookies and storage away from the next. The record is published DNS-only
-# (`cloudflare-proxied: "false"`), so site bytes reach the shared NLB directly rather than through
-# the proxy every other hosted host sits behind. Not a plan limit — every Cloudflare plan proxies a
-# wildcard record. It is the edge certificate: Universal SSL covers the apex and first-level
-# subdomains only, and a site sits deeper (`<label>.sites.<apex>`). Measured with the record proxied:
-# `probe.sites.testing.flyingobject.ai` resolved to Cloudflare and the handshake was refused
-# outright — no certificate the edge could serve, so every site was unreachable. Flipping this back
-# to "true" waits on `*.${sites_host}` joining the zone's ACM certificate. Our own certificate is
-# unaffected either way: cert-manager issues it over DNS-01, which needs no proxied record.
+# keeps one site's cookies and storage away from the next. A site is one label deep, not two, and
+# that depth is load-bearing: a wildcard SAN matches exactly one label, so the zone's edge
+# certificate (`*.${apex_host}`, measured) covers `<label>.${apex_host}` and covers nothing under a
+# `sites.` prefix. Proxying is not optional here — the NLB admits only Cloudflare's ranges
+# (`loadBalancerSourceRanges`), so a DNS-only site address resolves and then drops every connection.
+# The wildcard rule is the last resort for this apex: nginx matches an exact server name ahead of a
+# wildcard, so ${shared_host} and the apex itself keep their own rules, and any other unclaimed name
+# lands here and is refused for naming no site. Our own certificate needs no proxied record —
+# cert-manager issues it over DNS-01.
+# Every proxied response carries `Cache-Control: private, no-store` from the ingress, since a shared
+# cache that stored a site's bytes would answer later requests without the cookie check.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -355,15 +357,15 @@ metadata:
   namespace: ${namespace}
   annotations:
     cert-manager.io/cluster-issuer: ${cluster_issuer}
-    external-dns.alpha.kubernetes.io/hostname: "*.${sites_host}"
-    external-dns.alpha.kubernetes.io/cloudflare-proxied: "false"
+    external-dns.alpha.kubernetes.io/hostname: "*.${apex_host}"
+    external-dns.alpha.kubernetes.io/cloudflare-proxied: "true"
 spec:
   ingressClassName: ${ingress_class}
   tls:
-    - hosts: ["*.${sites_host}"]
+    - hosts: ["*.${apex_host}"]
       secretName: ufo-ingress-tls
   rules:
-    - host: "*.${sites_host}"
+    - host: "*.${apex_host}"
       http:
         paths:
           - path: /

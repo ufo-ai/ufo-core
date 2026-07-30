@@ -51,7 +51,7 @@ Two origins, two processes, one wire format:
 | piece | process | origin | traffic |
 |---|---|---|---|
 | frame page (header + selector + `<iframe>`) | main serve, `/surface/sites/{site_token}` | app host | one authenticated GET per visit |
-| site bytes (every asset / app request) | **sandbox ingress** (`ufoctl ingress`), new | the site's own subdomain of `[sandbox] ingress_public_url` (`*.sites.<domain>`, wildcard cert) | all of it |
+| site bytes (every asset / app request) | **sandbox ingress** (`ufoctl ingress`), new | the site's own subdomain of `[sandbox] ingress_public_url` (`*.<domain>`, wildcard cert) | all of it |
 
 Each site lives at its own origin: a stable DNS label that is a signed *address* for
 `(conversation, port)` — base32 of the conversation id, the port, and a truncated HMAC (34 bytes →
@@ -134,7 +134,7 @@ is its first minter.
   cookies ufo sets, not ones it relays. Stripping the attribute rather than the cookie leaves the
   site its own cookies, host-only to its own label, which is what a per-site origin is for.
 - Infra: one new Deployment + Service in `hosted.yaml.tpl`; the env overlay routes the wildcard
-  sites hostname (`*.sites.<domain>` DNS + cert) to it.
+  sites hostname (`*.<domain>` DNS + cert) to it.
 
 `SurfaceContext` gains `ingress_url(conversation_id, port)` so the sites surface mints without
 holding the secret — the `artifact_link` pattern. The TTL is `ingress_token`'s own constant, not an
@@ -289,22 +289,24 @@ permanent link opens.
 - **No WebSocket proxying.** The ingress forwards HTTP methods only, so a dev server's live
   reload (Vite HMR) never connects; a `publish_website` app that needs a socket at runtime does
   not work through the frame either.
-- **The sites wildcard is published DNS-only, and the reason is measured.** Proxying a wildcard is
-  available on every Cloudflare plan, so that was never the limit; the zone already serves a free
-  Let's Encrypt edge certificate carrying `*.testing.flyingobject.ai`, so ACM is active on it too.
-  The limit is depth: a wildcard SAN matches exactly one label, so nothing on that certificate
-  covers `<label>.sites.<apex>`. Measured with the record proxied on the first deploy —
-  `probe.sites.testing.flyingobject.ai` resolved to Cloudflare addresses and the TLS handshake was
-  refused outright (`SSLV3_ALERT_HANDSHAKE_FAILURE`), so every site was unreachable. DNS-only
-  restores hosting: nginx terminates with the cert-manager wildcard, which DNS-01 issues whatever
-  the record's proxy state. The cost is that site bytes alone reach the shared NLB directly, without
-  proxy-side DDoS absorption, WAF, or origin-IP concealment. Adding `*.sites.<apex>` to the zone's
-  ACM certificate is what lets `cloudflare-proxied` flip back to `"true"`, and that is the only
-  change needed then.
-- **The sites base is a sibling subdomain of the app host, so a site's scripts can still plant a
-  cookie on it. Scrubbing covers the header path only.** `sites.<domain>` shares a registrable domain
-  with `app.<domain>`, and that shared parent is what the browser computes `Domain=`-scoped cookies
-  and SameSite on, so it does not separate a site from the app for us. The ingress scrubs what it
+- **A site sits one label under the apex, and both halves of that are measured.** Two deploy facts
+  fix the address. The NLB admits only Cloudflare's ranges (`loadBalancerSourceRanges`), so a site
+  published DNS-only resolves and then drops every connection — measured on
+  `probe.sites.testing.flyingobject.ai` at `52.2.153.27`, timing out on 80 and 443 alike while the
+  proxied apex served 200. And a wildcard TLS SAN matches exactly one label, so the zone's edge
+  certificate — measured as `*.flyingobject.ai`, `*.testing.flyingobject.ai`, `flyingobject.ai` —
+  covers `<label>.<apex>` and covers nothing under a `sites.` prefix; proxied at that depth the
+  handshake is refused outright (`SSLV3_ALERT_HANDSHAKE_FAILURE`). A site host one label under the
+  apex satisfies both at once, with the certificate the zone already has: no ACM purchase, no
+  Cloudflare token scope beyond the DNS edit external-dns already holds. What it costs is the apex's
+  unclaimed namespace — the wildcard rule is the last match for `*.<apex>`, so a name nobody has
+  claimed with an exact rule reaches the ingress and is refused for naming no site. `sites.<apex>`
+  is not a host anymore.
+- **A site is a sibling subdomain of the app host, so a site's scripts can still plant a cookie on
+  it. Scrubbing covers the header path only.** `<label>.<domain>` shares a registrable domain with
+  `app.<domain>`, and that shared parent is what the browser computes `Domain=`-scoped cookies and
+  SameSite on, so it does not separate a site from the app for us — nor would a `sites.` prefix have,
+  since the shared parent is the same either way. The ingress scrubs what it
   relays — `Domain` stripped from every `Set-Cookie`, every cookie named under `ufo_` dropped, a
   nameless cookie dropped with them — and that closes the response header as a write path
   completely. It does not touch the other one: a site is agent-authored code *with scripts*, and
