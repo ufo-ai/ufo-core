@@ -420,10 +420,12 @@ ledger and the deploy's shape, which chat projects to no member, so each answers
 member whose explicit grant holds the agent, never the main-agent default alone. A shared connection or source names its owner only to an admin or the owner —
 chat resolves no other member's email for a non-admin, so neither does a panel. A panel mutation
 is a **prepared intent**: the form's structured intent is admitted as a turn on the member's one
-durable intent conversation with that agent and dispatched verbatim to the typed object verb —
-no model round, no fold into a live chat turn — so a submit applies exactly or returns the
-kind's refusal, the turn is the audit record, and the per-conversation partition runs a member's
-intents one at a time in order.
+durable intent conversation with that agent and dispatched verbatim to the typed object or tool
+action — no model round, no fold into a live chat turn — so a submit applies exactly or returns
+the kind's refusal, the turn is the audit record, and the per-conversation partition runs a
+member's intents one at a time in order. A connect intent leaves the same private OAuth handoff
+chat's connect_account does: the URL rides the turn's terminal and is minted per speaking member
+at stream time, never in a transcript or an intent response.
 
 The debug and memory-explorer surfaces are the operator-audience surfaces — the `ufoctl`-verbs
 audience, not a member action. They share one operator web session (`ufo.sdk.operator`, one

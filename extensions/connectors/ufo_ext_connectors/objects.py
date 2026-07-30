@@ -1,14 +1,12 @@
 """Member-owned connections and their per-agent connector grants as workspace objects."""
 
-import hashlib
-import re
 from dataclasses import dataclass
 from typing import ClassVar, Protocol
 
 from pydantic import BaseModel, ConfigDict
 
 from ufo.sdk.context import JsonValue
-from ufo.sdk.grants import connection_summaries, grant_summaries
+from ufo.sdk.grants import account_object_name, connection_summaries, grant_summaries
 from ufo.sdk.objects import (
     GeneratedObjectOwner,
     MemberOwnedObjects,
@@ -27,7 +25,6 @@ REVOKE_GATE = "only the connection owner or a workspace admin may revoke an agen
 SHARE_GATE = (
     "only the connection owner may share; the owner or a workspace admin may make it private"
 )
-NAME_DIGEST_LENGTH = 8
 
 
 class ConnectionSpec(BaseModel):
@@ -48,17 +45,8 @@ class _AccountSummary(Protocol):
     def account_id(self) -> str: ...
 
 
-def _slug(raw: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "-", raw.lower()).strip("-")
-
-
 def _named[SummaryT: _AccountSummary](rows: tuple[SummaryT, ...]) -> dict[str, SummaryT]:
-    named: dict[str, SummaryT] = {}
-    for row in rows:
-        identity = f"{row.provider}\0{row.account_id}".encode()
-        qualifier = hashlib.sha256(identity).hexdigest()[:NAME_DIGEST_LENGTH]
-        named[f"{_slug(row.provider)}-{_slug(row.account_id)}-{qualifier}"] = row
-    return named
+    return {account_object_name(row.provider, row.account_id): row for row in rows}
 
 
 @dataclass(frozen=True)

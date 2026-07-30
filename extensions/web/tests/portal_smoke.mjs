@@ -45,6 +45,25 @@ class StubElement {
   append(...nodes) {
     nodes.forEach((node) => this.appendChild(node));
   }
+  createTHead() {
+    return this.appendChild(new StubElement("thead"));
+  }
+  createTBody() {
+    return this.appendChild(new StubElement("tbody"));
+  }
+  insertRow() {
+    return this.appendChild(new StubElement("tr"));
+  }
+  insertCell() {
+    return this.appendChild(new StubElement("td"));
+  }
+  prepend(...nodes) {
+    for (const node of nodes.reverse()) {
+      node.remove();
+      node.parentNode = this;
+      this.childNodes.unshift(node);
+    }
+  }
   insertBefore(node, reference) {
     const at = this.childNodes.indexOf(reference);
     if (at === -1) throw new Error("insertBefore: reference is not a child");
@@ -265,6 +284,27 @@ const wire = {
     },
   },
   posted: [],
+  connectUrl: null,
+  connections: {
+    connections: [
+      {
+        provider: "github",
+        account_id: "gh-acct",
+        grant: "github-gh-acct-abcd1234",
+        owner_email: "admin@example.com",
+        shared: false,
+        connected_at: "2026-07-01T08:30:00+00:00",
+      },
+      {
+        provider: "slack",
+        account_id: "sl-acct",
+        grant: "slack-sl-acct-ef567890",
+        owner_email: null,
+        shared: true,
+        connected_at: "2026-07-02T08:30:00+00:00",
+      },
+    ],
+  },
   overview: {
     agent: {
       name: "assistant",
@@ -347,6 +387,9 @@ const sandbox = {
     if (url.endsWith("/usage")) {
       return { ok: false, status: 404, json: async () => ({}) };
     }
+    if (url.endsWith("/connections")) {
+      return { ok: true, status: 200, json: async () => structuredClone(wire.connections) };
+    }
     if (url.endsWith("/overview") && wire.overviewThrows) throw new TypeError("network down");
     if (url.endsWith("/overview") && wire.overviewStatus) {
       return { ok: false, status: wire.overviewStatus, json: async () => ({}) };
@@ -384,6 +427,9 @@ const sandbox = {
     constructor() {
       this.handlers = {};
       setTimeout(() => {
+        if (wire.connectUrl) {
+          this.handlers.connect?.({ data: JSON.stringify({ url: wire.connectUrl }) });
+        }
         this.handlers.terminal?.({
           data: JSON.stringify({ status: "done", text: "ok", model: "auto", tokens: 1, cost_micro_usd: 1 }),
         });
@@ -620,6 +666,71 @@ try {
     .querySelectorAll("*")
     .find((node) => node.textContent === "Usage for this agent is not shared with you.");
   if (!usageWall) throw new Error("the usage 404 renders no member line");
+  await tabNamed("connections").fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const connectionRows = byId.panel.querySelectorAll("tr").slice(1);
+  if (connectionRows.length !== 2) {
+    throw new Error(`connections rendered ${connectionRows.length} rows`);
+  }
+  const ownedActions = connectionRows[0].querySelectorAll("button");
+  if (texts(ownedActions).join("|") !== "Share with agent|Revoke") {
+    throw new Error(`owned row actions are ${texts(ownedActions).join("|")}`);
+  }
+  if (connectionRows[1].querySelectorAll("button").length !== 0) {
+    throw new Error("a foreign edge rendered owner actions");
+  }
+  await ownedActions[0].fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const flipEnvelope = wire.posted.at(-1);
+  if (JSON.stringify(flipEnvelope) !== JSON.stringify({
+    verb: "apply",
+    kind: "connector_grant",
+    name: "github-gh-acct-abcd1234",
+    spec: { provider: "github", account_id: "gh-acct", shared: true },
+  })) {
+    throw new Error(`flip posted ${JSON.stringify(flipEnvelope)}`);
+  }
+  const flipNotice = byId.panel
+    .querySelectorAll("*")
+    .find((node) => node.className.includes("result") && node.textContent === "Saved.");
+  if (!flipNotice) throw new Error("the flip outcome did not render on the re-read panel");
+  const rowsAfterFlip = byId.panel.querySelectorAll("tr").slice(1);
+  await rowsAfterFlip[0].querySelectorAll("button")[1].fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const revokeEnvelope = wire.posted.at(-1);
+  if (JSON.stringify(revokeEnvelope) !== JSON.stringify({
+    verb: "delete",
+    kind: "connector_grant",
+    name: "github-gh-acct-abcd1234",
+  })) {
+    throw new Error(`revoke posted ${JSON.stringify(revokeEnvelope)}`);
+  }
+  wire.connectUrl = "https://oauth.example.test/authorize?state=s1";
+  const connectForm = byId.panel.querySelector("form.search");
+  if (!connectForm) throw new Error("connections built no connect form");
+  const providerField = connectForm.querySelectorAll("input")[0];
+  const shareBox = connectForm.querySelectorAll("input")[1];
+  providerField.value = "notion";
+  shareBox.checked = true;
+  await connectForm.fire("submit");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const connectEnvelope = wire.posted.at(-1);
+  if (JSON.stringify(connectEnvelope) !== JSON.stringify({
+    verb: "connect",
+    kind: "connection",
+    name: "notion",
+    spec: { shared: true },
+  })) {
+    throw new Error(`connect posted ${JSON.stringify(connectEnvelope)}`);
+  }
+  const consentLink = byId.panel
+    .querySelectorAll("a")
+    .find((node) => node.textContent === "Open the provider consent page");
+  if (!consentLink || consentLink.href !== "https://oauth.example.test/authorize?state=s1") {
+    throw new Error("the private consent link did not render from the stream");
+  }
+  if (consentLink.target !== "_blank") throw new Error("consent link must open its own tab");
+  wire.connectUrl = null;
   await tabNamed("memory").fire("click");
   const searchForm = byId.panel.querySelector("form");
   if (!searchForm || searchForm.className !== "search") {

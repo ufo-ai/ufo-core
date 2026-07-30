@@ -578,14 +578,6 @@ function renderChat(agent) {
 }
 
 const PANELS = {
-  connections: {
-    key: 'connections',
-    columns: ['provider', 'account', 'owner', 'access', 'connected'],
-    row: (entry) => [entry.provider, entry.account_id, entry.owner_email,
-                     entry.shared ? 'agent-shared' : 'private',
-                     entry.connected_at.slice(0, 10)],
-    empty: 'No accounts are connected to this agent.',
-  },
   credentials: {
     key: 'slots',
     columns: ['slot', 'description', 'extension', 'state'],
@@ -859,6 +851,7 @@ async function selectTab(name, detail) {
   const agent = selected;
   panel.replaceChildren();
   if (name === 'overview') { await renderOverview(agent, load, detail); return; }
+  if (name === 'connections') { await renderConnections(agent, load, detail); return; }
   if (name === 'skills') { await renderSkills(agent, load, detail); return; }
   if (name === 'memory') { await renderMemory(agent, load, detail); return; }
   if (name === 'usage') { await renderUsage(agent, load); return; }
@@ -922,6 +915,152 @@ function specField(key, prop, value, options) {
   label.htmlFor = widget.id = 'spec-' + key;
   field.appendChild(widget);
   return field;
+}
+
+async function postIntent(agent, body) {
+  let res;
+  try {
+    res = await fetch(BASE + '/agents/' + agent.id + '/intents', {
+      method: 'POST',
+      credentials: 'same-origin',
+      body: JSON.stringify(body),
+    });
+  } catch (err) {
+    return { applied: false, message: 'Network error — try again.' };
+  }
+  const outcome = await res.json().catch(() => null);
+  if (outcome && outcome.message) return outcome;
+  return { applied: false, message: 'Error ' + res.status + ' — try again.' };
+}
+
+function connectHandoff(target, turnId) {
+  const source = new EventSource(BASE + '/turns/' + turnId + '/stream');
+  source.addEventListener('connect', (event) => {
+    const link = document.createElement('a');
+    link.href = JSON.parse(event.data).url;
+    link.target = '_blank';
+    link.rel = 'noopener';
+    link.textContent = 'Open the provider consent page';
+    target.replaceChildren(link);
+    source.close();
+  });
+  source.addEventListener('connect_error', (event) => {
+    target.textContent = JSON.parse(event.data).message;
+    source.close();
+  });
+  source.addEventListener('terminal', () => source.close());
+  source.onerror = () => source.close();
+}
+
+async function renderConnections(agent, load, notice) {
+  panel.replaceChildren();
+  let entries;
+  try {
+    const res = await fetch(BASE + '/agents/' + agent.id + '/connections',
+      { credentials: 'same-origin' });
+    if (load !== panelLoad) return;
+    if (!res.ok) {
+      fail(load, 'Error ' + res.status + ' — reload to retry.', notice);
+      return;
+    }
+    entries = (await res.json()).connections;
+  } catch (err) {
+    fail(load, 'Network error — try again.', notice);
+    return;
+  }
+  if (load !== panelLoad) return;
+  const form = document.createElement('form');
+  form.className = 'search';
+  const provider = document.createElement('input');
+  provider.placeholder = 'Provider (github, notion, …)';
+  const share = document.createElement('input');
+  share.type = 'checkbox';
+  share.id = 'connect-shared';
+  const shareLabel = document.createElement('label');
+  shareLabel.htmlFor = share.id;
+  shareLabel.textContent = 'Share with agent';
+  shareLabel.prepend(share);
+  const go = document.createElement('button');
+  go.type = 'submit';
+  go.className = 'send';
+  go.textContent = 'Connect';
+  form.append(provider, shareLabel, go);
+  const handoff = document.createElement('div');
+  handoff.className = 'result mono';
+  if (notice) handoff.textContent = notice;
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const named = provider.value.trim();
+    if (!named) return;
+    go.disabled = true;
+    const outcome = await postIntent(agent, {
+      verb: 'connect',
+      kind: 'connection',
+      name: named,
+      spec: { shared: share.checked },
+    });
+    go.disabled = false;
+    if (!outcome.applied) {
+      handoff.textContent = outcome.message;
+      return;
+    }
+    handoff.textContent = 'Consent opens privately for you.';
+    connectHandoff(handoff, outcome.turn_id);
+  });
+  panel.append(form, handoff);
+  if (!entries.length) {
+    panelEmpty('No accounts are connected to this agent.');
+    return;
+  }
+  const table = document.createElement('table');
+  const header = table.createTHead().insertRow();
+  for (const column of ['provider', 'account', 'owner', 'access', 'connected', '']) {
+    const cell = document.createElement('th');
+    cell.textContent = column;
+    header.appendChild(cell);
+  }
+  const body = table.createTBody();
+  for (const entry of entries) {
+    const row = body.insertRow();
+    for (const value of [entry.provider, entry.account_id, entry.owner_email,
+                         entry.shared ? 'agent-shared' : 'private',
+                         entry.connected_at.slice(0, 10)]) {
+      row.insertCell().textContent = value == null ? '\u2014' : value;
+    }
+    const actions = row.insertCell();
+    if (entry.owner_email === null) continue;
+    const flip = document.createElement('button');
+    flip.type = 'button';
+    flip.textContent = entry.shared ? 'Make private' : 'Share with agent';
+    flip.addEventListener('click', async () => {
+      flip.disabled = true;
+      const outcome = await postIntent(agent, {
+        verb: 'apply',
+        kind: 'connector_grant',
+        name: entry.grant,
+        spec: {
+          provider: entry.provider,
+          account_id: entry.account_id,
+          shared: !entry.shared,
+        },
+      });
+      if (tab === 'connections') selectTab('connections', outcome.message);
+    });
+    const revoke = document.createElement('button');
+    revoke.type = 'button';
+    revoke.textContent = 'Revoke';
+    revoke.addEventListener('click', async () => {
+      revoke.disabled = true;
+      const outcome = await postIntent(agent, {
+        verb: 'delete',
+        kind: 'connector_grant',
+        name: entry.grant,
+      });
+      if (tab === 'connections') selectTab('connections', outcome.message);
+    });
+    actions.append(flip, revoke);
+  }
+  panel.appendChild(table);
 }
 
 async function renderOverview(agent, load, notice) {

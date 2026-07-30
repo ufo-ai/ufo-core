@@ -15,6 +15,7 @@ from cryptography.fernet import Fernet
 from dbos import DBOSClient
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from ufo_ext_connectors.manifest import manifest as connectors_manifest
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.store import recall_subjects
 from ufo_ext_skill_create.manifest import manifest as skill_create_manifest
@@ -39,7 +40,13 @@ from ufo.credentials import (
 )
 from ufo.db import workspace_tx
 from ufo.ext.loader import skill_registry, turn_runtime_skills
-from ufo.grants import ConnectFlow, GrantStore, OAuthAccount, install_connect_flow
+from ufo.grants import (
+    ConnectFlow,
+    GrantStore,
+    OAuthAccount,
+    account_object_name,
+    install_connect_flow,
+)
 from ufo.hub import InProcessHub, SkillLoad, ToolCall
 from ufo.loop import queue as loop_queue
 from ufo.loop.subagents import SubagentRegistry
@@ -210,7 +217,7 @@ def dbos_runtime(
             dbos=dbos_client,
             subagents=SubagentRegistry(()),
             subagent_grants={},
-            manifests=(skill_create_manifest(),),
+            manifests=(connectors_manifest(), skill_create_manifest()),
             registry=STANDIN_REGISTRY,
             skills=skill_registry(()),
             credentials=CredentialStore(fernet=CREDENTIAL_FERNET),
@@ -2300,6 +2307,147 @@ async def test_an_out_of_audience_agent_takes_no_intent(
     assert "admin" in outcome["message"]
 
 
+async def test_grant_intents_flip_and_revoke_under_the_owner_gate(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    """The connections panel's two mutations ride the intent lane against the `connector_grant`
+    kind, named by the grant's stable object name: a non-owner member's flip surfaces the kind's
+    own refusal and changes nothing, the owner's flip lands exactly, and the owner's delete
+    revokes the grant row — each outcome synchronous and audited as a turn."""
+    client, workspace_id, agent_id = web
+    owner_id, owner_token = await _seed_member(workspace_id, "owner@example.com")
+    _other_id, other_token = await _seed_member(workspace_id, "other@example.com")
+    await _seed_connection(workspace_id, agent_id, owner_id, "github", shared=True)
+    name = account_object_name("github", "github-account")
+    flip = {
+        "verb": "apply",
+        "kind": "connector_grant",
+        "name": name,
+        "spec": {"provider": "github", "account_id": "github-account", "shared": False},
+    }
+    refused = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json=flip,
+        headers={"cookie": f"{SESSION_COOKIE}={other_token}"},
+    )
+    assert refused.status_code == 200
+    assert refused.json()["applied"] is False
+    assert "owner" in refused.json()["message"]
+    async with workspace_tx() as connection:
+        still_shared = (
+            await connection.execute(sa.select(tables.connector_grant.c.shared))
+        ).scalar_one()
+    assert still_shared is True
+    flipped = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json=flip,
+        headers={"cookie": f"{SESSION_COOKIE}={owner_token}"},
+    )
+    assert flipped.status_code == 200
+    assert flipped.json()["applied"] is True
+    async with workspace_tx() as connection:
+        shared_now = (
+            await connection.execute(sa.select(tables.connector_grant.c.shared))
+        ).scalar_one()
+    assert shared_now is False
+    revoked = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json={"verb": "delete", "kind": "connector_grant", "name": name},
+        headers={"cookie": f"{SESSION_COOKIE}={owner_token}"},
+    )
+    assert revoked.status_code == 200
+    assert revoked.json()["applied"] is True
+    async with workspace_tx() as connection:
+        grants_left = (
+            await connection.execute(sa.select(sa.func.count()).select_from(tables.connector_grant))
+        ).scalar_one()
+    assert grants_left == 0
+
+
+async def test_a_connect_intent_leaves_the_private_handoff_on_the_turn(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    """The panel's connect rides the same private OAuth handoff as chat's `connect_account`: the
+    intent's terminal carries the connect request (never a URL), the member's stream mints their
+    private authorization URL from it, and an unknown provider is the tool's own refusal."""
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "owner@example.com")
+    flow = ConnectFlow(
+        providers={"github": ConnectProvider()},
+        fernet=Fernet(Fernet.generate_key()),
+        store=GrantStore(),
+        redirect_uri="https://ufo.example.test/v1/connect/callback",
+    )
+    install_connect_flow(flow)
+    try:
+        submitted = await client.post(
+            f"/surface/web/agents/{agent_id}/intents",
+            json={"verb": "connect", "kind": "connection", "name": "github"},
+            headers={"cookie": f"{SESSION_COOKIE}={token}"},
+        )
+        assert submitted.status_code == 200
+        outcome = submitted.json()
+        assert outcome["applied"] is True
+        async with workspace_tx() as connection:
+            terminal = (
+                await connection.execute(
+                    sa.select(tables.turn.c.terminal).where(
+                        tables.turn.c.id == UUID(outcome["turn_id"])
+                    )
+                )
+            ).scalar_one()
+        frame = TerminalFrame.model_validate(terminal)
+        assert frame.connect_request is not None
+        assert frame.connect_request.provider == "github"
+        assert frame.connect_request.requester_member_id == member_id
+        assert "oauth.example.test" not in json.dumps(terminal)
+        streamed = await client.get(
+            f"/surface/web/turns/{outcome['turn_id']}/stream",
+            headers={"cookie": f"{SESSION_COOKIE}={token}"},
+        )
+        lines = streamed.text.splitlines()
+        connect_data = json.loads(lines[lines.index("event: connect") + 1].removeprefix("data: "))
+        assert connect_data["url"].startswith("https://oauth.example.test/authorize")
+        unknown = await client.post(
+            f"/surface/web/agents/{agent_id}/intents",
+            json={"verb": "connect", "kind": "connection", "name": "nonesuch"},
+            headers={"cookie": f"{SESSION_COOKIE}={token}"},
+        )
+        assert unknown.status_code == 200
+        assert unknown.json()["applied"] is False
+    finally:
+        install_connect_flow(None)
+
+
+async def test_connect_pairs_with_the_connection_kind_exactly(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """`connect` is the one verb no kind gates, so the model pins its pair both ways: `connect`
+    with any other kind, and any other verb with the `connection` kind, are malformed intents —
+    400 before any turn exists."""
+    client, workspace_id, agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "owner@example.com")
+    for body in (
+        {"verb": "connect", "kind": "connector_grant", "name": "github"},
+        {"verb": "connect", "kind": "agent", "name": "assistant"},
+        {"verb": "apply", "kind": "connection", "name": "github"},
+        {"verb": "delete", "kind": "connection", "name": "github"},
+    ):
+        refused = await client.post(
+            f"/surface/web/agents/{agent_id}/intents",
+            json=body,
+            headers={"cookie": f"{SESSION_COOKIE}={token}"},
+        )
+        assert refused.status_code == 400
+    async with workspace_tx() as connection:
+        turns = (
+            await connection.execute(sa.select(sa.func.count()).select_from(tables.turn))
+        ).scalar_one()
+    assert turns == 0
+
+
 async def test_an_intent_naming_another_kind_is_refused_at_validation(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
@@ -2581,7 +2729,9 @@ def test_portal_page_smoke_walks_every_view() -> None:
     """A reference-level walk of the page's script under a stub DOM (`portal_smoke.mjs`) — boot
     (signed in and the 401 token-card branch), select, overview, the settings save, the mid-save
     agent switch, the failed post-save re-read, the memory tab's search bar (its `form.search`
-    class and both style rules scoped to it), admin, select-after-admin, the question render
+    class and both style rules scoped to it), the connections panel (owner-gated flip and revoke
+    envelopes, the connect intent and its private consent link off the stream), admin,
+    select-after-admin, the question render
     across every `buttonable` condition, the answered chain, the credentials prompts and their
     refusal arms, an agent switch mid-answer, and a later turn superseding an older turn's
     question and files — so a deleted declaration, a dangling element reference, or a

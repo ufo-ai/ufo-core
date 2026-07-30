@@ -7,6 +7,8 @@ state; `complete` verifies that state, exchanges the code for the connected acco
 creates its connection, and grants the intended agent. The broker holds the account's token and
 executes tools server-side, so no secret crosses this boundary."""
 
+import hashlib
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -703,6 +705,23 @@ def connect_bridge_workspace(request: Request) -> UUID | None:
         )
     except (ConnectStateInvalid, ConnectUnavailable, UnknownProvider):
         return None
+
+
+ACCOUNT_NAME_DIGEST_LENGTH = 8
+
+
+def account_object_name(provider: str, account_id: str) -> str:
+    """The stable object name a provider account renders as — for both the `connection` and
+    `connector_grant` kinds and the portal's prepared intents, so every surface names one edge
+    the same way: slugged provider and account with a digest qualifier that keeps two accounts
+    whose slugs collide distinct."""
+    identity = f"{provider}\0{account_id}".encode()
+    qualifier = hashlib.sha256(identity).hexdigest()[:ACCOUNT_NAME_DIGEST_LENGTH]
+    return f"{_slug(provider)}-{_slug(account_id)}-{qualifier}"
+
+
+def _slug(raw: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", raw.lower()).strip("-")
 
 
 async def grant_summaries() -> tuple[GrantSummary, ...]:

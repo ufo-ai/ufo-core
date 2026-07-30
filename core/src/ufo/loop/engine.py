@@ -868,7 +868,9 @@ class TurnEngine:
     async def run_intent(self) -> TerminalFrame | None:
         """Run a prepared-intent turn: dispatch the one tool call the inbound envelope names,
         verbatim, and commit its result — no model round, so the submitted values apply exactly or
-        the kind's refusal returns, never a paraphrase. The dispatch is the same guarded step a
+        the kind's refusal returns, never a paraphrase. A successful `connect_account` dispatch
+        leaves its private OAuth handoff on the terminal exactly as a chat round does, so the
+        panel's stream mints the member's URL the same way. The dispatch is the same guarded step a
         model call takes: `pre_tool_use` may deny or fold arguments, `post_tool_use`/
         `post_tool_use_failure` fire on the result, member authority binds through the founding
         message, and the step memoizes across crash recovery. The turn-shaped hooks do not fire —
@@ -923,7 +925,24 @@ class TurnEngine:
                         "failed", usage_events, error=IntentRefused(result.text)
                     )
                 else:
-                    frame = await self._commit("done", usage_events, answer=result.text)
+                    connect_request = _final_act(
+                        (bound_call,),
+                        (
+                            ToolResultBlock(
+                                tool_use_id=bound_call.id,
+                                content=result.text,
+                                is_error=False,
+                            ),
+                        ),
+                        CONNECT_ACCOUNT_TOOL,
+                        ConnectRequest,
+                    )
+                    frame = await self._commit(
+                        "done",
+                        usage_events,
+                        answer=result.text,
+                        connect_request=connect_request,
+                    )
                 await self._persist_transcript(await self._load_messages(), result.text, "", "")
                 return frame
             except (DBOSWorkflowCancelledError, asyncio.CancelledError):

@@ -16,7 +16,7 @@ from typing import Literal
 from uuid import UUID
 
 import yaml
-from pydantic import BaseModel, JsonValue, ValidationError
+from pydantic import BaseModel, JsonValue, ValidationError, model_validator
 
 from ufo.sdk.audience import conversation_audience
 from ufo.sdk.http import JSONResponse, Request, Response
@@ -33,15 +33,34 @@ ERROR_CLASS_PREFIX = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]*: ")
 class PanelIntent(BaseModel):
     """What a panel form submits: one mutation of one object, by kind and name. `verb` and `kind`
     are the closed sets a panel produces today — the Literals are the gate keeping this route
-    from becoming a general object endpoint."""
+    from becoming a general object endpoint, and each object verb's outcome is the kind's own.
+    `connect` is the one verb no kind gates: it names the provider and opens the same private
+    OAuth handoff chat's `connect_account` leaves — the URL rides the turn's terminal and is
+    minted per speaking member at stream time, never in a transcript or an intent response — so
+    it pairs with the `connection` kind exactly, both ways."""
 
-    verb: Literal["apply", "delete"]
-    kind: Literal["agent", "skill"]
+    verb: Literal["apply", "delete", "connect"]
+    kind: Literal["agent", "skill", "connector_grant", "connection"]
     name: str
     spec: dict[str, JsonValue] | None = None
 
+    @model_validator(mode="after")
+    def _connect_pairs_with_connection(self) -> "PanelIntent":
+        if (self.verb == "connect") != (self.kind == "connection"):
+            raise ValueError("connect pairs with the connection kind exactly")
+        return self
+
 
 def _tool_intent(submitted: PanelIntent) -> ToolIntent:
+    if submitted.verb == "connect":
+        return ToolIntent(
+            tool="connect_account",
+            input={
+                "provider": submitted.name,
+                "shared": bool((submitted.spec or {}).get("shared", False)),
+                "user_description": f"Connect {submitted.name} from the portal.",
+            },
+        )
     if submitted.verb == "delete":
         return ToolIntent(
             tool="object_delete",

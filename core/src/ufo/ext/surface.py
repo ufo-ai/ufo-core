@@ -69,6 +69,7 @@ from ufo.grants import (
     ConnectHandoff,
     ConnectRequestInvalid,
     ConnectUnavailable,
+    account_object_name,
     installed_connect_flow,
 )
 from ufo.hub import LiveFrame
@@ -282,11 +283,13 @@ class PortalSkill:
 
 class ConnectionView(BaseModel):
     """One connector account reaching one agent, as the portal's connections panel lists it: the
-    provider identity, the consenting owner (named only to an admin or the owner), the edge's
-    disclosure, and when the grant landed."""
+    provider identity, the `connector_grant` object name a prepared intent mutates it by, the
+    consenting owner (named only to an admin or the owner), the edge's disclosure, and when the
+    grant landed."""
 
     provider: str
     account_id: str
+    grant: str
     owner_email: str | None
     shared: bool
     connected_at: datetime
@@ -1237,6 +1240,7 @@ class SurfaceContext:
             ConnectionView(
                 provider=row.provider,
                 account_id=row.account_id,
+                grant=account_object_name(row.provider, row.account_id),
                 owner_email=row.email if admin or row.owner_member_id == member_id else None,
                 shared=row.shared,
                 connected_at=row.created_at,
