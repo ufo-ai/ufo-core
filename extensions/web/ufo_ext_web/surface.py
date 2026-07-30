@@ -821,14 +821,24 @@ async def workspace_sources(ctx: SurfaceContext, request: Request) -> Response:
 
 
 async def workspace_artifacts(ctx: SurfaceContext, request: Request) -> Response:
-    """The newest files turns have shared with this member — their own conversations' artifacts,
-    every conversation's for an admin — each with the same signed TTL download link a delivery
-    would carry, or none when artifact delivery is unconfigured."""
+    """One keyset page of the files turns have shared with this member — their own conversations'
+    artifacts, every conversation's for an admin — each with the same signed TTL download link a
+    delivery would carry, or none when artifact delivery is unconfigured. A cursor this surface
+    never minted is the client's error, not a silent walk back to the newest page."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
     member_id, _email, audience = resolved
-    listed = await ctx.list_artifacts(member_id, admin=audience.admin, limit=ARTIFACT_LIST_LIMIT)
+    raw_cursor = request.query_params.get("after", "").strip()
+    cursor: ListingCursor | None = None
+    if raw_cursor:
+        try:
+            cursor = ListingCursor.decode(raw_cursor)
+        except MalformedCursor:
+            return Response("malformed listing cursor", status_code=400)
+    page = await ctx.list_artifacts(
+        member_id, admin=audience.admin, limit=ARTIFACT_LIST_LIMIT, cursor=cursor
+    )
     return JSONResponse(
         {
             "artifacts": [
@@ -840,8 +850,10 @@ async def workspace_artifacts(ctx: SurfaceContext, request: Request) -> Response
                     "created_at": _iso(entry.created_at),
                     "url": ctx.artifact_link(entry.artifact),
                 }
-                for entry in listed
-            ]
+                for entry in page.rows
+            ],
+            "older": None if page.older is None else page.older.encode(),
+            "newer": None if page.newer is None else page.newer.encode(),
         }
     )
 

@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from urllib.parse import quote
 from uuid import UUID, uuid4
 
 import pytest
@@ -704,19 +705,27 @@ async def test_artifacts_view_lists_own_files_with_links_and_admins_see_all(
     member_n, token_n = await _seed_member(workspace_id, "n@example.com")
     _admin, token_admin = await _seed_member(workspace_id, "boss@example.com", admin=True)
     minted = datetime(2026, 7, 29, 9, 0, tzinfo=UTC)
-    shared = {
-        "m@example.com": (
-            (member_m, "artifacts/a/report.pdf", "report.pdf", "application/pdf"),
-            (member_m, "artifacts/a/chart.png", "chart.png", "image/png"),
+    shared = (
+        (
+            member_m,
+            "m@example.com",
+            (
+                ("artifacts/a/report.pdf", "report.pdf", "application/pdf"),
+                ("artifacts/a/chart.png", "chart.png", "image/png"),
+            ),
         ),
-        "n@example.com": ((member_n, "artifacts/b/notes.txt", "notes.txt", "text/plain"),),
-    }
+        (
+            member_n,
+            "n@example.com",
+            (("artifacts/b/notes.txt", "notes.txt", "text/plain"),),
+        ),
+    )
     minute = 0
-    for email, files in shared.items():
+    for member_id, email, files in shared:
         _conversation, turn_id = await _seed_web_turn(
-            workspace_id, agent_id, files[0][0], email, TerminalFrame(status="done", text="ok")
+            workspace_id, agent_id, member_id, email, TerminalFrame(status="done", text="ok")
         )
-        for _member_id, blob_key, filename, media_type in files:
+        for blob_key, filename, media_type in files:
             async with workspace_tx() as connection:
                 await connection.execute(
                     sa.insert(tables.shared_artifact).values(
@@ -820,6 +829,269 @@ async def test_workspace_usage_answers_a_member_their_own_and_an_admin_the_rollu
         assert refused.status_code == 400
     anonymous = await client.get(path)
     assert anonymous.status_code == 401
+
+
+ARTIFACTS_PATH = "/surface/web/workspace/artifacts"
+
+
+async def _seed_artifacts(
+    workspace_id: UUID,
+    agent_id: UUID,
+    member_id: UUID,
+    email: str,
+    files: tuple[tuple[str, datetime], ...],
+) -> None:
+    """One turn of this member's sharing the given files at the given instants — the shape the
+    share tool writes, several files to one turn included. Called again for the same member, the
+    files ride a further turn of the one web conversation that member already has."""
+    async with workspace_tx() as connection:
+        existing = (
+            await connection.execute(
+                sa.select(tables.conversation.c.id).where(
+                    tables.conversation.c.workspace_id == workspace_id,
+                    tables.conversation.c.queue_key == f"{agent_id}/{email}",
+                )
+            )
+        ).scalar_one_or_none()
+    if existing is None:
+        _conversation, turn_id = await _seed_web_turn(
+            workspace_id, agent_id, member_id, email, TerminalFrame(status="done", text="ok")
+        )
+    else:
+        turn_id = uuid4()
+        async with workspace_tx() as connection:
+            seq = (
+                await connection.execute(
+                    sa.select(sa.func.count()).where(tables.turn.c.conversation_id == existing)
+                )
+            ).scalar_one()
+            await connection.execute(
+                sa.insert(tables.turn).values(
+                    id=turn_id,
+                    workspace_id=workspace_id,
+                    conversation_id=existing,
+                    agent_id=agent_id,
+                    seq=seq + 1,
+                    status="done",
+                    inbound="ask",
+                    speaker_member_id=member_id,
+                    terminal=TerminalFrame(status="done", text="ok").model_dump(mode="json"),
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+    for filename, shared_at in files:
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.insert(tables.shared_artifact).values(
+                    turn_id=turn_id,
+                    blob_key=f"artifacts/{uuid4()}/{filename}",
+                    workspace_id=workspace_id,
+                    filename=filename,
+                    subject=None,
+                    media_type="text/plain",
+                    size_bytes=3,
+                    created_at=shared_at,
+                    updated_at=shared_at,
+                )
+            )
+
+
+def _names(payload: dict) -> list[str]:
+    return [entry["filename"] for entry in payload["artifacts"]]
+
+
+WALK_PAGE_CEILING = 20
+
+
+async def _walk_artifacts(client: AsyncClient, headers: dict[str, str]) -> list[str]:
+    """Every file the Older control reaches, in the order the pages render them. The walk is
+    bounded: a cursor that cannot advance repeats its page forever, and this states that as a
+    failure rather than hanging the suite."""
+    payload = (await client.get(ARTIFACTS_PATH, headers=headers)).json()
+    walked = _names(payload)
+    pages = 1
+    while payload["older"]:
+        assert pages < WALK_PAGE_CEILING, f"the walk never ended: {walked}"
+        payload = (
+            await client.get(f"{ARTIFACTS_PATH}?after={quote(payload['older'])}", headers=headers)
+        ).json()
+        walked.extend(_names(payload))
+        pages += 1
+    return walked
+
+
+async def test_artifacts_listing_walks_pages_without_repeating_or_skipping(
+    web: tuple[AsyncClient, UUID, UUID], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The keyset walk over shared files: Older reaches every file exactly once, Newer returns the
+    page it came from, and each page's boundary cursors say which controls exist. The page size is
+    patched small so the walk's arithmetic is what the assertions read — the real
+    `ARTIFACT_LIST_LIMIT` is pinned by the fence-and-limit test."""
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "m@example.com")
+    base = datetime(2026, 7, 1, tzinfo=UTC)
+    await _seed_artifacts(
+        workspace_id,
+        agent_id,
+        member_id,
+        "m@example.com",
+        tuple((f"file-{index}.txt", base + timedelta(minutes=index)) for index in range(5)),
+    )
+    monkeypatch.setattr(web_surface, "ARTIFACT_LIST_LIMIT", 2)
+    headers = {"cookie": f"{SESSION_COOKIE}={token}"}
+
+    first = (await client.get(ARTIFACTS_PATH, headers=headers)).json()
+    assert _names(first) == ["file-4.txt", "file-3.txt"]
+    assert first["newer"] is None
+    assert first["older"] is not None
+    second = (
+        await client.get(f"{ARTIFACTS_PATH}?after={quote(first['older'])}", headers=headers)
+    ).json()
+    assert _names(second) == ["file-2.txt", "file-1.txt"]
+    assert second["newer"] is not None
+    back = (
+        await client.get(f"{ARTIFACTS_PATH}?after={quote(second['newer'])}", headers=headers)
+    ).json()
+    assert _names(back) == _names(first)
+    walked = await _walk_artifacts(client, headers)
+    assert walked == [f"file-{index}.txt" for index in (4, 3, 2, 1, 0)]
+    assert len(walked) == len(set(walked))
+
+
+async def test_artifacts_paging_breaks_a_shared_timestamp_at_the_boundary(
+    web: tuple[AsyncClient, UUID, UUID], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two files one turn shared in the same instant carry the same `created_at` and the same
+    `turn_id`, so only the row id can break the tie: with the page boundary falling between them,
+    the walk still reaches each exactly once."""
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "m@example.com")
+    together = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    await _seed_artifacts(
+        workspace_id,
+        agent_id,
+        member_id,
+        "m@example.com",
+        (
+            ("first.txt", together),
+            ("second.txt", together),
+            ("third.txt", together - timedelta(minutes=1)),
+        ),
+    )
+    monkeypatch.setattr(web_surface, "ARTIFACT_LIST_LIMIT", 1)
+    walked = await _walk_artifacts(client, {"cookie": f"{SESSION_COOKIE}={token}"})
+    assert sorted(walked) == ["first.txt", "second.txt", "third.txt"]
+    assert len(walked) == len(set(walked))
+
+
+async def test_artifacts_paging_is_stable_across_a_concurrent_share(
+    web: tuple[AsyncClient, UUID, UUID], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A file shared while the member reads page one neither repeats nor hides a row of page two:
+    the cursor names a position, not an offset."""
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "m@example.com")
+    base = datetime(2026, 7, 1, tzinfo=UTC)
+    await _seed_artifacts(
+        workspace_id,
+        agent_id,
+        member_id,
+        "m@example.com",
+        tuple((f"file-{index}.txt", base + timedelta(minutes=index)) for index in range(4)),
+    )
+    monkeypatch.setattr(web_surface, "ARTIFACT_LIST_LIMIT", 2)
+    headers = {"cookie": f"{SESSION_COOKIE}={token}"}
+    first = (await client.get(ARTIFACTS_PATH, headers=headers)).json()
+    assert _names(first) == ["file-3.txt", "file-2.txt"]
+    await _seed_artifacts(
+        workspace_id,
+        agent_id,
+        member_id,
+        "m@example.com",
+        (("arrived.txt", base + timedelta(minutes=9)),),
+    )
+    second = (
+        await client.get(f"{ARTIFACTS_PATH}?after={quote(first['older'])}", headers=headers)
+    ).json()
+    assert _names(second) == ["file-1.txt", "file-0.txt"]
+
+
+async def test_artifacts_view_refuses_a_cursor_it_never_minted(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """A token this surface did not mint is the client's error: the view answers 400 rather than
+    quietly serving the newest page, so a member on a stale link is told."""
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "m@example.com")
+    await _seed_artifacts(
+        workspace_id,
+        agent_id,
+        member_id,
+        "m@example.com",
+        (("file.txt", datetime(2026, 7, 1, tzinfo=UTC)),),
+    )
+    headers = {"cookie": f"{SESSION_COOKIE}={token}"}
+    for stale in ("nonsense", f"older|not-a-date|{uuid4()}", "sideways|2026-07-01T00:00:00|x"):
+        refused = await client.get(f"{ARTIFACTS_PATH}?after={quote(stale)}", headers=headers)
+        assert refused.status_code == 400, stale
+
+
+async def test_artifacts_pages_hold_the_member_fence_throughout_the_walk(
+    web: tuple[AsyncClient, UUID, UUID], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Another member's file is absent from every page of the walk, not merely the first — the
+    fence rides the query the cursor pages, not the page it produced. Their files interleave with
+    this member's by timestamp, so a leaked row would land mid-walk."""
+    client, workspace_id, agent_id = web
+    member_m, token_m = await _seed_member(workspace_id, "m@example.com")
+    member_n, _token_n = await _seed_member(workspace_id, "n@example.com")
+    base = datetime(2026, 7, 1, tzinfo=UTC)
+    await _seed_artifacts(
+        workspace_id,
+        agent_id,
+        member_m,
+        "m@example.com",
+        tuple((f"mine-{index}.txt", base + timedelta(minutes=index * 2)) for index in range(4)),
+    )
+    await _seed_artifacts(
+        workspace_id,
+        agent_id,
+        member_n,
+        "n@example.com",
+        tuple(
+            (f"theirs-{index}.txt", base + timedelta(minutes=index * 2 + 1)) for index in range(4)
+        ),
+    )
+    monkeypatch.setattr(web_surface, "ARTIFACT_LIST_LIMIT", 2)
+    walked = await _walk_artifacts(client, {"cookie": f"{SESSION_COOKIE}={token_m}"})
+    assert walked == [f"mine-{index}.txt" for index in (3, 2, 1, 0)]
+
+
+async def test_artifacts_listing_caps_at_the_real_limit_with_more_behind_it(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """One unpatched page carries at most `ARTIFACT_LIST_LIMIT` files and offers the Older control,
+    so the bound the view ships with is the one a member meets."""
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "m@example.com")
+    base = datetime(2026, 7, 1, tzinfo=UTC)
+    await _seed_artifacts(
+        workspace_id,
+        agent_id,
+        member_id,
+        "m@example.com",
+        tuple(
+            (f"file-{index}.txt", base + timedelta(seconds=index))
+            for index in range(web_surface.ARTIFACT_LIST_LIMIT + 2)
+        ),
+    )
+    page = (
+        await client.get(ARTIFACTS_PATH, headers={"cookie": f"{SESSION_COOKIE}={token}"})
+    ).json()
+    assert len(page["artifacts"]) == web_surface.ARTIFACT_LIST_LIMIT
+    assert page["older"] is not None
+    assert page["newer"] is None
 
 
 async def test_sites_view_answers_through_the_kinds_own_gate(

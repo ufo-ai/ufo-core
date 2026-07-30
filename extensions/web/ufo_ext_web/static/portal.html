@@ -1000,10 +1000,6 @@ function artifactIsImage(entry) {
   return entry.media_type.startsWith('image/');
 }
 
-function artifactIsText(entry) {
-  return entry.media_type.startsWith('text/') || entry.media_type === 'application/json';
-}
-
 function artifactThumb(entry) {
   const preview = document.createElement('img');
   preview.className = 'thumb';
@@ -1015,50 +1011,60 @@ function artifactThumb(entry) {
 }
 
 async function artifactText(url, into) {
-  let res;
   try {
-    res = await fetch(url, { credentials: 'same-origin' });
+    const res = await fetch(url, { credentials: 'same-origin' });
+    if (!res.ok) {
+      into.textContent = 'Error ' + res.status + ' — reload to retry.';
+      return;
+    }
+    const reader = res.body.getReader();
+    const chunks = [];
+    let read = 0;
+    let ended = false;
+    while (!ended && read <= VIEWER_TEXT_BYTES) {
+      const step = await reader.read();
+      if (step.done) ended = true;
+      else {
+        chunks.push(step.value);
+        read += step.value.length;
+      }
+    }
+    if (!ended) await reader.cancel();
+    const bytes = new Uint8Array(read);
+    let at = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, at);
+      at += chunk.length;
+    }
+    const body = document.createElement('pre');
+    body.textContent = new TextDecoder().decode(bytes.slice(0, VIEWER_TEXT_BYTES));
+    into.textContent = '';
+    into.appendChild(body);
+    if (read > VIEWER_TEXT_BYTES) {
+      const bound = document.createElement('div');
+      bound.className = 'meta';
+      bound.textContent = 'First ' + formatSize(VIEWER_TEXT_BYTES) + ' shown.';
+      into.appendChild(bound);
+    }
   } catch (err) {
     into.textContent = 'Network error — try again.';
-    return;
-  }
-  if (!res.ok) {
-    into.textContent = 'Error ' + res.status + ' — reload to retry.';
-    return;
-  }
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  const body = document.createElement('pre');
-  let read = 0;
-  let text = '';
-  while (read < VIEWER_TEXT_BYTES) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    read += value.length;
-    text += decoder.decode(value, { stream: true });
-  }
-  await reader.cancel();
-  body.textContent = text.slice(0, VIEWER_TEXT_BYTES);
-  into.textContent = '';
-  into.appendChild(body);
-  if (read >= VIEWER_TEXT_BYTES) {
-    const bound = document.createElement('div');
-    bound.className = 'meta';
-    bound.textContent = 'First ' + formatSize(VIEWER_TEXT_BYTES) + ' shown.';
-    into.appendChild(bound);
   }
 }
 
 let viewer = null;
+let viewerOpener = null;
 
 function closeArtifact() {
   if (!viewer) return;
   viewer.remove();
   viewer = null;
+  if (viewerOpener) viewerOpener.focus();
+  viewerOpener = null;
 }
 
-function openArtifact(entry) {
+function openArtifact(entry, opener) {
   closeArtifact();
+  viewerOpener = opener;
   viewer = document.createElement('aside');
   viewer.className = 'viewer';
   const head = document.createElement('header');
@@ -1078,8 +1084,15 @@ function openArtifact(entry) {
     const full = document.createElement('img');
     full.alt = '';
     full.src = entry.url;
+    full.addEventListener('error', () => {
+      full.remove();
+      shown.className = 'meta';
+      shown.textContent = 'The image did not load. Its link may have expired — reload the listing.';
+    });
     shown.appendChild(full);
-  } else if (artifactIsText(entry)) {
+  } else if (
+    entry.media_type.startsWith('text/') || entry.media_type === 'application/json'
+  ) {
     shown.textContent = 'Loading…';
     artifactText(entry.url, shown);
   } else {
@@ -1208,6 +1221,7 @@ function workspaceSources(view, entries, notice) {
 async function showWorkspace(name, query, placement) {
   // `placement` carries where a view opens: the keyset cursor and filter a paged listing walks
   // with, and the outcome a mutation left behind for the refreshed view to state.
+  closeArtifact();
   selected = null;
   panelLoad += 1;
   const place = placement || {};
@@ -1300,13 +1314,14 @@ async function showWorkspace(name, query, placement) {
           const label = document.createElement('span');
           label.textContent = entry.filename;
           open.appendChild(label);
-          open.addEventListener('click', () => openArtifact(entry));
+          open.addEventListener('click', () => openArtifact(entry, open));
           line.childNodes[0].textContent = '';
           line.childNodes[0].appendChild(open);
         }
         return line;
       })
     ));
+    view.appendChild(pageControls('artifacts', payload, place));
     return;
   }
   if (name === 'usage') {
@@ -2059,6 +2074,7 @@ function renderHead(agent) {
 }
 
 async function select(agent, name, detail) {
+  closeArtifact();
   if (!head.isConnected) restoreChatPane();
   selected = agent;
   for (const item of workspaceList.children) {

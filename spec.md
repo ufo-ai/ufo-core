@@ -437,11 +437,14 @@ ties) and one page envelope carrying the positions its Newer and Older controls 
 landing mid-read shifts no boundary and every listing pages identically. A cursor the surface
 never minted is refused rather than answered with some other page. Shared files are the
 member's own conversations' artifacts, every conversation's for an admin, each carrying the
-signed TTL link a delivery would; opening one pins a viewer over the listing that renders what
-the page honestly can — an image inline, text up to a bounded read, and a plain refusal to
-preview anything else — leaving the download an explicit act rather than the click's default. Sites list through the `site` kind's own visibility gate, so
-the portal and chat's `object_list` cannot disagree. A shared connection or source names its
-owner only to an admin or the owner — chat resolves no other member's email for a non-admin, so
+signed TTL link a delivery would and paging by the same shared cursor, `shared_artifact.id`
+breaking a tie two files one turn shared in one instant would otherwise leave unbroken; opening
+one pins a viewer over the listing that renders what the page honestly can — an image inline,
+text up to a bounded read, and a plain refusal to preview anything else — leaving the download an
+explicit act rather than the click's default. Sites list through the `site` kind's own visibility
+gate, so the portal and chat's `object_list` cannot disagree. A shared connection or source names
+its owner only to an admin or the owner — chat resolves no other member's email for a non-admin,
+so
 neither does a panel. A panel mutation
 is a **prepared intent**: the form's structured intent is admitted as a turn on the member's one
 durable intent conversation with that agent and dispatched verbatim to the typed object or tool

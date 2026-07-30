@@ -1,5 +1,7 @@
 """The one schema, dialect-neutral: SQLite (dev) and Postgres (deploys) from one metadata."""
 
+from uuid import uuid4
+
 import sqlalchemy as sa
 from sqlalchemy.engine.default import DefaultExecutionContext
 
@@ -411,6 +413,7 @@ shared_artifact = sa.Table(
     metadata,
     sa.Column("turn_id", sa.Uuid, sa.ForeignKey("turn.id"), primary_key=True),
     sa.Column("blob_key", sa.Text, primary_key=True),
+    sa.Column("id", sa.Uuid, nullable=False, unique=True, default=uuid4),
     sa.Column("workspace_id", sa.Uuid, sa.ForeignKey("workspace.id"), nullable=False),
     sa.Column("filename", sa.Text, nullable=False),
     sa.Column("subject", sa.Text, nullable=True),

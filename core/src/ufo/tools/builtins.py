@@ -550,6 +550,7 @@ async def share_file_handler(ctx: ToolContext, args: ShareFileInput) -> ToolResu
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.shared_artifact).values(
+                id=uuid4(),
                 turn_id=ctx.turn.id,
                 blob_key=key,
                 workspace_id=ctx.turn.workspace_id,

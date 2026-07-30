@@ -172,7 +172,7 @@ def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None
         heads = scripts.get_heads()
     assert scripts.get_revision("memory_0008").dependencies == "0049"
     assert {
-        "0060",
+        "0061",
         "index_default_0002",
         "memory_0012",
         "sample_ext_note_0001",
@@ -217,8 +217,59 @@ def test_one_memory_surface_advances_both_old_heads(tmp_path: Path, graph_instal
             row[0] for row in connection.execute("select version_num from alembic_version")
         }
     assert not {"graph_entity", "graph_edge"} & tables
-    assert "0060" in revisions
+    assert "0061" in revisions
     assert "knowledge_graph_0001" not in revisions
+
+
+def test_shared_artifact_id_backfills_every_existing_row(tmp_path: Path) -> None:
+    """0061 gives already-shared files their row identity: the column arrives non-null and unique,
+    so files a deploy shared before the paging cursor existed page by it afterwards — two files one
+    turn shared in the same instant included, which is the tie the cursor cannot break without
+    this column."""
+    database_path = tmp_path / "artifact-id.db"
+    url = f"sqlite+aiosqlite:///{database_path}"
+    config = Config()
+    config.set_main_option("script_location", str(MIGRATIONS_DIR))
+    config.set_main_option("version_locations", str(MIGRATIONS_DIR / "versions"))
+    config.set_main_option("path_separator", "os")
+    config.set_main_option("sqlalchemy.url", url)
+    command.upgrade(config, "0060")
+    workspace_id, agent_id, conversation_id, turn_id = uuid4(), uuid4(), uuid4(), uuid4()
+    now = datetime(2026, 7, 29, tzinfo=UTC).isoformat()
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "insert into workspace (id, created_at, updated_at) values (?, ?, ?)",
+            (workspace_id.hex, now, now),
+        )
+        connection.execute(
+            "insert into agent (id, workspace_id, name, prompt, model, is_main, created_at, "
+            "updated_at) values (?, ?, 'assistant', 'p', 'auto', 1, ?, ?)",
+            (agent_id.hex, workspace_id.hex, now, now),
+        )
+        connection.execute(
+            "insert into conversation (id, workspace_id, agent_id, surface, queue_key, "
+            "created_at, updated_at) values (?, ?, ?, 'web', 'a/b', ?, ?)",
+            (conversation_id.hex, workspace_id.hex, agent_id.hex, now, now),
+        )
+        connection.execute(
+            "insert into turn (id, workspace_id, conversation_id, agent_id, seq, status, "
+            "inbound, created_at, updated_at) values (?, ?, ?, ?, 1, 'queued', '{}', ?, ?)",
+            (turn_id.hex, workspace_id.hex, conversation_id.hex, agent_id.hex, now, now),
+        )
+        for name in ("chart.png", "notes.txt"):
+            connection.execute(
+                "insert into shared_artifact (turn_id, blob_key, workspace_id, filename, "
+                "media_type, size_bytes, created_at, updated_at) "
+                "values (?, ?, ?, ?, 'text/plain', 3, ?, ?)",
+                (turn_id.hex, f"artifacts/x/{name}", workspace_id.hex, name, now, now),
+            )
+    command.upgrade(config, "0061")
+    with sqlite3.connect(database_path) as connection:
+        rows = connection.execute("select filename, id from shared_artifact").fetchall()
+    identities = {name: value for name, value in rows}
+    assert set(identities) == {"chart.png", "notes.txt"}
+    assert all(value for value in identities.values())
+    assert len(set(identities.values())) == 2
 
 
 def test_intent_admission_downgrade_rewrites_to_internal(tmp_path: Path) -> None:

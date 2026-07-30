@@ -250,6 +250,9 @@ const wire = {
   artifactChunks: ["the handoff notes"],
   artifactCancels: 0,
   artifactReads: 0,
+  artifactBodyStatus: 0,
+  artifactBodyThrows: false,
+  artifactReadThrows: false,
   "/api/admin": {
     agents: [
       {
@@ -397,6 +400,7 @@ const wire = {
   },
   memoryQueries: [],
   memoryRequests: [],
+  artifactRequests: [],
   memory: {
     available: true,
     kinds: ["fact", "episodic", "semantic"],
@@ -504,6 +508,8 @@ const wire = {
       ],
     },
     artifacts: {
+      older: "older|2026-07-29T09:00:00+00:00|aa11",
+      newer: null,
       artifacts: [
         {
           filename: "report.pdf",
@@ -605,6 +611,9 @@ const sandbox = {
           getReader: () => ({
             read: async () => {
               wire.artifactReads += 1;
+              if (wire.artifactReadThrows && index === 1) {
+                throw new TypeError("network error");
+              }
               return index < chunks.length
                 ? { done: false, value: chunks[index++] }
                 : { done: true, value: undefined };
@@ -743,6 +752,36 @@ const sandbox = {
       if (wire.workspaceThrows) {
         wire.workspaceThrows = false;
         throw new TypeError("network down");
+      }
+      if (view.startsWith("artifacts")) {
+        const params = new URLSearchParams(view.split("?")[1] || "");
+        const after = params.get("after");
+        wire.artifactRequests.push({ after });
+        if (after === wire.workspace.artifacts.older) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              older: null,
+              newer: "newer|2026-07-29T08:00:00+00:00|bb22",
+              artifacts: [
+                {
+                  filename: "older.txt",
+                  subject: "the earlier handoff",
+                  media_type: "text/plain",
+                  size_bytes: 9,
+                  created_at: "2026-07-29T08:00:00+00:00",
+                  url: "https://web/surface/web/artifacts/older.txt?token=signed",
+                },
+              ],
+            }),
+          };
+        }
+        return {
+          ok: true,
+          status: 200,
+          json: async () => structuredClone(wire.workspace.artifacts),
+        };
       }
       if (view.startsWith("memory")) {
         const params = new URLSearchParams(view.split("?")[1] || "");
@@ -1720,8 +1759,8 @@ try {
   if (!shownText || shownText.textContent !== "the handoff notes") {
     throw new Error(`the viewer reads text as "${shownText?.textContent}"`);
   }
-  if (wire.artifactCancels !== 1) {
-    throw new Error(`the text read cancelled ${wire.artifactCancels} times`);
+  if (wire.artifactCancels !== 0) {
+    throw new Error(`a fully read file cancelled ${wire.artifactCancels} times`);
   }
   if (texts(panel.querySelectorAll(".meta")).some((line) => line.includes("shown."))) {
     throw new Error("a whole small file claimed truncation");
@@ -1742,11 +1781,99 @@ try {
   if (wire.artifactCancels !== 1) {
     throw new Error("the viewer left the bounded read unclosed");
   }
+  if (wire.artifactReads > 68) {
+    throw new Error(`the viewer read ${wire.artifactReads} chunks past its bound`);
+  }
   if (!texts(panel.querySelectorAll(".meta")).includes("First 64 kB shown.")) {
     throw new Error("a truncated read did not say so");
   }
   wire.artifactChunks = ["the handoff notes"];
   closeViewer();
+
+  wire.artifactChunks = ["x".repeat(65536)];
+  await openers[2].fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  panel = body.querySelector(".viewer");
+  if (panel.querySelector("pre").textContent.length !== 65536) {
+    throw new Error("a file of exactly the bound did not render whole");
+  }
+  if (texts(panel.querySelectorAll(".meta")).some((line) => line.includes("shown."))) {
+    throw new Error("a file of exactly the bound claimed truncation");
+  }
+  wire.artifactChunks = ["the handoff notes"];
+  closeViewer();
+
+  wire.artifactBodyStatus = 502;
+  await openers[2].fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  panel = body.querySelector(".viewer");
+  if (!texts(panel.querySelectorAll("*")).includes("Error 502 — reload to retry.")) {
+    throw new Error(`a refused body reads ${JSON.stringify(texts(panel.querySelectorAll("*")))}`);
+  }
+  wire.artifactBodyStatus = 0;
+  closeViewer();
+
+  wire.artifactBodyThrows = true;
+  await openers[2].fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  panel = body.querySelector(".viewer");
+  if (!texts(panel.querySelectorAll("*")).includes("Network error — try again.")) {
+    throw new Error("a body that never arrived left no statement");
+  }
+  wire.artifactBodyThrows = false;
+  closeViewer();
+
+  wire.artifactReadThrows = true;
+  await openers[2].fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  panel = body.querySelector(".viewer");
+  if (texts(panel.querySelectorAll("*")).includes("Loading…")) {
+    throw new Error("a read that failed mid-stream left the panel loading forever");
+  }
+  if (!texts(panel.querySelectorAll("*")).includes("Network error — try again.")) {
+    throw new Error("a read that failed mid-stream left no statement");
+  }
+  wire.artifactReadThrows = false;
+  closeViewer();
+
+  await openers[1].fire("click");
+  panel = body.querySelector(".viewer");
+  const brokenFull = panel.querySelector("img");
+  await brokenFull.fire("error");
+  if (body.querySelector(".viewer").querySelector("img")) {
+    throw new Error("an image that failed to load stayed in the panel");
+  }
+  if (!texts(panel.querySelectorAll("*")).some((line) => line.startsWith("The image did not load"))) {
+    throw new Error("an image that failed to load left the panel silent");
+  }
+  closeViewer();
+
+  await openers[1].fire("click");
+  if (focused !== body.querySelector(".viewer").querySelectorAll("button")[0]) {
+    throw new Error("reopening did not focus the viewer");
+  }
+  await openers[2].fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  if (body.querySelectorAll(".viewer").length !== 1) {
+    throw new Error("opening a second artifact left two viewers pinned");
+  }
+  const closeAgain = body
+    .querySelector(".viewer")
+    .querySelectorAll("button")
+    .find((el) => el.textContent === "Close");
+  await closeAgain.fire("click");
+  if (focused !== openers[2]) {
+    throw new Error("closing the viewer dropped focus off the control that opened it");
+  }
+
+  await openers[1].fire("click");
+  await workspaceNamed("Memory").fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  if (body.querySelector(".viewer")) {
+    throw new Error("the viewer stayed pinned over another view");
+  }
+  await workspaceNamed("Artifacts").fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
 
   await openers[0].fire("click");
   panel = body.querySelector(".viewer");
@@ -1759,6 +1886,34 @@ try {
     throw new Error(`the unrenderable viewer reads ${JSON.stringify(texts(panel.querySelectorAll("*")))}`);
   }
   closeViewer();
+
+  const artifactPager = () => {
+    const bar = body.querySelector(".admin-view").querySelectorAll(".filter").at(-1);
+    if (!bar) throw new Error("the artifacts listing rendered no page controls");
+    return bar.querySelectorAll("button");
+  };
+  if (texts(artifactPager()).join("|") !== "Older") {
+    throw new Error(`the newest artifacts page offers ${JSON.stringify(texts(artifactPager()))}`);
+  }
+  await artifactPager().find((button) => button.textContent === "Older").fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  if (wire.artifactRequests.at(-1).after !== wire.workspace.artifacts.older) {
+    throw new Error(`Older sent after=${JSON.stringify(wire.artifactRequests.at(-1).after)}`);
+  }
+  if (!viewCells().includes("the earlier handoff")) {
+    throw new Error(`the older artifacts page reads ${JSON.stringify(viewCells())}`);
+  }
+  if (texts(artifactPager()).join("|") !== "Newer") {
+    throw new Error(`the oldest artifacts page offers ${JSON.stringify(texts(artifactPager()))}`);
+  }
+  await artifactPager().find((button) => button.textContent === "Newer").fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  if (wire.artifactRequests.at(-1).after !== "newer|2026-07-29T08:00:00+00:00|bb22") {
+    throw new Error(`Newer sent after=${JSON.stringify(wire.artifactRequests.at(-1).after)}`);
+  }
+  if (!viewCells().includes("the quarterly numbers")) {
+    throw new Error("Newer did not return the page it came from");
+  }
 
   shared.url = null;
   previewed.url = null;

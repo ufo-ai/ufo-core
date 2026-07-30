@@ -83,6 +83,7 @@ from ufo.grants import (
     installed_connect_flow,
 )
 from ufo.hub import LiveFrame
+from ufo.listings import page_of, page_query
 from ufo.o11y import log
 from ufo.sandbox.conversation import (
     WORKSPACE_WRITE_MAX_BYTES,
@@ -1353,14 +1354,22 @@ class SurfaceContext:
         )
 
     async def list_artifacts(
-        self, member_id: UUID, *, admin: bool, limit: int
-    ) -> "tuple[ListedArtifact, ...]":
-        """The newest files turns have shared, as the portal's artifacts view lists them: a member
-        sees their own conversations' artifacts, an admin the workspace's — newest first, bounded.
-        Each entry carries the `SharedArtifact` the link minter signs, so the view links exactly
-        what the writeback delivery would."""
+        self,
+        member_id: UUID,
+        *,
+        admin: bool,
+        limit: int,
+        cursor: "ListingCursor | None" = None,
+    ) -> "ListingPage[ListedArtifact]":
+        """One keyset page of the files turns have shared, as the portal's artifacts view lists
+        them: a member sees their own conversations' artifacts, an admin the workspace's — newest
+        first, bounded, `shared_artifact.id` breaking a `created_at` tie so two files one turn
+        shared in the same instant page without repeating or skipping either. Each entry carries
+        the `SharedArtifact` the link minter signs, so the view links exactly what the writeback
+        delivery would."""
         query = (
             sa.select(
+                tables.shared_artifact.c.id,
                 tables.shared_artifact.c.blob_key,
                 tables.shared_artifact.c.filename,
                 tables.shared_artifact.c.subject,
@@ -1377,15 +1386,26 @@ class SurfaceContext:
                 )
             )
             .where(tables.shared_artifact.c.workspace_id == self.workspace_id)
-            .order_by(tables.shared_artifact.c.created_at.desc())
-            .limit(limit)
         )
         if not admin:
             query = query.where(tables.conversation.c.member_id == member_id)
         async with workspace_tx() as connection:
-            rows = (await connection.execute(query)).all()
-        return tuple(
-            ListedArtifact(
+            rows = (
+                await connection.execute(
+                    page_query(
+                        query,
+                        cursor,
+                        limit,
+                        created_at=tables.shared_artifact.c.created_at,
+                        ident=tables.shared_artifact.c.id,
+                    )
+                )
+            ).all()
+        return page_of(
+            rows,
+            cursor,
+            limit,
+            render=lambda row: ListedArtifact(
                 artifact=SharedArtifact(
                     blob_key=row.blob_key,
                     filename=row.filename,
@@ -1394,8 +1414,11 @@ class SurfaceContext:
                     size_bytes=row.size_bytes,
                 ),
                 created_at=row.created_at,
-            )
-            for row in rows
+            ),
+            position=lambda row: (
+                row.created_at if row.created_at.tzinfo else row.created_at.replace(tzinfo=UTC),
+                str(row.id),
+            ),
         )
 
     async def list_member_objects(
