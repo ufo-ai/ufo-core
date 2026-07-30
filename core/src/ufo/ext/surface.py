@@ -53,7 +53,14 @@ from ufo.artifact_token import (
     ARTIFACT_TOKEN_TTL_SECONDS,
     mint_artifact_token,
 )
-from ufo.audience import Audience, audience_member, narrow_audience, parse_audience
+from ufo.audience import (
+    SHARED_AUDIENCE,
+    Audience,
+    audience_member,
+    conversation_audience,
+    narrow_audience,
+    parse_audience,
+)
 from ufo.blob import BlobNotFound, BlobStore
 from ufo.candidates import WorkspaceCandidates, owner_candidates
 from ufo.connectors import DIRECT_ACCOUNT
@@ -93,6 +100,7 @@ from ufo.sandbox.ingress_token import (
 from ufo.scheduling import ScheduleStore
 from ufo.schema import tables
 from ufo.schema.records import (
+    SUBAGENT_SURFACE,
     WRITEBACK_CLAIMED,
     WRITEBACK_DELIVERED,
     WRITEBACK_FAILED,
@@ -415,6 +423,17 @@ class ConversationSummary(BaseModel):
         return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
+class ListedConversation(BaseModel):
+    """One conversation as the portal's per-agent conversations view lists it: `ConversationSummary`
+    plus whether this viewer may read its content. The two answers differ only for an admin, who
+    lists every conversation of the agent as administration metadata but reads another member's
+    private one no more than chat would — the same shape `list_agent_tasks` gives a private task
+    (row visible, content elided)."""
+
+    summary: ConversationSummary
+    readable: bool
+
+
 class LedgerEntry(BaseModel):
     """One accounting row of a turn — a dimension's metered amount and its priced cost."""
 
@@ -446,6 +465,17 @@ def _fulfilled_marker_key(workspace_id: UUID, sealed: str, slot: str) -> str:
     asking, and a fresh request (a rotation) seals differently and prompts anew."""
     digest = hashlib.sha256(sealed.encode()).hexdigest()[:32]
     return f"workspaces/{workspace_id}/credential_requests/{digest}/{slot}"
+
+
+def _readable_audience_values(member_id: UUID) -> tuple[str, ...]:
+    """The two conversation audiences whose content this member reads: the workspace-shared one and
+    their own. A room and an externally-shared channel are absent by construction — the one
+    definition `list_agent_conversations` and `readable_conversation` both answer from."""
+    return (str(SHARED_AUDIENCE), str(conversation_audience(member_id)))
+
+
+def _readable_audiences(member_id: UUID) -> sa.ColumnElement[bool]:
+    return tables.conversation.c.audience.in_(_readable_audience_values(member_id))
 
 
 def _email_domain(email: str) -> str:
@@ -1586,6 +1616,133 @@ class SurfaceContext:
             )
             for row in rows
         )
+
+    async def list_agent_conversations(
+        self, agent_id: UUID, member_id: UUID, *, admin: bool, limit: int
+    ) -> tuple[ListedConversation, ...]:
+        """One agent's conversations as the portal lists them, newest activity first and bounded:
+        the member's own plus the workspace-shared ones, every one of the agent's for an admin.
+        Each entry carries `readable` — see `readable_conversation` for the content rule an admin
+        does not widen. Subagent conversations are absent: they are the agent's own work on a
+        request, listed nested under the turn that spawned them, never beside it."""
+        activity = (
+            sa.select(
+                tables.turn.c.conversation_id,
+                sa.func.count().label("turn_count"),
+                sa.func.max(tables.turn.c.updated_at).label("last_turn_at"),
+            )
+            .where(tables.turn.c.workspace_id == self.workspace_id)
+            .group_by(tables.turn.c.conversation_id)
+            .subquery()
+        )
+        query = (
+            sa.select(
+                tables.conversation.c.id,
+                tables.conversation.c.surface,
+                tables.conversation.c.queue_key,
+                tables.conversation.c.audience,
+                tables.member.c.email,
+                tables.conversation.c.created_at,
+                activity.c.turn_count,
+                activity.c.last_turn_at,
+            )
+            .select_from(
+                tables.conversation.outerjoin(
+                    tables.member, tables.member.c.id == tables.conversation.c.member_id
+                ).outerjoin(activity, activity.c.conversation_id == tables.conversation.c.id)
+            )
+            .where(
+                tables.conversation.c.workspace_id == self.workspace_id,
+                tables.conversation.c.agent_id == agent_id,
+                tables.conversation.c.surface != SUBAGENT_SURFACE,
+            )
+            .order_by(
+                sa.func.coalesce(activity.c.last_turn_at, tables.conversation.c.created_at).desc()
+            )
+            .limit(limit)
+        )
+        if not admin:
+            query = query.where(_readable_audiences(member_id))
+        async with workspace_tx() as connection:
+            rows = (await connection.execute(query)).all()
+        return tuple(
+            ListedConversation(
+                summary=ConversationSummary(
+                    id=row.id,
+                    surface=row.surface,
+                    queue_key=row.queue_key,
+                    member_email=row.email,
+                    created_at=row.created_at,
+                    turn_count=row.turn_count or 0,
+                    last_turn_at=row.last_turn_at,
+                ),
+                readable=row.audience in _readable_audience_values(member_id),
+            )
+            for row in rows
+        )
+
+    async def readable_conversation(
+        self, conversation_id: UUID, agent_id: UUID, member_id: UUID
+    ) -> bool:
+        """Whether this member may read that conversation's content — its turns, the subagent turns
+        it spawned, and its workspace files. True for their own conversations and the
+        workspace-shared ones; false for another member's private one, for a room (a private
+        channel or group DM) and for an externally-shared channel, because participation there is
+        the peer surface's live roster and no portal read can check it (#645 — live reachability is
+        the audience authority). Being an admin does not widen this, exactly as an admin reads no
+        private task's content. The agent is the wall: another agent's conversation is unreadable
+        even by id, so every content route fails closed on this one answer."""
+        async with workspace_tx() as connection:
+            found = (
+                await connection.execute(
+                    sa.select(tables.conversation.c.id).where(
+                        tables.conversation.c.workspace_id == self.workspace_id,
+                        tables.conversation.c.id == conversation_id,
+                        tables.conversation.c.agent_id == agent_id,
+                        _readable_audiences(member_id),
+                    )
+                )
+            ).one_or_none()
+        return found is not None
+
+    async def conversation_subagent_turns(
+        self, conversation_id: UUID, limit: int = LIST_TURNS_LIMIT
+    ) -> tuple[Turn, ...]:
+        """Every turn spawned beneath this conversation's turns, transitively — a subagent that
+        spawns its own is nested again. Each runs in its own conversation carrying the parent's
+        audience and agent (`SubagentRunner`), so a caller authorized for the parent conversation is
+        authorized for these; the tree a view nests is `parent_turn_id` over this set. Breadth
+        first, so a parent always precedes the turns it spawned however the timestamps tie, and
+        bounded."""
+        roots = sa.select(tables.turn.c.id).where(
+            tables.turn.c.workspace_id == self.workspace_id,
+            tables.turn.c.conversation_id == conversation_id,
+        )
+        descendants = (
+            sa.select(tables.turn.c.id, sa.literal(1).label("depth"))
+            .where(
+                tables.turn.c.workspace_id == self.workspace_id,
+                tables.turn.c.parent_turn_id.in_(roots),
+            )
+            .cte("subagent_turns", recursive=True)
+        )
+        descendants = descendants.union_all(
+            sa.select(tables.turn.c.id, (descendants.c.depth + 1).label("depth")).where(
+                tables.turn.c.workspace_id == self.workspace_id,
+                tables.turn.c.parent_turn_id == descendants.c.id,
+            )
+        )
+        query = (
+            self._turn_query()
+            .add_columns(descendants.c.depth)
+            .join(descendants, descendants.c.id == tables.turn.c.id)
+            .where(tables.turn.c.workspace_id == self.workspace_id)
+            .order_by(descendants.c.depth, tables.turn.c.created_at, tables.turn.c.id)
+            .limit(limit)
+        )
+        async with workspace_tx() as connection:
+            rows = (await connection.execute(query)).all()
+        return tuple(self._turn_record(row) for row in rows)
 
     async def list_turns(
         self, conversation_id: UUID, limit: int = LIST_TURNS_LIMIT

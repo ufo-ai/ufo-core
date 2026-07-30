@@ -43,6 +43,9 @@ from ufo.ext.surface import (
     LedgerEntry as LedgerEntry,
 )
 from ufo.ext.surface import (
+    ListedConversation as ListedConversation,
+)
+from ufo.ext.surface import (
     PortalSkill as PortalSkill,
 )
 from ufo.ext.surface import (

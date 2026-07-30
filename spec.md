@@ -412,14 +412,20 @@ invoices, and payment methods stay chat acts (`manage_billing`), and caps have n
 yet, so the billing view is a read. Beside chat, each selected agent
 carries read projections shaped by the same contracts chat enforces: its scheduled tasks
 (creator sees content, an admin management metadata, others nothing), its loadable skills (the
-composition a turn loads), its connector accounts, its configuration overview (prompt, spec,
-bound surfaces, the deploy's ceilings — answering the agent's whole web audience, with the grant
-list inside it the admin's), and its rolling-window spend beside its agent-scoped caps — the
-ledger spans every member's turns, so spend answers an admin or a member whose explicit grant
-holds the agent, never the main-agent default alone. What the data never scoped to an agent
-reads — and, where a verb exists, mutates — beside the agent list instead of under one: source
-bindings, the deploy's member-fillable credential slots, memory, shared files, hosted sites, and
-usage. The usage view answers every member their own window — the ledger rows their
+composition a turn loads), its connector accounts, its conversations, its configuration overview
+(prompt, spec, bound surfaces, the deploy's ceilings — answering the agent's whole web audience,
+with the grant list inside it the admin's), and its rolling-window spend beside its agent-scoped
+caps — the ledger spans every member's turns, so spend answers an admin or a member whose
+explicit grant holds the agent, never the main-agent default alone. The conversations view lists
+the member's own plus the workspace-shared ones and opens each as its turns, the turns those
+spawned nested beneath them (a subagent runs in its own conversation carrying the parent's
+audience), and the live workspace files; an admin lists every conversation of the agent as
+administration metadata but reads another member's private one no more than chat would, and a
+room or an externally-shared channel is content nobody reads here, because participation there is
+the peer surface's live roster and no portal read can check it. What the data never scoped to an
+agent reads — and, where a verb exists, mutates — beside the agent list instead of under one:
+source bindings, the deploy's member-fillable credential slots, memory, shared files, hosted
+sites, and usage. The usage view answers every member their own window — the ledger rows their
 conversations' turns wrote, the join a `member` cap binds on, beside their member-scoped caps —
 and adds the workspace rollup for an admin, so a non-admin's payload names no other member and no
 agent. Memory with no query lists 100 live items under the viewer's own subjects at a time,

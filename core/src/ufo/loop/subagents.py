@@ -35,6 +35,7 @@ from ufo.schema import tables
 from ufo.schema.records import (
     DBOS_APP_VERSION,
     INTERNAL_ADMISSION,
+    SUBAGENT_SURFACE,
     TURN_QUEUE_NAME,
     TURN_WORKFLOW_NAME,
     TerminalFrame,
@@ -49,7 +50,6 @@ from ufo.tools.context import (
     UntrustedContentError,
 )
 
-SUBAGENT_SURFACE = "subagent"
 SUBAGENT_POLL_SECONDS = 0.1
 PRELOAD_PROMPT_CHAR_BOUND = 200_000
 FINISH_CONTRACT = (

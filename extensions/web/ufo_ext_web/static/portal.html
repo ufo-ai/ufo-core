@@ -110,6 +110,10 @@
                font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
   #panel .result { margin-top: 10px; }
   #panel h2 { font-size: 13px; opacity: 0.7; margin: 14px 0 4px; }
+  .transcript { display: flex; flex-direction: column; gap: 12px; margin: 8px 0 16px; }
+  .turn { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
+  .turn.nested { border-left: 2px solid color-mix(in srgb, CanvasText 20%, transparent);
+                 padding-left: 10px; }
   .filter { display: flex; gap: 6px; margin: 0 0 12px; }
   .filter button[aria-current="true"] { font-weight: 600; text-decoration: underline; }
   form.correct { display: flex; gap: 8px; margin: 12px 0; }
@@ -272,7 +276,8 @@ function emptyState(text) {
   log.appendChild(el);
 }
 
-const TABS = ['chat', 'overview', 'tasks', 'connections', 'skills', 'usage'];
+const TABS = ['chat', 'conversations', 'overview', 'tasks', 'connections', 'skills', 'usage'];
+const MAX_PREVIEW_BYTES = 256 * 1024;
 const WORKSPACE_TABS = ['sources', 'credentials', 'memory', 'artifacts', 'sites', 'usage'];
 const WORKSPACE_LABELS = {
   sources: 'Sources',
@@ -1427,6 +1432,188 @@ async function renderUsage(agent, load) {
   }
 }
 
+function turnTree(turns, spawned) {
+  const children = new Map();
+  for (const turn of spawned) {
+    if (!children.has(turn.parent_turn_id)) children.set(turn.parent_turn_id, []);
+    children.get(turn.parent_turn_id).push(turn);
+  }
+  const rows = [];
+  const placed = new Set();
+  function walk(turn, depth) {
+    rows.push({ turn, depth });
+    placed.add(turn.id);
+    for (const child of children.get(turn.id) || []) walk(child, depth + 1);
+  }
+  for (const turn of turns) walk(turn, 0);
+  for (const turn of spawned) {
+    if (!placed.has(turn.id)) walk(turn, 0);
+  }
+  return rows;
+}
+
+function turnLine(entry) {
+  const line = document.createElement('div');
+  line.className = entry.depth ? 'turn nested' : 'turn';
+  line.style.marginLeft = (entry.depth * 16) + 'px';
+  const heading = document.createElement('div');
+  heading.className = 'mono';
+  heading.textContent = (entry.turn.subagent_profile
+    ? 'subagent ' + entry.turn.subagent_profile
+    : 'turn ' + entry.turn.seq)
+    + ' · ' + entry.turn.status
+    + ' · ' + (day(entry.turn.created_at) || '');
+  const asked = document.createElement('div');
+  asked.className = 'bubble me';
+  asked.textContent = entry.turn.inbound;
+  line.append(heading, asked);
+  const answer = entry.turn.outcome || entry.turn.error_class;
+  if (answer) {
+    const said = document.createElement('div');
+    said.className = 'bubble agent';
+    said.textContent = answer;
+    line.appendChild(said);
+  }
+  return line;
+}
+
+async function renderConversationFiles(agent, conversation, load, target) {
+  let payload;
+  try {
+    const res = await fetch(
+      BASE + '/agents/' + agent.id + '/conversations/' + conversation.id + '/files',
+      { credentials: 'same-origin' });
+    if (load !== panelLoad) return;
+    if (!res.ok) { panelEmpty('Error ' + res.status + ' — reload to retry.'); return; }
+    payload = await res.json();
+  } catch (err) {
+    fail(load, 'Network error — try again.');
+    return;
+  }
+  if (load !== panelLoad) return;
+  const heading = document.createElement('h2');
+  heading.textContent = 'Workspace files';
+  target.appendChild(heading);
+  if (!payload.files.length) {
+    const none = document.createElement('span');
+    none.className = 'empty';
+    none.textContent = "No files in this conversation's workspace.";
+    target.appendChild(none);
+    return;
+  }
+  const preview = document.createElement('pre');
+  preview.hidden = true;
+  target.appendChild(table(
+    ['file', 'size', 'modified', ''],
+    payload.files.map((entry) => {
+      const line = row(entry.path, formatSize(entry.size_bytes), day(entry.modified_at));
+      const url = BASE + '/agents/' + agent.id + '/conversations/' + conversation.id
+        + '/files/' + entry.path;
+      const actions = document.createElement('td');
+      if (entry.size_bytes <= MAX_PREVIEW_BYTES) {
+        actions.appendChild(actionButton('View', async () => {
+          preview.hidden = false;
+          preview.textContent = 'Reading ' + entry.path + '…';
+          try {
+            const res = await fetch(url, { credentials: 'same-origin' });
+            preview.textContent = res.ok
+              ? await res.text()
+              : 'Error ' + res.status + ' — reload to retry.';
+          } catch (err) {
+            preview.textContent = 'Network error — try again.';
+          }
+        }));
+      }
+      const download = document.createElement('a');
+      download.href = url;
+      download.textContent = 'Download';
+      actions.appendChild(download);
+      line.appendChild(actions);
+      return line;
+    })
+  ));
+  target.appendChild(preview);
+}
+
+async function renderConversation(agent, conversation, load) {
+  panel.replaceChildren();
+  const back = actionButton('All conversations', () => selectTab('conversations'));
+  panel.appendChild(back);
+  const heading = document.createElement('h2');
+  heading.textContent = conversation.surface + ' · '
+    + (conversation.member_email || conversation.queue_key);
+  panel.appendChild(heading);
+  let payload;
+  try {
+    const res = await fetch(
+      BASE + '/agents/' + agent.id + '/conversations/' + conversation.id + '/turns',
+      { credentials: 'same-origin' });
+    if (load !== panelLoad) return;
+    if (res.status === 404) {
+      panelEmpty('This conversation is not shared with you.');
+      return;
+    }
+    if (!res.ok) { panelEmpty('Error ' + res.status + ' — reload to retry.'); return; }
+    payload = await res.json();
+  } catch (err) {
+    fail(load, 'Network error — try again.');
+    return;
+  }
+  if (load !== panelLoad) return;
+  if (!payload.turns.length && !payload.subagent_turns.length) {
+    panelEmpty('No turns in this conversation yet.');
+  }
+  else {
+    const rows = turnTree(payload.turns, payload.subagent_turns);
+    const transcript = document.createElement('div');
+    transcript.className = 'transcript';
+    for (const entry of rows) transcript.appendChild(turnLine(entry));
+    panel.appendChild(transcript);
+  }
+  await renderConversationFiles(agent, conversation, load, panel);
+}
+
+async function renderConversations(agent, load) {
+  let payload;
+  try {
+    const res = await fetch(BASE + '/agents/' + agent.id + '/conversations',
+      { credentials: 'same-origin' });
+    if (load !== panelLoad) return;
+    if (!res.ok) { panelEmpty('Error ' + res.status + ' — reload to retry.'); return; }
+    payload = await res.json();
+  } catch (err) {
+    fail(load, 'Network error — try again.');
+    return;
+  }
+  if (load !== panelLoad) return;
+  if (!payload.conversations.length) {
+    panelEmpty('No conversations with ' + agent.name + ' yet.');
+    return;
+  }
+  panel.appendChild(table(
+    ['conversation', 'surface', 'turns', 'last activity', ''],
+    payload.conversations.map((entry) => {
+      const line = row(
+        entry.member_email || entry.queue_key,
+        entry.surface,
+        String(entry.turn_count),
+        day(entry.last_turn_at) || day(entry.created_at)
+      );
+      const actions = document.createElement('td');
+      if (entry.readable) {
+        actions.appendChild(actionButton('Open', () => renderConversation(agent, entry, load)));
+      } else {
+        const held = document.createElement('span');
+        held.className = 'mono';
+        held.textContent = 'not shared with you';
+        actions.appendChild(held);
+      }
+      line.appendChild(actions);
+      return line;
+    })
+  ));
+}
+
 async function selectTab(name, detail) {
   tab = name;
   const load = ++panelLoad;
@@ -1443,6 +1630,7 @@ async function selectTab(name, detail) {
   const agent = selected;
   panel.replaceChildren();
   if (name === 'overview') { await renderOverview(agent, load, detail); return; }
+  if (name === 'conversations') { await renderConversations(agent, load); return; }
   if (name === 'connections') { await renderConnections(agent, load, detail); return; }
   if (name === 'skills') { await renderSkills(agent, load, detail); return; }
   if (name === 'usage') { await renderUsage(agent, load); return; }

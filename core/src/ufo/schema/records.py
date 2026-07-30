@@ -26,6 +26,7 @@ MEMBER_ADMISSION: TurnAdmissionSource = "member"
 INTERNAL_ADMISSION: TurnAdmissionSource = "internal"
 SCHEDULED_ADMISSION: TurnAdmissionSource = "scheduled"
 INTENT_ADMISSION: TurnAdmissionSource = "intent"
+SUBAGENT_SURFACE = "subagent"
 
 
 class ToolIntent(BaseModel):

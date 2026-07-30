@@ -314,6 +314,87 @@ const wire = {
       },
     ],
   },
+  fileReads: [],
+  conversations: {
+    conversations: [
+      {
+        id: "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa",
+        surface: "web",
+        queue_key: "web-key",
+        member_email: "admin@example.com",
+        turn_count: 2,
+        created_at: "2026-07-28T08:00:00+00:00",
+        last_turn_at: "2026-07-29T09:00:00+00:00",
+        readable: true,
+      },
+      {
+        id: "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb",
+        surface: "slack",
+        queue_key: "C42:1.0",
+        member_email: null,
+        turn_count: 1,
+        created_at: "2026-07-27T08:00:00+00:00",
+        last_turn_at: null,
+        readable: false,
+      },
+    ],
+  },
+  conversationTurns: {
+    turns: [
+      {
+        id: "10000000-0000-4000-8000-000000000001",
+        seq: 1,
+        status: "done",
+        inbound: "research the launch",
+        created_at: "2026-07-29T08:00:00+00:00",
+        parent_turn_id: null,
+        subagent_profile: null,
+        outcome: "here is the brief",
+        error_class: null,
+      },
+      {
+        id: "10000000-0000-4000-8000-000000000002",
+        seq: 2,
+        status: "failed",
+        inbound: "again",
+        created_at: "2026-07-29T09:00:00+00:00",
+        parent_turn_id: null,
+        subagent_profile: null,
+        outcome: null,
+        error_class: "ModelRefusal",
+      },
+    ],
+    subagent_turns: [
+      {
+        id: "20000000-0000-4000-8000-000000000001",
+        seq: 1,
+        status: "done",
+        inbound: "search the notes",
+        created_at: "2026-07-29T08:10:00+00:00",
+        parent_turn_id: "10000000-0000-4000-8000-000000000001",
+        subagent_profile: "researcher",
+        outcome: "found three",
+        error_class: null,
+      },
+      {
+        id: "30000000-0000-4000-8000-000000000001",
+        seq: 1,
+        status: "done",
+        inbound: "read note 2",
+        created_at: "2026-07-29T08:20:00+00:00",
+        parent_turn_id: "20000000-0000-4000-8000-000000000001",
+        subagent_profile: "reader",
+        outcome: "note 2 says teal",
+        error_class: null,
+      },
+    ],
+  },
+  conversationFiles: {
+    files: [
+      { path: "brief.md", size_bytes: 12, modified_at: "2026-07-29T08:30:00+00:00" },
+      { path: "huge.bin", size_bytes: 9_000_000, modified_at: "2026-07-29T08:31:00+00:00" },
+    ],
+  },
   memoryQueries: [],
   memoryRequests: [],
   memory: {
@@ -610,6 +691,26 @@ const sandbox = {
     }
     if (url.endsWith("/connections")) {
       return { ok: true, status: 200, json: async () => structuredClone(wire.connections) };
+    }
+    if (url.includes("/conversations/")) {
+      if (url.endsWith("/turns")) {
+        if (wire.turnsStatus) {
+          return { ok: false, status: wire.turnsStatus, json: async () => ({}) };
+        }
+        return {
+          ok: true,
+          status: 200,
+          json: async () => structuredClone(wire.conversationTurns),
+        };
+      }
+      if (url.endsWith("/files")) {
+        return { ok: true, status: 200, json: async () => structuredClone(wire.conversationFiles) };
+      }
+      wire.fileReads.push(url);
+      return { ok: true, status: 200, text: async () => "the brief body" };
+    }
+    if (url.endsWith("/conversations")) {
+      return { ok: true, status: 200, json: async () => structuredClone(wire.conversations) };
     }
     if (url.endsWith("/overview") && wire.overviewThrows) throw new TypeError("network down");
     if (url.endsWith("/overview") && wire.overviewStatus) {
@@ -1005,10 +1106,170 @@ try {
   if (consentLink.target !== "_blank") throw new Error("consent link must open its own tab");
   wire.connectUrl = null;
   const agentTabs = texts(byId.tabs.childNodes);
-  const expectedTabs = ["chat", "overview", "tasks", "connections", "skills", "usage"];
+  const expectedTabs = [
+    "chat",
+    "conversations",
+    "overview",
+    "tasks",
+    "connections",
+    "skills",
+    "usage",
+  ];
   if (agentTabs.join("|") !== expectedTabs.join("|")) {
     throw new Error(`the agent tab strip reads ${JSON.stringify(agentTabs)}`);
   }
+  const panelText = () =>
+    byId.panel
+      .querySelectorAll("*")
+      .map((node) => node.textContent)
+      .filter((line) => line)
+      .join(" | ");
+  await tabNamed("conversations").fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const conversationCells = byId.panel.querySelectorAll("td").map((node) => node.textContent);
+  if (!conversationCells.includes("admin@example.com") || !conversationCells.includes("C42:1.0")) {
+    throw new Error(`the conversations list reads ${JSON.stringify(conversationCells)}`);
+  }
+  if (!conversationCells.includes("2026-07-29 09:00")) {
+    throw new Error("the conversations list does not read last activity");
+  }
+  if (!panelText().includes("not shared with you")) {
+    throw new Error("an unreadable conversation renders no held line");
+  }
+  const openButtons = byId.panel
+    .querySelectorAll("button")
+    .filter((node) => node.textContent === "Open");
+  if (openButtons.length !== 1) {
+    throw new Error(`the list built ${openButtons.length} Open controls for one readable row`);
+  }
+  await openButtons[0].fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const transcript = byId.panel.querySelector(".transcript");
+  if (!transcript) throw new Error("opening a conversation built no transcript");
+  const turnRows = transcript.querySelectorAll(".turn");
+  if (turnRows.length !== 4) {
+    throw new Error(`the transcript built ${turnRows.length} turns, expected 4 with the tree`);
+  }
+  const nestedRows = transcript.querySelectorAll(".turn.nested");
+  if (nestedRows.length !== 2) {
+    throw new Error(`the transcript nested ${nestedRows.length} subagent turns, expected 2`);
+  }
+  if (nestedRows[0].style.marginLeft !== "16px" || nestedRows[1].style.marginLeft !== "32px") {
+    throw new Error("the subagent tree does not indent by depth");
+  }
+  const turnText = transcript.querySelectorAll("*").map((node) => node.textContent).join(" | ");
+  for (const expected of [
+    "subagent researcher",
+    "subagent reader",
+    "note 2 says teal",
+    "ModelRefusal",
+  ]) {
+    if (!turnText.includes(expected)) {
+      throw new Error(`the transcript omits ${expected}`);
+    }
+  }
+  if (!panelText().includes("Workspace files")) {
+    throw new Error("the conversation view renders no file section");
+  }
+  const viewButtons = byId.panel
+    .querySelectorAll("button")
+    .filter((node) => node.textContent === "View");
+  if (viewButtons.length !== 1) {
+    throw new Error(`${viewButtons.length} files offered a preview, expected the small one only`);
+  }
+  await viewButtons[0].fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const filePreview = byId.panel.querySelectorAll("pre").map((node) => node.textContent);
+  if (!filePreview.includes("the brief body")) {
+    throw new Error(`the file preview reads ${JSON.stringify(filePreview)}`);
+  }
+  if (!wire.fileReads[0].endsWith("/files/brief.md")) {
+    throw new Error(`the preview fetched ${wire.fileReads[0]}`);
+  }
+  const backButton = byId.panel
+    .querySelectorAll("button")
+    .find((node) => node.textContent === "All conversations");
+  if (!backButton) throw new Error("the conversation view offers no way back to the list");
+  await backButton.fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  if (!byId.panel.querySelectorAll("td").map((node) => node.textContent).includes("C42:1.0")) {
+    throw new Error("going back did not re-render the conversations list");
+  }
+  wire.turnsStatus = 404;
+  await (byId.panel
+    .querySelectorAll("button")
+    .filter((node) => node.textContent === "Open")[0]
+    .fire("click"));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  if (!panelText().includes("This conversation is not shared with you.")) {
+    throw new Error(`a 404 on a conversation reads ${panelText()}`);
+  }
+  wire.turnsStatus = null;
+  const nestedTurns = wire.conversationTurns;
+  wire.conversationTurns = {
+    turns: [],
+    subagent_turns: [
+      {
+        id: "40000000-0000-4000-8000-000000000001",
+        seq: 1,
+        status: "done",
+        inbound: "orphaned by the turn bound",
+        created_at: "2026-07-29T07:00:00+00:00",
+        parent_turn_id: "50000000-0000-4000-8000-000000000009",
+        subagent_profile: "researcher",
+        outcome: "still shown",
+        error_class: null,
+      },
+    ],
+  };
+  await tabNamed("chat").fire("click");
+  await tabNamed("conversations").fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await (byId.panel
+    .querySelectorAll("button")
+    .filter((node) => node.textContent === "Open")[0]
+    .fire("click"));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  if (!panelText().includes("orphaned by the turn bound")) {
+    throw new Error("a subagent turn whose parent is beyond the bound was dropped");
+  }
+  const listedFiles = wire.conversationFiles;
+  wire.conversationFiles = { files: [] };
+  await tabNamed("chat").fire("click");
+  await tabNamed("conversations").fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await (byId.panel
+    .querySelectorAll("button")
+    .filter((node) => node.textContent === "Open")[0]
+    .fire("click"));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  if (!panelText().includes("No files in this conversation's workspace.")) {
+    throw new Error(`a fileless conversation reads ${panelText()}`);
+  }
+  wire.conversationFiles = listedFiles;
+  wire.conversationTurns = { turns: [], subagent_turns: [] };
+  await tabNamed("chat").fire("click");
+  await tabNamed("conversations").fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await (byId.panel
+    .querySelectorAll("button")
+    .filter((node) => node.textContent === "Open")[0]
+    .fire("click"));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  if (!panelText().includes("No turns in this conversation yet.")) {
+    throw new Error(`a turnless conversation reads ${panelText()}`);
+  }
+  wire.conversationTurns = nestedTurns;
+  const listedConversations = wire.conversations;
+  wire.conversations = { conversations: [] };
+  await tabNamed("chat").fire("click");
+  await tabNamed("conversations").fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  if (!panelText().includes("No conversations with assistant yet.")) {
+    throw new Error(`an empty conversations list reads ${panelText()}`);
+  }
+  wire.conversations = listedConversations;
+  await tabNamed("chat").fire("click");
   const workspaceButtons = byId.workspace.querySelectorAll("button");
   const workspaceLabels = texts(workspaceButtons);
   const expectedWorkspace = [

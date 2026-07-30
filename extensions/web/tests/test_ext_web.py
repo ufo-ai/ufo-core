@@ -3400,3 +3400,341 @@ async def test_admin_payload_names_ids_and_models_for_the_mutation_forms(
     assert [agent["id"] for agent in payload["agents"]] == [str(agent_id)]
     assert [entry["id"] for entry in payload["members"]] == [str(admin_id)]
     assert payload["models"] == ["auto", "claude-opus-4-8", "claude-sonnet-5"]
+
+
+async def _seed_agent_conversation(
+    workspace_id: UUID,
+    agent_id: UUID,
+    *,
+    queue_key: str,
+    audience: str,
+    member_id: UUID | None,
+    surface: str = "web",
+) -> UUID:
+    conversation_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=conversation_id,
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                surface=surface,
+                queue_key=queue_key,
+                member_id=member_id,
+                audience=audience,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return conversation_id
+
+
+async def _seed_listed_turn(
+    workspace_id: UUID,
+    conversation_id: UUID,
+    agent_id: UUID,
+    *,
+    seq: int,
+    inbound: str,
+    parent_turn_id: UUID | None = None,
+    subagent_profile: str | None = None,
+) -> UUID:
+    turn_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=turn_id,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=seq,
+                status="done",
+                inbound=inbound,
+                terminal=TerminalFrame(status="done", text="ok").model_dump(mode="json"),
+                parent_turn_id=parent_turn_id,
+                subagent_profile=subagent_profile,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return turn_id
+
+
+async def test_conversations_list_by_audience_and_the_agent_wall(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The conversations view, read by a member who holds no grant and reaches the main agent
+    by default: they list their own conversations plus the workspace-shared ones, never another
+    member's private one or a room's. An admin lists every one of the agent's
+    as administration metadata and reads only the workspace-shared one — every member-private
+    conversation and every room is listed unreadable, the same shape a private task's content takes
+    for an admin. Another agent's conversation is absent, and an out-of-audience agent is
+    not-found."""
+    client, workspace_id, agent_id = web
+    member_m, token_m = await _seed_member(workspace_id, "m@example.com")
+    member_n, _token_n = await _seed_member(workspace_id, "n@example.com")
+    _admin_id, token_admin = await _seed_member(workspace_id, "boss@example.com", admin=True)
+    walled_agent = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=walled_agent,
+                workspace_id=workspace_id,
+                name="ops",
+                prompt="be operational",
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    mine = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="mine",
+        audience=str(conversation_audience(member_m)),
+        member_id=member_m,
+    )
+    shared = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="C1:1.0",
+        audience="shared",
+        member_id=None,
+        surface="slack",
+    )
+    theirs = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="theirs",
+        audience=str(conversation_audience(member_n)),
+        member_id=member_n,
+    )
+    room = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="C9:1.0",
+        audience="room:slack:C9",
+        member_id=None,
+        surface="slack",
+    )
+    elsewhere = await _seed_agent_conversation(
+        workspace_id, walled_agent, queue_key="other", audience="shared", member_id=None
+    )
+    path = f"/surface/web/agents/{agent_id}/conversations"
+
+    listed = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_m}"})
+    assert listed.status_code == 200
+    rows = listed.json()["conversations"]
+    assert {entry["id"] for entry in rows} == {str(mine), str(shared)}
+    assert all(entry["readable"] for entry in rows)
+    by_id = {entry["id"]: entry for entry in rows}
+    assert by_id[str(mine)]["member_email"] == "m@example.com"
+    assert by_id[str(shared)]["surface"] == "slack"
+    assert by_id[str(shared)]["queue_key"] == "C1:1.0"
+    assert by_id[str(shared)]["member_email"] is None
+
+    admin_view = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_admin}"})
+    admin_rows = admin_view.json()["conversations"]
+    assert {entry["id"] for entry in admin_rows} == {
+        str(mine),
+        str(shared),
+        str(theirs),
+        str(room),
+    }
+    assert {entry["id"] for entry in admin_rows if entry["readable"]} == {str(shared)}
+    assert {entry["id"] for entry in admin_rows if not entry["readable"]} == {
+        str(mine),
+        str(theirs),
+        str(room),
+    }
+    assert str(elsewhere) not in {entry["id"] for entry in admin_rows}
+
+    walled = await client.get(
+        f"/surface/web/agents/{walled_agent}/conversations",
+        headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
+    )
+    assert walled.status_code == 404
+    anonymous = await client.get(path)
+    assert anonymous.status_code == 401
+
+
+async def test_conversation_turns_nest_subagents_and_fail_closed(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """A readable conversation answers its turns and the turns they spawned — a subagent runs in its
+    own conversation carrying this one's audience — while another member's private conversation,
+    another agent's, a room's, and a guessed id are all not-found, for an admin too."""
+    client, workspace_id, agent_id = web
+    member_m, token_m = await _seed_member(workspace_id, "m@example.com")
+    member_n, _token_n = await _seed_member(workspace_id, "n@example.com")
+    _admin_id, token_admin = await _seed_member(workspace_id, "boss@example.com", admin=True)
+    walled_agent = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=walled_agent,
+                workspace_id=workspace_id,
+                name="ops",
+                prompt="be operational",
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    mine = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="mine",
+        audience=str(conversation_audience(member_m)),
+        member_id=member_m,
+    )
+    theirs = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="theirs",
+        audience=str(conversation_audience(member_n)),
+        member_id=member_n,
+    )
+    room = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="C9:1.0",
+        audience="room:slack:C9",
+        member_id=None,
+        surface="slack",
+    )
+    elsewhere = await _seed_agent_conversation(
+        workspace_id, walled_agent, queue_key="other", audience="shared", member_id=None
+    )
+    parent = await _seed_listed_turn(workspace_id, mine, agent_id, seq=1, inbound="research")
+    child_conversation = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key=str(parent),
+        audience=str(conversation_audience(member_m)),
+        member_id=member_m,
+        surface="subagent",
+    )
+    child = await _seed_listed_turn(
+        workspace_id,
+        child_conversation,
+        agent_id,
+        seq=1,
+        inbound="search",
+        parent_turn_id=parent,
+        subagent_profile="researcher",
+    )
+
+    read = await client.get(
+        f"/surface/web/agents/{agent_id}/conversations/{mine}/turns",
+        headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
+    )
+    assert read.status_code == 200
+    payload = read.json()
+    assert [entry["id"] for entry in payload["turns"]] == [str(parent)]
+    assert payload["turns"][0]["inbound"] == "research"
+    assert payload["turns"][0]["outcome"] == "ok"
+    assert [entry["id"] for entry in payload["subagent_turns"]] == [str(child)]
+    assert payload["subagent_turns"][0]["parent_turn_id"] == str(parent)
+    assert payload["subagent_turns"][0]["subagent_profile"] == "researcher"
+
+    for conversation_id in (theirs, room, uuid4()):
+        for token in (token_m, token_admin):
+            denied = await client.get(
+                f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/turns",
+                headers={"cookie": f"{SESSION_COOKIE}={token}"},
+            )
+            assert denied.status_code == 404
+    crossed = await client.get(
+        f"/surface/web/agents/{agent_id}/conversations/{elsewhere}/turns",
+        headers={"cookie": f"{SESSION_COOKIE}={token_admin}"},
+    )
+    assert crossed.status_code == 404
+    malformed = await client.get(
+        f"/surface/web/agents/{agent_id}/conversations/not-a-uuid/turns",
+        headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
+    )
+    assert malformed.status_code == 404
+    anonymous = await client.get(f"/surface/web/agents/{agent_id}/conversations/{mine}/turns")
+    assert anonymous.status_code == 401
+
+
+async def test_conversation_files_ride_the_same_gate(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The file list and one file's bytes answer only where the turns do: a member's own
+    conversation lists (empty without a live sandbox), a path escaping the workspace subtree is
+    not-found rather than read, and another member's private conversation is not-found on both
+    routes even for an admin. The agent is the wall here too — `_owned_conversation` scopes the
+    sandbox read to the workspace only, so a shared conversation of another agent is not-found
+    solely because this gate holds it."""
+    client, workspace_id, agent_id = web
+    member_m, token_m = await _seed_member(workspace_id, "m@example.com")
+    member_n, _token_n = await _seed_member(workspace_id, "n@example.com")
+    _admin_id, token_admin = await _seed_member(workspace_id, "boss@example.com", admin=True)
+    mine = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="mine",
+        audience=str(conversation_audience(member_m)),
+        member_id=member_m,
+    )
+    theirs = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="theirs",
+        audience=str(conversation_audience(member_n)),
+        member_id=member_n,
+    )
+
+    listed = await client.get(
+        f"/surface/web/agents/{agent_id}/conversations/{mine}/files",
+        headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
+    )
+    assert listed.status_code == 200
+    assert listed.json() == {"files": []}
+    absent = await client.get(
+        f"/surface/web/agents/{agent_id}/conversations/{mine}/files/brief.md",
+        headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
+    )
+    assert absent.status_code == 404
+    escaping = await client.get(
+        f"/surface/web/agents/{agent_id}/conversations/{mine}/files/../../etc/passwd",
+        headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
+    )
+    assert escaping.status_code == 404
+
+    for token in (token_m, token_admin):
+        denied_list = await client.get(
+            f"/surface/web/agents/{agent_id}/conversations/{theirs}/files",
+            headers={"cookie": f"{SESSION_COOKIE}={token}"},
+        )
+        assert denied_list.status_code == 404
+        denied_read = await client.get(
+            f"/surface/web/agents/{agent_id}/conversations/{theirs}/files/brief.md",
+            headers={"cookie": f"{SESSION_COOKIE}={token}"},
+        )
+        assert denied_read.status_code == 404
+
+    second_agent = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=second_agent,
+                workspace_id=workspace_id,
+                name="ops",
+                prompt="be operational",
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    elsewhere = await _seed_agent_conversation(
+        workspace_id, second_agent, queue_key="elsewhere", audience="shared", member_id=None
+    )
+    for route in ("files", "files/brief.md"):
+        crossed = await client.get(
+            f"/surface/web/agents/{agent_id}/conversations/{elsewhere}/{route}",
+            headers={"cookie": f"{SESSION_COOKIE}={token_admin}"},
+        )
+        assert crossed.status_code == 404

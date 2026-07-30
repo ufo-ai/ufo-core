@@ -69,7 +69,13 @@ from ufo.sandbox.ingress_token import (
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import ProxyEndpoint
 from ufo.schema import tables
-from ufo.schema.records import WRITEBACK_PENDING, TerminalFrame, ToolIntent, TurnContext
+from ufo.schema.records import (
+    SUBAGENT_SURFACE,
+    WRITEBACK_PENDING,
+    TerminalFrame,
+    ToolIntent,
+    TurnContext,
+)
 from ufo.sources.backend import binding_name
 from ufo.subjects import SHARED_SUBJECT
 from ufo.surfaces.admission import Admission, MemberAdmission
@@ -1987,3 +1993,319 @@ async def test_installation_reads_the_peer_surface_identity(db: None, tmp_path) 
         )
     assert await context.installation("slack") == "team:T042"
     assert await context.installation("teams") is None
+
+
+async def _seed_conversation(
+    workspace_id: UUID,
+    agent_id: UUID,
+    *,
+    queue_key: str,
+    audience: str,
+    member_id: UUID | None,
+    surface: str = SURFACE,
+) -> UUID:
+    conversation_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=conversation_id,
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                surface=surface,
+                queue_key=queue_key,
+                member_id=member_id,
+                audience=audience,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return conversation_id
+
+
+async def _seed_conversation_turn(
+    workspace_id: UUID,
+    conversation_id: UUID,
+    agent_id: UUID,
+    *,
+    seq: int,
+    inbound: str,
+    parent_turn_id: UUID | None = None,
+    subagent_profile: str | None = None,
+) -> UUID:
+    turn_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=turn_id,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=seq,
+                status="done",
+                inbound=inbound,
+                terminal=TerminalFrame(status="done", text="ok").model_dump(mode="json"),
+                parent_turn_id=parent_turn_id,
+                subagent_profile=subagent_profile,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return turn_id
+
+
+async def _seed_member_row(workspace_id: UUID, email: str) -> UUID:
+    member_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=member_id,
+                workspace_id=workspace_id,
+                email=email,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return member_id
+
+
+async def _seed_agent_row(workspace_id: UUID, name: str) -> UUID:
+    agent_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=agent_id,
+                workspace_id=workspace_id,
+                name=name,
+                prompt="be operational",
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return agent_id
+
+
+async def test_agent_conversations_list_by_audience_and_wall(db: None, tmp_path) -> None:
+    """The list a member reads: their own conversations and the workspace-shared ones, never
+    another member's private one, a room's, or an externally-shared channel's. An admin lists every
+    conversation of the agent as administration metadata, and each row says whether its content is
+    readable — false exactly where an admin lists what they may not read. Another agent's
+    conversations are absent whoever asks, and a subagent conversation never lists beside its
+    parent."""
+    workspace_id, agent_id, member_id = await _seed(member_email="m@example.com")
+    assert member_id is not None
+    other_id = await _seed_member_row(workspace_id, "n@example.com")
+    second_agent = await _seed_agent_row(workspace_id, "ops")
+    mine = await _seed_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="mine",
+        audience=str(conversation_audience(member_id)),
+        member_id=member_id,
+    )
+    shared = await _seed_conversation(
+        workspace_id, agent_id, queue_key="shared", audience=str(SHARED_AUDIENCE), member_id=None
+    )
+    theirs = await _seed_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="theirs",
+        audience=str(conversation_audience(other_id)),
+        member_id=other_id,
+    )
+    room = await _seed_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="room",
+        audience=str(room_audience("slack", "C7")),
+        member_id=None,
+    )
+    foreign = await _seed_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="foreign",
+        audience=str(foreign_room_audience("slack", "C8")),
+        member_id=None,
+    )
+    subagent = await _seed_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="child",
+        audience=str(conversation_audience(member_id)),
+        member_id=member_id,
+        surface=SUBAGENT_SURFACE,
+    )
+    walled = await _seed_conversation(
+        workspace_id,
+        second_agent,
+        queue_key="walled",
+        audience=str(SHARED_AUDIENCE),
+        member_id=None,
+    )
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+
+    listed = await context.list_agent_conversations(agent_id, member_id, admin=False, limit=50)
+    assert {entry.summary.id for entry in listed} == {mine, shared}
+    assert all(entry.readable for entry in listed)
+    assert {entry.summary.member_email for entry in listed} == {"m@example.com", None}
+
+    as_admin = await context.list_agent_conversations(agent_id, member_id, admin=True, limit=50)
+    assert {entry.summary.id for entry in as_admin} == {mine, shared, theirs, room, foreign}
+    assert {entry.summary.id for entry in as_admin if not entry.readable} == {theirs, room, foreign}
+    assert subagent not in {entry.summary.id for entry in as_admin}
+    assert walled not in {entry.summary.id for entry in as_admin}
+
+    other_agent = await context.list_agent_conversations(
+        second_agent, member_id, admin=True, limit=50
+    )
+    assert {entry.summary.id for entry in other_agent} == {walled}
+
+
+async def test_agent_conversations_order_and_bound_by_activity(db: None, tmp_path) -> None:
+    """Newest activity first, with the caller's limit as the bound."""
+    workspace_id, agent_id, member_id = await _seed(member_email="m@example.com")
+    assert member_id is not None
+    older = await _seed_conversation(
+        workspace_id, agent_id, queue_key="older", audience=str(SHARED_AUDIENCE), member_id=None
+    )
+    newer = await _seed_conversation(
+        workspace_id, agent_id, queue_key="newer", audience=str(SHARED_AUDIENCE), member_id=None
+    )
+    await _seed_conversation_turn(workspace_id, older, agent_id, seq=1, inbound="first")
+    await _seed_conversation_turn(workspace_id, newer, agent_id, seq=1, inbound="second")
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .values(updated_at=datetime.now(UTC) - timedelta(hours=2))
+            .where(tables.turn.c.conversation_id == older)
+        )
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+
+    listed = await context.list_agent_conversations(agent_id, member_id, admin=False, limit=50)
+    assert [entry.summary.id for entry in listed] == [newer, older]
+    assert [entry.summary.turn_count for entry in listed] == [1, 1]
+    assert all(entry.summary.last_turn_at is not None for entry in listed)
+    bounded = await context.list_agent_conversations(agent_id, member_id, admin=False, limit=1)
+    assert [entry.summary.id for entry in bounded] == [newer]
+
+
+async def test_readable_conversation_holds_the_audience_and_the_wall(db: None, tmp_path) -> None:
+    """The one content gate: a member's own conversation and a shared one read, another member's
+    private one and a room's do not, and the same conversation under another agent's id is
+    unreadable — the answer every content route fails closed on."""
+    workspace_id, agent_id, member_id = await _seed(member_email="m@example.com")
+    assert member_id is not None
+    other_id = await _seed_member_row(workspace_id, "n@example.com")
+    second_agent = await _seed_agent_row(workspace_id, "ops")
+    mine = await _seed_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="mine",
+        audience=str(conversation_audience(member_id)),
+        member_id=member_id,
+    )
+    shared = await _seed_conversation(
+        workspace_id, agent_id, queue_key="shared", audience=str(SHARED_AUDIENCE), member_id=None
+    )
+    theirs = await _seed_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="theirs",
+        audience=str(conversation_audience(other_id)),
+        member_id=other_id,
+    )
+    room = await _seed_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="room",
+        audience=str(room_audience("slack", "C7")),
+        member_id=None,
+    )
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+
+    assert await context.readable_conversation(mine, agent_id, member_id) is True
+    assert await context.readable_conversation(shared, agent_id, member_id) is True
+    assert await context.readable_conversation(theirs, agent_id, member_id) is False
+    assert await context.readable_conversation(room, agent_id, member_id) is False
+    assert await context.readable_conversation(mine, second_agent, member_id) is False
+    assert await context.readable_conversation(uuid4(), agent_id, member_id) is False
+    assert await context.readable_conversation(theirs, agent_id, other_id) is True
+
+
+async def test_conversation_subagent_turns_nest_transitively(db: None, tmp_path) -> None:
+    """Every turn spawned beneath the conversation's turns, however deep, oldest first, and nothing
+    spawned beneath another conversation's."""
+    workspace_id, agent_id, _ = await _seed()
+    conversation_id = await _seed_conversation(
+        workspace_id, agent_id, queue_key="root", audience=str(SHARED_AUDIENCE), member_id=None
+    )
+    sibling = await _seed_conversation(
+        workspace_id, agent_id, queue_key="sibling", audience=str(SHARED_AUDIENCE), member_id=None
+    )
+    parent_turn = await _seed_conversation_turn(
+        workspace_id, conversation_id, agent_id, seq=1, inbound="ask"
+    )
+    child_conversation = await _seed_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="child",
+        audience=str(SHARED_AUDIENCE),
+        member_id=None,
+        surface=SUBAGENT_SURFACE,
+    )
+    child_turn = await _seed_conversation_turn(
+        workspace_id,
+        child_conversation,
+        agent_id,
+        seq=1,
+        inbound="research",
+        parent_turn_id=parent_turn,
+        subagent_profile="researcher",
+    )
+    grandchild_conversation = await _seed_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="grandchild",
+        audience=str(SHARED_AUDIENCE),
+        member_id=None,
+        surface=SUBAGENT_SURFACE,
+    )
+    grandchild_turn = await _seed_conversation_turn(
+        workspace_id,
+        grandchild_conversation,
+        agent_id,
+        seq=1,
+        inbound="read",
+        parent_turn_id=child_turn,
+        subagent_profile="reader",
+    )
+    sibling_turn = await _seed_conversation_turn(
+        workspace_id, sibling, agent_id, seq=1, inbound="other"
+    )
+    sibling_child = await _seed_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="sibling-child",
+        audience=str(SHARED_AUDIENCE),
+        member_id=None,
+        surface=SUBAGENT_SURFACE,
+    )
+    await _seed_conversation_turn(
+        workspace_id,
+        sibling_child,
+        agent_id,
+        seq=1,
+        inbound="unrelated",
+        parent_turn_id=sibling_turn,
+        subagent_profile="researcher",
+    )
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+
+    nested = await context.conversation_subagent_turns(conversation_id)
+    assert [turn.id for turn in nested] == [child_turn, grandchild_turn]
+    assert [turn.parent_turn_id for turn in nested] == [parent_turn, child_turn]
+    assert [turn.subagent_profile for turn in nested] == ["researcher", "reader"]
+    assert [turn.id for turn in await context.conversation_subagent_turns(child_conversation)] == [
+        grandchild_turn
+    ]
+    assert await context.conversation_subagent_turns(grandchild_conversation) == ()

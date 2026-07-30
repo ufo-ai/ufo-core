@@ -55,6 +55,7 @@ from ufo.sdk.surfaces import (
     SurfaceAuth,
     SurfaceContext,
     SurfaceRoute,
+    Turn,
     TurnContext,
 )
 from ufo_ext_web.audience import WebAudience, granted_emails, web_audience, web_extension
@@ -79,6 +80,7 @@ MAX_MEMORY_QUERY_CHARS = 500
 MEMORY_RECENT_LIMIT = 100
 MEMORY_RESULT_LIMIT = 100
 ARTIFACT_LIST_LIMIT = 100
+CONVERSATION_LIST_LIMIT = 100
 SITE_KIND = "site"
 SPEND_WINDOW_DEFAULT_SECONDS = 86_400
 MAX_USAGE_WINDOW_SECONDS = 31_536_000
@@ -672,6 +674,127 @@ async def connections(ctx: SurfaceContext, request: Request) -> Response:
     return JSONResponse({"connections": [entry.model_dump(mode="json") for entry in listed]})
 
 
+async def conversations(ctx: SurfaceContext, request: Request) -> Response:
+    """The selected agent's conversations this member may see: their own plus the workspace-shared
+    ones, every one of the agent's for an admin, each saying whether its content is readable —
+    `readable_conversation` is the rule, and an admin does not widen it."""
+    gated = await _panel_gate(ctx, request)
+    if isinstance(gated, Response):
+        return gated
+    member_id, _email, audience, agent_id = gated
+    listed = await ctx.list_agent_conversations(
+        agent_id, member_id, admin=audience.admin, limit=CONVERSATION_LIST_LIMIT
+    )
+    return JSONResponse(
+        {
+            "conversations": [
+                {
+                    "id": str(entry.summary.id),
+                    "surface": entry.summary.surface,
+                    "queue_key": entry.summary.queue_key,
+                    "member_email": entry.summary.member_email,
+                    "turn_count": entry.summary.turn_count,
+                    "created_at": _iso(entry.summary.created_at),
+                    "last_turn_at": _iso(entry.summary.last_turn_at),
+                    "readable": entry.readable,
+                }
+                for entry in listed
+            ]
+        }
+    )
+
+
+async def _readable_conversation(
+    ctx: SurfaceContext, request: Request
+) -> tuple[UUID, UUID] | Response:
+    """The agent and conversation a content read is authorized for, or the 404 every unreadable
+    case answers: an agent outside the audience, a malformed id, another agent's conversation,
+    another member's private one, a room's. One gate, so the turn, subagent, and file reads below
+    cannot disagree."""
+    gated = await _panel_gate(ctx, request)
+    if isinstance(gated, Response):
+        return gated
+    member_id, _email, _audience, agent_id = gated
+    try:
+        conversation_id = UUID(request.path_params["conversation_id"])
+    except ValueError:
+        return Response("no such conversation", status_code=404)
+    if not await ctx.readable_conversation(conversation_id, agent_id, member_id):
+        return Response("no such conversation", status_code=404)
+    return agent_id, conversation_id
+
+
+def _turn_row(turn: Turn) -> dict[str, object]:
+    return {
+        "id": str(turn.id),
+        "seq": turn.seq,
+        "status": turn.status,
+        "inbound": turn.inbound,
+        "created_at": _iso(turn.created_at),
+        "parent_turn_id": None if turn.parent_turn_id is None else str(turn.parent_turn_id),
+        "subagent_profile": turn.subagent_profile,
+        "outcome": None if turn.terminal is None else turn.terminal.text,
+        "error_class": None if turn.terminal is None else turn.terminal.error_class,
+    }
+
+
+async def conversation_turns(ctx: SurfaceContext, request: Request) -> Response:
+    """One conversation's turns as the portal's transcript view renders them, and beneath them the
+    turns each spawned — a subagent runs in its own conversation carrying this one's audience, so
+    the same gate authorizes both and the page nests by `parent_turn_id`."""
+    authorized = await _readable_conversation(ctx, request)
+    if isinstance(authorized, Response):
+        return authorized
+    _agent_id, conversation_id = authorized
+    turns = await ctx.list_turns(conversation_id)
+    spawned = await ctx.conversation_subagent_turns(conversation_id)
+    return JSONResponse(
+        {
+            "turns": [_turn_row(turn) for turn in turns],
+            "subagent_turns": [_turn_row(turn) for turn in spawned],
+        }
+    )
+
+
+async def conversation_files(ctx: SurfaceContext, request: Request) -> Response:
+    """The conversation's live workspace files — the sandbox's own state, empty for a conversation
+    whose sandbox is gone."""
+    authorized = await _readable_conversation(ctx, request)
+    if isinstance(authorized, Response):
+        return authorized
+    _agent_id, conversation_id = authorized
+    listed = await ctx.list_workspace_files(conversation_id)
+    return JSONResponse(
+        {
+            "files": [
+                {
+                    "path": entry.path,
+                    "size_bytes": entry.size_bytes,
+                    "modified_at": _iso(entry.modified_at),
+                }
+                for entry in listed
+            ]
+        }
+    )
+
+
+async def conversation_file(ctx: SurfaceContext, request: Request) -> Response:
+    """One workspace file's bytes, streamed from the live sandbox under the same gate that listed
+    it — the path is workspace-scoped in the session, so it escapes neither the workspace nor the
+    container, and a member reads exactly what that conversation's agent wrote."""
+    authorized = await _readable_conversation(ctx, request)
+    if isinstance(authorized, Response):
+        return authorized
+    _agent_id, conversation_id = authorized
+    try:
+        stream = await ctx.read_workspace_file(conversation_id, request.path_params["path"])
+    except ValueError:
+        return Response("no such file", status_code=404)
+    if stream is None:
+        return Response("no such file", status_code=404)
+    return StreamingResponse(stream, media_type="application/octet-stream")
+
+
 async def workspace_credentials(ctx: SurfaceContext, request: Request) -> Response:
     """Member-fillable declared BYOK slots and their fill state — never a value, and never the
     `member_filled=False` seals the `credential` object kind still lists (deploy machinery, not a
@@ -1076,6 +1199,22 @@ ROUTES = (
     SurfaceRoute(method="GET", path="agents/{agent_id}/connections", handler=connections),
     SurfaceRoute(method="GET", path="agents/{agent_id}/skills", handler=skills),
     SurfaceRoute(method="GET", path="agents/{agent_id}/usage", handler=usage),
+    SurfaceRoute(method="GET", path="agents/{agent_id}/conversations", handler=conversations),
+    SurfaceRoute(
+        method="GET",
+        path="agents/{agent_id}/conversations/{conversation_id}/turns",
+        handler=conversation_turns,
+    ),
+    SurfaceRoute(
+        method="GET",
+        path="agents/{agent_id}/conversations/{conversation_id}/files",
+        handler=conversation_files,
+    ),
+    SurfaceRoute(
+        method="GET",
+        path="agents/{agent_id}/conversations/{conversation_id}/files/{path:path}",
+        handler=conversation_file,
+    ),
     SurfaceRoute(method="GET", path="workspace/sources", handler=workspace_sources),
     SurfaceRoute(method="GET", path="workspace/credentials", handler=workspace_credentials),
     SurfaceRoute(method="GET", path="workspace/memory", handler=workspace_memory),
