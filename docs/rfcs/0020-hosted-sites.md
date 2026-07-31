@@ -1,7 +1,7 @@
 ---
 rfc: 0020
 title: "Hosted sites — sandbox ingress and the access-controlled frame"
-status: proposed
+status: implemented
 date: 2026-07-28
 ---
 
