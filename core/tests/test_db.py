@@ -1,4 +1,5 @@
 import os
+import socket
 import sqlite3
 import warnings
 from collections.abc import AsyncIterator
@@ -13,10 +14,12 @@ import sqlalchemy as sa
 from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from ufo_testsupport.tables import reset_workspace_data
 
 from ufo import o11y
-from ufo.db import MIGRATIONS_DIR, _opened, apply_migrations, workspace_tx
+from ufo.db import MIGRATIONS_DIR, _build_engine, _opened, apply_migrations, workspace_tx
 from ufo.ext.loader import migration_locations
 from ufo.schema import tables
 
@@ -844,6 +847,56 @@ async def test_a_transaction_that_never_opens_is_counted(monkeypatch: pytest.Mon
 
     assert counted == [
         ("db_tx_unavailable_total", {"path": "workspace", "error_class": "TimeoutError"})
+    ]
+
+
+async def test_a_refused_connect_counts_under_the_class_the_driver_really_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`path` is this counter's only other dimension, so `error_class` is its whole information
+    content, and the emitter folds a class no allowlist entry names into `other` — which makes the
+    exact name load-bearing. Nothing in the code names these: they are whatever the driver raises
+    through the dialect, so both are taken from the real stack rather than guessed at as the
+    `OperationalError` a SQLAlchemy-shaped guess would reach for.
+
+    `_build_engine` is the whole engine path — the async engine this deployment builds, `NullPool`
+    and all, then a real connect — so it answers the question a bare driver connect cannot:
+    whether the dialect re-wraps the driver's `OSError` on the way out. It does not, and a release
+    that started to would fail here rather than send production to `other`. That a refused connect
+    surfaces from `_build_engine` at all is the same reason `_opened` only ever meets one after
+    boot: `_first_connect` re-raises, so a database down at startup fails `init_db`, and NullPool
+    then dials fresh for every later transaction — the incident this counter exists to report. Both
+    harvested classes then travel the rest of the way, through `_opened` to an exact attribute dict,
+    so neither entry in the allowlist is held by a name mirrored between two lists.
+
+    The refusal is taken from a privileged port, which nothing in this suite can bind: an ephemeral
+    port picked by binding and releasing is free for any parallel worker to take between the release
+    and the connect, and a worker that binds it as a server answers the TCP handshake and then never
+    speaks Postgres, which hangs the read rather than refusing it. A port that cannot be bound at
+    all has no such window."""
+    with pytest.raises(ConnectionRefusedError) as refused:
+        _build_engine("postgresql+asyncpg://ufo:ufo@127.0.0.1:1/ufo_test")
+    with pytest.raises(socket.gaierror) as unresolved:
+        _build_engine("postgresql+asyncpg://ufo:ufo@no-such-host.invalid:5432/ufo_test")
+
+    reader = InMemoryMetricReader()
+    provider = MeterProvider(metric_readers=[reader])
+    monkeypatch.setattr(o11y.metrics, "get_meter", provider.get_meter)
+    monkeypatch.setattr(o11y, "_counters", {})
+    for harvested in (refused.value, unresolved.value):
+        with pytest.raises(type(harvested)):
+            async with _opened(_RefusingEngine(type(harvested)()), "workspace"):
+                pass
+    assert [
+        dict(point.attributes)
+        for resource in reader.get_metrics_data().resource_metrics
+        for scope in resource.scope_metrics
+        for metric in scope.metrics
+        if metric.name == "ufo.db_tx_unavailable_total"
+        for point in metric.data.data_points
+    ] == [
+        {"path": "workspace", "error_class": "ConnectionRefusedError"},
+        {"path": "workspace", "error_class": "gaierror"},
     ]
 
 

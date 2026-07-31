@@ -73,6 +73,8 @@ MAX_PROVIDER_RETRIES = 6
 INITIAL_RETRY_DELAY_SECONDS = 2.0
 MAX_RETRY_DELAY_SECONDS = 60.0
 MAX_EMPTY_PROVIDER_RETRIES = 3
+STREAM_TIMEOUT_ERRORS = (openai.APITimeoutError,)
+STREAM_STATUS_ERRORS = (openai.APIStatusError,)
 REASONING_ENCRYPTED_CONTENT = "reasoning.encrypted_content"
 
 
@@ -393,7 +395,7 @@ class OpenAIClient:
                                 id=tool_call_ids[call.index],
                                 partial_json=call.function.arguments,
                             )
-            except openai.APITimeoutError:
+            except STREAM_TIMEOUT_ERRORS:
                 attempt += 1
                 if yielded or attempt > MAX_PROVIDER_RETRIES:
                     log(
@@ -412,7 +414,7 @@ class OpenAIClient:
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, MAX_RETRY_DELAY_SECONDS)
                 continue
-            except openai.APIStatusError as error:
+            except STREAM_STATUS_ERRORS as error:
                 attempt += 1
                 retryable = error.status_code == 429 or error.status_code >= 500
                 if yielded or not retryable or attempt > MAX_PROVIDER_RETRIES:
@@ -541,7 +543,7 @@ class OpenAIClient:
                             raise RuntimeError(f"OpenAI response failed: {message}")
                         case ResponseErrorEvent(message=message):
                             raise RuntimeError(f"OpenAI response failed: {message}")
-            except openai.APITimeoutError:
+            except STREAM_TIMEOUT_ERRORS:
                 attempt += 1
                 if yielded or attempt > MAX_PROVIDER_RETRIES:
                     log(
@@ -554,7 +556,7 @@ class OpenAIClient:
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, MAX_RETRY_DELAY_SECONDS)
                 continue
-            except openai.APIStatusError as error:
+            except STREAM_STATUS_ERRORS as error:
                 attempt += 1
                 retryable = error.status_code == 429 or error.status_code >= 500
                 if yielded or not retryable or attempt > MAX_PROVIDER_RETRIES:

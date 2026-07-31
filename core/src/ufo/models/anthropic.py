@@ -37,6 +37,8 @@ MAX_PROVIDER_RETRIES = 6
 INITIAL_RETRY_DELAY_SECONDS = 2.0
 MAX_RETRY_DELAY_SECONDS = 60.0
 MAX_EMPTY_PROVIDER_RETRIES = 3
+STREAM_TIMEOUT_ERRORS = (anthropic.APITimeoutError, httpx.TimeoutException)
+STREAM_STATUS_ERRORS = (anthropic.APIStatusError,)
 
 CACHE_CONTROL = {"type": "ephemeral", "ttl": "1h"}
 
@@ -243,7 +245,7 @@ class AnthropicClient:
                         case anthropic.types.RawMessageDeltaEvent(delta=delta, usage=usage):
                             output_tokens = usage.output_tokens
                             stop_reason = delta.stop_reason
-            except (anthropic.APITimeoutError, httpx.TimeoutException):
+            except STREAM_TIMEOUT_ERRORS:
                 attempt += 1
                 if yielded or attempt > MAX_PROVIDER_RETRIES:
                     log(
@@ -262,7 +264,7 @@ class AnthropicClient:
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, MAX_RETRY_DELAY_SECONDS)
                 continue
-            except anthropic.APIStatusError as error:
+            except STREAM_STATUS_ERRORS as error:
                 attempt += 1
                 deterministic_client_error = (
                     400 <= error.status_code < 500 and error.status_code != 429

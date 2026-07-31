@@ -115,6 +115,106 @@ HISTOGRAMS = {
     "tool_call_ms": TOOL_CALL_MS_BUCKETS,
     "turn_ms": TURN_MS_BUCKETS,
 }
+ERROR_CLASS_DIMENSION = "error_class"
+NO_ERROR_CLASS = ""
+OTHER_ERROR_CLASS = "other"
+ERROR_CLASSES = frozenset(
+    {
+        NO_ERROR_CLASS,
+        "APIConnectionError",
+        "APIError",
+        "APIResponseValidationError",
+        "APIStatusError",
+        "APITimeoutError",
+        "APIWebhookValidationError",
+        "AdminShutdownError",
+        "AuthenticationError",
+        "BadRequestError",
+        "BlockingIOError",
+        "BrokenPipeError",
+        "CancelledError",
+        "CannotConnectNowError",
+        "ChildProcessError",
+        "ClientCannotConnectError",
+        "ClientConfigurationError",
+        "CloseError",
+        "ConfigurationLimitExceededError",
+        "ConflictError",
+        "ConnectError",
+        "ConnectTimeout",
+        "ConnectionAbortedError",
+        "ConnectionDoesNotExistError",
+        "ConnectionError",
+        "ConnectionFailureError",
+        "ConnectionRefusedError",
+        "ConnectionRejectionError",
+        "ConnectionResetError",
+        "CrashShutdownError",
+        "CredentialValueInvalid",
+        "DataError",
+        "DatabaseDroppedError",
+        "DeadlineExceededError",
+        "DiskFullError",
+        "FileExistsError",
+        "FileNotFoundError",
+        "IdleSessionTimeoutError",
+        "InsufficientResourcesError",
+        "IntentRefused",
+        "InterfaceError",
+        "InternalClientError",
+        "InternalServerError",
+        "InterruptedError",
+        "InvalidAuthorizationSpecificationError",
+        "InvalidPasswordError",
+        "IsADirectoryError",
+        "KeyError",
+        "LocalProtocolError",
+        "ModelRefusal",
+        "ModelResponseTruncated",
+        "NetworkError",
+        "NotADirectoryError",
+        "NotFoundError",
+        "OAuthError",
+        "OSError",
+        "OperationalError",
+        "OperatorInterventionError",
+        "OutOfMemoryError",
+        "OutdatedSchemaCacheError",
+        "OverloadedError",
+        "PermissionDeniedError",
+        "PermissionError",
+        "PoolTimeout",
+        "PostgresConnectionError",
+        "ProcessLookupError",
+        "ProtocolError",
+        "ProtocolViolationError",
+        "ProxyError",
+        "QueryCanceledError",
+        "RateLimitError",
+        "ReadError",
+        "ReadTimeout",
+        "RemoteProtocolError",
+        "RequestTooLargeError",
+        "RuntimeError",
+        "ServiceUnavailableError",
+        "TargetServerAttributeNotMatched",
+        "TimeoutError",
+        "TimeoutException",
+        "TooManyConnectionsError",
+        "TransactionResolutionUnknownError",
+        "TransportError",
+        "UnprocessableEntityError",
+        "UnsupportedClientFeatureError",
+        "UnsupportedProtocol",
+        "UnsupportedServerFeatureError",
+        "UntrustedContentError",
+        "ValidationError",
+        "ValueError",
+        "WriteError",
+        "WriteTimeout",
+        "gaierror",
+    }
+)
 SENSITIVE_FIELD_KEYS = frozenset(
     {
         "prompt",
@@ -281,6 +381,22 @@ def _emit_log(
     )
 
 
+def _bounded_error_class(dimensions: dict[str, str]) -> dict[str, str]:
+    """A series' attributes with `error_class` folded onto `ERROR_CLASSES`, everything else
+    `OTHER_ERROR_CLASS`. A series costs the product of its dimensions, and a class name is whatever
+    raised — an extension's handler, a gating hook, a provider SDK, a database driver — so one
+    passed through mints a series across every other dimension of the metric, permanently, for a
+    class nothing reads. A base alone would fold the whole family: the SDK maps a status to its own
+    subclass and returns the base only for one it does not map, so listing `APIStatusError` without
+    `RateLimitError` beneath it puts every rate limit in the same bucket as an extension's crash.
+    The fold is here, at the one boundary both emitters pass through, so no call site can mint an
+    unlisted series, and an unlisted class folds rather than raises — every emission carrying one
+    sits in a failure path, where raising would destroy the error the count exists to report."""
+    if dimensions.get(ERROR_CLASS_DIMENSION, NO_ERROR_CLASS) in ERROR_CLASSES:
+        return dimensions
+    return {**dimensions, ERROR_CLASS_DIMENSION: OTHER_ERROR_CLASS}
+
+
 def emit_metric(name: str, amount: int = 1, /, **dimensions: str) -> None:
     """Increment a registered counter; unregistered names fail loud. What is measured is positional
     so that every keyword is a dimension."""
@@ -290,7 +406,7 @@ def emit_metric(name: str, amount: int = 1, /, **dimensions: str) -> None:
     if counter is None:
         counter = metrics.get_meter(INSTRUMENTATION_NAME).create_counter(f"ufo.{name}")
         _counters[name] = counter
-    counter.add(amount, attributes=dimensions)
+    counter.add(amount, attributes=_bounded_error_class(dimensions))
 
 
 def emit_histogram(name: str, value: int, /, **dimensions: str) -> None:
@@ -316,4 +432,4 @@ def emit_histogram(name: str, value: int, /, **dimensions: str) -> None:
             f"ufo.{name}", unit="ms", explicit_bucket_boundaries_advisory=boundaries
         )
         _histograms[name] = histogram
-    histogram.record(value, attributes=dimensions)
+    histogram.record(value, attributes=_bounded_error_class(dimensions))
