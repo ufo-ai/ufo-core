@@ -123,7 +123,8 @@ as a review gate:
   one operation — `to_thread` is a last resort for a library with genuinely no async API, and
   GIL-bound CPU work beyond ~10ms goes to a pool deliberately, never incidentally. Sync I/O is
   fine only off the loop: CLI startup, migrations, build scripts.
-- **No comments** — code self-documents through naming; docstrings on public APIs OK.
+- **No comments; docstrings only on public APIs** — Terraform, tests, and supporting actor methods
+  get no explanatory comments or docstrings. Names and structure carry intent.
 - **Constants over magic values** — top-level `SCREAMING_SNAKE_CASE`.
 - **Absolute imports, top-level imports, pathlib, guard clauses, built-ins over hand-rolled loops,
   match/case over isinstance chains, no `hasattr`/`getattr`.**
