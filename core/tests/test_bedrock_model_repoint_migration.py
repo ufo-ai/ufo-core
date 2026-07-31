@@ -33,8 +33,7 @@ def _replacements() -> dict[str, str]:
 def test_0064_maps_the_dropped_ids_onto_served_bedrock_specs() -> None:
     """The repoint rests on each target being a served Bedrock spec: a target core serves instead
     would resolve through a different key, stranding a Bedrock-only deploy at `client_for` and
-    flipping a BYOK workspace onto the platform rate card. The key set is stated here because
-    `0064:12-13` is the only place repo-wide that names the dropped ids."""
+    flipping a BYOK workspace onto the platform rate card."""
     served = {spec.id: spec for spec in bedrock.manifest().models}
 
     assert set(_replacements()) == set(DROPPED)
