@@ -4160,7 +4160,7 @@ def test_a_progress_post_names_the_work_never_a_tool() -> None:
     assert text == (
         "*Now:* Restarting the worker\n"
         "_3m in · since the last update: Reading the deploy log; github list pull requests; "
-        "read file; Restarting the worker_"
+        "read file_"
     )
     assert "GITHUB_LIST_PULL_REQUESTS" not in text
     assert "`" not in text
@@ -4188,7 +4188,7 @@ def test_a_progress_summary_keeps_a_handful_of_steps_and_counts_the_rest() -> No
     assert activity.report(1_200.0) == (
         "*Now:* Pushing the branch\n"
         "_20m in · since the last update: Reading the repo; Checking the failing tests; "
-        "Patching the fixture; Rerunning the failing test; +2 more_"
+        "Patching the fixture; Rerunning the failing test; +1 more_"
     )
 
     activity.checkpoint()
@@ -4217,8 +4217,26 @@ def test_a_progress_post_bounds_the_model_supplied_text_and_the_summary() -> Non
         f"{index}" * slack.PROGRESS_ACTIVITY_LIMIT for index in range(slack.PROGRESS_SUMMARY_STEPS)
     )
     assert summary == slack.PROGRESS_SUMMARY_LINE.format(
-        elapsed="1m", summary=f"{named}{slack.PROGRESS_SUMMARY_SEPARATOR}+2 more"
+        elapsed="1m", summary=f"{named}{slack.PROGRESS_SUMMARY_SEPARATOR}+1 more"
     )
+
+
+def test_a_progress_step_is_one_bounded_line_without_a_summary_boundary() -> None:
+    activity = slack.TurnActivity()
+    activity.tool("bash", "Ran migrations\nwaited; for the lock")
+    activity.tool("read_file", "Checking the schema")
+
+    assert activity.report(60.0) == (
+        "*Now:* Checking the schema\n"
+        "_1m in · since the last update: Ran migrations waited, for the lock_"
+    )
+
+
+def test_a_single_progress_call_is_not_repeated_below_the_current_step() -> None:
+    activity = slack.TurnActivity()
+    activity.tool("bash", "applying the migration")
+
+    assert activity.report(60.0) == "*Now:* applying the migration\n_1m in_"
 
 
 def test_every_closing_line_a_tool_free_checkpoint_can_render() -> None:
@@ -4246,19 +4264,6 @@ def test_every_closing_line_a_tool_free_checkpoint_can_render() -> None:
 def _progress_posts(recorder: list[httpx.Request]) -> list[dict[str, object]]:
     return [
         json.loads(r.content) for r in _requests_to(recorder, slack.SLACK_CHAT_POST_MESSAGE_URL)
-    ]
-
-
-def _progress_summaries(recorder: list[httpx.Request]) -> list[str]:
-    """The closing summary line of every post that had work to report, so a step the "Now:" line
-    still names in a later post cannot read as a second report of the same call."""
-    return [
-        line
-        for post in _progress_posts(recorder)
-        for line in str(post["text"]).splitlines()
-        if line.startswith("_")
-        and "since the last update" in line
-        and "no new activity" not in line
     ]
 
 
@@ -4504,9 +4509,7 @@ async def test_a_reply_to_a_still_running_turn_does_not_double_its_progress(
     member gets every remaining update twice on two independent clocks for the rest of a long turn.
     `_PROGRESS_TASKS` is cleared before the reply to reproduce the replica that took it without
     having seen the mention: nothing local is left to catch the duplicate, and admission reporting
-    the fold is the whole guard. Each tool call is then summarized by exactly one post — the summary
-    resets at every checkpoint, so a second reporter reading the same frames on its own clock
-    would report each call a second time."""
+    the fold is the whole guard."""
     workspace_id, _ = await _seed()
     monkeypatch.setattr(slack, "PROGRESS_BASE_SECONDS", 0.05)
     monkeypatch.setattr(slack, "PROGRESS_CAP_SECONDS", 0.1)
@@ -4557,15 +4560,22 @@ async def test_a_reply_to_a_still_running_turn_does_not_double_its_progress(
     deadline = time.monotonic() + 10
     for step in ("bash", "grep"):
         await hub.publish(turn_id, ToolCall(tool=step, preview="{}", description=f"{step} step"))
-        while not [line for line in _progress_summaries(recorder) if f"{step} step" in line]:
+        while not [
+            post
+            for post in _progress_posts(recorder)
+            if f"*Now:* {step} step\n" in str(post["text"]) and str(post["text"]).endswith(" in_")
+        ]:
             assert time.monotonic() < deadline, f"the {step} step never posted"
             await asyncio.sleep(0.01)
     while len(_progress_posts(recorder)) < 4:
         assert time.monotonic() < deadline, "the reporter stopped before two further checkpoints"
         await asyncio.sleep(0.01)
-    summaries = _progress_summaries(recorder)
-    assert [line for line in summaries if "bash step" in line] == [summaries[0]]
-    assert len([line for line in summaries if "grep step" in line]) == 1
+    posted = [str(post["text"]) for post in _progress_posts(recorder)]
+    for step in ("bash", "grep"):
+        matching = [
+            text for text in posted if f"*Now:* {step} step\n" in text and text.endswith(" in_")
+        ]
+        assert len(matching) == 1
 
     await _finish_turn(turn_id, "migrated")
     await asyncio.wait_for(reporter[turn_id], timeout=10)
@@ -4643,7 +4653,7 @@ async def test_a_cost_tick_is_absorbed_without_reporting_anything(
 
     reported = str(_progress_posts(recorder)[0]["text"])
     assert "*Now:* applying the migration" in reported
-    assert "since the last update: applying the migration" in reported
+    assert reported.endswith(" in_")
     assert "1,234" not in reported and "567" not in reported
     await _finish_turn(turn_id, "migrated")
     await asyncio.wait_for(task, timeout=10)

@@ -33,7 +33,7 @@ being reported. These
 are side-channel writes: the turn is never told, so a post neither ends it nor stalls it, and its
 terminal reply still lands through the poller exactly as it does for a turn that never ran long
 enough to post one. Each post carries what the tail saw — the latest completed narration, the step
-it is in, the tally since the last — and a signalless checkpoint is skipped, never filled.
+it is in, the completed work since the last — and a signalless checkpoint is skipped, never filled.
 
 A reply whose turn ended by asking the user (`Writeback.question`) renders the whole ask as Block
 Kit — the title, every question, and each single-choice question's options as a button row; a
@@ -1814,8 +1814,9 @@ class TurnActivity:
 
     def tool(self, tool: str, description: str) -> None:
         self._close_narration()
-        spoken = description.strip() or tool.replace("_", " ").replace("-", " ").strip().lower()
-        step = (spoken or tool)[:PROGRESS_ACTIVITY_LIMIT]
+        humanized = " ".join(tool.replace("_", " ").replace("-", " ").split()).lower()
+        described = " ".join(description.split()).replace(PROGRESS_SUMMARY_SEPARATOR, ", ")
+        step = (described or humanized)[:PROGRESS_ACTIVITY_LIMIT]
         self.activity = step
         if step not in self.steps:
             self.steps.append(step)
@@ -1851,13 +1852,8 @@ class TurnActivity:
         """This checkpoint's post, or None when the turn produced no signal at all — a checkpoint
         with nothing but the clock behind it is skipped, never filled with a placeholder. One that
         saw no *new* call still posts: naming the step the turn has sat in for the whole interval
-        answers "is it stalled?", the question that earns the post. The closing line summarizes the
-        interval's work in the model's own descriptions when calls landed — the first few in the
-        order they happened, since the step above already names the latest, and a count standing in
-        for the rest so a busy interval reads as a summary and not a list — the clock alone while
-        text is in flight (the growing size above it already says the turn is producing), and the
-        stall clause otherwise. Every named step is bounded on the way in, so the line is bounded by
-        how many it names."""
+        answers "is it stalled?", the question that earns the post. Every named step is bounded on
+        the way in, so the line is bounded by how many it names."""
         step = self.current_step()
         if not self.narration and not step:
             return None
@@ -1872,10 +1868,14 @@ class TurnActivity:
             quiet = PROGRESS_ELAPSED_LINE if self.streaming else PROGRESS_QUIET_LINE
             lines.append(quiet.format(elapsed=elapsed))
             return "\n".join(lines)
-        named = self.steps[:PROGRESS_SUMMARY_STEPS]
+        prior_steps = [prior for prior in self.steps if prior != step]
+        if not prior_steps:
+            lines.append(PROGRESS_ELAPSED_LINE.format(elapsed=elapsed))
+            return "\n".join(lines)
+        named = prior_steps[:PROGRESS_SUMMARY_STEPS]
         summary = PROGRESS_SUMMARY_SEPARATOR.join(named)
-        if len(self.steps) > len(named):
-            more = PROGRESS_SUMMARY_MORE.format(count=len(self.steps) - len(named))
+        if len(prior_steps) > len(named):
+            more = PROGRESS_SUMMARY_MORE.format(count=len(prior_steps) - len(named))
             summary = f"{summary}{PROGRESS_SUMMARY_SEPARATOR}{more}"
         lines.append(PROGRESS_SUMMARY_LINE.format(elapsed=elapsed, summary=summary))
         return "\n".join(lines)
