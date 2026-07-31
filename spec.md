@@ -403,11 +403,11 @@ portal lists and admits exactly the non-main agents whose web audience holds the
 member — grants kept in the web extension's own store, granted and revoked in chat
 (`grant_web_access`/`revoke_web_access`, admin-only, applying to the conversation's agent) —
 while a workspace admin reaches and administers every agent. An out-of-audience agent is
-not-found on every portal route, the workspace-shaped reads — the spend rollup and the
-administration view (agents with their policy, installations, and web-audience grants; members
-and seats; spend caps with their subjects named; the deploy's installed extensions and
-public-internet ceiling) — answer a workspace admin only, and the signed bearer enters as a
-session cookie through one POST (the gateway's signed-in card), never a URL. The plan,
+not-found on every portal route, the administration view (agents with their policy,
+installations, and web-audience grants; members and seats; spend caps with their subjects named;
+the deploy's installed extensions and public-internet ceiling) answers a workspace admin only,
+and the signed bearer enters as a session cookie through one POST (the gateway's signed-in
+card), never a URL. The plan,
 invoices, and payment methods stay chat acts (`manage_billing`), and caps have no object kind
 yet, so the billing view is a read. Beside chat, each selected agent
 carries read projections shaped by the same contracts chat enforces: its scheduled tasks

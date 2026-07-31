@@ -673,9 +673,9 @@ async def test_usage_sums_only_the_selected_agents_ledger(portal) -> None:
         {"window_seconds": 3_600, "limit_micro_usd": 5_000_000, "on_breach": "park"},
         {"window_seconds": 86_400, "limit_micro_usd": 5_000_000, "on_breach": "park"},
     ]
-    assert report["workspace_spend"] is False
     admin_report = await client.get(f"/surface/web/agents/{agent_b}/usage", headers=admin_headers)
-    assert admin_report.json()["workspace_spend"] is True
+    assert admin_report.status_code == 200
+    assert admin_report.json()["total_micro_usd"] == report["total_micro_usd"]
     async with workspace_tx() as connection:
         workspace_tokens = (
             await connection.execute(
@@ -694,7 +694,7 @@ async def test_usage_sums_only_the_selected_agents_ledger(portal) -> None:
         )
         assert refused.status_code == 400
         rollup_refused = await client.get(
-            f"/surface/web/spend?window_seconds={bad_window}", headers=admin_headers
+            f"/surface/web/workspace/usage?window_seconds={bad_window}", headers=admin_headers
         )
         assert rollup_refused.status_code == 400
 

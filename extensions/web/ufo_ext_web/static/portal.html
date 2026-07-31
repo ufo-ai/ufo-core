@@ -32,7 +32,6 @@
   #agents .model { display: block; opacity: 0.55; }
   nav footer { padding: 12px 16px; display: flex; flex-direction: column; gap: 4px;
                border-top: 1px solid color-mix(in srgb, CanvasText 15%, transparent); }
-  nav footer a { color: inherit; }
   nav footer button { border: 0; background: none; color: inherit; padding: 0; text-align: left;
                       font: inherit; text-decoration: underline; }
   .admin-view { padding: 16px; overflow-y: auto; display: flex; flex-direction: column;
@@ -203,7 +202,6 @@
   <ul id="workspace"></ul>
   <footer class="mono">
     <span class="email" id="member-email"></span>
-    <a id="spend" href="/surface/web/spend" hidden>Spend</a>
     <button id="admin" type="button" hidden>Administration</button>
   </footer>
 </nav>
@@ -583,7 +581,6 @@ function restoreChatPane() {
 function wireMemberChrome() {
   document.getElementById('member-email').textContent =
     member.email + (member.admin ? ' · admin' : '');
-  document.getElementById('spend').hidden = !member.admin;
   const admin = document.getElementById('admin');
   admin.hidden = !member.admin;
   admin.addEventListener('click', showAdmin);
@@ -1436,12 +1433,6 @@ async function renderUsage(agent, load) {
         cap.on_breach
       ))
     ));
-  }
-  if (report.workspace_spend) {
-    const link = document.createElement('a');
-    link.href = BASE + '/spend';
-    link.textContent = 'Workspace totals';
-    panel.appendChild(link);
   }
 }
 

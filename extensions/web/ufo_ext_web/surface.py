@@ -4,8 +4,8 @@ cookie-authenticated turn admission and an SSE tail of each turn's live frames, 
 (the agent index, per-agent transcripts, overviews, scheduled tasks, skills, per-agent usage,
 and connections) beside the workspace-level views every member holds — sources, credential
 slots, memory (latest first, searched across every reachable agent), shared artifacts, hosted
-sites — plus, for workspace admins, the administration view and the spend rollup, and prepared
-intents, the panels' one mutation path.
+sites, and usage (their own window, plus the workspace rollup for an admin) — plus the
+administration view for a workspace admin, and prepared intents, the panels' one mutation path.
 
 The `ufo_session` cookie carries the signed HMAC member bearer the gateway or `ufoctl init` mints
 (the `ufo.sdk.bearer` codec over `{ws, email, exp}`), landed by the one POST that opens a session
@@ -19,7 +19,6 @@ through the writeback poller. Everything web-specific lives here, reaching core 
 privileged `SurfaceContext` — the SDK surface a CI gate pins."""
 
 import asyncio
-import html
 import json
 import re
 from collections.abc import AsyncIterator
@@ -27,7 +26,6 @@ from datetime import datetime
 from pathlib import Path
 from uuid import UUID
 
-from ufo.sdk.accounting import MICRO_USD_PER_USD, SpendReport, SubjectTotal
 from ufo.sdk.audience import audience_subjects, conversation_audience
 from ufo.sdk.bearer import verify_token, workspace_claim
 from ufo.sdk.context import SourceReader
@@ -642,7 +640,7 @@ async def usage(ctx: SurfaceContext, request: Request) -> Response:
     """The selected agent's rolling-window spend and its agent-scoped caps — the agent's whole
     ledger across every member's turns, so it answers an admin or a member whose explicit grant
     put the agent in front of them, and the main-agent default alone opens nothing here (chat
-    projects no spend to a member); the workspace-wide rollup stays the admin's spend page."""
+    projects no spend to a member); the workspace-wide rollup stays the workspace usage view."""
     gated = await _panel_gate(ctx, request)
     if isinstance(gated, Response):
         return gated
@@ -673,7 +671,6 @@ async def usage(ctx: SurfaceContext, request: Request) -> Response:
                 }
                 for cap in report.caps
             ],
-            "workspace_spend": audience.admin,
         }
     )
 
@@ -876,9 +873,9 @@ async def workspace_artifacts(ctx: SurfaceContext, request: Request) -> Response
 
 async def workspace_usage(ctx: SurfaceContext, request: Request) -> Response:
     """The reader's own rolling-window spend and their member-scoped caps — a member's own burn is
-    theirs to read, so this answers every member rather than 404ing like the workspace rollup. An
-    admin additionally receives that rollup (totals by dimension, member, and agent) in the same
-    payload, because they already read it on the spend page; a non-admin's payload names no other
+    theirs to read, so this answers every member. An admin additionally receives the workspace
+    rollup (totals by dimension, member, and agent) in the same payload — the workspace's whole
+    financial state, which lives here and nowhere else; a non-admin's payload names no other
     member and no agent."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
@@ -1067,13 +1064,12 @@ async def fulfill_credential(ctx: SurfaceContext, request: Request) -> Response:
 
 
 async def admin_index(ctx: SurfaceContext, request: Request) -> Response:
-    """One of the two workspace-shaped reads (this view and the spend rollup — spec.md names
-    both): every agent with its policy, surface installations, and web-audience grants; members
-    and seat state; every spend cap with its subject named; and the deploy's shape — installed
-    extensions and the sandbox public-internet ceiling. The workspace's shape answers a workspace
-    admin only and is not-found for everyone else. Reads only; every mutation stays a chat act —
-    caps are the deploy operators' today (no object kind owns them), and the plan, invoices, and
-    payment methods are managed with the agent in chat (`manage_billing`)."""
+    """The administration read: every agent with its policy, surface installations, and
+    web-audience grants; members and seat state; every spend cap with its subject named; and the
+    deploy's shape — installed extensions and the sandbox public-internet ceiling. It answers a
+    workspace admin only and is not-found for everyone else. Reads only; every mutation stays a
+    chat act — caps are the deploy operators' today (no object kind owns them), and the plan,
+    invoices, and payment methods are managed with the agent in chat (`manage_billing`)."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
@@ -1122,25 +1118,6 @@ async def admin_index(ctx: SurfaceContext, request: Request) -> Response:
     )
 
 
-async def spend(ctx: SurfaceContext, request: Request) -> Response:
-    """Render the workspace spend rollup over a window — the same sums `ufoctl spend` prints, for a
-    workspace admin. The rollup is the workspace's financial state, not a member's own: it names
-    every agent and every member's burn, so a non-admin is not-found here for the same reason an
-    out-of-audience agent is not-found on every other portal route, and the footer offers the link
-    only to an admin."""
-    resolved = await _audience_for(ctx, request)
-    if isinstance(resolved, Response):
-        return resolved
-    _member_id, _email, audience = resolved
-    if not audience.admin:
-        return Response("no such page", status_code=404)
-    window = _window_param(request)
-    if isinstance(window, Response):
-        return window
-    report = await ctx.spend_rollup(window)
-    return HTMLResponse(_spend_page(report))
-
-
 def _sse(cursor: str, frame: LiveFrame) -> bytes:
     """One SSE event. A non-empty cursor is emitted as the event `id:`, which the browser echoes as
     `Last-Event-ID` on reconnect, so a dropped stream resumes from the last frame it rendered."""
@@ -1159,41 +1136,6 @@ def _sse(cursor: str, frame: LiveFrame) -> bytes:
             return head + b"event: skill\ndata: " + frame.model_dump_json().encode() + b"\n\n"
         case _:
             return head + b"data: " + frame.model_dump_json().encode() + b"\n\n"
-
-
-def _money(micro_usd: int) -> str:
-    return f"${micro_usd / MICRO_USD_PER_USD:,.6f}"
-
-
-def _subject_rows(subjects: tuple[SubjectTotal, ...]) -> str:
-    body = "".join(
-        f"<tr><td>{html.escape(s.label)}</td><td>{_money(s.priced_micro_usd)}</td></tr>"
-        for s in subjects
-    )
-    return body or "<tr><td colspan=2>none</td></tr>"
-
-
-def _spend_page(report: SpendReport) -> str:
-    dimensions = "".join(
-        f"<tr><td>{html.escape(d.dimension)}</td><td>{d.amount:,}</td>"
-        f"<td>{_money(d.priced_micro_usd)}</td></tr>"
-        for d in report.by_dimension
-    )
-    return (
-        "<!doctype html><meta charset=utf-8><title>ufo spend</title>"
-        "<style>body{font:15px/1.5 system-ui,sans-serif;margin:24px;max-width:720px}"
-        "table{border-collapse:collapse;width:100%;margin:8px 0 24px}"
-        "th,td{text-align:left;padding:6px 10px;border-bottom:1px solid #8884}"
-        "td+td,th+th{text-align:right}h1{font-size:20px}h2{font-size:15px;opacity:.7}</style>"
-        f"<h1>Spend · last {report.window_seconds / 3600:g}h · "
-        f"{_money(report.total_micro_usd)}</h1>"
-        "<h2>by dimension</h2><table><tr><th>dimension</th><th>units</th><th>cost</th></tr>"
-        f"{dimensions or '<tr><td colspan=3>no spend in window</td></tr>'}</table>"
-        "<h2>by member</h2><table><tr><th>member</th><th>cost</th></tr>"
-        f"{_subject_rows(report.by_member)}</table>"
-        "<h2>by agent</h2><table><tr><th>agent</th><th>cost</th></tr>"
-        f"{_subject_rows(report.by_agent)}</table>"
-    )
 
 
 async def intents(ctx: SurfaceContext, request: Request) -> Response:
@@ -1252,5 +1194,4 @@ ROUTES = (
     SurfaceRoute(method="GET", path="workspace/usage", handler=workspace_usage),
     SurfaceRoute(method="GET", path="turns/{turn_id}/stream", handler=stream),
     SurfaceRoute(method="POST", path="credentials", handler=fulfill_credential),
-    SurfaceRoute(method="GET", path="spend", handler=spend),
 )

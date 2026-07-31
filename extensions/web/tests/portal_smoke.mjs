@@ -197,7 +197,7 @@ body.append(tokenCard, nav, main);
 tokenCard.appendChild(element("form", "token-form"));
 nav.append(element("div"), element("ul", "agents"), element("ul", "workspace"));
 const footer = element("footer");
-footer.append(element("span", "member-email"), element("a", "spend"), element("button", "admin"));
+footer.append(element("span", "member-email"), element("button", "admin"));
 nav.appendChild(footer);
 const composer = element("form", "composer");
 const sendButton = element("button");

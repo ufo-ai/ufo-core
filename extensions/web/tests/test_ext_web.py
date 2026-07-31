@@ -791,10 +791,10 @@ async def test_artifacts_view_lists_own_files_with_links_and_admins_see_all(
 async def test_workspace_usage_answers_a_member_their_own_and_an_admin_the_rollup(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
-    """A member's own burn is theirs to read, so the workspace usage view answers every member —
-    unlike the admin-only rollup page. A non-admin's payload carries only their own sums and their
-    own member-scoped caps, naming no other member and no agent; an admin additionally receives the
-    rollup they already read on the spend page."""
+    """A member's own burn is theirs to read, so the workspace usage view answers every member.
+    A non-admin's payload carries only their own sums and their own member-scoped caps, naming no
+    other member and no agent; an admin additionally receives the workspace rollup — every
+    dimension, every member's burn, and every agent's — which this view is the only home for."""
     client, workspace_id, agent_id = web
     member_m, token_m = await _seed_member(workspace_id, "m@example.com")
     member_n, token_n = await _seed_member(workspace_id, "n@example.com")
@@ -1450,19 +1450,6 @@ async def _seed_priced_turn(workspace_id: UUID, agent_id: UUID, member_id: UUID)
         await record_egress_request(connection, workspace_id, turn_id)
 
 
-async def test_web_spend_view_matches_ledger_sums(web: tuple[AsyncClient, UUID, UUID]) -> None:
-    client, workspace_id, agent_id = web
-    member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
-    await _seed_priced_turn(workspace_id, agent_id, member_id)
-    page = await client.get("/surface/web/spend", headers={"cookie": f"{SESSION_COOKIE}={token}"})
-    assert page.status_code == 200
-    body = page.text
-    assert "owner@example.com" in body
-    assert "assistant" in body
-    assert "egress" in body
-    assert "$0.055000" in body
-
-
 async def test_admin_view_reads_the_workspace_shape(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
@@ -1606,28 +1593,6 @@ async def test_a_non_admin_is_not_found_on_the_admin_view(
     )
     assert denied.status_code == 404
     assert "admin@example.com" not in denied.text
-
-
-async def test_a_non_admin_is_not_found_on_the_spend_view(
-    web: tuple[AsyncClient, UUID, UUID],
-) -> None:
-    """The rollup is the workspace's financial state — every agent by name and every member's
-    burn — so it answers an admin only. A member who reaches the main agent's chat still cannot
-    read the workspace's spend, and the page is not-found rather than refused so it never
-    confirms what it holds."""
-    client, workspace_id, agent_id = web
-    admin_id, _admin_token = await _seed_member(workspace_id, "owner@example.com", admin=True)
-    await _seed_priced_turn(workspace_id, agent_id, admin_id)
-    _member_id, token = await _seed_member(workspace_id, "member@example.com")
-    reached = await client.get(
-        f"/surface/web/agents/{agent_id}/transcript",
-        headers={"cookie": f"{SESSION_COOKIE}={token}"},
-    )
-    assert reached.status_code == 200
-    page = await client.get("/surface/web/spend", headers={"cookie": f"{SESSION_COOKIE}={token}"})
-    assert page.status_code == 404
-    assert "owner@example.com" not in page.text
-    assert "assistant" not in page.text
 
 
 def test_portal_page_is_self_contained() -> None:
