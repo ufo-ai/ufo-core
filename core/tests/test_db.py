@@ -1,4 +1,5 @@
 import os
+import shutil
 import socket
 import sqlite3
 import warnings
@@ -1022,3 +1023,35 @@ async def test_turn_protocol_state_is_constrained(db: None) -> None:
                         updated_at=sa.func.now(),
                     )
                 )
+
+
+def test_a_migrated_sqlite_file_needs_no_journal_conversion_from_its_readers(
+    tmp_path: Path,
+) -> None:
+    """A migrated sqlite file is left in the mode its engines already use, and holds all its rows.
+
+    Converting the journal mode takes an exclusive lock it cannot wait out: a connection that has to
+    convert while another holds the file ends in `database is locked`. Leaving the migrated file
+    converted means the engine every caller builds never asks for that lock — proved here by
+    building one against a byte copy the way the test fixture copies its template, while a write is
+    held open on it."""
+    template = tmp_path / "template.db"
+    apply_migrations(f"sqlite+aiosqlite:///{template}")
+    assert not template.with_name(f"{template.name}-wal").exists()
+
+    copy = tmp_path / "copy.db"
+    shutil.copy(template, copy)
+    with sqlite3.connect(copy) as seeded:
+        assert seeded.execute("select count(*) from alembic_version").fetchone()[0] > 0
+
+    holder = sqlite3.connect(copy, timeout=0.2)
+    holder.execute("begin immediate")
+    holder.execute(
+        "insert into workspace (id, created_at, updated_at) values (?, ?, ?)",
+        (str(uuid4()), "2026-01-01", "2026-01-01"),
+    )
+    try:
+        _build_engine(f"sqlite+aiosqlite:///{copy}")
+    finally:
+        holder.rollback()
+        holder.close()

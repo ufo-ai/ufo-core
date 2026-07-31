@@ -12,6 +12,7 @@ enumerate through — never a scoped read, and the caller re-binds each row unde
 
 import asyncio
 import os
+import sqlite3
 import threading
 import warnings
 from collections.abc import AsyncIterator
@@ -25,6 +26,7 @@ import sqlalchemy as sa
 from alembic import command
 from alembic.config import Config as AlembicConfig
 from alembic.script import ScriptDirectory
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -187,6 +189,27 @@ def apply_migrations(url: str, pack: str | None = None) -> None:
     except UserWarning as error:
         raise RuntimeError("a duplicate migration revision collapses into one node") from error
     command.upgrade(config, "heads")
+    if url.startswith("sqlite"):
+        _seal_sqlite_journal(url)
+
+
+def _seal_sqlite_journal(url: str) -> None:
+    """Leave a migrated sqlite file in the journal mode every engine that opens it expects, with
+    nothing left in a sidecar.
+
+    Alembic builds its own engine, so `_sqlite_on_connect` never runs against it and the file it
+    writes is left in the default rollback journal. The first engine to open that file then converts
+    it, and the conversion needs an exclusive lock it cannot wait out: a connection that has to
+    convert while another holds the file ends in `database is locked`. Converting here — once,
+    before any engine or any copy of this file exists — means no later connection ever asks for that
+    lock. Alembic commits every migrated row into the file itself and closing leaves no write-ahead
+    log beside it, so a plain byte copy of it carries the whole database."""
+    database = make_url(url).database
+    if database is None:
+        raise RuntimeError(f"sqlite url names no file: {url}")
+    with sqlite3.connect(database) as connection:
+        connection.execute("pragma journal_mode=wal")
+    connection.close()
 
 
 def _sqlite_on_connect(dbapi_connection: Any, _connection_record: Any) -> None:
