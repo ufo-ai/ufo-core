@@ -3,15 +3,23 @@
 Every hosted site is served from its own origin, so a site's `/`-rooted assets and redirects
 resolve and its cookies and browser storage can never reach another site's. The label naming that
 origin encodes the conversation and the port, signed with a truncated HMAC over the same deploy
-secret the ingress token carries: 16 bytes of conversation id, 2 of port, 16 of signature, base32
-without padding — inside DNS's 63-character label bound, and case-insensitive by construction
-because DNS is. The label is an address, not an authorization: it is stable for a
-`(conversation, port)` so a member's bookmark and their site's stored state survive a redeploy,
-while the signature keeps a stranger from addressing a conversation nobody handed them.
+secret the ingress token carries: 16 bytes of conversation id, 2 of port, 4 of signature, base32
+without padding — 36 characters, inside DNS's 63-character label bound, and case-insensitive by
+construction because DNS is. The label is an address, not an authorization: it is stable for a
+`(conversation, port)` so a member's bookmark and their site's stored state survive a redeploy.
 
-One site, one label, exactly. 34 bytes fill 272 of the 275 bits 55 base32 characters carry, and
-base32 decoding discards the 3 that are left over — so eight labels would decode alike, and a
-browser would treat all eight as separate origins with their own cookie jars and storage. Parsing
+The signature is 4 bytes, sized by what forging one wins rather than by habit, and what it wins is
+nothing on its own. Both ways in carry the `(conversation, port)` they claim and must match the
+label: the view path verifies a minted token, every later request a session cookie, and a mismatch
+is 403 before a sandbox is dialed or a row is read. So the signature never stands between a stranger
+and a site — it keeps a guessed hostname from reaching the conversation read at all, and a member
+reads and copies 19 characters fewer for it. What 32 bits costs is an attacker willing to spend
+billions of requests to have one chosen conversation's row read and then refused; a wider tag buys
+nothing past that, because the cookie is the gate.
+
+One site, one label, exactly. 22 bytes fill 176 of the 180 bits 36 base32 characters carry, and
+base32 decoding discards the 4 that are left over — so sixteen labels decode alike, and a browser
+would treat all sixteen as separate origins with their own cookie jars and storage. Parsing
 therefore re-encodes what it decoded and refuses anything but the one canonical spelling."""
 
 import base64
@@ -25,7 +33,7 @@ SITE_LABEL_KIND = b"sandbox-site"
 UUID_BYTES = 16
 PORT_BYTES = 2
 ADDRESS_BYTES = UUID_BYTES + PORT_BYTES
-SIGNATURE_BYTES = 16
+SIGNATURE_BYTES = 4
 BASE32_BITS_PER_CHAR = 5
 DNS_LABEL_MAX_CHARS = 63
 LABEL_CHARS = -(-(ADDRESS_BYTES + SIGNATURE_BYTES) * 8 // BASE32_BITS_PER_CHAR)

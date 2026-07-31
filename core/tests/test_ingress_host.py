@@ -5,8 +5,11 @@ import pytest
 
 from ufo.bearer import UFO_TOKEN_SECRET_ENV
 from ufo.sandbox.ingress_host import (
+    ADDRESS_BYTES,
+    BASE32_BITS_PER_CHAR,
     DNS_LABEL_MAX_CHARS,
     LABEL_CHARS,
+    SIGNATURE_BYTES,
     SiteLabelError,
     parse_site_label,
     site_label,
@@ -49,10 +52,11 @@ def test_case_folds_because_dns_does(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_only_the_canonical_spelling_addresses_the_site(monkeypatch: pytest.MonkeyPatch) -> None:
-    """55 base32 characters carry 275 bits and the address fills 272, so eight spellings decode to
-    the same bytes and `b32decode` throws the difference away. A browser reads all eight as separate
-    origins with their own cookie jars and storage, fracturing one site across them — so exactly one
-    spelling parses and its seven aliases are refused."""
+    """A label carries more bits than the address fills, and `b32decode` throws the difference
+    away, so several spellings decode alike. A browser reads each as a separate origin with its own
+    cookie jar and storage, fracturing one site across them — so exactly one spelling parses and the
+    rest are refused. The count comes from the module's own arithmetic rather than a literal, so
+    shortening the signature cannot leave this asserting the old width."""
     monkeypatch.setenv(UFO_TOKEN_SECRET_ENV, "s3cret")
     conversation_id = uuid4()
     label = site_label(conversation_id, 8000)
@@ -64,7 +68,8 @@ def test_only_the_canonical_spelling_addresses_the_site(monkeypatch: pytest.Monk
         if (candidate := label[:-1] + character) != label
         and base64.b32decode(candidate + padding, casefold=True) == decoded
     ]
-    assert len(aliases) == 7
+    spare_bits = LABEL_CHARS * BASE32_BITS_PER_CHAR - (ADDRESS_BYTES + SIGNATURE_BYTES) * 8
+    assert len(aliases) == 2**spare_bits - 1
     assert parse_site_label(label) == (conversation_id, 8000)
     for alias in aliases:
         with pytest.raises(SiteLabelError, match="canonical"):

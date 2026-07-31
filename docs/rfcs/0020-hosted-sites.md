@@ -54,8 +54,8 @@ Two origins, two processes, one wire format:
 | site bytes (every asset / app request) | **sandbox ingress** (`ufoctl ingress`), new | the site's own subdomain of `[sandbox] ingress_public_url` (`*.<domain>`, wildcard cert) | all of it |
 
 Each site lives at its own origin: a stable DNS label that is a signed *address* for
-`(conversation, port)` — base32 of the conversation id, the port, and a truncated HMAC (34 bytes →
-55 chars, inside DNS's 63, case-insensitive by construction). The workspace is not in the label; it
+`(conversation, port)` — base32 of the conversation id, the port, and a truncated HMAC (22 bytes →
+36 chars, inside DNS's 63, case-insensitive by construction). The workspace is not in the label; it
 rides the signed claims the viewer's session carries, and filters the conversation read. Per-origin
 sites are what make a generated site behave like a website: `/`-rooted assets and redirects (Vite
 and Next's default output) resolve, and cookies and `localStorage` persist per site and cannot cross
@@ -97,9 +97,13 @@ is its first minter.
 - `core/src/ufo/sandbox/ingress_host.py`: `site_label(conversation_id, port)` /
   `parse_site_label(label)` — the DNS label codec, base32 over the conversation, the port, and a
   truncated HMAC of the same deploy secret. It refuses to import if the signed bytes would outgrow
-  DNS's 63-character label bound, and parses only the one canonical spelling of a label: 34 bytes
-  fill 272 of the 275 bits 55 base32 characters carry, so without that check eight labels decode
-  alike and a browser reads all eight as separate origins with their own cookies and storage.
+  DNS's 63-character label bound, and parses only the one canonical spelling of a label: 22 bytes
+  fill 176 of the 180 bits 36 base32 characters carry, so without that check sixteen labels decode
+  alike and a browser reads all sixteen as separate origins with their own cookies and storage. The
+  HMAC is 4 bytes because forging one wins nothing by itself: both ways in carry the
+  `(conversation, port)` they claim and must match the label, so a guessed hostname is 403 before a
+  row is read or a sandbox dialed. The tag keeps enumeration off the conversation read; the cookie is
+  the gate, and 19 characters fewer is what a member reads and copies.
 - `ufoctl ingress`: composition root mirroring `proxy_serve.py` — config, manifests, carrier, owner
   DSN, the token secret, and `[sandbox] ingress_public_url` resolved at boot, so a deploy missing
   any of them dies before its readiness probe reports green. `GET /~t/{view_token}` verifies the
