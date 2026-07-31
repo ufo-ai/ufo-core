@@ -56,7 +56,7 @@ export function App({ agents, member }: AppProps) {
     <MainAgentProvider agents={agents}>
     <div className="grid h-screen grid-cols-[var(--container-sidebar)_1fr] max-narrow:grid-cols-1 max-narrow:grid-rows-[auto_1fr]">
       <nav className="flex min-h-0 flex-col border-r border-edge max-narrow:flex-row max-narrow:items-center max-narrow:border-r-0 max-narrow:border-b">
-        <div className="px-2xl py-xl font-strong tracking-brand max-narrow:px-lg max-narrow:py-md">
+        <div className="px-2xl py-lg font-strong max-narrow:px-lg max-narrow:py-md">
           ufo
         </div>
         <ul className="m-0 flex-1 list-none overflow-y-auto py-2xs max-narrow:flex max-narrow:overflow-y-hidden max-narrow:overflow-x-auto max-narrow:p-0">

@@ -4,7 +4,7 @@ import type { ComponentProps } from "react";
 import { cn } from "@/lib/cn";
 
 const CONTROL =
-  "rounded-panel border border-edge-control bg-field text-field-ink px-md py-sm font-inherit";
+  "rounded-panel border border-edge-control bg-field text-field-ink px-lg py-md font-inherit";
 
 export function Label({ className, ...props }: ComponentProps<typeof LabelPrimitive.Root>) {
   return (
@@ -39,7 +39,7 @@ export function Checkbox({ className, ...props }: ComponentProps<"input">) {
 export function Hint({ className, ...props }: ComponentProps<"div">) {
   return (
     <div
-      className={cn("text-small opacity-(--muted) max-w-hint mt-2xs mb-lg", className)}
+      className={cn("text-label opacity-(--muted-faint) max-w-hint mt-2xs mb-lg", className)}
       {...props}
     />
   );

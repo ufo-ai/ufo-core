@@ -3,7 +3,11 @@ import type { ComponentProps } from "react";
 import { cn } from "@/lib/cn";
 
 export function Table({ className, ...props }: ComponentProps<"table">) {
-  return <table className={cn("w-full border-collapse mb-4xl", className)} {...props} />;
+  return (
+    <div className="mb-4xl overflow-x-auto">
+      <table className={cn("w-full border-collapse", className)} {...props} />
+    </div>
+  );
 }
 
 export function Th({ className, ...props }: ComponentProps<"th">) {
