@@ -3840,10 +3840,10 @@ async def test_newest_turn_owns_the_thread_status(db: None, tmp_path, monkeypatc
 
 def test_the_progress_cadence_grows_from_the_base_and_settles_at_the_cap() -> None:
     """The shipped schedule as a member experiences it — the clock reading when each update lands,
-    which is what the waiting is measured in, not the gaps between them. A first word two and a half
-    minutes in, before silence starts reading as absence, then at every doubling of the wait: five,
-    ten, twenty, forty minutes. Past that a doubling would leave an hour of silence, so the wait
-    settles at thirty and the marks walk on by thirty."""
+    which is what the waiting is measured in, not the gaps between them. A first word ten minutes
+    in, once the wait is plainly a long one, then at every doubling of it: twenty, forty minutes.
+    Past that a doubling would leave an hour of silence, so the wait settles at thirty and the marks
+    walk on by thirty."""
     cadence = slack.ProgressCadence(
         base_seconds=slack.PROGRESS_BASE_SECONDS, cap_seconds=slack.PROGRESS_CAP_SECONDS
     )
@@ -3851,8 +3851,8 @@ def test_the_progress_cadence_grows_from_the_base_and_settles_at_the_cap() -> No
     waits = [next(intervals) for _ in range(7)]
     elapsed = list(itertools.accumulate(waits))
 
-    assert [minutes / 60 for minutes in elapsed] == [2.5, 5.0, 10.0, 20.0, 40.0, 70.0, 100.0]
-    assert waits == [150.0, 150.0, 300.0, 600.0, 1200.0, 1800.0, 1800.0]
+    assert [minutes / 60 for minutes in elapsed] == [10.0, 20.0, 40.0, 70.0, 100.0, 130.0, 160.0]
+    assert waits == [600.0, 600.0, 1200.0, 1800.0, 1800.0, 1800.0, 1800.0]
 
     with pytest.raises(ValueError):
         slack.ProgressCadence(base_seconds=0.0, cap_seconds=60.0)

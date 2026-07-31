@@ -22,8 +22,8 @@ so a crashed status task costs a stale status, never a lost answer.
 
 A one-line status is enough while a turn takes seconds; a turn taking minutes leaves the member
 unable to tell progress from a stall, so a second per-turn task tails the same frames and posts
-interim progress into the turn's own destination each time the wait doubles — two and a half minutes
-in, then five, ten, twenty, forty — until it settles at one post every thirty. Unlike the status
+interim progress into the turn's own destination each time the wait doubles — ten minutes in, then
+twenty, forty — until it settles at one post every thirty. Unlike the status
 these are messages, so a second reporter doubles the member's updates for the turn's whole life
 rather than costing a redundant overwrite: the reporter starts only on the delivery admission says
 opened the turn's run, which is one delivery per run across the fleet however many of them Slack
@@ -631,7 +631,7 @@ STATUS_DESCRIPTION_LIMIT = STATUS_TEXT_LIMIT - len(STATUS_DESCRIBED_TEXT.format(
 STATUS_UPDATE_MIN_SECONDS = 1.0
 STATUS_REFRESH_SECONDS = 90.0
 
-PROGRESS_BASE_SECONDS = 150.0
+PROGRESS_BASE_SECONDS = 600.0
 PROGRESS_CAP_SECONDS = 1_800.0
 PROGRESS_NARRATION_LIMIT = 600
 PROGRESS_ACTIVITY_LIMIT = 200
@@ -1750,11 +1750,10 @@ class ProgressCadence:
 
     def intervals(self) -> Iterator[float]:
         """Each wait in order. The first is `base_seconds`; every later one is however long the
-        turn has already been running, so a post lands each time the elapsed time doubles — two and
-        a half minutes in, then five, ten, twenty, forty — until a wait would outrun `cap_seconds`
-        and every one after settles there. Reporting scaled to how long the member has already
-        waited: dense while the wait is new and the question live, sparse once it is plainly a long
-        one."""
+        turn has already been running, so a post lands each time the elapsed time doubles — ten
+        minutes in, then twenty, forty — until a wait would outrun `cap_seconds` and every one after
+        settles there. Reporting scaled to how long the member has already waited: nothing until the
+        wait is plainly long, then sparser still once it is very long."""
         elapsed = 0.0
         wait = self.base_seconds
         while True:
