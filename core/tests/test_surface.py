@@ -1359,6 +1359,13 @@ async def test_attachment_failure_retries_from_the_recorded_reply(db: None, tmp_
 async def test_live_delivery_renews_its_claim_before_a_peer_can_recover_it(
     db: None, tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A live delivery holds its claim by renewing it, so a peer draining the same workspace
+    recovers nothing while the delivery is still in flight.
+
+    Every wait is bounded by the drain, never by a wall clock. The claim this proves is renewed
+    regardless of expiry, so nothing here has time semantics: a loaded runner stretches each
+    refresh arbitrarily while the renewal it must prove stays correct, and the drain ending early
+    is the only way the posts and their refreshes never arrive."""
     cycles: dict[UUID, int] = {}
     refreshed_once: set[UUID] = set()
     refreshed_twice: set[UUID] = set()
@@ -1398,10 +1405,11 @@ async def test_live_delivery_renews_its_claim_before_a_peer_can_recover_it(
     surface = BlockingSurface(blocked_workspace=workspace_id)
     first = _fleet_poller(contexts, surface, worker_id="worker-1")
     running = asyncio.create_task(first.drain())
+    posted_and_refreshed = asyncio.gather(surface.blocked.wait(), all_refreshed_once.wait())
+    renewed_twice = asyncio.ensure_future(all_refreshed_twice.wait())
     try:
-        await asyncio.wait_for(
-            asyncio.gather(surface.blocked.wait(), all_refreshed_once.wait()), timeout=1
-        )
+        await asyncio.wait((posted_and_refreshed, running), return_when=asyncio.FIRST_COMPLETED)
+        assert posted_and_refreshed.done(), "the drain ended before every turn posted and refreshed"
         expired = datetime.now(UTC) - timedelta(seconds=1)
         for turn_id in turn_ids:
             await _set_writeback(turn_id, claim_expires_at=expired)
@@ -1409,7 +1417,8 @@ async def test_live_delivery_renews_its_claim_before_a_peer_can_recover_it(
             turn_id: (await _writeback(turn_id)).claim_expires_at for turn_id in turn_ids
         }
         next_refresh.set()
-        await asyncio.wait_for(all_refreshed_twice.wait(), timeout=1)
+        await asyncio.wait((renewed_twice, running), return_when=asyncio.FIRST_COMPLETED)
+        assert renewed_twice.done(), "the drain ended before every claim renewed a second time"
         for turn_id in turn_ids:
             renewed = await _writeback(turn_id)
             assert renewed.status == WRITEBACK_CLAIMED
@@ -1419,8 +1428,10 @@ async def test_live_delivery_renews_its_claim_before_a_peer_can_recover_it(
         await _fleet_poller(contexts, peer_surface, worker_id="worker-2").drain()
         assert peer_surface.posted == []
     finally:
+        posted_and_refreshed.cancel()
+        renewed_twice.cancel()
         surface.release.set()
-        await asyncio.wait_for(running, timeout=1)
+        await running
     assert [(await _writeback(turn_id)).status for turn_id in turn_ids] == [
         WRITEBACK_DELIVERED,
         WRITEBACK_DELIVERED,
