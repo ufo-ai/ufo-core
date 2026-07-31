@@ -44,6 +44,7 @@ from ufo.models.interface import (
     Message,
     ModelClient,
     ModelRequest,
+    ReasoningItemBlock,
     RedactedThinkingBlock,
     TextBlock,
     TextDelta,
@@ -391,7 +392,7 @@ class ModelAccess:
         call_names: dict[str, str] = {}
         call_json: dict[str, list[str]] = {}
         call_order: list[str] = []
-        reasoning: list[ThinkingBlock | RedactedThinkingBlock] = []
+        reasoning: list[ThinkingBlock | RedactedThinkingBlock | ReasoningItemBlock] = []
         usages: list[Usage] = []
         async with ws_current().billable_event() as bill:
             async for event in client.complete(request.model_copy(update={"model": model})):
@@ -404,7 +405,7 @@ class ModelAccess:
                         call_order.append(call_id)
                     case ToolCallDelta(id=call_id, partial_json=partial):
                         call_json[call_id].append(partial)
-                    case ThinkingBlock() | RedactedThinkingBlock():
+                    case ThinkingBlock() | RedactedThinkingBlock() | ReasoningItemBlock():
                         reasoning.append(event)
                     case Usage():
                         usages.append(event)

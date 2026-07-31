@@ -40,6 +40,7 @@ from ufo.sdk.context import ExtensionContext, Trajectory
 from ufo.sdk.models import (
     ImageBlock,
     Message,
+    ReasoningItemBlock,
     RedactedThinkingBlock,
     TextBlock,
     ThinkingBlock,
@@ -655,6 +656,14 @@ def _safe_messages(
                     )
                 case RedactedThinkingBlock():
                     blocks.append(TextBlock(text=REDACTED_REASONING_EVIDENCE))
+                case ReasoningItemBlock():
+                    blocks.append(
+                        TextBlock(
+                            text=REASONING_EVIDENCE.format(
+                                summary=_redact_text("\n".join(block.summary), private_values)
+                            )
+                        )
+                    )
                 case ImageBlock():
                     blocks.append(
                         TextBlock(

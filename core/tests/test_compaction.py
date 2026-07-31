@@ -24,6 +24,7 @@ from ufo.models.interface import (
     Message,
     ModelEvent,
     ModelRequest,
+    ReasoningItemBlock,
     RedactedThinkingBlock,
     TextBlock,
     TextDelta,
@@ -579,15 +580,19 @@ async def test_images_count_toward_the_compaction_budget(tmp_path: Path) -> None
     [
         pytest.param(ThinkingBlock(thinking="", signature="s" * 200), id="signature"),
         pytest.param(RedactedThinkingBlock(data="e" * 200), id="encrypted"),
+        pytest.param(
+            ReasoningItemBlock(id="rs_1", encrypted_content="e" * 200), id="reasoning_item"
+        ),
     ],
 )
 async def test_each_reasoning_kind_counts_toward_the_compaction_budget(
-    tmp_path: Path, block: ThinkingBlock | RedactedThinkingBlock
+    tmp_path: Path, block: ThinkingBlock | RedactedThinkingBlock | ReasoningItemBlock
 ) -> None:
     """A reasoning round is mostly opaque bytes — an empty thinking text under `display: omitted`,
-    a signature, an encrypted block — so a window the summarizer would render as almost nothing must
-    still trip the trigger on what it re-sends to the provider every round. Each kind carries its
-    own window: a redacted block has no signature to ride along with, so it must trip on `data`."""
+    a signature, an encrypted block, a reasoning item whose request asked for no summary — so a
+    window the summarizer would render as almost nothing must still trip the trigger on what it
+    re-sends to the provider every round. Each kind carries its own window: a redacted block has no
+    signature to ride along with, so it must trip on `data`."""
     compaction = _compaction(tmp_path, trigger_tokens=100, keep_messages=2)
     short_text = (
         Message(role="user", content="hi"),
@@ -620,6 +625,11 @@ async def test_head_reasoning_reaches_the_summarizer_as_text_without_its_signatu
                 content=(
                     ThinkingBlock(thinking="weigh the options", signature="SECRETSIGNATURE"),
                     RedactedThinkingBlock(data="SECRETDATA"),
+                    ReasoningItemBlock(
+                        id="rs_1",
+                        encrypted_content="SECRETENCRYPTEDITEM",
+                        summary=("weigh the item",),
+                    ),
                     TextBlock(text="done"),
                 ),
             ),
@@ -629,9 +639,11 @@ async def test_head_reasoning_reaches_the_summarizer_as_text_without_its_signatu
         )
     )
     assert "weigh the options" in model.seen[0]
+    assert "weigh the item" in model.seen[0]
     assert "[redacted reasoning]" in model.seen[0]
     assert "SECRETSIGNATURE" not in model.seen[0]
     assert "SECRETDATA" not in model.seen[0]
+    assert "SECRETENCRYPTEDITEM" not in model.seen[0]
 
 
 async def test_compaction_index_is_monotonic(tmp_path: Path) -> None:

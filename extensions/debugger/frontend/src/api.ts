@@ -54,6 +54,7 @@ export type ContentBlock =
   | { type: "image"; source: unknown }
   | { type: "thinking"; thinking: string; signature: string }
   | { type: "redacted_thinking"; data: string }
+  | { type: "reasoning"; id: string; encrypted_content: string; summary: string[] }
   | { type: "tool_use"; id: string; name: string; input: Record<string, unknown> }
   | {
       type: "tool_result";

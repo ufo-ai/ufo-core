@@ -137,6 +137,7 @@ from ufo.models.interface import (
     ModelEvent,
     ModelRequest,
     ModelResponseTruncated,
+    ReasoningItemBlock,
     RedactedThinkingBlock,
     TextBlock,
     TextDelta,
@@ -1278,6 +1279,11 @@ async def test_eval_trajectory_names_reasoning_and_stores_no_signature(db: None,
             content=(
                 RedactedThinkingBlock(data="ZW5jcnlwdGVkLXJlYXNvbmluZw"),
                 ThinkingBlock(thinking=f"the member handed me {seal}", signature="signature-bytes"),
+                ReasoningItemBlock(
+                    id="rs_secret",
+                    encrypted_content="encrypted-item-bytes",
+                    summary=(f"it gave me {seal}",),
+                ),
                 TextBlock(text="expected"),
             ),
         ),
@@ -1307,12 +1313,14 @@ async def test_eval_trajectory_names_reasoning_and_stores_no_signature(db: None,
     assert [block["text"] for block in blocks] == [
         "[reasoning redacted by the provider]",
         "[reasoning]\nthe member handed me [private handoff redacted]",
+        "[reasoning]\nit gave me [private handoff redacted]",
         "expected",
     ]
     serialized = dumps(trajectory)
     assert seal not in serialized
     assert "signature-bytes" not in serialized
     assert "ZW5jcnlwdGVkLXJlYXNvbmluZw" not in serialized
+    assert "encrypted-item-bytes" not in serialized
 
 
 async def test_oversized_eval_trajectory_is_omitted_without_aborting_the_case(

@@ -68,6 +68,13 @@ function Block(props: { block: ContentBlock }) {
       );
     case "redacted_thinking":
       return <div className="meta">[redacted reasoning]</div>;
+    case "reasoning":
+      return (
+        <details>
+          <summary>reasoning</summary>
+          <pre>{block.summary.join("\n")}</pre>
+        </details>
+      );
     case "tool_use":
       return (
         <details>

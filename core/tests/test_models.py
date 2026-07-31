@@ -28,6 +28,7 @@ from ufo.models.interface import (
     ModelRefusal,
     ModelRequest,
     ModelResponseTruncated,
+    ReasoningItemBlock,
     RedactedThinkingBlock,
     TextBlock,
     TextDelta,
@@ -962,6 +963,9 @@ REASONING_REQUEST = ModelRequest(
             content=(
                 ThinkingBlock(thinking="weigh the options", signature="sig-1"),
                 RedactedThinkingBlock(data="ZW5jcnlwdGVk"),
+                ReasoningItemBlock(
+                    id="rs_1", encrypted_content="Z3B0LWVuY3J5cHRlZA", summary=("weigh the item",)
+                ),
                 TextBlock(text="checking"),
                 ToolUseBlock(id="t1", name="bash", input={"command": "ls"}),
             ),
@@ -971,7 +975,10 @@ REASONING_REQUEST = ModelRequest(
 )
 
 
-async def test_anthropic_request_echoes_the_reasoning_blocks_back_unchanged() -> None:
+async def test_anthropic_request_echoes_its_own_reasoning_and_drops_the_openai_item() -> None:
+    """Anthropic gets its thinking blocks back verbatim and never the OpenAI reasoning item: the
+    whole rendered list is pinned, so an arm that starts carrying the other wire's block fails
+    here."""
     create = CapturingCreate(
         ([anthropic_message_start(input_tokens=1), anthropic_text("ok"), anthropic_output(1)], None)
     )
@@ -989,9 +996,10 @@ async def test_anthropic_request_echoes_the_reasoning_blocks_back_unchanged() ->
     ]
 
 
-def test_openai_messages_drop_the_reasoning_blocks() -> None:
-    """A signed Anthropic reasoning block never reaches an OpenAI-shaped request: the whole rendered
-    list is pinned, so any arm that starts carrying one fails here."""
+def test_openai_messages_drop_every_reasoning_block() -> None:
+    """The Chat Completions surface carries no reasoning at all — its assistant message has no field
+    that holds any, whichever provider produced it — so the pinned list has none: neither the signed
+    Anthropic blocks nor the reasoning item the Responses surface does replay."""
     assert openai_messages(REASONING_REQUEST.system, REASONING_REQUEST.messages) == [
         {"role": "system", "content": "be terse"},
         {"role": "user", "content": "hi"},
@@ -1010,11 +1018,18 @@ def test_openai_messages_drop_the_reasoning_blocks() -> None:
     ]
 
 
-def test_responses_input_drops_the_reasoning_blocks() -> None:
-    """The Responses surface pins the same line: the full item list, so a reasoning block cannot
-    appear as an input item or inside one."""
+def test_responses_input_echoes_the_reasoning_item_and_drops_the_thinking_blocks() -> None:
+    """The Responses surface replays its own reasoning item whole — ahead of the message and the
+    function call the round chose — and drops the Anthropic blocks: the full item list is pinned, so
+    a lost field or a moved item fails here."""
     assert responses_input(REASONING_REQUEST.messages) == [
         {"role": "user", "content": "hi"},
+        {
+            "type": "reasoning",
+            "id": "rs_1",
+            "encrypted_content": "Z3B0LWVuY3J5cHRlZA",
+            "summary": [{"type": "summary_text", "text": "weigh the item"}],
+        },
         {"role": "assistant", "content": [{"type": "input_text", "text": "checking"}]},
         {
             "type": "function_call",

@@ -17,10 +17,13 @@ from openai.types.responses import (
     ResponseFunctionToolCall,
     ResponseIncompleteEvent,
     ResponseOutputItemAddedEvent,
+    ResponseOutputItemDoneEvent,
+    ResponseReasoningItem,
     ResponseRefusalDeltaEvent,
     ResponseTextDeltaEvent,
 )
 from openai.types.responses.response import IncompleteDetails
+from openai.types.responses.response_reasoning_item import Summary as ReasoningSummary
 from openai.types.responses.response_usage import (
     InputTokensDetails,
     OutputTokensDetails,
@@ -34,6 +37,7 @@ from ufo.models.interface import (
     ModelRefusal,
     ModelRequest,
     ModelResponseTruncated,
+    ReasoningItemBlock,
     TextBlock,
     TextDelta,
     ToolCallDelta,
@@ -46,6 +50,7 @@ from ufo.models.openai import (
     MAX_EMPTY_PROVIDER_RETRIES,
     MAX_PROVIDER_RETRIES,
     OpenAIClient,
+    responses_input,
     responses_request,
 )
 from ufo.models.pricing import ModelPrice
@@ -153,6 +158,27 @@ def _completed_events(
     return events
 
 
+def _reasoning_done(
+    item_id: str,
+    encrypted: str | None = "ZW5jcnlwdGVk",
+    summary: tuple[str, ...] = ("weighing it",),
+    output_index: int = 0,
+) -> ResponseOutputItemDoneEvent:
+    """One whole reasoning item as a stateless response hands it back: the summary parts the model
+    chose to show and the encrypted body that carries the reasoning itself."""
+    return ResponseOutputItemDoneEvent(
+        type="response.output_item.done",
+        output_index=output_index,
+        sequence_number=0,
+        item=ResponseReasoningItem(
+            type="reasoning",
+            id=item_id,
+            encrypted_content=encrypted,
+            summary=[ReasoningSummary(type="summary_text", text=text) for text in summary],
+        ),
+    )
+
+
 def _provider_error(status: int, retry_after: str | None = "0") -> openai.APIStatusError:
     headers = {} if retry_after is None else {"retry-after": retry_after}
     response = httpx.Response(
@@ -252,6 +278,125 @@ async def test_responses_path_translates_images_tools_and_usage() -> None:
     ]
 
 
+async def test_responses_path_yields_the_reasoning_items_once_the_stream_closes() -> None:
+    """The round's reasoning items arrive whole on their done events and are held to the end, in the
+    provider's own output order and just ahead of the Usage, so the engine can send that sequence
+    back on the message carrying this round's function calls. An item whose request asked for no
+    summary is still real — the encrypted body is what the next request resolves on."""
+    scripted = ScriptedResponses(
+        (
+            [
+                _reasoning_done("rs_1"),
+                _reasoning_done("rs_2", encrypted="bW9yZQ", summary=(), output_index=1),
+                *_completed_events(text="done", input_tokens=3, output_tokens=4),
+            ],
+            None,
+        )
+    )
+    events = [event async for event in _responses_client(scripted).complete(_request())]
+    assert events == [
+        TextDelta(text="done"),
+        ReasoningItemBlock(id="rs_1", encrypted_content="ZW5jcnlwdGVk", summary=("weighing it",)),
+        ReasoningItemBlock(id="rs_2", encrypted_content="bW9yZQ"),
+        Usage(input_tokens=3, output_tokens=4),
+    ]
+
+
+async def test_responses_reasoning_without_an_answer_is_an_empty_completion() -> None:
+    """Reasoning alone is not an answer: the round is re-issued, and the abandoned attempt's item is
+    never delivered beside the new attempt's."""
+    scripted = ScriptedResponses(
+        (
+            [
+                _reasoning_done("rs_dropped"),
+                *_completed_events(text="", input_tokens=1, output_tokens=0),
+            ],
+            None,
+        ),
+        (
+            [
+                _reasoning_done("rs_kept"),
+                *_completed_events(text="recovered", input_tokens=2, output_tokens=3),
+            ],
+            None,
+        ),
+    )
+    events = [event async for event in _responses_client(scripted).complete(_request())]
+    assert scripted.calls == 2
+    assert events == [
+        TextDelta(text="recovered"),
+        ReasoningItemBlock(
+            id="rs_kept", encrypted_content="ZW5jcnlwdGVk", summary=("weighing it",)
+        ),
+        Usage(input_tokens=2, output_tokens=3),
+    ]
+
+
+async def test_responses_stream_dying_after_a_reasoning_item_retries_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("ufo.models.openai.INITIAL_RETRY_DELAY_SECONDS", 0.0)
+    scripted = ScriptedResponses(
+        ([_reasoning_done("rs_abandoned")], _provider_timeout()),
+        (
+            [
+                _reasoning_done("rs_kept"),
+                *_completed_events(text="recovered", input_tokens=2, output_tokens=3),
+            ],
+            None,
+        ),
+    )
+    events = [event async for event in _responses_client(scripted).complete(_request())]
+    assert scripted.calls == 2
+    assert events == [
+        TextDelta(text="recovered"),
+        ReasoningItemBlock(
+            id="rs_kept", encrypted_content="ZW5jcnlwdGVk", summary=("weighing it",)
+        ),
+        Usage(input_tokens=2, output_tokens=3),
+    ]
+
+
+async def test_responses_reasoning_item_without_encrypted_content_fails_loud() -> None:
+    """The request asks for `encrypted_content`, so an item arriving without it is a provider that
+    did not honour `include`. Such an item cannot be replayed — echoing the bare id would resolve
+    against state a `store=False` request left nowhere — so the round fails here, naming the missing
+    field, rather than on the next request's 400."""
+    scripted = ScriptedResponses(
+        ([_reasoning_done("rs_1", encrypted=None), *_completed_events()], None)
+    )
+    with pytest.raises(RuntimeError, match="no encrypted content"):
+        [event async for event in _responses_client(scripted).complete(_request())]
+
+
+def test_responses_input_replays_the_round_reasoning_ahead_of_its_function_calls() -> None:
+    """The guarantee the replay rests on: a round's items keep their order among themselves and land
+    ahead of the function calls they chose, in the arrangement the engine leads the message with."""
+    assert responses_input(
+        (
+            Message(
+                role="assistant",
+                content=(
+                    ReasoningItemBlock(id="rs_1", encrypted_content="ZW5jcnlwdGVk"),
+                    ReasoningItemBlock(id="rs_2", encrypted_content="bW9yZQ"),
+                    TextBlock(text="looking"),
+                    ToolUseBlock(id="call-1", name="read", input={"path": "a"}),
+                ),
+            ),
+        )
+    ) == [
+        {"type": "reasoning", "id": "rs_1", "encrypted_content": "ZW5jcnlwdGVk", "summary": []},
+        {"type": "reasoning", "id": "rs_2", "encrypted_content": "bW9yZQ", "summary": []},
+        {"role": "assistant", "content": [{"type": "input_text", "text": "looking"}]},
+        {
+            "type": "function_call",
+            "call_id": "call-1",
+            "name": "read",
+            "arguments": '{"path": "a"}',
+        },
+    ]
+
+
 def test_responses_request_preserves_input_controls_and_disables_storage() -> None:
     request = ModelRequest(
         model="gpt-5.6-terra",
@@ -281,6 +426,7 @@ def test_responses_request_preserves_input_controls_and_disables_storage() -> No
     kwargs = responses_request(request)
     assert kwargs["instructions"] == "be terse"
     assert kwargs["store"] is False
+    assert kwargs["include"] == ["reasoning.encrypted_content"]
     assert "reasoning" not in kwargs
     assert kwargs["input"] == [
         {

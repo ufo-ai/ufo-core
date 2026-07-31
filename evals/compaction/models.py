@@ -19,6 +19,7 @@ from ufo.loop.compaction import (
 from ufo.models.interface import (
     ImageBlock,
     Message,
+    ReasoningItemBlock,
     RedactedThinkingBlock,
     TextBlock,
     ThinkingBlock,
@@ -137,6 +138,8 @@ def message_text(message: Message) -> str:
                 rendered.append(thinking)
             case RedactedThinkingBlock():
                 rendered.append(REDACTED_REASONING_MARKER)
+            case ReasoningItemBlock(summary=summary):
+                rendered.extend(summary)
             case ImageBlock():
                 rendered.append(IMAGE_MARKER)
             case ToolResultBlock(content=str(content)):
@@ -160,6 +163,8 @@ def _opaque_chars(message: Message) -> int:
                 total += len(signature)
             case RedactedThinkingBlock(data=data):
                 total += len(data)
+            case ReasoningItemBlock(encrypted_content=encrypted):
+                total += len(encrypted)
     return total
 
 

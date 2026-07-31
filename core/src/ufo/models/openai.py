@@ -22,6 +22,9 @@ from openai.types.responses import (
     ResponseFunctionToolCall,
     ResponseIncompleteEvent,
     ResponseOutputItemAddedEvent,
+    ResponseOutputItemDoneEvent,
+    ResponseReasoningItem,
+    ResponseReasoningItemParam,
     ResponseRefusalDeltaEvent,
     ResponseTextDeltaEvent,
 )
@@ -39,6 +42,7 @@ from openai.types.responses.response_input_message_content_list_param import (
 from openai.types.responses.response_input_param import FunctionCallOutput, ResponseInputItemParam
 from openai.types.responses.response_input_text_content_param import ResponseInputTextContentParam
 from openai.types.responses.response_input_text_param import ResponseInputTextParam
+from openai.types.responses.response_reasoning_item_param import Summary as ReasoningSummaryParam
 
 from ufo.models.interface import (
     ImageBlock,
@@ -48,6 +52,7 @@ from ufo.models.interface import (
     ModelRefusal,
     ModelRequest,
     ModelResponseTruncated,
+    ReasoningItemBlock,
     RedactedThinkingBlock,
     TextBlock,
     TextDelta,
@@ -68,6 +73,7 @@ MAX_PROVIDER_RETRIES = 6
 INITIAL_RETRY_DELAY_SECONDS = 2.0
 MAX_RETRY_DELAY_SECONDS = 60.0
 MAX_EMPTY_PROVIDER_RETRIES = 3
+REASONING_ENCRYPTED_CONTENT = "reasoning.encrypted_content"
 
 
 def openai_sdk_client(api_key: str, base_url: str | None = None) -> openai.AsyncOpenAI:
@@ -106,6 +112,10 @@ def _openai_tool_result(
 
 
 def openai_messages(system: str, messages: tuple[Message, ...]) -> list[dict[str, object]]:
+    """Canonical messages as Chat Completions messages. Every reasoning block is dropped, whichever
+    provider produced it: a chat assistant message carries `content`, `refusal`, and `tool_calls`
+    and nothing that holds reasoning, so this surface has no place to put a round's reasoning and
+    the model resumes a tool round from the tool result alone."""
     out: list[dict[str, object]] = [{"role": "system", "content": system}]
     for message in trim_images(messages):
         content = message.content
@@ -118,7 +128,7 @@ def openai_messages(system: str, messages: tuple[Message, ...]) -> list[dict[str
         lifted_images: list[dict[str, object]] = []
         for block in content:
             match block:
-                case ThinkingBlock() | RedactedThinkingBlock():
+                case ThinkingBlock() | RedactedThinkingBlock() | ReasoningItemBlock():
                     continue
                 case TextBlock(text=text):
                     text_parts.append(text)
@@ -164,8 +174,11 @@ def openai_messages(system: str, messages: tuple[Message, ...]) -> list[dict[str
 
 
 def responses_input(messages: tuple[Message, ...]) -> list[ResponseInputItemParam]:
-    """Canonical messages as Responses API input items: text/image content, function calls, and
-    function-call outputs — the shape `/v1/responses` accepts."""
+    """Canonical messages as Responses API input items: reasoning items, text/image content,
+    function calls, and function-call outputs — the shape `/v1/responses` accepts. A message's
+    reasoning items go back whole, keeping their order among themselves and landing ahead of the
+    round's function calls, which is what lets the model resume the reasoning that chose them; an
+    Anthropic thinking block is another wire's shape of the same idea and is dropped."""
     items: list[ResponseInputItemParam] = []
     for message in trim_images(messages):
         if isinstance(message.content, str):
@@ -176,6 +189,18 @@ def responses_input(messages: tuple[Message, ...]) -> list[ResponseInputItemPara
             match block:
                 case ThinkingBlock() | RedactedThinkingBlock():
                     continue
+                case ReasoningItemBlock(id=item_id, encrypted_content=encrypted, summary=summary):
+                    items.append(
+                        ResponseReasoningItemParam(
+                            type="reasoning",
+                            id=item_id,
+                            encrypted_content=encrypted,
+                            summary=[
+                                ReasoningSummaryParam(type="summary_text", text=part)
+                                for part in summary
+                            ],
+                        )
+                    )
                 case TextBlock(text=text):
                     content.append(ResponseInputTextParam(type="input_text", text=text))
                 case ImageBlock(source=source):
@@ -235,10 +260,15 @@ def responses_input(messages: tuple[Message, ...]) -> list[ResponseInputItemPara
 
 
 def responses_request(request: ModelRequest) -> dict[str, Any]:
+    """The `/v1/responses` request. `store=False` keeps the conversation ours — nothing is left on
+    the provider between rounds — and `include` is what asks for the encrypted reasoning body that
+    a kept conversation then has to replay: without it a reasoning item comes back as an id the
+    next request cannot resolve, so the pair travels together and neither is conditional."""
     kwargs: dict[str, Any] = {
         "model": request.model,
         "instructions": request.system,
         "input": responses_input(request.messages),
+        "include": [REASONING_ENCRYPTED_CONTENT],
         "max_output_tokens": request.max_tokens,
         "store": False,
         "stream": True,
@@ -416,7 +446,16 @@ class OpenAIClient:
         `api_surface="responses"` — same retry, truncation, refusal, and empty-completion contract,
         translated to the Responses streaming events. Reasoning is gated by the spec exactly as the
         chat path is: an unsupported reasoning or reasoning-with-tools combination never emits the
-        thinking parameters."""
+        thinking parameters.
+
+        The round's reasoning items are collected whole off their done events — the event that
+        carries the encrypted body, which the added event does not — and yielded once the stream
+        closes, keeping their order among themselves and arriving just ahead of the Usage, so the
+        engine can send them back on the assistant message that carries this round's function
+        calls: what the provider asks for so the model resumes its reasoning when the results
+        return. Held until the stream closes because reasoning is not live output and a re-issued
+        attempt must not deliver the abandoned attempt's items, and reasoning alone never counts as
+        having yielded: an answerless round stays an empty completion and is retried."""
         effort = self.spec.default_reasoning(request.reasoning, request.tools)
         request = request.model_copy(update={"reasoning": effort})
         delay = INITIAL_RETRY_DELAY_SECONDS
@@ -426,6 +465,7 @@ class OpenAIClient:
             yielded = False
             tool_call_ids: dict[str, str] = {}
             tool_call_arguments: set[str] = set()
+            reasoning: list[ReasoningItemBlock] = []
             usage: Usage | None = None
             try:
                 stream = await self.client.responses.create(**responses_request(request))
@@ -455,6 +495,20 @@ class OpenAIClient:
                         ) if item_id not in tool_call_arguments:
                             yielded = True
                             yield ToolCallDelta(id=tool_call_ids[item_id], partial_json=arguments)
+                        case ResponseOutputItemDoneEvent(
+                            item=ResponseReasoningItem(
+                                id=item_id, summary=parts, encrypted_content=encrypted
+                            )
+                        ):
+                            if encrypted is None:
+                                raise RuntimeError("OpenAI reasoning item has no encrypted content")
+                            reasoning.append(
+                                ReasoningItemBlock(
+                                    id=item_id,
+                                    encrypted_content=encrypted,
+                                    summary=tuple(part.text for part in parts),
+                                )
+                            )
                         case ResponseRefusalDeltaEvent(delta=refusal):
                             raise ModelRefusal(f"OpenAI declined the completion: {refusal}")
                         case ResponseCompletedEvent(response=response):
@@ -518,5 +572,7 @@ class OpenAIClient:
             if not yielded and empty_attempt < MAX_EMPTY_PROVIDER_RETRIES:
                 empty_attempt += 1
                 continue
+            for block in reasoning:
+                yield block
             yield usage
             return

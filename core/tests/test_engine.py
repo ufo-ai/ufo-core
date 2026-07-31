@@ -104,6 +104,7 @@ from ufo.models.interface import (
     ModelEvent,
     ModelRequest,
     ModelResponseTruncated,
+    ReasoningItemBlock,
     RedactedThinkingBlock,
     TextBlock,
     TextDelta,
@@ -306,9 +307,9 @@ class ToolCallingModel:
 
 @dataclass
 class ThinkingToolCallingModel:
-    """Reasons — one encrypted block, one thinking block — calls a tool, then answers once the
-    result comes back, recording each round's window so a test can read back the assistant message
-    the engine put in front of the model."""
+    """Reasons — one encrypted block, one thinking block, one OpenAI reasoning item — calls a tool,
+    then answers once the result comes back, recording each round's window so a test can read back
+    the assistant message the engine put in front of the model."""
 
     seen: list[tuple[Message, ...]] = field(default_factory=list)
 
@@ -320,6 +321,7 @@ class ThinkingToolCallingModel:
             return
         yield RedactedThinkingBlock(data="ZW5jcnlwdGVk")
         yield ThinkingBlock(thinking="", signature="sig-1")
+        yield ReasoningItemBlock(id="rs_1", encrypted_content="Z3B0LWVuY3J5cHRlZA")
         yield ToolCallStart(id="c1", name="no_such_tool")
         yield ToolCallDelta(id="c1", partial_json="{}")
         yield Usage(input_tokens=2, output_tokens=2)
@@ -1551,6 +1553,7 @@ async def test_reasoning_blocks_open_the_assistant_message_that_carries_the_tool
         content=(
             RedactedThinkingBlock(data="ZW5jcnlwdGVk"),
             ThinkingBlock(thinking="", signature="sig-1"),
+            ReasoningItemBlock(id="rs_1", encrypted_content="Z3B0LWVuY3J5cHRlZA"),
             ToolUseBlock(id="c1", name="no_such_tool", input={}),
         ),
     )

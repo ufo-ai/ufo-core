@@ -54,7 +54,24 @@ class RedactedThinkingBlock(BaseModel):
     data: str
 
 
-ReasoningBlock = Annotated[ThinkingBlock | RedactedThinkingBlock, Field(discriminator="type")]
+class ReasoningItemBlock(BaseModel):
+    """A reasoning item an OpenAI-wire model returned on the Responses surface, carried whole so the
+    next request can replay it: the provider asks for every reasoning item that came back with a
+    function call to be sent again alongside that call's output. The request asks for
+    `encrypted_content` so the item carries the reasoning itself and resolves on its own bytes
+    rather than on state a `store=False` request left nowhere. `summary` is the provider's summary
+    parts in their own order — the readable side, empty when the request asked for no summary — and
+    is a required field of the echoed item either way."""
+
+    type: Literal["reasoning"] = "reasoning"
+    id: str
+    encrypted_content: str
+    summary: tuple[str, ...] = ()
+
+
+ReasoningBlock = Annotated[
+    ThinkingBlock | RedactedThinkingBlock | ReasoningItemBlock, Field(discriminator="type")
+]
 
 ToolResultContent = Annotated[TextBlock | ImageBlock, Field(discriminator="type")]
 
@@ -72,7 +89,13 @@ class ToolResultBlock(BaseModel):
 
 
 ContentBlock = Annotated[
-    TextBlock | ImageBlock | ToolUseBlock | ToolResultBlock | ThinkingBlock | RedactedThinkingBlock,
+    TextBlock
+    | ImageBlock
+    | ToolUseBlock
+    | ToolResultBlock
+    | ThinkingBlock
+    | RedactedThinkingBlock
+    | ReasoningItemBlock,
     Field(discriminator="type"),
 ]
 
@@ -138,7 +161,13 @@ class ToolCallDelta(BaseModel):
 
 
 ModelEvent = (
-    TextDelta | ToolCallStart | ToolCallDelta | ThinkingBlock | RedactedThinkingBlock | Usage
+    TextDelta
+    | ToolCallStart
+    | ToolCallDelta
+    | ThinkingBlock
+    | RedactedThinkingBlock
+    | ReasoningItemBlock
+    | Usage
 )
 
 

@@ -28,6 +28,7 @@ from ufo.models.interface import (
     Message,
     ModelEvent,
     ModelRequest,
+    ReasoningItemBlock,
     RedactedThinkingBlock,
     TextBlock,
     TextDelta,
@@ -138,6 +139,9 @@ async def test_the_estimator_mirror_matches_the_live_compaction(tmp_path: Path) 
             content=(
                 RedactedThinkingBlock(data="e" * 40),
                 ThinkingBlock(thinking="weigh the options", signature="s" * 40),
+                ReasoningItemBlock(
+                    id="rs_1", encrypted_content="g" * 40, summary=("weigh the item",)
+                ),
                 TextBlock(text="reading the tree"),
                 ImageBlock(source=ImageSource(media_type="image/png", data="AAAA")),
                 ToolUseBlock(id="t1", name="bash", input={"command": "ls"}),

@@ -30,6 +30,9 @@ from ufo.models.interface import (
     ModelResponseTruncated as ModelResponseTruncated,
 )
 from ufo.models.interface import (
+    ReasoningItemBlock as ReasoningItemBlock,
+)
+from ufo.models.interface import (
     RedactedThinkingBlock as RedactedThinkingBlock,
 )
 from ufo.models.interface import (

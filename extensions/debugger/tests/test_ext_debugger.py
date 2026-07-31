@@ -27,6 +27,7 @@ from ufo.db import workspace_tx
 from ufo.hub import InProcessHub
 from ufo.models.interface import (
     Message,
+    ReasoningItemBlock,
     RedactedThinkingBlock,
     TextBlock,
     ThinkingBlock,
@@ -358,6 +359,11 @@ async def test_transcript_compactions_and_files_read_the_blobs_and_the_sandbox(d
                 content=(
                     RedactedThinkingBlock(data="ZW5jcnlwdGVk"),
                     ThinkingBlock(thinking="check the tree", signature="sig-1"),
+                    ReasoningItemBlock(
+                        id="rs_1",
+                        encrypted_content="Z3B0LWVuY3J5cHRlZA",
+                        summary=("check the tree",),
+                    ),
                     ToolUseBlock(id="t1", name="bash", input={"command": "ls"}),
                     ToolResultBlock(tool_use_id="t1", content="README.md"),
                     TextBlock(text="done"),
@@ -389,11 +395,13 @@ async def test_transcript_compactions_and_files_read_the_blobs_and_the_sandbox(d
     assert [block["type"] for block in blocks] == [
         "redacted_thinking",
         "thinking",
+        "reasoning",
         "tool_use",
         "tool_result",
         "text",
     ]
     assert blocks[1]["signature"] == "sig-1"
+    assert blocks[2]["summary"] == ["check the tree"]
 
     compactions = await client.get(
         f"/surface/debug/api/conversations/{conversation_id}/compactions", headers=_auth(token)

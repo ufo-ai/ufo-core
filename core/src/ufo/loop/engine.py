@@ -68,6 +68,7 @@ from ufo.models.interface import (
     ModelRequest,
     ModelResponseTruncated,
     ReasoningBlock,
+    ReasoningItemBlock,
     RedactedThinkingBlock,
     TextBlock,
     TextDelta,
@@ -312,12 +313,11 @@ class StreamResult(BaseModel):
     them — preserving the model's own error class and its message for context-overflow detection.
     `partial_output` rides an errored round for the same reason: the deltas the stream yielded
     before dying are already paid for, so they survive in the recorded output for the truncation
-    recovery to salvage into a workspace file. `reasoning` is the round's thinking and
-    redacted-thinking blocks in the provider's own order: the assistant message that carries this
-    round's tool calls must open with that whole sequence, echoed unchanged, for the provider to
-    accept and resume the reasoning when the tool results come back — memoized here, so a
-    crash-recovery replay echoes the blocks the first run saw rather than a sequence the signatures
-    no longer authenticate."""
+    recovery to salvage into a workspace file. `reasoning` is the round's reasoning blocks in the
+    provider's own order: the assistant message that carries this round's tool calls must open with
+    that whole sequence, echoed unchanged, for the provider to accept and resume the reasoning when
+    the tool results come back — memoized here, so a crash-recovery replay echoes the blocks the
+    first run saw rather than a sequence re-derived from a second call."""
 
     text: str = ""
     tool_calls: tuple[ToolUseBlock, ...] = ()
@@ -1529,7 +1529,7 @@ class TurnEngine:
         call_names: dict[str, str] = {}
         call_json: dict[str, list[str]] = {}
         call_order: list[str] = []
-        reasoning: list[ThinkingBlock | RedactedThinkingBlock] = []
+        reasoning: list[ThinkingBlock | RedactedThinkingBlock | ReasoningItemBlock] = []
         usages: list[Usage] = []
         error: Exception | None = None
 
@@ -1562,7 +1562,7 @@ class TurnEngine:
                         call_order.append(call_id)
                     case ToolCallDelta(id=call_id, partial_json=partial):
                         call_json[call_id].append(partial)
-                    case ThinkingBlock() | RedactedThinkingBlock():
+                    case ThinkingBlock() | RedactedThinkingBlock() | ReasoningItemBlock():
                         reasoning.append(event)
                     case Usage():
                         usages.append(event)

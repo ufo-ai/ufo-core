@@ -16,6 +16,7 @@ from ufo.models.interface import (
     ModelRefusal,
     ModelRequest,
     ModelResponseTruncated,
+    ReasoningItemBlock,
     RedactedThinkingBlock,
     TextBlock,
     TextDelta,
@@ -63,6 +64,9 @@ def _anthropic_tool_result_part(part: ToolResultContent) -> dict[str, object]:
 
 
 def anthropic_content(content: str | tuple[ContentBlock, ...]) -> str | list[dict[str, object]]:
+    """Canonical content as Anthropic content blocks. A reasoning item is the OpenAI wire's shape of
+    the same idea and is dropped: only the provider that produced a round's reasoning can be handed
+    it back, and neither provider parses the other's."""
     if isinstance(content, str):
         return content
     blocks: list[dict[str, object]] = []
@@ -72,6 +76,8 @@ def anthropic_content(content: str | tuple[ContentBlock, ...]) -> str | list[dic
                 blocks.append({"type": "thinking", "thinking": thinking, "signature": signature})
             case RedactedThinkingBlock(data=data):
                 blocks.append({"type": "redacted_thinking", "data": data})
+            case ReasoningItemBlock():
+                continue
             case TextBlock(text=text):
                 blocks.append({"type": "text", "text": text})
             case ImageBlock(source=source):

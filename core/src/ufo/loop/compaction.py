@@ -30,6 +30,7 @@ from ufo.models.interface import (
     Message,
     ModelClient,
     ModelRequest,
+    ReasoningItemBlock,
     RedactedThinkingBlock,
     TextBlock,
     TextDelta,
@@ -482,11 +483,12 @@ class Compaction:
 
     def _opaque_chars(self, message: Message) -> int:
         """What a reasoning block costs the window beyond its rendered text: a thinking block's
-        signature and a redacted block's encrypted body are re-sent on every request of the turn but
-        are not prose a summarizer can use, so they are counted here and rendered nowhere. Counted
-        because an uncounted block is the direction `_tokens` cannot afford — under `display:
-        omitted` the signature is the whole block, so leaving it out estimates every reasoning round
-        of the deploy's default model at zero."""
+        signature, a redacted block's encrypted body, and a reasoning item's encrypted body are
+        re-sent on every request of the turn but are not prose a summarizer can use, so they are
+        counted here and rendered nowhere. Counted because an uncounted block is the direction
+        `_tokens` cannot afford — under `display: omitted`, or a reasoning item whose request asked
+        for no summary, the opaque body is the whole block, so leaving it out estimates every
+        reasoning round of the deploy's default model at zero."""
         if isinstance(message.content, str):
             return 0
         total = 0
@@ -496,6 +498,8 @@ class Compaction:
                     total += len(signature)
                 case RedactedThinkingBlock(data=data):
                     total += len(data)
+                case ReasoningItemBlock(encrypted_content=encrypted):
+                    total += len(encrypted)
         return total
 
     def _image_count(self, message: Message) -> int:
@@ -522,6 +526,8 @@ class Compaction:
                     rendered.append(thinking)
                 case RedactedThinkingBlock():
                     rendered.append(REDACTED_REASONING_MARKER)
+                case ReasoningItemBlock(summary=summary):
+                    rendered.extend(summary)
                 case ImageBlock():
                     rendered.append(IMAGE_MARKER)
                 case ToolResultBlock(content=str(content)):

@@ -28,6 +28,7 @@ from ufo.models.interface import (
     ModelClient,
     ModelEvent,
     ModelRequest,
+    ReasoningItemBlock,
     RedactedThinkingBlock,
     TextBlock,
     TextDelta,
@@ -76,14 +77,16 @@ def _store() -> CredentialStore:
 
 @dataclass(frozen=True)
 class ReasoningModel:
-    """Streams one reasoning round — an encrypted block, a thinking block, text — and calls a tool
-    only when `with_tool` is set, so a test can drive both shapes `turn` assembles."""
+    """Streams one reasoning round — an encrypted block, a thinking block, an OpenAI reasoning item,
+    text — and calls a tool only when `with_tool` is set, so a test can drive both shapes `turn`
+    assembles."""
 
     with_tool: bool
 
     async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
         yield RedactedThinkingBlock(data="ZW5jcnlwdGVk")
         yield ThinkingBlock(thinking="", signature="sig-1")
+        yield ReasoningItemBlock(id="rs_1", encrypted_content="Z3B0LWVuY3J5cHRlZA")
         yield TextDelta(text="checking")
         if self.with_tool:
             yield ToolCallStart(id="c1", name="bash")
@@ -134,6 +137,7 @@ async def test_model_turn_opens_a_tool_calling_message_with_its_reasoning_blocks
     assert (await _turn(ReasoningModel(with_tool=True))).content == (
         RedactedThinkingBlock(data="ZW5jcnlwdGVk"),
         ThinkingBlock(thinking="", signature="sig-1"),
+        ReasoningItemBlock(id="rs_1", encrypted_content="Z3B0LWVuY3J5cHRlZA"),
         TextBlock(text="checking"),
         ToolUseBlock(id="c1", name="bash", input={"command": "ls"}),
     )
