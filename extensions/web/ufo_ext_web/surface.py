@@ -187,6 +187,17 @@ def _conversation_key(agent_id: UUID, email: str) -> str:
     return f"{agent_id}/{email}"
 
 
+def _chat_source(public_base_url: str | None, agent_id: UUID, email: str) -> str:
+    """Where a portal message was said, as the agent carries it into anything it creates: the portal
+    URL that opens this agent's chat, plus who asked. The portal routes on the fragment
+    (`#/agents/<id>`), so the link lands on the conversation rather than the shell. A deploy whose
+    public base is unset or empty has no address to give, and names the client and the member
+    instead."""
+    if not public_base_url:
+        return f"{SOURCE} ({email})"
+    return f"{public_base_url.rstrip('/')}{PORTAL_PATH}#/agents/{agent_id} ({email})"
+
+
 async def _audience_for(
     ctx: SurfaceContext, request: Request
 ) -> tuple[UUID, str, WebAudience] | Response:
@@ -383,7 +394,9 @@ async def chat(ctx: SurfaceContext, request: Request) -> Response:
     admitted = await ctx.admit(
         conversation_id,
         inbound,
-        context=TurnContext(sender=email, source=f"{SOURCE} ({email})"),
+        context=TurnContext(
+            sender=email, source=_chat_source(ctx.public_base_url, agent_id, email)
+        ),
         idempotency_key=key,
         speaker_member_id=member_id,
     )

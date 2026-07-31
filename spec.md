@@ -342,13 +342,13 @@ durable turn queue through the member-only admission capability, consuming any p
 pause, with its ambient `TurnContext` — the sender, IANA timezone, and source the surface knows,
 which the engine renders as the `<context>` tag (stable message ref; the admission moment, local
 when a timezone is known; sender; source) before each member inbound, a surface that can name a
-source doing so in the form it has — a chat surface the message's own permalink, a terminal or
-browser client the client and the member's address — so anything the agent creates elsewhere can
-name where it was asked for; a message arriving while the conversation's newest turn is still live
-lands on the conversation's inbound queue, which the engine drains into that turn at each round
-boundary as separate `<context>`-tagged messages — the terminal commit
-refuses to close over a non-empty queue, so one FIFO aggregate produces one reply and one writeback
-across all speakers — **identity** resolution (an external id → member + conversation,
+source doing so in the form it has — a chat surface the message's own permalink, the portal a
+link to the conversation, a terminal the client and the member's address — so anything the agent
+creates elsewhere can name where it was asked for; a message arriving while the conversation's
+newest turn is still live lands on the conversation's inbound queue, which the engine drains into
+that turn at each round boundary as separate `<context>`-tagged messages — the terminal
+commit refuses to close over a non-empty queue, so one FIFO aggregate produces one reply and one
+writeback across all speakers — **identity** resolution (an external id → member + conversation,
 linking a `surface_identity` on first contact — `join_member` also creates the member when a
 channel-verified email matches the workspace's own domain, the first member's vetted email domain,
 so only that initial member onboards through provisioning — and `adopt_identity` to span a member across

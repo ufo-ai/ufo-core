@@ -264,6 +264,20 @@ def dbos_runtime(
     loop_queue.reset_runtime()
 
 
+def test_chat_source_links_the_portal_at_the_agent_and_names_who_asked() -> None:
+    agent_id = uuid4()
+    assert web_surface._chat_source("https://ufo.example", agent_id, "bee@example.com") == (
+        f"https://ufo.example/surface/web#/agents/{agent_id} (bee@example.com)"
+    )
+    assert web_surface._chat_source("https://ufo.example/", agent_id, "bee@example.com") == (
+        f"https://ufo.example/surface/web#/agents/{agent_id} (bee@example.com)"
+    )
+    for unset in (None, ""):
+        assert web_surface._chat_source(unset, agent_id, "bee@example.com") == (
+            "ufo web (bee@example.com)"
+        )
+
+
 @pytest.fixture
 async def web(
     db: None,
@@ -389,7 +403,7 @@ async def test_web_turn_round_trip_admits_streams_and_links_identity(
     assert context == {
         "sender": "owner@example.com",
         "timezone": None,
-        "source": "ufo web (owner@example.com)",
+        "source": (f"https://web/surface/web#/agents/{agent_id} (owner@example.com)"),
     }
     transcript = await client.get(
         f"/surface/web/agents/{agent_id}/transcript",
