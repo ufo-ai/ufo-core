@@ -16,6 +16,15 @@ from ufo.credentials import (
     CredentialSlotUnset as CredentialSlotUnset,
 )
 from ufo.ext.surface import (
+    AMBIENT_CONTEXT_ELEMENT as AMBIENT_CONTEXT_ELEMENT,
+)
+from ufo.ext.surface import (
+    ATTACHMENTS_ELEMENT as ATTACHMENTS_ELEMENT,
+)
+from ufo.ext.surface import (
+    MEMBER_MESSAGE_ELEMENT as MEMBER_MESSAGE_ELEMENT,
+)
+from ufo.ext.surface import (
     OPERATOR_EMAIL_DOMAIN as OPERATOR_EMAIL_DOMAIN,
 )
 from ufo.ext.surface import (
@@ -89,6 +98,15 @@ from ufo.ext.surface import (
 )
 from ufo.ext.surface import (
     Writeback as Writeback,
+)
+from ufo.ext.surface import (
+    fence_member_message as fence_member_message,
+)
+from ufo.ext.surface import (
+    member_message_text as member_message_text,
+)
+from ufo.ext.surface import (
+    mint_marker as mint_marker,
 )
 from ufo.ext.surface import (
     record_transcript_access as record_transcript_access,

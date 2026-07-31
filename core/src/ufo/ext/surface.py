@@ -29,10 +29,12 @@ downgrade, not a second seam."""
 import asyncio
 import hashlib
 import json
+import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from secrets import token_hex
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 from urllib.parse import urlsplit
@@ -136,6 +138,57 @@ if TYPE_CHECKING:
     from ufo.objects import BoundKind, ObjectPage
 
 OPERATOR_EMAIL_DOMAIN = "metalcraft.ai"
+
+
+AMBIENT_CONTEXT_ELEMENT = "channel_context"
+MEMBER_MESSAGE_ELEMENT = "member_message"
+ATTACHMENTS_ELEMENT = "attachments"
+MARKER_BYTES = 4
+_MEMBER_MESSAGE_RE = re.compile(
+    rf"<{MEMBER_MESSAGE_ELEMENT}_(?P<marker>[0-9a-f]{{{MARKER_BYTES * 2}}})>\n"
+    rf"(?P<said>.*)\n</{MEMBER_MESSAGE_ELEMENT}_(?P=marker)>",
+    re.DOTALL,
+)
+
+
+def mint_marker() -> str:
+    """The token one member message's elements are named with.
+
+    Minted per message, so no text the prompt carries can name one: a bystander's words were already
+    frozen in the ambient digest when it did not exist, and the member's own text is their own
+    message anyway. That is what makes the elements a boundary rather than a convention, and why
+    nothing escapes anybody's words: Slack's `<@U…>` mentions and `<https://…|label>` links, an
+    inequality, a tag a member typed on purpose all reach the model as written."""
+    return token_hex(MARKER_BYTES)
+
+
+def fence_member_message(marker: str, ambient: str, body: str, attachments: str) -> str:
+    """The inbound text one member message becomes: already-rendered ambient context, the member's
+    own words, then what their attachments delivered — each in its own element, named with `marker`.
+
+    Run together as plain text these are one transcript whose last line is the member's message, so
+    a message that trails off — an attachment that never arrived, a sentence ending on a colon —
+    reads as a log with more to come and the turn answers by writing the member's next message
+    instead of its own."""
+    member = f"{MEMBER_MESSAGE_ELEMENT}_{marker}"
+    fenced = f"{ambient}<{member}>\n{body}\n</{member}>"
+    if not attachments:
+        return fenced
+    delivered = f"{ATTACHMENTS_ELEMENT}_{marker}"
+    return f"{fenced}\n<{delivered}>\n{attachments}\n</{delivered}>"
+
+
+def member_message_text(inbound: str) -> str:
+    """The member's own words back out of a fenced inbound, for a projection that renders what the
+    member said rather than the prompt the turn ran on.
+
+    Exact, not a guess: the element is named with a marker minted for that one message, so the only
+    text that can close it is text `fence_member_message` wrote. A member who types
+    `</member_message>` closes nothing, which is why their bubble in the portal reads back as they
+    wrote it. An inbound no surface fenced — a prepared intent, a subagent payload — is its own
+    text."""
+    found = _MEMBER_MESSAGE_RE.search(inbound)
+    return inbound if found is None else found.group("said")
 
 
 @dataclass(frozen=True)

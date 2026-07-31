@@ -56,6 +56,7 @@ from ufo.sdk.surfaces import (
     SurfaceRoute,
     Turn,
     TurnContext,
+    member_message_text,
 )
 from ufo_ext_web.audience import WebAudience, granted_emails, web_audience, web_extension
 from ufo_ext_web.panels import agent_overview, reasoning_levels, submit_intent
@@ -384,7 +385,7 @@ async def _deliver_uploads(
 
 
 def _files_note(text: str, paths: tuple[str, ...]) -> str:
-    """The admitted text naming the saved paths the way Slack's inbound files do."""
+    """The admitted text naming the saved paths it carries."""
     note = f"[Attached files, saved in the workspace: {', '.join(paths)}]"
     return f"{text}\n\n{note}" if text.strip() else note
 
@@ -806,11 +807,13 @@ async def _readable_conversation(
 
 
 def _turn_row(turn: Turn) -> dict[str, object]:
+    """The transcript view renders `inbound` as the member's own bubble, so it carries the words the
+    member wrote and never the elements a surface named around them."""
     return {
         "id": str(turn.id),
         "seq": turn.seq,
         "status": turn.status,
-        "inbound": turn.inbound,
+        "inbound": member_message_text(turn.inbound),
         "created_at": _iso(turn.created_at),
         "parent_turn_id": None if turn.parent_turn_id is None else str(turn.parent_turn_id),
         "subagent_profile": turn.subagent_profile,
