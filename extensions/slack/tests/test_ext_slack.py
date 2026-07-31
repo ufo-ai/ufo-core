@@ -3874,6 +3874,61 @@ async def test_a_dead_tail_kills_the_status_follower_and_still_clears(
     assert not any(record.message == "slack.thread_status.failed" for record in caplog.records)
 
 
+async def test_a_cancelled_follower_leaves_the_status_standing(
+    db: None, tmp_path, monkeypatch, caplog
+) -> None:
+    """A cancelled follower sends no clear — the last shown line is left standing — and names
+    itself under `cancelled`."""
+    caplog.set_level(logging.INFO, logger="ufo")
+    workspace_id, _ = await _seed()
+    monkeypatch.setattr(slack, "STATUS_UPDATE_MIN_SECONDS", 0.0)
+    recorder: list[httpx.Request] = []
+    hub = InProcessHub()
+    _, client, _ = await _mount(monkeypatch, workspace_id, tmp_path, recorder, hub=hub)
+    mention = _event_body(
+        type="app_mention", user="U1", channel="C1", ts="100.5", text="<@UBOT00000> hi"
+    )
+    async with client:
+        response = await client.post(
+            EVENTS_PATH, content=mention, headers=_sign(mention, int(time.time()))
+        )
+    assert response.status_code == 200
+    async with workspace_tx() as connection:
+        turn_id = (
+            await connection.execute(
+                sa.select(tables.turn.c.id).where(tables.turn.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+    task = slack._STATUS_TASKS.pop(turn_id)
+
+    await hub.publish(turn_id, ToolCall(tool="bash", preview="{}", description="Reading the repo"))
+    working = slack.STATUS_DESCRIBED_TEXT.format(description="Reading the repo")
+    deadline = time.monotonic() + 5
+    while not any(
+        json.loads(r.content)["status"] == working
+        for r in _requests_to(recorder, slack.SLACK_ASSISTANT_STATUS_URL)
+    ):
+        assert time.monotonic() < deadline, "the tool-call status never reached Slack"
+        await asyncio.sleep(0.01)
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+    statuses = [
+        json.loads(r.content)["status"]
+        for r in _requests_to(recorder, slack.SLACK_ASSISTANT_STATUS_URL)
+    ]
+    assert statuses[-1] == working
+    assert all(statuses)
+    written = [
+        r.ufo["status_text"] for r in caplog.records if r.message == "slack.thread_status.write"
+    ]
+    assert written and all(written)
+    cancelled = [r for r in caplog.records if r.message == "slack.thread_status.cancelled"]
+    assert [(r.ufo["turn"], r.ufo["channel"], r.ufo["thread_ts"]) for r in cancelled] == [
+        (str(turn_id), "C1", "100.5")
+    ]
+
+
 async def test_a_parked_turn_clears_the_status(db: None, tmp_path, monkeypatch) -> None:
     """A parked turn has no reply coming, so the status task clears the thread status itself. The
     tool-call publish waits for its status write first — a Parked published before any subscriber

@@ -1591,6 +1591,7 @@ class ThreadStatus:
     is refused, so every line the follower builds is bounded before the send, not only the model's
     prose. The clear at turn end is always ours: a reply never ends the status (a DM reply posts
     top-level, outside the status thread), so Terminal, Parked, and a dead stream all clear alike.
+    A cancelled follower does not clear.
     The status is state on the thread, not a message, and the thread has one writer — the newest
     turn (`_THREAD_WRITERS`) — so an
     outrun sibling's writes, its clear included, are skipped rather than blanking the status the
@@ -1619,8 +1620,18 @@ class ThreadStatus:
                 await self._follow(
                     client, bot_token, STATUS_THINKING_TEXT if admitted else STATUS_CLEAR_TEXT
                 )
-            finally:
+            except asyncio.CancelledError:
+                log(
+                    "slack.thread_status.cancelled",
+                    turn=str(self.turn_id),
+                    channel=self.channel,
+                    thread_ts=self.thread_ts,
+                )
+                raise
+            except Exception:
                 await self._set(client, bot_token, STATUS_CLEAR_TEXT)
+                raise
+            await self._set(client, bot_token, STATUS_CLEAR_TEXT)
 
     async def _set(self, client: httpx.AsyncClient, bot_token: str, status: str) -> bool:
         """Whether Slack took the line, so the caller keeps `shown` on what a member can actually
