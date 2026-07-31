@@ -28,8 +28,10 @@ from ufo.models.interface import (
     ModelRefusal,
     ModelRequest,
     ModelResponseTruncated,
+    RedactedThinkingBlock,
     TextBlock,
     TextDelta,
+    ThinkingBlock,
     ToolResultBlock,
     ToolSchema,
     ToolUseBlock,
@@ -37,7 +39,13 @@ from ufo.models.interface import (
 )
 from ufo.models.openai import MAX_EMPTY_PROVIDER_RETRIES as OPENAI_MAX_EMPTY_RETRIES
 from ufo.models.openai import MAX_PROVIDER_RETRIES as OPENAI_MAX_RETRIES
-from ufo.models.openai import OpenAIClient, openai_sdk_client, responses_request
+from ufo.models.openai import (
+    OpenAIClient,
+    openai_messages,
+    openai_sdk_client,
+    responses_input,
+    responses_request,
+)
 from ufo.models.pricing import ModelPrice
 from ufo.models.registry import model_registry
 from ufo.models.spec import ModelSpec, ReasoningSupport
@@ -139,6 +147,29 @@ def anthropic_text(text: str) -> anthropic.types.RawContentBlockDeltaEvent:
         index=0,
         delta=anthropic.types.TextDelta(type="text_delta", text=text),
     )
+
+
+def anthropic_thinking(text: str, signature: str, index: int = 0) -> list[object]:
+    """One whole thinking block as the provider streams it: an empty start block, the reasoning
+    text in deltas, the signature that authenticates it, then the close."""
+    return [
+        anthropic.types.RawContentBlockStartEvent(
+            type="content_block_start",
+            index=index,
+            content_block=anthropic.types.ThinkingBlock(type="thinking", thinking="", signature=""),
+        ),
+        anthropic.types.RawContentBlockDeltaEvent(
+            type="content_block_delta",
+            index=index,
+            delta=anthropic.types.ThinkingDelta(type="thinking_delta", thinking=text),
+        ),
+        anthropic.types.RawContentBlockDeltaEvent(
+            type="content_block_delta",
+            index=index,
+            delta=anthropic.types.SignatureDelta(type="signature_delta", signature=signature),
+        ),
+        anthropic.types.RawContentBlockStopEvent(type="content_block_stop", index=index),
+    ]
 
 
 def anthropic_output(
@@ -427,6 +458,40 @@ async def test_anthropic_maps_deltas_then_single_usage() -> None:
         TextDelta(text="Hel"),
         TextDelta(text="lo"),
         Usage(input_tokens=100, output_tokens=42, cache_read_tokens=11, cache_write_tokens=7),
+    ]
+
+
+async def test_anthropic_yields_the_whole_reasoning_sequence_once_the_stream_closes() -> None:
+    """Both reasoning kinds ride one list in the provider's block order: the redacted block arrives
+    whole on its start event, each thinking block on its close, and a round that interleaves them
+    must be echoed back in that same order or the provider rejects the sequence."""
+    create = ScriptedCreate(
+        (
+            [
+                anthropic_message_start(input_tokens=100),
+                *anthropic_thinking("weigh ", "sig-1"),
+                anthropic.types.RawContentBlockStartEvent(
+                    type="content_block_start",
+                    index=1,
+                    content_block=anthropic.types.RedactedThinkingBlock(
+                        type="redacted_thinking", data="ZW5jcnlwdGVk"
+                    ),
+                ),
+                anthropic.types.RawContentBlockStopEvent(type="content_block_stop", index=1),
+                *anthropic_thinking("then decide", "sig-2", index=2),
+                anthropic_text("ok"),
+                anthropic_output(42),
+            ],
+            None,
+        )
+    )
+    events = await collect(AnthropicClient(client=anthropic_sdk(create), spec=ANTHROPIC_SPEC))
+    assert events == [
+        TextDelta(text="ok"),
+        ThinkingBlock(thinking="weigh ", signature="sig-1"),
+        RedactedThinkingBlock(data="ZW5jcnlwdGVk"),
+        ThinkingBlock(thinking="then decide", signature="sig-2"),
+        Usage(input_tokens=100, output_tokens=42),
     ]
 
 
@@ -748,6 +813,66 @@ async def test_anthropic_empty_completion_retries_then_succeeds() -> None:
     ]
 
 
+async def test_anthropic_reasoning_without_an_answer_is_an_empty_completion() -> None:
+    create = ScriptedCreate(
+        (
+            [
+                anthropic_message_start(input_tokens=1),
+                *anthropic_thinking("thought about it", "sig-dropped"),
+                anthropic_output(0, stop_reason="end_turn"),
+            ],
+            None,
+        ),
+        (
+            [
+                anthropic_message_start(input_tokens=2),
+                *anthropic_thinking("thought again", "sig-kept"),
+                anthropic_text("recovered"),
+                anthropic_output(3, stop_reason="end_turn"),
+            ],
+            None,
+        ),
+    )
+    events = await collect(AnthropicClient(client=anthropic_sdk(create), spec=ANTHROPIC_SPEC))
+    assert create.calls == 2
+    assert events == [
+        TextDelta(text="recovered"),
+        ThinkingBlock(thinking="thought again", signature="sig-kept"),
+        Usage(input_tokens=2, output_tokens=3),
+    ]
+
+
+async def test_anthropic_stream_dying_after_the_thinking_block_retries_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    zero_backoff(monkeypatch)
+    create = ScriptedCreate(
+        (
+            [
+                anthropic_message_start(input_tokens=1),
+                *anthropic_thinking("abandoned", "sig-dropped"),
+            ],
+            stream_read_timeout(),
+        ),
+        (
+            [
+                anthropic_message_start(input_tokens=2),
+                *anthropic_thinking("kept", "sig-kept"),
+                anthropic_text("recovered"),
+                anthropic_output(3),
+            ],
+            None,
+        ),
+    )
+    events = await collect(AnthropicClient(client=anthropic_sdk(create), spec=ANTHROPIC_SPEC))
+    assert create.calls == 2
+    assert events == [
+        TextDelta(text="recovered"),
+        ThinkingBlock(thinking="kept", signature="sig-kept"),
+        Usage(input_tokens=2, output_tokens=3),
+    ]
+
+
 async def test_openai_empty_completion_retries_then_succeeds() -> None:
     create = ScriptedCreate(
         ([openai_finish("stop"), openai_usage(prompt=1, completion=0)], None),
@@ -824,6 +949,81 @@ async def test_anthropic_reasoning_off_omits_the_thinking_block() -> None:
         pass
     assert "thinking" not in create.kwargs
     assert "output_config" not in create.kwargs
+
+
+REASONING_REQUEST = ModelRequest(
+    model="claude-opus-4-8",
+    system="be terse",
+    max_tokens=64,
+    messages=(
+        Message(role="user", content="hi"),
+        Message(
+            role="assistant",
+            content=(
+                ThinkingBlock(thinking="weigh the options", signature="sig-1"),
+                RedactedThinkingBlock(data="ZW5jcnlwdGVk"),
+                TextBlock(text="checking"),
+                ToolUseBlock(id="t1", name="bash", input={"command": "ls"}),
+            ),
+        ),
+        Message(role="user", content=(ToolResultBlock(tool_use_id="t1", content="chart.png"),)),
+    ),
+)
+
+
+async def test_anthropic_request_echoes_the_reasoning_blocks_back_unchanged() -> None:
+    create = CapturingCreate(
+        ([anthropic_message_start(input_tokens=1), anthropic_text("ok"), anthropic_output(1)], None)
+    )
+    async for _ in AnthropicClient(client=anthropic_sdk(create), spec=ANTHROPIC_SPEC).complete(
+        REASONING_REQUEST
+    ):
+        pass
+    messages = create.kwargs["messages"]
+    assert isinstance(messages, list)
+    assert messages[1]["content"] == [
+        {"type": "thinking", "thinking": "weigh the options", "signature": "sig-1"},
+        {"type": "redacted_thinking", "data": "ZW5jcnlwdGVk"},
+        {"type": "text", "text": "checking"},
+        {"type": "tool_use", "id": "t1", "name": "bash", "input": {"command": "ls"}},
+    ]
+
+
+def test_openai_messages_drop_the_reasoning_blocks() -> None:
+    """A signed Anthropic reasoning block never reaches an OpenAI-shaped request: the whole rendered
+    list is pinned, so any arm that starts carrying one fails here."""
+    assert openai_messages(REASONING_REQUEST.system, REASONING_REQUEST.messages) == [
+        {"role": "system", "content": "be terse"},
+        {"role": "user", "content": "hi"},
+        {
+            "role": "assistant",
+            "content": "checking",
+            "tool_calls": [
+                {
+                    "id": "t1",
+                    "type": "function",
+                    "function": {"name": "bash", "arguments": '{"command": "ls"}'},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "t1", "content": "chart.png"},
+    ]
+
+
+def test_responses_input_drops_the_reasoning_blocks() -> None:
+    """The Responses surface pins the same line: the full item list, so a reasoning block cannot
+    appear as an input item or inside one."""
+    assert responses_input(REASONING_REQUEST.messages) == [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": [{"type": "input_text", "text": "checking"}]},
+        {
+            "type": "function_call",
+            "call_id": "t1",
+            "name": "bash",
+            "arguments": '{"command": "ls"}',
+        },
+        {"type": "function_call_output", "call_id": "t1", "output": "chart.png"},
+    ]
 
 
 async def test_openai_default_request_omits_reasoning_effort() -> None:

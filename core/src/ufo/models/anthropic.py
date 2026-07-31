@@ -16,8 +16,10 @@ from ufo.models.interface import (
     ModelRefusal,
     ModelRequest,
     ModelResponseTruncated,
+    RedactedThinkingBlock,
     TextBlock,
     TextDelta,
+    ThinkingBlock,
     ToolCallDelta,
     ToolCallStart,
     ToolResultBlock,
@@ -66,6 +68,10 @@ def anthropic_content(content: str | tuple[ContentBlock, ...]) -> str | list[dic
     blocks: list[dict[str, object]] = []
     for block in content:
         match block:
+            case ThinkingBlock(thinking=thinking, signature=signature):
+                blocks.append({"type": "thinking", "thinking": thinking, "signature": signature})
+            case RedactedThinkingBlock(data=data):
+                blocks.append({"type": "redacted_thinking", "data": data})
             case TextBlock(text=text):
                 blocks.append({"type": "text", "text": text})
             case ImageBlock(source=source):
@@ -94,7 +100,16 @@ class AnthropicClient:
     spec: ModelSpec
 
     async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
-        """Yield text and tool-call events then exactly one Usage as the final event.
+        """Yield text and tool-call events then exactly one Usage as the final event. The round's
+        reasoning blocks are yielded whole — each thinking block's text and signature together, and
+        every redacted block the provider encrypted — once the stream closes, in the provider's own
+        block order and just ahead of the Usage, so the engine can echo the sequence back verbatim
+        on the round's assistant message, which the API requires when a reasoning round's tool
+        results come back on the same model. A missing or reordered block is a modified sequence and
+        is rejected there, so both kinds ride one ordered list. Held until the stream closes because
+        reasoning is not live output — no surface streams it — and handing it over early would close
+        both retry paths for a round that has yet to answer: a re-issue would deliver the abandoned
+        attempt's reasoning alongside the new attempt's.
 
         Every provider failure except a deterministic 4xx client error (400-499 other than 429)
         retries with retry-after-aware exponential backoff, and request timeouts retry on the same
@@ -106,12 +121,12 @@ class AnthropicClient:
         response and so carries status_code 200 — keying retry off the single non-retryable case
         (a deterministic 4xx) catches it where a 5xx allowlist would let a 200-coded fault through.
         stop_reason=max_tokens is a truncated completion and raises ModelResponseTruncated;
-        stop_reason=refusal raises
-        ModelRefusal (deterministic per request — never retried, never an empty success).
-        stop_reason=tool_use is a normal stop. An empty completion (no event,
-        stop_reason=end_turn) is a retryable provider failure, re-issued up to
-        MAX_EMPTY_PROVIDER_RETRIES before degrading to the empty result for the turn loop's
-        nudge — a tool-call-only response has yielded and never degrades.
+        stop_reason=refusal raises ModelRefusal (deterministic per request — never retried, never
+        an empty success). stop_reason=tool_use is a normal stop. An empty completion (no text and
+        no tool call — reasoning alone is not an answer — with stop_reason=end_turn) is a retryable
+        provider failure, re-issued up to MAX_EMPTY_PROVIDER_RETRIES before degrading to the empty
+        result for the turn loop's nudge — a tool-call-only response has yielded and never
+        degrades.
         """
         delay = INITIAL_RETRY_DELAY_SECONDS
         attempt = 0
@@ -119,6 +134,9 @@ class AnthropicClient:
         while True:
             yielded = False
             tool_use_ids: dict[int, str] = {}
+            thinking_parts: dict[int, list[str]] = {}
+            thinking_signatures: dict[int, str] = {}
+            reasoning: list[ThinkingBlock | RedactedThinkingBlock] = []
             input_tokens = 0
             cache_read_tokens = 0
             cache_write_tokens = 0
@@ -187,6 +205,35 @@ class AnthropicClient:
                         ):
                             yielded = True
                             yield ToolCallDelta(id=tool_use_ids[index], partial_json=partial_json)
+                        case anthropic.types.RawContentBlockStartEvent(
+                            content_block=anthropic.types.ThinkingBlock(
+                                thinking=initial, signature=signature
+                            ),
+                            index=index,
+                        ):
+                            thinking_parts[index] = [initial]
+                            thinking_signatures[index] = signature
+                        case anthropic.types.RawContentBlockStartEvent(
+                            content_block=anthropic.types.RedactedThinkingBlock(data=data)
+                        ):
+                            reasoning.append(RedactedThinkingBlock(data=data))
+                        case anthropic.types.RawContentBlockDeltaEvent(
+                            delta=anthropic.types.ThinkingDelta(thinking=part), index=index
+                        ):
+                            thinking_parts[index].append(part)
+                        case anthropic.types.RawContentBlockDeltaEvent(
+                            delta=anthropic.types.SignatureDelta(signature=signature), index=index
+                        ):
+                            thinking_signatures[index] = signature
+                        case anthropic.types.RawContentBlockStopEvent(index=index) if (
+                            index in thinking_parts
+                        ):
+                            reasoning.append(
+                                ThinkingBlock(
+                                    thinking="".join(thinking_parts.pop(index)),
+                                    signature=thinking_signatures.pop(index),
+                                )
+                            )
                         case anthropic.types.RawMessageDeltaEvent(delta=delta, usage=usage):
                             output_tokens = usage.output_tokens
                             stop_reason = delta.stop_reason
@@ -240,6 +287,8 @@ class AnthropicClient:
             ):
                 empty_attempt += 1
                 continue
+            for block in reasoning:
+                yield block
             yield Usage(
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,

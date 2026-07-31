@@ -48,8 +48,10 @@ from ufo.models.interface import (
     ModelRefusal,
     ModelRequest,
     ModelResponseTruncated,
+    RedactedThinkingBlock,
     TextBlock,
     TextDelta,
+    ThinkingBlock,
     ToolCallDelta,
     ToolCallStart,
     ToolResultBlock,
@@ -116,6 +118,8 @@ def openai_messages(system: str, messages: tuple[Message, ...]) -> list[dict[str
         lifted_images: list[dict[str, object]] = []
         for block in content:
             match block:
+                case ThinkingBlock() | RedactedThinkingBlock():
+                    continue
                 case TextBlock(text=text):
                     text_parts.append(text)
                 case ImageBlock(source=source):
@@ -170,6 +174,8 @@ def responses_input(messages: tuple[Message, ...]) -> list[ResponseInputItemPara
         content: list[ResponseInputContentParam] = []
         for block in message.content:
             match block:
+                case ThinkingBlock() | RedactedThinkingBlock():
+                    continue
                 case TextBlock(text=text):
                     content.append(ResponseInputTextParam(type="input_text", text=text))
                 case ImageBlock(source=source):

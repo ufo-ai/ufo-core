@@ -52,6 +52,8 @@ export type TurnDetail = { turn: Turn; ledger: LedgerEntry[]; children: Turn[] }
 export type ContentBlock =
   | { type: "text"; text: string }
   | { type: "image"; source: unknown }
+  | { type: "thinking"; thinking: string; signature: string }
+  | { type: "redacted_thinking"; data: string }
   | { type: "tool_use"; id: string; name: string; input: Record<string, unknown> }
   | {
       type: "tool_result";

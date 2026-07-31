@@ -20,6 +20,7 @@ from ufo.loop.compaction import (
     COMPACTION_SUMMARY_MAX_TOKENS,
     MAX_REFERENCE_PATHS,
     TOOL_OUTPUT_PATH_RE,
+    Compaction,
 )
 from ufo.models.interface import (
     ImageBlock,
@@ -27,8 +28,10 @@ from ufo.models.interface import (
     Message,
     ModelEvent,
     ModelRequest,
+    RedactedThinkingBlock,
     TextBlock,
     TextDelta,
+    ThinkingBlock,
     ToolResultBlock,
     ToolUseBlock,
 )
@@ -122,6 +125,48 @@ def snapshot_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
     out = tmp_path_factory.mktemp("snapshot")
     SnapshotBuild(repo=repo, out=out, target_tokens=TEST_TARGET_TOKENS).build()
     return out
+
+
+async def test_the_estimator_mirror_matches_the_live_compaction(tmp_path: Path) -> None:
+    """`estimate_tokens`/`message_text` claim to mirror `Compaction._tokens`/`_text` exactly, and a
+    built window only provably crosses the trigger while that holds. Asserted over one window
+    carrying each block kind, so a term or arm that changes on one side alone fails here."""
+    window = (
+        Message(role="user", content="plan the migration"),
+        Message(
+            role="assistant",
+            content=(
+                RedactedThinkingBlock(data="e" * 40),
+                ThinkingBlock(thinking="weigh the options", signature="s" * 40),
+                TextBlock(text="reading the tree"),
+                ImageBlock(source=ImageSource(media_type="image/png", data="AAAA")),
+                ToolUseBlock(id="t1", name="bash", input={"command": "ls"}),
+            ),
+        ),
+        Message(
+            role="user",
+            content=(
+                ToolResultBlock(tool_use_id="t1", content="README.md"),
+                ToolResultBlock(
+                    tool_use_id="t2",
+                    content=(
+                        TextBlock(text="chart.png"),
+                        ImageBlock(source=ImageSource(media_type="image/png", data="BBBB")),
+                    ),
+                ),
+            ),
+        ),
+    )
+    live = Compaction(
+        client=ScriptedSummaryModel(_summary()),
+        model="claude-opus-4-8",
+        blob=FilesystemBlobStore(root=tmp_path),
+        conversation_id=uuid4(),
+    )
+    assert [message_text(message) for message in window] == [
+        live._text(message) for message in window
+    ]
+    assert estimate_tokens(window) == live._tokens(window)
 
 
 async def test_build_is_deterministic(tmp_path: Path) -> None:

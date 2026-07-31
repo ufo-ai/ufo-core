@@ -1,3 +1,5 @@
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -20,10 +22,26 @@ from ufo.ext.surface import (
     SurfaceInstallationConflict,
     UndeclaredSurface,
 )
+from ufo.models.catalog import CORE_PRICING
+from ufo.models.interface import (
+    Message,
+    ModelClient,
+    ModelEvent,
+    ModelRequest,
+    RedactedThinkingBlock,
+    TextBlock,
+    TextDelta,
+    ThinkingBlock,
+    ToolCallDelta,
+    ToolCallStart,
+    ToolUseBlock,
+)
+from ufo.models.pricing import Pricing
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import ProxyEndpoint
 from ufo.schema import tables
+from ufo.schema.records import Usage
 from ufo.sources.sync import CorePageFeed
 from ufo.subjects import SHARED_SUBJECT, member_subject
 from ufo.workspace import WorkspaceUnbound, init_workspace_credentials, ws
@@ -54,6 +72,77 @@ async def _workspace() -> UUID:
 
 def _store() -> CredentialStore:
     return CredentialStore(fernet=Fernet(Fernet.generate_key()))
+
+
+@dataclass(frozen=True)
+class ReasoningModel:
+    """Streams one reasoning round — an encrypted block, a thinking block, text — and calls a tool
+    only when `with_tool` is set, so a test can drive both shapes `turn` assembles."""
+
+    with_tool: bool
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        yield RedactedThinkingBlock(data="ZW5jcnlwdGVk")
+        yield ThinkingBlock(thinking="", signature="sig-1")
+        yield TextDelta(text="checking")
+        if self.with_tool:
+            yield ToolCallStart(id="c1", name="bash")
+            yield ToolCallDelta(id="c1", partial_json='{"command": "ls"}')
+        yield Usage(input_tokens=1, output_tokens=1)
+
+
+@dataclass(frozen=True)
+class StubResolver:
+    """The model registry as `ModelAccess` reads it, wired to one scripted client."""
+
+    client: ModelClient
+
+    @property
+    def auto_model(self) -> str:
+        return "claude-opus-4-8"
+
+    @property
+    def pricing(self) -> Pricing:
+        return CORE_PRICING
+
+    async def client_for(self, model: str) -> ModelClient:
+        return self.client
+
+    def key_slot_for(self, model: str) -> str | None:
+        return None
+
+
+async def _turn(model: ModelClient) -> Message:
+    context = context_for("core", frozenset(), model_resolver=StubResolver(model))
+    assert context.model is not None
+    with ws(await _workspace()):
+        return await context.model.turn(
+            ModelRequest(
+                model="auto",
+                system="be terse",
+                messages=(Message(role="user", content="hi"),),
+                max_tokens=64,
+            )
+        )
+
+
+async def test_model_turn_opens_a_tool_calling_message_with_its_reasoning_blocks(
+    db: None,
+) -> None:
+    """The seam re-sends this message when a handler feeds the tool result back, so it carries the
+    round's reasoning ahead of the tool calls the signature authenticates."""
+    assert (await _turn(ReasoningModel(with_tool=True))).content == (
+        RedactedThinkingBlock(data="ZW5jcnlwdGVk"),
+        ThinkingBlock(thinking="", signature="sig-1"),
+        TextBlock(text="checking"),
+        ToolUseBlock(id="c1", name="bash", input={"command": "ls"}),
+    )
+
+
+async def test_model_turn_without_tool_calls_stays_plain_text(db: None) -> None:
+    """A round with nothing to authenticate returns its text: there is no tool call coming back, so
+    the reasoning has no continuation to ride and never becomes a blocks tuple."""
+    assert (await _turn(ReasoningModel(with_tool=False))).content == "checking"
 
 
 async def test_scoped_store_round_trips_json_values(db: None) -> None:

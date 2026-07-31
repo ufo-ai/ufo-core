@@ -137,8 +137,10 @@ from ufo.models.interface import (
     ModelEvent,
     ModelRequest,
     ModelResponseTruncated,
+    RedactedThinkingBlock,
     TextBlock,
     TextDelta,
+    ThinkingBlock,
     ToolResultBlock,
     ToolUseBlock,
 )
@@ -1239,6 +1241,78 @@ async def test_eval_trajectory_omits_images_and_private_handoffs(db: None, tmp_p
     assert "[private handoff redacted]" in serialized
     assert "[image omitted: image/png" in serialized
     assert result.output.calls[0].result == "[private handoff redacted]"
+
+
+async def test_eval_trajectory_names_reasoning_and_stores_no_signature(db: None, tmp_path) -> None:
+    """A reasoning round reaches the archive as named evidence, never as the opaque bytes that
+    authenticate it: the summary goes through the same private-handoff redaction as any text and an
+    encrypted block is named the way an image is, so a reader can tell a round reasoned."""
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    seal = "sealed-eval-secret"
+    transcript = (
+        Message(
+            role="assistant",
+            content=(
+                ToolUseBlock(
+                    id="credential",
+                    name="request_credentials",
+                    input={"reason": "test", "prompts": []},
+                ),
+            ),
+        ),
+        Message(
+            role="user",
+            content=(
+                ToolResultBlock(
+                    tool_use_id="credential",
+                    content=(
+                        "Collect privately\n"
+                        '{"reason":"test","prompts":[],"sealed":"sealed-eval-secret"}'
+                    ),
+                ),
+            ),
+        ),
+        Message(
+            role="assistant",
+            content=(
+                RedactedThinkingBlock(data="ZW5jcnlwdGVkLXJlYXNvbmluZw"),
+                ThinkingBlock(thinking=f"the member handed me {seal}", signature="signature-bytes"),
+                TextBlock(text="expected"),
+            ),
+        ),
+    )
+    blob = FilesystemBlobStore(root=tmp_path)
+    worker = StubWorker(blob, workspace_id, transcript)
+    ctx = _context(blob, worker)
+    target = InProcessTarget(
+        ctx=ctx,
+        agent_id=agent_id,
+        conversations=DbConversations(workspace_id),
+        outcome=CorpusOutcome(ctx),
+        blob=blob,
+    )
+
+    with ws(workspace_id):
+        result = await run_capability_case(
+            CapabilityCase("reasoning", "answer", exact_scorer("expected")), target
+        )
+
+    attempts = cast(list[dict[str, object]], result.evidence["attempts"])
+    trajectory = cast(dict[str, object], attempts[0]["trajectory"])
+    blocks = cast(
+        list[dict[str, object]],
+        cast(list[dict[str, object]], trajectory["messages"])[2]["content"],
+    )
+    assert [block["text"] for block in blocks] == [
+        "[reasoning redacted by the provider]",
+        "[reasoning]\nthe member handed me [private handoff redacted]",
+        "expected",
+    ]
+    serialized = dumps(trajectory)
+    assert seal not in serialized
+    assert "signature-bytes" not in serialized
+    assert "ZW5jcnlwdGVkLXJlYXNvbmluZw" not in serialized
 
 
 async def test_oversized_eval_trajectory_is_omitted_without_aborting_the_case(

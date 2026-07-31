@@ -31,6 +31,31 @@ class ToolUseBlock(BaseModel):
     input: dict[str, Any]
 
 
+class ThinkingBlock(BaseModel):
+    """A reasoning block the model streamed ahead of its text and tool calls, carried opaquely:
+    the provider requires it echoed back unchanged when the conversation continues on the same
+    model, and the signature is what authenticates it there. The text is whatever that model's
+    display default returns — a summary on the 4.6-era models, empty on the ones that omit it — so
+    it is real data either way. Doubles as the ModelEvent a client yields once the block is
+    whole."""
+
+    type: Literal["thinking"] = "thinking"
+    thinking: str
+    signature: str
+
+
+class RedactedThinkingBlock(BaseModel):
+    """A reasoning block the provider encrypted before returning it: `data` is the whole block and
+    there is no readable text. It rides the round's reasoning sequence in the position the provider
+    streamed it and is echoed back unchanged like any other — a sequence missing one block, or
+    reordering two, is a modified sequence the provider rejects."""
+
+    type: Literal["redacted_thinking"] = "redacted_thinking"
+    data: str
+
+
+ReasoningBlock = Annotated[ThinkingBlock | RedactedThinkingBlock, Field(discriminator="type")]
+
 ToolResultContent = Annotated[TextBlock | ImageBlock, Field(discriminator="type")]
 
 
@@ -47,7 +72,8 @@ class ToolResultBlock(BaseModel):
 
 
 ContentBlock = Annotated[
-    TextBlock | ImageBlock | ToolUseBlock | ToolResultBlock, Field(discriminator="type")
+    TextBlock | ImageBlock | ToolUseBlock | ToolResultBlock | ThinkingBlock | RedactedThinkingBlock,
+    Field(discriminator="type"),
 ]
 
 MAX_IMAGES_PER_MESSAGE = 20
@@ -111,7 +137,9 @@ class ToolCallDelta(BaseModel):
     partial_json: str
 
 
-ModelEvent = TextDelta | ToolCallStart | ToolCallDelta | Usage
+ModelEvent = (
+    TextDelta | ToolCallStart | ToolCallDelta | ThinkingBlock | RedactedThinkingBlock | Usage
+)
 
 
 class ModelResponseTruncated(RuntimeError):

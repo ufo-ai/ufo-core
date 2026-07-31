@@ -25,7 +25,14 @@ from ufo_testsupport.surfaces import EMPTY_SKILL_REGISTRY, no_user_skills
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.hub import InProcessHub
-from ufo.models.interface import Message, TextBlock, ToolResultBlock, ToolUseBlock
+from ufo.models.interface import (
+    Message,
+    RedactedThinkingBlock,
+    TextBlock,
+    ThinkingBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+)
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import ProxyEndpoint
@@ -349,6 +356,8 @@ async def test_transcript_compactions_and_files_read_the_blobs_and_the_sandbox(d
             Message(
                 role="assistant",
                 content=(
+                    RedactedThinkingBlock(data="ZW5jcnlwdGVk"),
+                    ThinkingBlock(thinking="check the tree", signature="sig-1"),
                     ToolUseBlock(id="t1", name="bash", input={"command": "ls"}),
                     ToolResultBlock(tool_use_id="t1", content="README.md"),
                     TextBlock(text="done"),
@@ -377,7 +386,14 @@ async def test_transcript_compactions_and_files_read_the_blobs_and_the_sandbox(d
     assert transcript.json()["system"] == stored.system
     assert transcript.json()["injected"] == stored.injected
     blocks = transcript.json()["messages"][1]["content"]
-    assert [block["type"] for block in blocks] == ["tool_use", "tool_result", "text"]
+    assert [block["type"] for block in blocks] == [
+        "redacted_thinking",
+        "thinking",
+        "tool_use",
+        "tool_result",
+        "text",
+    ]
+    assert blocks[1]["signature"] == "sig-1"
 
     compactions = await client.get(
         f"/surface/debug/api/conversations/{conversation_id}/compactions", headers=_auth(token)

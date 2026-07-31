@@ -24,8 +24,10 @@ from ufo.models.interface import (
     Message,
     ModelEvent,
     ModelRequest,
+    RedactedThinkingBlock,
     TextBlock,
     TextDelta,
+    ThinkingBlock,
     ToolResultBlock,
     ToolUseBlock,
 )
@@ -570,6 +572,66 @@ async def test_images_count_toward_the_compaction_budget(tmp_path: Path) -> None
     )
     _, image_usage = await compaction.maybe_compact(with_image)
     assert len(image_usage) == 1
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        pytest.param(ThinkingBlock(thinking="", signature="s" * 200), id="signature"),
+        pytest.param(RedactedThinkingBlock(data="e" * 200), id="encrypted"),
+    ],
+)
+async def test_each_reasoning_kind_counts_toward_the_compaction_budget(
+    tmp_path: Path, block: ThinkingBlock | RedactedThinkingBlock
+) -> None:
+    """A reasoning round is mostly opaque bytes — an empty thinking text under `display: omitted`,
+    a signature, an encrypted block — so a window the summarizer would render as almost nothing must
+    still trip the trigger on what it re-sends to the provider every round. Each kind carries its
+    own window: a redacted block has no signature to ride along with, so it must trip on `data`."""
+    compaction = _compaction(tmp_path, trigger_tokens=100, keep_messages=2)
+    short_text = (
+        Message(role="user", content="hi"),
+        Message(role="assistant", content="ok"),
+        Message(role="user", content="more"),
+        Message(role="assistant", content="sure"),
+        Message(role="user", content="tail"),
+    )
+    _, text_usage = await compaction.maybe_compact(short_text)
+    assert text_usage == ()
+    with_reasoning = (
+        short_text[0],
+        Message(role="assistant", content=(block, ToolUseBlock(id="t1", name="bash", input={}))),
+        *short_text[2:],
+    )
+    _, reasoning_usage = await compaction.maybe_compact(with_reasoning)
+    assert len(reasoning_usage) == 1
+
+
+async def test_head_reasoning_reaches_the_summarizer_as_text_without_its_signature(
+    tmp_path: Path,
+) -> None:
+    model = CapturingSummaryModel()
+    compaction = _compaction(tmp_path, model=model, trigger_tokens=1, keep_messages=2)
+    await compaction.maybe_compact(
+        (
+            Message(role="user", content="hi"),
+            Message(
+                role="assistant",
+                content=(
+                    ThinkingBlock(thinking="weigh the options", signature="SECRETSIGNATURE"),
+                    RedactedThinkingBlock(data="SECRETDATA"),
+                    TextBlock(text="done"),
+                ),
+            ),
+            Message(role="user", content="keep going"),
+            Message(role="assistant", content="working"),
+            Message(role="user", content="tail"),
+        )
+    )
+    assert "weigh the options" in model.seen[0]
+    assert "[redacted reasoning]" in model.seen[0]
+    assert "SECRETSIGNATURE" not in model.seen[0]
+    assert "SECRETDATA" not in model.seen[0]
 
 
 async def test_compaction_index_is_monotonic(tmp_path: Path) -> None:

@@ -10,8 +10,21 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from ufo.loop.compaction import CHARS_PER_TOKEN, IMAGE_MARKER, IMAGE_TOKEN_ESTIMATE
-from ufo.models.interface import ImageBlock, Message, TextBlock, ToolResultBlock, ToolUseBlock
+from ufo.loop.compaction import (
+    CHARS_PER_TOKEN,
+    IMAGE_MARKER,
+    IMAGE_TOKEN_ESTIMATE,
+    REDACTED_REASONING_MARKER,
+)
+from ufo.models.interface import (
+    ImageBlock,
+    Message,
+    RedactedThinkingBlock,
+    TextBlock,
+    ThinkingBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+)
 
 type CompactionLeaf = Literal[
     "overload", "buried", "supersession", "chain", "reference", "image", "behavior", "real"
@@ -99,7 +112,14 @@ def estimate_tokens(messages: tuple[Message, ...]) -> int:
     """The window estimate the compaction trigger uses — mirrored exactly, so a built window
     provably crosses the trigger and a report's compression ratios match the pipeline's own."""
     return sum(
-        (len(message.role) + len(message_text(message)) + CHARS_PER_TOKEN - 1) // CHARS_PER_TOKEN
+        (
+            len(message.role)
+            + len(message_text(message))
+            + _opaque_chars(message)
+            + CHARS_PER_TOKEN
+            - 1
+        )
+        // CHARS_PER_TOKEN
         + IMAGE_TOKEN_ESTIMATE * _image_count(message)
         for message in messages
     )
@@ -113,6 +133,10 @@ def message_text(message: Message) -> str:
         match block:
             case TextBlock(text=text):
                 rendered.append(text)
+            case ThinkingBlock(thinking=thinking):
+                rendered.append(thinking)
+            case RedactedThinkingBlock():
+                rendered.append(REDACTED_REASONING_MARKER)
             case ImageBlock():
                 rendered.append(IMAGE_MARKER)
             case ToolResultBlock(content=str(content)):
@@ -124,6 +148,19 @@ def message_text(message: Message) -> str:
             case ToolUseBlock(name=name, input=arguments):
                 rendered.append(f"{name}({json.dumps(arguments, sort_keys=True)})")
     return "\n".join(rendered)
+
+
+def _opaque_chars(message: Message) -> int:
+    if isinstance(message.content, str):
+        return 0
+    total = 0
+    for block in message.content:
+        match block:
+            case ThinkingBlock(signature=signature):
+                total += len(signature)
+            case RedactedThinkingBlock(data=data):
+                total += len(data)
+    return total
 
 
 def _image_count(message: Message) -> int:

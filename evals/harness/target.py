@@ -37,7 +37,15 @@ from ufo.db import workspace_tx
 from ufo.schema import tables
 from ufo.schema.records import CredentialRequest, TerminalFrame, TurnStatus
 from ufo.sdk.context import ExtensionContext, Trajectory
-from ufo.sdk.models import ImageBlock, Message, TextBlock, ToolResultBlock, ToolUseBlock
+from ufo.sdk.models import (
+    ImageBlock,
+    Message,
+    RedactedThinkingBlock,
+    TextBlock,
+    ThinkingBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+)
 from ufo.transcript import (
     CompactionRecord,
     TranscriptDecodeError,
@@ -58,6 +66,8 @@ MAX_EVAL_TRAJECTORY_BYTES = 8 * 1024 * 1024
 MAX_EVAL_COMPACTION_BYTES = 8 * 1024 * 1024
 PRIVATE_HANDOFF_TOOL = "request_credentials"
 PRIVATE_HANDOFF_REDACTED = "[private handoff redacted]"
+REASONING_EVIDENCE = "[reasoning]\n{summary}"
+REDACTED_REASONING_EVIDENCE = "[reasoning redacted by the provider]"
 TERMINAL_CHILD_STATUSES = frozenset({"done", "failed", "cancelled"})
 CHILD_TRANSCRIPT_POLL_SECONDS = 0.2
 CHILD_TRANSCRIPT_POLL_ATTEMPTS = 25
@@ -635,6 +645,16 @@ def _safe_messages(
             match block:
                 case TextBlock():
                     blocks.append(TextBlock(text=_redact_text(block.text, private_values)))
+                case ThinkingBlock():
+                    blocks.append(
+                        TextBlock(
+                            text=REASONING_EVIDENCE.format(
+                                summary=_redact_text(block.thinking, private_values)
+                            )
+                        )
+                    )
+                case RedactedThinkingBlock():
+                    blocks.append(TextBlock(text=REDACTED_REASONING_EVIDENCE))
                 case ImageBlock():
                     blocks.append(
                         TextBlock(

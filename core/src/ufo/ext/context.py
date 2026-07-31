@@ -44,8 +44,10 @@ from ufo.models.interface import (
     Message,
     ModelClient,
     ModelRequest,
+    RedactedThinkingBlock,
     TextBlock,
     TextDelta,
+    ThinkingBlock,
     ToolCallDelta,
     ToolCallStart,
     ToolUseBlock,
@@ -379,13 +381,17 @@ class ModelAccess:
         return "".join(block.text for block in response.content if isinstance(block, TextBlock))
 
     async def turn(self, request: ModelRequest) -> Message:
-        """Run one tool-aware model turn and return its assistant message after metering it."""
+        """Run one tool-aware model turn and return its assistant message after metering it. A
+        reasoning round's message opens with the blocks the model streamed, ahead of its text and
+        tool calls: a handler that feeds tool results back through `turn` sends that message again,
+        and the provider requires the sequence unchanged beside the tool calls it authenticates."""
         model = self._resolver.auto_model
         client = await self._resolver.client_for(model)
         parts: list[str] = []
         call_names: dict[str, str] = {}
         call_json: dict[str, list[str]] = {}
         call_order: list[str] = []
+        reasoning: list[ThinkingBlock | RedactedThinkingBlock] = []
         usages: list[Usage] = []
         async with ws_current().billable_event() as bill:
             async for event in client.complete(request.model_copy(update={"model": model})):
@@ -398,6 +404,8 @@ class ModelAccess:
                         call_order.append(call_id)
                     case ToolCallDelta(id=call_id, partial_json=partial):
                         call_json[call_id].append(partial)
+                    case ThinkingBlock() | RedactedThinkingBlock():
+                        reasoning.append(event)
                     case Usage():
                         usages.append(event)
             if not usages:
@@ -425,7 +433,7 @@ class ModelAccess:
             return Message(role="assistant", content=text)
         return Message(
             role="assistant",
-            content=(*((TextBlock(text=text),) if text else ()), *tool_calls),
+            content=(*reasoning, *((TextBlock(text=text),) if text else ()), *tool_calls),
         )
 
 

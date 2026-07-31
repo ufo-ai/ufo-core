@@ -67,8 +67,11 @@ from ufo.models.interface import (
     ModelClient,
     ModelRequest,
     ModelResponseTruncated,
+    ReasoningBlock,
+    RedactedThinkingBlock,
     TextBlock,
     TextDelta,
+    ThinkingBlock,
     ToolCallDelta,
     ToolCallStart,
     ToolResultBlock,
@@ -309,10 +312,16 @@ class StreamResult(BaseModel):
     them — preserving the model's own error class and its message for context-overflow detection.
     `partial_output` rides an errored round for the same reason: the deltas the stream yielded
     before dying are already paid for, so they survive in the recorded output for the truncation
-    recovery to salvage into a workspace file."""
+    recovery to salvage into a workspace file. `reasoning` is the round's thinking and
+    redacted-thinking blocks in the provider's own order: the assistant message that carries this
+    round's tool calls must open with that whole sequence, echoed unchanged, for the provider to
+    accept and resume the reasoning when the tool results come back — memoized here, so a
+    crash-recovery replay echoes the blocks the first run saw rather than a sequence the signatures
+    no longer authenticate."""
 
     text: str = ""
     tool_calls: tuple[ToolUseBlock, ...] = ()
+    reasoning: tuple[ReasoningBlock, ...] = ()
     usages: tuple[Usage, ...] = ()
     error_class: str | None = None
     error_message: str | None = None
@@ -1078,9 +1087,10 @@ class TurnEngine:
             self._reseed_loaded_skills(messages)
             usage_events.extend(compaction_usage)
             try:
-                messages, text, tool_calls = await self._stream_recovering_overflow(
+                messages, round_result = await self._stream_recovering_overflow(
                     messages, usage_events, system, active_requests=active_requests
                 )
+                text, tool_calls = round_result.text, round_result.tool_calls
             except ModelStreamError as error:
                 if error.model_error_class != MODEL_TRUNCATED_ERROR_CLASS:
                     raise
@@ -1130,7 +1140,11 @@ class TurnEngine:
                         finish_error = FINISH_SCHEMA_ERROR.format(error=error)
                     else:
                         return messages, output.model_dump_json(), None, None, None
-            assistant_blocks = (*((TextBlock(text=text),) if text else ()), *tool_calls)
+            assistant_blocks = (
+                *round_result.reasoning,
+                *((TextBlock(text=text),) if text else ()),
+                *tool_calls,
+            )
             results: tuple[ToolResultBlock, ...] = ()
             for segment in _dispatch_segments(self.tools, tool_calls):
                 if finish_error is not None and segment[0].name == FINISH_TOOL:
@@ -1334,7 +1348,7 @@ class TurnEngine:
             messages = (*messages, Message(role="user", content=FORCE_FINISH_PROMPT))
             return await self._force_finish(messages, usage_events, system)
         messages = (*messages, Message(role="user", content=FORCE_FINAL_PROMPT))
-        messages, text, _ = await self._stream_recovering_overflow(
+        messages, result = await self._stream_recovering_overflow(
             messages,
             usage_events,
             system,
@@ -1342,7 +1356,7 @@ class TurnEngine:
             active_requests=active_requests,
         )
         await self._publish_cost(usage_events)
-        return messages, text
+        return messages, result.text
 
     async def _force_finish(
         self,
@@ -1356,11 +1370,11 @@ class TurnEngine:
         fault — the turn fails loud rather than committing a malformed answer."""
         if self.output_model is None:
             raise RuntimeError("finish forced on a turn with no output model")
-        messages, _, tool_calls = await self._stream_recovering_overflow(
+        messages, result = await self._stream_recovering_overflow(
             messages, usage_events, system, force_finish=True
         )
         await self._publish_cost(usage_events)
-        match tool_calls:
+        match result.tool_calls:
             case (ToolUseBlock(name=name, input=args),) if name == FINISH_TOOL:
                 try:
                     return messages, self.output_model.model_validate(args).model_dump_json()
@@ -1379,7 +1393,7 @@ class TurnEngine:
         offer_tools: bool = True,
         force_finish: bool = False,
         active_requests: tuple[str, ...] = (),
-    ) -> tuple[tuple[Message, ...], str, tuple[ToolUseBlock, ...]]:
+    ) -> tuple[tuple[Message, ...], StreamResult]:
         """Run one model round, recovering from a provider context-overflow: the proactive
         compaction already ran, so an overflow here means the window is still too large — force a
         compaction past the trigger and retry once. The recovered window is returned so it carries
@@ -1393,7 +1407,7 @@ class TurnEngine:
                 raise ModelStreamError(
                     result.error_class, result.error_message or "", result.partial_output
                 )
-            return messages, result.text, result.tool_calls
+            return messages, result
         except Exception as error:
             if not is_context_overflow(error):
                 raise
@@ -1414,7 +1428,7 @@ class TurnEngine:
                 raise ModelStreamError(
                     result.error_class, result.error_message or "", result.partial_output
                 ) from None
-            return compacted, result.text, result.tool_calls
+            return compacted, result
 
     async def _enforce_spend(
         self,
@@ -1469,10 +1483,11 @@ class TurnEngine:
         force_finish: bool = False,
     ) -> StreamResult:
         """One model round, memoized as a DBOS step: it streams the deltas live to the hub and
-        returns the round's text, tool calls, and usage as a StreamResult. Memoizing the round
-        freezes the model-assigned `call_id`s and the round structure, so a crash-recovery replay
-        returns this recorded output without re-calling the model (no tokens re-spent, the same tool
-        ids), and the per-tool `_dispatch` steps that follow key off those frozen ids. A mid-stream
+        returns the round's text, tool calls, reasoning blocks, and usage as a StreamResult.
+        Memoizing the round freezes the model-assigned `call_id`s and the round structure, so a
+        crash-recovery replay returns this recorded output without re-calling the model (no tokens
+        re-spent, the same tool ids, the same reasoning blocks to echo), and the per-tool
+        `_dispatch` steps that follow key off those frozen ids. A mid-stream
         model error is caught and carried on the result, never raised out of the step, so the
         already-consumed usage — and the partial deltas, for the truncation salvage — survive in
         the recorded output; the caller re-raises it.
@@ -1514,6 +1529,7 @@ class TurnEngine:
         call_names: dict[str, str] = {}
         call_json: dict[str, list[str]] = {}
         call_order: list[str] = []
+        reasoning: list[ThinkingBlock | RedactedThinkingBlock] = []
         usages: list[Usage] = []
         error: Exception | None = None
 
@@ -1542,6 +1558,8 @@ class TurnEngine:
                         call_order.append(call_id)
                     case ToolCallDelta(id=call_id, partial_json=partial):
                         call_json[call_id].append(partial)
+                    case ThinkingBlock() | RedactedThinkingBlock():
+                        reasoning.append(event)
                     case Usage():
                         usages.append(event)
         except Exception as caught:
@@ -1568,7 +1586,12 @@ class TurnEngine:
             )
             for call_id in call_order
         )
-        return StreamResult(text="".join(parts), tool_calls=tool_calls, usages=tuple(usages))
+        return StreamResult(
+            text="".join(parts),
+            tool_calls=tool_calls,
+            reasoning=tuple(reasoning),
+            usages=tuple(usages),
+        )
 
     async def _publish_cost(self, usage_events: list[Usage]) -> None:
         """After each model round, push the turn's spend so far as a live CostTick — the same priced

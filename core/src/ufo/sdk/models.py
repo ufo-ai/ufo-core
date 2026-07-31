@@ -30,10 +30,16 @@ from ufo.models.interface import (
     ModelResponseTruncated as ModelResponseTruncated,
 )
 from ufo.models.interface import (
+    RedactedThinkingBlock as RedactedThinkingBlock,
+)
+from ufo.models.interface import (
     TextBlock as TextBlock,
 )
 from ufo.models.interface import (
     TextDelta as TextDelta,
+)
+from ufo.models.interface import (
+    ThinkingBlock as ThinkingBlock,
 )
 from ufo.models.interface import (
     ToolCallDelta as ToolCallDelta,

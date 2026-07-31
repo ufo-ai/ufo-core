@@ -97,8 +97,10 @@ from ufo.models.interface import (
     ModelEvent,
     ModelRequest,
     ModelResponseTruncated,
+    RedactedThinkingBlock,
     TextBlock,
     TextDelta,
+    ThinkingBlock,
     ToolCallDelta,
     ToolCallStart,
     ToolResultBlock,
@@ -292,6 +294,27 @@ class ToolCallingModel:
         yield ToolCallDelta(
             id="c1", partial_json='{"command": "echo hi", "user_description": "running a check"}'
         )
+        yield Usage(input_tokens=2, output_tokens=2)
+
+
+@dataclass
+class ThinkingToolCallingModel:
+    """Reasons — one encrypted block, one thinking block — calls a tool, then answers once the
+    result comes back, recording each round's window so a test can read back the assistant message
+    the engine put in front of the model."""
+
+    seen: list[tuple[Message, ...]] = field(default_factory=list)
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        self.seen.append(request.messages)
+        if len(self.seen) > 1:
+            yield TextDelta(text="done")
+            yield Usage(input_tokens=1, output_tokens=1)
+            return
+        yield RedactedThinkingBlock(data="ZW5jcnlwdGVk")
+        yield ThinkingBlock(thinking="", signature="sig-1")
+        yield ToolCallStart(id="c1", name="no_such_tool")
+        yield ToolCallDelta(id="c1", partial_json="{}")
         yield Usage(input_tokens=2, output_tokens=2)
 
 
@@ -1357,6 +1380,29 @@ async def test_tool_call_round_dispatches_in_sandbox_then_answers(db: None, tmp_
     assert isinstance(tool_result, tuple) and isinstance(tool_result[0], ToolResultBlock)
     assert "hi" in tool_result[0].content
     assert stored.messages[-1] == Message(role="assistant", content="done")
+
+
+async def test_reasoning_blocks_open_the_assistant_message_that_carries_the_tool_calls(
+    db: None, tmp_path: Path
+) -> None:
+    turn = await _seed_turn("queued", None)
+    model = ThinkingToolCallingModel()
+    engine = _engine(turn, model, tmp_path)
+    frame = await engine.run()
+    assert frame.status == "done"
+    assert frame.text == "done"
+    echoed = Message(
+        role="assistant",
+        content=(
+            RedactedThinkingBlock(data="ZW5jcnlwdGVk"),
+            ThinkingBlock(thinking="", signature="sig-1"),
+            ToolUseBlock(id="c1", name="no_such_tool", input={}),
+        ),
+    )
+    assert model.seen[1][-2] == echoed
+    stored = await engine.transcript.read()
+    assert stored is not None
+    assert stored.messages[1] == echoed
 
 
 async def test_multi_tool_round_publishes_skill_then_tool_activity_frames_in_order(

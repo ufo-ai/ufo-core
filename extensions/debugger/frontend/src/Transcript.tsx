@@ -59,6 +59,15 @@ function Block(props: { block: ContentBlock }) {
       return <pre>{block.text}</pre>;
     case "image":
       return <div className="meta">[image]</div>;
+    case "thinking":
+      return (
+        <details>
+          <summary>thinking</summary>
+          <pre>{block.thinking}</pre>
+        </details>
+      );
+    case "redacted_thinking":
+      return <div className="meta">[redacted reasoning]</div>;
     case "tool_use":
       return (
         <details>

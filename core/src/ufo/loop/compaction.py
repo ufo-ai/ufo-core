@@ -30,8 +30,10 @@ from ufo.models.interface import (
     Message,
     ModelClient,
     ModelRequest,
+    RedactedThinkingBlock,
     TextBlock,
     TextDelta,
+    ThinkingBlock,
     ToolResultBlock,
     ToolUseBlock,
 )
@@ -62,6 +64,7 @@ COMPACTION_FORMAT_RESTATEMENT = (
     "your instructions — no prose, no markdown fences, nothing else."
 )
 IMAGE_MARKER = "[image]"
+REDACTED_REASONING_MARKER = "[redacted reasoning]"
 REPEATED_RUN_MIN_OCCURRENCES = 10
 REPEATED_RUN_UNIT_MAX_WORDS = 32
 REPEATED_RUN_WORD_MAX_CHARS = 80
@@ -453,10 +456,10 @@ class Compaction:
         return compaction_key(self.conversation_id, index, half)
 
     def _tokens(self, messages: tuple[Message, ...]) -> int:
-        """Estimate the window's token cost: text length over CHARS_PER_TOKEN plus a flat cost per
-        inline image. Images carry no text, so without IMAGE_TOKEN_ESTIMATE an image-heavy window
-        counts as ~0 tokens and never trips the compaction trigger, ballooning the stored
-        conversation.
+        """Estimate the window's token cost: text length (plus a reasoning block's opaque bytes)
+        over CHARS_PER_TOKEN, plus a flat cost per inline image. Images carry no text, so without
+        IMAGE_TOKEN_ESTIMATE an image-heavy window counts as ~0 tokens and never trips the
+        compaction trigger, ballooning the stored conversation.
 
         Both constants are measured against Anthropic's `count_tokens` on real windows, never
         assumed. What a real window is made of tokenizes dense: connector JSON at 2.2 characters per
@@ -465,10 +468,35 @@ class Compaction:
         over-estimating compacts a little early, while under-estimating sails a connector-heavy turn
         past the trigger to overflow the provider instead (#282)."""
         return sum(
-            (len(message.role) + len(self._text(message)) + CHARS_PER_TOKEN - 1) // CHARS_PER_TOKEN
+            (
+                len(message.role)
+                + len(self._text(message))
+                + self._opaque_chars(message)
+                + CHARS_PER_TOKEN
+                - 1
+            )
+            // CHARS_PER_TOKEN
             + IMAGE_TOKEN_ESTIMATE * self._image_count(message)
             for message in messages
         )
+
+    def _opaque_chars(self, message: Message) -> int:
+        """What a reasoning block costs the window beyond its rendered text: a thinking block's
+        signature and a redacted block's encrypted body are re-sent on every request of the turn but
+        are not prose a summarizer can use, so they are counted here and rendered nowhere. Counted
+        because an uncounted block is the direction `_tokens` cannot afford — under `display:
+        omitted` the signature is the whole block, so leaving it out estimates every reasoning round
+        of the deploy's default model at zero."""
+        if isinstance(message.content, str):
+            return 0
+        total = 0
+        for block in message.content:
+            match block:
+                case ThinkingBlock(signature=signature):
+                    total += len(signature)
+                case RedactedThinkingBlock(data=data):
+                    total += len(data)
+        return total
 
     def _image_count(self, message: Message) -> int:
         if isinstance(message.content, str):
@@ -490,6 +518,10 @@ class Compaction:
             match block:
                 case TextBlock(text=text):
                     rendered.append(text)
+                case ThinkingBlock(thinking=thinking):
+                    rendered.append(thinking)
+                case RedactedThinkingBlock():
+                    rendered.append(REDACTED_REASONING_MARKER)
                 case ImageBlock():
                     rendered.append(IMAGE_MARKER)
                 case ToolResultBlock(content=str(content)):
