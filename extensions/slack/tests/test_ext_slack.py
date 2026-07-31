@@ -5016,6 +5016,7 @@ async def test_a_rejected_progress_post_costs_an_update_and_not_the_reply(
         await asyncio.sleep(0.01)
 
     await _finish_turn(turn_id, "migrated")
+    await asyncio.wait_for(task, timeout=10)
     await app.state.writeback_poller.drain()
 
     async with workspace_tx() as connection:
@@ -5030,7 +5031,6 @@ async def test_a_rejected_progress_post_costs_an_update_and_not_the_reply(
     assert writeback.reply_ref == "C1:999.100"
     reply = json.loads(_requests_to(recorder, slack.SLACK_CHAT_POST_MESSAGE_URL)[-1].content)
     assert reply["text"] == "migrated" and reply["thread_ts"] == "100.5"
-    await asyncio.wait_for(task, timeout=10)
     assert turn_id not in slack._PROGRESS_TASKS
 
 
