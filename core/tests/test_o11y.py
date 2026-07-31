@@ -7,9 +7,17 @@ from opentelemetry._logs import SeverityNumber
 from opentelemetry.sdk._logs import LoggerProvider
 from opentelemetry.sdk._logs.export import InMemoryLogRecordExporter, SimpleLogRecordProcessor
 from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from opentelemetry.sdk.trace import TracerProvider
 
 from ufo import o11y
+from ufo.models.anthropic import (
+    INITIAL_RETRY_DELAY_SECONDS,
+    MAX_EMPTY_PROVIDER_RETRIES,
+    MAX_PROVIDER_RETRIES,
+    MAX_RETRY_DELAY_SECONDS,
+    PROVIDER_TIMEOUT_SECONDS,
+)
 
 
 def test_redact_payload_drops_sensitive_keys_at_depth():
@@ -53,6 +61,64 @@ def test_emit_metric_caches_instruments():
     instrument = o11y._counters["turn_started_total"]
     o11y.emit_metric("turn_started_total", status="done")
     assert o11y._counters["turn_started_total"] is instrument
+
+
+def test_emit_histogram_rejects_unregistered_names():
+    with pytest.raises(ValueError, match="unknown histogram"):
+        o11y.emit_histogram("model_call_ms", 1)
+
+
+def test_emit_histogram_caches_instruments():
+    o11y.emit_histogram("model_round_ms", 12)
+    instrument = o11y._histograms["model_round_ms"]
+    o11y.emit_histogram("model_round_ms", 34, model="claude-opus-4-8")
+    assert o11y._histograms["model_round_ms"] is instrument
+
+
+PROVIDER_RETRY_BAND_MS = int(
+    (
+        PROVIDER_TIMEOUT_SECONDS * (MAX_PROVIDER_RETRIES + MAX_EMPTY_PROVIDER_RETRIES + 1)
+        + sum(
+            min(INITIAL_RETRY_DELAY_SECONDS * 2**attempt, MAX_RETRY_DELAY_SECONDS)
+            for attempt in range(MAX_PROVIDER_RETRIES)
+        )
+    )
+    * 1000
+)
+
+
+WORST_CASE_MS = {
+    "model_first_event_ms": PROVIDER_RETRY_BAND_MS,
+    "model_round_ms": o11y.HISTOGRAMS["model_first_event_ms"][-1] + 1,
+}
+
+
+def test_registered_histograms_bucket_their_own_worst_case(monkeypatch):
+    """Each name's worst case is its own. The client re-issues only until the first event is
+    yielded — a timed-out attempt with its backoff, an empty completion with none — so the band its
+    retry constants derive is what the first-event latency has to bucket. A round's wall clock is
+    that latency plus the stream, and nothing bounds the stream, so it has to bucket past the
+    highest first-event latency there is. Everything above a top bound shares one bucket, where no
+    percentile survives, so a dropped tail fails here."""
+    reader = InMemoryMetricReader()
+    provider = MeterProvider(metric_readers=[reader])
+    monkeypatch.setattr(o11y.metrics, "get_meter", provider.get_meter)
+    monkeypatch.setattr(o11y, "_histograms", {})
+    for name in o11y.HISTOGRAMS:
+        o11y.emit_histogram(name, WORST_CASE_MS[name])
+    exported = {
+        metric.name: metric
+        for resource in reader.get_metrics_data().resource_metrics
+        for scope in resource.scope_metrics
+        for metric in scope.metrics
+    }
+    for name, boundaries in o11y.HISTOGRAMS.items():
+        metric = exported[f"ufo.{name}"]
+        point = metric.data.data_points[0]
+        assert metric.unit == "ms"
+        assert tuple(point.explicit_bounds) == boundaries
+        assert point.count == 1
+        assert point.bucket_counts[-1] == 0
 
 
 def test_turn_span_yields_and_closes():

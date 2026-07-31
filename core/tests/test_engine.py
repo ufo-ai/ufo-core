@@ -4,7 +4,7 @@ import logging
 import pickle
 import zlib
 from base64 import b64decode, b64encode
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from io import BytesIO
@@ -17,9 +17,16 @@ import sqlalchemy as sa
 from cryptography.fernet import Fernet
 from dbos._error import DBOSWorkflowCancelledError
 from opentelemetry import trace
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import (
+    HistogramDataPoint,
+    InMemoryMetricReader,
+    NumberDataPoint,
+)
 from PIL import Image
 from pydantic import BaseModel, ConfigDict
 
+from ufo import o11y
 from ufo.accounting import record_turn_usage
 from ufo.audience import Audience, audience_subjects, conversation_audience
 from ufo.blob import FilesystemBlobStore
@@ -570,6 +577,50 @@ class StreamErrorModel:
         if self.calls == 1:
             raise RuntimeError("stream boom")
         yield Usage(input_tokens=1, output_tokens=1)
+
+
+@dataclass
+class UsageThenErrorModel:
+    """Reports the round's usage — cache tokens included — and then dies mid-stream: the shape a
+    provider fault takes once the prompt is already charged."""
+
+    calls: int = 0
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        self.calls += 1
+        yield TextDelta(text="partial")
+        yield Usage(input_tokens=9, output_tokens=2, cache_read_tokens=6, cache_write_tokens=4)
+        raise RuntimeError("stream boom")
+
+
+@dataclass
+class ManualClock:
+    """Stands in for `time.monotonic` inside the engine module so a metered round's latencies are
+    exact — the model fake advances it, rather than the fake's own real duration setting them."""
+
+    now: float = 1_000_000.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+
+FIRST_EVENT_SECONDS = 0.25
+REST_OF_STREAM_SECONDS = 1.75
+
+
+@dataclass(frozen=True)
+class ClockedModel:
+    """Advances the clock as it streams: the first event lands FIRST_EVENT_SECONDS into the round
+    and the stream ends REST_OF_STREAM_SECONDS after that, so time to first event and round wall
+    clock are two different known numbers. Its usage carries all four token kinds."""
+
+    clock: ManualClock
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        self.clock.now += FIRST_EVENT_SECONDS
+        yield TextDelta(text="answer")
+        self.clock.now += REST_OF_STREAM_SECONDS
+        yield Usage(input_tokens=11, output_tokens=5, cache_read_tokens=7, cache_write_tokens=3)
 
 
 STUB_AUTHORIZE_URL = "https://stub.test/oauth"
@@ -1248,6 +1299,110 @@ async def test_turn_with_a_traceparent_runs_inside_the_admitting_trace(
     frame = await _engine(traced, model, tmp_path).run()
     assert frame.status == "done"
     assert [context.trace_id for context in model.contexts] == [0x0AF7651916CD43DD8448EB211C80319C]
+
+
+def _metric_capture(monkeypatch: pytest.MonkeyPatch) -> InMemoryMetricReader:
+    """Route what the turn emits onto a reader the test reads back, installing no global meter
+    provider. Both instrument caches hold instruments bound to the provider they were created
+    against, so they are emptied alongside it."""
+    reader = InMemoryMetricReader()
+    provider = MeterProvider(metric_readers=[reader])
+    monkeypatch.setattr(o11y.metrics, "get_meter", provider.get_meter)
+    monkeypatch.setattr(o11y, "_counters", {})
+    monkeypatch.setattr(o11y, "_histograms", {})
+    return reader
+
+
+def _exported_metrics(
+    reader: InMemoryMetricReader,
+) -> dict[str, Sequence[HistogramDataPoint | NumberDataPoint]]:
+    return {
+        metric.name: metric.data.data_points
+        for resource in reader.get_metrics_data().resource_metrics
+        for scope in resource.scope_metrics
+        for metric in scope.metrics
+    }
+
+
+async def test_every_model_round_meters_one_observation_and_its_tokens(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A turn that calls the model twice — one tool round, one answering round — records one
+    observation per round on each latency histogram and the tokens both rounds spent."""
+    reader = _metric_capture(monkeypatch)
+    turn = await _seed_turn("queued", None)
+    carrier = RecordingCarrier(result=ExecResult(stdout="hi\n", stderr="", exit_code=0))
+    frame = await _engine(turn, ToolCallingModel(), tmp_path, carrier=carrier).run()
+    assert frame.status == "done"
+    points = _exported_metrics(reader)
+    assert [(point.count, dict(point.attributes)) for point in points["ufo.model_round_ms"]] == [
+        (2, {"model": "claude-opus-4-8"})
+    ]
+    assert [
+        (point.count, dict(point.attributes)) for point in points["ufo.model_first_event_ms"]
+    ] == [(2, {"model": "claude-opus-4-8"})]
+    assert {
+        (point.attributes["kind"], point.attributes["model"], point.value)
+        for point in points["ufo.model_round_tokens_total"]
+    } == {("input", "claude-opus-4-8", 3), ("output", "claude-opus-4-8", 3)}
+
+
+async def test_a_metered_round_separates_first_event_latency_from_the_round_wall(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The two histograms carry two different measurements of the same round: the wall clock spans
+    the whole stream, and the first-event latency stops at the first event the model yielded."""
+    clock = ManualClock()
+    monkeypatch.setattr("ufo.loop.engine.time", clock)
+    reader = _metric_capture(monkeypatch)
+    turn = await _seed_turn("queued", None)
+    frame = await _engine(turn, ClockedModel(clock), tmp_path).run()
+    assert frame.status == "done"
+    points = _exported_metrics(reader)
+    assert [point.sum for point in points["ufo.model_first_event_ms"]] == [250]
+    assert [point.sum for point in points["ufo.model_round_ms"]] == [2000]
+    assert {
+        (point.attributes["kind"], point.value) for point in points["ufo.model_round_tokens_total"]
+    } == {("input", 11), ("output", 5), ("cache_read", 7), ("cache_write", 3)}
+
+
+async def test_a_failed_round_meters_its_error_class_and_the_tokens_it_already_spent(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A round that streamed before it died reports how fast the model started answering, on the one
+    first-event series — the model did start, and the failure is already a dimension of the wall
+    clock, which is the measurement the failure changes."""
+    reader = _metric_capture(monkeypatch)
+    turn = await _seed_turn("queued", None)
+    model = UsageThenErrorModel()
+    with pytest.raises(ModelStreamError):
+        await _engine(turn, model, tmp_path).run()
+    assert model.calls == 1
+    points = _exported_metrics(reader)
+    assert [dict(point.attributes) for point in points["ufo.model_round_ms"]] == [
+        {"model": "claude-opus-4-8", "error_class": "RuntimeError"}
+    ]
+    assert [dict(point.attributes) for point in points["ufo.model_first_event_ms"]] == [
+        {"model": "claude-opus-4-8"}
+    ]
+    assert {
+        (point.attributes["kind"], point.value) for point in points["ufo.model_round_tokens_total"]
+    } == {("input", 9), ("output", 2), ("cache_read", 6), ("cache_write", 4)}
+
+
+async def test_a_round_that_yielded_nothing_records_no_first_event_latency(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reader = _metric_capture(monkeypatch)
+    turn = await _seed_turn("queued", None)
+    with pytest.raises(ModelStreamError):
+        await _engine(turn, StreamErrorModel(), tmp_path).run()
+    points = _exported_metrics(reader)
+    assert "ufo.model_first_event_ms" not in points
+    assert "ufo.model_round_tokens_total" not in points
+    assert [dict(point.attributes) for point in points["ufo.model_round_ms"]] == [
+        {"model": "claude-opus-4-8", "error_class": "RuntimeError"}
+    ]
 
 
 async def test_terminal_records_cached_share_of_prompt_tokens(db: None, tmp_path: Path) -> None:

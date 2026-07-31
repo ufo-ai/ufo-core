@@ -79,7 +79,7 @@ from ufo.models.interface import (
     ToolUseBlock,
 )
 from ufo.models.pricing import Pricing
-from ufo.o11y import emit_metric, log, turn_span
+from ufo.o11y import emit_histogram, emit_metric, log, turn_span
 from ufo.sandbox.session import TOOL_OUTPUT_DIR, SandboxSession
 from ufo.schema import tables
 from ufo.schema.records import (
@@ -1541,8 +1541,12 @@ class TurnEngine:
                 pending = 0
             last_flush = time.monotonic()
 
+        started = time.monotonic()
+        first_event_ms: int | None = None
         try:
             async for event in self.model.complete(request):
+                if first_event_ms is None:
+                    first_event_ms = int((time.monotonic() - started) * 1000)
                 match event:
                     case TextDelta(text=chunk):
                         parts.append(chunk)
@@ -1564,7 +1568,25 @@ class TurnEngine:
                         usages.append(event)
         except Exception as caught:
             error = caught
+        wall_ms = int((time.monotonic() - started) * 1000)
         await flush()
+        emit_histogram(
+            "model_round_ms",
+            wall_ms,
+            model=request.model,
+            **({} if error is None else {"error_class": type(error).__name__}),
+        )
+        if first_event_ms is not None:
+            emit_histogram("model_first_event_ms", first_event_ms, model=request.model)
+        round_usage = _total_usage(usages)
+        for kind, amount in (
+            ("input", round_usage.input_tokens),
+            ("output", round_usage.output_tokens),
+            ("cache_read", round_usage.cache_read_tokens),
+            ("cache_write", round_usage.cache_write_tokens),
+        ):
+            if amount:
+                emit_metric("model_round_tokens_total", amount, model=request.model, kind=kind)
         if error is not None:
             partial_calls = tuple(
                 f"[tool call: {call_names[call_id]}]\n{''.join(call_json[call_id])}"

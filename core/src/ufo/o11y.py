@@ -11,7 +11,7 @@ from opentelemetry._logs import SeverityNumber
 from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
 from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
-from opentelemetry.metrics import Counter
+from opentelemetry.metrics import Counter, Histogram
 from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
 from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
 from opentelemetry.sdk.metrics import MeterProvider
@@ -42,7 +42,30 @@ METRICS = (
     "sandbox_tool_output_dir_reclaimed_total",
     "tool_offload_failed_total",
     "db_tx_unavailable_total",
+    "model_round_tokens_total",
 )
+MODEL_FIRST_EVENT_MS_BUCKETS = (
+    25,
+    50,
+    100,
+    250,
+    500,
+    1_000,
+    2_500,
+    5_000,
+    10_000,
+    20_000,
+    30_000,
+    60_000,
+    120_000,
+    300_000,
+    600_000,
+    900_000,
+)
+HISTOGRAMS = {
+    "model_round_ms": (*MODEL_FIRST_EVENT_MS_BUCKETS, 1_800_000),
+    "model_first_event_ms": MODEL_FIRST_EVENT_MS_BUCKETS,
+}
 SENSITIVE_FIELD_KEYS = frozenset(
     {
         "prompt",
@@ -59,6 +82,7 @@ SENSITIVE_FIELD_KEYS = frozenset(
 type JsonValue = None | bool | int | float | str | list[JsonValue] | dict[str, JsonValue]
 
 _counters: dict[str, Counter] = {}
+_histograms: dict[str, Histogram] = {}
 
 
 def init_o11y(otlp_endpoint: str | None) -> None:
@@ -217,3 +241,22 @@ def emit_metric(name: str, amount: int = 1, **dimensions: str) -> None:
         counter = metrics.get_meter(INSTRUMENTATION_NAME).create_counter(f"ufo.{name}")
         _counters[name] = counter
     counter.add(amount, attributes=dimensions)
+
+
+def emit_histogram(name: str, value: int, **dimensions: str) -> None:
+    """Record one observation in milliseconds on a registered histogram; unregistered names fail
+    loud. The registry carries each histogram's bucket boundaries, so one name cannot acquire two
+    bucket sets: the SDK default tops out at 10 s and every observation past a top bound shares one
+    bucket, where no percentile survives. The provider re-issues for minutes before the first event,
+    so the first-event boundaries reach past that band; a round's wall clock contains that latency
+    and then the stream, which nothing bounds, so it resolves one step further still."""
+    boundaries = HISTOGRAMS.get(name)
+    if boundaries is None:
+        raise ValueError(f"unknown histogram: {name}")
+    histogram = _histograms.get(name)
+    if histogram is None:
+        histogram = metrics.get_meter(INSTRUMENTATION_NAME).create_histogram(
+            f"ufo.{name}", unit="ms", explicit_bucket_boundaries_advisory=boundaries
+        )
+        _histograms[name] = histogram
+    histogram.record(value, attributes=dimensions)
