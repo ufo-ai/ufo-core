@@ -10,6 +10,7 @@ from evals import (
     connector_refs,
     cos_workflows,
     document_visual,
+    github_connections,
     memory_hygiene,
     object_tools,
     onboarding_help,
@@ -69,6 +70,7 @@ TASKS: tuple[EvalTask, ...] = (
         simulator_model=SCENARIO_SIMULATOR_MODEL,
     ),
     skill_loading_task(SKILL_LOADING_CASES),
+    capability_task("github_connections", github_connections.CASES, serial=True),
     capability_task("connector_refs", connector_refs.CASES),
     capability_task(
         "document_visual",

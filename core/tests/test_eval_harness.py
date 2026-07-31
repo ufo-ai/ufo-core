@@ -23,12 +23,13 @@ import lz4.frame
 import pytest
 import sqlalchemy as sa
 from aiobotocore.session import get_session
+from cryptography.fernet import Fernet
 from dbos import DBOSClient
 from dbos import error as dbos_error
 from httpx import AsyncClient
 
 import evals.harness.target as harness_target
-from evals import cos_workflows
+from evals import cos_workflows, github_connections
 from evals.__main__ import EVAL_SHARE_BUCKET_ENV, _task_reports
 from evals.__main__ import _run as run_evals
 from evals.__main__ import main as eval_main
@@ -123,6 +124,14 @@ from evals.response_register import (
 from ufo.accounting import Pricing
 from ufo.blob import FilesystemBlobStore, S3BlobStore
 from ufo.config import BlobConfig, Config, DatabaseConfig
+from ufo.credentials import (
+    CredentialRequests,
+    CredentialSlotUnset,
+    CredentialStore,
+    install_credential_requests,
+    open_installation,
+    seal_installation,
+)
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, ModelAccess, Trajectory, context_for
 from ufo.governance import Governance, prompt_digest
@@ -157,7 +166,7 @@ from ufo.transcript import (
     encode,
     transcript_key,
 )
-from ufo.workspace import ws
+from ufo.workspace import init_workspace_credentials, ws
 
 MODEL = "claude-opus-4-8"
 AGENT_REASONING = "high"
@@ -260,20 +269,17 @@ def test_registry_pins_judge_and_simulator_models_by_workload() -> None:
     )
 
 
-def test_scenario_tasks_are_exclusive() -> None:
+def test_stateful_and_scenario_tasks_are_exclusive() -> None:
     exclusive = {task.name for task in TASKS if task.exclusive}
     scenario = {task.name for task in TASKS if task.suite == "scenario"}
 
-    assert (
-        exclusive
-        == scenario
-        == {
-            "object_tools_flows",
-            "scenario_smoke",
-            "scenario_env",
-            "memory_hygiene",
-        }
-    )
+    assert scenario == {
+        "object_tools_flows",
+        "scenario_smoke",
+        "scenario_env",
+        "memory_hygiene",
+    }
+    assert exclusive == scenario | {"github_connections"}
 
 
 async def test_task_reports_overlaps_tasks_and_isolates_exclusive_ones() -> None:
@@ -421,6 +427,309 @@ async def test_capability_task_fans_out_and_keeps_corpus_order() -> None:
 
     assert tuple(case.name for case in report.cases) == ("one", "two")
     assert all(case.passed for case in report.cases)
+
+
+async def test_serial_capability_task_keeps_stateful_cases_one_at_a_time() -> None:
+    in_flight = 0
+    maximum = 0
+
+    @dataclass
+    class SerialTarget:
+        judge: None = None
+
+        async def run(self, case: CapabilityCase) -> TargetResult:
+            nonlocal in_flight, maximum
+            in_flight += 1
+            maximum = max(maximum, in_flight)
+            await asyncio.sleep(0)
+            in_flight -= 1
+            return TargetResult(CapabilityOutput(case.name, ()), clean=True)
+
+    task = capability_task(
+        "stateful",
+        tuple(CapabilityCase(name, "answer", exact_scorer(name)) for name in ("one", "two")),
+        serial=True,
+    )
+
+    report = await task.run(SerialTarget(), asyncio.Semaphore(2))  # type: ignore[arg-type]
+
+    assert maximum == 1
+    assert task.exclusive
+    assert tuple(case.name for case in report.cases) == ("one", "two")
+
+
+def test_serial_capability_task_changes_the_suite_digest() -> None:
+    cases = tuple(CapabilityCase(name, "answer", exact_scorer(name)) for name in ("one", "two"))
+
+    concurrent = capability_task("stateful", cases)
+    serial = capability_task("stateful", cases, serial=True)
+
+    assert concurrent.digest != serial.digest
+
+
+async def test_github_connection_cases_seed_the_claimed_state(db: None) -> None:
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    member_id = await _seed_member(workspace_id, "owner@example.com")
+    fernet = Fernet(Fernet.generate_key())
+    store = CredentialStore(fernet)
+    init_workspace_credentials(store)
+    install_credential_requests(
+        CredentialRequests(
+            fernet=fernet,
+            declared=frozenset(
+                {
+                    github_connections.GIT_INSTALLATION_SLOT,
+                    github_connections.GIT_SLOT,
+                }
+            ),
+            fillable=frozenset({github_connections.GIT_SLOT}),
+        )
+    )
+
+    try:
+        bound_source_id: UUID | None = None
+        for _ in range(2):
+            for case, connector, app in zip(
+                github_connections.CASES,
+                (False, True, False),
+                (False, False, True),
+                strict=True,
+            ):
+                assert case.seed is not None
+                with ws(workspace_id):
+                    await case.seed(workspace_id, agent_id)
+                    async with workspace_tx() as connection:
+                        grants = (
+                            await connection.execute(
+                                sa.select(sa.func.count())
+                                .select_from(
+                                    tables.connector_grant.join(
+                                        tables.connection,
+                                        tables.connector_grant.c.connection_id
+                                        == tables.connection.c.id,
+                                    )
+                                )
+                                .where(
+                                    tables.connector_grant.c.workspace_id == workspace_id,
+                                    tables.connector_grant.c.agent_id == agent_id,
+                                    tables.connection.c.provider == "github",
+                                )
+                            )
+                        ).scalar_one()
+                        if bound_source_id is not None:
+                            detached = (
+                                await connection.execute(
+                                    sa.select(
+                                        tables.source.c.connection_id,
+                                        tables.source.c.removed_at,
+                                    ).where(tables.source.c.id == bound_source_id)
+                                )
+                            ).one()
+                            assert detached.connection_id is None
+                            assert detached.removed_at is not None
+                            bound_source_id = None
+                        if connector:
+                            connection_id = (
+                                await connection.execute(
+                                    sa.select(tables.connection.c.id).where(
+                                        tables.connection.c.workspace_id == workspace_id,
+                                        tables.connection.c.provider == "github",
+                                    )
+                                )
+                            ).scalar_one()
+                            bound_source_id = uuid4()
+                            await connection.execute(
+                                sa.insert(tables.source).values(
+                                    id=bound_source_id,
+                                    workspace_id=workspace_id,
+                                    backend="github-eval",
+                                    config={},
+                                    subject="shared",
+                                    owner_member_id=member_id,
+                                    connection_id=connection_id,
+                                    cursor=None,
+                                    next_sync_at=sa.func.now(),
+                                    claimed_by=None,
+                                    claim_expires_at=None,
+                                    created_at=sa.func.now(),
+                                    updated_at=sa.func.now(),
+                                )
+                            )
+                    try:
+                        sealed = await store.get(
+                            workspace_id, github_connections.GIT_INSTALLATION_SLOT
+                        )
+                    except CredentialSlotUnset:
+                        installed = False
+                    else:
+                        installed = (
+                            open_installation(
+                                fernet,
+                                workspace_id,
+                                github_connections.GIT_INSTALLATION_SLOT,
+                                sealed,
+                            )
+                            == github_connections.GITHUB_INSTALLATION_ID
+                        )
+
+                assert bool(grants) is connector
+                assert installed is app
+
+        assert github_connections.CASES[0].seed is not None
+        with ws(workspace_id):
+            foreign_apps = (
+                (
+                    store,
+                    seal_installation(
+                        fernet,
+                        workspace_id,
+                        github_connections.GIT_INSTALLATION_SLOT,
+                        "foreign-installation",
+                    ),
+                ),
+                (store, "not-an-installation-seal"),
+                (CredentialStore(Fernet(Fernet.generate_key())), "sealed-by-another-deploy"),
+            )
+            for foreign_store, value in foreign_apps:
+                await foreign_store.put(
+                    workspace_id,
+                    github_connections.GIT_INSTALLATION_SLOT,
+                    value,
+                )
+                with pytest.raises(RuntimeError, match="without a GitHub App"):
+                    await github_connections.CASES[0].seed(workspace_id, agent_id)
+                assert (
+                    await foreign_store.get(
+                        workspace_id,
+                        github_connections.GIT_INSTALLATION_SLOT,
+                    )
+                    == value
+                )
+                async with workspace_tx() as connection:
+                    await connection.execute(
+                        sa.delete(tables.credential).where(
+                            tables.credential.c.workspace_id == workspace_id,
+                            tables.credential.c.slot == github_connections.GIT_INSTALLATION_SLOT,
+                        )
+                    )
+            await store.put(workspace_id, github_connections.GIT_SLOT, "member-token")
+            with pytest.raises(RuntimeError, match="without a GitHub git token"):
+                await github_connections.CASES[0].seed(workspace_id, agent_id)
+            assert (await store.get(workspace_id, github_connections.GIT_SLOT)) == "member-token"
+            async with workspace_tx() as connection:
+                await connection.execute(
+                    sa.delete(tables.credential).where(
+                        tables.credential.c.workspace_id == workspace_id,
+                        tables.credential.c.slot == github_connections.GIT_SLOT,
+                    )
+                )
+                foreign_connection_id = uuid4()
+                foreign_conversation_id = uuid4()
+                await connection.execute(
+                    sa.insert(tables.conversation).values(
+                        id=foreign_conversation_id,
+                        workspace_id=workspace_id,
+                        agent_id=agent_id,
+                        surface="eval",
+                        queue_key=f"eval-foreign-github:{foreign_conversation_id}",
+                        created_at=sa.func.now(),
+                        updated_at=sa.func.now(),
+                    )
+                )
+                await connection.execute(
+                    sa.insert(tables.connection).values(
+                        id=foreign_connection_id,
+                        workspace_id=workspace_id,
+                        provider="github",
+                        account_id="member-account",
+                        host="",
+                        owner_member_id=member_id,
+                        conversation_id=foreign_conversation_id,
+                        created_at=sa.func.now(),
+                        updated_at=sa.func.now(),
+                    )
+                )
+            with pytest.raises(RuntimeError, match="without GitHub accounts"):
+                await github_connections.CASES[0].seed(workspace_id, agent_id)
+            async with workspace_tx() as connection:
+                assert (
+                    await connection.execute(
+                        sa.select(tables.connection.c.id).where(
+                            tables.connection.c.workspace_id == workspace_id,
+                            tables.connection.c.id == foreign_connection_id,
+                        )
+                    )
+                ).scalar_one() == foreign_connection_id
+    finally:
+        install_credential_requests(None)
+        init_workspace_credentials(None)
+
+
+async def test_github_states_without_a_credential_key_are_explicit(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    await _seed_member(workspace_id, "owner@example.com")
+    init_workspace_credentials(None)
+    install_credential_requests(None)
+    monkeypatch.delenv("GITHUB_APP_INSTALLATION", raising=False)
+
+    try:
+        for case in github_connections.CASES[:2]:
+            assert case.seed is not None
+            with ws(workspace_id):
+                await case.seed(workspace_id, agent_id)
+
+        app_case = github_connections.CASES[2]
+        assert app_case.seed is not None
+        with (
+            ws(workspace_id),
+            pytest.raises(RuntimeError, match="credential authorization unavailable"),
+        ):
+            await app_case.seed(workspace_id, agent_id)
+
+        fernet = Fernet(Fernet.generate_key())
+        store = CredentialStore(fernet)
+        init_workspace_credentials(store)
+        install_credential_requests(
+            CredentialRequests(
+                fernet=fernet,
+                declared=frozenset(
+                    {
+                        github_connections.GIT_INSTALLATION_SLOT,
+                        github_connections.GIT_SLOT,
+                    }
+                ),
+                fillable=frozenset({github_connections.GIT_SLOT}),
+            )
+        )
+        with ws(workspace_id):
+            await app_case.seed(workspace_id, agent_id)
+
+        init_workspace_credentials(None)
+        install_credential_requests(None)
+        for case in github_connections.CASES:
+            assert case.seed is not None
+            with ws(workspace_id), pytest.raises(RuntimeError, match="without a GitHub App"):
+                await case.seed(workspace_id, agent_id)
+
+        init_workspace_credentials(store)
+        with ws(workspace_id):
+            sealed = await store.get(workspace_id, github_connections.GIT_INSTALLATION_SLOT)
+        assert (
+            open_installation(
+                fernet,
+                workspace_id,
+                github_connections.GIT_INSTALLATION_SLOT,
+                sealed,
+            )
+            == github_connections.GITHUB_INSTALLATION_ID
+        )
+    finally:
+        install_credential_requests(None)
+        init_workspace_credentials(None)
 
 
 async def test_seed_candidate_agent_arms_a_pending_proposals_prompt(db: None) -> None:
@@ -1756,6 +2065,106 @@ async def test_required_tools_scorer_rejects_error_and_missing_result() -> None:
 
     assert not (await grader(errored)).passed
     assert not (await grader(unfinished)).passed
+
+
+async def test_github_connection_graders_accept_the_shipped_routes() -> None:
+    coding = ToolInvocation("load_skill", {"name": "coding"}, "loaded", True)
+    github_app = ToolInvocation("connect_github", {}, "admin required", True, True)
+    github_connector = ToolInvocation(
+        "connect_account", {"provider": "github"}, "member required", True, True
+    )
+    outputs = (
+        CapabilityOutput("", (coding, github_app, github_connector)),
+        CapabilityOutput("", (coding, github_app)),
+        CapabilityOutput("", (coding, github_connector)),
+    )
+
+    reasons = (
+        "loaded 'coding'; attempted connect_github, connect_account",
+        "loaded 'coding'; attempted connect_github",
+        "loaded 'coding'; attempted connect_account",
+    )
+
+    for case, output, reason in zip(github_connections.CASES, outputs, reasons, strict=True):
+        verdict = await case.grader(output)
+        assert verdict.passed
+        assert verdict.reason == reason
+
+
+async def test_github_connection_graders_reject_the_wrong_routes() -> None:
+    coding = ToolInvocation("load_skill", {"name": "coding"}, "loaded", True)
+    github_app = ToolInvocation("connect_github", {}, "admin required", True, True)
+    github_connector = ToolInvocation(
+        "connect_account", {"provider": "github"}, "member required", True, True
+    )
+    wrong_connector = ToolInvocation(
+        "connect_account", {"provider": "gitlab"}, "member required", True, True
+    )
+    failures = (
+        (
+            CapabilityOutput("", (coding, github_connector)),
+            "loaded 'coding'; did not attempt: connect_github matching {}",
+        ),
+        (
+            CapabilityOutput("", (coding, github_app, github_connector)),
+            "loaded 'coding'; attempted forbidden tool(s): connect_account",
+        ),
+        (
+            CapabilityOutput("", (coding, wrong_connector)),
+            "loaded 'coding'; did not attempt: connect_account matching {'provider': 'github'}",
+        ),
+    )
+
+    for case, (output, reason) in zip(github_connections.CASES, failures, strict=True):
+        verdict = await case.grader(output)
+        assert not verdict.passed
+        assert verdict.reason == reason
+
+
+async def test_github_connection_graders_require_the_parent_to_load_coding_first() -> None:
+    errored_coding = ToolInvocation("load_skill", {"name": "coding"}, "mount failed", True, True)
+    coding = ToolInvocation("load_skill", {"name": "coding"}, "loaded", True)
+    github_app = ToolInvocation("connect_github", {}, "admin required", True, True)
+    github_connector = ToolInvocation(
+        "connect_account", {"provider": "github"}, "member required", True, True
+    )
+    routed = (
+        (github_app, github_connector),
+        (github_app,),
+        (github_connector,),
+    )
+
+    for case, calls in zip(github_connections.CASES, routed, strict=True):
+        assert not (await case.grader(CapabilityOutput("", (errored_coding, *calls)))).passed
+        assert not (await case.grader(CapabilityOutput("", (*calls, coding)))).passed
+        assert not (
+            await case.grader(
+                CapabilityOutput(
+                    "",
+                    (
+                        coding,
+                        ToolInvocation("spawn_subagent", {"profile": "coding"}, "done", True),
+                        *calls,
+                    ),
+                )
+            )
+        ).passed
+
+
+def test_github_connection_grading_statements_pin_inputs_order_and_restraint() -> None:
+    statements = tuple(grading_statement(case.grader) for case in github_connections.CASES)
+
+    skill = "the first load_skill loads 'coding' (not the distractor 'code-review') and succeeds; "
+    assert statements == (
+        skill
+        + "attempts connect_github matching {}, connect_account matching {'provider': 'github'}; "
+        "load_skill before connect_github, load_skill before connect_account; "
+        "never attempts spawn_subagent",
+        skill + "attempts connect_github matching {}; load_skill before connect_github; "
+        "never attempts connect_account, spawn_subagent",
+        skill + "attempts connect_account matching {'provider': 'github'}; "
+        "load_skill before connect_account; never attempts connect_github, spawn_subagent",
+    )
 
 
 async def test_browser_navigation_requires_successful_navigation_and_reading() -> None:
@@ -3972,10 +4381,11 @@ def test_candidate_arm_rejects_corpus_backed_evals(tmp_path) -> None:
     assert excinfo.value.code == 2
 
 
-async def test_eval_run_pins_model_metadata_on_boundary_report(tmp_path, monkeypatch) -> None:
+async def test_eval_run_installs_credentials_and_pins_model_metadata(tmp_path, monkeypatch) -> None:
     workspace_id = uuid4()
     agent_id = uuid4()
     report = EvalReport(name="suite", suite="capability", digest="sha256:abc", cases=())
+    installed: list[CredentialRequests | None] = []
 
     async def resolve(*_args):
         return workspace_id, agent_id, "prompt", MODEL, "auto"
@@ -3989,15 +4399,29 @@ async def test_eval_run_pins_model_metadata_on_boundary_report(tmp_path, monkeyp
     async def dispose() -> None:
         return None
 
-    monkeypatch.delenv("UFO_CREDENTIAL_KEY", raising=False)
+    key = Fernet.generate_key()
+    monkeypatch.setenv("UFO_CREDENTIAL_KEY", key.decode())
     monkeypatch.setattr("evals.__main__.init_db", lambda _url: None)
     monkeypatch.setattr("evals.__main__.dispose_db", dispose)
     monkeypatch.setattr("evals.__main__.init_workspace_credentials", lambda _store: None)
+    monkeypatch.setattr(
+        "evals.__main__.install_credential_requests", lambda requests: installed.append(requests)
+    )
     monkeypatch.setattr("evals.__main__.resolve_workspace_and_agent", resolve)
     monkeypatch.setattr("evals.__main__.blob_store_for", lambda _config: object())
     monkeypatch.setattr("evals.__main__.DBOSClient", lambda **_kwargs: object())
     monkeypatch.setattr("evals.__main__.WorkspaceDriver", lambda *_args, **_kwargs: object())
-    monkeypatch.setattr("evals.__main__.load_manifests", lambda *_args: ())
+    monkeypatch.setattr(
+        "evals.__main__.load_manifests",
+        lambda *_args: (
+            SimpleNamespace(
+                credentials=(
+                    SimpleNamespace(name="member-slot", member_filled=True),
+                    SimpleNamespace(name="provider-slot", member_filled=False),
+                )
+            ),
+        ),
+    )
     registry = ModelRegistry({}, CORE_PRICING, MODEL)
     monkeypatch.setattr("evals.__main__.model_registry", lambda *_args: registry)
     monkeypatch.setattr(
@@ -4024,6 +4448,11 @@ async def test_eval_run_pins_model_metadata_on_boundary_report(tmp_path, monkeyp
     reports, agent_prompt = await run_evals(config, (task,), "assistant")
 
     assert agent_prompt == "prompt"
+    assert installed[-1] is None
+    requests = cast(CredentialRequests, installed[0])
+    assert requests.fernet.decrypt(Fernet(key).encrypt(b"proof")) == b"proof"
+    assert requests.declared == frozenset({"member-slot", "provider-slot"})
+    assert requests.fillable == frozenset({"member-slot"})
     assert reports == (
         report.model_copy(
             update={

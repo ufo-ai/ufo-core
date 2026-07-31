@@ -62,6 +62,7 @@ def capability_task(
     judge_model: str | None = None,
     judge_max_tokens: int = JUDGE_MAX_TOKENS,
     judge_reasoning: ReasoningEffort = "low",
+    serial: bool = False,
 ) -> EvalTask:
     needs_judge = any(case.rubric or case.visual_rubric for case in cases)
     if needs_judge and judge_model is None:
@@ -75,6 +76,7 @@ def capability_task(
             "runner": "capability-case",
             "task": name,
             "cases": [case.payload() for case in cases],
+            **({"serial": True} if serial else {}),
             **(
                 {
                     "judgeModel": judge_model,
@@ -88,9 +90,15 @@ def capability_task(
     )
 
     async def run(target: CapabilityTarget, slots: asyncio.Semaphore) -> EvalReport:
-        results = await gather_cases(
-            slots, tuple(partial(run_capability_case, case, target) for case in cases)
-        )
+        if serial:
+            results: tuple[EvalCaseResult, ...] = ()
+            for case in cases:
+                async with slots:
+                    results += (await run_capability_case(case, target),)
+        else:
+            results = await gather_cases(
+                slots, tuple(partial(run_capability_case, case, target) for case in cases)
+            )
         return EvalReport(name=name, suite="capability", digest=digest, cases=results)
 
     return EvalTask(
@@ -103,6 +111,7 @@ def capability_task(
         judge_revision=JUDGE_REVISION if judge_model is not None else None,
         judge_max_tokens=judge_max_tokens,
         judge_reasoning=judge_reasoning,
+        exclusive=serial,
     )
 
 

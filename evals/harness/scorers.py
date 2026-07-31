@@ -30,6 +30,7 @@ from evals.harness.capability import (
     SharedArtifact,
     grading_statement,
 )
+from evals.harness.harness import JsonObject
 
 ANSWER_TOLERANCE = 0.05
 
@@ -119,6 +120,53 @@ def required_tools_scorer(
 
     ordered = "".join(f"; {before} precedes {after}" for before, after in orderings)
     return DescribedGrader(f"{', '.join(required)} complete(s) successfully{ordered}", grade)
+
+
+def attempted_tools_scorer(
+    required: tuple[tuple[str, JsonObject], ...],
+    forbidden: tuple[str, ...],
+    orderings: tuple[tuple[str, str], ...],
+) -> Grader:
+    """Required handoff tools are attempted and no adjacent handoff is attempted.
+
+    Authorization handoffs fail closed without a speaking member in the capability harness, so
+    their routing eval grades the selected boundary rather than an external consent completion.
+    """
+
+    async def grade(output: CapabilityOutput) -> CapabilityVerdict:
+        missing = [
+            f"{tool} matching {expected}"
+            for tool, expected in required
+            if not any(
+                call.name == tool
+                and all(call.input.get(key) == value for key, value in expected.items())
+                for call in output.calls
+            )
+        ]
+        if missing:
+            return CapabilityVerdict(False, f"did not attempt: {', '.join(missing)}")
+        used_forbidden = [tool for tool in forbidden if tool in output.tools]
+        if used_forbidden:
+            return CapabilityVerdict(
+                False, f"attempted forbidden tool(s): {', '.join(used_forbidden)}"
+            )
+        disordered = [
+            f"{before} before {after}"
+            for before, after in orderings
+            if before in output.tools
+            and after in output.tools
+            and output.tools.index(before) > output.tools.index(after)
+        ]
+        if disordered:
+            return CapabilityVerdict(False, f"wrong order: {', '.join(disordered)}")
+        attempted = ", ".join(tool for tool, _ in required)
+        return CapabilityVerdict(True, f"attempted {attempted}")
+
+    attempts = ", ".join(f"{tool} matching {expected}" for tool, expected in required)
+    ordered = ", ".join(f"{before} before {after}" for before, after in orderings)
+    return DescribedGrader(
+        f"attempts {attempts}; {ordered}; never attempts {', '.join(forbidden)}", grade
+    )
 
 
 def restraint_scorer(forbidden: tuple[str, ...]) -> Grader:

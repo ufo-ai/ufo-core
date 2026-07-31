@@ -101,7 +101,7 @@ from evals.wandr.runner import (
 from ufo.agent_scope import agent
 from ufo.blob import blob_store_for
 from ufo.config import Config, config_path, load_config
-from ufo.credentials import CredentialStore
+from ufo.credentials import CredentialRequests, CredentialStore, install_credential_requests
 from ufo.db import dispose_db, init_db
 from ufo.ext.context import context_for
 from ufo.ext.loader import load_manifests, skill_registry
@@ -493,9 +493,26 @@ async def _run(
     concurrency: int = 1,
 ) -> tuple[tuple[EvalReport, ...], str]:
     init_db(config.database.url)
+    manifests = load_manifests(config.pack.name)
     key = os.environ.get(config.credentials.key_env)
     credentials = CredentialStore(fernet=Fernet(key.encode())) if key else None
     init_workspace_credentials(credentials)
+    install_credential_requests(
+        None
+        if credentials is None
+        else CredentialRequests(
+            fernet=credentials.fernet,
+            declared=frozenset(
+                slot.name for manifest in manifests for slot in manifest.credentials
+            ),
+            fillable=frozenset(
+                slot.name
+                for manifest in manifests
+                for slot in manifest.credentials
+                if slot.member_filled
+            ),
+        )
+    )
     try:
         async with AsyncExitStack() as stack:
             if collector is not None:
@@ -523,7 +540,7 @@ async def _run(
                 agent_model,
                 workflow_wait_seconds=workflow_wait_seconds,
             )
-            registry = model_registry(config, load_manifests(config.pack.name))
+            registry = model_registry(config, manifests)
             ctx = context_for(
                 "evals",
                 frozenset(),
@@ -540,9 +557,7 @@ async def _run(
             with ws(workspace_id), agent(agent_id):
                 loadable_skills: frozenset[str] | None = None
                 if any(task.suite == "skill_loading" for task in tasks):
-                    loadable_skills = frozenset(
-                        skill_registry(load_manifests(config.pack.name)).by_name
-                    )
+                    loadable_skills = frozenset(skill_registry(manifests).by_name)
                 compaction: CompactionTarget | None = None
                 if any(task.suite == "compaction" for task in tasks):
                     resolved_model = registry.resolve(agent_model)
@@ -592,7 +607,6 @@ async def _run(
                     for task in tasks
                 )
                 reports = await _task_reports(tasks, targets, slots)
-            manifests = load_manifests(config.pack.name)
             completed: list[EvalReport] = []
             for report, task in zip(reports, tasks, strict=True):
                 digest = report.digest
@@ -643,6 +657,7 @@ async def _run(
                 )
             return tuple(completed), agent_prompt
     finally:
+        install_credential_requests(None)
         init_workspace_credentials(None)
         await dispose_db()
 

@@ -76,6 +76,16 @@ def test_coding_skills_parse_and_index() -> None:
     assert "only the owner" not in instructions
 
 
+def test_private_git_access_does_not_infer_from_the_connector() -> None:
+    instructions = skill_registry((coding.manifest(),)).named("coding").instructions
+
+    assert (
+        "A working connector is never a reason to skip `connect_github` when private git access "
+        "is missing."
+    ) in instructions
+    assert "Composio" not in instructions
+
+
 def test_coding_prompt_wraps_with_citation_and_fills_the_skill_index() -> None:
     prompt = subagent_system_prompt(
         coding.CODING_PROFILE, skills=(("extension-skill", "A turn-specific coding workflow."),)
