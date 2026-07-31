@@ -4442,17 +4442,30 @@ async def test_the_transcript_read_ledger_caps_at_the_real_limit_with_more_behin
     bounding: one page carries at most `TRANSCRIPT_READ_LIMIT` rows and says more remain."""
     client, workspace_id, agent_id = web
     member_m, _token_m = await _seed_member(workspace_id, "m@example.com")
-    _admin_id, token_admin = await _seed_member(workspace_id, "boss@example.com", admin=True)
-    for index in range(web_surface.TRANSCRIPT_READ_LIMIT + 1):
-        conversation = await _seed_agent_conversation(
-            workspace_id,
-            agent_id,
-            queue_key=f"theirs-{index}",
-            audience=f"member:{member_m}",
-            member_id=member_m,
+    admin_id, token_admin = await _seed_member(workspace_id, "boss@example.com", admin=True)
+    conversation = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="theirs",
+        audience=f"member:{member_m}",
+        member_id=member_m,
+    )
+    recorded_at = datetime.now(UTC)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.transcript_access),
+            [
+                {
+                    "id": uuid4(),
+                    "workspace_id": workspace_id,
+                    "conversation_id": conversation,
+                    "reader_member_id": admin_id,
+                    "subject_member_id": member_m,
+                    "created_at": recorded_at + timedelta(microseconds=index),
+                }
+                for index in range(web_surface.TRANSCRIPT_READ_LIMIT + 1)
+            ],
         )
-        acknowledged = await _acknowledge(client, agent_id, conversation, token_admin)
-        assert acknowledged.json()["applied"] is True
 
     page = (
         await client.get(
