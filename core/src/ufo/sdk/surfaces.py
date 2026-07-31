@@ -90,6 +90,9 @@ from ufo.ext.surface import (
 from ufo.ext.surface import (
     Writeback as Writeback,
 )
+from ufo.ext.surface import (
+    record_transcript_access as record_transcript_access,
+)
 from ufo.grants import (
     ConnectRequestInvalid as ConnectRequestInvalid,
 )

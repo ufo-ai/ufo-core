@@ -505,6 +505,31 @@ source_grant = sa.Table(
     ),
 )
 
+transcript_access = sa.Table(
+    "transcript_access",
+    metadata,
+    sa.Column("id", sa.Uuid, primary_key=True),
+    sa.Column("workspace_id", sa.Uuid, sa.ForeignKey("workspace.id"), nullable=False),
+    sa.Column("conversation_id", sa.Uuid, nullable=False),
+    sa.Column("reader_member_id", sa.Uuid, nullable=False),
+    sa.Column("subject_member_id", sa.Uuid, nullable=False),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.ForeignKeyConstraint(
+        ["workspace_id", "conversation_id"],
+        ["conversation.workspace_id", "conversation.id"],
+    ),
+    sa.ForeignKeyConstraint(
+        ["workspace_id", "reader_member_id"],
+        ["member.workspace_id", "member.id"],
+    ),
+    sa.ForeignKeyConstraint(
+        ["workspace_id", "subject_member_id"],
+        ["member.workspace_id", "member.id"],
+    ),
+    sa.Index("transcript_access_conversation", "workspace_id", "conversation_id"),
+    sa.Index("transcript_access_subject", "workspace_id", "subject_member_id"),
+)
+
 scheduled_task = sa.Table(
     "scheduled_task",
     metadata,

@@ -55,7 +55,8 @@ function emptyState(text) {
 
 const TABS = ['chat', 'conversations', 'overview', 'tasks', 'connections', 'skills', 'usage'];
 const MAX_PREVIEW_BYTES = 256 * 1024;
-const WORKSPACE_TABS = ['team', 'sources', 'credentials', 'memory', 'artifacts', 'sites', 'usage'];
+const WORKSPACE_TABS = ['team', 'sources', 'credentials', 'memory', 'artifacts', 'sites', 'usage',
+  'transcript-reads'];
 const WORKSPACE_LABELS = {
   team: 'Team',
   sources: 'Sources',
@@ -64,12 +65,13 @@ const WORKSPACE_LABELS = {
   artifacts: 'Artifacts',
   sites: 'Sites',
   usage: 'Usage',
+  'transcript-reads': 'Transcript reads',
 };
 let tab = 'chat';
 let panelLoad = 0;
 
 function hashState() {
-  const workspaceMatch = location.hash.match(/^#\/workspace\/(\w+)$/);
+  const workspaceMatch = location.hash.match(/^#\/workspace\/([\w-]+)$/);
   if (workspaceMatch && WORKSPACE_TABS.includes(workspaceMatch[1])) {
     return { agent: null, tab: 'chat', workspace: workspaceMatch[1] };
   }
@@ -1169,6 +1171,22 @@ async function showWorkspace(name, query, placement) {
     view.appendChild(pageControls('artifacts', payload, place));
     return;
   }
+  if (name === 'transcript-reads') {
+    if (!payload.reads.length) {
+      workspaceEmpty(view, payload.workspace
+        ? 'No admin has read a private conversation.'
+        : 'No admin has read your conversations.');
+      return;
+    }
+    view.appendChild(table(
+      payload.workspace ? ['read by', 'conversation of', 'when'] : ['read by', 'when'],
+      payload.reads.map((entry) => (payload.workspace
+        ? row(entry.reader_email, entry.subject_email, day(entry.created_at))
+        : row(entry.reader_email, day(entry.created_at))))
+    ));
+    view.appendChild(pageControls('transcript-reads', payload, place));
+    return;
+  }
   if (name === 'usage') {
     renderWorkspaceUsage(view, payload);
     return;
@@ -1427,6 +1445,38 @@ async function renderConversation(agent, conversation, load) {
   await renderConversationFiles(agent, conversation, load, panel);
 }
 
+async function discloseConversation(agent, conversation, load) {
+  panel.replaceChildren();
+  panel.appendChild(actionButton('All conversations', () => selectTab('conversations')));
+  const heading = document.createElement('h2');
+  heading.textContent = conversation.surface + ' · '
+    + (conversation.member_email || conversation.queue_key);
+  panel.appendChild(heading);
+  const owner = conversation.member_email || 'another member';
+  const warning = document.createElement('p');
+  warning.className = 'warning';
+  warning.textContent = 'This conversation is private to ' + owner
+    + ' and may contain private information. Opening it records your email, theirs, and the time. '
+    + owner + ' and every admin can read that record.';
+  panel.appendChild(warning);
+  const outcome = document.createElement('div');
+  outcome.className = 'result mono';
+  const open = actionButton('Open transcript', async () => {
+    // The acknowledgement is a granting act, so it rides the intent lane like every other panel
+    // mutation: the turn is its audit record and the row it writes is what the content gate reads.
+    const submitted = await postIntent(agent,
+      { verb: 'read', kind: 'transcript', conversation_id: conversation.id });
+    if (load !== panelLoad) return;
+    if (!submitted.applied) {
+      outcome.textContent = submitted.message;
+      return;
+    }
+    await renderConversation(agent, conversation, load);
+  });
+  panel.appendChild(open);
+  panel.appendChild(outcome);
+}
+
 async function renderConversations(agent, load) {
   let payload;
   try {
@@ -1456,6 +1506,9 @@ async function renderConversations(agent, load) {
       const actions = document.createElement('td');
       if (entry.readable) {
         actions.appendChild(actionButton('Open', () => renderConversation(agent, entry, load)));
+      } else if (entry.disclosable) {
+        actions.appendChild(
+          actionButton('Open as admin', () => discloseConversation(agent, entry, load)));
       } else {
         const held = document.createElement('span');
         held.className = 'mono';

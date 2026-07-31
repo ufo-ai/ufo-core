@@ -89,6 +89,18 @@ class AudienceIntent(BaseModel):
     email: str
 
 
+class TranscriptIntent(BaseModel):
+    """One admin's acknowledgement that another member's private conversation may hold private
+    information, prepared by the conversations view and dispatched verbatim to
+    `read_private_transcript` on the conversation's own agent. It is a granting act — the row it
+    writes is what the content gate answers on — so it rides the lane rather than a route, and the
+    turn is its audit record."""
+
+    verb: Literal["read"]
+    kind: Literal["transcript"]
+    conversation_id: UUID
+
+
 class CorrectionIntent(BaseModel):
     """One memory correction from the workspace memory view: a corrective memory recorded through
     `memory_update`, exactly the write chat performs — a new item under the correcting member's own
@@ -115,15 +127,35 @@ class PanelIntent(BaseModel):
     """What a panel form submits: the closed set of mutations a panel produces today."""
 
     submitted: (
-        ApplyIntent | AddMemberIntent | AudienceIntent | CorrectionIntent | CredentialIntent
+        ApplyIntent
+        | AddMemberIntent
+        | AudienceIntent
+        | CorrectionIntent
+        | CredentialIntent
+        | TranscriptIntent
     ) = Field(discriminator="verb")
 
 
 def _tool_intent(
-    submitted: ApplyIntent | AddMemberIntent | AudienceIntent | CorrectionIntent | CredentialIntent,
+    submitted: (
+        ApplyIntent
+        | AddMemberIntent
+        | AudienceIntent
+        | CorrectionIntent
+        | CredentialIntent
+        | TranscriptIntent
+    ),
     slot: CredentialSlotView | None,
 ) -> ToolIntent:
     match submitted:
+        case TranscriptIntent():
+            return ToolIntent(
+                tool="read_private_transcript",
+                input={
+                    "conversation_id": str(submitted.conversation_id),
+                    "user_description": "Open a private transcript from the portal.",
+                },
+            )
         case CredentialIntent():
             assert slot is not None
             return ToolIntent(

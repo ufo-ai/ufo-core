@@ -1,5 +1,5 @@
-"""The web extension's manifest: one surface on the core seam, live mode, plus the two chat verbs
-maintaining the surface's own audience (#645 — the web surface is its audience authority). No
+"""The web extension's manifest: one surface on the core seam, live mode, plus the admin-only chat
+verbs the portal's own acts ride (#645 — the web surface is its audience authority). No
 credential slots (its session cookie carries the member's own token, not a bot secret) and no
 config knob — installed means mounted, like Slack. The surface admits without writeback and tails
 the hub in its own stream route."""

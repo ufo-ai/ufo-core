@@ -426,6 +426,20 @@ const wire = {
     ],
   },
   fileReads: [],
+  acknowledged: [],
+  transcriptRequests: [],
+  transcriptReads: {
+    reads: [
+      {
+        reader_email: "boss@example.com",
+        subject_email: "m@example.com",
+        created_at: "2026-07-30T10:00:00+00:00",
+      },
+    ],
+    older: "older|2026-07-30T10:00:00+00:00|dddddddd-4444-4444-8444-dddddddddddd",
+    newer: null,
+    workspace: false,
+  },
   conversations: {
     conversations: [
       {
@@ -437,6 +451,7 @@ const wire = {
         created_at: "2026-07-28T08:00:00+00:00",
         last_turn_at: "2026-07-29T09:00:00+00:00",
         readable: true,
+        disclosable: false,
       },
       {
         id: "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb",
@@ -447,6 +462,18 @@ const wire = {
         created_at: "2026-07-27T08:00:00+00:00",
         last_turn_at: null,
         readable: false,
+        disclosable: false,
+      },
+      {
+        id: "cccccccc-3333-4333-8333-cccccccccccc",
+        surface: "web",
+        queue_key: "web-private",
+        member_email: "member@example.com",
+        turn_count: 3,
+        created_at: "2026-07-26T08:00:00+00:00",
+        last_turn_at: "2026-07-26T09:00:00+00:00",
+        readable: false,
+        disclosable: true,
       },
     ],
   },
@@ -781,6 +808,26 @@ const sandbox = {
           }),
         };
       }
+      if (submitted.kind === "transcript") {
+        wire.acknowledged.push(submitted.conversation_id);
+        if (wire.acknowledgeRefuses) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              applied: false,
+              message:
+                "Ask a workspace admin — only they can read another member's transcript.",
+              turn_id: "t",
+            }),
+          };
+        }
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ applied: true, message: "Saved.", turn_id: "t" }),
+        };
+      }
       if (wire.intentRefuses) {
         return {
           ok: true,
@@ -879,6 +926,33 @@ const sandbox = {
       if (wire.workspaceThrows) {
         wire.workspaceThrows = false;
         throw new TypeError("network down");
+      }
+      if (view.startsWith("transcript-reads")) {
+        const params = new URLSearchParams(view.split("?")[1] || "");
+        wire.transcriptRequests.push(params.get("after"));
+        if (params.get("after") && params.get("after") === wire.transcriptReads.older) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              reads: [
+                {
+                  reader_email: "chief@example.com",
+                  subject_email: "m@example.com",
+                  created_at: "2026-07-29T10:00:00+00:00",
+                },
+              ],
+              older: null,
+              newer: "newer|2026-07-29T10:00:00+00:00|eeeeeeee-5555-4555-8555-eeeeeeeeeeee",
+              workspace: false,
+            }),
+          };
+        }
+        return {
+          ok: true,
+          status: 200,
+          json: async () => structuredClone(wire.transcriptReads),
+        };
       }
       if (view.startsWith("artifacts")) {
         const params = new URLSearchParams(view.split("?")[1] || "");
@@ -1449,6 +1523,74 @@ try {
   if (!byId.panel.querySelectorAll("td").map((node) => node.textContent).includes("C42:1.0")) {
     throw new Error("going back did not re-render the conversations list");
   }
+  const disclosureButtons = byId.panel
+    .querySelectorAll("button")
+    .filter((node) => node.textContent === "Open as admin");
+  if (disclosureButtons.length !== 1) {
+    throw new Error(
+      `the list built ${disclosureButtons.length} disclosure controls for one disclosable row`,
+    );
+  }
+  await disclosureButtons[0].fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  if (wire.acknowledged.length !== 0) {
+    throw new Error("the disclosure warning acknowledged before the admin confirmed");
+  }
+  if (byId.panel.querySelector(".transcript")) {
+    throw new Error("the disclosure warning revealed the transcript before acknowledgement");
+  }
+  // Scoped to the warning's own element: panelText() also carries the heading, which names the
+  // owner too, so a warning that dropped the owner would still have passed.
+  const warningNode = byId.panel.querySelector(".warning");
+  if (!warningNode) throw new Error("the disclosure offers no warning");
+  const warningText = warningNode.textContent;
+  if (
+    !warningText.includes("may contain private information") ||
+    !warningText.includes("member@example.com") ||
+    !warningText.includes("records your email, theirs, and the time") ||
+    !warningText.includes("every admin can read that record")
+  ) {
+    throw new Error(`the disclosure warning reads ${warningText}`);
+  }
+  const confirmDisclosure = () =>
+    byId.panel
+      .querySelectorAll("button")
+      .find((node) => node.textContent === "Open transcript");
+  if (!confirmDisclosure()) throw new Error("the disclosure warning offers no way to proceed");
+  wire.acknowledgeRefuses = true;
+  await confirmDisclosure().fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  if (byId.panel.querySelector(".transcript")) {
+    throw new Error("a refused acknowledgement still opened the transcript");
+  }
+  if (!panelText().includes("only they can read another member's transcript")) {
+    throw new Error(`a refused acknowledgement reads ${panelText()}`);
+  }
+  wire.acknowledgeRefuses = false;
+  await confirmDisclosure().fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  if (wire.acknowledged.length !== 2) {
+    throw new Error(`the panel recorded ${wire.acknowledged.length} acknowledgements, expected 2`);
+  }
+  if (wire.acknowledged[1] !== "cccccccc-3333-4333-8333-cccccccccccc") {
+    throw new Error(`the acknowledgement named ${wire.acknowledged[1]}`);
+  }
+  const lane = wire.posted[wire.posted.length - 1];
+  if (lane.verb !== "read" || lane.kind !== "transcript") {
+    throw new Error(`the acknowledgement rode ${JSON.stringify(lane)}`);
+  }
+  if (!wire.intentUrls[wire.intentUrls.length - 1].endsWith("/intents")) {
+    throw new Error("the acknowledgement did not ride the intent lane");
+  }
+  if (!byId.panel.querySelector(".transcript")) {
+    throw new Error("an acknowledged disclosure opened no transcript");
+  }
+  await byId.panel
+    .querySelectorAll("button")
+    .find((node) => node.textContent === "All conversations")
+    .fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
   wire.turnsStatus = 404;
   await (byId.panel
     .querySelectorAll("button")
@@ -1527,7 +1669,7 @@ try {
   const workspaceButtons = byId.workspace.querySelectorAll("button");
   const workspaceLabels = texts(workspaceButtons);
   const expectedWorkspace = [
-    "Team", "Sources", "Credentials", "Memory", "Artifacts", "Sites", "Usage",
+    "Team", "Sources", "Credentials", "Memory", "Artifacts", "Sites", "Usage", "Transcript reads",
   ];
   if (workspaceLabels.join("|") !== expectedWorkspace.join("|")) {
     throw new Error(`the workspace sidebar reads ${JSON.stringify(workspaceLabels)}`);
@@ -2342,6 +2484,73 @@ try {
     throw new Error("a non-admin usage view named another subject");
   }
 
+  await workspaceNamed("Transcript reads").fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const readsText = viewText();
+  if (!readsText.includes("boss@example.com") || !readsText.includes("2026-07-30 10:00")) {
+    throw new Error(`the transcript-reads view reads ${readsText}`);
+  }
+  if (readsText.includes("m@example.com")) {
+    throw new Error("a member's own transcript-reads view names the subject column");
+  }
+  const readsHead = body.querySelectorAll("th").map((node) => node.textContent);
+  if (readsHead.join("|") !== "read by|when") {
+    throw new Error(`the member's transcript-reads header reads ${JSON.stringify(readsHead)}`);
+  }
+  const olderRead = body
+    .querySelector(".admin-view")
+    ?.querySelectorAll("button")
+    .find((node) => node.textContent === "Older")
+    ?? body.querySelectorAll("button").find((node) => node.textContent === "Older");
+  if (!olderRead) throw new Error("the transcript-reads view offers no Older control");
+  await olderRead.fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  if (wire.transcriptRequests[1] !== wire.transcriptReads.older) {
+    throw new Error(`Older walked to ${JSON.stringify(wire.transcriptRequests)}`);
+  }
+  if (!viewText().includes("chief@example.com")) {
+    throw new Error(`the second page reads ${viewText()}`);
+  }
+  const memberReads = wire.transcriptReads;
+  wire.transcriptReads = {
+    reads: [
+      {
+        reader_email: "boss@example.com",
+        subject_email: "m@example.com",
+        created_at: "2026-07-30T10:00:00+00:00",
+      },
+    ],
+    older: null,
+    newer: null,
+    workspace: true,
+  };
+  await workspaceNamed("Transcript reads").fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const ledgerHead = body.querySelectorAll("th").map((node) => node.textContent);
+  if (ledgerHead.join("|") !== "read by|conversation of|when") {
+    throw new Error(`the admin ledger header reads ${JSON.stringify(ledgerHead)}`);
+  }
+  const ledgerCells = body.querySelectorAll("td").map((node) => node.textContent);
+  if (ledgerCells[0] !== "boss@example.com" || ledgerCells[1] !== "m@example.com") {
+    throw new Error(`the admin ledger row reads ${JSON.stringify(ledgerCells)}`);
+  }
+  wire.transcriptReads = memberReads;
+  const emptyReads = wire.transcriptReads;
+  wire.transcriptReads = { reads: [], older: null, newer: null, workspace: false };
+  wire.transcriptRequests = [];
+  await workspaceNamed("Transcript reads").fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  if (!viewText().includes("No admin has read your conversations.")) {
+    throw new Error(`an empty transcript-reads view reads ${viewText()}`);
+  }
+  // Its own fixture rather than flipping the shared one, which the Older walk above reads.
+  wire.transcriptReads = { reads: [], older: null, newer: null, workspace: true };
+  await workspaceNamed("Transcript reads").fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  if (!viewText().includes("No admin has read a private conversation.")) {
+    throw new Error(`an empty admin transcript-reads view reads ${viewText()}`);
+  }
+  wire.transcriptReads = emptyReads;
   wire.workspaceStatus = 500;
   await workspaceNamed("Sites").fire("click");
   await new Promise((resolve) => setTimeout(resolve, 0));

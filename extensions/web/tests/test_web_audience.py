@@ -1,5 +1,5 @@
-"""The web surface's audience authority: the grant/revoke chat verbs writing the extension's own
-store, and the resolution the portal reads — admins see every agent, everyone else the main agent
+"""The web surface's audience authority: the admin-only chat verbs the portal's acts ride, and the
+resolution the portal reads — admins see every agent, everyone else the main agent
 plus exactly the non-main agents granted to their email."""
 
 from datetime import UTC, datetime
@@ -10,6 +10,7 @@ import sqlalchemy as sa
 from ufo_ext_web.audience import (
     AUDIENCE_PREFIX,
     WEB_ACCESS_TOOLS,
+    PrivateTranscriptInput,
     WebAccessInput,
     granted_emails,
     web_audience,
@@ -37,6 +38,7 @@ from ufo.workspace import ws
 
 GRANT = WEB_ACCESS_TOOLS[0]
 REVOKE = WEB_ACCESS_TOOLS[1]
+TRANSCRIPT = WEB_ACCESS_TOOLS[2]
 ADMIN_EMAIL = "alice@example.com"
 MEMBER_EMAIL = "bob@example.com"
 
@@ -276,6 +278,85 @@ async def test_speakerless_turn_cannot_change_web_access(db: None, tmp_path) -> 
             WebAccessInput(email=ADMIN_EMAIL, user_description="granting access"),
         )
         assert refused.is_error
+
+
+async def test_reading_a_private_transcript_is_admin_only_and_records_the_reader(
+    db: None, tmp_path
+) -> None:
+    """The acknowledgement tool itself, the lane's dispatch target: an admin's call records the
+    disclosure and names the subject back, while a non-admin bystander, an admin reading their own
+    conversation, a speakerless turn, and a conversation of another agent each refuse — every gate
+    holds inside the tool, not only at the route that prepares it."""
+    workspace_id, main_agent, second_agent = await _seed()
+    admin_id = await _member(workspace_id, ADMIN_EMAIL, admin=True)
+    member_id = await _member(workspace_id, MEMBER_EMAIL)
+    bystander_id = await _member(workspace_id, "bystander@example.com")
+    conversation_id, own_conversation_id = uuid4(), uuid4()
+    async with workspace_tx() as connection:
+        for seeded, subject, queue_key in (
+            (conversation_id, member_id, "theirs"),
+            (own_conversation_id, admin_id, "the admin's own"),
+        ):
+            await connection.execute(
+                sa.insert(tables.conversation).values(
+                    id=seeded,
+                    workspace_id=workspace_id,
+                    agent_id=main_agent,
+                    surface="web",
+                    queue_key=queue_key,
+                    member_id=subject,
+                    audience=f"member:{subject}",
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+    args = PrivateTranscriptInput(
+        conversation_id=conversation_id, user_description="reading a transcript"
+    )
+    own_args = PrivateTranscriptInput(
+        conversation_id=own_conversation_id, user_description="reading my own"
+    )
+    with ws(workspace_id):
+        # The non-admin is a bystander rather than the subject, because the admin gate is the first
+        # thing a non-admin subject would hit — the reader's-own branch sits inside the writer,
+        # behind that gate, so only an admin subject reaches it. `own_args` is that case.
+        refused = await TRANSCRIPT.handler(_tool_ctx(workspace_id, main_agent, bystander_id), args)
+        assert refused.is_error
+        assert "admin" in refused.content[0].text
+        own = await TRANSCRIPT.handler(_tool_ctx(workspace_id, main_agent, admin_id), own_args)
+        assert own.is_error
+        assert own.content[0].text != refused.content[0].text
+        # The one refusal answers three branches — no such conversation on this agent, a room or
+        # externally-shared channel, and the reader's own — so it may not claim the id is unknown.
+        assert "your own" in own.content[0].text
+        assert "has that id" not in own.content[0].text
+        speakerless = await TRANSCRIPT.handler(_tool_ctx(workspace_id, main_agent, None), args)
+        assert speakerless.is_error
+        assert "speaking member" in speakerless.content[0].text
+        walled = await TRANSCRIPT.handler(_tool_ctx(workspace_id, second_agent, admin_id), args)
+        assert walled.is_error
+        async with workspace_tx() as connection:
+            assert (
+                await connection.execute(
+                    sa.select(sa.func.count()).select_from(tables.transcript_access)
+                )
+            ).scalar_one() == 0
+
+        recorded = await TRANSCRIPT.handler(_tool_ctx(workspace_id, main_agent, admin_id), args)
+        assert not recorded.is_error
+        assert MEMBER_EMAIL in recorded.content[0].text
+        async with workspace_tx() as connection:
+            rows = (
+                await connection.execute(
+                    sa.select(
+                        tables.transcript_access.c.reader_member_id,
+                        tables.transcript_access.c.subject_member_id,
+                    )
+                )
+            ).all()
+        assert [(row.reader_member_id, row.subject_member_id) for row in rows] == [
+            (admin_id, member_id)
+        ]
 
 
 async def test_every_web_access_tool_takes_a_required_user_description() -> None:

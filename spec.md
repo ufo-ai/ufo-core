@@ -419,10 +419,23 @@ caps — the ledger spans every member's turns, so spend answers an admin or a m
 explicit grant holds the agent, never the main-agent default alone. The conversations view lists
 the member's own plus the workspace-shared ones and opens each as its turns, the turns those
 spawned nested beneath them (a subagent runs in its own conversation carrying the parent's
-audience), and the live workspace files; an admin lists every conversation of the agent as
-administration metadata but reads another member's private one no more than chat would, and a
-room or an externally-shared channel is content nobody reads here, because participation there is
-the peer surface's live roster and no portal read can check it. What the data never scoped to an
+audience), and the live workspace files; an admin lists every conversation of the agent and reads
+another member's private one only by acknowledging first that it may hold private information.
+The acknowledgement is a granting act, so it rides the prepared-intent lane like every other panel
+mutation — `read_private_transcript`, admin-only — and the turn is its audit record; the row it
+writes names the reader, the subject, and the moment before any content is served, and is what the
+content gate answers on, opening that conversation to that admin for an hour, so a second visit is
+a second recorded access rather than a silent re-read. The record is read at both ends by one
+workspace-scoped listing — a member reads the disclosures against their own conversations, an
+admin every one in the workspace — which is not hung off an agent because a private conversation
+can live on an agent its own subject cannot list, and which pages by the shared keyset cursor
+rather than truncating, so the admin a row names cannot bury it under later reads. Chat stays
+narrower on purpose — no tool reads another member's transcript, and none is added: a portal read
+discloses to one authenticated person, once, on the record, while an agent asked in chat would
+pull that content into a context that summarizes, embeds, and recalls it, turning one bounded
+disclosure into an unbounded one. A room or an externally-shared channel remains content nobody
+reads here, admin included, because participation there is the peer surface's live roster and no
+portal read can check it. What the data never scoped to an
 agent reads — and, where a verb exists, mutates — beside the agent list instead of under one:
 the team roster, source bindings, the deploy's member-fillable credential slots, memory, shared
 files, hosted sites, and usage. The team view is the workspace roster — every member reads who

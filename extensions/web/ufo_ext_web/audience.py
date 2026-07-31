@@ -3,8 +3,8 @@ member reaches in the portal (#645 — the surface is the audience authority; th
 surface-independent member↔agent ACL).
 
 Grants live in the extension's own store, one row per `(agent, email)` — the email is the web
-surface's identity axis, the claim its bearer proves. `grant_web_access`/`revoke_web_access` are
-the chat verbs: admin-only, applying to the executing agent, so granting access to an agent
+surface's identity axis, the claim its bearer proves. The chat verbs here are admin-only and apply
+to the executing agent, so granting access to an agent
 happens in that agent's own conversation — which a workspace admin can always open, because an
 admin reaches every agent. Everyone else reaches the workspace's main agent — the agent every
 surface routes an unbound member to, so the portal answers a member the way the CLI and an
@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 
 from ufo.sdk.context import CredentialAccess, ExtensionContext, ScopedStore
 from ufo.sdk.seats import Seats
-from ufo.sdk.surfaces import AgentSummary, SurfaceContext
+from ufo.sdk.surfaces import AgentSummary, SurfaceContext, record_transcript_access
 from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 
 EXTENSION_WEB = "web"
@@ -180,6 +180,47 @@ async def _revoke(ctx: ToolContext, args: WebAccessInput) -> ToolResult:
     )
 
 
+class PrivateTranscriptInput(BaseModel):
+    """Which conversation an admin is about to read. The agent is the executing one, so a
+    conversation of any other agent is refused by the same wall the portal's routes answer on."""
+
+    conversation_id: UUID = Field(description="The conversation whose transcript will be read.")
+    user_description: str = Field(
+        description="Brief plain-language description for non-technical users, shown in the "
+        "activity timeline."
+    )
+
+
+async def _read_private_transcript(ctx: ToolContext, args: PrivateTranscriptInput) -> ToolResult:
+    """Record the acknowledgement that opens another member's private transcript. This is a
+    granting act — the row it writes is what the portal's content gate answers on — so it rides a
+    turn like every other grant, and that turn is its audit record."""
+    if ctx.speaker_member_id is None:
+        return _refusal("Only a speaking member can open a private transcript.")
+    if not await ctx.speaker_is_admin():
+        return _refusal("Ask a workspace admin — only they can read another member's transcript.")
+    recorded = await record_transcript_access(
+        ctx.turn.workspace_id,
+        args.conversation_id,
+        ctx.turn.agent_id,
+        ctx.speaker_member_id,
+    )
+    if recorded is None:
+        return _refusal(
+            "Nothing to acknowledge for that id on this agent. An acknowledgement opens another "
+            "member's private conversation; your own and a workspace-shared one need none, and a "
+            "channel or group DM is readable by nobody here."
+        )
+    return ToolResult(
+        content=(
+            TextContent(
+                text=f"Recorded: you opened {recorded.subject_email}'s private conversation. "
+                f"{recorded.subject_email} and every admin can read that record."
+            ),
+        )
+    )
+
+
 WEB_ACCESS_TOOLS = (
     ToolDef(
         name="grant_web_access",
@@ -201,6 +242,18 @@ WEB_ACCESS_TOOLS = (
         ),
         input_model=WebAccessInput,
         handler=_revoke,
+        side_effecting=True,
+    ),
+    ToolDef(
+        name="read_private_transcript",
+        description=(
+            "Acknowledge that another member's private conversation may hold private information "
+            "and open it for reading in the web portal — workspace admins only. Records who read "
+            "it, whose it was, and when; the member and every admin can read that record. The "
+            "transcript itself is read in the portal, not here."
+        ),
+        input_model=PrivateTranscriptInput,
+        handler=_read_private_transcript,
         side_effecting=True,
     ),
 )

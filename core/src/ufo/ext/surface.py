@@ -236,6 +236,8 @@ class Writeback:
 
 LIST_CONVERSATIONS_LIMIT = 200
 LIST_TURNS_LIMIT = 500
+TRANSCRIPT_ACCESS_LIMIT = 200
+TRANSCRIPT_ACCESS_WINDOW = timedelta(hours=1)
 
 
 class AgentSummary(BaseModel):
@@ -426,15 +428,93 @@ class ConversationSummary(BaseModel):
         return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
+class TranscriptAccess(BaseModel):
+    """One recorded disclosure: the moment an admin acknowledged that another member's private
+    transcript may hold private information and read it. Written by `record_transcript_access`
+    before any content is served and read back by the two views that close the loop — the subject
+    sees who read theirs, an admin sees every access the workspace has made."""
+
+    conversation_id: UUID
+    reader_email: str
+    subject_email: str
+    created_at: datetime
+
+    @field_validator("created_at")
+    @classmethod
+    def _aware_utc(cls, value: datetime) -> datetime:
+        return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+async def record_transcript_access(
+    workspace_id: UUID, conversation_id: UUID, agent_id: UUID, member_id: UUID
+) -> TranscriptAccess | None:
+    """Record that an admin acknowledged another member's private transcript may hold private
+    information and is reading it, and open that conversation's content to them for
+    `TRANSCRIPT_ACCESS_WINDOW`. This is the disclosure's one writer, and it is a tool the portal
+    reaches through the prepared-intent lane rather than a route of its own: the row is a grant —
+    it is what `readable_conversation` answers on — and a granting act is speaker-gated and rides
+    a turn, so the turn is its audit record and this row is the gate it opens.
+
+    Each acknowledgement writes its own row, so a second visit is a second access rather than a
+    silent re-read. None — the caller's refusal — for a conversation this agent does not hold, for
+    a room or externally-shared channel (content nobody reads here), and for the reader's own or
+    the workspace-shared one, which need no disclosure. The caller establishes that the member is
+    an admin."""
+    async with workspace_tx() as connection:
+        found = (
+            await connection.execute(
+                sa.select(tables.conversation.c.audience).where(
+                    tables.conversation.c.workspace_id == workspace_id,
+                    tables.conversation.c.id == conversation_id,
+                    tables.conversation.c.agent_id == agent_id,
+                )
+            )
+        ).one_or_none()
+        if found is None:
+            return None
+        subject_id = audience_member(parse_audience(found.audience))
+        if subject_id is None or subject_id == member_id:
+            return None
+        named = (
+            await connection.execute(
+                sa.select(tables.member.c.id, tables.member.c.email).where(
+                    tables.member.c.workspace_id == workspace_id,
+                    tables.member.c.id.in_((member_id, subject_id)),
+                )
+            )
+        ).all()
+        emails: dict[UUID, str] = {row.id: row.email for row in named}
+        recorded_at = datetime.now(UTC)
+        await connection.execute(
+            sa.insert(tables.transcript_access).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                reader_member_id=member_id,
+                subject_member_id=subject_id,
+                created_at=recorded_at,
+            )
+        )
+    return TranscriptAccess(
+        conversation_id=conversation_id,
+        reader_email=emails[member_id],
+        subject_email=emails[subject_id],
+        created_at=recorded_at,
+    )
+
+
 class ListedConversation(BaseModel):
     """One conversation as the portal's per-agent conversations view lists it: `ConversationSummary`
-    plus whether this viewer may read its content. The two answers differ only for an admin, who
-    lists every conversation of the agent as administration metadata but reads another member's
-    private one no more than chat would — the same shape `list_agent_tasks` gives a private task
-    (row visible, content elided)."""
+    plus whether this viewer may read its content now and whether they may disclose it to
+    themselves by acknowledging (an admin, another member's private conversation — never a
+    room's). Disclosures recorded against it are not here: a private conversation can live on an
+    agent its own subject cannot list — a surface installation binds every conversation it creates
+    to one agent — so an agent-scoped read would hide exactly the rows the subject most needs.
+    `transcript_accesses` is workspace-scoped for that reason."""
 
     summary: ConversationSummary
     readable: bool
+    disclosable: bool
 
 
 class LedgerEntry(BaseModel):
@@ -479,6 +559,13 @@ def _readable_audience_values(member_id: UUID) -> tuple[str, ...]:
 
 def _readable_audiences(member_id: UUID) -> sa.ColumnElement[bool]:
     return tables.conversation.c.audience.in_(_readable_audience_values(member_id))
+
+
+def _email_domain(email: str) -> str:
+    """The address's domain, lowercased — empty for anything that is not `local@domain`, so a
+    malformed value can never satisfy a domain match."""
+    local, _, domain = email.strip().lower().rpartition("@")
+    return domain if local and domain else ""
 
 
 async def _main_agent(workspace_id: UUID) -> UUID:
@@ -1653,9 +1740,10 @@ class SurfaceContext:
     ) -> tuple[ListedConversation, ...]:
         """One agent's conversations as the portal lists them, newest activity first and bounded:
         the member's own plus the workspace-shared ones, every one of the agent's for an admin.
-        Each entry carries `readable` — see `readable_conversation` for the content rule an admin
-        does not widen. Subagent conversations are absent: they are the agent's own work on a
-        request, listed nested under the turn that spawned them, never beside it."""
+        Each entry carries `readable` (content this viewer reads now) and `disclosable` (an admin
+        may acknowledge and read another member's private one — `record_transcript_access` is the
+        act). Subagent conversations are absent: they are the agent's own work on a request, listed
+        nested under the turn that spawned them, never beside it."""
         activity = (
             sa.select(
                 tables.turn.c.conversation_id,
@@ -1693,9 +1781,12 @@ class SurfaceContext:
             .limit(limit)
         )
         if not admin:
-            query = query.where(_readable_audiences(member_id))
+            query = query.where(
+                tables.conversation.c.audience.in_(_readable_audience_values(member_id))
+            )
         async with workspace_tx() as connection:
             rows = (await connection.execute(query)).all()
+        mine = str(conversation_audience(member_id))
         return tuple(
             ListedConversation(
                 summary=ConversationSummary(
@@ -1708,33 +1799,112 @@ class SurfaceContext:
                     last_turn_at=row.last_turn_at,
                 ),
                 readable=row.audience in _readable_audience_values(member_id),
+                disclosable=admin
+                and row.audience != mine
+                and audience_member(parse_audience(row.audience)) is not None,
             )
             for row in rows
         )
 
     async def readable_conversation(
-        self, conversation_id: UUID, agent_id: UUID, member_id: UUID
+        self, conversation_id: UUID, agent_id: UUID, member_id: UUID, *, admin: bool = False
     ) -> bool:
         """Whether this member may read that conversation's content — its turns, the subagent turns
         it spawned, and its workspace files. True for their own conversations and the
-        workspace-shared ones; false for another member's private one, for a room (a private
-        channel or group DM) and for an externally-shared channel, because participation there is
-        the peer surface's live roster and no portal read can check it (#645 — live reachability is
-        the audience authority). Being an admin does not widen this, exactly as an admin reads no
-        private task's content. The agent is the wall: another agent's conversation is unreadable
-        even by id, so every content route fails closed on this one answer."""
+        workspace-shared ones. Another member's private one answers true for an admin who has
+        recorded a disclosure against it inside `TRANSCRIPT_ACCESS_WINDOW`
+        (`record_transcript_access` — the acknowledgement is the act, and the row is the audit
+        record), and false for that same admin until they do. A room (a private channel or group
+        DM) and an externally-shared channel stay false for everyone, admin included, because
+        participation there is the peer surface's live roster and no portal read can check it
+        (#645 — live reachability is the audience authority). The agent is the wall: another
+        agent's conversation is unreadable even by id, so every content route fails closed on this
+        one answer."""
         async with workspace_tx() as connection:
             found = (
                 await connection.execute(
-                    sa.select(tables.conversation.c.id).where(
+                    sa.select(tables.conversation.c.audience).where(
                         tables.conversation.c.workspace_id == self.workspace_id,
                         tables.conversation.c.id == conversation_id,
                         tables.conversation.c.agent_id == agent_id,
-                        _readable_audiences(member_id),
                     )
                 )
             ).one_or_none()
-        return found is not None
+            if found is None:
+                return False
+            if found.audience in _readable_audience_values(member_id):
+                return True
+            if not admin or audience_member(parse_audience(found.audience)) is None:
+                return False
+            disclosed = (
+                await connection.execute(
+                    sa.select(tables.transcript_access.c.id).where(
+                        tables.transcript_access.c.workspace_id == self.workspace_id,
+                        tables.transcript_access.c.conversation_id == conversation_id,
+                        tables.transcript_access.c.reader_member_id == member_id,
+                        tables.transcript_access.c.created_at
+                        >= datetime.now(UTC) - TRANSCRIPT_ACCESS_WINDOW,
+                    )
+                )
+            ).first()
+        return disclosed is not None
+
+    async def transcript_accesses(
+        self,
+        *,
+        subject_member_id: UUID | None = None,
+        limit: int = TRANSCRIPT_ACCESS_LIMIT,
+        cursor: "ListingCursor | None" = None,
+    ) -> "ListingPage[TranscriptAccess]":
+        """One keyset page of recorded disclosures, newest first — every one in the workspace, or
+        only those against one member's conversations. The read half of `record_transcript_access`:
+        a log nothing reads is dead weight, so the subject reads who read theirs and an admin reads
+        the workspace's. It pages rather than truncating because this ledger holds its own readers
+        to account: a capped read with no way past the cap lets the admin it names evict the row by
+        acknowledging often enough to push it off the end."""
+        reader = tables.member.alias("reader")
+        subject = tables.member.alias("subject")
+        query = (
+            sa.select(
+                tables.transcript_access.c.id,
+                tables.transcript_access.c.conversation_id,
+                reader.c.email.label("reader_email"),
+                subject.c.email.label("subject_email"),
+                tables.transcript_access.c.created_at,
+            )
+            .select_from(
+                tables.transcript_access.join(
+                    reader, reader.c.id == tables.transcript_access.c.reader_member_id
+                ).join(subject, subject.c.id == tables.transcript_access.c.subject_member_id)
+            )
+            .where(tables.transcript_access.c.workspace_id == self.workspace_id)
+        )
+        if subject_member_id is not None:
+            query = query.where(tables.transcript_access.c.subject_member_id == subject_member_id)
+        async with workspace_tx() as connection:
+            rows = (
+                await connection.execute(
+                    page_query(
+                        query,
+                        cursor,
+                        limit,
+                        created_at=tables.transcript_access.c.created_at,
+                        ident=tables.transcript_access.c.id,
+                    )
+                )
+            ).all()
+        return page_of(
+            rows,
+            cursor,
+            limit,
+            render=lambda row: TranscriptAccess(
+                conversation_id=row.conversation_id,
+                reader_email=row.reader_email,
+                subject_email=row.subject_email,
+                created_at=row.created_at,
+            ),
+            position=lambda row: (row.created_at, str(row.id)),
+        )
 
     async def conversation_subagent_turns(
         self, conversation_id: UUID, limit: int = LIST_TURNS_LIMIT

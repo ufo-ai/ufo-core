@@ -47,6 +47,7 @@ class ToolIntent(BaseModel):
         "revoke_web_access",
         "memory_update",
         "request_credentials",
+        "read_private_transcript",
     ]
     input: dict[str, JsonValue]
 
