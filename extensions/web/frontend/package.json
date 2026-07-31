@@ -7,14 +7,30 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "check": "tsc -b",
-    "test": "vitest run",
-    "walk": "node ../tests/portal_smoke.mjs ."
+    "test": "vitest run"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "^4.3.3",
+    "@testing-library/dom": "^10.4.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
     "@types/node": "^26.1.2",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "@vitejs/plugin-react": "^4.7.0",
     "jsdom": "^26.0.0",
+    "tailwindcss": "^4.3.3",
     "typescript": "~5.8.3",
     "vite": "^7.0.0",
     "vitest": "^3.0.0"
+  },
+  "dependencies": {
+    "@radix-ui/react-dialog": "^1.1.23",
+    "@radix-ui/react-label": "^2.1.15",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "tailwind-merge": "^2.6.1"
   }
 }

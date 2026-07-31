@@ -1,9 +1,15 @@
+import react from "@vitejs/plugin-react";
+import tailwindcss from "@tailwindcss/vite";
 import { defineConfig } from "vite";
 
 import { devLocalPath } from "./dev-routing";
 
 export default defineConfig({
   base: "/surface/web/static/",
+  plugins: [react(), tailwindcss()],
+  resolve: {
+    alias: { "@": new URL("./src", import.meta.url).pathname },
+  },
   build: {
     outDir: "../ufo_ext_web/static",
     emptyOutDir: true,
@@ -23,6 +29,7 @@ export default defineConfig({
   },
   test: {
     environment: "jsdom",
-    include: ["tests/**/*.test.ts"],
+    setupFiles: ["./tests/setup.ts"],
+    include: ["tests/**/*.test.ts", "tests/**/*.test.tsx"],
   },
 });

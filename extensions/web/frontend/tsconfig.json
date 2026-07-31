@@ -4,6 +4,7 @@
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "module": "ESNext",
     "moduleResolution": "bundler",
+    "jsx": "react-jsx",
     "strict": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
@@ -11,9 +12,9 @@
     "noEmit": true,
     "skipLibCheck": true,
     "isolatedModules": true,
-    "allowJs": true,
-    "checkJs": false,
+    "baseUrl": ".",
+    "paths": { "@/*": ["./src/*"] },
     "types": ["node"]
   },
-  "include": ["src", "tests", "vite.config.ts", "dev-routing.ts"]
+  "include": ["src", "tests", "dev-routing.ts", "vite.config.ts"]
 }

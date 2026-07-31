@@ -4,6 +4,7 @@ __pycache__/
 node_modules/
 extensions/debugger/ufo_ext_debugger/static/
 extensions/web/ufo_ext_web/static/
+extensions/web/frontend/tsconfig.tsbuildinfo
 .env
 .local/
 dist/

@@ -58,9 +58,10 @@ jobs:
       - run: uv run pytest --collect-only -m integration -q
 
   # The portal is a built app. This job is the only one that installs its npm tree for testing:
-  # it builds, proves the bundle and the page walk, and publishes the output the pytest shards
-  # read. `checks` builds its own copy because the wheel gate has to see the production shape
-  # assembled from a clean tree.
+  # it builds, proves the bundle and every view, and publishes the output the pytest shards read,
+  # so no shard installs npm. The shards still need the runner's own node — two repl tests drive a
+  # real `LocalCarrier` through it — which `ubuntu-latest` ships. `checks` builds its own copy
+  # because the wheel gate has to see the production shape assembled from a clean tree.
   web:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -74,7 +75,6 @@ jobs:
       - run: npm --prefix extensions/web/frontend ci
       - run: npm --prefix extensions/web/frontend run build
       - run: npm --prefix extensions/web/frontend test
-      - run: npm --prefix extensions/web/frontend run walk
       - uses: actions/upload-artifact@v4
         with:
           name: portal-static

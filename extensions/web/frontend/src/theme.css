@@ -1,0 +1,95 @@
+@import "tailwindcss";
+
+@theme {
+  --color-surface: Canvas;
+  --color-ink: CanvasText;
+  --color-field: Field;
+  --color-field-ink: FieldText;
+
+  --color-edge-soft: color-mix(in srgb, CanvasText 12%, transparent);
+  --color-edge: color-mix(in srgb, CanvasText 15%, transparent);
+  --color-edge-strong: color-mix(in srgb, CanvasText 20%, transparent);
+  --color-edge-control: color-mix(in srgb, CanvasText 25%, transparent);
+  --color-edge-control-strong: color-mix(in srgb, CanvasText 35%, transparent);
+
+  --color-fill-subtle: color-mix(in srgb, CanvasText 6%, transparent);
+  --color-fill-hover: color-mix(in srgb, CanvasText 8%, transparent);
+  --color-fill: color-mix(in srgb, CanvasText 12%, transparent);
+
+  --muted: 0.6;
+  --muted-strong: 0.55;
+  --muted-soft: 0.7;
+  --muted-faint: 0.75;
+  --disabled: 0.4;
+
+  --spacing-hair: 2px;
+  --spacing-2xs: 4px;
+  --spacing-xs: 6px;
+  --spacing-sm: 8px;
+  --spacing-md: 10px;
+  --spacing-lg: 12px;
+  --spacing-xl: 14px;
+  --spacing-2xl: 16px;
+  --spacing-3xl: 18px;
+  --spacing-4xl: 20px;
+  --spacing-5xl: 22px;
+  --spacing-6xl: 40px;
+
+  --radius-sm: 4px;
+  --radius-control: 6px;
+  --radius-panel: 8px;
+  --radius-bubble: 12px;
+
+  --font-sans: system-ui, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --text-mono: 11px;
+  --text-small: 12px;
+  --text-label: 13px;
+  --text-section: 14px;
+  --text-body: 15px;
+  --text-title: 18px;
+
+  --font-weight-strong: 600;
+  --tracking-brand: 0.35em;
+
+  --breakpoint-narrow: 720px;
+
+  --container-sidebar: 240px;
+  --container-drawer: min(520px, 100vw);
+  --container-card: min(440px, calc(100vw - 32px));
+  --container-bubble: 70ch;
+  --container-section: 76ch;
+  --container-hint: 64ch;
+  --container-form: 52ch;
+  --container-empty: 44ch;
+  --container-control: 40ch;
+
+  --media-tall: 60vh;
+  --size-thumb: 96px;
+  --marker-width: 2px;
+}
+
+@layer base {
+  :root {
+    color-scheme: light dark;
+  }
+
+  body {
+    height: 100vh;
+    margin: 0;
+    background: var(--color-surface);
+    color: var(--color-ink);
+    font: var(--text-body) / 1.5 var(--font-sans);
+  }
+
+  button {
+    cursor: pointer;
+    font: inherit;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-ink);
+    outline-offset: 2px;
+  }
+}

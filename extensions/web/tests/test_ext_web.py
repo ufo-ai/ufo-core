@@ -28,7 +28,7 @@ from ufo_ext_web import surface as web_surface
 from ufo_ext_web.audience import AUDIENCE_PREFIX, web_extension
 from ufo_ext_web.manifest import manifest as web_manifest
 from ufo_ext_web.panels import _outcome
-from ufo_ext_web.surface import PORTAL_HTML, SESSION_COOKIE, _sse, load_assets
+from ufo_ext_web.surface import PORTAL_FILE, PORTAL_HTML, SESSION_COOKIE, _sse, load_assets
 from ufo_testsupport.stream_gate import GatingHub, StreamGate, release_when_running
 from ufo_testsupport.surfaces import EMPTY_SKILL_REGISTRY, no_user_skills
 
@@ -1231,14 +1231,15 @@ async def test_a_stale_cookie_does_not_block_a_fresh_token_post(
 ) -> None:
     """The fallback chain keys on the cookie failing to resolve, not being absent: a member whose
     cookie outlived its bearer recovers by posting a fresh token — the session reopens instead of
-    401ing behind the stale cookie, and a GET behind that stale cookie serves the portal page with
-    its token form rather than a bare rejection."""
+    401ing behind the stale cookie, and a GET behind that stale cookie serves the portal page
+    rather than a bare rejection. What that page then shows is the bundle's business, proven where
+    it runs (`tests/boot.test.tsx`)."""
     client, workspace_id, _agent_id = web
     stale = mint_token(TOKEN_SECRET, str(workspace_id), "owner@example.com", timedelta(hours=-1))
     fresh = mint_token(TOKEN_SECRET, str(workspace_id), "owner@example.com", timedelta(hours=1))
     page = await client.get("/surface/web", headers={"cookie": f"{SESSION_COOKIE}={stale}"})
     assert page.status_code == 200
-    assert "token-form" in page.text
+    assert page.text == PORTAL_FILE.read_text()
     opened = await client.post(
         "/surface/web",
         data={"token": fresh},
@@ -1664,14 +1665,15 @@ async def test_every_asset_the_portal_references_is_served_from_the_surface_itse
 async def test_portal_serves_without_a_session_and_posted_token_opens_one(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
-    """The bearer never rides a URL: the page serves unauthenticated (its token form posts back
-    here), and the one POST that opens a session lands the form token as the host-only session
-    cookie — HttpOnly, Secure, and `lax`, because arrival is a cross-site navigation from the
-    gateway's signed-in card — then redirects into the portal."""
+    """The bearer never rides a URL: the page serves unauthenticated — the bundle it loads posts
+    the token back here, and that the unauthenticated read renders that form is proven in
+    `tests/boot.test.tsx` — and the one POST that opens a session lands the form token as the
+    host-only session cookie — HttpOnly, Secure, and `lax`, because arrival is a cross-site
+    navigation from the gateway's signed-in card — then redirects into the portal."""
     client, workspace_id, _agent_id = web
     page = await client.get("/surface/web")
     assert page.status_code == 200
-    assert "token-form" in page.text
+    assert page.text == PORTAL_FILE.read_text()
     token = mint_token(TOKEN_SECRET, str(workspace_id), "owner@example.com", timedelta(hours=1))
     opened = await client.post("/surface/web", data={"token": token})
     assert opened.status_code == 303
