@@ -1,11 +1,11 @@
 import { useEffect, useState } from "react";
 
-import { Pager, type Placement } from "@/views/Workspace";
+import { Pager, type Placement } from "@/kernel/pager";
 import { day } from "@/views/Tasks";
 import { formatSize } from "@/views/Chat";
 import { Sheet } from "@/components/ui/sheet";
 import { Table, Td, Th } from "@/components/ui/table";
-import { PanelEmpty, usePanelRead } from "@/kernel/panel";
+import { Panel, usePanelRead } from "@/kernel/panel";
 
 const VIEWER_TEXT_BYTES = 64 * 1024;
 
@@ -48,48 +48,53 @@ export function Artifacts({
   );
   const [opened, setOpened] = useState<Artifact | null>(null);
 
-  if (state.phase === "loading") return null;
-  if (state.phase === "failed") return <PanelEmpty>{state.message}</PanelEmpty>;
-  if (!state.payload.artifacts.length) return <PanelEmpty>No shared files yet.</PanelEmpty>;
-
   return (
-    <>
-      <Table>
-        <thead>
-          <tr>
-            {["file", "subject", "type", "size", "date"].map((column) => (
-              <Th key={column}>{column}</Th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {state.payload.artifacts.map((entry) => (
-            <tr key={entry.id}>
-              <Td>
-                {entry.url ? (
-                  <button
-                    type="button"
-                    onClick={() => setOpened(entry)}
-                    className="border-0 bg-transparent p-0 text-left text-inherit underline"
-                  >
-                    {isImage(entry) ? <Thumb entry={entry} /> : null}
-                    <span>{entry.filename}</span>
-                  </button>
-                ) : (
-                  entry.filename
-                )}
-              </Td>
-              <Td>{entry.subject}</Td>
-              <Td>{entry.media_type}</Td>
-              <Td>{formatSize(entry.size_bytes)}</Td>
-              <Td>{day(entry.created_at)}</Td>
-            </tr>
-          ))}
-        </tbody>
-      </Table>
-      <Pager payload={state.payload} place={place} onPlace={onPlace} />
-      {opened ? <Viewer entry={opened} onClose={() => setOpened(null)} /> : null}
-    </>
+    <Panel
+      state={state}
+      empty={(payload) => (payload.artifacts.length ? null : "No shared files yet.")}
+    >
+      {(payload) => {
+        return (
+          <>
+            <Table>
+              <thead>
+                <tr>
+                  {["file", "subject", "type", "size", "date"].map((column) => (
+                    <Th key={column}>{column}</Th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {payload.artifacts.map((entry) => (
+                  <tr key={entry.id}>
+                    <Td>
+                      {entry.url ? (
+                        <button
+                          type="button"
+                          onClick={() => setOpened(entry)}
+                          className="border-0 bg-transparent p-0 text-left text-inherit underline"
+                        >
+                          {isImage(entry) ? <Thumb entry={entry} /> : null}
+                          <span>{entry.filename}</span>
+                        </button>
+                      ) : (
+                        entry.filename
+                      )}
+                    </Td>
+                    <Td>{entry.subject}</Td>
+                    <Td>{entry.media_type}</Td>
+                    <Td>{formatSize(entry.size_bytes)}</Td>
+                    <Td>{day(entry.created_at)}</Td>
+                  </tr>
+                ))}
+              </tbody>
+            </Table>
+            <Pager payload={payload} place={place} onPlace={onPlace} />
+            {opened ? <Viewer entry={opened} onClose={() => setOpened(null)} /> : null}
+          </>
+        );
+      }}
+    </Panel>
   );
 }
 

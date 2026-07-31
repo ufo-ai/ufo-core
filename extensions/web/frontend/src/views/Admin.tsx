@@ -3,7 +3,7 @@ import { useEffect, useState, type FormEvent } from "react";
 import { Button } from "@/components/ui/button";
 import { Checkbox, Input, Select, Textarea } from "@/components/ui/field";
 import { Table, Td, Th } from "@/components/ui/table";
-import { Notice, PanelEmpty, usePanelRead } from "@/kernel/panel";
+import { Notice, Panel, PanelEmpty, usePanelRead } from "@/kernel/panel";
 import { getJson, postIntent } from "@/lib/api";
 import type { Agent, AdminPayload, Member } from "@/lib/types";
 
@@ -19,151 +19,154 @@ export function Admin() {
     if (outcome.applied) setReloads((count) => count + 1);
   }
 
-  if (state.phase === "loading") return null;
-  if (state.phase === "failed") {
-    return (
-      <main className="flex flex-col gap-3xl overflow-y-auto p-2xl">
-        <PanelEmpty>{state.message}</PanelEmpty>
-      </main>
-    );
-  }
-
-  const payload = state.payload;
-  const mainAgent = payload.agents.find((agent) => agent.main);
-  const seats = payload.seats;
-  const gated = seats.limit !== null || seats.included !== null;
-
   return (
-    <main className="flex flex-col gap-3xl overflow-y-auto p-2xl" data-testid="admin">
-      <Notice>{notice}</Notice>
-
-      <h2 className="m-0 text-section">Agents</h2>
-      <Table>
-        <thead>
-          <tr>
-            {["agent", "model", "public internet", "surfaces", "web audience", ""].map(
-              (column, index) => (
-                <Th key={index}>{column}</Th>
-              ),
-            )}
-          </tr>
-        </thead>
-        <tbody>
-          {payload.agents.map((agent) => (
-            <AgentRow
-              key={agent.id}
-              agent={agent}
-              onCopy={() => {
-                setCopying(agent);
-                setNotice("Copying " + agent.name + " — configuration only.");
-              }}
-              onAudience={(verb, email) => intent(agent.id, { verb, email })}
-            />
-          ))}
-        </tbody>
-      </Table>
-
-      {mainAgent ? (
-        <CreateAgent
-          payload={payload}
-          copying={copying}
-          onCreated={(name, spec) =>
-            intent(
-              mainAgent.id,
-              { verb: "apply", kind: "agent", name, spec },
-              "Created " + name + ".",
-            )
-          }
-        />
-      ) : null}
-
-      <h2 className="m-0 text-section">
-        {"Members" +
-          (gated ? "" : " · seats ungated") +
-          (seats.limit !== null ? " · " + seats.limit + " seat limit" : "") +
-          (seats.included !== null ? " · " + seats.included + " included" : "")}
-      </h2>
-      <Table>
-        <thead>
-          <tr>
-            {(gated ? ["member", "role", "seat", ""] : ["member", "role", ""]).map(
-              (column, index) => (
-                <Th key={index}>{column}</Th>
-              ),
-            )}
-          </tr>
-        </thead>
-        <tbody>
-          {payload.members.map((member) => (
-            <MemberRow
-              key={member.email}
-              member={member}
-              gated={gated}
-              onApply={(spec) =>
-                mainAgent
-                  ? intent(mainAgent.id, {
-                      verb: "apply",
-                      kind: "member",
-                      name: member.id,
-                      spec,
-                    })
-                  : undefined
-              }
-            />
-          ))}
-        </tbody>
-      </Table>
-
-      <h2 className="m-0 text-section">Billing</h2>
-      {payload.caps.length ? (
-        <Table>
-          <thead>
-            <tr>
-              {["cap", "subject", "window", "limit", "on breach"].map((column) => (
-                <Th key={column}>{column}</Th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {payload.caps.map((cap, index) => (
-              <tr key={index}>
-                <Td>{cap.scope}</Td>
-                <Td>{cap.subject || "—"}</Td>
-                <Td>{cap.window_seconds / 3600 + "h"}</Td>
-                <Td>{"$" + (cap.limit_micro_usd / 1e6).toFixed(2)}</Td>
-                <Td>{cap.on_breach}</Td>
-              </tr>
-            ))}
-          </tbody>
-        </Table>
-      ) : (
-        <div>No spend caps are set.</div>
+    <Panel
+      state={state}
+      failed={(message) => (
+        <main className="flex flex-col gap-3xl overflow-y-auto p-2xl">
+          <PanelEmpty>{message}</PanelEmpty>
+        </main>
       )}
-      <div>The plan, invoices, and payment methods are managed with the agent in chat.</div>
+    >
+      {(payload) => {
+        const mainAgent = payload.agents.find((agent) => agent.main);
+        const seats = payload.seats;
+        const gated = seats.limit !== null || seats.included !== null;
 
-      <h2 className="m-0 text-section">Deploy</h2>
-      <div>
-        Sandbox public internet: {payload.deploy.sandbox_internet ? "allowed" : "blocked"}
-      </div>
-      <Table>
-        <thead>
-          <tr>
-            {["extension", "version", "public internet"].map((column) => (
-              <Th key={column}>{column}</Th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {payload.deploy.extensions.map((extension) => (
-            <tr key={extension.name}>
-              <Td>{extension.name}</Td>
-              <Td>{extension.version}</Td>
-              <Td>{extension.sandbox_internet ? "allowed" : "blocked"}</Td>
-            </tr>
-          ))}
-        </tbody>
-      </Table>
-    </main>
+        return (
+          <main className="flex flex-col gap-3xl overflow-y-auto p-2xl" data-testid="admin">
+            <Notice>{notice}</Notice>
+
+            <h2 className="m-0 text-section">Agents</h2>
+            <Table>
+              <thead>
+                <tr>
+                  {["agent", "model", "public internet", "surfaces", "web audience", ""].map(
+                    (column, index) => (
+                      <Th key={index}>{column}</Th>
+                    ),
+                  )}
+                </tr>
+              </thead>
+              <tbody>
+                {payload.agents.map((agent) => (
+                  <AgentRow
+                    key={agent.id}
+                    agent={agent}
+                    onCopy={() => {
+                      setCopying(agent);
+                      setNotice("Copying " + agent.name + " — configuration only.");
+                    }}
+                    onAudience={(verb, email) => intent(agent.id, { verb, email })}
+                  />
+                ))}
+              </tbody>
+            </Table>
+
+            {mainAgent ? (
+              <CreateAgent
+                payload={payload}
+                copying={copying}
+                onCreated={(name, spec) =>
+                  intent(
+                    mainAgent.id,
+                    { verb: "apply", kind: "agent", name, spec },
+                    "Created " + name + ".",
+                  )
+                }
+              />
+            ) : null}
+
+            <h2 className="m-0 text-section">
+              {"Members" +
+                (gated ? "" : " · seats ungated") +
+                (seats.limit !== null ? " · " + seats.limit + " seat limit" : "") +
+                (seats.included !== null ? " · " + seats.included + " included" : "")}
+            </h2>
+            <Table>
+              <thead>
+                <tr>
+                  {(gated ? ["member", "role", "seat", ""] : ["member", "role", ""]).map(
+                    (column, index) => (
+                      <Th key={index}>{column}</Th>
+                    ),
+                  )}
+                </tr>
+              </thead>
+              <tbody>
+                {payload.members.map((member) => (
+                  <MemberRow
+                    key={member.email}
+                    member={member}
+                    gated={gated}
+                    onApply={(spec) =>
+                      mainAgent
+                        ? intent(mainAgent.id, {
+                            verb: "apply",
+                            kind: "member",
+                            name: member.id,
+                            spec,
+                          })
+                        : undefined
+                    }
+                  />
+                ))}
+              </tbody>
+            </Table>
+
+            <h2 className="m-0 text-section">Billing</h2>
+            {payload.caps.length ? (
+              <Table>
+                <thead>
+                  <tr>
+                    {["cap", "subject", "window", "limit", "on breach"].map((column) => (
+                      <Th key={column}>{column}</Th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {payload.caps.map((cap, index) => (
+                    <tr key={index}>
+                      <Td>{cap.scope}</Td>
+                      <Td>{cap.subject || "—"}</Td>
+                      <Td>{cap.window_seconds / 3600 + "h"}</Td>
+                      <Td>{"$" + (cap.limit_micro_usd / 1e6).toFixed(2)}</Td>
+                      <Td>{cap.on_breach}</Td>
+                    </tr>
+                  ))}
+                </tbody>
+              </Table>
+            ) : (
+              <div>No spend caps are set.</div>
+            )}
+            <div>The plan, invoices, and payment methods are managed with the agent in chat.</div>
+
+            <h2 className="m-0 text-section">Deploy</h2>
+            <div>
+              Sandbox public internet: {payload.deploy.sandbox_internet ? "allowed" : "blocked"}
+            </div>
+            <Table>
+              <thead>
+                <tr>
+                  {["extension", "version", "public internet"].map((column) => (
+                    <Th key={column}>{column}</Th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {payload.deploy.extensions.map((extension) => (
+                  <tr key={extension.name}>
+                    <Td>{extension.name}</Td>
+                    <Td>{extension.version}</Td>
+                    <Td>{extension.sandbox_internet ? "allowed" : "blocked"}</Td>
+                  </tr>
+                ))}
+              </tbody>
+            </Table>
+          </main>
+        );
+      }}
+    </Panel>
   );
 }
 

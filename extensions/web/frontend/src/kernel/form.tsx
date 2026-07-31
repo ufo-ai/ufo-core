@@ -1,9 +1,14 @@
 import { Checkbox, Input, Label, Select } from "@/components/ui/field";
 import type { SchemaProperty } from "@/lib/types";
 
+export type SpecSchema = {
+  properties?: Record<string, SchemaProperty>;
+  required?: string[];
+};
+
 export type SpecValue = string | boolean;
 
-export function specType(prop: SchemaProperty): string {
+function specType(prop: SchemaProperty): string {
   if (prop.type) return prop.type;
   const alternative = (prop.anyOf ?? []).find((entry) => entry.type && entry.type !== "null");
   return alternative?.type ?? "string";
@@ -14,7 +19,7 @@ export function initialSpecValue(prop: SchemaProperty, value: unknown): SpecValu
   return value === undefined || value === null ? "" : String(value);
 }
 
-export type SpecFieldProps = {
+type SpecFieldProps = {
   name: string;
   prop: SchemaProperty;
   value: SpecValue;
@@ -22,7 +27,7 @@ export type SpecFieldProps = {
   onChange: (value: SpecValue) => void;
 };
 
-export function SpecField({ name, prop, value, options, onChange }: SpecFieldProps) {
+function SpecField({ name, prop, value, options, onChange }: SpecFieldProps) {
   const id = "spec-" + name;
   const choices = options ?? prop.enum;
   return (
@@ -46,5 +51,36 @@ export function SpecField({ name, prop, value, options, onChange }: SpecFieldPro
         <Input id={id} value={String(value)} onChange={(event) => onChange(event.target.value)} />
       )}
     </div>
+  );
+}
+
+export function FormFromSchema({
+  schema,
+  fields,
+  values,
+  options,
+  onChange,
+}: {
+  schema: SpecSchema;
+  fields?: string[];
+  values: Record<string, SpecValue>;
+  options?: Record<string, string[] | null>;
+  onChange: (name: string, value: SpecValue) => void;
+}) {
+  const properties = schema.properties ?? {};
+  const shown = fields ?? Object.keys(properties);
+  return (
+    <>
+      {shown.map((name) => (
+        <SpecField
+          key={name}
+          name={name}
+          prop={properties[name]}
+          value={values[name] ?? ""}
+          options={options?.[name] ?? null}
+          onChange={(value) => onChange(name, value)}
+        />
+      ))}
+    </>
   );
 }

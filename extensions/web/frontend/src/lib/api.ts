@@ -4,9 +4,9 @@ export const BASE = "/surface/web";
 
 export type Fetched<T> = { ok: true; payload: T } | { ok: false; message: string };
 
-export async function getJson<T>(path: string): Promise<Fetched<T>> {
+export async function getJson<T>(path: string, signal?: AbortSignal): Promise<Fetched<T>> {
   try {
-    const res = await fetch(BASE + path, { credentials: "same-origin" });
+    const res = await fetch(BASE + path, { credentials: "same-origin", signal });
     if (!res.ok) return { ok: false, message: "Error " + res.status + " — reload to retry." };
     return { ok: true, payload: (await res.json()) as T };
   } catch {

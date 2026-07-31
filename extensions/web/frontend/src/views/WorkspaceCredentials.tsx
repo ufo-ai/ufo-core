@@ -1,10 +1,10 @@
 import { useState } from "react";
 
-import type { Placement } from "@/views/Workspace";
+import type { Placement } from "@/kernel/pager";
 import { CredentialPromptForm } from "@/views/CredentialPrompt";
 import { Button } from "@/components/ui/button";
 import { Table, Td, Th } from "@/components/ui/table";
-import { Notice, PanelEmpty, usePanelRead } from "@/kernel/panel";
+import { Notice, Panel, usePanelRead } from "@/kernel/panel";
 import { postIntent } from "@/lib/api";
 import { useMainAgent } from "@/lib/mainAgent";
 import type { CredentialRequest } from "@/lib/types";
@@ -50,59 +50,64 @@ export function WorkspaceCredentials({
     setNotice(outcome.message);
   }
 
-  if (state.phase === "loading") return null;
-  if (state.phase === "failed") return <PanelEmpty>{state.message}</PanelEmpty>;
-
-  const slots = state.payload.slots;
-  if (!slots.length) return <PanelEmpty>No credential slots are declared.</PanelEmpty>;
-
   return (
-    <>
-      <Table>
-        <thead>
-          <tr>
-            {["slot", "description", "extension", "state", ""].map((column, index) => (
-              <Th key={index}>{column}</Th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {slots.map((entry) => (
-            <tr key={entry.name}>
-              <Td>{entry.slot}</Td>
-              <Td>{entry.description}</Td>
-              <Td>{entry.extension}</Td>
-              <Td>{entry.filled ? "filled" : "empty"}</Td>
-              <Td>
-                <div className="flex flex-wrap gap-xs">
-                  <Button variant="row" disabled={busy} onClick={() => act(entry, "request")}>
-                    {entry.filled ? "Replace" : "Set"}
-                  </Button>
-                  {entry.filled ? (
-                    <Button variant="row" disabled={busy} onClick={() => act(entry, "delete")}>
-                      Clear
-                    </Button>
-                  ) : null}
-                </div>
-              </Td>
-            </tr>
-          ))}
-        </tbody>
-      </Table>
-      {request ? (
-        <div>
-          <div>{request.reason}</div>
-          {request.prompts.map((prompt) => (
-            <CredentialPromptForm
-              key={prompt.slot}
-              sealed={request.sealed}
-              prompt={prompt}
-              onStored={(slot) => onPlace({ notice: "Stored " + slot + "." })}
-            />
-          ))}
-        </div>
-      ) : null}
-      <Notice>{notice}</Notice>
-    </>
+    <Panel
+      state={state}
+      empty={(payload) => (payload.slots.length ? null : "No credential slots are declared.")}
+    >
+      {(payload) => {
+        const slots = payload.slots;
+
+        return (
+          <>
+            <Table>
+              <thead>
+                <tr>
+                  {["slot", "description", "extension", "state", ""].map((column, index) => (
+                    <Th key={index}>{column}</Th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {slots.map((entry) => (
+                  <tr key={entry.name}>
+                    <Td>{entry.slot}</Td>
+                    <Td>{entry.description}</Td>
+                    <Td>{entry.extension}</Td>
+                    <Td>{entry.filled ? "filled" : "empty"}</Td>
+                    <Td>
+                      <div className="flex flex-wrap gap-xs">
+                        <Button variant="row" disabled={busy} onClick={() => act(entry, "request")}>
+                          {entry.filled ? "Replace" : "Set"}
+                        </Button>
+                        {entry.filled ? (
+                          <Button variant="row" disabled={busy} onClick={() => act(entry, "delete")}>
+                            Clear
+                          </Button>
+                        ) : null}
+                      </div>
+                    </Td>
+                  </tr>
+                ))}
+              </tbody>
+            </Table>
+            {request ? (
+              <div>
+                <div>{request.reason}</div>
+                {request.prompts.map((prompt) => (
+                  <CredentialPromptForm
+                    key={prompt.slot}
+                    sealed={request.sealed}
+                    prompt={prompt}
+                    onStored={(slot) => onPlace({ notice: "Stored " + slot + "." })}
+                  />
+                ))}
+              </div>
+            ) : null}
+            <Notice>{notice}</Notice>
+          </>
+        );
+      }}
+    </Panel>
   );
 }

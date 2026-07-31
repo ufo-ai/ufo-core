@@ -26,6 +26,11 @@ ENVELOPE_COLUMNS = {"workspace_id", "created_at", "updated_at"}
 SCHEMA_TABLES = CORE_SRC / "schema" / "tables.py"
 SCHEDULING_MODULE = CORE_SRC / "scheduling.py"
 AMBIENT_SCHEDULE_METHODS = frozenset({"create", "pause", "_upsert", "cancel", "list", "inspect"})
+PORTAL_SOURCE = Path("extensions/web/frontend/src")
+PORTAL_ENTRY = PORTAL_SOURCE / "main.tsx"
+PORTAL_THEME = PORTAL_SOURCE / "theme.css"
+PORTAL_MODULE_SUFFIXES = frozenset({".ts", ".tsx", ".js", ".jsx", ".mts", ".cts"})
+STYLESHEET_IMPORT = re.compile(r"""["'][^"']*\.css["']""")
 EXTENSIONS_ROOT = "extensions"
 PACKS_ROOT = "packs"
 EXT_SCAFFOLD_DIRS = frozenset({"tests"})
@@ -672,6 +677,35 @@ def _registered_naming_failures() -> list[str]:
     return _naming_failures(manifests, packs)
 
 
+def _portal_style_failures() -> list[str]:
+    """The portal's look lives in the Tailwind theme and the component set. A view that imports a
+    stylesheet or emits a `<style>` tag can restyle a sibling it never named, which is how a rule
+    written for one panel silently reshaped another. An inline `style` object is a computed value,
+    not a selector, and stays allowed. The portal's own markup entry is checked too: a `<style>`
+    there is the same escape by a different door."""
+    source = ROOT / PORTAL_SOURCE
+    if not source.is_dir():
+        return [f"{PORTAL_SOURCE}: the portal source is missing"]
+    failures = []
+    for path in sorted(source.rglob("*")):
+        rel = path.relative_to(ROOT)
+        if path.suffix == ".css" and rel != PORTAL_THEME:
+            failures.append(f"{rel}: the theme is the only stylesheet")
+        if path.suffix not in PORTAL_MODULE_SUFFIXES:
+            continue
+        text = path.read_text()
+        if "<style" in text:
+            failures.append(f"{rel}: a view may not emit a <style> tag")
+        if STYLESHEET_IMPORT.search(text) and rel != PORTAL_ENTRY:
+            failures.append(f"{rel}: only the entry module imports the theme")
+    markup = ROOT / PORTAL_SOURCE.parent / "index.html"
+    if not markup.is_file():
+        return [*failures, f"{markup.relative_to(ROOT)}: the portal entry markup is missing"]
+    if "<style" in markup.read_text():
+        failures.append(f"{markup.relative_to(ROOT)}: a view may not emit a <style> tag")
+    return failures
+
+
 def main() -> int:
     failures = []
     trees: dict[Path, ast.Module] = {}
@@ -713,6 +747,7 @@ def main() -> int:
     failures.extend(_skill_boundary_failures(skill_trees))
     failures.extend(_migration_failures(trees))
     failures.extend(_registered_naming_failures())
+    failures.extend(_portal_style_failures())
     terraform = _env_terraform()
     if not terraform:
         failures.append(f"env roots: no terraform found under {ENV_ROOTS}")

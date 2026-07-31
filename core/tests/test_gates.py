@@ -349,3 +349,39 @@ def test_shared_singleton_gate_allows_two_files_in_one_root() -> None:
     """A root may split its terraform across files. The rule is one root, not one file."""
     other = Path("infra/envs/testing/datadog_extra.tf")
     assert gates._shared_singleton_failures({TESTING_TF: INTEGRATION, other: INTEGRATION}) == []
+
+
+def test_portal_style_gate_reaches_the_source_it_judges() -> None:
+    """The gate reads a fixed path, so a rename makes the rule quietly stop applying: a scan root
+    that resolves to nothing yields no files, no failures, and a green gate. It names the miss
+    instead."""
+    assert (gates.ROOT / gates.PORTAL_SOURCE).is_dir()
+    assert (gates.ROOT / gates.PORTAL_THEME).is_file()
+    assert (gates.ROOT / gates.PORTAL_ENTRY).is_file()
+    assert gates._portal_style_failures() == []
+
+
+def test_portal_style_gate_names_a_missing_source_rather_than_passing() -> None:
+    """The failure this gate cannot afford is silence, so an absent root is itself a failure."""
+    original = gates.PORTAL_SOURCE
+    gates.PORTAL_SOURCE = Path("extensions/web/frontend/renamed")
+    try:
+        failures = gates._portal_style_failures()
+    finally:
+        gates.PORTAL_SOURCE = original
+    assert failures == ["extensions/web/frontend/renamed: the portal source is missing"]
+
+
+def test_portal_style_gate_refuses_a_stylesheet_a_single_quoted_import_hides() -> None:
+    """Prettier writes double quotes, so a single-quoted import is exactly how a stylesheet would
+    arrive unnoticed. The rule is about the import, not the quoting."""
+    source = gates.ROOT / gates.PORTAL_SOURCE
+    smuggled = source / "views" / "smuggled.tsx"
+    smuggled.write_text("import 'some-package/dist/widget.css';\nexport const x = 1;\n")
+    try:
+        failures = gates._portal_style_failures()
+    finally:
+        smuggled.unlink()
+    assert failures == [
+        "extensions/web/frontend/src/views/smuggled.tsx: only the entry module imports the theme"
+    ]

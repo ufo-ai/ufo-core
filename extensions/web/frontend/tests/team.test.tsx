@@ -114,3 +114,11 @@ test("the sidebar offers Team, and selecting it reads the roster", async () => {
   await waitFor(() => expect(calls.some((url) => url.includes("/workspace/team"))).toBe(true));
   expect(await screen.findByText("lead@example.com")).toBeTruthy();
 });
+
+test("a failed roster read states the fault through the shared fence", async () => {
+  wire({ "/workspace/team": () => new Response("nope", { status: 500 }) });
+  render(<App agents={[AGENT]} member={ADMIN} />);
+
+  expect(await screen.findByText("Error 500 — reload to retry.")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Add member" })).toBeNull();
+});

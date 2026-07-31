@@ -429,3 +429,42 @@ test("the agent tab strip opens the tab named in the hash", async () => {
   expect(await screen.findByText("No member-authored skills for assistant.")).toBeTruthy();
   expect(screen.getByRole("tab", { name: "skills" }).getAttribute("aria-selected")).toBe("true");
 });
+
+test("the model field offers the deploy's models, which its schema alone cannot supply", async () => {
+  wire({
+    "/overview": () => json(OVERVIEW),
+    "/transcript": () => json({ messages: [] }),
+  });
+  render(<App agents={[AGENT]} member={MEMBER} />);
+
+  await userEvent.click(screen.getByRole("tab", { name: "overview" }));
+  const model = (await screen.findByLabelText("model")) as HTMLSelectElement;
+  expect(model.tagName).toBe("SELECT");
+  expect([...model.options].map((option) => option.value)).toEqual(["opus", "sonnet"]);
+});
+
+test("a conversation the member may not read says so instead of reporting a status code", async () => {
+  wire({
+    "/turns": () => new Response("no", { status: 404 }),
+    "/files": () => json({ files: [] }),
+    "/conversations": () =>
+      json({
+        conversations: [
+          {
+            id: "c1",
+            title: "a shared thread",
+            audience: "shared",
+            updated_at: "2026-07-30T12:00:00",
+            readable: true,
+          },
+        ],
+      }),
+    "/transcript": () => json({ messages: [] }),
+  });
+  render(<App agents={[AGENT]} member={MEMBER} />);
+
+  await userEvent.click(screen.getByRole("tab", { name: "conversations" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Open" }));
+  expect(await screen.findByText("This conversation is not shared with you.")).toBeTruthy();
+  expect(screen.queryByText(/Error 404/)).toBeNull();
+});

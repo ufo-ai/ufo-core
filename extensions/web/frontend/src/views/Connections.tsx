@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 
 import { Button } from "@/components/ui/button";
-import { Table, Td, Th } from "@/components/ui/table";
-import { Notice, PanelEmpty, usePanelRead } from "@/kernel/panel";
+import { Td } from "@/components/ui/table";
+import { Notice, Panel, usePanelRead } from "@/kernel/panel";
+import { DataTable } from "@/kernel/table";
 import { BASE, postIntent } from "@/lib/api";
 import type { Agent } from "@/lib/types";
 
@@ -80,8 +81,6 @@ export function Connections({ agent }: { agent: Agent }) {
     setReloads((count) => count + 1);
   }
 
-  const entries = state.phase === "ready" ? state.payload.connections : [];
-
   return (
     <>
       <form onSubmit={connect} className="mb-lg flex gap-sm">
@@ -113,22 +112,16 @@ export function Connections({ agent }: { agent: Agent }) {
           handoff
         )}
       </Notice>
-      {state.phase === "failed" ? <PanelEmpty>{state.message}</PanelEmpty> : null}
-      {state.phase === "ready" && !entries.length ? (
-        <PanelEmpty>No accounts are connected to this agent.</PanelEmpty>
-      ) : null}
-      {entries.length ? (
-        <Table>
-          <thead>
-            <tr>
-              {["provider", "account", "owner", "access", "connected", ""].map((column, index) => (
-                <Th key={index}>{column}</Th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {entries.map((entry) => (
-              <tr key={entry.grant}>
+      <Panel state={state}>
+        {(payload) => (
+          <DataTable
+            columns={["provider", "account", "owner", "access", "connected", ""]}
+            rows={payload.connections}
+            rowKey={(entry) => entry.grant}
+            empty="No accounts are connected to this agent."
+          >
+            {(entry) => (
+              <>
                 <Td>{entry.provider}</Td>
                 <Td>{entry.account_id ?? "—"}</Td>
                 <Td>{entry.owner_email ?? "—"}</Td>
@@ -165,11 +158,11 @@ export function Connections({ agent }: { agent: Agent }) {
                     </div>
                   )}
                 </Td>
-              </tr>
-            ))}
-          </tbody>
-        </Table>
-      ) : null}
+              </>
+            )}
+          </DataTable>
+        )}
+      </Panel>
     </>
   );
 }

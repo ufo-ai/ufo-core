@@ -1,10 +1,10 @@
 import { useState, type FormEvent } from "react";
 
-import type { Placement } from "@/views/Workspace";
+import type { Placement } from "@/kernel/pager";
 import { Button } from "@/components/ui/button";
 import { Checkbox, Input } from "@/components/ui/field";
 import { Table, Td, Th } from "@/components/ui/table";
-import { Notice, PanelEmpty, usePanelRead } from "@/kernel/panel";
+import { Notice, Panel, usePanelRead } from "@/kernel/panel";
 import { postIntent } from "@/lib/api";
 import { useMainAgent } from "@/lib/mainAgent";
 
@@ -44,55 +44,54 @@ export function Team({
     setNotice(outcome.message);
   }
 
-  if (state.phase === "loading") return null;
-  if (state.phase === "failed") return <PanelEmpty>{state.message}</PanelEmpty>;
-
-  const { members, can_add, domain } = state.payload;
-
   return (
-    <>
-      <Table>
-        <thead>
-          <tr>
-            {["member", "role", "seat"].map((column) => (
-              <Th key={column}>{column}</Th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {members.map((entry) => (
-            <tr key={entry.email}>
-              <Td>{entry.email}</Td>
-              <Td>{entry.admin ? "Admin" : "Member"}</Td>
-              <Td>{entry.seated ? "Seated" : "No seat"}</Td>
-            </tr>
-          ))}
-        </tbody>
-      </Table>
-      {can_add && mainAgent ? (
-        <form onSubmit={add} className="mb-lg flex items-center gap-sm">
-          <Input
-            type="email"
-            required
-            name="email"
-            placeholder={domain ? "email@" + domain : "email@work.com"}
-            value={email}
-            onChange={(event) => setEmail(event.target.value)}
-          />
-          <label className="flex items-center gap-hair">
-            <Checkbox
-              name="admin"
-              checked={admin}
-              onChange={(event) => setAdmin(event.target.checked)}
-            />
-            Admin
-          </label>
-          <Button type="submit" variant="send" disabled={busy}>
-            Add member
-          </Button>
-        </form>
-      ) : null}
-      <Notice>{notice}</Notice>
-    </>
+    <Panel state={state}>
+      {({ members, can_add, domain }) => (
+        <>
+          <Table>
+            <thead>
+              <tr>
+                {["member", "role", "seat"].map((column) => (
+                  <Th key={column}>{column}</Th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {members.map((entry) => (
+                <tr key={entry.email}>
+                  <Td>{entry.email}</Td>
+                  <Td>{entry.admin ? "Admin" : "Member"}</Td>
+                  <Td>{entry.seated ? "Seated" : "No seat"}</Td>
+                </tr>
+              ))}
+            </tbody>
+          </Table>
+          {can_add && mainAgent ? (
+            <form onSubmit={add} className="mb-lg flex items-center gap-sm">
+              <Input
+                type="email"
+                required
+                name="email"
+                placeholder={domain ? "email@" + domain : "email@work.com"}
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
+              />
+              <label className="flex items-center gap-hair">
+                <Checkbox
+                  name="admin"
+                  checked={admin}
+                  onChange={(event) => setAdmin(event.target.checked)}
+                />
+                Admin
+              </label>
+              <Button type="submit" variant="send" disabled={busy}>
+                Add member
+              </Button>
+            </form>
+          ) : null}
+          <Notice>{notice}</Notice>
+        </>
+      )}
+    </Panel>
   );
 }

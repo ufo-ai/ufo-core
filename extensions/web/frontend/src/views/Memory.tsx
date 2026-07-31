@@ -1,10 +1,10 @@
 import { useState, type FormEvent } from "react";
 
-import { Pager, type Placement } from "@/views/Workspace";
+import { Pager, type Placement } from "@/kernel/pager";
 import { day } from "@/views/Tasks";
 import { Button } from "@/components/ui/button";
 import { Table, Td, Th } from "@/components/ui/table";
-import { Notice, PanelEmpty, usePanelRead } from "@/kernel/panel";
+import { Notice, Panel, PanelEmpty, usePanelRead } from "@/kernel/panel";
 import { postIntent } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { useMainAgent } from "@/lib/mainAgent";
@@ -68,15 +68,15 @@ export function Memory({
           Search
         </Button>
       </form>
-      {state.phase === "failed" ? <PanelEmpty>{state.message}</PanelEmpty> : null}
-      {state.phase === "ready" ? (
-        !state.payload.available ? (
-          <PanelEmpty>This deploy has no memory extension.</PanelEmpty>
-        ) : (
+      <Panel
+        state={state}
+        empty={(payload) => (payload.available ? null : "This deploy has no memory extension.")}
+      >
+        {(payload) => (
           <>
             {submitted ? null : (
               <div className="mb-lg flex gap-xs">
-                {["all", ...state.payload.kinds].map((kind) => {
+                {["all", ...payload.kinds].map((kind) => {
                   const chosen = kind === "all" ? !place.kind : place.kind === kind;
                   return (
                     <button
@@ -95,7 +95,7 @@ export function Memory({
                 })}
               </div>
             )}
-            {!state.payload.matches.length ? (
+            {!payload.matches.length ? (
               <>
                 <PanelEmpty>
                   {submitted
@@ -105,7 +105,7 @@ export function Memory({
                       : "No memories yet."}
                 </PanelEmpty>
                 {submitted ? null : (
-                  <Pager payload={state.payload} place={place} onPlace={onPlace} />
+                  <Pager payload={payload} place={place} onPlace={onPlace} />
                 )}
               </>
             ) : (
@@ -119,7 +119,7 @@ export function Memory({
                     </tr>
                   </thead>
                   <tbody>
-                    {state.payload.matches.map((match, index) => (
+                    {payload.matches.map((match, index) => (
                       <tr key={index}>
                         <Td>{match.text}</Td>
                         <Td>{match.kind}</Td>
@@ -139,13 +139,13 @@ export function Memory({
                   </tbody>
                 </Table>
                 {submitted ? null : (
-                  <Pager payload={state.payload} place={place} onPlace={onPlace} />
+                  <Pager payload={payload} place={place} onPlace={onPlace} />
                 )}
               </>
             )}
           </>
-        )
-      ) : null}
+        )}
+      </Panel>
       {correcting ? (
         <CorrectionForm
           match={correcting}

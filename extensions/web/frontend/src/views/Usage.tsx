@@ -1,5 +1,5 @@
 import { Table, Td, Th } from "@/components/ui/table";
-import { PanelEmpty, usePanelRead } from "@/kernel/panel";
+import { Panel, PanelEmpty, usePanelRead } from "@/kernel/panel";
 import { money } from "@/lib/money";
 import type { Agent } from "@/lib/types";
 
@@ -104,55 +104,64 @@ export function Subjects({ rows, empty }: { rows: SubjectLine[]; empty: string }
 
 export function AgentUsage({ agent }: { agent: Agent }) {
   const state = usePanelRead<UsageReport>("/agents/" + agent.id + "/usage");
-  if (state.phase === "loading") return null;
-  if (state.phase === "failed") {
-    return (
-      <PanelEmpty>
-        {state.message.startsWith("Error 404")
-          ? "Usage for this agent is not shared with you."
-          : state.message}
-      </PanelEmpty>
-    );
-  }
-  const report = state.payload;
   return (
-    <>
-      <Heading>
-        Last {hours(report.window_seconds)} · {money(report.total_micro_usd)}
-      </Heading>
-      <Dimensions lines={report.by_dimension} empty={"No spend in window for " + agent.name + "."} />
-      <Heading>Caps for this agent</Heading>
-      <Caps caps={report.caps} empty="No agent-scoped caps." />
-    </>
+    <Panel
+      state={state}
+      failed={(message) => (
+        <PanelEmpty>
+          {message.startsWith("Error 404")
+            ? "Usage for this agent is not shared with you."
+            : message}
+        </PanelEmpty>
+      )}
+    >
+      {(report) => {
+        return (
+          <>
+            <Heading>
+              Last {hours(report.window_seconds)} · {money(report.total_micro_usd)}
+            </Heading>
+            <Dimensions lines={report.by_dimension} empty={"No spend in window for " + agent.name + "."} />
+            <Heading>Caps for this agent</Heading>
+            <Caps caps={report.caps} empty="No agent-scoped caps." />
+          </>
+        );
+      }}
+    </Panel>
   );
 }
 
 export function WorkspaceUsage() {
   const state = usePanelRead<WorkspaceUsageReport>("/workspace/usage");
-  if (state.phase === "loading") return null;
-  if (state.phase === "failed") return <PanelEmpty>{state.message}</PanelEmpty>;
-  const payload = state.payload;
   return (
-    <>
-      <Heading>
-        Your spend · last {hours(payload.window_seconds)} · {money(payload.total_micro_usd)}
-      </Heading>
-      <Dimensions lines={payload.by_dimension} empty="No spend of yours in window." />
-      <Heading>Your caps</Heading>
-      <Caps caps={payload.caps} empty="No caps are set on you." />
-      {payload.workspace ? (
-        <>
-          <Heading>Workspace · {money(payload.workspace.total_micro_usd)}</Heading>
-          <Dimensions
-            lines={payload.workspace.by_dimension}
-            empty="No workspace spend in window."
-          />
-          <Heading>By member</Heading>
-          <Subjects rows={payload.workspace.by_member} empty="None in window." />
-          <Heading>By agent</Heading>
-          <Subjects rows={payload.workspace.by_agent} empty="None in window." />
-        </>
-      ) : null}
-    </>
+    <Panel
+      state={state}
+    >
+      {(payload) => {
+        return (
+          <>
+            <Heading>
+              Your spend · last {hours(payload.window_seconds)} · {money(payload.total_micro_usd)}
+            </Heading>
+            <Dimensions lines={payload.by_dimension} empty="No spend of yours in window." />
+            <Heading>Your caps</Heading>
+            <Caps caps={payload.caps} empty="No caps are set on you." />
+            {payload.workspace ? (
+              <>
+                <Heading>Workspace · {money(payload.workspace.total_micro_usd)}</Heading>
+                <Dimensions
+                  lines={payload.workspace.by_dimension}
+                  empty="No workspace spend in window."
+                />
+                <Heading>By member</Heading>
+                <Subjects rows={payload.workspace.by_member} empty="None in window." />
+                <Heading>By agent</Heading>
+                <Subjects rows={payload.workspace.by_agent} empty="None in window." />
+              </>
+            ) : null}
+          </>
+        );
+      }}
+    </Panel>
   );
 }

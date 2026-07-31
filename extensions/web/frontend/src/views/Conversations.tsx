@@ -5,7 +5,7 @@ import { Table, Td, Th } from "@/components/ui/table";
 import { Heading } from "@/views/Usage";
 import { day } from "@/views/Tasks";
 import { formatSize } from "@/views/Chat";
-import { Notice, PanelEmpty, usePanelRead } from "@/kernel/panel";
+import { Notice, Panel, PanelEmpty, usePanelRead } from "@/kernel/panel";
 import { BASE, postIntent } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import type { Agent } from "@/lib/types";
@@ -142,45 +142,49 @@ export function Conversations({ agent }: { agent: Agent }) {
       />
     );
   }
-  if (state.phase === "loading") return null;
-  if (state.phase === "failed") return <PanelEmpty>{state.message}</PanelEmpty>;
-
-  const entries = state.payload.conversations;
-  if (!entries.length) return <PanelEmpty>No conversations with {agent.name} yet.</PanelEmpty>;
-
   return (
-    <Table>
-      <thead>
-        <tr>
-          {["conversation", "surface", "turns", "last activity", ""].map((column, index) => (
-            <Th key={index}>{column}</Th>
-          ))}
-        </tr>
-      </thead>
-      <tbody>
-        {entries.map((entry) => (
-          <tr key={entry.id}>
-            <Td>{entry.member_email || entry.queue_key}</Td>
-            <Td>{entry.surface}</Td>
-            <Td>{String(entry.turn_count)}</Td>
-            <Td>{day(entry.last_turn_at) || day(entry.created_at)}</Td>
-            <Td>
-              {entry.readable ? (
-                <Button variant="row" onClick={() => setOpened(entry)}>
-                  Open
-                </Button>
-              ) : entry.disclosable ? (
-                <Button variant="row" onClick={() => setDisclosing(entry)}>
-                  Open as admin
-                </Button>
-              ) : (
-                <span className="font-mono text-mono">not shared with you</span>
-              )}
-            </Td>
-          </tr>
-        ))}
-      </tbody>
-    </Table>
+    <Panel state={state}>
+      {(payload) => {
+        const entries = payload.conversations;
+        if (!entries.length)
+          return <PanelEmpty>No conversations with {agent.name} yet.</PanelEmpty>;
+
+        return (
+          <Table>
+            <thead>
+              <tr>
+                {["conversation", "surface", "turns", "last activity", ""].map((column, index) => (
+                  <Th key={index}>{column}</Th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {entries.map((entry) => (
+                <tr key={entry.id}>
+                  <Td>{entry.member_email || entry.queue_key}</Td>
+                  <Td>{entry.surface}</Td>
+                  <Td>{String(entry.turn_count)}</Td>
+                  <Td>{day(entry.last_turn_at) || day(entry.created_at)}</Td>
+                  <Td>
+                    {entry.readable ? (
+                      <Button variant="row" onClick={() => setOpened(entry)}>
+                        Open
+                      </Button>
+                    ) : entry.disclosable ? (
+                      <Button variant="row" onClick={() => setDisclosing(entry)}>
+                        Open as admin
+                      </Button>
+                    ) : (
+                      <span className="font-mono text-mono">not shared with you</span>
+                    )}
+                  </Td>
+                </tr>
+              ))}
+            </tbody>
+          </Table>
+        );
+      }}
+    </Panel>
   );
 }
 
@@ -204,24 +208,29 @@ function ConversationDetail({
       <Heading>
         {conversation.surface} · {conversation.member_email || conversation.queue_key}
       </Heading>
-      {state.phase === "failed" ? (
-        <PanelEmpty>
-          {state.message.startsWith("Error 404")
-            ? "This conversation is not shared with you."
-            : state.message}
-        </PanelEmpty>
-      ) : null}
-      {state.phase === "ready" ? (
-        !state.payload.turns.length && !state.payload.subagent_turns.length ? (
-          <PanelEmpty>No turns in this conversation yet.</PanelEmpty>
-        ) : (
+      <Panel
+        state={state}
+        failed={(message) => (
+          <PanelEmpty>
+            {message.startsWith("Error 404")
+              ? "This conversation is not shared with you."
+              : message}
+          </PanelEmpty>
+        )}
+        empty={(payload) =>
+          payload.turns.length || payload.subagent_turns.length
+            ? null
+            : "No turns in this conversation yet."
+        }
+      >
+        {(payload) => (
           <div className="my-lg flex flex-col gap-lg">
-            {turnTree(state.payload.turns, state.payload.subagent_turns).map((entry) => (
+            {turnTree(payload.turns, payload.subagent_turns).map((entry) => (
               <TurnLine key={entry.turn.id} turn={entry.turn} depth={entry.depth} />
             ))}
           </div>
-        )
-      ) : null}
+        )}
+      </Panel>
       <ConversationFiles base={path} />
     </>
   );
@@ -260,11 +269,6 @@ function ConversationFiles({ base }: { base: string }) {
   const state = usePanelRead<{ files: WorkspaceFile[] }>(base + "/files");
   const [preview, setPreview] = useState<string | null>(null);
 
-  if (state.phase === "loading") return null;
-  if (state.phase === "failed") return <PanelEmpty>{state.message}</PanelEmpty>;
-
-  const files = state.payload.files;
-
   async function view(entry: WorkspaceFile) {
     setPreview("Reading " + entry.path + "…");
     try {
@@ -278,47 +282,51 @@ function ConversationFiles({ base }: { base: string }) {
   }
 
   return (
-    <>
-      <Heading>Workspace files</Heading>
-      {!files.length ? (
-        <PanelEmpty>No files in this conversation's workspace.</PanelEmpty>
-      ) : (
+    <Panel state={state}>
+      {(payload) => (
         <>
-          <Table>
-            <thead>
-              <tr>
-                {["file", "size", "modified", ""].map((column, index) => (
-                  <Th key={index}>{column}</Th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {files.map((entry) => (
-                <tr key={entry.path}>
-                  <Td>{entry.path}</Td>
-                  <Td>{formatSize(entry.size_bytes)}</Td>
-                  <Td>{day(entry.modified_at)}</Td>
-                  <Td>
-                    <div className="flex flex-wrap items-baseline gap-xs">
-                      {entry.size_bytes <= MAX_PREVIEW_BYTES ? (
-                        <Button variant="row" onClick={() => view(entry)}>
-                          View
-                        </Button>
-                      ) : null}
-                      <a href={BASE + base + "/files/" + entry.path}>Download</a>
-                    </div>
-                  </Td>
-                </tr>
-              ))}
-            </tbody>
-          </Table>
-          {preview === null ? null : (
-            <pre className="overflow-x-auto whitespace-pre-wrap rounded-panel bg-fill-subtle p-lg font-mono text-mono">
-              {preview}
-            </pre>
+          <Heading>Workspace files</Heading>
+          {!payload.files.length ? (
+            <PanelEmpty>No files in this conversation's workspace.</PanelEmpty>
+          ) : (
+            <>
+              <Table>
+                <thead>
+                  <tr>
+                    {["file", "size", "modified", ""].map((column, index) => (
+                      <Th key={index}>{column}</Th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {payload.files.map((entry) => (
+                    <tr key={entry.path}>
+                      <Td>{entry.path}</Td>
+                      <Td>{formatSize(entry.size_bytes)}</Td>
+                      <Td>{day(entry.modified_at)}</Td>
+                      <Td>
+                        <div className="flex flex-wrap items-baseline gap-xs">
+                          {entry.size_bytes <= MAX_PREVIEW_BYTES ? (
+                            <Button variant="row" onClick={() => view(entry)}>
+                              View
+                            </Button>
+                          ) : null}
+                          <a href={BASE + base + "/files/" + entry.path}>Download</a>
+                        </div>
+                      </Td>
+                    </tr>
+                  ))}
+                </tbody>
+              </Table>
+              {preview === null ? null : (
+                <pre className="overflow-x-auto whitespace-pre-wrap rounded-panel bg-fill-subtle p-lg font-mono text-mono">
+                  {preview}
+                </pre>
+              )}
+            </>
           )}
         </>
       )}
-    </>
+    </Panel>
   );
 }

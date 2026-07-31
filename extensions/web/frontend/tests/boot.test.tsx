@@ -149,3 +149,15 @@ test("the entry refuses to mount a page with no root rather than doing nothing",
   document.body.innerHTML = "";
   await expect(import("@/main")).rejects.toThrow("the portal page has no #root to mount into");
 });
+
+test("a failed administration read stays inside the scrolling frame the view owns", async () => {
+  wire({
+    "/api/admin": () => new Response("no", { status: 500 }),
+    "/transcript": () => json({ messages: [] }),
+  });
+  render(<App agents={[AGENT]} member={{ ...MEMBER, admin: true }} />);
+
+  await userEvent.click(screen.getByRole("button", { name: "Administration" }));
+  const message = await screen.findByText("Error 500 — reload to retry.");
+  expect(message.closest("main")).not.toBeNull();
+});

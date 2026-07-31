@@ -2,8 +2,8 @@ import { useEffect, useState, type FormEvent } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Hint } from "@/components/ui/field";
-import { SpecField, initialSpecValue, type SpecValue } from "@/kernel/form";
-import { Notice, PanelEmpty, Section, usePanelRead } from "@/kernel/panel";
+import { FormFromSchema, initialSpecValue, type SpecValue } from "@/kernel/form";
+import { Notice, Panel, Section, usePanelRead } from "@/kernel/panel";
 import { postIntent } from "@/lib/api";
 import type { Agent, SchemaProperty } from "@/lib/types";
 
@@ -45,85 +45,90 @@ export function Overview({ agent }: { agent: Agent }) {
     );
   }, [payload]);
 
-  if (state.phase === "loading") return null;
-  if (state.phase === "failed") return <PanelEmpty>{state.message}</PanelEmpty>;
-
-  const data = state.payload;
-  const properties = data.spec_schema.properties ?? {};
-
-  async function save(event: FormEvent) {
-    event.preventDefault();
-    setBusy(true);
-    const outcome = await postIntent(agent.id, {
-      verb: "apply",
-      kind: "agent",
-      name: data.agent.name,
-      spec: values,
-    });
-    setBusy(false);
-    setNotice(outcome.message);
-    if (outcome.applied) setReloads((count) => count + 1);
-  }
-
   return (
-    <>
-      <Section title="Agent">
-        <div className="font-mono text-mono">
-          {[
-            data.agent.main ? "main agent" : "agent",
-            "installations: " +
-              (data.agent.surfaces.length ? data.agent.surfaces.join(", ") : "none"),
-            "updated " + data.agent.updated_at.slice(0, 16).replace("T", " "),
-          ].join(" · ")}
-        </div>
-      </Section>
+    <Panel
+      state={state}
+    >
+      {(ready) => {
+        const properties = ready.spec_schema.properties ?? {};
 
-      <Section title="Settings">
-        <form onSubmit={save}>
-          {Object.keys(properties).map((key) => (
-            <SpecField
-              key={key}
-              name={key}
-              prop={properties[key]}
-              value={values[key] ?? initialSpecValue(properties[key], data.spec[key])}
-              options={key === "model" ? data.models : null}
-              onChange={(value) => setValues((current) => ({ ...current, [key]: value }))}
-            />
-          ))}
-          {data.deploy.sandbox_internet ? null : (
-            <Hint>
-              This deploy grants no sandbox public internet — the agent setting narrows a capability
-              that is currently off.
-            </Hint>
-          )}
-          <Button type="submit" variant="send" disabled={busy}>
-            Save
-          </Button>
-          <Notice>{notice}</Notice>
-        </form>
-      </Section>
+        async function save(event: FormEvent) {
+          event.preventDefault();
+          setBusy(true);
+          const outcome = await postIntent(agent.id, {
+            verb: "apply",
+            kind: "agent",
+            name: ready.agent.name,
+            spec: values,
+          });
+          setBusy(false);
+          setNotice(outcome.message);
+          if (outcome.applied) setReloads((count) => count + 1);
+        }
 
-      <Section title="Prompt">
-        <Hint className="font-mono">
-          digest {data.agent.prompt_digest} — prompt changes go through the governed proposal path
-          in chat
-        </Hint>
-        <pre className="overflow-x-auto whitespace-pre-wrap rounded-panel bg-fill-subtle p-lg font-mono text-mono">
-          {data.agent.prompt}
-        </pre>
-      </Section>
+        return (
+          <>
+            <Section title="Agent">
+              <div className="font-mono text-mono">
+                {[
+                  ready.agent.main ? "main agent" : "agent",
+                  "installations: " +
+                    (ready.agent.surfaces.length ? ready.agent.surfaces.join(", ") : "none"),
+                  "updated " + ready.agent.updated_at.slice(0, 16).replace("T", " "),
+                ].join(" · ")}
+              </div>
+            </Section>
 
-      {data.audience ? (
-        <Section title="Web audience">
-          <div className="font-mono text-mono">
-            {data.agent.main
-              ? "every member"
-              : data.audience.length
-                ? data.audience.join(", ")
-                : "no member grants — admins only"}
-          </div>
-        </Section>
-      ) : null}
-    </>
+            <Section title="Settings">
+              <form onSubmit={save}>
+                <FormFromSchema
+                  schema={ready.spec_schema}
+                  values={Object.fromEntries(
+                    Object.keys(properties).map((key) => [
+                      key,
+                      values[key] ?? initialSpecValue(properties[key], ready.spec[key]),
+                    ]),
+                  )}
+                  options={{ model: ready.models }}
+                  onChange={(key, value) => setValues((current) => ({ ...current, [key]: value }))}
+                />
+                {ready.deploy.sandbox_internet ? null : (
+                  <Hint>
+                    This deploy grants no sandbox public internet — the agent setting narrows a capability
+                    that is currently off.
+                  </Hint>
+                )}
+                <Button type="submit" variant="send" disabled={busy}>
+                  Save
+                </Button>
+                <Notice>{notice}</Notice>
+              </form>
+            </Section>
+
+            <Section title="Prompt">
+              <Hint className="font-mono">
+                digest {ready.agent.prompt_digest} — prompt changes go through the governed proposal path
+                in chat
+              </Hint>
+              <pre className="overflow-x-auto whitespace-pre-wrap rounded-panel bg-fill-subtle p-lg font-mono text-mono">
+                {ready.agent.prompt}
+              </pre>
+            </Section>
+
+            {ready.audience ? (
+              <Section title="Web audience">
+                <div className="font-mono text-mono">
+                  {ready.agent.main
+                    ? "every member"
+                    : ready.audience.length
+                      ? ready.audience.join(", ")
+                      : "no member grants — admins only"}
+                </div>
+              </Section>
+            ) : null}
+          </>
+        );
+      }}
+    </Panel>
   );
 }

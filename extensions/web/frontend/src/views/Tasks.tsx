@@ -2,9 +2,10 @@ import { useState, type FormEvent } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/field";
-import { Table, Td, Th } from "@/components/ui/table";
-import { SpecField, initialSpecValue, specType, type SpecValue } from "@/kernel/form";
-import { Notice, PanelEmpty, Section, usePanelRead } from "@/kernel/panel";
+import { Td } from "@/components/ui/table";
+import { FormFromSchema, initialSpecValue, type SpecValue } from "@/kernel/form";
+import { Notice, Panel, Section, usePanelRead } from "@/kernel/panel";
+import { DataTable } from "@/kernel/table";
 import { postIntent } from "@/lib/api";
 import type { Agent, SchemaProperty } from "@/lib/types";
 
@@ -42,39 +43,29 @@ export function Tasks({ agent }: { agent: Agent }) {
     setReloads((count) => count + 1);
   }
 
-  if (state.phase === "loading") return null;
-  if (state.phase === "failed") return <PanelEmpty>{state.message}</PanelEmpty>;
-
-  const payload = state.payload;
-  const schema = payload.spec_schema;
-
   return (
-    <>
-      {notice ? <Notice>{notice}</Notice> : null}
-      {!payload.tasks.length ? (
-        <PanelEmpty>No scheduled tasks for this agent.</PanelEmpty>
-      ) : (
-        <Table>
-          <thead>
-            <tr>
-              {[
-                "name",
-                "schedule",
-                "task",
-                "creator",
-                "state",
-                "next run",
-                "last run",
-                "expires",
-                "",
-              ].map((column, index) => (
-                <Th key={index}>{column}</Th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {payload.tasks.map((task) => (
-              <tr key={task.name}>
+    <Panel state={state}>
+      {(payload) => (
+        <>
+          {notice ? <Notice>{notice}</Notice> : null}
+          <DataTable
+            columns={[
+              "name",
+              "schedule",
+              "task",
+              "creator",
+              "state",
+              "next run",
+              "last run",
+              "expires",
+              "",
+            ]}
+            rows={payload.tasks}
+            rowKey={(task) => task.name}
+            empty="No scheduled tasks for this agent."
+          >
+            {(task) => (
+              <>
                 <Td>{task.name}</Td>
                 <Td>{task.schedule}</Td>
                 <Td>{task.description || task.prompt || "private member task"}</Td>
@@ -84,7 +75,7 @@ export function Tasks({ agent }: { agent: Agent }) {
                 <Td>{day(task.last_run_at) || "—"}</Td>
                 <Td>{day(task.expires_at) || "—"}</Td>
                 <Td>
-                  {schema ? (
+                  {payload.spec_schema ? (
                     <div className="flex flex-wrap gap-xs">
                       <Button variant="row" onClick={() => setEditing(task)}>
                         Edit
@@ -113,23 +104,23 @@ export function Tasks({ agent }: { agent: Agent }) {
                     </div>
                   ) : null}
                 </Td>
-              </tr>
-            ))}
-          </tbody>
-        </Table>
+              </>
+            )}
+          </DataTable>
+          {payload.spec_schema ? (
+            editing ? (
+              <Section title={"Edit " + editing.name}>
+                <TaskForm schema={payload.spec_schema} task={editing} onDone={act} />
+              </Section>
+            ) : (
+              <Section title="New task">
+                <TaskForm schema={payload.spec_schema} task={null} onDone={act} />
+              </Section>
+            )
+          ) : null}
+        </>
       )}
-      {schema ? (
-        editing ? (
-          <Section title={"Edit " + editing.name}>
-            <TaskForm schema={schema} task={editing} onDone={act} />
-          </Section>
-        ) : (
-          <Section title="New task">
-            <TaskForm schema={schema} task={null} onDone={act} />
-          </Section>
-        )
-      ) : null}
-    </>
+    </Panel>
   );
 }
 
@@ -159,7 +150,7 @@ function TaskForm({
   const [name, setName] = useState(task ? task.name : "");
   const [values, setValues] = useState<Record<string, SpecValue>>(() =>
     Object.fromEntries(
-      editable.map((key) => [key, initialSpecValue({ type: "string" }, current[key])]),
+      editable.map((key) => [key, initialSpecValue(properties[key] ?? {}, current[key])]),
     ),
   );
   const [busy, setBusy] = useState(false);
@@ -185,15 +176,12 @@ function TaskForm({
         disabled={task !== null}
         onChange={(event) => setName(event.target.value)}
       />
-      {editable.map((key) => (
-        <SpecField
-          key={key}
-          name={key}
-          prop={{ type: specType(properties[key]) }}
-          value={values[key] ?? ""}
-          onChange={(value) => setValues((state) => ({ ...state, [key]: value }))}
-        />
-      ))}
+      <FormFromSchema
+        schema={schema}
+        fields={editable}
+        values={values}
+        onChange={(key, value) => setValues((state) => ({ ...state, [key]: value }))}
+      />
       <Button type="submit" variant="send" disabled={busy}>
         {task ? "Save task" : "Create task"}
       </Button>

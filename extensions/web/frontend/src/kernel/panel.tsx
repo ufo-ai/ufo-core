@@ -8,12 +8,14 @@ export type PanelState<T> =
   | { phase: "failed"; message: string }
   | { phase: "ready"; payload: T };
 
-export function usePanelRead<T>(path: string, reloads: number = 0): PanelState<T> {
+export function usePanelRead<T>(path: string | null, reloads: number = 0): PanelState<T> {
   const [state, setState] = useState<PanelState<T>>({ phase: "loading" });
   useEffect(() => {
+    if (path === null) return;
+    const superseded = new AbortController();
     let live = true;
     setState({ phase: "loading" });
-    getJson<T>(path).then((result) => {
+    getJson<T>(path, superseded.signal).then((result) => {
       if (!live) return;
       setState(
         result.ok
@@ -23,9 +25,29 @@ export function usePanelRead<T>(path: string, reloads: number = 0): PanelState<T
     });
     return () => {
       live = false;
+      superseded.abort();
     };
   }, [path, reloads]);
   return state;
+}
+
+export function Panel<T>({
+  state,
+  failed,
+  empty,
+  children,
+}: {
+  state: PanelState<T>;
+  failed?: (message: string) => ReactNode;
+  empty?: (payload: T) => ReactNode;
+  children: (payload: T) => ReactNode;
+}) {
+  if (state.phase === "loading") return null;
+  if (state.phase === "failed")
+    return failed ? failed(state.message) : <PanelEmpty>{state.message}</PanelEmpty>;
+  const nothing = empty?.(state.payload);
+  if (nothing) return <PanelEmpty>{nothing}</PanelEmpty>;
+  return children(state.payload);
 }
 
 function Empty({ className, children }: { className?: string; children: ReactNode }) {

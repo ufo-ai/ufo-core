@@ -2,8 +2,9 @@ import { useState, type FormEvent } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Input, Textarea } from "@/components/ui/field";
-import { Table, Td, Th } from "@/components/ui/table";
-import { Notice, PanelEmpty, usePanelRead } from "@/kernel/panel";
+import { Td } from "@/components/ui/table";
+import { Notice, Panel, usePanelRead } from "@/kernel/panel";
+import { DataTable } from "@/kernel/table";
 import { postIntent } from "@/lib/api";
 import type { Agent } from "@/lib/types";
 
@@ -25,13 +26,6 @@ export function Skills({ agent }: { agent: Agent }) {
     if (outcome.applied) setReloads((count) => count + 1);
   }
 
-  if (state.phase === "loading") return null;
-  if (state.phase === "failed") return <PanelEmpty>{state.message}</PanelEmpty>;
-
-  const listed = state.payload.skills;
-  const custom = listed.filter((skill) => skill.origin === "member");
-  const deploy = listed.filter((skill) => skill.origin === "deploy");
-
   function save(event: FormEvent) {
     event.preventDefault();
     if (!name.trim() || !content.trim()) return;
@@ -44,22 +38,20 @@ export function Skills({ agent }: { agent: Agent }) {
   }
 
   return (
-    <>
-      <h2 className="mb-2xs mt-xl text-label opacity-(--muted-soft)">This agent's skills</h2>
-      {!custom.length ? (
-        <PanelEmpty>No member-authored skills for {agent.name}.</PanelEmpty>
-      ) : (
-        <Table>
-          <thead>
-            <tr>
-              {["name", "description", ""].map((column, index) => (
-                <Th key={index}>{column}</Th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {custom.map((skill) => (
-              <tr key={skill.name}>
+    <Panel state={state}>
+      {(payload) => (
+        <>
+          <h2 className="mb-2xs mt-xl text-label opacity-(--muted-soft)">
+            This agent's skills
+          </h2>
+          <DataTable
+            columns={["name", "description", ""]}
+            rows={payload.skills.filter((skill) => skill.origin === "member")}
+            rowKey={(skill) => skill.name}
+            empty={"No member-authored skills for " + agent.name + "."}
+          >
+            {(skill) => (
+              <>
                 <Td>{skill.name}</Td>
                 <Td>{skill.description}</Td>
                 <Td>
@@ -71,52 +63,44 @@ export function Skills({ agent }: { agent: Agent }) {
                     Delete
                   </Button>
                 </Td>
-              </tr>
-            ))}
-          </tbody>
-        </Table>
-      )}
+              </>
+            )}
+          </DataTable>
 
-      <h2 className="mb-2xs mt-xl text-label opacity-(--muted-soft)">Deploy skills</h2>
-      {!deploy.length ? (
-        <PanelEmpty>No deploy skills.</PanelEmpty>
-      ) : (
-        <Table>
-          <thead>
-            <tr>
-              {["name", "description"].map((column) => (
-                <Th key={column}>{column}</Th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {deploy.map((skill) => (
-              <tr key={skill.name}>
+          <h2 className="mb-2xs mt-xl text-label opacity-(--muted-soft)">Deploy skills</h2>
+          <DataTable
+            columns={["name", "description"]}
+            rows={payload.skills.filter((skill) => skill.origin === "deploy")}
+            rowKey={(skill) => skill.name}
+            empty="No deploy skills."
+          >
+            {(skill) => (
+              <>
                 <Td>{skill.name}</Td>
                 <Td>{skill.description}</Td>
-              </tr>
-            ))}
-          </tbody>
-        </Table>
-      )}
+              </>
+            )}
+          </DataTable>
 
-      <h2 className="mb-2xs mt-xl text-label opacity-(--muted-soft)">Save a skill</h2>
-      <form onSubmit={save}>
-        <Input
-          placeholder="skill-name"
-          value={name}
-          onChange={(event) => setName(event.target.value)}
-        />
-        <Textarea
-          placeholder={"---\nname: skill-name\ndescription: …\n---\n"}
-          value={content}
-          onChange={(event) => setContent(event.target.value)}
-        />
-        <Button type="submit" variant="send" disabled={busy}>
-          Save
-        </Button>
-      </form>
-      <Notice>{notice}</Notice>
-    </>
+          <h2 className="mb-2xs mt-xl text-label opacity-(--muted-soft)">Save a skill</h2>
+          <form onSubmit={save}>
+            <Input
+              placeholder="skill-name"
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+            />
+            <Textarea
+              placeholder={"---\nname: skill-name\ndescription: …\n---\n"}
+              value={content}
+              onChange={(event) => setContent(event.target.value)}
+            />
+            <Button type="submit" variant="send" disabled={busy}>
+              Save
+            </Button>
+          </form>
+          <Notice>{notice}</Notice>
+        </>
+      )}
+    </Panel>
   );
 }
