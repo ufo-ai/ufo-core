@@ -72,7 +72,6 @@ import logging
 import os
 import re
 import time
-from collections import Counter
 from collections.abc import AsyncIterator, Awaitable, Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -635,10 +634,12 @@ PROGRESS_BASE_SECONDS = 600.0
 PROGRESS_CAP_SECONDS = 1_800.0
 PROGRESS_NARRATION_LIMIT = 600
 PROGRESS_ACTIVITY_LIMIT = 200
-PROGRESS_TALLY_TOOLS = 4
+PROGRESS_SUMMARY_STEPS = 4
 PROGRESS_NARRATION_LINE = "> {narration}"
 PROGRESS_ACTIVITY_LINE = "*Now:* {activity}"
-PROGRESS_TALLY_LINE = "_{elapsed} in · {calls} tool calls since the last update: {tally}_"
+PROGRESS_SUMMARY_LINE = "_{elapsed} in · since the last update: {summary}_"
+PROGRESS_SUMMARY_SEPARATOR = "; "
+PROGRESS_SUMMARY_MORE = "+{count} more"
 PROGRESS_QUIET_LINE = "_{elapsed} in · no new activity since the last update_"
 PROGRESS_ELAPSED_LINE = "_{elapsed} in_"
 PROGRESS_WRITING_STEP = "writing — {characters} characters so far"
@@ -1767,23 +1768,25 @@ class TurnActivity:
     """What a turn's tail has seen, reduced to what a progress post says. `narration` is the model's
     own prose from its latest *completed* narration — text it streamed before calling a tool —
     never the text in flight, which is either that narration unfinished or the final answer a
-    progress post must not preempt. `activity` is the step it is inside right now, and `tools`
-    tallies the calls since the last post, so a post distinguishes a turn making progress from one
-    wedged inside a single call. A step is the model's own `user_description` of the call — what it
-    is doing for the member, not the tool it reached for — with the slug in backticks standing in
-    for a call that gave none. The tally stays keyed by slug: it is a per-tool count, and it is
-    where a reader who wants the plumbing finds it."""
+    progress post must not preempt. `activity` is the step it is inside right now, and `steps` is
+    the work it got through since the last post, so a post distinguishes a turn making progress from
+    one wedged inside a single call. A step is the model's own `user_description` of the call — what
+    it is doing for the member, never the tool it reached for; a call that gave none is named by its
+    slug read as words, so no line a member reads carries an internal identifier. A step already in
+    the interval is not repeated: twenty calls describing the same work are one line of it."""
 
     narration: str = ""
     activity: str = ""
     streaming: list[str] = field(default_factory=list)
-    tools: Counter[str] = field(default_factory=Counter)
+    steps: list[str] = field(default_factory=list)
 
     def tool(self, tool: str, description: str) -> None:
         self._close_narration()
-        step = description.strip() or f"`{tool}`"
-        self.activity = step[:PROGRESS_ACTIVITY_LIMIT]
-        self.tools[tool] += 1
+        spoken = description.strip() or tool.replace("_", " ").replace("-", " ").strip().lower()
+        step = (spoken or tool)[:PROGRESS_ACTIVITY_LIMIT]
+        self.activity = step
+        if step not in self.steps:
+            self.steps.append(step)
 
     def skill(self, skill: str) -> None:
         self._close_narration()
@@ -1793,7 +1796,7 @@ class TurnActivity:
         self.streaming.append(text)
 
     def checkpoint(self) -> None:
-        self.tools.clear()
+        self.steps.clear()
 
     def current_step(self) -> str:
         """The step to report now. Text in flight is the live step and outranks the last tool call,
@@ -1816,9 +1819,13 @@ class TurnActivity:
         """This checkpoint's post, or None when the turn produced no signal at all — a checkpoint
         with nothing but the clock behind it is skipped, never filled with a placeholder. One that
         saw no *new* call still posts: naming the step the turn has sat in for the whole interval
-        answers "is it stalled?", the question that earns the post. The closing line carries the
-        tally when calls landed, the clock alone while text is in flight (the growing size above it
-        already says the turn is producing), and the stall clause otherwise."""
+        answers "is it stalled?", the question that earns the post. The closing line summarizes the
+        interval's work in the model's own descriptions when calls landed — the first few in the
+        order they happened, since the step above already names the latest, and a count standing in
+        for the rest so a busy interval reads as a summary and not a list — the clock alone while
+        text is in flight (the growing size above it already says the turn is producing), and the
+        stall clause otherwise. Every named step is bounded on the way in, so the line is bounded by
+        how many it names."""
         step = self.current_step()
         if not self.narration and not step:
             return None
@@ -1829,16 +1836,16 @@ class TurnActivity:
             lines.append(PROGRESS_NARRATION_LINE.format(narration=self.narration))
         if step:
             lines.append(PROGRESS_ACTIVITY_LINE.format(activity=step))
-        calls = sum(self.tools.values())
-        if not calls:
+        if not self.steps:
             quiet = PROGRESS_ELAPSED_LINE if self.streaming else PROGRESS_QUIET_LINE
             lines.append(quiet.format(elapsed=elapsed))
             return "\n".join(lines)
-        busiest = self.tools.most_common(PROGRESS_TALLY_TOOLS)
-        tally = ", ".join(f"{tool} x{count}" for tool, count in busiest)
-        if len(self.tools) > len(busiest):
-            tally = f"{tally}, +{len(self.tools) - len(busiest)} more"
-        lines.append(PROGRESS_TALLY_LINE.format(elapsed=elapsed, calls=calls, tally=tally))
+        named = self.steps[:PROGRESS_SUMMARY_STEPS]
+        summary = PROGRESS_SUMMARY_SEPARATOR.join(named)
+        if len(self.steps) > len(named):
+            more = PROGRESS_SUMMARY_MORE.format(count=len(self.steps) - len(named))
+            summary = f"{summary}{PROGRESS_SUMMARY_SEPARATOR}{more}"
+        lines.append(PROGRESS_SUMMARY_LINE.format(elapsed=elapsed, summary=summary))
         return "\n".join(lines)
 
 
@@ -1853,13 +1860,12 @@ class ThreadProgress:
     inside the first interval posts nothing at all and a long one reports less often the longer it
     runs. Each post carries what the tail actually saw — the model's latest completed narration, the
     step it is inside (text in flight reported by its size, never its content, so a tool-free turn
-    that only streams still reports), the tool tally since the last post — and a signalless
-    checkpoint is
-    skipped. Best-effort per checkpoint, never per turn: a rejected post costs that one update and
-    the next checkpoint posts as usual, because a transient rate limit must not silence the rest
-    of a long turn — the silence this exists to end. Bounded like the thread
-    status: the tail ends on the durable terminal state (its own poll, not the lossy hub), so the
-    task always ends within a second of the commit."""
+    that only streams still reports), what it worked through since the last post in the model's own
+    descriptions of it — and a signalless checkpoint is skipped. Best-effort per checkpoint, never
+    per turn: a rejected post costs that one update and the next checkpoint posts as usual, because
+    a transient rate limit must not silence the rest of a long turn — the silence this exists to
+    end. Bounded like the thread status: the tail ends on the durable terminal state (its own poll,
+    not the lossy hub), so the task always ends within a second of the commit."""
 
     ctx: SurfaceContext
     turn_id: UUID
