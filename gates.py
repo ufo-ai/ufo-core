@@ -40,9 +40,10 @@ CORE_OWNER = "core"
 NAME_SEPARATOR = "-"
 CANDIDATES_FIELD = "candidates"
 ENV_ROOTS = Path("infra/envs")
-ACCOUNT_SINGLETON_RESOURCES = (
+SHARED_SINGLETON_RESOURCES = (
     "datadog_integration_aws_account",
     "datadog_integration_aws_external_id",
+    "datadog_metric_tag_configuration",
 )
 
 
@@ -644,17 +645,17 @@ def _env_terraform() -> dict[Path, str]:
     return {path: path.read_text() for path in (ROOT / ENV_ROOTS).glob("*/*.tf")}
 
 
-def _account_singleton_failures(sources: dict[Path, str]) -> list[str]:
-    """A resource that is per AWS account, declared in more than one environment root. Every root
-    deploys into the same account, so a second declaration puts two states on one remote object and
-    each apply takes it back from the other."""
+def _shared_singleton_failures(sources: dict[Path, str]) -> list[str]:
+    """A resource declared in more than one environment root when one remote object backs them all.
+    A second declaration puts two states on that object and each apply takes it back from the
+    other."""
     failures = []
-    for resource in ACCOUNT_SINGLETON_RESOURCES:
+    for resource in SHARED_SINGLETON_RESOURCES:
         declaration = f'resource "{resource}"'
         roots = sorted({path.parent.name for path, text in sources.items() if declaration in text})
         if len(roots) > 1:
             failures.append(
-                f"{resource} is per AWS account but is declared in {', '.join(roots)}; "
+                f"{resource} is declared in {', '.join(roots)}; "
                 "one root owns it and the others read its effects"
             )
     return failures
@@ -715,7 +716,7 @@ def main() -> int:
     terraform = _env_terraform()
     if not terraform:
         failures.append(f"env roots: no terraform found under {ENV_ROOTS}")
-    failures.extend(_account_singleton_failures(terraform))
+    failures.extend(_shared_singleton_failures(terraform))
 
     for failure in failures:
         print(f"GATE: {failure}")

@@ -308,22 +308,33 @@ TESTING_TF = Path("infra/envs/testing/datadog_aws.tf")
 PROD_TF = Path("infra/envs/prod/datadog_aws.tf")
 INTEGRATION = 'resource "datadog_integration_aws_account" "ufo" {}\n'
 EXTERNAL_ID = 'resource "datadog_integration_aws_external_id" "ufo" {}\n'
+TAG_CONFIGURATION = 'resource "datadog_metric_tag_configuration" "turn_ms" {}\n'
 
 
-def test_account_singleton_gate_flags_an_integration_declared_in_two_roots() -> None:
-    failures = gates._account_singleton_failures({TESTING_TF: INTEGRATION, PROD_TF: INTEGRATION})
+def test_shared_singleton_gate_flags_an_integration_declared_in_two_roots() -> None:
+    failures = gates._shared_singleton_failures({TESTING_TF: INTEGRATION, PROD_TF: INTEGRATION})
     assert failures and "prod, testing" in failures[0]
 
 
-def test_account_singleton_gate_allows_one_root() -> None:
-    assert gates._account_singleton_failures({TESTING_TF: INTEGRATION + EXTERNAL_ID}) == []
+def test_shared_singleton_gate_allows_one_root() -> None:
+    assert gates._shared_singleton_failures({TESTING_TF: INTEGRATION + EXTERNAL_ID}) == []
 
 
-def test_account_singleton_gate_covers_the_external_id_that_pairs_with_it() -> None:
+def test_shared_singleton_gate_covers_the_external_id_that_pairs_with_it() -> None:
     """The external id carries no arguments, so nothing about a second declaration looks wrong on
     its own — it is the integration it pairs with that cannot exist twice."""
-    failures = gates._account_singleton_failures({TESTING_TF: EXTERNAL_ID, PROD_TF: EXTERNAL_ID})
+    failures = gates._shared_singleton_failures({TESTING_TF: EXTERNAL_ID, PROD_TF: EXTERNAL_ID})
     assert failures and "datadog_integration_aws_external_id" in failures[0]
+
+
+def test_shared_singleton_gate_covers_the_metric_tag_configuration() -> None:
+    """A tag configuration is keyed by metric name alone, so the same metric declared from two roots
+    is one remote object with two owners — and the per-environment `env` tag on the metric makes a
+    second declaration read as environment-scoped when nothing about it is."""
+    failures = gates._shared_singleton_failures(
+        {TESTING_TF: TAG_CONFIGURATION, PROD_TF: TAG_CONFIGURATION}
+    )
+    assert failures and "datadog_metric_tag_configuration" in failures[0]
 
 
 def test_env_terraform_reaches_every_environment_root() -> None:
@@ -334,7 +345,7 @@ def test_env_terraform_reaches_every_environment_root() -> None:
     assert {"prod", "testing"} <= roots
 
 
-def test_account_singleton_gate_allows_two_files_in_one_root() -> None:
+def test_shared_singleton_gate_allows_two_files_in_one_root() -> None:
     """A root may split its terraform across files. The rule is one root, not one file."""
     other = Path("infra/envs/testing/datadog_extra.tf")
-    assert gates._account_singleton_failures({TESTING_TF: INTEGRATION, other: INTEGRATION}) == []
+    assert gates._shared_singleton_failures({TESTING_TF: INTEGRATION, other: INTEGRATION}) == []

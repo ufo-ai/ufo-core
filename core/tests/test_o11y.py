@@ -1,6 +1,10 @@
 import asyncio
 import logging
+import re
 import socket
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+from threading import Thread
 from uuid import uuid4
 
 import anthropic
@@ -11,10 +15,18 @@ import pytest
 import sqlalchemy as sa
 from opentelemetry import _logs, metrics, trace
 from opentelemetry._logs import SeverityNumber
+from opentelemetry.proto.collector.metrics.v1.metrics_service_pb2 import (
+    ExportMetricsServiceRequest,
+)
+from opentelemetry.proto.metrics.v1.metrics_pb2 import AGGREGATION_TEMPORALITY_DELTA
 from opentelemetry.sdk._logs import LoggerProvider
 from opentelemetry.sdk._logs.export import InMemoryLogRecordExporter, SimpleLogRecordProcessor
 from opentelemetry.sdk.metrics import MeterProvider
-from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+from opentelemetry.sdk.metrics.export import (
+    AggregationTemporality,
+    ExponentialHistogramDataPoint,
+    InMemoryMetricReader,
+)
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -23,23 +35,12 @@ from pydantic import ValidationError
 from evals.harness.scenario import TRANSIENT_ERROR_CLASSES
 from ufo import o11y
 from ufo.credentials import CredentialValueInvalid
-from ufo.ext.loader import HOOK_TIMEOUT_SECONDS
-from ufo.loop.engine import MAIN_ROUND_LIMIT, IntentRefused
+from ufo.loop.engine import IntentRefused
 from ufo.models import anthropic as anthropic_models
 from ufo.models import openai as openai_models
-from ufo.models.anthropic import (
-    INITIAL_RETRY_DELAY_SECONDS,
-    MAX_EMPTY_PROVIDER_RETRIES,
-    MAX_PROVIDER_RETRIES,
-    MAX_RETRY_DELAY_SECONDS,
-    PROVIDER_TIMEOUT_SECONDS,
-)
 from ufo.models.interface import ModelRefusal, ModelResponseTruncated
-from ufo.tools.builtins import ARTIFACT_PUT_TIMEOUT_SECONDS, SHARE_PREFLIGHT_TIMEOUT_SECONDS
 from ufo.tools.context import UntrustedContentError
 from ufo.workspace import ws
-
-BRACKETING_HOOKS = ("pre_tool_use", "post_tool_use")
 
 
 def test_redact_payload_drops_sensitive_keys_at_depth():
@@ -266,71 +267,112 @@ def _family(root: type[BaseException]) -> set[type[BaseException]]:
     return found
 
 
-PROVIDER_RETRY_BAND_MS = int(
-    (
-        PROVIDER_TIMEOUT_SECONDS * (MAX_PROVIDER_RETRIES + MAX_EMPTY_PROVIDER_RETRIES + 1)
-        + sum(
-            min(INITIAL_RETRY_DELAY_SECONDS * 2**attempt, MAX_RETRY_DELAY_SECONDS)
-            for attempt in range(MAX_PROVIDER_RETRIES)
+CACHED_FILE_READ_MS = 1
+LONG_TURN_MS = 24 * 60 * 60 * 1000
+PERCENTILE_CONFIG = Path(__file__).parents[2] / "infra/envs/testing/metrics.tf"
+PIPELINE_TAGS = ("env", "host", "service")
+
+
+def test_every_histogram_declares_the_tags_it_emits():
+    """Both ends of the deployed allowlist. A distribution reaches Datadog whether or not
+    percentiles are enabled, so a histogram with no tag configuration reads as a working metric no
+    percentile can be read off; and because the configuration is also the allowlist of queryable
+    tags, a dimension missing from it aggregates away silently. Each list is the name's declared
+    dimensions plus what the pipeline stamps on every metric."""
+    text = PERCENTILE_CONFIG.read_text()
+    configured = {
+        name: tuple(sorted(re.findall(r'"(\w+)"', tags)))
+        for name, tags in re.findall(
+            r'metric_name\s+=\s+"ufo\.(\w+)".*?tags\s+=\s+\[([^\]]*)\]', text, re.DOTALL
         )
+    }
+    assert configured == {
+        name: tuple(sorted({*PIPELINE_TAGS, *dimensions}))
+        for name, dimensions in o11y.HISTOGRAMS.items()
+    }
+    assert text.count("include_percentiles = true") == len(o11y.HISTOGRAMS)
+
+
+def test_emit_histogram_rejects_a_dimension_the_name_does_not_declare():
+    """The allowlist is deployed config: a tag it omits is dropped at Datadog, so a call site that
+    invents a dimension would emit a series whose new tag is readable nowhere. It fails at the one
+    boundary both emitters pass through instead."""
+    with pytest.raises(ValueError, match="undeclared dimensions on turn_ms: outcome"):
+        o11y.emit_histogram("turn_ms", 1, status="done", outcome="ok")
+
+
+def test_histograms_resolve_a_millisecond_and_a_day_as_delta_exponential(monkeypatch):
+    """The production pairing, held against the SDK that implements it. One instrument carries a
+    cached file read and a turn that ran for a day: an exponential histogram spends buckets on
+    relative error rather than a declared range, so neither end saturates a top bucket and both
+    survive as percentiles. Delta is what reaches Datadog — its exporter maps an exponential
+    histogram to a sketch only in delta and drops a cumulative one, so a temporality regression
+    would mean silence in production and fails here instead."""
+    reader = InMemoryMetricReader(
+        preferred_aggregation=o11y.HISTOGRAM_AGGREGATION,
+        preferred_temporality=o11y.HISTOGRAM_TEMPORALITY,
     )
-    * 1000
-)
-
-
-LONGEST_BOUNDED_DISPATCH_MS = int(
-    (
-        SHARE_PREFLIGHT_TIMEOUT_SECONDS
-        + ARTIFACT_PUT_TIMEOUT_SECONDS
-        + HOOK_TIMEOUT_SECONDS * len(BRACKETING_HOOKS)
-    )
-    * 1000
-)
-
-
-MODEL_ROUND_WORST_CASE_MS = o11y.HISTOGRAMS["model_first_event_ms"][-1] + 1
-
-
-WORST_CASE_MS = {
-    "model_first_event_ms": PROVIDER_RETRY_BAND_MS,
-    "model_round_ms": MODEL_ROUND_WORST_CASE_MS,
-    "tool_call_ms": LONGEST_BOUNDED_DISPATCH_MS,
-    "turn_ms": MAIN_ROUND_LIMIT * MODEL_ROUND_WORST_CASE_MS,
-}
-
-
-def test_registered_histograms_bucket_their_own_worst_case(monkeypatch):
-    """Each name's worst case is its own. The client re-issues only until the first event is
-    yielded — a timed-out attempt with its backoff, an empty completion with none — so the band its
-    retry constants derive is what the first-event latency has to bucket. A round's wall clock is
-    that latency plus the stream, and nothing bounds the stream, so it has to bucket past the
-    highest first-event latency there is. A dispatch's is `share_file` — the only tool that bounds
-    two transfers of its own — inside the hook pair the step brackets every handler with, since the
-    metered wall is the step and not the handler. A foreground subagent bounds its wall at nothing,
-    so the tail past this is deliberately unresolved; what has a bound has to land under one. A turn
-    is up to `MAIN_ROUND_LIMIT` of those rounds, every one of them able to reach the worst case
-    charged one round here, so its own worst case is that product — charging a round any less would
-    contradict the line above it. Everything above a top bound shares one bucket, where no
-    percentile survives, so a dropped tail fails here."""
-    reader = InMemoryMetricReader()
     provider = MeterProvider(metric_readers=[reader])
     monkeypatch.setattr(o11y.metrics, "get_meter", provider.get_meter)
     monkeypatch.setattr(o11y, "_histograms", {})
-    for name in o11y.HISTOGRAMS:
-        o11y.emit_histogram(name, WORST_CASE_MS[name])
-    exported = {
-        metric.name: metric
+    o11y.emit_histogram("turn_ms", CACHED_FILE_READ_MS)
+    o11y.emit_histogram("turn_ms", LONG_TURN_MS)
+    metric = next(
+        metric
         for resource in reader.get_metrics_data().resource_metrics
         for scope in resource.scope_metrics
         for metric in scope.metrics
-    }
-    for name, boundaries in o11y.HISTOGRAMS.items():
-        metric = exported[f"ufo.{name}"]
-        point = metric.data.data_points[0]
-        assert metric.unit == "ms"
-        assert tuple(point.explicit_bounds) == boundaries
-        assert point.count == 1
-        assert point.bucket_counts[-1] == 0
+    )
+    point = metric.data.data_points[0]
+    assert metric.name == "ufo.turn_ms"
+    assert metric.unit == "ms"
+    assert isinstance(point, ExponentialHistogramDataPoint)
+    assert metric.data.aggregation_temporality is AggregationTemporality.DELTA
+    assert (point.min, point.max, point.count) == (CACHED_FILE_READ_MS, LONG_TURN_MS, 2)
+    assert point.positive.bucket_counts.count(1) == 2
+
+
+def test_init_o11y_ships_histograms_as_delta_exponential(monkeypatch):
+    """The pairing where it is installed. Holding the constants against the SDK proves what they
+    mean, not that anything passes them: dropping both keyword arguments from the exporter leaves
+    every other assertion in this file passing, while production goes silent because the Datadog
+    exporter drops the cumulative histograms it would then receive. So this reads the bytes the real
+    exporter puts on the wire, built by `init_o11y` itself."""
+    received: list[bytes] = []
+
+    class Intake(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            received.append(self.rfile.read(int(self.headers["content-length"])))
+            self.send_response(200)
+            self.send_header("content-length", "0")
+            self.end_headers()
+
+        def log_message(self, *args: object) -> None:
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Intake)
+    Thread(target=server.serve_forever, daemon=True).start()
+    installed: list[MeterProvider] = []
+    monkeypatch.setattr(o11y.metrics, "set_meter_provider", installed.append)
+    monkeypatch.setattr(o11y.trace, "set_tracer_provider", lambda provider: None)
+    monkeypatch.setattr(o11y._logs, "set_logger_provider", lambda provider: None)
+    monkeypatch.setattr(o11y, "_bridge_warning_logs", lambda provider: None)
+    monkeypatch.setattr(o11y, "_histograms", {})
+    o11y.init_o11y(f"http://127.0.0.1:{server.server_port}")
+    provider = installed[0]
+    monkeypatch.setattr(o11y.metrics, "get_meter", provider.get_meter)
+    o11y.emit_histogram("turn_ms", CACHED_FILE_READ_MS, status="done")
+    o11y.emit_histogram("turn_ms", LONG_TURN_MS, status="done")
+    assert provider.force_flush(timeout_millis=15_000)
+    server.shutdown()
+    export = ExportMetricsServiceRequest()
+    export.ParseFromString(received[0])
+    metric = export.resource_metrics[0].scope_metrics[0].metrics[0]
+    point = metric.exponential_histogram.data_points[0]
+    assert metric.name == "ufo.turn_ms"
+    assert metric.WhichOneof("data") == "exponential_histogram"
+    assert metric.exponential_histogram.aggregation_temporality == AGGREGATION_TEMPORALITY_DELTA
+    assert (point.min, point.max, point.count) == (CACHED_FILE_READ_MS, LONG_TURN_MS, 2)
 
 
 def test_turn_span_yields_and_closes():

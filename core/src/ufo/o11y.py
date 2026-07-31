@@ -14,8 +14,16 @@ from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExport
 from opentelemetry.metrics import Counter, Histogram
 from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
 from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
+from opentelemetry.sdk.metrics import Histogram as HistogramInstrument
 from opentelemetry.sdk.metrics import MeterProvider
-from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+from opentelemetry.sdk.metrics.export import (
+    AggregationTemporality,
+    PeriodicExportingMetricReader,
+)
+from opentelemetry.sdk.metrics.view import (
+    Aggregation,
+    ExponentialBucketHistogramAggregation,
+)
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
@@ -46,76 +54,19 @@ METRICS = (
     "model_round_tokens_total",
     "tool_call_total",
 )
-MODEL_FIRST_EVENT_MS_BUCKETS = (
-    25,
-    50,
-    100,
-    250,
-    500,
-    1_000,
-    2_500,
-    5_000,
-    10_000,
-    20_000,
-    30_000,
-    60_000,
-    120_000,
-    300_000,
-    600_000,
-    900_000,
-)
-TOOL_CALL_MS_BUCKETS = (
-    1,
-    5,
-    10,
-    25,
-    50,
-    100,
-    250,
-    500,
-    1_000,
-    2_500,
-    5_000,
-    10_000,
-    30_000,
-    60_000,
-    120_000,
-    300_000,
-    600_000,
-    1_200_000,
-    1_800_000,
-)
-TURN_MS_BUCKETS = (
-    100,
-    250,
-    500,
-    1_000,
-    2_500,
-    5_000,
-    10_000,
-    30_000,
-    60_000,
-    120_000,
-    300_000,
-    600_000,
-    1_200_000,
-    1_800_000,
-    3_600_000,
-    7_200_000,
-    10_800_000,
-    21_600_000,
-    43_200_000,
-    86_400_000,
-    172_800_000,
-    259_200_000,
-)
-HISTOGRAMS = {
-    "model_round_ms": (*MODEL_FIRST_EVENT_MS_BUCKETS, 1_800_000),
-    "model_first_event_ms": MODEL_FIRST_EVENT_MS_BUCKETS,
-    "tool_call_ms": TOOL_CALL_MS_BUCKETS,
-    "turn_ms": TURN_MS_BUCKETS,
-}
 ERROR_CLASS_DIMENSION = "error_class"
+HISTOGRAMS = {
+    "model_round_ms": ("model", ERROR_CLASS_DIMENSION),
+    "model_first_event_ms": ("model",),
+    "tool_call_ms": ("tool", "outcome", ERROR_CLASS_DIMENSION),
+    "turn_ms": ("status",),
+}
+HISTOGRAM_AGGREGATION: dict[type, Aggregation] = {
+    HistogramInstrument: ExponentialBucketHistogramAggregation()
+}
+HISTOGRAM_TEMPORALITY: dict[type, AggregationTemporality] = {
+    HistogramInstrument: AggregationTemporality.DELTA
+}
 NO_ERROR_CLASS = ""
 OTHER_ERROR_CLASS = "other"
 ERROR_CLASSES = frozenset(
@@ -244,7 +195,11 @@ def init_o11y(otlp_endpoint: str | None) -> None:
     tracer_provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=traces_url)))
     trace.set_tracer_provider(tracer_provider)
     reader = PeriodicExportingMetricReader(
-        OTLPMetricExporter(endpoint=metrics_url),
+        OTLPMetricExporter(
+            endpoint=metrics_url,
+            preferred_aggregation=HISTOGRAM_AGGREGATION,
+            preferred_temporality=HISTOGRAM_TEMPORALITY,
+        ),
         export_interval_millis=METRIC_EXPORT_INTERVAL_MILLIS,
     )
     metrics.set_meter_provider(MeterProvider(resource=resource, metric_readers=[reader]))
@@ -410,26 +365,25 @@ def emit_metric(name: str, amount: int = 1, /, **dimensions: str) -> None:
 
 
 def emit_histogram(name: str, value: int, /, **dimensions: str) -> None:
-    """Record one observation in milliseconds on a registered histogram; unregistered names fail
-    loud. The registry carries each histogram's bucket boundaries, so one name cannot acquire two
-    bucket sets: the SDK default tops out at 10 s and every observation past a top bound shares one
-    bucket, where no percentile survives. The provider re-issues for minutes before the first event,
-    so the first-event boundaries reach past that band; a round's wall clock contains that latency
-    and then the stream, which nothing bounds, so it resolves one step further still. A tool call's
-    boundaries instead start at a millisecond, where a cached file read lands, and reach past the
-    longest dispatch that has a bound at all — `share_file`'s two transfer timeouts inside the hook
-    pair that brackets every handler. A foreground `spawn_subagent` is bounded by nothing but the
-    child turn it awaits, so it shares the top bucket: that tail is what this metric declines to
-    resolve. A turn holds up to `MAIN_ROUND_LIMIT` rounds and the tool calls between them, each
-    round able to reach a round's own worst case, so it carries boundaries reaching that whole
-    product; production turns run for hours, which a round's ceiling cannot resolve at all."""
-    boundaries = HISTOGRAMS.get(name)
-    if boundaries is None:
+    """Record one observation in milliseconds on a registered histogram; an unregistered name or a
+    dimension the name does not declare fails loud. Percentiles are computable only where a tag
+    configuration enables them, and that configuration is also the allowlist of queryable tags — so
+    a dimension absent from it aggregates away, readable nowhere. Declaring dimensions here is what
+    the deployed allowlist is held against, and no call site can reach Datadog with a tag the
+    allowlist omits. `HISTOGRAM_AGGREGATION` resolves a cached file read and a turn that ran for
+    hours on one instrument, at bounded relative error, so no name declares a range;
+    `HISTOGRAM_TEMPORALITY` is what carries it, since the Datadog exporter maps an exponential
+    histogram to a sketch only in delta and drops a cumulative one."""
+    declared = HISTOGRAMS.get(name)
+    if declared is None:
         raise ValueError(f"unknown histogram: {name}")
+    undeclared = sorted(set(dimensions) - set(declared))
+    if undeclared:
+        raise ValueError(f"undeclared dimensions on {name}: {', '.join(undeclared)}")
     histogram = _histograms.get(name)
     if histogram is None:
         histogram = metrics.get_meter(INSTRUMENTATION_NAME).create_histogram(
-            f"ufo.{name}", unit="ms", explicit_bucket_boundaries_advisory=boundaries
+            f"ufo.{name}", unit="ms"
         )
         _histograms[name] = histogram
     histogram.record(value, attributes=_bounded_error_class(dimensions))
