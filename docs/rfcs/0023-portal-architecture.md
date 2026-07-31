@@ -52,22 +52,31 @@ providing one file to write it in.
 
 Constraints that stay, because they are load-bearing:
 
-- **No build step, no dependency, no CDN in the portal's path.** `test_portal_page_is_self_contained`
-  forbids any literal external URL, and one process serves the page as static files. The repo does
-  run npm builds elsewhere (`ci.yaml:30`, `:35-36` — the edge module and the debugger's React app),
-  which is exactly the precedent argued against below: the debugger's build is what makes it awkward
-  to change, and the portal is not to acquire one.
+- **No external origin at runtime.** `test_portal_page_is_self_contained` forbids any literal
+  external URL: no CDN, no remote font, no third-party host — everything the page loads comes from
+  the surface's own path. This is the CSP and offline-serving property, and it survives every
+  proposal below. It is *not* the same as "no build step": the repo already builds a
+  frontend in CI — the debugger's React 19 + TypeScript app, `npm ci` then `npm run build`
+  (`ci.yaml:35-36`), deliberately before the wheel gate. (The edge module is installed and tested
+  there, not built; its sources are hand-written.) A bundler emitting local assets
+  satisfies the origin rule exactly as a hand-written file does.
 - **Mutations are audited turns** through the prepared-intent lane; reads are projections. RFC 0022
   proposes the declaration that removes the surface's duplicate copy of the callable set — this RFC
   assumes it and completes the other half (how the control is *rendered*).
-- **Behaviour is proven by the stub-DOM walk with mutation checks**, not by asserting rendered
-  markup in pytest. The harness does read the page source in three places, and each is a coupling
-  the split must answer rather than inherit: the walk extracts the one inline script
-  (`portal_smoke.mjs:919`), the CSS-scoping legs grep rule text (`:1648`, `:1650`, `:1678`), and
-  `test_portal_page_is_self_contained` (`test_ext_web.py:1606-1611`) asserts against the page whole.
-  Modules break the first, tokens and components make the second unnecessary, and unit 1 replaces
-  the third with an origin gate — so this is a constraint the proposal *changes*, budgeted in unit 1,
-  not one it inherits untouched.
+- **Behaviour is proven by mutation-checked tests**, never by asserting rendered markup in
+  pytest. *How* it is proven is not load-bearing and this RFC changes it. Today's harness is a
+  2,418-line file whose hand-rolled substrate — `StubElement` and the global shims — exists
+  precisely because the portal has no test toolchain. That substrate grows a
+  method every time a view touches a new browser API (`createTHead`, `insertRow`,
+  `addEventListener`, `TextDecoder`, a focus recorder, a body reader), and those additions were
+  themselves a merge-conflict source this wave. The rest of the file is fixtures and the walk
+  itself, which a toolchain does not delete — what vitest removes is the substrate, not the suite. It also reads page source in three
+  places — the walk extracts the one inline script (`portal_smoke.mjs:919`), the CSS-scoping legs
+  grep rule text (`:1648`, `:1650`, `:1678`), and `test_portal_page_is_self_contained`
+  (`test_ext_web.py:1633-1638`) asserts against the page whole — each a coupling to the single-file
+  shape. That test asserts five things, not three: the doctype and the presence of `EventSource`
+  alongside the three external-URL refusals. An origin gate replaces the URL half; the doctype and
+  the live-stream assertion have to keep a home rather than vanish with the string they read.
 
 ## Proposal
 
@@ -75,31 +84,100 @@ Four separable pieces: a file layout that lets units work in parallel, a kernel,
 the repetitive view, and a token-based design system. Extension contribution falls out of the
 declaration; third-party isolation falls out of RFC 0020.
 
-### 1. Many files, still no build
+### 1. Many files, and a real toolchain
 
-ES modules over same-origin routes need no bundler. The web extension serves
-`/surface/web/static/*.js`, the page carries one `<script type="module" src="…/kernel.js">`, and
-each view is its own module. The self-contained gate changes from *one file* to *no external
-origin* — the property that actually matters for CSP and for offline serving — and gets stricter
-about it: the gate should assert every `src`/`href` resolves under the surface's own path.
+**React + Tailwind + shadcn/ui (Radix underneath) in TypeScript is the standard for every web UI in
+the system.** The portal adopts it here; the sites skill's webapp template already ships exactly
+that (`tailwind.config.ts`, `components.json`, Radix primitives); the debugger already runs React 19
++ TS + Vite and converges on the theme and component set as it is next touched. One stack means one idiom, one theme, one test
+toolchain, and a component learned in one surface transferring to the next — a per-surface stack
+choice is what produced a hand-rolled 2,722-line page in the first place. Three things drive the
+adoption, and only the first is about file count:
+
+- **Types, and this is measured, not asserted.** `tsc` over the current portal script in *loose*
+  mode (no `strict`, no `noImplicitAny`) reports **50 errors**, 48 of them in five codes: 22 `TS2339` (a
+  `querySelector` result used as `HTMLInputElement`), 14 `TS2554` (wrong argument count — the
+  API-drift class), **8 `TS2393`, duplicate function implementations**, 3 `TS2345`
+  (`setAttribute(name, boolean)`), and 1 `TS2322`. Those
+  eight are a live defect: a merge duplicated a 228-line block, the later copy wins by hoisting and
+  calls `showWorkspace('credentials', undefined, 'Stored …')` with a bare string where the callee
+  reads `place.notice`, so **setting a credential from the portal currently succeeds and says
+  nothing**. The stub-DOM harness never saw it; `tsc` reports it as a compile error.
+- **A test toolchain.** vitest + React Testing Library over jsdom gives real DOM semantics and
+  deletes the hand-rolled stub. Measured under vitest + jsdom on node 26: the table API
+  (`insertRow`, `createTHead`), `document.activeElement`, `TextDecoder`, `AbortController`,
+  `FormData`, and `ReadableStream` all work; `matchMedia` is absent and unused. **`EventSource` is
+  absent** in bare jsdom, under vitest, and from node itself — so the chat turn stream keeps one
+  ~30-line fake with an event queue. That is the whole residue of the stub, and it is named here so
+  it is budgeted rather than discovered. The harness split this RFC previously listed as its concentrated
+  risk stops being a risk to manage and becomes a problem that dissolves: there is no stub to split.
+- **Components and utilities instead of hand-built DOM.** React ends the manual
+  `createElement`/`appendChild` construction where several of this wave's defects lived — a viewer
+  that never tore down on navigation, a panel left on `Loading…`, an empty state that
+  short-circuited a populated render. Tailwind ends bespoke CSS: a view composes utilities from one
+  theme instead of authoring a selector, which is what makes the selector-collision class
+  structurally impossible rather than review-caught.
+
+Vite emits hashed assets served from the surface's own static path. **Not** `vite-plugin-singlefile`
+— the debugger wants one file, the portal wants per-view code splitting, which is the point of the
+split. The self-contained gate becomes an origin gate over built output: every `src`/`href` resolves
+under the surface's own path, and each referenced asset is actually served.
 
 ```
-static/
-  portal.html      markup skeleton + <link>/<script> only
-  tokens.css       the design system's variables
-  components.css   the fixed component set
-  kernel.js        boot, session, routing, fence, registry, primitives
-  views/
-    listing.js     the generic declared-listing renderer
-    chat.js        layout-bearing
-    conversation.js  layout-bearing (turn tree, file pane)
-    artifact.js    layout-bearing (pinned viewer)
-    admin.js       layout-bearing (workspace administration)
+extensions/web/
+  frontend/                   source, never served
+    tailwind.config.ts        the design system: tokens as theme, nothing themed elsewhere
+    portal.html               skeleton + entry <script type="module">
+    src/
+      main.tsx                boot, session, router mount
+      kernel/                 fence, registry, and the eight primitives
+      components/             shadcn/ui, vendored and themed
+      views/
+        Listing.tsx           the generic declared-listing component
+        Chat.tsx              layout-bearing
+        Conversation.tsx      layout-bearing (turn tree, file pane)
+        Artifact.tsx          layout-bearing (pinned viewer)
+        Admin.tsx             layout-bearing (workspace administration)
+  ufo_ext_web/
+    static/                   build output (`outDir: ../ufo_ext_web/static`), gitignored,
+                              shipped via `artifacts`, and what `surface.py` serves
 ```
+
+The served path stays inside the Python package, where `surface.py:88-89` already reads
+`static/portal.html` at import and where the debugger's `outDir: ../ufo_ext_debugger/static` points.
+Vite names an HTML output after its input, so the entry keeps the name `portal.html` and the build
+emits exactly the path the package already reads — no rename, and no second answer to which file is
+served. Only the source tree is new, and it sits outside the package because it is never served.
 
 Ten units editing ten files conflict where they genuinely overlap (the registry line) instead of
-everywhere. The same split applies to the harness: a kernel harness proving the primitives once,
-and one fixture file per view.
+everywhere.
+
+**The build must be real in every environment the portal runs in**, and this is unit 1's actual
+risk. The debugger's wiring is the template — `outDir` into the extension's `static/`, the
+directory gitignored, `pyproject.toml`'s `artifacts` naming the built file so hatchling ships it
+despite the ignore, `npm ci && npm run build` in CI before the wheel gate, and the same before
+`ufoctl bundle` in `deploy.yml` — and it is a template with four known gaps for the portal:
+
+- **`test-shard` has no build and no pinned node** (`ci.yaml:55-84`). Node itself is present —
+  `ubuntu-latest` ships it, which is why `test_portal_page_smoke_walks_every_view`
+  (`test_ext_web.py:3597-3622`) shells out to it and the behavioural walk really does run in the
+  shards today; `checks`' `setup-node` pins a version rather than supplying one. What is missing is
+  the build. The debugger survives that because no Python test reads its built page; the portal
+  does the opposite — `surface.py:89` reads the page at **import**, unguarded, so a missing build
+  breaks extension import for every web test, not just the page. Either the shards gain a build
+  step or `checks` uploads the assets as an artifact the shards download. The debugger's own
+  tolerance (`if APP_FILE.is_file() else None`, raising at request time naming the npm command) is
+  the pattern to copy for the read.
+- **The walk leaves pytest.** It runs today *from* a pytest test; under vitest it becomes its own
+  suite and needs its own CI job, or it silently stops running — the failure mode being a green
+  board that proves nothing about the page.
+- **`artifacts` is a single literal path**; hashed multi-file output needs a glob, and `static/`
+  must become fully generated and ignored — which means `portal.html` moves to the frontend source
+  tree, since `emptyOutDir` would otherwise delete a tracked file.
+- **`gates.py:57-70` walks `extensions/` with `rglob("*.py")` excluding only `.venv`**, so it will
+  descend into `node_modules`. Both existing JS trees contain zero `.py` files, so this is safe
+  today by luck; a vitest tree is larger, and one vendored `.py` fails the gate. Exclude
+  `node_modules` beside `.venv`.
 
 ### 2. The kernel
 
@@ -112,12 +190,19 @@ Small and owned centrally, because these are exactly the things that must not be
 - **The request fence** — one `load()` helper that owns the monotonic token, the abort of a
   superseded read, the error arm, and the empty arm. A view never writes `load !== panelLoad`
   again; the 19 hand-written copies become one.
-- **The primitives** — `table`, `row`, `cell`, `emptyState`, `errorLine`, `notice`, `pageControls`
-  (`ListingCursor`, already on `main` at `core/src/ufo/listings.py` and re-exported through
-  `ufo.sdk.listings`), `drawer` (the artifact viewer's pinned panel, reusable),
-  `formFromSchema` (generalizing `specField`, `portal.html:1440-1467` — which today builds a
-  `<select>` only when its caller passes an options list, never reads `prop.enum` or
-  `prop.description`, and labels a field with its raw key, so the kernel builds those), `confirm`.
+- **The primitives, eight of them** — `Table` (rows and cells are its props, not primitives of
+  their own, once a component takes columns and data), `Empty`, `ErrorLine`, `Notice`, `Pager` (over
+  `ListingCursor`, already on `main` at `core/src/ufo/listings.py` and re-exported through
+  `ufo.sdk.listings`), `Drawer` (the artifact viewer's pinned panel, generalized over shadcn's
+  sheet), `FormFromSchema` (generalizing `specField`, `portal.html:1663-1692`, whose choices come from
+  **two** sources it must keep — `options || prop.enum` at `:1670`, where `reasoning` selects from
+  the schema's own enum and `model` selects from caller-supplied options because `AgentSpec.model`
+  is a bare `str` and the deploy's model ids arrive in the payload (`panels.py:310`, consumed at
+  `portal.html:2340-2341`); a form deriving choices from the schema alone renders `model` as a text
+  input and drops the deploy-model constraint the form exists to express. What it adds over that
+  code: `prop.description` as a hint, which is never read today, and a label better than the raw
+  key (`:1667`)), and
+  `Confirm`. The same eight everywhere this document lists them.
 - **The view registry** — `register({id, placement, label, render})`, one line per view. A view is
   reachable because it registered, not because a `TABS` array elsewhere lists it.
 
@@ -160,20 +245,30 @@ and no kernel edit; **copy** lives beside the declaration where a gate can check
 
 ### 4. The design system
 
-One token layer, one component set, no per-view CSS — which is what makes selector collisions
+One theme, one component set, no bespoke CSS — which is what makes selector collisions
 structurally impossible rather than review-caught.
 
-**Tokens** (`tokens.css`) — colour, space, type scale, radius, border, elevation, motion, as CSS
-custom properties, defined once for light and dark. Today's `Canvas`/`CanvasText` system colours
-stay the light/dark source (they give correct contrast free and cost nothing), but they resolve
-*into* tokens, so the eventual convergence with the `/login` redesign (#503) is a token file swap,
-not a sweep through 181 lines of rules. Values are named by role (`--surface`, `--edge`,
-`--muted`, `--accent`, `--space-2`), never by appearance.
+**Tokens are the Tailwind theme** (`tailwind.config.ts`) — colour, space, type scale, radius,
+border, elevation, motion, extended once and named by role (`surface`, `edge`, `muted`, `accent`),
+never by appearance. Light and dark are the theme's two modes; today's `Canvas`/`CanvasText` system
+colours are the starting values (correct contrast, free), resolved *through* the theme so the
+convergence with the `/login` redesign (#503) is a theme edit rather than a sweep through 181 lines
+of rules. A utility class in a view that names a raw value instead of a theme token is the thing to
+gate against — that is how a design system erodes under Tailwind.
 
-**Components** (`components.css`) — the fixed set the kernel renders: page shell, sidebar, tab
-strip, table, row, cell, action control, drawer, form field, hint, empty, notice, pager, badge,
-bubble. Each carries its own class; **a view may not author a selector**. That single rule kills
-the `#panel form` class of defect: a view cannot restyle a sibling because it never names one.
+**Components are shadcn/ui, vendored and themed.** shadcn is not a dependency but source copied
+into the tree (`components.json` drives it), which suits this repo: the components are ours to edit,
+they carry no version to chase, and the theme reaches them because they are plain Tailwind. Take
+what the portal actually needs — table, dialog/sheet for the drawer, form field, select, checkbox,
+badge, tooltip, dropdown — and no more; an unused vendored component is dead code, and `sites`'
+template vendoring forty of them is not a precedent to copy wholesale. Radix underneath is what
+makes focus trapping, dismissal, and keyboard semantics correct rather than approximated.
+
+On top of that sits the portal's own composition layer — page shell, sidebar, tab strip, the kernel
+primitives (Table, Empty, ErrorLine, Notice, Pager, Drawer, FormFromSchema, Confirm) — each built
+*from* shadcn components, never beside them. A view composes those and theme utilities; **a view may
+not author a stylesheet or a selector**. That rule kills the `#panel form` class of defect: a view
+cannot restyle a sibling because it never names one.
 
 **Copy** — strings live in the declaration, and the register rule (sentence case, ending
 punctuation, no UFO metaphors, no lowercase-as-aesthetic) becomes a gate over declaration strings
@@ -230,15 +325,24 @@ designed into a corner (hence `placement`, `id`, and a versioned declaration sch
 - **The repetitive view stops being code.** Twelve hand-written renderers become declarations plus
   four layout modules; the fence, the empty state, the error arm, and paging exist once.
 - **Predictable changes get cheap**: a column, an action, a view, a copy string, a theme.
-- **Testing changes shape**, and this is the real risk. Today's proof is a mutation-red walk over
-  hand-written markup. Generated markup is harder to mutate-test per string, so the harness must
-  split: the kernel's primitives get the mutation treatment once (fence, empty, error, drawer,
-  pager, form derivation), and a declared view is proven by its declaration and its envelope — the
-  columns it names, the actions it offers, the read it calls — not by re-walking generated DOM. A
-  layout-bearing view keeps its bespoke walk. Getting this wrong would trade merge pain for test
-  blindness; it is the piece to prototype first.
-- **A migration, not a rewrite.** The kernel and tokens land under the existing page; views move one
-  at a time, each PR moving one view and deleting its hand-written twin. Nothing needs a flag day.
+- **Testing changes shape, and the toolchain shrinks the risk rather than adding to it.** Today's
+  proof is a mutation-red walk over hand-written markup through a hand-rolled stub DOM. Under
+  vitest + React Testing Library the stub goes away and the mutation discipline stays: the fence and
+  the eight primitives get the mutation treatment once, and a declared
+  view is proven by its declaration and its envelope — the columns it names, the actions it offers,
+  the read it calls — not by re-walking generated DOM. A layout-bearing view keeps its own walk. The
+  bar unit 1 must clear is concrete: the restructured tests still red on the real defects this wave
+  produced — a dropped fence arm, a `try` enclosing only the initial fetch, a byte bound cut in
+  characters, a viewer that survives navigation. Trading merge pain for test blindness is still the
+  way this goes wrong; jsdom makes it less likely, not impossible.
+- **A new dependency surface.** npm packages in the portal's path are a supply-chain and upgrade
+  cost the single file did not have. Lockfile committed, dependencies few and justified, and the
+  runtime origin rule unchanged — nothing is fetched from a third-party host at run time.
+- **A staged replacement, not a flag day.** Unit 1 replaces the page: `static/` becomes generated
+  output and the hand-written `portal.html` moves into the frontend tree, so there is no "existing
+  page" for later units to land beside. What stays incremental is everything after: views port one
+  at a time, each PR porting one and deleting its imperative twin, with the member-visible surface
+  unchanged at every step.
 - **Cost**: roughly five units (below). This competes with product work; it earns its place only
   because the next wave of views (deploy status, billing detail, per-extension panels, a second
   surface) is a repeat of the last one.
@@ -246,7 +350,7 @@ designed into a corner (hence `placement`, `id`, and a versioned declaration sch
 ## Doctrine fit / implications
 
 **What stays out of core.** Everything here is the web extension's own: the kernel, the tokens, the
-components, and the `listing()` declaration all live under `extensions/web/ufo_ext_web/static/`,
+components, and the `listing()` declaration all live under `extensions/web/frontend/`,
 and `PortalView` is a `Manifest` point an extension fills, not a core capability. Core gains one
 thing — the manifest field and its boot validation — because a deploy-wide view-id namespace and a
 declaration that names an action must be checked where the deploy is assembled; an extension cannot
@@ -271,19 +375,33 @@ boot rather than rendering nothing. The current failure mode is silence: a view 
 simply never appears.
 
 **Self-contained stays enforced, and gets stricter.** `test_portal_page_is_self_contained`
-(`extensions/web/tests/test_ext_web.py:1333-1338`) asserts the page string carries no `http://`,
-`https://`, or `//cdn`. Splitting into modules makes that assertion insufficient on its own — it
-would pass a page referencing a file that does not exist — so it is replaced by a gate asserting
-every `src`/`href` resolves under the surface's own static path and that each referenced file is
-served.
+(`extensions/web/tests/test_ext_web.py:1633-1638`) asserts five things: the doctype, the presence of
+`EventSource`, and no `http://`, `https://`, or `//cdn`. Splitting into modules makes the URL half
+insufficient on its own — it would pass a page referencing a file that does not exist — so that half
+becomes a gate asserting every `src`/`href` resolves under the surface's own static path and that
+each referenced file is served. The doctype and the live-stream assertion do not disappear with the
+string they read: the doctype belongs to the same gate, and `EventSource` becomes a behavioural
+assertion in the vitest suite, where a stream that never opens fails rather than a substring going
+missing.
 
 ## Alternatives
 
-- **Adopt a framework** (React/Svelte/Lit). Rejected: it buys componentisation we can get from ES
-  modules plus one CSS layer, and it costs a build step, a dependency, and a second idiom in a repo
-  whose whole surface is served as static files by one process. The debugger's React app is
-  precedent *for* an operator tool, not for the member portal — and its build is exactly what makes
-  it awkward to change.
+- **Stay hand-written with no build.** Rejected — this was the previous version of this RFC, and
+  it was wrong. It reasoned from "the repo has no build" when the repo already builds the debugger's
+  React app, with node in CI; the portal's single-file shape was a local habit,
+  not a property to preserve. It also paid for that habit twice over: untyped client code, and a
+  hand-rolled stub DOM whose growth and collisions were themselves a top-three merge cost this wave.
+- **Plain TypeScript modules without React.** Rejected — by the system-wide standard, and the
+  dissenting evidence is recorded rather than buried. Sampling wave 2's defects found they cluster
+  in data (the turn tree's ordering and orphan bugs), async protocol (a `try` enclosing only the
+  fetch), and lifecycle (teardown, focus) — *not* in DOM construction, which produced no defect
+  found. On that evidence alone one `drawer` primitive and one `load()` fence would cover the real
+  win, and plain TS would do. The standard decides otherwise for reasons the defect count does not
+  measure: one idiom across every surface, one component set, one theme, and transferable
+  familiarity. The portal was the outlier, not the adopter.
+- **Hand-authored CSS instead of Tailwind.** Rejected. The rule that matters is that a view never
+  authors a selector; utilities from one theme enforce it mechanically, where a component
+  stylesheet enforces it only by review — which is exactly how `#panel form` shipped.
 - **Keep one file, add discipline.** Rejected on evidence: discipline is what we applied this wave,
   with review rounds catching selector and slot collisions after the fact, and the file grew 2,488
   lines in two days.
@@ -295,13 +413,15 @@ served.
 
 ## Open decisions
 
-1. **Does the split survive the no-build rule in practice?** ES modules over same-origin routes need
-   no bundler, but each module is one more request on first paint and the portal currently ships as
-   a single string with no cache story. Unit 1 measures it; if first paint regresses materially, the
-   fallback is concatenation at serve time, which is a build step in everything but name and should
-   be argued before it is adopted.
-2. **How is a declared view tested?** Named as the concentrated risk below and deliberately left
-   open: unit 3 settles it against three real views before units 4–5 mechanize the rest.
+1. **Where does the build live in each environment?** The stack is settled — TypeScript, React,
+   Tailwind, shadcn/ui, Vite, vitest + React Testing Library. What unit 1 must answer concretely is the
+   build's placement: assets produced at image-build time, served by `ufoctl serve`, built in CI
+   before the tests that need them, and a dev loop that does not make a Python change require an
+   npm invocation. That is where an adopted build fails, not in the editor.
+2. **How is a declared view tested?** This is the document's one concentrated risk, and it is
+   deliberately left open: unit 3 settles it against three real views before units 4–5 mechanize
+   the rest. The toolchain shrinks it — jsdom replaces the stub substrate — without answering it,
+   because the question is what a generated view's proof *asserts*, not what it runs on.
 3. **Does `listing()` cover a view with per-row heterogeneity?** Sources renders grouped bindings
    and plain rows differently today. Either the declaration grows a row-variant concept — the
    generic machinery this RFC otherwise avoids — or that view stays hand-written. Unit 3 includes
@@ -313,10 +433,31 @@ served.
 
 ## Units
 
-1. **Kernel + tokens, no behaviour change.** Split `portal.html` into the skeleton, `tokens.css`,
-   `components.css`, and `kernel.js`; the existing views move as-is into modules with no rewrite;
-   the self-contained gate becomes an origin gate. Proves the split and the serving path alone.
-2. **The fence and the primitives.** One `load()` owning the token, abort, error, and empty; the 17
+1. **Toolchain + kernel + theme, no *member-visible* behaviour change.** Adopt TypeScript, React,
+   Tailwind, shadcn/ui, Vite, and vitest + React Testing Library; split `portal.html` into the
+   skeleton, the theme, the component set, and the kernel; port the existing views into components.
+   Porting an imperative view into a `.tsx` component **is a rewrite of the code** — what must not
+   change is what a member sees and can do. The panel suites read payloads rather than markup and
+   carry over untouched; **four** pytest tests read the page's markup and none of them survives as
+   written, so each is replaced deliberately rather than silently:
+   `test_portal_page_is_self_contained` (`test_ext_web.py:1633`) becomes an origin gate over built
+   output, carrying the doctype, with `EventSource` becoming a behavioural assertion;
+   `test_portal_page_smoke_walks_every_view` (`:3597`) moves off pytest into vitest with its own CI
+   job; and `:1241` and `:1651` both assert `token-form` in the served body, which is static markup
+   today (`portal.html:194`) and becomes a kernel branch the moment the route serves a skeleton — so
+   httpx stops seeing it. Their route contract stays in pytest (the 200 behind a stale cookie, the
+   303, the cookie's flags), including the absent-versus-stale distinction, which only the server
+   can see: `surface.py:122-127` serves one shell for every unresolved portal GET and the session
+   cookie is `httponly`, so the page cannot tell those states apart. What moves to vitest is the
+   branch the page does decide — `api/agents` answering 401 renders the token form rather than an
+   empty shell, the same arm a dropped fetch takes by design, since `boot()` folds a null response
+   into it (`portal.html:2683`). That relocation is unit 1's work,
+   not a later unit's. Any defect the port fixes on
+   the way — the duplicated block, and whatever `tsc` surfaces — is named in the PR, not absorbed
+   into "no behaviour change". Wire the build into the image, CI, and the dev loop, and prove
+   the served path end to end. Splitting this into two PRs — adopt the toolchain, then move the
+   views — is the expected shape; the toolchain half is the one that must not be rushed.
+2. **The fence and the primitives.** One `load()` owning the token, abort, error, and empty; the 19
    hand-written fences delete; the harness gains a kernel fixture that mutation-tests them once.
 3. **`listing()` + the first three declarations** (sources, artifacts, sites — one mutating, one
    layout-adjacent, one extension-owned). Each PR deletes the renderer it replaces. This is where
