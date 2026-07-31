@@ -527,7 +527,6 @@ transcript_access = sa.Table(
         ["member.workspace_id", "member.id"],
     ),
     sa.Index("transcript_access_conversation", "workspace_id", "conversation_id"),
-    sa.Index("transcript_access_subject", "workspace_id", "subject_member_id"),
 )
 
 scheduled_task = sa.Table(

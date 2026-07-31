@@ -80,7 +80,6 @@ MAX_MEMORY_QUERY_CHARS = 500
 MEMORY_RECENT_LIMIT = 100
 MEMORY_RESULT_LIMIT = 100
 ARTIFACT_LIST_LIMIT = 100
-TRANSCRIPT_READ_LIMIT = 100
 CONVERSATION_LIST_LIMIT = 100
 SITE_KIND = "site"
 SPEND_WINDOW_DEFAULT_SECONDS = 86_400
@@ -755,8 +754,8 @@ async def conversations(ctx: SurfaceContext, request: Request) -> Response:
     """The selected agent's conversations this member may see: their own plus the workspace-shared
     ones, every one of the agent's for an admin. Each says whether its content reads now and
     whether an admin may disclose it to themselves by acknowledging. Recorded disclosures are not
-    here — they answer at `workspace/transcript-reads`, which is workspace-scoped because a private
-    conversation can sit on an agent its own subject cannot list."""
+    here and no portal read lists them: that record is the operator's, read with
+    `ufoctl transcript-reads`."""
     gated = await _panel_gate(ctx, request)
     if isinstance(gated, Response):
         return gated
@@ -877,47 +876,6 @@ async def conversation_file(ctx: SurfaceContext, request: Request) -> Response:
     if stream is None:
         return Response("no such file", status_code=404)
     return StreamingResponse(stream, media_type="application/octet-stream")
-
-
-async def workspace_transcript_reads(ctx: SurfaceContext, request: Request) -> Response:
-    """One keyset page of the disclosures recorded when an admin read a private transcript: every
-    read of this member's own conversations, and every read in the workspace for an admin. It is
-    workspace-scoped rather than hung off an agent because a surface installation binds each
-    conversation it creates to one agent, so a member's private conversation can live on an agent
-    their web audience never lists — an agent-scoped read would hide from the subject exactly the
-    disclosures they most need. It pages for the same reason the ledger exists: an admin must not
-    be able to push the row naming them off the end of the only read that names it."""
-    resolved = await _audience_for(ctx, request)
-    if isinstance(resolved, Response):
-        return resolved
-    member_id, _email, audience = resolved
-    raw_cursor = request.query_params.get("after", "").strip()
-    cursor: ListingCursor | None = None
-    if raw_cursor:
-        try:
-            cursor = ListingCursor.decode(raw_cursor)
-        except MalformedCursor:
-            return Response("malformed listing cursor", status_code=400)
-    page = await ctx.transcript_accesses(
-        subject_member_id=None if audience.admin else member_id,
-        limit=TRANSCRIPT_READ_LIMIT,
-        cursor=cursor,
-    )
-    return JSONResponse(
-        {
-            "reads": [
-                {
-                    "reader_email": access.reader_email,
-                    "subject_email": access.subject_email,
-                    "created_at": _iso(access.created_at),
-                }
-                for access in page.rows
-            ],
-            "older": None if page.older is None else page.older.encode(),
-            "newer": None if page.newer is None else page.newer.encode(),
-            "workspace": audience.admin,
-        }
-    )
 
 
 async def workspace_credentials(ctx: SurfaceContext, request: Request) -> Response:
@@ -1203,11 +1161,10 @@ async def admin_index(ctx: SurfaceContext, request: Request) -> Response:
     """The administration read: every agent with its policy, surface installations, and
     web-audience grants; members and seat state; every spend cap with its subject named; and the
     deploy's shape — installed extensions and the sandbox public-internet ceiling. Recorded
-    disclosures of private transcripts are their own paged read (`workspace/transcript-reads`),
-    because a ledger holding its own readers to account cannot be a capped block inside another
-    payload. It answers a workspace admin only and is not-found for everyone else. Reads only;
-    every mutation stays a chat act — caps are the deploy operators' today (no object kind owns
-    them), and the plan, invoices, and payment methods are managed with the agent in chat
+    disclosures of private transcripts are absent: that record is the operator's, read with
+    `ufoctl transcript-reads`. It answers a workspace admin only and is not-found for everyone
+    else. Reads only; every mutation stays a chat act — caps are the deploy operators' today (no
+    object kind owns them), and the plan, invoices, and payment methods are managed in chat
     (`manage_billing`)."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
@@ -1333,9 +1290,6 @@ ROUTES = (
     SurfaceRoute(method="GET", path="workspace/artifacts", handler=workspace_artifacts),
     SurfaceRoute(method="GET", path="workspace/sites", handler=workspace_sites),
     SurfaceRoute(method="GET", path="workspace/usage", handler=workspace_usage),
-    SurfaceRoute(
-        method="GET", path="workspace/transcript-reads", handler=workspace_transcript_reads
-    ),
     SurfaceRoute(method="GET", path="turns/{turn_id}/stream", handler=stream),
     SurfaceRoute(method="POST", path="credentials", handler=fulfill_credential),
 )

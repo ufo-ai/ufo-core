@@ -4265,15 +4265,15 @@ async def test_losing_admin_closes_an_open_disclosure_window(
     ).status_code == 404
 
 
-async def test_a_recorded_read_reaches_its_subject_and_the_administration_view(
+async def test_the_conversations_route_serializes_who_may_be_disclosed(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
-    """Both ends of the log: the subject's workspace read names who read them, another member's
-    names nothing, and an admin's carries the workspace ledger with both emails. A cursor this
-    surface never minted is the client's error rather than a silent walk to the newest page."""
+    """The wire carries the disclosure predicate as the seam computes it: another member's private
+    conversation is disclosable to an admin, a room is not, and the admin's own is not — one
+    acknowledgement changes none of those flags, since each is a property of the conversation
+    rather than of what has already been read."""
     client, workspace_id, agent_id = web
-    member_m, token_m = await _seed_member(workspace_id, "m@example.com")
-    _member_n, token_n = await _seed_member(workspace_id, "n@example.com")
+    member_m, _token_m = await _seed_member(workspace_id, "m@example.com")
     admin_id, token_admin = await _seed_member(workspace_id, "boss@example.com", admin=True)
     theirs = await _seed_agent_conversation(
         workspace_id,
@@ -4297,229 +4297,16 @@ async def test_a_recorded_read_reaches_its_subject_and_the_administration_view(
         audience=f"member:{admin_id}",
         member_id=admin_id,
     )
-    acknowledged = await _acknowledge(client, agent_id, theirs, token_admin)
-    assert acknowledged.json()["applied"] is True
+    assert (await _acknowledge(client, agent_id, theirs, token_admin)).json()["applied"] is True
 
-    subject = await client.get(
-        "/surface/web/workspace/transcript-reads",
-        headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
-    )
-    assert subject.json()["workspace"] is False
-    assert [entry["reader_email"] for entry in subject.json()["reads"]] == ["boss@example.com"]
-
-    stranger = await client.get(
-        "/surface/web/workspace/transcript-reads",
-        headers={"cookie": f"{SESSION_COOKIE}={token_n}"},
-    )
-    assert stranger.json()["reads"] == []
-
-    reading_admin = await client.get(
+    listed = await client.get(
         f"/surface/web/agents/{agent_id}/conversations",
         headers={"cookie": f"{SESSION_COOKIE}={token_admin}"},
     )
-    admin_rows = {entry["id"]: entry for entry in reading_admin.json()["conversations"]}
-    assert admin_rows[str(theirs)]["disclosable"] is True
-    assert admin_rows[str(room)]["disclosable"] is False
-    assert admin_rows[str(own)]["disclosable"] is False
-
-    ledger = await client.get(
-        "/surface/web/workspace/transcript-reads",
-        headers={"cookie": f"{SESSION_COOKIE}={token_admin}"},
-    )
-    assert ledger.json()["workspace"] is True
-    assert [
-        (entry["reader_email"], entry["subject_email"]) for entry in ledger.json()["reads"]
-    ] == [("boss@example.com", "m@example.com")]
-    malformed = await client.get(
-        "/surface/web/workspace/transcript-reads?after=not-a-cursor",
-        headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
-    )
-    assert malformed.status_code == 400
-
-
-TRANSCRIPT_READS_PATH = "/surface/web/workspace/transcript-reads"
-
-
-async def _walk_transcript_reads(
-    client: AsyncClient, headers: dict[str, str]
-) -> list[tuple[str, str]]:
-    """Every disclosure the Older control reaches, in render order. Bounded like the artifacts
-    walk: a cursor that cannot advance repeats its page forever, and this states that as a failure
-    rather than hanging the suite."""
-    payload = (await client.get(TRANSCRIPT_READS_PATH, headers=headers)).json()
-    walked = [(entry["reader_email"], entry["created_at"]) for entry in payload["reads"]]
-    pages = 1
-    while payload["older"]:
-        assert pages < WALK_PAGE_CEILING, f"the walk never ended: {walked}"
-        payload = (
-            await client.get(
-                f"{TRANSCRIPT_READS_PATH}?after={quote(payload['older'])}", headers=headers
-            )
-        ).json()
-        walked.extend((entry["reader_email"], entry["created_at"]) for entry in payload["reads"])
-        pages += 1
-    return walked
-
-
-async def test_the_transcript_read_ledger_pages_instead_of_burying_a_row(
-    web: tuple[AsyncClient, UUID, UUID], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The ledger exists so the admin a row names cannot push it off the end, which holds only if
-    the route pages: Older reaches every disclosure exactly once, the cursor it mints is what the
-    next page answers, and the oldest row stays reachable behind later reads. The page size is
-    patched small so the walk's arithmetic is what the assertions read; the real limit is pinned
-    by the test below."""
-    client, workspace_id, agent_id = web
-    member_m, _token_m = await _seed_member(workspace_id, "m@example.com")
-    _admin_id, token_admin = await _seed_member(workspace_id, "boss@example.com", admin=True)
-    conversations = [
-        await _seed_agent_conversation(
-            workspace_id,
-            agent_id,
-            queue_key=f"theirs-{index}",
-            audience=f"member:{member_m}",
-            member_id=member_m,
-        )
-        for index in range(5)
-    ]
-    for conversation in conversations:
-        acknowledged = await _acknowledge(client, agent_id, conversation, token_admin)
-        assert acknowledged.json()["applied"] is True
-
-    monkeypatch.setattr(web_surface, "TRANSCRIPT_READ_LIMIT", 2)
-    headers = {"cookie": f"{SESSION_COOKIE}={token_admin}"}
-    first = (await client.get(TRANSCRIPT_READS_PATH, headers=headers)).json()
-    assert len(first["reads"]) == 2
-    assert first["older"] is not None
-    assert first["newer"] is None
-
-    walked = await _walk_transcript_reads(client, headers)
-    assert len(walked) == 5
-    assert len(set(walked)) == 5
-
-    oldest = walked[-1]
-    second_page = (
-        await client.get(f"{TRANSCRIPT_READS_PATH}?after={quote(first['older'])}", headers=headers)
-    ).json()
-    assert oldest not in [
-        (entry["reader_email"], entry["created_at"]) for entry in second_page["reads"]
-    ]
-    assert second_page["newer"] is not None
-
-
-async def test_a_subject_walks_only_their_own_disclosures_on_every_page(
-    web: tuple[AsyncClient, UUID, UUID], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The subject fence holds on every page, not only the first: with two members' disclosures
-    interleaved, a member's walk reaches their own alone while the admin's reaches both."""
-    client, workspace_id, agent_id = web
-    mine, token_mine = await _seed_member(workspace_id, "m@example.com")
-    theirs, _token_theirs = await _seed_member(workspace_id, "other@example.com")
-    _admin_id, token_admin = await _seed_member(workspace_id, "boss@example.com", admin=True)
-    for index in range(6):
-        subject = mine if index % 2 == 0 else theirs
-        conversation = await _seed_agent_conversation(
-            workspace_id,
-            agent_id,
-            queue_key=f"private-{index}",
-            audience=f"member:{subject}",
-            member_id=subject,
-        )
-        acknowledged = await _acknowledge(client, agent_id, conversation, token_admin)
-        assert acknowledged.json()["applied"] is True
-
-    monkeypatch.setattr(web_surface, "TRANSCRIPT_READ_LIMIT", 2)
-    subject_walk = await _walk_transcript_reads(
-        client, {"cookie": f"{SESSION_COOKIE}={token_mine}"}
-    )
-    assert len(subject_walk) == 3
-    admin_walk = await _walk_transcript_reads(client, {"cookie": f"{SESSION_COOKIE}={token_admin}"})
-    assert len(admin_walk) == 6
-
-
-async def test_the_transcript_read_ledger_caps_at_the_real_limit_with_more_behind_it(
-    web: tuple[AsyncClient, UUID, UUID],
-) -> None:
-    """The unpatched bound, so the walking test's `monkeypatch` cannot hide a limit that stopped
-    bounding: one page carries at most `TRANSCRIPT_READ_LIMIT` rows and says more remain."""
-    client, workspace_id, agent_id = web
-    member_m, _token_m = await _seed_member(workspace_id, "m@example.com")
-    admin_id, token_admin = await _seed_member(workspace_id, "boss@example.com", admin=True)
-    conversation = await _seed_agent_conversation(
-        workspace_id,
-        agent_id,
-        queue_key="theirs",
-        audience=f"member:{member_m}",
-        member_id=member_m,
-    )
-    recorded_at = datetime.now(UTC)
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.transcript_access),
-            [
-                {
-                    "id": uuid4(),
-                    "workspace_id": workspace_id,
-                    "conversation_id": conversation,
-                    "reader_member_id": admin_id,
-                    "subject_member_id": member_m,
-                    "created_at": recorded_at + timedelta(microseconds=index),
-                }
-                for index in range(web_surface.TRANSCRIPT_READ_LIMIT + 1)
-            ],
-        )
-
-    page = (
-        await client.get(
-            TRANSCRIPT_READS_PATH, headers={"cookie": f"{SESSION_COOKIE}={token_admin}"}
-        )
-    ).json()
-    assert len(page["reads"]) == web_surface.TRANSCRIPT_READ_LIMIT
-    assert page["older"] is not None
-
-
-async def test_a_subject_reads_back_a_disclosure_on_an_agent_they_cannot_list(
-    web: tuple[AsyncClient, UUID, UUID],
-) -> None:
-    """A surface installation binds every conversation it creates to one agent, so a member's
-    private conversation can live on an agent their own web audience never lists. The disclosure
-    read is workspace-scoped for exactly that reason: the subject reads the row even though the
-    agent holding the conversation is 404 for them."""
-    client, workspace_id, _agent_id = web
-    member_m, token_m = await _seed_member(workspace_id, "m@example.com")
-    _admin_id, token_admin = await _seed_member(workspace_id, "boss@example.com", admin=True)
-    walled_agent = uuid4()
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.agent).values(
-                id=walled_agent,
-                workspace_id=workspace_id,
-                name="ops",
-                prompt="be operational",
-                model="claude-opus-4-8",
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-    elsewhere = await _seed_agent_conversation(
-        workspace_id,
-        walled_agent,
-        queue_key="slack-dm",
-        audience=f"member:{member_m}",
-        member_id=member_m,
-        surface="slack",
-    )
-    member_cookie = {"cookie": f"{SESSION_COOKIE}={token_m}"}
-    assert (
-        await client.get(f"/surface/web/agents/{walled_agent}/conversations", headers=member_cookie)
-    ).status_code == 404
-
-    acknowledged = await _acknowledge(client, walled_agent, elsewhere, token_admin)
-    assert acknowledged.json()["applied"] is True
-
-    reads = await client.get("/surface/web/workspace/transcript-reads", headers=member_cookie)
-    assert reads.status_code == 200
-    assert [entry["reader_email"] for entry in reads.json()["reads"]] == ["boss@example.com"]
+    rows = {entry["id"]: entry for entry in listed.json()["conversations"]}
+    assert rows[str(theirs)]["disclosable"] is True
+    assert rows[str(room)]["disclosable"] is False
+    assert rows[str(own)]["disclosable"] is False
 
 
 async def test_conversation_files_ride_the_same_gate(

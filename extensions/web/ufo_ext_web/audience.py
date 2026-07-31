@@ -215,7 +215,7 @@ async def _read_private_transcript(ctx: ToolContext, args: PrivateTranscriptInpu
         content=(
             TextContent(
                 text=f"Recorded: you opened {recorded.subject_email}'s private conversation. "
-                f"{recorded.subject_email} and every admin can read that record."
+                "Your email, theirs, and the time are on the record."
             ),
         )
     )
@@ -249,8 +249,7 @@ WEB_ACCESS_TOOLS = (
         description=(
             "Acknowledge that another member's private conversation may hold private information "
             "and open it for reading in the web portal — workspace admins only. Records who read "
-            "it, whose it was, and when; the member and every admin can read that record. The "
-            "transcript itself is read in the portal, not here."
+            "it, whose it was, and when. The transcript itself is read in the portal, not here."
         ),
         input_model=PrivateTranscriptInput,
         handler=_read_private_transcript,

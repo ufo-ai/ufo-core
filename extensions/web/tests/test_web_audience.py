@@ -345,6 +345,9 @@ async def test_reading_a_private_transcript_is_admin_only_and_records_the_reader
         recorded = await TRANSCRIPT.handler(_tool_ctx(workspace_id, main_agent, admin_id), args)
         assert not recorded.is_error
         assert MEMBER_EMAIL in recorded.content[0].text
+        # The record is the operator's, so the admin is told it exists and is told no reader.
+        assert "are on the record" in recorded.content[0].text
+        assert "can read that record" not in recorded.content[0].text
         async with workspace_tx() as connection:
             rows = (
                 await connection.execute(
@@ -357,6 +360,18 @@ async def test_reading_a_private_transcript_is_admin_only_and_records_the_reader
         assert [(row.reader_member_id, row.subject_member_id) for row in rows] == [
             (admin_id, member_id)
         ]
+
+
+def test_the_disclosure_tool_promises_a_record_it_does_not_promise_a_reader() -> None:
+    """No member surface lists the disclosure rows, so neither the tool's description nor the
+    result it returns may offer a member one. What each still owes: the description says the act
+    is admin-only, what it records, and that the transcript is read in the portal; the result names
+    the subject and says the record exists."""
+    described = TRANSCRIPT.description
+    assert "workspace admins only" in described
+    assert "Records who read it, whose it was, and when." in described
+    assert "read in the portal, not here" in described
+    assert "can read that record" not in described
 
 
 async def test_every_web_access_tool_takes_a_required_user_description() -> None:

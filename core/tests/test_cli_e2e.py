@@ -236,6 +236,13 @@ def test_grants_lists_none_when_no_account_is_connected(cli_home: CliRunner) -> 
     assert "no grants" in result.output
 
 
+def test_transcript_reads_lists_none_when_no_disclosure_is_recorded(cli_home: CliRunner) -> None:
+    _init(cli_home)
+    result = cli_home.invoke(cli.main, ["transcript-reads"])
+    assert result.exit_code == 0, result.output
+    assert "no transcript reads recorded" in result.output
+
+
 async def _read_credential(slot: str) -> str:
     config = load_config()
     init_db(config.database.url)

@@ -289,7 +289,6 @@ class Writeback:
 
 LIST_CONVERSATIONS_LIMIT = 200
 LIST_TURNS_LIMIT = 500
-TRANSCRIPT_ACCESS_LIMIT = 200
 TRANSCRIPT_ACCESS_WINDOW = timedelta(hours=1)
 
 
@@ -484,18 +483,11 @@ class ConversationSummary(BaseModel):
 class TranscriptAccess(BaseModel):
     """One recorded disclosure: the moment an admin acknowledged that another member's private
     transcript may hold private information and read it. Written by `record_transcript_access`
-    before any content is served and read back by the two views that close the loop — the subject
-    sees who read theirs, an admin sees every access the workspace has made."""
+    before any content is served; the row it names is the operator's record, read by `ufoctl
+    transcript-reads`, and the subject it names is what the acknowledging admin is told back."""
 
-    conversation_id: UUID
     reader_email: str
     subject_email: str
-    created_at: datetime
-
-    @field_validator("created_at")
-    @classmethod
-    def _aware_utc(cls, value: datetime) -> datetime:
-        return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
 async def record_transcript_access(
@@ -506,7 +498,9 @@ async def record_transcript_access(
     `TRANSCRIPT_ACCESS_WINDOW`. This is the disclosure's one writer, and it is a tool the portal
     reaches through the prepared-intent lane rather than a route of its own: the row is a grant —
     it is what `readable_conversation` answers on — and a granting act is speaker-gated and rides
-    a turn, so the turn is its audit record and this row is the gate it opens.
+    a turn, so the turn is its audit record and this row is the gate it opens. The same act emits
+    `surface.transcript_disclosed`, which is the operator's read of who opened whose conversation;
+    no member surface lists the rows.
 
     Each acknowledgement writes its own row, so a second visit is a second access rather than a
     silent re-read. None — the caller's refusal — for a conversation this agent does not hold, for
@@ -548,11 +542,15 @@ async def record_transcript_access(
                 created_at=recorded_at,
             )
         )
-    return TranscriptAccess(
-        conversation_id=conversation_id,
+    log(
+        "surface.transcript_disclosed",
+        conversation_id=str(conversation_id),
         reader_email=emails[member_id],
         subject_email=emails[subject_id],
-        created_at=recorded_at,
+    )
+    return TranscriptAccess(
+        reader_email=emails[member_id],
+        subject_email=emails[subject_id],
     )
 
 
@@ -560,10 +558,9 @@ class ListedConversation(BaseModel):
     """One conversation as the portal's per-agent conversations view lists it: `ConversationSummary`
     plus whether this viewer may read its content now and whether they may disclose it to
     themselves by acknowledging (an admin, another member's private conversation — never a
-    room's). Disclosures recorded against it are not here: a private conversation can live on an
-    agent its own subject cannot list — a surface installation binds every conversation it creates
-    to one agent — so an agent-scoped read would hide exactly the rows the subject most needs.
-    `transcript_accesses` is workspace-scoped for that reason."""
+    room's). Disclosures recorded against it are not here and no portal read lists them: the
+    record is the operator's, kept in `transcript_access` and reported by
+    `surface.transcript_disclosed`."""
 
     summary: ConversationSummary
     readable: bool
@@ -1920,63 +1917,6 @@ class SurfaceContext:
                 )
             ).first()
         return disclosed is not None
-
-    async def transcript_accesses(
-        self,
-        *,
-        subject_member_id: UUID | None = None,
-        limit: int = TRANSCRIPT_ACCESS_LIMIT,
-        cursor: "ListingCursor | None" = None,
-    ) -> "ListingPage[TranscriptAccess]":
-        """One keyset page of recorded disclosures, newest first — every one in the workspace, or
-        only those against one member's conversations. The read half of `record_transcript_access`:
-        a log nothing reads is dead weight, so the subject reads who read theirs and an admin reads
-        the workspace's. It pages rather than truncating because this ledger holds its own readers
-        to account: a capped read with no way past the cap lets the admin it names evict the row by
-        acknowledging often enough to push it off the end."""
-        reader = tables.member.alias("reader")
-        subject = tables.member.alias("subject")
-        query = (
-            sa.select(
-                tables.transcript_access.c.id,
-                tables.transcript_access.c.conversation_id,
-                reader.c.email.label("reader_email"),
-                subject.c.email.label("subject_email"),
-                tables.transcript_access.c.created_at,
-            )
-            .select_from(
-                tables.transcript_access.join(
-                    reader, reader.c.id == tables.transcript_access.c.reader_member_id
-                ).join(subject, subject.c.id == tables.transcript_access.c.subject_member_id)
-            )
-            .where(tables.transcript_access.c.workspace_id == self.workspace_id)
-        )
-        if subject_member_id is not None:
-            query = query.where(tables.transcript_access.c.subject_member_id == subject_member_id)
-        async with workspace_tx() as connection:
-            rows = (
-                await connection.execute(
-                    page_query(
-                        query,
-                        cursor,
-                        limit,
-                        created_at=tables.transcript_access.c.created_at,
-                        ident=tables.transcript_access.c.id,
-                    )
-                )
-            ).all()
-        return page_of(
-            rows,
-            cursor,
-            limit,
-            render=lambda row: TranscriptAccess(
-                conversation_id=row.conversation_id,
-                reader_email=row.reader_email,
-                subject_email=row.subject_email,
-                created_at=row.created_at,
-            ),
-            position=lambda row: (row.created_at, str(row.id)),
-        )
 
     async def conversation_subagent_turns(
         self, conversation_id: UUID, limit: int = LIST_TURNS_LIMIT

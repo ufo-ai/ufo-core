@@ -6,7 +6,7 @@ import warnings
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -176,7 +176,7 @@ def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None
         heads = scripts.get_heads()
     assert scripts.get_revision("memory_0008").dependencies == "0049"
     assert {
-        "0065",
+        "0066",
         "index_default_0002",
         "memory_0012",
         "sample_ext_note_0001",
@@ -221,7 +221,7 @@ def test_one_memory_surface_advances_both_old_heads(tmp_path: Path, graph_instal
             row[0] for row in connection.execute("select version_num from alembic_version")
         }
     assert not {"graph_entity", "graph_edge"} & tables
-    assert "0065" in revisions
+    assert "0066" in revisions
     assert "knowledge_graph_0001" not in revisions
 
 
@@ -725,6 +725,82 @@ def test_migrate_command_brings_the_schema_to_head(
     assert "workspace" in names
     assert "user_skill" in names
     assert "sample_ext_note" in names
+
+
+def test_transcript_reads_names_disclosures_newest_first_and_pages_on_the_operator_s_limit(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The operator's read of the disclosure record, which is the only read of it: `ufoctl
+    transcript-reads` names who opened whose conversation and when, newest first, and the operator
+    asking sets how far back the page reaches."""
+    from click.testing import CliRunner
+
+    from ufo.cli import TRANSCRIPT_READS_LIMIT, main
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "ufo.toml").write_text(
+        '[database]\nurl = "sqlite+aiosqlite:///app.db"\n'
+        '[blob]\nbackend = "filesystem"\nroot = "./blobs"\n'
+    )
+    runner = CliRunner()
+    assert runner.invoke(main, ["migrate"]).exit_code == 0
+
+    database_path = tmp_path / "app.db"
+    workspace_id, agent_id, conversation_id = uuid4(), uuid4(), uuid4()
+    admin_id, subject_id = uuid4(), uuid4()
+    now = datetime(2026, 7, 31, 9, 0, tzinfo=UTC)
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "insert into workspace (id, created_at, updated_at) values (?, ?, ?)",
+            (workspace_id.hex, now.isoformat(), now.isoformat()),
+        )
+        for member_id, email, admin in (
+            (admin_id, "boss@example.com", 1),
+            (subject_id, "m@example.com", 0),
+        ):
+            connection.execute(
+                "insert into member (id, workspace_id, email, is_admin, created_at, updated_at) "
+                "values (?, ?, ?, ?, ?, ?)",
+                (member_id.hex, workspace_id.hex, email, admin, now.isoformat(), now.isoformat()),
+            )
+        connection.execute(
+            "insert into agent (id, workspace_id, name, prompt, model, is_main, created_at, "
+            "updated_at) values (?, ?, 'assistant', 'p', 'auto', 1, ?, ?)",
+            (agent_id.hex, workspace_id.hex, now.isoformat(), now.isoformat()),
+        )
+        connection.execute(
+            "insert into conversation (id, workspace_id, agent_id, surface, queue_key, "
+            "created_at, updated_at) values (?, ?, ?, 'web', 'a/b', ?, ?)",
+            (conversation_id.hex, workspace_id.hex, agent_id.hex, now.isoformat(), now.isoformat()),
+        )
+        for index in range(TRANSCRIPT_READS_LIMIT + 1):
+            connection.execute(
+                "insert into transcript_access (id, workspace_id, conversation_id, "
+                "reader_member_id, subject_member_id, created_at) values (?, ?, ?, ?, ?, ?)",
+                (
+                    uuid4().hex,
+                    workspace_id.hex,
+                    conversation_id.hex,
+                    admin_id.hex,
+                    subject_id.hex,
+                    (now + timedelta(minutes=index)).isoformat(),
+                ),
+            )
+
+    listed = runner.invoke(main, ["transcript-reads"])
+    assert listed.exit_code == 0
+    assert "boss@example.com" in listed.output
+    assert "m@example.com" in listed.output
+    assert str(conversation_id) in listed.output
+    assert len(listed.output.strip().splitlines()) == TRANSCRIPT_READS_LIMIT
+    # Newest first, so the flood fills the default page and the earliest read falls off it.
+    assert "2026-07-31 09:00" not in listed.output
+
+    deeper = runner.invoke(main, ["transcript-reads", "--limit", str(TRANSCRIPT_READS_LIMIT + 1)])
+    assert deeper.exit_code == 0
+    assert "2026-07-31 09:00" in deeper.output
+
+    assert runner.invoke(main, ["transcript-reads", "--limit", "0"]).exit_code != 0
 
 
 async def test_workspace_tx_round_trip(db: None) -> None:

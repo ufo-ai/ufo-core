@@ -425,11 +425,10 @@ The acknowledgement is a granting act, so it rides the prepared-intent lane like
 mutation — `read_private_transcript`, admin-only — and the turn is its audit record; the row it
 writes names the reader, the subject, and the moment before any content is served, and is what the
 content gate answers on, opening that conversation to that admin for an hour, so a second visit is
-a second recorded access rather than a silent re-read. The record is read at both ends by one
-workspace-scoped listing — a member reads the disclosures against their own conversations, an
-admin every one in the workspace — which is not hung off an agent because a private conversation
-can live on an agent its own subject cannot list, and which pages by the shared keyset cursor
-rather than truncating, so the admin a row names cannot bury it under later reads. Chat stays
+a second recorded access rather than a silent re-read. The record is the operator's, not a product
+surface: no portal read lists those rows, the disclosure emits `surface.transcript_disclosed`, and
+`ufoctl transcript-reads` reads the table — so the acknowledgement tells the admin their email,
+the subject's, and the time are recorded, and promises no member-facing listing. Chat stays
 narrower on purpose — no tool reads another member's transcript, and none is added: a portal read
 discloses to one authenticated person, once, on the record, while an agent asked in chat would
 pull that content into a context that summarizes, embeds, and recalls it, turning one bounded

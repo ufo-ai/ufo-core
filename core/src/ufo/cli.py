@@ -7,7 +7,7 @@ import subprocess
 import sys
 import tomllib
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TextIO
 from uuid import UUID, uuid4
@@ -651,6 +651,64 @@ async def _read_spend(config: Config, window_seconds: int) -> SpendReport:
         async with workspace_tx() as connection:
             workspace_id = (await connection.execute(sa.select(tables.workspace.c.id))).scalar_one()
             return await SpendRollup(workspace_id).read(connection, window_seconds)
+    finally:
+        await dispose_db()
+
+
+TRANSCRIPT_READS_LIMIT = 100
+
+
+@main.command(name="transcript-reads")
+@click.option("--limit", type=int, default=TRANSCRIPT_READS_LIMIT, show_default=True)
+def transcript_reads(limit: int) -> None:
+    """List the disclosures an admin recorded to read another member's private transcript, newest
+    first. This is the operator's read of that record; no member surface lists it, and every
+    disclosure also emits `surface.transcript_disclosed`."""
+    if limit < 1:
+        raise click.ClickException("--limit must be at least 1")
+    config = load_config()
+    reads = asyncio.run(_read_transcript_accesses(config, limit))
+    if not reads:
+        click.echo("no transcript reads recorded")
+        return
+    for reader_email, subject_email, conversation_id, created_at in reads:
+        when = created_at.strftime("%Y-%m-%d %H:%M")
+        click.echo(f"{when}  {reader_email:<32}{subject_email:<32}{conversation_id}")
+
+
+async def _read_transcript_accesses(
+    config: Config, limit: int
+) -> list[tuple[str, str, UUID, datetime]]:
+    init_db(config.database.url)
+    try:
+        reader = tables.member.alias("reader")
+        subject = tables.member.alias("subject")
+        async with workspace_tx() as connection:
+            workspace_id = (await connection.execute(sa.select(tables.workspace.c.id))).scalar_one()
+            rows = (
+                await connection.execute(
+                    sa.select(
+                        reader.c.email.label("reader_email"),
+                        subject.c.email.label("subject_email"),
+                        tables.transcript_access.c.conversation_id,
+                        tables.transcript_access.c.created_at,
+                    )
+                    .select_from(
+                        tables.transcript_access.join(
+                            reader, reader.c.id == tables.transcript_access.c.reader_member_id
+                        ).join(
+                            subject, subject.c.id == tables.transcript_access.c.subject_member_id
+                        )
+                    )
+                    .where(tables.transcript_access.c.workspace_id == workspace_id)
+                    .order_by(
+                        tables.transcript_access.c.created_at.desc(),
+                        tables.transcript_access.c.id.desc(),
+                    )
+                    .limit(limit)
+                )
+            ).all()
+        return [(r.reader_email, r.subject_email, r.conversation_id, r.created_at) for r in rows]
     finally:
         await dispose_db()
 

@@ -2084,6 +2084,19 @@ async def _seed_conversation(
     return conversation_id
 
 
+async def _recorded_disclosures(workspace_id: UUID) -> int:
+    """How many disclosures the workspace holds. No surface lists these rows — the record is the
+    operator's, read with `ufoctl transcript-reads` — so a test counts them at the table."""
+    async with workspace_tx() as connection:
+        return (
+            await connection.execute(
+                sa.select(sa.func.count())
+                .select_from(tables.transcript_access)
+                .where(tables.transcript_access.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+
+
 async def _seed_conversation_turn(
     workspace_id: UUID,
     conversation_id: UUID,
@@ -2334,7 +2347,40 @@ async def test_an_admin_reads_a_private_transcript_only_once_recorded(db: None, 
         member_id=member_id,
     )
     assert await record_transcript_access(workspace_id, mine, agent_id, member_id) is None
-    assert (await context.transcript_accesses(subject_member_id=member_id)).rows == ()
+    assert await _recorded_disclosures(workspace_id) == 1
+
+
+async def test_a_disclosure_reports_itself_to_the_operator(
+    db: None, tmp_path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """No member surface lists these rows, so the disclosure reports itself where an operator
+    watches: one `surface.transcript_disclosed` record per acknowledgement, naming the reader, the
+    subject, and the conversation. A refused acknowledgement writes nothing and reports nothing."""
+    workspace_id, agent_id, member_id = await _seed(member_email="boss@example.com")
+    assert member_id is not None
+    subject = await _seed_member_row(workspace_id, "m@example.com")
+    theirs = await _seed_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="theirs",
+        audience=str(conversation_audience(subject)),
+        member_id=subject,
+    )
+    room = await _seed_conversation(
+        workspace_id, agent_id, queue_key="room", audience="room:slack:C7", member_id=None
+    )
+    with caplog.at_level(logging.INFO, logger="ufo"):
+        assert await record_transcript_access(workspace_id, theirs, agent_id, member_id)
+        assert await record_transcript_access(workspace_id, room, agent_id, member_id) is None
+    disclosed = [
+        record.ufo
+        for record in caplog.records
+        if record.getMessage() == "surface.transcript_disclosed"
+    ]
+    assert [
+        (entry["reader_email"], entry["subject_email"], entry["conversation_id"])
+        for entry in disclosed
+    ] == [("boss@example.com", "m@example.com", str(theirs))]
 
 
 async def test_a_stale_disclosure_closes_the_transcript_again(db: None, tmp_path) -> None:
@@ -2366,7 +2412,7 @@ async def test_a_stale_disclosure_closes_the_transcript_again(db: None, tmp_path
     assert await context.readable_conversation(theirs, agent_id, member_id, admin=True) is False
     assert await record_transcript_access(workspace_id, theirs, agent_id, member_id) is not None
     assert await context.readable_conversation(theirs, agent_id, member_id, admin=True) is True
-    assert len((await context.transcript_accesses()).rows) == 2
+    assert await _recorded_disclosures(workspace_id) == 2
 
 
 async def test_one_disclosure_opens_exactly_its_own_conversation_for_its_own_reader(
@@ -2463,85 +2509,6 @@ async def test_a_live_row_opens_nothing_for_a_non_admin_or_a_room(db: None, tmp_
             await context.readable_conversation(conversation_id, agent_id, reader_id, admin=True)
             is False
         )
-
-
-async def test_transcript_accesses_read_back_whole_and_by_subject(db: None, tmp_path) -> None:
-    """The log's read half: every disclosure for the administration view, and only their own
-    conversations' for a subject — so a member sees who read theirs and nobody else's."""
-    workspace_id, agent_id, member_id = await _seed(member_email="admin@example.com")
-    assert member_id is not None
-    first = await _seed_member_row(workspace_id, "one@example.com")
-    second = await _seed_member_row(workspace_id, "two@example.com")
-    conversations = {}
-    for label, subject in (("one", first), ("two", second)):
-        conversations[label] = await _seed_conversation(
-            workspace_id,
-            agent_id,
-            queue_key=label,
-            audience=str(conversation_audience(subject)),
-            member_id=subject,
-        )
-    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
-    for label in ("one", "two"):
-        assert await record_transcript_access(
-            workspace_id, conversations[label], agent_id, member_id
-        )
-
-    every = await context.transcript_accesses()
-    assert {entry.subject_email for entry in every.rows} == {"one@example.com", "two@example.com"}
-    theirs = await context.transcript_accesses(subject_member_id=first)
-    assert [entry.subject_email for entry in theirs.rows] == ["one@example.com"]
-    assert [entry.reader_email for entry in theirs.rows] == ["admin@example.com"]
-    assert (await context.transcript_accesses(subject_member_id=member_id)).rows == ()
-
-
-WALK_PAGE_CEILING = 20
-
-
-async def test_a_later_flood_of_reads_cannot_evict_an_earlier_one(db: None, tmp_path) -> None:
-    """The ledger holds its own readers to account, so it pages rather than truncating: an admin
-    who acknowledges repeatedly pushes an earlier row past one page's limit, and it is still
-    reachable by walking older — the row naming them cannot be evicted from the only read that
-    names it."""
-    workspace_id, agent_id, admin_id = await _seed(member_email="admin@example.com")
-    assert admin_id is not None
-    subject = await _seed_member_row(workspace_id, "m@example.com")
-    first = await _seed_conversation(
-        workspace_id,
-        agent_id,
-        queue_key="first",
-        audience=str(conversation_audience(subject)),
-        member_id=subject,
-    )
-    second = await _seed_conversation(
-        workspace_id,
-        agent_id,
-        queue_key="second",
-        audience=str(conversation_audience(subject)),
-        member_id=subject,
-    )
-    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
-    buried = await record_transcript_access(workspace_id, first, agent_id, admin_id)
-    assert buried is not None
-    for _ in range(4):
-        assert await record_transcript_access(workspace_id, second, agent_id, admin_id) is not None
-
-    page = await context.transcript_accesses(subject_member_id=subject, limit=2)
-    assert len(page.rows) == 2
-    assert page.older is not None
-    walked = list(page.rows)
-    cursor = page.older
-    pages = 1
-    while cursor is not None:
-        # Bounded: a cursor that cannot advance repeats its page forever, and this states that as
-        # a failure rather than hanging the suite.
-        assert pages < WALK_PAGE_CEILING, f"the walk never ended: {len(walked)} rows"
-        page = await context.transcript_accesses(subject_member_id=subject, limit=2, cursor=cursor)
-        walked.extend(page.rows)
-        cursor = page.older
-        pages += 1
-    assert len(walked) == 5
-    assert walked[-1].conversation_id == first
 
 
 async def test_conversation_subagent_turns_nest_transitively(db: None, tmp_path) -> None:
