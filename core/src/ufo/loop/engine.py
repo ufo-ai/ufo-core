@@ -288,6 +288,7 @@ TOOL_RESULT_PREVIEW_CHARS = 6_144
 TOOL_IMAGE_BLOB_DIR = "tool-images"
 TOOL_IMAGE_EDGE_LIMIT = 2000
 TOOL_IMAGE_SAVE_FORMATS = {"image/jpeg": "JPEG", "image/png": "PNG", "image/webp": "WEBP"}
+UNREGISTERED_TOOL = "unregistered"
 RESULT_CUT_MARKER = "\n…["
 OFFLOAD_NOTICE = (
     RESULT_CUT_MARKER + "preview only — the full {total} chars are at {path} — narrow it with bash "
@@ -475,6 +476,30 @@ def _bounded(content: str) -> str:
     return content[:MAX_TOOL_RESULT_CHARS] + TRUNCATION_NOTICE.format(
         dropped=len(content) - MAX_TOOL_RESULT_CHARS, total=len(content)
     )
+
+
+def _meter_dispatch(
+    tools: ToolRegistry, call: ToolUseBlock, started: float, outcome: str, error_class: str | None
+) -> None:
+    """One count and one wall-clock observation for a dispatched call, so a dashboard reads which
+    tool a workspace spends its time in and where that time fails. `outcome` separates the ends a
+    dispatch has by whose fault each one is — the model's, the tool's, a policy hook's, or the
+    engine's — because a metric that reports only the successes reads as nothing having failed, and
+    one that folds an infrastructure fault into a refusal reads as policy working as designed.
+    `error_class` rides every end that carries an exception; the workspace rides along from the
+    ambient scope.
+
+    The wall clock is what the round waited on. A name the registry does not hold reports as
+    UNREGISTERED_TOOL — the name arrives on an assistant message the model wrote, so passing it
+    through would mint one series per invented name."""
+    registered = any(tool.name == call.name for tool in tools.tools)
+    dimensions = {
+        "tool": call.name if registered else UNREGISTERED_TOOL,
+        "outcome": outcome,
+        **({} if error_class is None else {"error_class": error_class}),
+    }
+    emit_metric("tool_call_total", **dimensions)
+    emit_histogram("tool_call_ms", int((time.monotonic() - started) * 1000), **dimensions)
 
 
 def _loaded_skill_closures(
@@ -1655,10 +1680,31 @@ class TurnEngine:
         back from the blob and rehydrated into the `ToolResultBlock` the model sees. The blob read
         is a deterministic keyed fetch, so a crash-recovery replay reassembles the same result from
         the same blobs the first run wrote; the rehydrated bytes ride a step *input* (the messages
-        list) which DBOS does not persist, so they never re-enter the checkpoint."""
+        list) which DBOS does not persist, so they never re-enter the checkpoint.
+
+        A `requested_by` the model wrote that names no active inbound message fails the bind, and
+        the model reads that as the tool's error — the same unusable-call class the step counts, so
+        it is counted here, where the step it precedes never runs. Only the ref's own `ValueError`
+        is the model's doing: the bind also resolves the acting member's sandbox, which reaches a
+        store, so a fault out of that is the engine's and counts as one. A cancellation landing on
+        the bind counts as the same end the step's own does, and is re-raised rather than folded
+        into an is_error result — cancelling a turn must not read to the model as a tool that
+        failed. This runs in the workflow body rather than a step, so a recovery attempt that
+        re-executes the bind counts it again: the attempt genuinely re-ran it."""
+        started = time.monotonic()
         try:
             context, call = await self._bind_requester(context, call, requesters)
+        except asyncio.CancelledError as error:
+            _meter_dispatch(self.tools, call, started, "step_failed", type(error).__name__)
+            raise
         except Exception as error:
+            _meter_dispatch(
+                self.tools,
+                call,
+                started,
+                "invalid_call" if isinstance(error, ValueError) else "step_failed",
+                type(error).__name__,
+            )
             return ToolResultBlock(
                 tool_use_id=call.id,
                 content=f"{type(error).__name__}: {error}",
@@ -1789,98 +1835,123 @@ class TurnEngine:
         a many-image request and downscales anything over ~1568px before the model sees it, so
         pixels past the limit buy no fidelity) and offloaded to the blob store and returned as
         references so the step log carries no image bytes; an error result drops its images and
-        stays plain text so error-content consumers stay str-typed."""
-        await self._publish_activity(call)
+        stays plain text so error-content consumers stay str-typed.
+        One try encloses the whole step and its finally meters the call, so an end reaches the
+        counter by leaving the body rather than by a call site remembering to name it — a raise past
+        the handler (an image's blob put, a cancellation) is `step_failed` with its class, never an
+        unrecorded call whose handler already ran. A gating hook that fails closed denies the call
+        like a policy Deny and counts as `hook_failed`, so an extension hook that crashes or hangs
+        is not read as policy. Inside the step is where it counts: the recorded result replays on a
+        crash-recovery re-run without re-entering the body, so a replayed turn re-counts nothing."""
+        started = time.monotonic()
+        outcome, error_class = "ok", None
         try:
-            tool = self.tools.get(call.name)
-            args = tool.input_model.model_validate(call.input)
-        except Exception as error:
+            await self._publish_activity(call)
+            try:
+                tool = self.tools.get(call.name)
+                args = tool.input_model.model_validate(call.input)
+            except Exception as error:
+                outcome, error_class = "invalid_call", type(error).__name__
+                return DispatchResult(
+                    tool_use_id=call.id, text=f"{type(error).__name__}: {error}", is_error=True
+                )
+            pre = await self.hooks.fire(
+                "pre_tool_use",
+                PreToolUse(tool_name=call.name, tool_input=args),
+                self.turn,
+                self.agent,
+                context.speaker_member_id,
+            )
+            if pre.denied is not None:
+                outcome, error_class = (
+                    ("hook_denied", None)
+                    if pre.failed_closed is None
+                    else ("hook_failed", pre.failed_closed)
+                )
+                return DispatchResult(tool_use_id=call.id, text=pre.denied, is_error=True)
+            args = pre.tool_input if pre.tool_input is not None else args
+            images: list[ImageBlock] = []
+            key = f"{self.turn.id}/{call.name}/{call.id}" if tool.side_effecting else None
+            try:
+                handler_context = replace(
+                    context, ext=self.tool_ext.get(call.name), idempotency_key=key
+                )
+                result = await tool.handler(handler_context, args)
+                text_parts: list[str] = []
+                for block in result.content:
+                    match block:
+                        case TextContent(text=text):
+                            text_parts.append(text)
+                        case ImageContent(media_type=media_type, data=data):
+                            images.append(
+                                ImageBlock(source=ImageSource(media_type=media_type, data=data))
+                            )
+                content = "".join(text_parts)
+                is_error = result.is_error
+                untrusted = tool.untrusted or result.untrusted
+                outcome, error_class = ("handler_error" if is_error else "ok"), None
+            except Exception as error:
+                content, is_error = f"{type(error).__name__}: {error}", True
+                untrusted = tool.untrusted or isinstance(error, UntrustedContentError)
+                outcome, error_class = "handler_raised", type(error).__name__
+            if is_error:
+                content = _bounded(content)
+            elif len(content) > MAX_TOOL_RESULT_CHARS:
+                path = await self._offload(f"{call.id}.txt", content)
+                content = (
+                    content[:TOOL_RESULT_PREVIEW_CHARS]
+                    + OFFLOAD_NOTICE.format(total=len(content), path=path)
+                    if path is not None
+                    else _bounded(content)
+                )
+            if untrusted:
+                walled = content.replace(UNTRUSTED_RESULT_CLOSE, UNTRUSTED_RESULT_CLOSE_ESCAPE)
+                content = (
+                    UNTRUSTED_RESULT_NOTICE.format(source=tool.name)
+                    + UNTRUSTED_RESULT_OPEN.format(source=tool.name)
+                    + walled
+                    + UNTRUSTED_RESULT_CLOSE
+                )
+            if is_error:
+                await self.hooks.fire(
+                    "post_tool_use_failure",
+                    PostToolUseFailure(tool_name=call.name, tool_input=args, output=content),
+                    self.turn,
+                    self.agent,
+                    context.speaker_member_id,
+                )
+            else:
+                post = await self.hooks.fire(
+                    "post_tool_use",
+                    PostToolUse(tool_name=call.name, tool_input=args, output=content),
+                    self.turn,
+                    self.agent,
+                    context.speaker_member_id,
+                )
+                if post.output is not None:
+                    content = post.output
+                if post.injected:
+                    content = f"{content}\n{post.injected}"
+            image_refs: list[ImageRef] = []
+            if images and not is_error:
+                for index, image in enumerate(images):
+                    bounded = await self._bounded_image(image)
+                    blob_key = f"{TOOL_IMAGE_BLOB_DIR}/{self.turn.id}/{call.id}/{index}"
+                    await self.blob.put(blob_key, bounded.source.data.encode())
+                    image_refs.append(
+                        ImageRef(media_type=bounded.source.media_type, blob_key=blob_key)
+                    )
             return DispatchResult(
-                tool_use_id=call.id, text=f"{type(error).__name__}: {error}", is_error=True
+                tool_use_id=call.id,
+                text=content,
+                is_error=is_error,
+                image_refs=tuple(image_refs),
             )
-        pre = await self.hooks.fire(
-            "pre_tool_use",
-            PreToolUse(tool_name=call.name, tool_input=args),
-            self.turn,
-            self.agent,
-            context.speaker_member_id,
-        )
-        if pre.denied is not None:
-            return DispatchResult(tool_use_id=call.id, text=pre.denied, is_error=True)
-        args = pre.tool_input if pre.tool_input is not None else args
-        images: list[ImageBlock] = []
-        key = f"{self.turn.id}/{call.name}/{call.id}" if tool.side_effecting else None
-        try:
-            handler_context = replace(
-                context, ext=self.tool_ext.get(call.name), idempotency_key=key
-            )
-            result = await tool.handler(handler_context, args)
-            text_parts: list[str] = []
-            for block in result.content:
-                match block:
-                    case TextContent(text=text):
-                        text_parts.append(text)
-                    case ImageContent(media_type=media_type, data=data):
-                        images.append(
-                            ImageBlock(source=ImageSource(media_type=media_type, data=data))
-                        )
-            content = "".join(text_parts)
-            is_error = result.is_error
-            untrusted = tool.untrusted or result.untrusted
-        except Exception as error:
-            content, is_error = f"{type(error).__name__}: {error}", True
-            untrusted = tool.untrusted or isinstance(error, UntrustedContentError)
-        if is_error:
-            content = _bounded(content)
-        elif len(content) > MAX_TOOL_RESULT_CHARS:
-            path = await self._offload(f"{call.id}.txt", content)
-            content = (
-                content[:TOOL_RESULT_PREVIEW_CHARS]
-                + OFFLOAD_NOTICE.format(total=len(content), path=path)
-                if path is not None
-                else _bounded(content)
-            )
-        if untrusted:
-            walled = content.replace(UNTRUSTED_RESULT_CLOSE, UNTRUSTED_RESULT_CLOSE_ESCAPE)
-            content = (
-                UNTRUSTED_RESULT_NOTICE.format(source=tool.name)
-                + UNTRUSTED_RESULT_OPEN.format(source=tool.name)
-                + walled
-                + UNTRUSTED_RESULT_CLOSE
-            )
-        if is_error:
-            await self.hooks.fire(
-                "post_tool_use_failure",
-                PostToolUseFailure(tool_name=call.name, tool_input=args, output=content),
-                self.turn,
-                self.agent,
-                context.speaker_member_id,
-            )
-        else:
-            post = await self.hooks.fire(
-                "post_tool_use",
-                PostToolUse(tool_name=call.name, tool_input=args, output=content),
-                self.turn,
-                self.agent,
-                context.speaker_member_id,
-            )
-            if post.output is not None:
-                content = post.output
-            if post.injected:
-                content = f"{content}\n{post.injected}"
-        image_refs: list[ImageRef] = []
-        if images and not is_error:
-            for index, image in enumerate(images):
-                bounded = await self._bounded_image(image)
-                blob_key = f"{TOOL_IMAGE_BLOB_DIR}/{self.turn.id}/{call.id}/{index}"
-                await self.blob.put(blob_key, bounded.source.data.encode())
-                image_refs.append(ImageRef(media_type=bounded.source.media_type, blob_key=blob_key))
-        return DispatchResult(
-            tool_use_id=call.id,
-            text=content,
-            is_error=is_error,
-            image_refs=tuple(image_refs),
-        )
+        except (Exception, asyncio.CancelledError) as error:
+            outcome, error_class = "step_failed", type(error).__name__
+            raise
+        finally:
+            _meter_dispatch(self.tools, call, started, outcome, error_class)
 
     async def _bounded_image(self, image: ImageBlock) -> ImageBlock:
         source = image.source

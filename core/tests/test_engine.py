@@ -79,6 +79,7 @@ from ufo.loop.engine import (
     TOOL_RESULT_PREVIEW_CHARS,
     TRUNCATION_FEEDBACK,
     TRUNCATION_SALVAGE_NOTICE,
+    UNREGISTERED_TOOL,
     UNTRUSTED_RESULT_CLOSE,
     UNTRUSTED_RESULT_CLOSE_ESCAPE,
     UNTRUSTED_RESULT_NOTICE,
@@ -1404,6 +1405,432 @@ async def test_a_round_that_yielded_nothing_records_no_first_event_latency(
     assert "ufo.model_round_tokens_total" not in points
     assert [dict(point.attributes) for point in points["ufo.model_round_ms"]] == [
         {"model": "claude-opus-4-8", "error_class": "RuntimeError"}
+    ]
+
+
+class _StrictInput(BaseModel):
+    count: int
+
+
+DISPATCH_ENDS = (
+    "ok_tool",
+    "error_tool",
+    "raising_tool",
+    "strict_tool",
+    "denied_tool",
+    "ghost_tool",
+)
+
+
+@dataclass(frozen=True)
+class EveryEndModel:
+    """One round calling every tool a dispatch can end differently on — including a name no registry
+    holds — then an answering round once the results come back."""
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        answered = any(
+            isinstance(message.content, tuple)
+            and any(isinstance(block, ToolResultBlock) for block in message.content)
+            for message in request.messages
+        )
+        if answered:
+            yield TextDelta(text="done")
+            yield Usage(input_tokens=1, output_tokens=1)
+            return
+        for name in DISPATCH_ENDS:
+            yield ToolCallStart(id=name, name=name)
+            yield ToolCallDelta(id=name, partial_json='{"count": "not a number"}')
+        yield Usage(input_tokens=2, output_tokens=2)
+
+
+async def test_each_end_a_tool_call_has_is_metered_apart_under_its_workspace(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A metric silent on failure reads as nothing having failed, so each end a dispatch has counts
+    as itself, separated by whose fault it is. Each carries the workspace the turn ran under, so a
+    dashboard reads one team's tool time apart from another's."""
+    reader = _metric_capture(monkeypatch)
+
+    async def ok(ctx: ToolContext, args: BaseModel) -> ToolResult:
+        return ToolResult(content=(TextContent(text="fine"),))
+
+    async def reports_failure(ctx: ToolContext, args: BaseModel) -> ToolResult:
+        return ToolResult(content=(TextContent(text="no"),), is_error=True)
+
+    async def raises(ctx: ToolContext, args: BaseModel) -> ToolResult:
+        raise RuntimeError("boom")
+
+    async def deny(ctx: HookContext) -> HookOutcome:
+        return Deny(reason="policy")
+
+    tools = ToolRegistry(
+        (
+            ToolDef(name="ok_tool", description="d", input_model=_NoArgs, handler=ok),
+            ToolDef(
+                name="error_tool", description="d", input_model=_NoArgs, handler=reports_failure
+            ),
+            ToolDef(name="raising_tool", description="d", input_model=_NoArgs, handler=raises),
+            ToolDef(name="strict_tool", description="d", input_model=_StrictInput, handler=ok),
+            ToolDef(name="denied_tool", description="d", input_model=_NoArgs, handler=ok),
+        )
+    )
+    chain = HookChain(
+        hooks={
+            "pre_tool_use": (
+                BoundHook(
+                    spec=HookSpec(event="pre_tool_use", handler=deny, tools=("denied_tool",)),
+                    ext=context_for("probe", frozenset()),
+                ),
+            )
+        },
+        audience=conversation_audience(None),
+    )
+    turn = await _seed_turn("queued", None)
+    engine = replace(_engine(turn, EveryEndModel(), tmp_path), tools=tools, hooks=chain)
+    with ws(turn.workspace_id):
+        frame = await engine.run()
+    assert frame.status == "done"
+    workspace = str(turn.workspace_id)
+    points = _exported_metrics(reader)
+    assert {
+        (point.value, tuple(sorted(point.attributes.items())))
+        for point in points["ufo.tool_call_total"]
+    } == {
+        (1, (("outcome", "ok"), ("tool", "ok_tool"), ("workspace_id", workspace))),
+        (1, (("outcome", "handler_error"), ("tool", "error_tool"), ("workspace_id", workspace))),
+        (
+            1,
+            (
+                ("error_class", "RuntimeError"),
+                ("outcome", "handler_raised"),
+                ("tool", "raising_tool"),
+                ("workspace_id", workspace),
+            ),
+        ),
+        (
+            1,
+            (
+                ("error_class", "ValidationError"),
+                ("outcome", "invalid_call"),
+                ("tool", "strict_tool"),
+                ("workspace_id", workspace),
+            ),
+        ),
+        (1, (("outcome", "hook_denied"), ("tool", "denied_tool"), ("workspace_id", workspace))),
+        (
+            1,
+            (
+                ("error_class", "KeyError"),
+                ("outcome", "invalid_call"),
+                ("tool", UNREGISTERED_TOOL),
+                ("workspace_id", workspace),
+            ),
+        ),
+    }
+    assert {
+        (point.count, point.attributes["tool"], point.attributes["outcome"])
+        for point in points["ufo.tool_call_ms"]
+    } == {
+        (1, "ok_tool", "ok"),
+        (1, "error_tool", "handler_error"),
+        (1, "raising_tool", "handler_raised"),
+        (1, "strict_tool", "invalid_call"),
+        (1, "denied_tool", "hook_denied"),
+        (1, UNREGISTERED_TOOL, "invalid_call"),
+    }
+
+
+def _dispatch_context(engine: TurnEngine) -> ToolContext:
+    return ToolContext(
+        sandbox=engine.sandbox,
+        blob=engine.blob,
+        turn=engine.turn,
+        agent=engine.agent,
+        spawn=engine.spawn,
+        speaker_member_id=engine.turn.speaker_member_id,
+        audience=engine.audience,
+        artifact_token_secret=engine.artifact_token_secret,
+        grants=engine.grants,
+    )
+
+
+async def test_a_call_whose_requester_will_not_bind_counts_as_an_unusable_call(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `requested_by` naming no active inbound message is the model's own bad argument, and the
+    model reads the failed bind as the tool's error — so the dashboard reads it as one too. The bind
+    runs before the step, so nothing inside the step would ever see it."""
+    reader = _metric_capture(monkeypatch)
+
+    async def ok(ctx: ToolContext, args: BaseModel) -> ToolResult:
+        return ToolResult(content=(TextContent(text="fine"),))
+
+    turn = await _seed_turn("queued", None)
+    engine = replace(
+        _engine(turn, EchoModel(), tmp_path),
+        tools=ToolRegistry(
+            (ToolDef(name="ok_tool", description="d", input_model=_NoArgs, handler=ok),)
+        ),
+    )
+    with ws(turn.workspace_id):
+        result = await engine._dispatch(
+            _dispatch_context(engine),
+            ToolUseBlock(id="c1", name="ok_tool", input={"requested_by": "not-a-ref"}),
+            {},
+        )
+    assert result.is_error
+    assert [
+        dict(point.attributes) for point in _exported_metrics(reader)["ufo.tool_call_total"]
+    ] == [
+        {
+            "tool": "ok_tool",
+            "outcome": "invalid_call",
+            "error_class": "ValueError",
+            "workspace_id": str(turn.workspace_id),
+        }
+    ]
+
+
+async def test_a_store_fault_reached_through_the_bind_is_the_engines_and_not_the_models(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bind also resolves the acting member's sandbox, which reaches a store. Folding that
+    fault into the model's own unusable-call series would report a workspace whose database is down
+    as a model writing bad refs — on every tool call, for as long as the incident lasts."""
+    reader = _metric_capture(monkeypatch)
+
+    async def ok(ctx: ToolContext, args: BaseModel) -> ToolResult:
+        return ToolResult(content=(TextContent(text="fine"),))
+
+    async def unreachable_store(member_id: UUID | None) -> SandboxSession:
+        raise sa.exc.OperationalError("select 1", None, Exception("pool exhausted"))
+
+    turn = await _seed_turn("queued", None)
+    engine = replace(
+        _engine(turn, EchoModel(), tmp_path),
+        tools=ToolRegistry(
+            (ToolDef(name="ok_tool", description="d", input_model=_NoArgs, handler=ok),)
+        ),
+        sandbox_for=unreachable_store,
+    )
+    with ws(turn.workspace_id):
+        result = await engine._dispatch(
+            _dispatch_context(engine), ToolUseBlock(id="c1", name="ok_tool", input={}), {}
+        )
+    assert result.is_error
+    assert [
+        dict(point.attributes) for point in _exported_metrics(reader)["ufo.tool_call_total"]
+    ] == [
+        {
+            "tool": "ok_tool",
+            "outcome": "step_failed",
+            "error_class": "OperationalError",
+            "workspace_id": str(turn.workspace_id),
+        }
+    ]
+
+
+async def test_a_cancelled_bind_counts_the_same_end_the_step_would_have(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cancelling a turn while the bind resolves the acting member's sandbox lands `CancelledError`
+    on the workflow-body task, where `except Exception` cannot see it — the step whose finally would
+    have counted it never runs. The same event a microsecond later counts as `step_failed`, so
+    counting nothing here would make a mass cancellation show some of its dispatches and not
+    others. The cancellation still propagates: a cancelled turn is not a tool the model saw fail."""
+    reader = _metric_capture(monkeypatch)
+
+    async def ok(ctx: ToolContext, args: BaseModel) -> ToolResult:
+        return ToolResult(content=(TextContent(text="fine"),))
+
+    async def cancelled_mid_bind(member_id: UUID | None) -> SandboxSession:
+        raise asyncio.CancelledError
+
+    turn = await _seed_turn("queued", None)
+    engine = replace(
+        _engine(turn, EchoModel(), tmp_path),
+        tools=ToolRegistry(
+            (ToolDef(name="ok_tool", description="d", input_model=_NoArgs, handler=ok),)
+        ),
+        sandbox_for=cancelled_mid_bind,
+    )
+    with ws(turn.workspace_id), pytest.raises(asyncio.CancelledError):
+        await engine._dispatch(
+            _dispatch_context(engine), ToolUseBlock(id="c1", name="ok_tool", input={}), {}
+        )
+    assert [
+        dict(point.attributes) for point in _exported_metrics(reader)["ufo.tool_call_total"]
+    ] == [
+        {
+            "tool": "ok_tool",
+            "outcome": "step_failed",
+            "error_class": "CancelledError",
+            "workspace_id": str(turn.workspace_id),
+        }
+    ]
+
+
+async def test_a_gating_hook_that_fails_closed_is_not_counted_as_policy(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `pre_tool_use` hook that crashes or hangs denies the call exactly as a policy Deny does, so
+    an extension blocking every tool call in a workspace would otherwise read as policy working as
+    designed. The counter separates them and names the fault's class."""
+    reader = _metric_capture(monkeypatch)
+
+    async def ok(ctx: ToolContext, args: BaseModel) -> ToolResult:
+        return ToolResult(content=(TextContent(text="fine"),))
+
+    async def crashing_gate(ctx: HookContext) -> HookOutcome:
+        raise ZeroDivisionError("hook bug")
+
+    turn = await _seed_turn("queued", None)
+    engine = replace(
+        _engine(turn, EchoModel(), tmp_path),
+        tools=ToolRegistry(
+            (ToolDef(name="ok_tool", description="d", input_model=_NoArgs, handler=ok),)
+        ),
+        hooks=HookChain(
+            hooks={
+                "pre_tool_use": (
+                    BoundHook(
+                        spec=HookSpec(event="pre_tool_use", handler=crashing_gate),
+                        ext=context_for("probe", frozenset()),
+                    ),
+                )
+            },
+            audience=conversation_audience(None),
+        ),
+    )
+    with ws(turn.workspace_id):
+        result = await engine._dispatch_step(
+            _dispatch_context(engine), ToolUseBlock(id="c1", name="ok_tool", input={})
+        )
+    assert result.is_error and "failed closed" in result.text
+    assert [
+        dict(point.attributes) for point in _exported_metrics(reader)["ufo.tool_call_total"]
+    ] == [
+        {
+            "tool": "ok_tool",
+            "outcome": "hook_failed",
+            "error_class": "ZeroDivisionError",
+            "workspace_id": str(turn.workspace_id),
+        }
+    ]
+
+
+async def test_a_dispatch_that_raises_past_its_handler_counts_the_step_it_failed_in(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The handler ran to completion — its external effect already applied — and the step then died
+    storing the image it returned. Counting nothing is the silence this metric exists to end, and
+    counting the handler's success would be a lie about a call that raised."""
+
+    async def unwritable(self: FilesystemBlobStore, key: str, data: bytes) -> None:
+        raise RuntimeError("blob store down")
+
+    monkeypatch.setattr(FilesystemBlobStore, "put", unwritable)
+    reader = _metric_capture(monkeypatch)
+    turn = await _seed_turn("queued", None)
+    engine = replace(
+        _engine(turn, EchoModel(), tmp_path), tools=ToolRegistry((_image_result_tool("shot"),))
+    )
+    with ws(turn.workspace_id), pytest.raises(RuntimeError, match="blob store down"):
+        await engine._dispatch_step(
+            _dispatch_context(engine), ToolUseBlock(id="c1", name="shot", input={})
+        )
+    assert [
+        dict(point.attributes) for point in _exported_metrics(reader)["ufo.tool_call_total"]
+    ] == [
+        {
+            "tool": "shot",
+            "outcome": "step_failed",
+            "error_class": "RuntimeError",
+            "workspace_id": str(turn.workspace_id),
+        }
+    ]
+
+
+async def test_a_cancelled_dispatch_records_the_cancellation_and_not_a_success(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The step is preemptible, so DBOS cancels its task and the handler raises `CancelledError`
+    inside this body — which `except Exception` would miss, leaving the finally to record the call
+    that died at its `ok` initializer."""
+    reader = _metric_capture(monkeypatch)
+
+    async def cancelled(ctx: ToolContext, args: BaseModel) -> ToolResult:
+        raise asyncio.CancelledError
+
+    turn = await _seed_turn("queued", None)
+    engine = replace(
+        _engine(turn, EchoModel(), tmp_path),
+        tools=ToolRegistry(
+            (ToolDef(name="ok_tool", description="d", input_model=_NoArgs, handler=cancelled),)
+        ),
+    )
+    with ws(turn.workspace_id), pytest.raises(asyncio.CancelledError):
+        await engine._dispatch_step(
+            _dispatch_context(engine), ToolUseBlock(id="c1", name="ok_tool", input={})
+        )
+    assert [
+        dict(point.attributes) for point in _exported_metrics(reader)["ufo.tool_call_total"]
+    ] == [
+        {
+            "tool": "ok_tool",
+            "outcome": "step_failed",
+            "error_class": "CancelledError",
+            "workspace_id": str(turn.workspace_id),
+        }
+    ]
+
+
+HANDLER_SECONDS = 3.5
+
+
+@dataclass(frozen=True)
+class OneToolModel:
+    """Calls `slow` once, then answers when its result comes back."""
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        answered = any(
+            isinstance(message.content, tuple)
+            and any(isinstance(block, ToolResultBlock) for block in message.content)
+            for message in request.messages
+        )
+        if answered:
+            yield TextDelta(text="done")
+            yield Usage(input_tokens=1, output_tokens=1)
+            return
+        yield ToolCallStart(id="s1", name="slow")
+        yield ToolCallDelta(id="s1", partial_json="{}")
+        yield Usage(input_tokens=2, output_tokens=2)
+
+
+async def test_a_tool_calls_metered_wall_is_the_time_the_round_waited_on_it(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The observation is the handler's own wall clock, not the zero an instant fake records."""
+    clock = ManualClock()
+    monkeypatch.setattr("ufo.loop.engine.time", clock)
+    reader = _metric_capture(monkeypatch)
+
+    async def slow(ctx: ToolContext, args: BaseModel) -> ToolResult:
+        clock.now += HANDLER_SECONDS
+        return ToolResult(content=(TextContent(text="fine"),))
+
+    turn = await _seed_turn("queued", None)
+    engine = replace(
+        _engine(turn, OneToolModel(), tmp_path),
+        tools=ToolRegistry(
+            (ToolDef(name="slow", description="d", input_model=_NoArgs, handler=slow),)
+        ),
+    )
+    frame = await engine.run()
+    assert frame.status == "done"
+    points = _exported_metrics(reader)
+    assert [(point.sum, point.attributes["tool"]) for point in points["ufo.tool_call_ms"]] == [
+        (int(HANDLER_SECONDS * 1000), "slow")
     ]
 
 

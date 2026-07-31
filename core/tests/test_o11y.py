@@ -11,6 +11,7 @@ from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from opentelemetry.sdk.trace import TracerProvider
 
 from ufo import o11y
+from ufo.ext.loader import HOOK_TIMEOUT_SECONDS
 from ufo.models.anthropic import (
     INITIAL_RETRY_DELAY_SECONDS,
     MAX_EMPTY_PROVIDER_RETRIES,
@@ -18,6 +19,10 @@ from ufo.models.anthropic import (
     MAX_RETRY_DELAY_SECONDS,
     PROVIDER_TIMEOUT_SECONDS,
 )
+from ufo.tools.builtins import ARTIFACT_PUT_TIMEOUT_SECONDS, SHARE_PREFLIGHT_TIMEOUT_SECONDS
+from ufo.workspace import ws
+
+BRACKETING_HOOKS = ("pre_tool_use", "post_tool_use")
 
 
 def test_redact_payload_drops_sensitive_keys_at_depth():
@@ -75,6 +80,65 @@ def test_emit_histogram_caches_instruments():
     assert o11y._histograms["model_round_ms"] is instrument
 
 
+def _reader(monkeypatch) -> InMemoryMetricReader:
+    """Route what the emitters record onto a reader the test reads back, installing no global meter
+    provider. Both instrument caches hold instruments bound to the provider they were created
+    against, so they are emptied alongside it."""
+    reader = InMemoryMetricReader()
+    provider = MeterProvider(metric_readers=[reader])
+    monkeypatch.setattr(o11y.metrics, "get_meter", provider.get_meter)
+    monkeypatch.setattr(o11y, "_counters", {})
+    monkeypatch.setattr(o11y, "_histograms", {})
+    return reader
+
+
+def _attributes(reader: InMemoryMetricReader) -> dict[str, dict[str, str]]:
+    return {
+        metric.name: dict(metric.data.data_points[0].attributes)
+        for resource in reader.get_metrics_data().resource_metrics
+        for scope in resource.scope_metrics
+        for metric in scope.metrics
+    }
+
+
+def test_a_metric_emitted_in_a_workspace_scope_carries_it(monkeypatch):
+    """The tenant slice every dashboard cuts by is read from the bound scope, not passed by the call
+    site — so a counter and a histogram emitted inside a turn both carry the workspace that ran
+    it."""
+    reader = _reader(monkeypatch)
+    workspace_id = uuid4()
+    with ws(workspace_id):
+        o11y.emit_metric("turn_started_total")
+        o11y.emit_histogram("model_round_ms", 12, model="claude-opus-4-8")
+    assert _attributes(reader) == {
+        "ufo.turn_started_total": {"workspace_id": str(workspace_id)},
+        "ufo.model_round_ms": {"model": "claude-opus-4-8", "workspace_id": str(workspace_id)},
+    }
+
+
+def test_a_metric_emitted_outside_a_workspace_scope_omits_the_dimension(monkeypatch):
+    """Deploy-level work — boot, a sweep before it re-binds a row's workspace — has no tenant, and
+    records none: a placeholder would put deploy work in a group beside real workspaces."""
+    reader = _reader(monkeypatch)
+    o11y.emit_metric("turn_terminal_total", status="done")
+    o11y.emit_histogram("model_round_ms", 12)
+    assert _attributes(reader) == {
+        "ufo.turn_terminal_total": {"status": "done"},
+        "ufo.model_round_ms": {},
+    }
+
+
+def test_a_call_site_cannot_pass_the_workspace_dimension(monkeypatch):
+    """The scope is the dimension's only source. A call site passing it is refused rather than
+    silently losing to the ambient value, so no series can be tagged with a workspace that did not
+    run the emission."""
+    _reader(monkeypatch)
+    with ws(uuid4()), pytest.raises(ValueError, match="workspace_id"):
+        o11y.emit_metric("turn_started_total", workspace_id=str(uuid4()))
+    with pytest.raises(ValueError, match="workspace_id"):
+        o11y.emit_histogram("model_round_ms", 1, workspace_id=str(uuid4()))
+
+
 PROVIDER_RETRY_BAND_MS = int(
     (
         PROVIDER_TIMEOUT_SECONDS * (MAX_PROVIDER_RETRIES + MAX_EMPTY_PROVIDER_RETRIES + 1)
@@ -87,9 +151,20 @@ PROVIDER_RETRY_BAND_MS = int(
 )
 
 
+LONGEST_BOUNDED_DISPATCH_MS = int(
+    (
+        SHARE_PREFLIGHT_TIMEOUT_SECONDS
+        + ARTIFACT_PUT_TIMEOUT_SECONDS
+        + HOOK_TIMEOUT_SECONDS * len(BRACKETING_HOOKS)
+    )
+    * 1000
+)
+
+
 WORST_CASE_MS = {
     "model_first_event_ms": PROVIDER_RETRY_BAND_MS,
     "model_round_ms": o11y.HISTOGRAMS["model_first_event_ms"][-1] + 1,
+    "tool_call_ms": LONGEST_BOUNDED_DISPATCH_MS,
 }
 
 
@@ -98,8 +173,12 @@ def test_registered_histograms_bucket_their_own_worst_case(monkeypatch):
     yielded — a timed-out attempt with its backoff, an empty completion with none — so the band its
     retry constants derive is what the first-event latency has to bucket. A round's wall clock is
     that latency plus the stream, and nothing bounds the stream, so it has to bucket past the
-    highest first-event latency there is. Everything above a top bound shares one bucket, where no
-    percentile survives, so a dropped tail fails here."""
+    highest first-event latency there is. A dispatch's is `share_file` — the only tool that bounds
+    two transfers of its own — inside the hook pair the step brackets every handler with, since the
+    metered wall is the step and not the handler. A foreground subagent bounds its wall at nothing,
+    so the tail past this is deliberately unresolved; what has a bound has to land under one.
+    Everything above a top bound shares one bucket, where no percentile survives, so a dropped tail
+    fails here."""
     reader = InMemoryMetricReader()
     provider = MeterProvider(metric_readers=[reader])
     monkeypatch.setattr(o11y.metrics, "get_meter", provider.get_meter)

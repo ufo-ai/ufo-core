@@ -700,9 +700,13 @@ class BoundHook:
 class HookResolution:
     """The folded outcome of firing an event's hooks. `denied` is set (short-circuit) the moment a
     hook Denies; otherwise `tool_input`/`output` carry the left-to-right ModifyInput/ModifyOutput
-    fold (each hook saw the prior's) and `injected` concatenates every InjectContext in order."""
+    fold (each hook saw the prior's) and `injected` concatenates every InjectContext in order.
+    `failed_closed` names the class of the fault behind a denial a gating hook produced by failing
+    rather than by deciding — the two are one refusal to the caller and two different events to an
+    operator, so what reports the refusal can tell them apart."""
 
     denied: str | None = None
+    failed_closed: str | None = None
     tool_input: BaseModel | None = None
     output: str | None = None
     injected: str = ""
@@ -778,7 +782,8 @@ class HookChain:
                         denied=(
                             f"hook {hook.ext.store.extension!r} failed closed on {event}: "
                             f"{type(error).__name__}"
-                        )
+                        ),
+                        failed_closed=type(error).__name__,
                     )
                 log(
                     "hook.swallowed",

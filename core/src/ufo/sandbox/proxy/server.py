@@ -589,7 +589,7 @@ class EgressProxy:
             return
         writer.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
         await writer.drain()
-        self._meter(host, rules)
+        self._meter(host, run, rules)
         await self._meter_ledger(host, run, rules)
         await _relay(reader, writer, upstream_reader, upstream_writer)
 
@@ -640,7 +640,7 @@ class EgressProxy:
         upstream_writer.write(_inject(headers, injections))
         upstream_writer.write(b"\r\n")
         await upstream_writer.drain()
-        self._meter(host, rules)
+        self._meter(host, run, rules)
         await self._meter_ledger(host, run, rules)
         tokens_metered = any(
             isinstance(rule, MeterRule) and rule.host == host and rule.dimension == TOKENS_DIMENSION
@@ -681,7 +681,7 @@ class EgressProxy:
             await _respond(client_writer, body.status, body.message)
             await _drain_refused_body(client_reader, body.pending)
             return
-        self._meter(host, rules)
+        self._meter(host, run, rules)
         await self._meter_ledger(host, run, rules)
         try:
             response = await rule.forward.forward(
@@ -748,10 +748,14 @@ class EgressProxy:
             self._contexts[host] = context
             return context
 
-    def _meter(self, host: str, rules: tuple[Rule, ...]) -> None:
-        for rule in rules:
-            if isinstance(rule, MeterRule) and rule.host == host:
-                emit_metric("sandbox_egress_total", host=host, dimension=rule.dimension)
+    def _meter(self, host: str, run: RunToken, rules: tuple[Rule, ...]) -> None:
+        """Count one metered request under the workspace whose sandbox made it. The counter reads
+        its workspace from the bound scope, so the run's own is bound here rather than passed —
+        unbound, the series reports every tenant's egress as one deploy-level total."""
+        with ws(run.workspace_id):
+            for rule in rules:
+                if isinstance(rule, MeterRule) and rule.host == host:
+                    emit_metric("sandbox_egress_total", host=host, dimension=rule.dimension)
 
     async def _meter_ledger(self, host: str, run: RunToken, rules: tuple[Rule, ...]) -> None:
         if not any(
