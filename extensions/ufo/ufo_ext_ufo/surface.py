@@ -23,6 +23,7 @@ from uuid import UUID
 from ufo.sdk.accounting import MICRO_USD_PER_USD
 from ufo.sdk.audience import conversation_audience
 from ufo.sdk.bearer import verify_token, workspace_claim
+from ufo.sdk.credentials import CredentialValueInvalid
 from ufo.sdk.http import PlainTextResponse, Request, Response, StreamingResponse
 from ufo.sdk.hub import CostTick, LiveFrame, Parked, SkillLoad, Terminal, TextDelta, ToolCall
 from ufo.sdk.surfaces import (
@@ -44,6 +45,7 @@ MAX_SECRET_BYTES = 4_096
 SECRET_HEADER = "x-ufo-secret"
 SECRET_SLOT_HEADER = "x-ufo-slot"
 QUEUE_KEY_SEPARATOR = ":"
+TURN_FAILED_MESSAGE = "The agent could not complete the request. Try again."
 
 # Hold a live stream open just under the shell's `curl --max-time 90`, so a turn that outruns the
 # hold ends on `poll` (the shell reconnects) rather than the client's own timeout truncating it.
@@ -111,9 +113,9 @@ def _answer(
 ) -> tuple[bytes, ...]:
     """Cap a turn. A done turn prompts (`ask`) after its answer — already streamed as `txt`, else
     said now, preceded by one `secret` line per still-unanswered credential prompt, so the shell
-    collects exactly the missing values privately; a failure says its error and prompts so the
-    member can retry; a cancel says so and ends the client session (`exit`), the conversation
-    resuming on the next `ufo`."""
+    collects exactly the missing values privately; a failure says what to do next and prompts; a
+    cancel says so and ends the client session (`exit`), the conversation resuming on the next
+    `ufo`."""
     frame = terminal.frame
     match frame.status:
         case "done":
@@ -125,8 +127,13 @@ def _answer(
             connect = () if connect_message is None else (directive("say", connect_message),)
             return (*said, *secrets, *connect, directive("ask", PROMPT))
         case "failed":
+            safe_error = (
+                frame.error_message
+                if frame.error_class == CredentialValueInvalid.__name__
+                else None
+            )
             return (
-                *_say_lines(frame.text or frame.error_class or "the turn failed"),
+                *_say_lines(safe_error or TURN_FAILED_MESSAGE),
                 directive("ask", PROMPT),
             )
         case "cancelled":

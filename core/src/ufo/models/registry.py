@@ -8,7 +8,7 @@ until an agent pinned to that backend actually runs. See RFC 0018."""
 from dataclasses import dataclass
 
 from ufo.config import Config
-from ufo.credentials import CredentialSlotUnset
+from ufo.credentials import CredentialSlotUnset, CredentialValueInvalid
 from ufo.ext.manifest import Manifest
 from ufo.models.catalog import core_model_specs
 from ufo.models.interface import AUTO_MODEL, PROVIDER_ANTHROPIC, PROVIDER_OPENAI, ModelClient
@@ -50,14 +50,22 @@ class ModelRegistry:
         spec = self.spec(model)
         if not spec.key_slot and not spec.key_env:
             return spec.client(spec, "")
+        needed = spec.key_env or spec.key_slot.upper()
         try:
             key = await ws_current().credential(spec.key_slot, spec.key_env or None)
         except CredentialSlotUnset as unset:
-            needed = spec.key_env or spec.key_slot.upper()
             raise RuntimeError(
                 f"model {model!r} needs a key: set env {needed} or the workspace's "
                 f"{spec.key_slot!r} BYOK slot"
             ) from unset
+        try:
+            key.encode("ascii")
+        except UnicodeEncodeError as error:
+            raise CredentialValueInvalid(
+                f"model {model!r} key contains non-ASCII characters: env {needed} or the "
+                f"workspace's {spec.key_slot!r} BYOK slot holds a value the provider wire "
+                "cannot carry."
+            ) from error
         return spec.client(spec, key)
 
     def key_slot_for(self, model: str) -> str | None:

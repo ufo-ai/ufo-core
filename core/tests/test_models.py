@@ -14,6 +14,7 @@ from openai.types.chat import chat_completion_chunk
 from openai.types.completion_usage import CompletionUsage, PromptTokensDetails
 
 from ufo.config import BlobConfig, Config, DatabaseConfig, ModelsConfig
+from ufo.credentials import CredentialValueInvalid
 from ufo.ext.manifest import Manifest
 from ufo.models.anthropic import MAX_EMPTY_PROVIDER_RETRIES as ANTHROPIC_MAX_EMPTY_RETRIES
 from ufo.models.anthropic import MAX_PROVIDER_RETRIES as ANTHROPIC_MAX_RETRIES
@@ -1132,6 +1133,34 @@ async def test_registry_builds_core_clients_from_their_specs(
     assert isinstance(openai_client, OpenAIClient)
     assert openai_client.client is openai_wire
     assert openai_client.spec is registry.spec("gpt-5.4")
+
+
+@pytest.mark.parametrize(
+    ("model_id", "key_env", "key_slot"),
+    (
+        ("claude-opus-4-8", "ANTHROPIC_API_KEY", "anthropic_api_key"),
+        ("gpt-5.4", "OPENAI_API_KEY", "openai_api_key"),
+    ),
+)
+async def test_registry_rejects_non_ascii_core_provider_keys(
+    model_id: str,
+    key_env: str,
+    key_slot: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(key_env, "—")
+    registry = model_registry(_config(tmp_path), ())
+    with ws(uuid4()):
+        with pytest.raises(
+            CredentialValueInvalid,
+            match=(
+                rf"model {model_id!r} key contains non-ASCII characters: env {key_env} "
+                rf"or the workspace's {key_slot!r} BYOK slot holds a value "
+                r"the provider wire cannot carry\."
+            ),
+        ):
+            await registry.client_for(model_id)
 
 
 def test_responses_request_carries_tools_and_reasoning_together() -> None:

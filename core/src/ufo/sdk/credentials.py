@@ -10,6 +10,9 @@ from ufo.credentials import (
     CredentialStore as CredentialStore,
 )
 from ufo.credentials import (
+    CredentialValueInvalid as CredentialValueInvalid,
+)
+from ufo.credentials import (
     authorized_slot_workspace as authorized_slot_workspace,
 )
 from ufo.credentials import (

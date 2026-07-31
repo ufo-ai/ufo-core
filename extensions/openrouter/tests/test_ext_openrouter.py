@@ -24,6 +24,7 @@ from ufo.models.interface import (
 )
 from ufo.models.registry import model_registry
 from ufo.schema.records import Usage
+from ufo.sdk.credentials import CredentialValueInvalid
 from ufo.workspace import ws
 
 REQUEST = ModelRequest(
@@ -216,6 +217,28 @@ async def test_model_client_requires_its_key(monkeypatch: pytest.MonkeyPatch, tm
     registry = model_registry(config, (openrouter.manifest(),))
     with ws(uuid4()), pytest.raises(RuntimeError, match=openrouter.OPENROUTER_API_KEY_ENV):
         await registry.client_for("google/gemini-2.5-pro")
+
+
+async def test_registry_rejects_a_non_ascii_openrouter_key(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    monkeypatch.setenv(openrouter.OPENROUTER_API_KEY_ENV, "—")
+    config = Config(
+        database=DatabaseConfig(url="sqlite+aiosqlite:///:memory:"),
+        blob=BlobConfig(backend="filesystem", root=tmp_path),
+    )
+    registry = model_registry(config, (openrouter.manifest(),))
+    with ws(uuid4()):
+        with pytest.raises(
+            CredentialValueInvalid,
+            match=(
+                r"model 'google/gemini-2\.5-pro' key contains non-ASCII characters: "
+                rf"env {openrouter.OPENROUTER_API_KEY_ENV} or the workspace's "
+                rf"{openrouter.OPENROUTER_KEY_SLOT!r} BYOK slot holds a value "
+                r"the provider wire cannot carry\."
+            ),
+        ):
+            await registry.client_for("google/gemini-2.5-pro")
 
 
 async def test_registry_selects_openrouter_and_prices_its_slug(

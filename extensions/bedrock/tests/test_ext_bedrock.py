@@ -9,6 +9,7 @@ from ufo.config import BlobConfig, Config, DatabaseConfig
 from ufo.models.anthropic import AnthropicClient
 from ufo.models.openai import OpenAIClient
 from ufo.models.registry import model_registry
+from ufo.sdk.credentials import CredentialValueInvalid
 from ufo.workspace import ws
 
 
@@ -54,6 +55,28 @@ def test_openai_chat_specs_build_a_mantle_chat_client(monkeypatch: pytest.Monkey
     assert client.spec.api_surface == "chat"
     assert str(client.client.base_url) == "https://bedrock-mantle.us-east-1.api.aws/v1/"
     assert client.client.auth_headers == {"Authorization": "Bearer bedrock-key"}
+
+
+@pytest.mark.parametrize("model_id", ("anthropic.claude-opus-5", "openai.gpt-5.5"))
+async def test_registry_rejects_a_non_ascii_bedrock_key(
+    model_id: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(bedrock.AWS_REGION_ENV, "us-west-2")
+    monkeypatch.setenv(bedrock.BEDROCK_API_KEY_ENV, "—")
+    registry = model_registry(_config(tmp_path), (bedrock.manifest(),))
+    with ws(uuid4()):
+        with pytest.raises(
+            CredentialValueInvalid,
+            match=(
+                rf"model {model_id!r} key contains non-ASCII characters: "
+                rf"env {bedrock.BEDROCK_API_KEY_ENV} or the workspace's "
+                rf"{bedrock.BEDROCK_KEY_SLOT!r} BYOK slot holds a value "
+                r"the provider wire cannot carry\."
+            ),
+        ):
+            await registry.client_for(model_id)
 
 
 def test_frontier_openai_specs_build_a_mantle_responses_client(

@@ -63,6 +63,10 @@ class CredentialRequestInvalid(ValueError):
     member, or slot it was not sealed for."""
 
 
+class CredentialValueInvalid(ValueError):
+    """A credential value cannot be represented on its provider wire."""
+
+
 CREDENTIAL_REQUEST_PURPOSE = "credential-request"
 INSTALLATION_BINDING_PURPOSE = "installation-binding"
 

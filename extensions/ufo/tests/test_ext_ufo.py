@@ -107,8 +107,34 @@ def test_terminal_frame_maps_by_status_and_streamed() -> None:
         b"ask\t>\n",
     )
     assert directives_for(done, streamed=True) == (b"ask\t>\n",)
-    failed = Terminal(frame=TerminalFrame(status="failed", error_class="ModelError"))
-    assert directives_for(failed, streamed=True) == (b"say\tModelError\n", b"ask\t>\n")
+    failed = Terminal(
+        frame=TerminalFrame(
+            status="failed",
+            error_class="UnicodeEncodeError",
+            error_message="'utf-8' codec could not encode the response",
+        )
+    )
+    assert directives_for(failed, streamed=True) == (
+        b"say\tThe agent could not complete the request. Try again.\n",
+        b"ask\t>\n",
+    )
+    invalid_credential = Terminal(
+        frame=TerminalFrame(
+            status="failed",
+            error_class="CredentialValueInvalid",
+            error_message=(
+                "model 'anthropic.claude-opus-5' key contains non-ASCII characters: "
+                "env AWS_BEARER_TOKEN_BEDROCK or the workspace's 'bedrock_api_key' BYOK slot "
+                "holds a value the provider wire cannot carry."
+            ),
+        )
+    )
+    assert directives_for(invalid_credential, streamed=True) == (
+        b"say\tmodel 'anthropic.claude-opus-5' key contains non-ASCII characters: "
+        b"env AWS_BEARER_TOKEN_BEDROCK or the workspace's 'bedrock_api_key' BYOK slot "
+        b"holds a value the provider wire cannot carry.\n",
+        b"ask\t>\n",
+    )
     cancelled = Terminal(frame=TerminalFrame(status="cancelled"))
     assert directives_for(cancelled, streamed=True) == (b"say\tcancelled\n", b"exit\t0\n")
     assert directives_for(Parked(message="over cap"), False) == (b"say\tover cap\n", b"ask\t>\n")
