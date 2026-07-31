@@ -1166,6 +1166,25 @@ class SurfaceContext:
             ).one_or_none()
         return None if row is None else row.member_id
 
+    async def turn_is_terminal(self, turn_id: UUID) -> bool:
+        """Whether a turn has committed its terminal state, read from the row rather than the hub.
+
+        A side-channel writer that posts on a timer needs this: the tail learns a turn ended by
+        polling, so between the commit and the frame there is a window in which the poller has
+        already delivered the turn's reply. A checkpoint firing inside that window would post an
+        update *after* the answer it was reporting progress towards, which the member sees in their
+        thread. A missing turn reads as terminal — there is nothing left to report on."""
+        async with workspace_tx() as connection:
+            row = (
+                await connection.execute(
+                    sa.select(tables.turn.c.status).where(
+                        tables.turn.c.id == turn_id,
+                        tables.turn.c.workspace_id == self.workspace_id,
+                    )
+                )
+            ).one_or_none()
+        return row is None or row.status in TERMINAL_TURN_STATUSES
+
     async def latest_turn(self, conversation_id: UUID) -> UUID | None:
         """The most recent turn admitted to a conversation, or None when it holds none — the
         turn a live surface resumes tailing when a held stream reconnects to drain an answer that

@@ -1921,6 +1921,8 @@ class ThreadProgress:
                 waiting = max(deadline - time.monotonic(), 0.0)
                 done, _pending = await asyncio.wait([upcoming], timeout=waiting)
                 if not done:
+                    if await self.ctx.turn_is_terminal(self.turn_id):
+                        return
                     await self._post(client, bot_token, activity, time.monotonic() - started)
                     activity.checkpoint()
                     deadline = time.monotonic() + next(intervals)
