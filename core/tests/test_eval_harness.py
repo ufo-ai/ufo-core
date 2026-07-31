@@ -247,6 +247,8 @@ def test_registry_pins_judge_and_simulator_models_by_workload() -> None:
     assert tasks["response_register"].judge_model == SEMANTIC_JUDGE_MODEL
     assert tasks["response_register"].simulator_model is None
     assert tasks["closing_message"].judge_model == SEMANTIC_JUDGE_MODEL
+    assert tasks["slack_message_block"].judge_model == SEMANTIC_JUDGE_MODEL
+    assert tasks["slack_message_block"].simulator_model is None
     assert tasks["closing_message"].simulator_model is None
     assert tasks["onboarding_help"].judge_model == SEMANTIC_JUDGE_MODEL
     assert tasks["onboarding_help"].simulator_model is None
@@ -264,6 +266,7 @@ def test_registry_pins_judge_and_simulator_models_by_workload() -> None:
             "document_visual",
             "response_register",
             "closing_message",
+            "slack_message_block",
             "onboarding_help",
         }
     )
