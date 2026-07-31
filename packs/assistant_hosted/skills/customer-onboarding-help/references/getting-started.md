@@ -18,7 +18,9 @@ every agent there; other agents appear once an admin shares them (see `capabilit
 3. **Their verified email domain opens the workspace.** Nothing else is asked for. The invitation
    works once per domain, and lapses if it goes unused for a couple of weeks.
 4. **Joining an existing workspace needs no invitation.** A teammate whose email domain already has a
-   workspace signs in and joins it directly.
+   workspace signs in and joins it directly. An admin can also add someone ahead of their first
+   sign-in — by asking the agent, or from the portal's Team view — optionally as an admin. Either
+   way the address must be at the workspace's own domain.
 5. **A workspace admin is offered billing setup at the end.** In the terminal the admin gets a choice
    on the concluding screen; picking it starts a chat with the agent, which returns a link for saving
    a payment method. A joined teammate gets the ordinary prompt instead, and signing in through the
@@ -29,7 +31,8 @@ every agent there; other agents appear once an admin shares them (see `capabilit
 ## What to say when asked
 
 "Your invitation covers your company's email domain, so there is nothing to type in. Your teammates
-do not need one at all: they sign in with their work email and join the workspace you already have."
+do not need one at all: they sign in with their work email and join the workspace you already have.
+If you want someone set up before they sign in, ask me to add them by their work email and I will."
 
 ## Boundaries
 

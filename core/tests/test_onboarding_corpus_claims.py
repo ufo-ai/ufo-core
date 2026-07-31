@@ -27,6 +27,7 @@ INVITES = "control/src/ufo_control/gateway_invite.py"
 SLACK_CONNECT = "control/src/ufo_control/gateway_slack_connect.py"
 AUDIENCE = "core/src/ufo/audience.py"
 MEMBERS = "core/src/ufo/members.py"
+SEATS = "core/src/ufo/seats.py"
 
 
 @dataclass(frozen=True)
@@ -166,6 +167,27 @@ CLAIMS = (
         phrase="never a subagent",
         source=MEMBERS,
         pattern=r"if not await ctx\.agent_is_main\(\) or ctx\.speaker_member_id is None",
+    ),
+    Claim(
+        claim="an admin can add a teammate before that teammate ever signs in",
+        corpus="references/getting-started.md",
+        phrase="add someone ahead of their first",
+        source=MEMBERS,
+        pattern=r'ADD_MEMBER_TOOL = "add_member"',
+    ),
+    Claim(
+        claim="an added address must be at the workspace's own domain",
+        corpus="references/getting-started.md",
+        phrase="must be at the workspace's own domain",
+        source=MEMBERS,
+        pattern=r'raise ValueError\(f"this workspace admits \{own\} addresses"\)',
+    ),
+    Claim(
+        claim="a member an admin adds is seated while an included seat is open",
+        corpus="references/billing-and-seats.md",
+        phrase="one an admin adds by email",
+        source=SEATS,
+        pattern=r"await Seats\(workspace_id\)\.auto_seat\(connection, created\)",
     ),
     Claim(
         claim="a private channel carries a room scope of its own",

@@ -50,6 +50,7 @@ from ufo.artifacts import artifact_object_names
 from ufo.blob import FilesystemBlobStore, S3BlobStore
 from ufo.db import workspace_tx
 from ufo.grants import installed_connect_flow
+from ufo.members import ADD_MEMBER_TOOL_DEF
 from ufo.sandbox.session import WORKSPACE_DIR, workspace_path
 from ufo.schema import tables
 from ufo.schema.records import AskUserInput, ConnectRequest, CredentialPrompt, CredentialRequest
@@ -743,6 +744,7 @@ async def message_subagent_handler(ctx: ToolContext, args: MessageSubagentInput)
 
 
 BUILTIN_TOOLS: tuple[ToolDef, ...] = (
+    ADD_MEMBER_TOOL_DEF,
     ToolDef(
         name="bash",
         description=(

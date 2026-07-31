@@ -145,6 +145,7 @@ def test_builtin_tools_are_trusted_by_default() -> None:
 def test_registry_schemas_cover_every_tool() -> None:
     schemas = REGISTRY.schemas()
     assert {schema.name for schema in schemas} == {
+        "add_member",
         "bash",
         "read",
         "write",

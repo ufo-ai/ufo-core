@@ -14,8 +14,9 @@ key."""
 from uuid import NAMESPACE_DNS, UUID, uuid5
 
 from ufo.bearer import verified_claims
-from ufo.ext.surface import OPERATOR_EMAIL_DOMAIN, SurfaceAuth, SurfaceContext, _email_domain
+from ufo.ext.surface import OPERATOR_EMAIL_DOMAIN, SurfaceAuth, SurfaceContext
 from ufo.sdk.http import JSONResponse, RedirectResponse, Request, Response, set_session_cookie
+from ufo.seats import email_domain
 
 OPERATOR_COOKIE = "ufo_debug"
 TOKEN_FIELD = "token"
@@ -50,7 +51,7 @@ async def resolve_operator_workspace(request: Request, _auth: SurfaceAuth) -> UU
     if claims is None:
         return None
     claimed_workspace, email = claims
-    if _email_domain(email) != OPERATOR_EMAIL_DOMAIN:
+    if email_domain(email) != OPERATOR_EMAIL_DOMAIN:
         return None
     target = request.query_params.get("ws", "").strip()
     if not target:

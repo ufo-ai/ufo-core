@@ -38,7 +38,8 @@ change seat billing.
 
 A seat is what lets a person talk to the agent.
 
-- A new member who joins is seated automatically while an included seat is open.
+- A new member — one who signs in, or one an admin adds by email — is seated automatically
+  while an included seat is open.
 - Beyond the included allowance, a new member is not seated: their messages are refused and a
   workspace admin gets a seat approval request.
 - If an admin approves, the extra seat bills as overage on the invoice. Always say that when an admin

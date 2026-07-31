@@ -321,6 +321,42 @@ class Seats:
         )
 
 
+def email_domain(email: str) -> str:
+    """The address's domain, lowercased — empty for anything that is not one `local@domain` with no
+    whitespace, so a malformed value can never satisfy a domain match and never reaches a member
+    row. `create_member` calls it too, so this is the shape gate for every creation path and not
+    only for the two that match a domain: an address no sign-in could normalize to and no
+    channel-verified join could equal would otherwise become a seated member the `member` kind
+    cannot delete."""
+    candidate = email.strip().lower()
+    local, _, domain = candidate.partition("@")
+    if not local or not domain or "@" in domain:
+        return ""
+    if any(character.isspace() for character in candidate):
+        return ""
+    return domain
+
+
+async def workspace_domain(connection: AsyncConnection, workspace_id: UUID) -> str | None:
+    """The workspace's own email domain: its first member's, the vetted domain a sign-in resolves
+    a workspace by and a chat-surface join matches against. The one derivation every consumer
+    reads — what `add_member` admits, what `join_member` matches, what the operator check compares,
+    and what the portal advertises cannot diverge. None only when the workspace has no member yet,
+    the state a chat-surface join meets before anyone has onboarded: every stored address carries a
+    domain, because `create_member` admits none that does not."""
+    email = (
+        await connection.execute(
+            sa.select(tables.member.c.email)
+            .where(tables.member.c.workspace_id == workspace_id)
+            .order_by(tables.member.c.created_at.asc(), tables.member.c.id.asc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if email is None:
+        return None
+    return email_domain(email) or None
+
+
 async def member_is_admin(connection: AsyncConnection, workspace_id: UUID, member_id: UUID) -> bool:
     return bool(
         (
@@ -345,7 +381,23 @@ async def create_member(
     channel-verified teammate join, hosted onboarding, whatever joins next — inserts through
     here, so the seat rule is applied structurally rather than remembered per call site. A lost
     creation race collapses on the member's (workspace_id, email) uniqueness and answers the
-    surviving row, which the racing winner already seated."""
+    surviving row, which the racing winner already seated.
+
+    The workspace row is locked before the insert, never after: `auto_seat` needs it anyway, and
+    taking it here gives every creation path one lock order. Two creations of one address —
+    a teammate's first channel message and an admin adding them in the same moment — then queue
+    instead of forming a cycle with whichever caller already holds the row.
+
+    The address crosses `email_domain` here, so the shape rule holds for every caller rather than
+    for the two that match a domain: a value no sign-in normalizes to and no verified join equals
+    cannot become a seated row the `member` kind refuses to delete."""
+    if not email_domain(email):
+        raise ValueError(f"{email!r} is not one local@domain address")
+    await connection.execute(
+        sa.select(tables.workspace.c.id)
+        .where(tables.workspace.c.id == workspace_id)
+        .with_for_update()
+    )
     insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
     created = (
         await connection.execute(

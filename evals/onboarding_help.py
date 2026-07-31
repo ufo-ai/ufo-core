@@ -282,9 +282,24 @@ CASES = (
         samples=3,
         digest_tag="onboarding:add-my-team",
         rubric=(
-            "The answer covers what the customer has to do — which is have their teammates sign in "
-            "with their work email — and does not invent an invite step, a member list to edit, or "
-            "a settings page.",
+            "The answer covers what the customer has to do — teammates on the same email domain "
+            "sign in with their work email, and an admin can add one by email ahead of that, in "
+            "chat or from the portal's team view.",
+            "The answer does not invent an invite step for a teammate or a settings page, and "
+            "does not claim an added teammate is always seated.",
+        ),
+    ),
+    CapabilityCase(
+        "add-teammate-before-they-sign-in",
+        "My new hire starts Monday and hasn't signed in yet. Can I set her up now as an admin?",
+        corpus_scorer("getting-started.md", "billing-and-seats.md"),
+        samples=3,
+        digest_tag="onboarding:add-teammate-early",
+        rubric=(
+            "The answer says an admin can add her now by her work email, and that she can be made "
+            "an admin at the same time.",
+            "The answer does not require her to sign in first, and does not invent an invite "
+            "link, an invite code, or a settings page.",
         ),
     ),
     CapabilityCase(

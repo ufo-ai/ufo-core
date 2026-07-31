@@ -57,6 +57,7 @@ from ufo.hub import InProcessHub, SkillLoad, ToolCall
 from ufo.loop import queue as loop_queue
 from ufo.loop.subagents import SubagentRegistry
 from ufo.loop.transcript import Transcript
+from ufo.members import ADD_MEMBER_GATE
 from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
 from ufo.models.interface import ModelEvent, ModelRequest, TextDelta
 from ufo.models.registry import ModelRegistry
@@ -4227,3 +4228,122 @@ async def test_conversation_files_ride_the_same_gate(
             headers={"cookie": f"{SESSION_COOKIE}={token_admin}"},
         )
         assert crossed.status_code == 404
+
+
+async def test_team_view_lists_the_roster_for_every_member(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The workspace team view: every member reads the whole roster with each member's role and
+    seat — the same rows the `member` kind lists to a member asking the main agent — while
+    `can_add` opens the add form for an admin alone. An unauthenticated read is refused."""
+    client, workspace_id, _agent_id = web
+    _member_id, token_m = await _seed_member(workspace_id, "m@example.com")
+    _admin_id, token_admin = await _seed_member(workspace_id, "boss@example.com", admin=True)
+    path = "/surface/web/workspace/team"
+
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.member)
+            .where(tables.member.c.id == _member_id)
+            .values(seated_at=sa.func.now())
+        )
+    member_view = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_m}"})
+    body = member_view.json()
+    assert [(entry["email"], entry["admin"], entry["seated"]) for entry in body["members"]] == [
+        ("boss@example.com", True, False),
+        ("m@example.com", False, True),
+    ]
+    assert "id" not in body["members"][0]
+    assert body["can_add"] is False
+    assert body["domain"] == "example.com"
+
+    admin_view = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_admin}"})
+    assert admin_view.json()["can_add"] is True
+    assert [entry["email"] for entry in admin_view.json()["members"]] == [
+        entry["email"] for entry in body["members"]
+    ]
+
+    anonymous = await client.get(path)
+    assert anonymous.status_code == 401
+
+
+async def test_the_team_panel_adds_a_member_through_the_intent_lane(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    """The panel's own envelope reaching the real `add_member` verb: an admin's submit mints the
+    member row at the workspace's domain with the admin flag the form carried, and the new member
+    appears in the roster the panel re-reads. A non-admin's identical submit is refused by the
+    verb with no row written — the panel's hidden form is not the gate."""
+    client, workspace_id, agent_id = web
+    _admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
+    _member_id, member_token = await _seed_member(workspace_id, "plain@example.com")
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+
+    added = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json={"verb": "add_member", "email": "New.Hire@example.com", "admin": True},
+        headers=cookie,
+    )
+    assert added.status_code == 200
+    outcome = added.json()
+    assert outcome["applied"] is True, outcome["message"]
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(tables.member.c.is_admin, tables.member.c.seated_at).where(
+                    tables.member.c.workspace_id == workspace_id,
+                    tables.member.c.email == "new.hire@example.com",
+                )
+            )
+        ).one()
+    assert row.is_admin is True
+    assert row.seated_at is not None
+    roster = await client.get("/surface/web/workspace/team", headers=cookie)
+    assert "new.hire@example.com" in [entry["email"] for entry in roster.json()["members"]]
+
+    refused = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json={"verb": "add_member", "email": "sneak@example.com", "admin": True},
+        headers={"cookie": f"{SESSION_COOKIE}={member_token}"},
+    )
+    assert refused.status_code == 200
+    assert refused.json()["applied"] is False
+    assert refused.json()["message"] == ADD_MEMBER_GATE
+    async with workspace_tx() as connection:
+        assert (
+            await connection.execute(
+                sa.select(tables.member.c.id).where(
+                    tables.member.c.workspace_id == workspace_id,
+                    tables.member.c.email == "sneak@example.com",
+                )
+            )
+        ).one_or_none() is None
+
+
+async def test_the_team_panel_refuses_a_foreign_domain(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    """An address outside the workspace's own domain is refused with the verb's own words and no
+    row: a sign-in resolves its workspace by the address's domain, so such a member could never
+    answer for this one."""
+    client, workspace_id, agent_id = web
+    _admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
+    refused = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json={"verb": "add_member", "email": "outsider@other.test", "admin": False},
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    assert refused.status_code == 200
+    assert refused.json()["applied"] is False
+    assert "example.com" in refused.json()["message"]
+    async with workspace_tx() as connection:
+        assert (
+            await connection.execute(
+                sa.select(tables.member.c.id).where(
+                    tables.member.c.workspace_id == workspace_id,
+                    tables.member.c.email == "outsider@other.test",
+                )
+            )
+        ).one_or_none() is None

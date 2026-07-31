@@ -55,8 +55,9 @@ function emptyState(text) {
 
 const TABS = ['chat', 'conversations', 'overview', 'tasks', 'connections', 'skills', 'usage'];
 const MAX_PREVIEW_BYTES = 256 * 1024;
-const WORKSPACE_TABS = ['sources', 'credentials', 'memory', 'artifacts', 'sites', 'usage'];
+const WORKSPACE_TABS = ['team', 'sources', 'credentials', 'memory', 'artifacts', 'sites', 'usage'];
 const WORKSPACE_LABELS = {
+  team: 'Team',
   sources: 'Sources',
   credentials: 'Credentials',
   memory: 'Memory',
@@ -891,6 +892,72 @@ function markWorkspace(name) {
   }
 }
 
+function workspaceTeam(view, payload, notice) {
+  // The roster every member reads, and — for an admin — the one form that mints a member ahead of
+  // their first contact. Role and seat changes are the member kind's, not this form's.
+  const result = document.createElement('div');
+  result.className = 'result mono';
+  if (notice) result.textContent = notice;
+  const mainAgent = agents.find((agent) => agent.main);
+  view.appendChild(table(
+    ['member', 'role', 'seat'],
+    payload.members.map((entry) => row(
+      entry.email,
+      entry.admin ? 'Admin' : 'Member',
+      entry.seated ? 'Seated' : 'No seat'
+    ))
+  ));
+  if (payload.can_add && mainAgent) {
+    const form = document.createElement('form');
+    form.className = 'add-member';
+    const email = document.createElement('input');
+    email.type = 'email';
+    email.required = true;
+    email.name = 'email';
+    email.placeholder = payload.domain ? 'email@' + payload.domain : 'email@work.com';
+    const adminLabel = document.createElement('label');
+    const admin = document.createElement('input');
+    admin.type = 'checkbox';
+    admin.name = 'admin';
+    adminLabel.append(admin, document.createTextNode(' Admin'));
+    const submit = document.createElement('button');
+    submit.type = 'submit';
+    submit.className = 'send';
+    submit.textContent = 'Add member';
+    form.append(email, adminLabel, submit);
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const address = email.value.trim();
+      if (!address) return;
+      submit.disabled = true;
+      let res;
+      try {
+        res = await fetch(BASE + '/agents/' + mainAgent.id + '/intents', {
+          method: 'POST',
+          credentials: 'same-origin',
+          body: JSON.stringify({ verb: 'add_member', email: address, admin: admin.checked }),
+        });
+      } catch (err) {
+        result.textContent = 'Network error — try again.';
+        submit.disabled = false;
+        return;
+      }
+      const outcome = await res.json().catch(() => null);
+      const message = outcome && outcome.message
+        ? outcome.message
+        : 'Error ' + res.status + ' — try again.';
+      if (outcome && outcome.applied) {
+        showWorkspace('team', undefined, { notice: message });
+        return;
+      }
+      result.textContent = message;
+      submit.disabled = false;
+    });
+    view.appendChild(form);
+  }
+  view.appendChild(result);
+}
+
 function workspaceSources(view, entries, notice) {
   // A source binding is the unit the `source` kind mutates: its streams share one provider,
   // account, and tenant URL, so the rows group by the kind's own binding name and each act
@@ -1040,6 +1107,10 @@ async function showWorkspace(name, query, placement) {
     payload = await res.json();
   } catch (err) {
     workspaceEmpty(view, 'Network error — try again.');
+    return;
+  }
+  if (name === 'team') {
+    workspaceTeam(view, payload, place.notice);
     return;
   }
   if (name === 'sources') {

@@ -33,6 +33,7 @@ from ufo.proxy_serve import OWNER_DSN_ENV
 from ufo.proxy_serve import run as proxy_run
 from ufo.schema import tables
 from ufo.schema.records import DEFAULT_AGENT_NAME
+from ufo.seats import email_domain
 from ufo.serve import run as serve_run
 
 UFOCTL_DIR_ENV = "UFOCTL_DIR"
@@ -107,8 +108,16 @@ def main() -> None:
     _load_dotenv()
 
 
+def _one_address(_ctx: click.Context, _param: click.Parameter, value: str) -> str:
+    """The owner's address answers the same shape rule the member write enforces, so a typo is
+    refused here with a readable line instead of raising out of the workspace insert."""
+    if not email_domain(value):
+        raise click.BadParameter(f"{value!r} is not one local@domain address.")
+    return value
+
+
 @main.command()
-@click.option("--email", required=True)
+@click.option("--email", required=True, callback=_one_address)
 @click.option("--model", default=DEFAULT_AGENT_MODEL, show_default=True)
 def init(email: str, model: str) -> None:
     """Write ufo.toml if absent, apply the schema, then onboard the workspace, owner, default

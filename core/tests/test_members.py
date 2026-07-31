@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -8,15 +9,16 @@ import pytest
 import sqlalchemy as sa
 import yaml
 
-from ufo.audience import conversation_audience
+from ufo.audience import Audience, conversation_audience, foreign_room_audience
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.ext.loader import turn_tools
-from ufo.members import MEMBER_KIND
-from ufo.objects import AdminRequired, VerbNotSupported
+from ufo.members import ADD_MEMBER_TOOL, MEMBER_KIND
+from ufo.objects import AdminRequired, UnknownObject, VerbNotSupported
 from ufo.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
+from ufo.seats import create_member
 from ufo.tools.context import SpawnResult, ToolContext
 from ufo.tools.registry import ToolDef
 from ufo.workspace import ws
@@ -93,6 +95,7 @@ def _context(
     workspace_id: UUID,
     agent_id: UUID,
     speaker_id: UUID,
+    audience: Audience | None = None,
 ) -> ToolContext:
     return ToolContext(
         sandbox=SandboxSession(
@@ -113,7 +116,7 @@ def _context(
         agent=Agent(prompt="p", model="m"),
         spawn=_unavailable_spawn,
         speaker_member_id=speaker_id,
-        audience=conversation_audience(speaker_id),
+        audience=audience or conversation_audience(speaker_id),
         artifact_token_secret="",
     )
 
@@ -318,3 +321,404 @@ async def test_demoted_admin_cannot_finish_a_role_change(
                     sa.select(tables.member.c.is_admin).where(tables.member.c.id == target)
                 )
             ).scalar_one()
+
+
+async def _member_row(workspace_id: UUID, email: str) -> sa.Row | None:
+    async with workspace_tx() as connection:
+        return (
+            await connection.execute(
+                sa.select(
+                    tables.member.c.id,
+                    tables.member.c.is_admin,
+                    tables.member.c.seated_at,
+                ).where(
+                    tables.member.c.workspace_id == workspace_id,
+                    tables.member.c.email == email,
+                )
+            )
+        ).one_or_none()
+
+
+async def _add(ctx: ToolContext, **args: object) -> str:
+    return await _text(_tool(ADD_MEMBER_TOOL), ctx, **args)
+
+
+async def test_an_admin_adds_a_member_who_has_never_spoken(db: None) -> None:
+    workspace_id, main_agent, _, admin_id, _ = await _seed()
+    with ws(workspace_id):
+        answer = await _add(
+            _context(workspace_id, main_agent, admin_id), email="New.Person@Example.com"
+        )
+    row = await _member_row(workspace_id, "new.person@example.com")
+    assert row is not None and not row.is_admin
+    assert row.seated_at is not None
+    assert "new.person@example.com" in answer
+
+
+async def test_an_admin_adds_a_member_as_an_admin(db: None) -> None:
+    workspace_id, main_agent, _, admin_id, _ = await _seed()
+    with ws(workspace_id):
+        await _add(
+            _context(workspace_id, main_agent, admin_id),
+            email="second@example.com",
+            admin=True,
+        )
+    row = await _member_row(workspace_id, "second@example.com")
+    assert row is not None and row.is_admin
+
+
+async def test_a_non_admin_cannot_add_a_member(db: None) -> None:
+    workspace_id, main_agent, _, _, member_id = await _seed()
+    with ws(workspace_id), pytest.raises(AdminRequired, match="workspace admin"):
+        await _add(_context(workspace_id, main_agent, member_id), email="new@example.com")
+    assert await _member_row(workspace_id, "new@example.com") is None
+
+
+async def test_a_child_agent_cannot_add_a_member(db: None) -> None:
+    workspace_id, _, child_agent, admin_id, _ = await _seed()
+    with ws(workspace_id), pytest.raises(AdminRequired, match="main agent"):
+        await _add(_context(workspace_id, child_agent, admin_id), email="new@example.com")
+    assert await _member_row(workspace_id, "new@example.com") is None
+
+
+async def test_an_email_outside_the_workspace_domain_is_refused(db: None) -> None:
+    workspace_id, main_agent, _, admin_id, _ = await _seed()
+    refusal = re.escape("admits example.com addresses")
+    with ws(workspace_id), pytest.raises(ValueError, match=refusal):
+        await _add(_context(workspace_id, main_agent, admin_id), email="outsider@other.com")
+    assert await _member_row(workspace_id, "outsider@other.com") is None
+
+
+async def test_a_malformed_address_is_refused(db: None) -> None:
+    workspace_id, main_agent, _, admin_id, _ = await _seed()
+    with ws(workspace_id), pytest.raises(ValueError, match="not an email address"):
+        await _add(_context(workspace_id, main_agent, admin_id), email="not-an-address")
+
+
+async def test_adding_an_existing_member_refuses_and_leaves_their_role(db: None) -> None:
+    workspace_id, main_agent, _, admin_id, member_id = await _seed()
+    with ws(workspace_id), pytest.raises(ValueError, match="already a member"):
+        await _add(
+            _context(workspace_id, main_agent, admin_id),
+            email="member@example.com",
+            admin=True,
+        )
+    row = await _member_row(workspace_id, "member@example.com")
+    assert row is not None and row.id == member_id and not row.is_admin
+
+
+async def test_a_member_added_beyond_the_included_allowance_holds_no_seat(db: None) -> None:
+    workspace_id, main_agent, _, admin_id, _ = await _seed()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.workspace)
+            .where(tables.workspace.c.id == workspace_id)
+            .values(included_seats=2)
+        )
+    with ws(workspace_id):
+        answer = await _add(_context(workspace_id, main_agent, admin_id), email="third@example.com")
+    row = await _member_row(workspace_id, "third@example.com")
+    assert row is not None and row.seated_at is None
+    assert "no seat" in answer
+
+
+async def test_every_member_lists_the_roster_from_the_main_agent(db: None) -> None:
+    workspace_id, main_agent, child_agent, admin_id, member_id = await _seed()
+    with ws(workspace_id):
+        listing = json.loads(
+            await _text(
+                _tool("object_list"),
+                _context(workspace_id, main_agent, member_id),
+                kind=MEMBER_KIND,
+            )
+        )
+        assert {row["name"] for row in listing["objects"]} == {str(admin_id), str(member_id)}
+        assert {row["summary"] for row in listing["objects"]} == {
+            "admin@example.com, workspace admin, seated",
+            "member@example.com, workspace member, seated",
+        }
+        opened = yaml.safe_load(
+            await _text(
+                _tool("object_get"),
+                _context(workspace_id, main_agent, member_id),
+                kind=MEMBER_KIND,
+                name=str(admin_id),
+            )
+        )
+        assert opened["spec"] == {"admin": True, "seated": True}
+        assert opened["status"]["email"] == "admin@example.com"
+        walled = json.loads(
+            await _text(
+                _tool("object_list"),
+                _context(workspace_id, child_agent, member_id),
+                kind=MEMBER_KIND,
+            )
+        )
+        assert [row["name"] for row in walled["objects"]] == [str(member_id)]
+
+
+async def test_a_listing_member_still_cannot_change_a_role(db: None) -> None:
+    workspace_id, main_agent, _, admin_id, member_id = await _seed()
+    with ws(workspace_id), pytest.raises(AdminRequired, match="workspace admin"):
+        await _tool("object_apply").handler(
+            _context(workspace_id, main_agent, member_id),
+            _tool("object_apply").input_model.model_validate(
+                {"user_description": TOOL_NARRATION, "manifest": _manifest(admin_id, False)}
+            ),
+        )
+
+
+async def test_an_externally_shared_room_reads_only_the_speaker(db: None) -> None:
+    """The roster is internal. In a channel another organization sits in, a non-admin listing
+    members reads their own row alone — and cannot open a colleague's — so a Slack Connect channel
+    never hears who works here, who administers the workspace, or who is unseated."""
+    workspace_id, main_agent, _, admin_id, member_id = await _seed()
+    foreign = foreign_room_audience("slack", "C123")
+    with ws(workspace_id):
+        listing = json.loads(
+            await _text(
+                _tool("object_list"),
+                _context(workspace_id, main_agent, member_id, foreign),
+                kind=MEMBER_KIND,
+            )
+        )
+        assert [row["name"] for row in listing["objects"]] == [str(member_id)]
+        assert "admin@example.com" not in json.dumps(listing)
+        with pytest.raises(UnknownObject):
+            await _text(
+                _tool("object_get"),
+                _context(workspace_id, main_agent, member_id, foreign),
+                kind=MEMBER_KIND,
+                name=str(admin_id),
+            )
+
+
+async def test_the_foreign_room_narrows_an_admin_too(db: None) -> None:
+    """The room is the boundary, not the role: the staff list reaching another organization is no
+    less a disclosure when an admin is the one who asked, so an admin in an externally shared
+    channel reads their own row alone and reaches the roster from an internal conversation."""
+    workspace_id, main_agent, _, admin_id, member_id = await _seed()
+    with ws(workspace_id):
+        listing = json.loads(
+            await _text(
+                _tool("object_list"),
+                _context(workspace_id, main_agent, admin_id, foreign_room_audience("slack", "C1")),
+                kind=MEMBER_KIND,
+            )
+        )
+        assert [row["name"] for row in listing["objects"]] == [str(admin_id)]
+        assert "member@example.com" not in json.dumps(listing)
+        internal = json.loads(
+            await _text(
+                _tool("object_list"),
+                _context(workspace_id, main_agent, admin_id),
+                kind=MEMBER_KIND,
+            )
+        )
+    assert {row["name"] for row in internal["objects"]} == {str(admin_id), str(member_id)}
+
+
+async def test_an_address_differing_only_in_case_is_already_a_member(db: None) -> None:
+    """A mixed-case row is real — onboarding stores `--email` verbatim — so the duplicate check
+    folds case. Otherwise the exact-index conflict would not fire and one person would hold two
+    member rows and two seats."""
+    workspace_id, main_agent, _, admin_id, _ = await _seed()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                email="Mixed.Case@Example.com",
+                is_admin=False,
+                seated_at=sa.func.now(),
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    with ws(workspace_id), pytest.raises(ValueError, match="already a member"):
+        await _add(_context(workspace_id, main_agent, admin_id), email="mixed.case@example.com")
+    async with workspace_tx() as connection:
+        rows = (
+            await connection.execute(
+                sa.select(sa.func.count()).where(
+                    tables.member.c.workspace_id == workspace_id,
+                    sa.func.lower(tables.member.c.email) == "mixed.case@example.com",
+                )
+            )
+        ).scalar_one()
+    assert rows == 1
+
+
+async def test_the_success_report_names_the_role_it_wrote(db: None) -> None:
+    """The report is what an admin acts on, so it states the role that landed and that the member
+    can be answered — a member added as an admin is not described as an ordinary member."""
+    workspace_id, main_agent, _, admin_id, _ = await _seed()
+    with ws(workspace_id):
+        as_admin = await _add(
+            _context(workspace_id, main_agent, admin_id), email="chief@example.com", admin=True
+        )
+        as_member = await _add(
+            _context(workspace_id, main_agent, admin_id), email="hand@example.com"
+        )
+    assert as_admin == "chief@example.com is a workspace admin. They can speak to the agent now."
+    assert as_member == "hand@example.com is a workspace member. They can speak to the agent now."
+
+
+async def test_a_dotless_workspace_domain_admits_its_own_addresses(db: None) -> None:
+    """A self-hosted deploy initialized at a dotless domain (`ufoctl init --email admin@internal`)
+    admits its own teammates: the advertised domain and the admitted set are one derivation, so
+    the panel cannot promise a domain every add refuses."""
+    workspace_id, main_agent, _, admin_id, _ = await _seed()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.member)
+            .where(tables.member.c.workspace_id == workspace_id)
+            .values(email=sa.func.replace(tables.member.c.email, "@example.com", "@internal"))
+        )
+    with ws(workspace_id):
+        answer = await _add(_context(workspace_id, main_agent, admin_id), email="bob@internal")
+    assert "bob@internal is a workspace member" in answer
+    assert await _member_row(workspace_id, "bob@internal") is not None
+
+
+async def test_object_apply_names_the_verb_that_creates_a_member(db: None) -> None:
+    """The kind refuses create and points at the verb that does it, so an agent told "add
+    jane@acme.com" is never left with a dead end."""
+    workspace_id, main_agent, _, admin_id, _ = await _seed()
+    with ws(workspace_id), pytest.raises(VerbNotSupported, match="added with add_member"):
+        await _tool("object_apply").handler(
+            _context(workspace_id, main_agent, admin_id),
+            _tool("object_apply").input_model.model_validate(
+                {"user_description": TOOL_NARRATION, "manifest": _manifest(uuid4(), False)}
+            ),
+        )
+
+
+async def test_create_member_holds_the_workspace_row_before_it_inserts(
+    db: None,
+    database_url: str,
+) -> None:
+    """The lock order every creation path shares, asserted where it can regress: `create_member`
+    takes the workspace row before its insert, so a caller holding nothing (`join_member`) and a
+    caller already holding the row (`add_member`, hosted onboarding) queue behind one another
+    instead of forming a cycle — one taking the row then the address, the other the address then
+    the row.
+
+    The discriminator is *which* statement blocks while another transaction holds the row. With the
+    lock first, `create_member` waits on its `SELECT … workspace … FOR UPDATE` and has inserted
+    nothing. With the lock below the insert, it waits inside `INSERT INTO member` instead — the
+    insert takes a `KEY SHARE` lock on the referenced workspace row — having already taken the
+    address's index key, which is the second edge of the deadlock."""
+    if not database_url.startswith("postgresql"):
+        pytest.skip("row-lock interleaving requires PostgreSQL")
+    workspace_id, _main, _child, _admin, _member = await _seed()
+
+    async def create() -> None:
+        with ws(workspace_id):
+            async with workspace_tx() as connection:
+                await create_member(connection, workspace_id, "queued@example.com")
+
+    with ws(workspace_id):
+        async with workspace_tx() as holder:
+            holder_pid = (await holder.execute(sa.text("select pg_backend_pid()"))).scalar_one()
+            await holder.execute(
+                sa.select(tables.workspace.c.id)
+                .where(tables.workspace.c.id == workspace_id)
+                .with_for_update()
+            )
+            creating = asyncio.create_task(create())
+            blocked_query = ""
+            async with asyncio.timeout(LOCK_OBSERVE_TIMEOUT_SECONDS):
+                while not blocked_query:
+                    async with workspace_tx() as observer:
+                        blocked_query = (
+                            await observer.execute(
+                                sa.text(
+                                    "select query from pg_stat_activity "
+                                    "where cast(:holder as integer) = any(pg_blocking_pids(pid))"
+                                ),
+                                {"holder": holder_pid},
+                            )
+                        ).scalar_one_or_none() or ""
+            assert "for update" in blocked_query.lower(), blocked_query
+            assert "insert into member" not in blocked_query.lower(), blocked_query
+        await creating
+    assert await _member_row(workspace_id, "queued@example.com") is not None
+
+
+@pytest.mark.parametrize(
+    "address",
+    [
+        "jane doe@example.com",
+        "a@b@example.com",
+        "@@example.com",
+        "  spaced out @example.com",
+        "no-at-sign",
+        "@example.com",
+        "trailing@",
+    ],
+)
+async def test_a_malformed_address_never_becomes_a_member(db: None, address: str) -> None:
+    """`create_member` crosses the shape gate, so nothing a sign-in could never normalize to and no
+    channel-verified join could ever equal reaches a member row. (An unusual-but-structural local
+    part like `<script>@example.com` is admitted — the gate rules out whitespace and stray
+    separators, not local-part taste.) Such a row would be seated against the allowance,
+    answerable by nobody, and undeletable — the `member` kind refuses delete."""
+    workspace_id, main_agent, _, admin_id, _ = await _seed()
+    with ws(workspace_id), pytest.raises(ValueError):
+        await _add(_context(workspace_id, main_agent, admin_id), email=address)
+    async with workspace_tx() as connection:
+        added = (
+            await connection.execute(
+                sa.select(sa.func.count()).where(
+                    tables.member.c.workspace_id == workspace_id,
+                    tables.member.c.email.not_in(("admin@example.com", "member@example.com")),
+                )
+            )
+        ).scalar_one()
+    assert added == 0
+    # The gate lives in the write, not only in the verb that calls it, so the two creation paths
+    # that match no domain — onboarding's owner and hosted signup — cannot mint the row either.
+    with ws(workspace_id), pytest.raises(ValueError, match="local@domain"):
+        async with workspace_tx() as connection:
+            await create_member(connection, workspace_id, address)
+
+
+async def test_membership_is_not_managed_in_an_externally_shared_channel(db: None) -> None:
+    """`add_member` is refused in a channel another organization sits in, whoever asks: its refusal
+    would confirm a colleague's membership and hand out their member id, and its success would
+    mint a member there. The reads already narrow in that room; the write matches them."""
+    workspace_id, main_agent, _, admin_id, member_id = await _seed()
+    foreign = foreign_room_audience("slack", "C900")
+    with ws(workspace_id):
+        with pytest.raises(AdminRequired, match="internal conversation"):
+            await _add(
+                _context(workspace_id, main_agent, admin_id, foreign), email="newhire@example.com"
+            )
+        with pytest.raises(AdminRequired, match="internal conversation"):
+            await _add(
+                _context(workspace_id, main_agent, admin_id, foreign),
+                email="member@example.com",
+            )
+    assert await _member_row(workspace_id, "newhire@example.com") is None
+    async with workspace_tx() as connection:
+        untouched = (
+            await connection.execute(
+                sa.select(tables.member.c.is_admin).where(tables.member.c.id == member_id)
+            )
+        ).scalar_one()
+    assert untouched is False
+
+
+async def test_a_workspace_whose_own_address_has_no_domain_refuses_and_says_why(db: None) -> None:
+    """`ufoctl init --email root` mints a workspace with no domain of its own. The refusal names
+    that cause rather than claiming the asking admin is not a member."""
+    workspace_id, main_agent, _, admin_id, _ = await _seed()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.member)
+            .where(tables.member.c.workspace_id == workspace_id)
+            .values(email=sa.func.replace(tables.member.c.email, "@example.com", ""))
+        )
+    with ws(workspace_id), pytest.raises(ValueError, match="carries no domain"):
+        await _add(_context(workspace_id, main_agent, admin_id), email="bob@example.com")

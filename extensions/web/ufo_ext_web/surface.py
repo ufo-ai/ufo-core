@@ -881,6 +881,30 @@ async def workspace_credentials(ctx: SurfaceContext, request: Request) -> Respon
     return JSONResponse({"slots": [entry.model_dump(mode="json") for entry in listed]})
 
 
+async def workspace_team(ctx: SurfaceContext, request: Request) -> Response:
+    """The workspace roster: who the members are, which of them administer the workspace, and who
+    holds a seat — the same rows the `member` kind lists to a member asking the main agent, so the
+    panel shows a non-admin exactly what chat would tell them. `can_add` reports whether this
+    member may add another, and the domain names what an added address must match — both read
+    back from the verb's own authorities (the same `member.is_admin` row its gate checks, and the
+    one workspace-domain derivation it admits by), never a second copy; the verb refuses
+    regardless."""
+    resolved = await _audience_for(ctx, request)
+    if isinstance(resolved, Response):
+        return resolved
+    _member_id, _email, audience = resolved
+    return JSONResponse(
+        {
+            "members": [
+                {"email": entry.email, "admin": entry.admin, "seated": entry.seated}
+                for entry in await ctx.list_members()
+            ],
+            "can_add": audience.admin,
+            "domain": await ctx.workspace_domain(),
+        }
+    )
+
+
 async def workspace_sources(ctx: SurfaceContext, request: Request) -> Response:
     """The live source bindings this member may see — their own registrations plus shared ones,
     all of them for a workspace admin. Workspace-scoped: the rows never carried an agent. A
@@ -1249,6 +1273,7 @@ ROUTES = (
         path="agents/{agent_id}/conversations/{conversation_id}/files/{path:path}",
         handler=conversation_file,
     ),
+    SurfaceRoute(method="GET", path="workspace/team", handler=workspace_team),
     SurfaceRoute(method="GET", path="workspace/sources", handler=workspace_sources),
     SurfaceRoute(method="GET", path="workspace/credentials", handler=workspace_credentials),
     SurfaceRoute(method="GET", path="workspace/memory", handler=workspace_memory),

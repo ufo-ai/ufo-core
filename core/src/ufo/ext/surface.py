@@ -116,7 +116,7 @@ from ufo.schema.records import (
     Turn,
     TurnContext,
 )
-from ufo.seats import create_member
+from ufo.seats import SeatEntry, Seats, create_member, email_domain, workspace_domain
 from ufo.skills.runtime import RuntimeSkill, SkillRegistry
 from ufo.sources.backend import ConnectorSourceConfig, binding_name
 from ufo.subjects import SHARED_SUBJECT
@@ -481,13 +481,6 @@ def _readable_audiences(member_id: UUID) -> sa.ColumnElement[bool]:
     return tables.conversation.c.audience.in_(_readable_audience_values(member_id))
 
 
-def _email_domain(email: str) -> str:
-    """The address's domain, lowercased — empty for anything that is not `local@domain`, so a
-    malformed value can never satisfy a domain match."""
-    local, _, domain = email.strip().lower().rpartition("@")
-    return domain if local and domain else ""
-
-
 async def _main_agent(workspace_id: UUID) -> UUID:
     """The workspace's main agent, used when no surface binding names an agent."""
     async with workspace_tx() as connection:
@@ -758,19 +751,6 @@ class SurfaceContext:
     async def linked_member(self, external_id: str) -> UUID | None:
         return await self._identity_member(self.surface, external_id)
 
-    async def _workspace_email(self) -> str | None:
-        """The first member's email, whose vetted domain identifies the workspace."""
-        async with workspace_tx() as connection:
-            row = (
-                await connection.execute(
-                    sa.select(tables.member.c.email)
-                    .where(tables.member.c.workspace_id == self.workspace_id)
-                    .order_by(tables.member.c.created_at.asc(), tables.member.c.id.asc())
-                    .limit(1)
-                )
-            ).one_or_none()
-        return None if row is None else row.email
-
     async def is_operator_workspace(self) -> bool:
         """Whether this workspace is the fleet operator's own — the workspace whose own domain
         (its initial member's vetted email domain, the same resolution hosted onboarding joins by)
@@ -778,10 +758,7 @@ class SurfaceContext:
         accounting footer and its debugger link — never a tenant-facing capability; an
         unidentified workspace is never the operator's, so internals render nowhere rather than
         in a customer's thread."""
-        workspace_email = await self._workspace_email()
-        return (
-            workspace_email is not None and _email_domain(workspace_email) == OPERATOR_EMAIL_DOMAIN
-        )
+        return await self.workspace_domain() == OPERATOR_EMAIL_DOMAIN
 
     async def adopt_identity(self, peer_surface: str, external_id: str) -> UUID | None:
         """Link this surface's external id to the member a peer surface already knows it by, so one
@@ -850,9 +827,9 @@ class SurfaceContext:
         linked = await self.link_member(external_id, email)
         if linked is not None:
             return linked
-        workspace_email = await self._workspace_email()
-        domain = _email_domain(email)
-        if workspace_email is None or not domain or domain != _email_domain(workspace_email):
+        own = await self.workspace_domain()
+        domain = email_domain(email)
+        if own is None or not domain or domain != own:
             return None
         async with workspace_tx() as connection:
             await create_member(connection, self.workspace_id, email.strip().lower())
@@ -1321,8 +1298,8 @@ class SurfaceContext:
         in the query, never the caller: an admin sees every edge, everyone else their own private
         grants plus agent-shared ones (#645's resolution rule, read-side). The wall stays the
         query's `agent_id`; another agent's edges are simply absent. A shared edge names its
-        owner only to an admin or the owner — chat resolves no other member's email for a
-        non-admin, so neither does this read."""
+        owner only to an admin or the owner: the roster names every colleague, but which of them
+        holds a given account is the owner's to disclose, and chat names it to nobody else."""
         query = (
             sa.select(
                 tables.connection.c.provider,
@@ -1485,12 +1462,31 @@ class SurfaceContext:
             if slot.member_filled
         )
 
+    async def workspace_domain(self) -> str | None:
+        """The workspace's own email domain, read through the one derivation `add_member` admits
+        by, so the domain a panel advertises and the addresses the verb accepts cannot diverge.
+        None only when the workspace has no member yet, since every stored address carries a
+        domain; a caller reading None has no domain to advertise and admits no added address."""
+        async with workspace_tx() as connection:
+            return await workspace_domain(connection, self.workspace_id)
+
+    async def list_members(self) -> tuple[SeatEntry, ...]:
+        """The workspace roster a portal session reads, ordered by email so the panel's rows are
+        stable — the same rows the `member` kind lists to a member asking the main agent in an
+        internal conversation, which a portal session always is (its audience is the signed-in
+        member's own, never a shared room). Adding a member and changing a role or seat stay
+        admin-gated in their own verbs."""
+        async with workspace_tx() as connection:
+            snapshot = await Seats(self.workspace_id).snapshot(connection)
+        return tuple(sorted(snapshot.members, key=lambda entry: entry.email))
+
     async def list_sources(self, member_id: UUID, *, admin: bool) -> tuple[SourceView, ...]:
         """The live source bindings this member may see — an admin all of them, everyone else
         their own registrations plus shared ones. Removed sources stay gone; a member-subject
         source's pages remain gated to that member wherever they land. A shared source names its
-        owner only to an admin or the owner — chat omits a shared source's owner entirely, so a
-        non-admin learns no other member's email through either surface."""
+        owner only to an admin or the owner: chat omits a shared source's owner entirely, so which
+        colleague registered a binding stays the owner's to disclose even though the roster names
+        every colleague."""
         query = (
             sa.select(
                 tables.source.c.backend,

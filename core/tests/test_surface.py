@@ -1011,6 +1011,11 @@ async def test_join_member_refuses_without_a_domain_match(db: None, tmp_path) ->
         ("UGIGI", "gigi@elsewhere.com"),
         ("UBARE", "example.com"),
         ("UEMPTY", "@example.com"),
+        # Malformed at the workspace's own domain: a surface asserts the address, so the shape
+        # rule is what stops a row no sign-in normalizes to and no later join equals. A rule
+        # reading only the last `@` admits both — they carry `example.com` — and seats them.
+        ("USPACE", "jane doe@example.com"),
+        ("UTWICE", "a@b@example.com"),
     ):
         assert await context.join_member(external_id, email) is None
         assert await context.linked_member(external_id) is None

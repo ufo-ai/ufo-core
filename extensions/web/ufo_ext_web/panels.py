@@ -101,16 +101,26 @@ class CorrectionIntent(BaseModel):
     body: str = Field(min_length=1)
 
 
+class AddMemberIntent(BaseModel):
+    """One member added from the team panel — the same admin-only `add_member` chat verb, which
+    mints the member at the workspace's own email domain and reports whether they took a seat.
+    Changing an existing member's role or seat is an apply on the member kind, never this."""
+
+    verb: Literal["add_member"]
+    email: str
+    admin: bool = False
+
+
 class PanelIntent(BaseModel):
     """What a panel form submits: the closed set of mutations a panel produces today."""
 
-    submitted: ApplyIntent | AudienceIntent | CorrectionIntent | CredentialIntent = Field(
-        discriminator="verb"
-    )
+    submitted: (
+        ApplyIntent | AddMemberIntent | AudienceIntent | CorrectionIntent | CredentialIntent
+    ) = Field(discriminator="verb")
 
 
 def _tool_intent(
-    submitted: ApplyIntent | AudienceIntent | CorrectionIntent | CredentialIntent,
+    submitted: ApplyIntent | AddMemberIntent | AudienceIntent | CorrectionIntent | CredentialIntent,
     slot: CredentialSlotView | None,
 ) -> ToolIntent:
     match submitted:
@@ -134,6 +144,15 @@ def _tool_intent(
                     "body": submitted.body,
                     "source_ref": f"corrects memory/{submitted.corrects}",
                     "user_description": "Correct a memory from the portal.",
+                },
+            )
+        case AddMemberIntent():
+            return ToolIntent(
+                tool="add_member",
+                input={
+                    "email": submitted.email,
+                    "admin": submitted.admin,
+                    "user_description": f"Add {submitted.email} to the workspace from the portal.",
                 },
             )
         case AudienceIntent():

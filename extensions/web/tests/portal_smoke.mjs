@@ -560,6 +560,14 @@ const wire = {
     ],
   },
   workspace: {
+    team: {
+      members: [
+        { email: "admin@example.com", admin: true, seated: true },
+        { email: "member@example.com", admin: false, seated: false },
+      ],
+      can_add: true,
+      domain: "example.com",
+    },
     sources: {
       sources: [
         {
@@ -751,6 +759,10 @@ const sandbox = {
       const submitted = JSON.parse(options.body);
       wire.posted.push(submitted);
       wire.intentUrls.push(url);
+      if (wire.intentThrows) throw new Error("network down");
+      if (wire.intentStatus) {
+        return { ok: false, status: wire.intentStatus, json: async () => null };
+      }
       if (wire.holdPost) await wire.holdPost;
       wire.overview.agent.updated_at = "2026-07-30T12:00:00+00:00";
       if (submitted.verb === "request" && submitted.kind === "credential") {
@@ -1515,7 +1527,7 @@ try {
   const workspaceButtons = byId.workspace.querySelectorAll("button");
   const workspaceLabels = texts(workspaceButtons);
   const expectedWorkspace = [
-    "Sources", "Credentials", "Memory", "Artifacts", "Sites", "Usage",
+    "Team", "Sources", "Credentials", "Memory", "Artifacts", "Sites", "Usage",
   ];
   if (workspaceLabels.join("|") !== expectedWorkspace.join("|")) {
     throw new Error(`the workspace sidebar reads ${JSON.stringify(workspaceLabels)}`);
@@ -1537,6 +1549,130 @@ try {
         .querySelectorAll("*")
         .filter((node) => node.tagName === "th" || node.tagName === "td")
     );
+
+  await workspaceNamed("Team").fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const teamCells = viewCells();
+  const expectedTeam = [
+    "member", "role", "seat",
+    "admin@example.com", "Admin", "Seated",
+    "member@example.com", "Member", "No seat",
+  ];
+  if (teamCells.join("|") !== expectedTeam.join("|")) {
+    throw new Error(`the team view reads ${JSON.stringify(teamCells)}`);
+  }
+  const addForm = body.querySelectorAll("form").at(-1);
+  if (!addForm || !addForm.className.includes("add-member")) {
+    throw new Error("an admin got no add-member form");
+  }
+  const teamField = (field) =>
+    body.querySelector(".admin-view").querySelectorAll("input")
+      .find((node) => node.name === field);
+  if (!teamField("email") || !teamField("admin")) {
+    throw new Error("the add-member form is missing a field");
+  }
+  if (teamField("email").placeholder !== "email@example.com") {
+    throw new Error(`the add field prompts "${teamField("email").placeholder}"`);
+  }
+  const teamPostsBefore = wire.posted.length;
+  teamField("email").value = "  New.Person@example.com  ";
+  teamField("admin").checked = true;
+  await addForm.fire("submit");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  if (JSON.stringify(wire.posted[teamPostsBefore]) !== JSON.stringify({
+    verb: "add_member", email: "New.Person@example.com", admin: true,
+  })) {
+    throw new Error(`add posted ${JSON.stringify(wire.posted[teamPostsBefore])}`);
+  }
+  if (wire.intentUrls.at(-1) !== `/surface/web/agents/${AGENT_A}/intents`) {
+    throw new Error(`the add intent posted to ${wire.intentUrls.at(-1)}`);
+  }
+  const teamOutcome = body.querySelector(".admin-view").querySelectorAll("*")
+    .find((node) => node.className.includes("result"));
+  if (!teamOutcome || teamOutcome.textContent !== "Saved.") {
+    throw new Error(`the team outcome reads "${teamOutcome?.textContent}"`);
+  }
+  const blankPostsBefore = wire.posted.length;
+  teamField("email").value = "   ";
+  await body.querySelectorAll("form").at(-1).fire("submit");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  if (wire.posted.length !== blankPostsBefore) {
+    throw new Error("a blank address submitted an intent");
+  }
+  wire.intentRefuses = true;
+  const refusedBefore = wire.posted.length;
+  teamField("email").value = "outsider@other.test";
+  await body.querySelectorAll("form").at(-1).fire("submit");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  if (wire.posted.length !== refusedBefore + 1) {
+    throw new Error("the refused add never submitted");
+  }
+  const refusedOutcome = body.querySelector(".admin-view").querySelectorAll("*")
+    .find((node) => node.className.includes("result"));
+  if (!refusedOutcome || refusedOutcome.textContent !== "Not applied.") {
+    throw new Error(`a refused add reads "${refusedOutcome?.textContent}"`);
+  }
+  const addButton = body.querySelector(".admin-view").querySelectorAll("button")
+    .find((node) => node.textContent === "Add member");
+  if (!addButton || addButton.disabled) {
+    throw new Error("a refused add left the button disabled with no way to retry");
+  }
+  wire.intentRefuses = false;
+
+  wire.intentThrows = true;
+  teamField("email").value = "unreachable@example.com";
+  await body.querySelectorAll("form").at(-1).fire("submit");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const thrownOutcome = body.querySelector(".admin-view").querySelectorAll("*")
+    .find((node) => node.className.includes("result"));
+  if (!thrownOutcome || thrownOutcome.textContent !== "Network error — try again.") {
+    throw new Error(`an add that never arrived reads "${thrownOutcome?.textContent}"`);
+  }
+  const afterThrow = body.querySelector(".admin-view").querySelectorAll("button")
+    .find((node) => node.textContent === "Add member");
+  if (!afterThrow || afterThrow.disabled) {
+    throw new Error("an add that never arrived left the button disabled forever");
+  }
+  wire.intentThrows = false;
+
+  wire.intentStatus = 502;
+  teamField("email").value = "refused@example.com";
+  await body.querySelectorAll("form").at(-1).fire("submit");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const statusOutcome = body.querySelector(".admin-view").querySelectorAll("*")
+    .find((node) => node.className.includes("result"));
+  if (!statusOutcome || statusOutcome.textContent !== "Error 502 — try again.") {
+    throw new Error(`a 502 add reads "${statusOutcome?.textContent}"`);
+  }
+  const afterStatus = body.querySelector(".admin-view").querySelectorAll("button")
+    .find((node) => node.textContent === "Add member");
+  if (!afterStatus || afterStatus.disabled) {
+    throw new Error("a 502 add left the button disabled forever");
+  }
+  wire.intentStatus = 0;
+
+  wire.workspace.team.can_add = false;
+  await workspaceNamed("Team").fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  if (body.querySelectorAll("form").some((node) => node.className.includes("add-member"))) {
+    throw new Error("a non-admin was offered the add-member form");
+  }
+  if (viewCells().join("|") !== expectedTeam.join("|")) {
+    throw new Error("a non-admin reads a different roster");
+  }
+  wire.workspace.team.can_add = true;
+
+  // A workspace whose own address carries no domain has nothing to suggest, so the field prompts
+  // with a neutral placeholder rather than an address ending in the word null.
+  wire.workspace.team.domain = null;
+  await workspaceNamed("Team").fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  if (teamField("email").placeholder !== "email@work.com") {
+    throw new Error(`a domainless workspace prompts "${teamField("email").placeholder}"`);
+  }
+  wire.workspace.team.domain = "example.com";
+  await workspaceNamed("Team").fire("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
 
   await workspaceNamed("Sources").fire("click");
   await new Promise((resolve) => setTimeout(resolve, 0));

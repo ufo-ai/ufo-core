@@ -424,8 +424,27 @@ administration metadata but reads another member's private one no more than chat
 room or an externally-shared channel is content nobody reads here, because participation there is
 the peer surface's live roster and no portal read can check it. What the data never scoped to an
 agent reads — and, where a verb exists, mutates — beside the agent list instead of under one:
-source bindings, the deploy's member-fillable credential slots, memory, shared files, hosted
-sites, and usage. The usage view answers every member their own window — the ledger rows their
+the team roster, source bindings, the deploy's member-fillable credential slots, memory, shared
+files, hosted sites, and usage. The team view is the workspace roster — every member reads who
+their colleagues are, which of them administer the workspace, and who holds a seat, exactly what
+the `member` kind answers a member asking the main agent in an internal conversation. The roster
+is internal: a child agent and an externally shared channel answer the speaker's own row alone,
+whoever asks, so a channel another organization sits in never hears the staff list; a portal
+session is always the signed-in member's own audience, so the panel needs no such branch.
+Adding someone is `add_member`, the one verb that mints a member before their first contact: a
+speaking admin on the main agent names a work email at the workspace's own domain — the domain
+every join path already anchors on, and the one a sign-in resolves a workspace by, so a row at any
+other domain could never answer for this workspace — and optionally makes them an admin in the
+same act, since both fields carry the identical gate. An address that is already a member is
+refused rather than silently promoted; changing an existing member's role or seat stays the
+`member` kind's admin-gated apply. The new member is auto-seated while an included seat is open
+and the verb reports which happened, because an unseated member is one the agent refuses. The
+address must also parse as one `local@domain` with no whitespace: every creation path crosses that
+shape gate, so an address no sign-in could normalize to and no channel-verified join could equal
+never becomes a seated member the `member` kind cannot delete. Membership is managed in an internal
+conversation only — the verb refuses in an externally shared channel, where its refusal would
+confirm a colleague's membership and its success would mint a member.
+The usage view answers every member their own window — the ledger rows their
 conversations' turns wrote, the join a `member` cap binds on, beside their member-scoped caps —
 and adds the workspace rollup for an admin, so a non-admin's payload names no other member and no
 agent. Memory with no query lists 100 live items under the viewer's own subjects at a time,
@@ -443,9 +462,9 @@ one pins a viewer over the listing that renders what the page honestly can — a
 text up to a bounded read, and a plain refusal to preview anything else — leaving the download an
 explicit act rather than the click's default. Sites list through the `site` kind's own visibility
 gate, so the portal and chat's `object_list` cannot disagree. A shared connection or source names
-its owner only to an admin or the owner — chat resolves no other member's email for a non-admin,
-so
-neither does a panel. A panel mutation
+its owner only to an admin or the owner: the roster tells every member who their colleagues are,
+but which colleague registered a given binding is the owner's to disclose, and chat names it to
+nobody else either, so neither does a panel. A panel mutation
 is a **prepared intent**: the form's structured intent is admitted as a turn on the member's one
 durable intent conversation with that agent and dispatched verbatim to the typed object or tool
 action — no model round, no fold into a live chat turn — so a submit applies exactly or returns

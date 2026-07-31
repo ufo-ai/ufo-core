@@ -39,6 +39,7 @@ class ToolIntent(BaseModel):
     itself never rides an intent."""
 
     tool: Literal[
+        "add_member",
         "object_apply",
         "object_delete",
         "connect_account",

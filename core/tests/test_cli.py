@@ -8,8 +8,9 @@ from pathlib import Path
 import click
 import httpx
 import pytest
+from click.testing import CliRunner
 
-from ufo.cli import _ChatStream, _load_dotenv, _run_turn, _TurnDisplay, _unescape
+from ufo.cli import _ChatStream, _load_dotenv, _run_turn, _TurnDisplay, _unescape, init
 from ufo.config import BlobConfig, Config, DatabaseConfig
 
 
@@ -259,3 +260,14 @@ def test_load_dotenv_fills_unset_vars_without_overriding(
     assert os.environ["UFO_TEST_SET"] == "from-env"
     assert os.environ["UFO_TEST_QUOTED"] == "quoted value"
     assert os.environ["UFO_TEST_EXPORTED"] == "exported"
+
+
+@pytest.mark.parametrize("address", ["jane doe", "root", "a@b@example.com", "trailing@"])
+def test_init_refuses_an_owner_address_that_is_not_one_local_at_domain(address: str) -> None:
+    """`--email` is the one unvalidated way an address reached a member row: the owner row is
+    seated, admin, and undeletable, so a typo would leave a workspace whose own domain matches no
+    teammate. The option answers the same shape rule the write enforces, and says so in one line
+    instead of raising out of the workspace insert."""
+    result = CliRunner().invoke(init, ["--email", address])
+    assert result.exit_code == 2
+    assert f"{address!r} is not one local@domain address." in result.output
