@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ufo</title>
+</head>
+<body>
+<section id="token-card">
+  <h1>Open your workspace</h1>
+  <div class="hint">Paste the session token from <code>ufoctl init</code> or your sign-in
+    page.</div>
+  <form id="token-form" method="post" action="/surface/web">
+    <input name="token" placeholder="Session token" required autofocus>
+    <button type="submit">Open</button>
+  </form>
+</section>
+
+<nav hidden>
+  <div class="brand">ufo</div>
+  <ul id="agents"></ul>
+  <ul id="workspace"></ul>
+  <footer class="mono">
+    <span class="email" id="member-email"></span>
+    <button id="admin" type="button" hidden>Administration</button>
+  </footer>
+</nav>
+
+<main hidden>
+  <div id="agent-head"></div>
+  <div id="tabs" role="tablist"></div>
+  <div id="log"></div>
+  <div id="panel" hidden></div>
+  <form id="composer">
+    <label class="attach" title="Attach files">
+      <input id="files" type="file" multiple hidden>
+      +
+    </label>
+    <input id="msg" autocomplete="off" placeholder="Message the agent…">
+    <button type="submit" class="send">Send</button>
+  </form>
+</main>
+
+<script type="module" src="/src/portal.js"></script>
+</body>
+</html>

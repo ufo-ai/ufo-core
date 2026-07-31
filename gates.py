@@ -54,12 +54,18 @@ def _is_skill_content(path: Path) -> bool:
     return any((parent / SKILL_MANIFEST).is_file() for parent in path.parents)
 
 
+def _vendored(path: Path) -> bool:
+    """A dependency tree checked out inside a source root — a python virtualenv or an npm install
+    a frontend build needs. Its files are nobody's code to gate."""
+    return bool({".venv", "node_modules"}.intersection(path.parts))
+
+
 def _skill_scripts() -> list[Path]:
     return [
         path
         for root in SOURCE_ROOTS
         for path in (ROOT / root).rglob("*.py")
-        if ".venv" not in path.parts and _is_skill_content(path)
+        if not _vendored(path) and _is_skill_content(path)
     ]
 
 
@@ -68,7 +74,7 @@ def _python_files() -> list[Path]:
         path
         for root in SOURCE_ROOTS
         for path in (ROOT / root).rglob("*.py")
-        if ".venv" not in path.parts and not _is_skill_content(path)
+        if not _vendored(path) and not _is_skill_content(path)
     ]
 
 

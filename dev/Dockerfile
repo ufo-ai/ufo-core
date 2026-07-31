@@ -1,7 +1,7 @@
 # One image for the whole local stack: it carries both entry points — `ufoctl` (core serve,
 # proxy, migrate) and `ufo-control` (gateway, rls-bootstrap) — so every compose service is this
 # image with a different command. Built from source via uv, not the production `ufoctl bundle`
-# image (that needs an npm build + bundle step, far too heavy for a local loop).
+# image (that needs a bundle step, far too heavy for a local loop).
 FROM python:3.12-slim
 
 # `docker` CLI for the docker sandbox carrier (it shells out to `docker`, reaching the host daemon

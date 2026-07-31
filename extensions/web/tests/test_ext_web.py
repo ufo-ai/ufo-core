@@ -1,8 +1,7 @@
 import asyncio
 import json
+import re
 import secrets
-import shutil
-import subprocess
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -29,7 +28,7 @@ from ufo_ext_web import surface as web_surface
 from ufo_ext_web.audience import AUDIENCE_PREFIX, web_extension
 from ufo_ext_web.manifest import manifest as web_manifest
 from ufo_ext_web.panels import _outcome
-from ufo_ext_web.surface import PORTAL_HTML, SESSION_COOKIE, _sse
+from ufo_ext_web.surface import PORTAL_HTML, SESSION_COOKIE, _sse, load_assets
 from ufo_testsupport.stream_gate import GatingHub, StreamGate, release_when_running
 from ufo_testsupport.surfaces import EMPTY_SKILL_REGISTRY, no_user_skills
 
@@ -1595,12 +1594,70 @@ async def test_a_non_admin_is_not_found_on_the_admin_view(
     assert "admin@example.com" not in denied.text
 
 
-def test_portal_page_is_self_contained() -> None:
+def test_only_declared_asset_suffixes_are_served(tmp_path: Path) -> None:
+    """This read runs on every boot, so nothing the build directory happens to hold may wedge it:
+    a directory named for a declared suffix is the entry that reaches `read_bytes` when only the
+    suffix is checked. Suffixes answer the other half — assets serve before authentication, so
+    turning on `build.sourcemap` publishes nothing until someone declares `.map` here."""
+    assets = tmp_path / "assets"
+    (assets / "nested").mkdir(parents=True)
+    (assets / "chunks.js").mkdir()
+    (assets / "index-abc.js").write_text("boot()")
+    (assets / "index-abc.css").write_text("body{}")
+    (assets / "index-abc.js.map").write_text('{"sources":["portal.js"]}')
+    (assets / ".DS_Store").write_bytes(b"\x00")
+
+    served = load_assets(assets)
+
+    assert sorted(served) == ["assets/index-abc.css", "assets/index-abc.js"]
+    assert served["assets/index-abc.js"] == (b"boot()", "text/javascript; charset=utf-8")
+
+
+async def test_every_asset_the_portal_references_is_served_from_the_surface_itself(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The page names no origin but this surface. Splitting the stylesheet out of the page makes
+    the absence of an external URL insufficient on its own — a page referencing a file nobody
+    serves carries no external origin either — so every `src` and `href` it names must resolve
+    under the surface's own static path and answer with the media type its element expects.
+    The token card styles itself before any session exists, so each asset serves unauthenticated
+    too, and each revalidates by etag rather than transferring on every load."""
+    client, workspace_id, _agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "member@example.com")
+    assert PORTAL_HTML is not None
     assert "<!doctype html>" in PORTAL_HTML
-    assert "EventSource" in PORTAL_HTML
-    assert "http://" not in PORTAL_HTML
-    assert "https://" not in PORTAL_HTML
-    assert "//cdn" not in PORTAL_HTML
+    for scheme in ("http://", "https://", "//cdn"):
+        assert scheme not in PORTAL_HTML
+
+    referenced = set(re.findall(r'(?:src|href)="([^"]+)"', PORTAL_HTML))
+    assets = {ref for ref in referenced if ref.startswith("/surface/web/static/")}
+    assert any(ref.endswith(".js") for ref in assets)
+    assert any(ref.endswith(".css") for ref in assets)
+    for ref in referenced:
+        assert ref.startswith("/surface/web"), ref
+
+    for ref in sorted(assets):
+        signed_out = await client.get(ref)
+        assert signed_out.status_code == 200, ref
+        expected = "text/javascript" if ref.endswith(".js") else "text/css"
+        assert signed_out.headers["content-type"].startswith(expected)
+        assert signed_out.text.strip()
+
+        signed_in = await client.get(ref, headers={"cookie": f"{SESSION_COOKIE}={token}"})
+        assert signed_in.status_code == 200
+        assert signed_in.text == signed_out.text
+
+        etag = signed_out.headers["etag"]
+        unchanged = await client.get(ref, headers={"if-none-match": etag})
+        assert unchanged.status_code == 304
+
+    missing = await client.get("/surface/web/static/assets/nothing.css")
+    assert missing.status_code == 401
+    traversal = await client.get(
+        "/surface/web/static/assets/..%2F..%2Fsurface.py",
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    assert traversal.status_code == 404
 
 
 async def test_portal_serves_without_a_session_and_posted_token_opens_one(
@@ -3557,34 +3614,6 @@ async def test_overview_reports_the_deploy_internet_ceiling_when_granted(
     dbos_client.destroy()
     assert seen.status_code == 200
     assert seen.json()["deploy"]["sandbox_internet"] is True
-
-
-def test_portal_page_smoke_walks_every_view() -> None:
-    """A reference-level walk of the page's script under a stub DOM (`portal_smoke.mjs`) — boot
-    (signed in and the 401 token-card branch), select, overview, the settings save, the mid-save
-    agent switch, the failed post-save re-read, the memory tab's search bar (its `form.search`
-    class and both style rules scoped to it), the connections panel (owner-gated flip and revoke
-    envelopes, the connect intent and its private consent link off the stream), the workspace
-    sources view (per-binding grouping, the summed errors and earliest next-sync cells, the
-    resync/share/remove envelopes on the main agent's lane, Share suppressed once shared, and the
-    empty state), admin, select-after-admin, the question render
-    across every `buttonable` condition, the answered chain, the credentials prompts and their
-    refusal arms, an agent switch mid-answer, and a later turn superseding an older turn's
-    question and files — so a deleted declaration, a dangling element reference, or a
-    silently reverted render rule fails here instead of rendering a blank portal (the class of
-    bug `node --check` cannot see)."""
-    node = shutil.which("node")
-    if node is None:
-        pytest.skip("node is not installed")
-    tests_dir = Path(__file__).parent
-    page = tests_dir.parent / "ufo_ext_web" / "static" / "portal.html"
-    result = subprocess.run(
-        [node, str(tests_dir / "portal_smoke.mjs"), str(page)],
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
-    assert result.returncode == 0, result.stderr
 
 
 def test_outcome_strips_the_error_class_and_names_a_bare_status() -> None:

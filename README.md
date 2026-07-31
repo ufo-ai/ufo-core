@@ -17,6 +17,8 @@ system for everything else (connectors, data sources, tools, subagents, onboardi
 ```bash
 export ANTHROPIC_API_KEY=...
 uv run ufoctl init --email you@example.com  # writes ufo.toml; SQLite — zero services
+npm --prefix extensions/web/frontend ci     # only if you want the web portal; chat needs no build
+npm --prefix extensions/web/frontend run build
 uv run ufoctl serve                         # one process: surfaces + workers
 uv run ufoctl chat                          # second terminal; sessions persist across runs
 ```
@@ -25,6 +27,8 @@ uv run ufoctl chat                          # second terminal; sessions persist 
 **gateway** (`/login`), and the **serve** fleet (surfaces + DBOS workers + embedded egress proxy):
 
 ```bash
+npm --prefix extensions/web/frontend ci     # the portal is a built app; serve reads its output
+npm --prefix extensions/web/frontend run build
 export ANTHROPIC_API_KEY=...   # required for serve to boot; the gateway/login needs no key
 docker compose up
 ```
@@ -36,7 +40,10 @@ One image (`dev/Dockerfile`, the whole workspace via uv) runs as four roles (`de
 — read it from `docker compose logs gateway`); `serve` runs the shared fleet on :8710 over the
 `assistant` pack with local backends (filesystem blobs, in-process hub, the built-in `local` sandbox
 carrier). Sign in at `http://localhost:8080/login` with a work email and the code from the gateway
-log (local signup needs no invite — `UFO_INVITE_REQUIRED=false`). Host ports override via
+log (local signup needs no invite — `UFO_INVITE_REQUIRED=false`), which opens the portal at
+`http://localhost:8710/surface/web`. The portal is built by npm, not tracked in git, so the
+build above runs before the stack; skip it and the portal route fails with the command in the
+serve log. Host ports override via
 `UFO_PG_PORT` / `UFO_GATEWAY_PORT_HOST` /
 `UFO_SERVE_PORT_HOST` / `UFO_REDIS_PORT`, and `UFO_DEV_PACK` selects the pack the serve config names
 (`assistant_billing` adds Metronome, so the owner's billing choice can be driven locally — see

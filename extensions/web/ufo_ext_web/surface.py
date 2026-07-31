@@ -23,6 +23,7 @@ import json
 import re
 from collections.abc import AsyncIterator
 from datetime import datetime
+from hashlib import sha256
 from pathlib import Path
 from uuid import UUID
 
@@ -83,8 +84,36 @@ SITE_KIND = "site"
 SPEND_WINDOW_DEFAULT_SECONDS = 86_400
 MAX_USAGE_WINDOW_SECONDS = 31_536_000
 PORTAL_PATH = "/surface/web"
-PORTAL_FILE = Path(__file__).parent / "static" / "portal.html"
-PORTAL_HTML = PORTAL_FILE.read_text()
+PORTAL_BUILD = (
+    "npm --prefix extensions/web/frontend ci && npm --prefix extensions/web/frontend run build"
+)
+STATIC_DIR = Path(__file__).parent / "static"
+PORTAL_FILE = STATIC_DIR / "index.html"
+PORTAL_HTML = PORTAL_FILE.read_text() if PORTAL_FILE.is_file() else None
+STATIC_PREFIX = f"{PORTAL_PATH}/static/"
+ASSET_MEDIA_TYPES = {
+    ".css": "text/css; charset=utf-8",
+    ".js": "text/javascript; charset=utf-8",
+}
+
+
+def load_assets(directory: Path) -> dict[str, tuple[bytes, str]]:
+    """The built assets this surface serves, by request name. Only a file whose suffix carries a
+    declared media type is served: these answer before authentication, so a build that starts
+    emitting source maps publishes nothing until someone declares them here. Nothing raises —
+    the page names the assets it needs, and the origin gate fails when one of those is unserved,
+    which is the layer that can tell a missing asset from a file the build merely left behind."""
+    return {
+        f"{directory.name}/{path.name}": (path.read_bytes(), ASSET_MEDIA_TYPES[path.suffix])
+        for path in sorted(directory.glob("*"))
+        if path.is_file() and path.suffix in ASSET_MEDIA_TYPES
+    }
+
+
+STATIC_ASSETS = load_assets(STATIC_DIR / "assets")
+STATIC_ETAGS = {
+    name: f'"{sha256(body).hexdigest()[:32]}"' for name, (body, _) in STATIC_ASSETS.items()
+}
 CONTEXT_TAG = re.compile(r"\A\s*<context>.*?</context>\s*", re.S)
 TOKEN_SHAPE = re.compile(r"[A-Za-z0-9._-]+")
 
@@ -117,13 +146,45 @@ async def resolve_workspace(request: Request, _auth: SurfaceAuth) -> UUID | Resp
         posted = form.get(TOKEN_FIELD, "")
         if isinstance(posted, str) and posted.strip():
             workspace = workspace_claim(posted.strip())
-    if (
-        workspace is None
-        and request.method == "GET"
-        and request.url.path.rstrip("/") == PORTAL_PATH
-    ):
-        return HTMLResponse(PORTAL_HTML)
+    if workspace is None and request.method == "GET":
+        if request.url.path.rstrip("/") == PORTAL_PATH:
+            return _portal_response()
+        asset = _static_response(request)
+        if asset is not None:
+            return asset
     return workspace
+
+
+def _portal_response() -> Response:
+    """The built page. A deploy that skipped the frontend build fails here, naming the command,
+    rather than at import — an unbuilt tree still loads the extension, so every route that holds
+    no built asset keeps working and the fault reads as what it is."""
+    if PORTAL_HTML is None:
+        raise RuntimeError(f"portal app is not built — run `{PORTAL_BUILD}`")
+    return HTMLResponse(PORTAL_HTML)
+
+
+def _static_response(request: Request) -> Response | None:
+    """The stylesheet or module a portal page path names, or None when the path names no declared
+    asset. The name indexes a table built at import, so a traversal sequence resolves to no entry
+    rather than to a file. A matching `if-none-match` answers 304: the page's assets revalidate on
+    every load and transfer only when their content hash changes."""
+    name = request.url.path.removeprefix(STATIC_PREFIX)
+    asset = STATIC_ASSETS.get(name)
+    if asset is None:
+        return None
+    body, media_type = asset
+    etag = STATIC_ETAGS[name]
+    headers = {"etag": etag, "cache-control": "no-cache"}
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers=headers)
+    return Response(body, media_type=media_type, headers=headers)
+
+
+async def portal_page(ctx: SurfaceContext, request: Request) -> Response:
+    """Serve the portal shell. The page itself decides between its token form (no session yet) and
+    the signed-in shell by asking `api/agents` — the server serves one page either way."""
+    return _portal_response()
 
 
 async def _authenticate(ctx: SurfaceContext, request: Request) -> tuple[UUID, str] | None:
@@ -140,10 +201,11 @@ async def _authenticate(ctx: SurfaceContext, request: Request) -> tuple[UUID, st
     return None if member_id is None else (member_id, email)
 
 
-async def portal_page(ctx: SurfaceContext, request: Request) -> Response:
-    """Serve the portal shell. The page itself decides between its token form (no session yet) and
-    the signed-in shell by asking `api/agents` — the server serves one page either way."""
-    return HTMLResponse(PORTAL_HTML)
+async def static_asset(ctx: SurfaceContext, request: Request) -> Response:
+    """Serve a portal stylesheet or module to a request whose session resolved. An unresolved
+    request never reaches here — `resolve_workspace` answers it with the same bytes, because the
+    token card styles itself before any session exists. The assets carry no workspace data."""
+    return _static_response(request) or Response("no such asset", status_code=404)
 
 
 async def open_session(ctx: SurfaceContext, request: Request) -> Response:
@@ -1160,6 +1222,7 @@ async def overview(ctx: SurfaceContext, request: Request) -> Response:
 ROUTES = (
     SurfaceRoute(method="GET", path="", handler=portal_page),
     SurfaceRoute(method="POST", path="", handler=open_session),
+    SurfaceRoute(method="GET", path="static/{asset:path}", handler=static_asset),
     SurfaceRoute(method="GET", path="api/agents", handler=agents_index),
     SurfaceRoute(method="GET", path="api/admin", handler=admin_index),
     SurfaceRoute(method="POST", path="agents/{agent_id}/chat", handler=chat),

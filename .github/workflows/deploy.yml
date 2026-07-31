@@ -102,7 +102,7 @@ jobs:
 
       # Bundle image: `ufoctl bundle` freezes the assistant_hosted pack into a build context
       # (Dockerfile + ufo.toml + ufo.lock), then docker build installs the pinned ufo distribution.
-      # The debugger app builds first so its static/index.html rides inside the wheel.
+      # The debugger and portal apps build first so their static pages ride inside the wheel.
       - name: Build + push bundle image
         if: github.event_name != 'pull_request'
         run: |
@@ -111,6 +111,8 @@ jobs:
           else
             npm --prefix extensions/debugger/frontend ci
             npm --prefix extensions/debugger/frontend run build
+            npm --prefix extensions/web/frontend ci
+            npm --prefix extensions/web/frontend run build
             UFO_CONFIG=hosted.toml uv run ufoctl bundle --out bundle
             docker build -t "$ECR_REGISTRY/ufo:$IMAGE_TAG" bundle
             docker push "$ECR_REGISTRY/ufo:$IMAGE_TAG"

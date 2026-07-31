@@ -29,6 +29,17 @@ def _migration(revision: str, down: str, depends: str = "None") -> ast.Module:
     )
 
 
+def test_the_gate_walk_skips_vendored_dependency_trees() -> None:
+    """A frontend build checks an npm tree out inside `extensions/`, and a virtualenv can sit under
+    any source root. Neither is code this repo gates, and a single vendored `.py` would otherwise
+    fail every push — so the walk skips both at any depth while gating the tree around them."""
+    assert gates._vendored(Path("extensions/web/frontend/node_modules/pkg/setup.py"))
+    assert gates._vendored(Path("extensions/web/frontend/node_modules/a/b/c/deep.py"))
+    assert gates._vendored(Path("core/.venv/lib/python3.12/site-packages/thing.py"))
+    assert not gates._vendored(Path("extensions/web/ufo_ext_web/surface.py"))
+    assert not gates._vendored(Path("extensions/web/tests/test_ext_web.py"))
+
+
 def test_sdk_only_gate_rejects_core_internal_import_from_extensions() -> None:
     trees = {ROGUE: ast.parse("from ufo.db import workspace_tx\n")}
     failures = gates._sdk_import_failures(trees)

@@ -30,14 +30,19 @@ jobs:
       - run: npm --prefix infra/modules/edge ci
       - run: npm --prefix infra/modules/edge exec -- playwright install --with-deps chromium
       - run: node --test infra/modules/edge/*.test.mjs
-      # The debugger app must typecheck and build on every push, BEFORE the wheel gate below: the
-      # bundle image bakes it, so the gated wheel must be the production shape.
+      # Both apps build on every push, BEFORE the wheel gate below: the bundle image bakes them,
+      # so the gated wheel must be the production shape.
       - run: npm --prefix extensions/debugger/frontend ci
       - run: npm --prefix extensions/debugger/frontend run build
+      - run: npm --prefix extensions/web/frontend ci
+      - run: npm --prefix extensions/web/frontend run build
       - name: Gate production wheel
         run: |
           uv build --wheel --out-dir /tmp/ufo-wheel
           unzip -l /tmp/ufo-wheel/ufo-*.whl | grep -q "ufo_ext_debugger/static/index.html"
+          unzip -l /tmp/ufo-wheel/ufo-*.whl | grep -q "ufo_ext_web/static/index.html"
+          unzip -l /tmp/ufo-wheel/ufo-*.whl | grep -qE "ufo_ext_web/static/assets/index-.*\.js"
+          unzip -l /tmp/ufo-wheel/ufo-*.whl | grep -qE "ufo_ext_web/static/assets/index-.*\.css"
           uv venv --python 3.12 /tmp/ufo-wheel-venv
           uv pip install --python /tmp/ufo-wheel-venv/bin/python /tmp/ufo-wheel/ufo-*.whl
           /tmp/ufo-wheel-venv/bin/ufoctl --help >/dev/null
@@ -52,8 +57,34 @@ jobs:
           PY
       - run: uv run pytest --collect-only -m integration -q
 
+  # The portal is a built app. This job is the only one that installs its npm tree for testing:
+  # it builds, proves the bundle and the page walk, and publishes the output the pytest shards
+  # read. `checks` builds its own copy because the wheel gate has to see the production shape
+  # assembled from a clean tree.
+  web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: extensions/web/frontend/package-lock.json
+      - run: npm --prefix extensions/web/frontend ci
+      - run: npm --prefix extensions/web/frontend run build
+      - run: npm --prefix extensions/web/frontend test
+      - run: npm --prefix extensions/web/frontend run walk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: portal-static
+          path: extensions/web/ufo_ext_web/static
+          if-no-files-found: error
+          retention-days: 1
+
   test-shard:
     name: test shard ${{ matrix.shard }}
+    needs: web
     strategy:
       fail-fast: false
       matrix:
@@ -81,6 +112,12 @@ jobs:
           python-version: "3.12"
           enable-cache: true
       - run: uv sync
+      # The portal's Python tests read its built page. The `web` job built it once; a missing
+      # artifact fails this step rather than letting the suite test an absent page.
+      - uses: actions/download-artifact@v4
+        with:
+          name: portal-static
+          path: extensions/web/ufo_ext_web/static
       - run: uv run pytest -n auto --shard "${{ matrix.shard }}" -m "not serial and not integration and not docker" -q
 
   control-test:

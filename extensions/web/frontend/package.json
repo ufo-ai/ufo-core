@@ -1,0 +1,20 @@
+{
+  "name": "ufo-portal",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "check": "tsc -b",
+    "test": "vitest run",
+    "walk": "node ../tests/portal_smoke.mjs ."
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.2",
+    "jsdom": "^26.0.0",
+    "typescript": "~5.8.3",
+    "vite": "^7.0.0",
+    "vitest": "^3.0.0"
+  }
+}

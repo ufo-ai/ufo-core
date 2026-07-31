@@ -122,10 +122,15 @@ build-backend = "hatchling.build"
 # extensions and packs
 # (a source directory whose basename is the import name) map 1:1 through `packages`; the source tree
 # stays in core/, extensions/*, packs/*, testsupport/ exactly as it lives.
-# `artifacts` ships the debugger's npm-built page: hatchling drops VCS-ignored files even under
-# explicit `packages`, and this is its escape hatch for build products that must ride the wheel.
+# `artifacts` ships the npm-built pages — the debugger's and the portal's: hatchling drops
+# VCS-ignored files even under explicit `packages`, and this is its escape hatch for build products
+# that must ride the wheel. The portal emits hashed asset names, so its entry names a glob.
 [tool.hatch.build]
-artifacts = ["/extensions/debugger/ufo_ext_debugger/static/index.html"]
+artifacts = [
+    "/extensions/debugger/ufo_ext_debugger/static/index.html",
+    "/extensions/web/ufo_ext_web/static/index.html",
+    "/extensions/web/ufo_ext_web/static/assets/*",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = [

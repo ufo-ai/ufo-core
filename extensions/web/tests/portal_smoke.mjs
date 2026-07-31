@@ -1,8 +1,9 @@
 // A stub DOM stands in for the browser so the page's script runs whole under node: ids resolve
 // only when the page's own markup carries them, insertBefore throws on a detached reference as
 // the real DOM does, and a stub-level fault surfaces as a thrown error rather than a silently
-// blank portal. Run: node portal_smoke.mjs <path-to-portal.html>.
+// blank portal. Run: node portal_smoke.mjs <path-to-frontend-dir>.
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { argv, exit } from "node:process";
 
 class StubElement {
@@ -178,7 +179,58 @@ const documentRoot = new StubElement("html");
 const body = new StubElement("body");
 documentRoot.appendChild(body);
 
-const html = readFileSync(argv[2], "utf8");
+const frontend = argv[2];
+const html = readFileSync(join(frontend, "index.html"), "utf8");
+const entry = readFileSync(join(frontend, "src", "portal.js"), "utf8");
+const imported = [...entry.matchAll(/^import "\.\/([^"]+)";$/gm)].map(([, name]) => name);
+if (!imported.length) throw new Error("the entry module imports no stylesheet");
+const compactCss = imported
+  .map((name) => readFileSync(join(frontend, "src", name), "utf8"))
+  .join("\n")
+  .replace(/\s+/g, "");
+// A rule's position, not its neighbours, decides whether it styles a component at every width, so
+// the existence claim is asked of the stylesheet with every at-block cut out, and the absence claim
+// of the whole text, since a collision rule hidden in an at-block is still a collision. The two
+// claims take opposite boundaries, which is why they cannot share one pattern. On at-block-free
+// text a top-level rule is preceded only by the start or by its predecessor's `}`, so admitting `{`
+// or `;` there would read a nested rule (`nav{form.search{…}}`, `nav{color:red;form.search{…}}`) as
+// styling the component everywhere when it styles it only inside `nav`. The absence claim needs
+// both, because a collision rule sits after `{` when it opens an at-block and after `;` when it
+// follows a declaration. Both anchor the selector so a flat rescope (`nav form.search`) reads as
+// absent rather than matching inside the longer selector.
+const withoutAtBlocks = (css) => {
+  let out = "";
+  for (let i = 0; i < css.length; ) {
+    const at = css.indexOf("@", i);
+    if (at === -1) return out + css.slice(i);
+    out += css.slice(i, at);
+    const open = css.indexOf("{", at);
+    const semi = css.indexOf(";", at);
+    // An at-rule that ends at `;` (`@layer a,b;`, `@import …;`) holds no block, and so does an `@`
+    // inside a declaration value (`url(logo@2x.png)`). Treating the next `{` as theirs would cut
+    // the following top-level rule out of the text and read it as absent.
+    if (semi !== -1 && (open === -1 || semi < open)) {
+      i = semi + 1;
+      continue;
+    }
+    if (open === -1) return out;
+    let depth = 0;
+    let end = open;
+    for (; end < css.length; end += 1) {
+      if (css[end] === "{") depth += 1;
+      else if (css[end] === "}" && --depth === 0) break;
+    }
+    i = end + 1;
+  }
+  return out;
+};
+const unconditionalCss = withoutAtBlocks(compactCss);
+const anchored = (selector) =>
+  selector.replace(/\s+/g, "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const stylesUnconditionally = (selector) =>
+  new RegExp(`(^|\\})${anchored(selector)}\\{`).test(unconditionalCss);
+const stylesAnywhere = (selector) =>
+  new RegExp(`(^|[};{])${anchored(selector)}\\{`).test(compactCss);
 const idPattern = /id="([a-z-]+)"/g;
 const pageIds = new Set([...html.matchAll(idPattern)].map(([, id]) => id));
 const byId = {};
@@ -916,7 +968,7 @@ const sandbox = {
   console,
 };
 
-const script = html.split("<script>")[1].split("</script>")[0];
+const script = entry.replace(/^import "\.\/[^"]+";$/gm, "");
 const run = new Function(...Object.keys(sandbox), `"use strict";\n${script}`);
 
 const texts = (nodes) => nodes.map((node) => node.textContent);
@@ -1644,10 +1696,12 @@ try {
   await new Promise((resolve) => setTimeout(resolve, 0));
   const searchForm = body.querySelector("form.search");
   if (!searchForm) throw new Error("the memory view built no form.search search bar");
-  for (const rule of ["\n  form.search {", "\n  form.search input {"]) {
-    if (!html.includes(rule)) throw new Error(`the page no longer styles ${rule.trim()}`);
+  for (const rule of ["form.search", "form.search input"]) {
+    if (!stylesUnconditionally(rule)) {
+      throw new Error(`the stylesheet no longer styles ${rule} outside an at-block`);
+    }
   }
-  if (html.includes("#panel form {") || html.includes("#panel form input {")) {
+  if (stylesAnywhere("#panel form") || stylesAnywhere("#panel form input")) {
     throw new Error("#panel form styling rescoped past the search bar onto the settings form");
   }
   if (wire.memoryQueries.at(-1) !== null) {
@@ -1674,8 +1728,10 @@ try {
   await listedCorrect[0].fire("click");
   const correctionForm = body.querySelector("form.correct");
   if (!correctionForm) throw new Error("the correction control built no form.correct");
-  for (const rule of ["\n  form.correct {", "\n  form.correct input {"]) {
-    if (!html.includes(rule)) throw new Error(`the page no longer styles ${rule.trim()}`);
+  for (const rule of ["form.correct", "form.correct input"]) {
+    if (!stylesUnconditionally(rule)) {
+      throw new Error(`the stylesheet no longer styles ${rule} outside an at-block`);
+    }
   }
   const correctionBody = correctionForm.querySelector("input");
   if (correctionBody.value !== "the launch codename is bluebird") {
