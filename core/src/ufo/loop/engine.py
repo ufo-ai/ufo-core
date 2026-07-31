@@ -483,12 +483,11 @@ def _meter_dispatch(
     tools: ToolRegistry, call: ToolUseBlock, started: float, outcome: str, error_class: str | None
 ) -> None:
     """One count and one wall-clock observation for a dispatched call, so a dashboard reads which
-    tool a workspace spends its time in and where that time fails. `outcome` separates the ends a
+    tool the fleet spends its time in and where that time fails. `outcome` separates the ends a
     dispatch has by whose fault each one is — the model's, the tool's, a policy hook's, or the
     engine's — because a metric that reports only the successes reads as nothing having failed, and
     one that folds an infrastructure fault into a refusal reads as policy working as designed.
-    `error_class` rides every end that carries an exception; the workspace rides along from the
-    ambient scope.
+    `error_class` rides every end that carries an exception.
 
     The wall clock is what the round waited on. A name the registry does not hold reports as
     UNREGISTERED_TOOL — the name arrives on an assistant message the model wrote, so passing it

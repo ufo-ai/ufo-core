@@ -115,7 +115,6 @@ HISTOGRAMS = {
     "tool_call_ms": TOOL_CALL_MS_BUCKETS,
     "turn_ms": TURN_MS_BUCKETS,
 }
-WORKSPACE_DIMENSION = "workspace_id"
 SENSITIVE_FIELD_KEYS = frozenset(
     {
         "prompt",
@@ -182,12 +181,11 @@ def _otlp_signal_urls(otlp_endpoint: str) -> tuple[str, str, str]:
 
 
 def _ambient_scope() -> dict[str, str]:
-    """The ambient workspace as log, trace, and metric metadata, read from the `with ws(...)` scope
-    the turn or job bound — so every record, span, and series inside a scope is tagged with the
-    workspace it ran under, no call site passing it. Empty outside a scope (deploy-level boot
-    work)."""
+    """The ambient workspace as log/trace metadata, read from the `with ws(...)` scope the turn or
+    job bound — so every record and span inside a scope is tagged with the workspace it ran under,
+    no call site passing it. Empty outside a scope (deploy-level boot work)."""
     workspace_id = current_workspace.get()
-    return {} if workspace_id is None else {WORKSPACE_DIMENSION: str(workspace_id)}
+    return {} if workspace_id is None else {"workspace_id": str(workspace_id)}
 
 
 def current_traceparent() -> str | None:
@@ -283,34 +281,21 @@ def _emit_log(
     )
 
 
-def _tagged(dimensions: Mapping[str, str]) -> dict[str, str]:
-    """A series' attributes: what the call site measured, plus the workspace the emission ran under.
-    The tenant slice every dashboard cuts by is established here, at the one boundary both emitters
-    pass through, rather than threaded through every call site — the scope is its only source, so
-    `WORKSPACE_DIMENSION` from a call site is refused instead of silently losing to the ambient
-    value. Outside a scope the dimension is absent rather than a placeholder, so no series claims a
-    workspace that did not run it."""
-    if WORKSPACE_DIMENSION in dimensions:
-        raise ValueError(f"{WORKSPACE_DIMENSION} is the ambient scope's, never a call site's")
-    return {**dimensions, **_ambient_scope()}
-
-
 def emit_metric(name: str, amount: int = 1, /, **dimensions: str) -> None:
-    """Increment a registered counter, dimensioned by the ambient workspace; unregistered names fail
-    loud. What is measured is positional so that every keyword is a dimension."""
+    """Increment a registered counter; unregistered names fail loud. What is measured is positional
+    so that every keyword is a dimension."""
     if name not in METRICS:
         raise ValueError(f"unknown metric: {name}")
     counter = _counters.get(name)
     if counter is None:
         counter = metrics.get_meter(INSTRUMENTATION_NAME).create_counter(f"ufo.{name}")
         _counters[name] = counter
-    counter.add(amount, attributes=_tagged(dimensions))
+    counter.add(amount, attributes=dimensions)
 
 
 def emit_histogram(name: str, value: int, /, **dimensions: str) -> None:
-    """Record one observation in milliseconds on a registered histogram, dimensioned by the ambient
-    workspace; unregistered names fail loud. The registry carries each histogram's bucket
-    boundaries, so one name cannot acquire two
+    """Record one observation in milliseconds on a registered histogram; unregistered names fail
+    loud. The registry carries each histogram's bucket boundaries, so one name cannot acquire two
     bucket sets: the SDK default tops out at 10 s and every observation past a top bound shares one
     bucket, where no percentile survives. The provider re-issues for minutes before the first event,
     so the first-event boundaries reach past that band; a round's wall clock contains that latency
@@ -331,4 +316,4 @@ def emit_histogram(name: str, value: int, /, **dimensions: str) -> None:
             f"ufo.{name}", unit="ms", explicit_bucket_boundaries_advisory=boundaries
         )
         _histograms[name] = histogram
-    histogram.record(value, attributes=_tagged(dimensions))
+    histogram.record(value, attributes=dimensions)

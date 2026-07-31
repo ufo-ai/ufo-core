@@ -9,6 +9,8 @@ from opentelemetry.sdk._logs.export import InMemoryLogRecordExporter, SimpleLogR
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from ufo import o11y
 from ufo.ext.loader import HOOK_TIMEOUT_SECONDS
@@ -102,42 +104,29 @@ def _attributes(reader: InMemoryMetricReader) -> dict[str, dict[str, str]]:
     }
 
 
-def test_a_metric_emitted_in_a_workspace_scope_carries_it(monkeypatch):
-    """The tenant slice every dashboard cuts by is read from the bound scope, not passed by the call
-    site — so a counter and a histogram emitted inside a turn both carry the workspace that ran
-    it."""
+def test_logs_and_spans_carry_the_workspace_and_metrics_carry_none(monkeypatch, caplog):
+    """A workspace on a metric is one time series per workspace, multiplied by every other dimension
+    — the one dimension that grows with the customer base. A record and a span cost their own
+    storage and are read one at a time, so the scope tags both: the same turn is findable by
+    workspace in logs and traces, and its metrics aggregate across the fleet."""
+    exporter = InMemorySpanExporter()
+    tracer_provider = TracerProvider()
+    tracer_provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(o11y.trace, "get_tracer", tracer_provider.get_tracer)
     reader = _reader(monkeypatch)
     workspace_id = uuid4()
-    with ws(workspace_id):
+    with ws(workspace_id), caplog.at_level(logging.INFO, logger="ufo"):
         o11y.emit_metric("turn_started_total")
         o11y.emit_histogram("model_round_ms", 12, model="claude-opus-4-8")
+        with o11y.turn_span(uuid4(), uuid4(), None):
+            pass
+        o11y.log("turn.started", turn_id="abc")
     assert _attributes(reader) == {
-        "ufo.turn_started_total": {"workspace_id": str(workspace_id)},
-        "ufo.model_round_ms": {"model": "claude-opus-4-8", "workspace_id": str(workspace_id)},
+        "ufo.turn_started_total": {},
+        "ufo.model_round_ms": {"model": "claude-opus-4-8"},
     }
-
-
-def test_a_metric_emitted_outside_a_workspace_scope_omits_the_dimension(monkeypatch):
-    """Deploy-level work — boot, a sweep before it re-binds a row's workspace — has no tenant, and
-    records none: a placeholder would put deploy work in a group beside real workspaces."""
-    reader = _reader(monkeypatch)
-    o11y.emit_metric("turn_terminal_total", status="done")
-    o11y.emit_histogram("model_round_ms", 12)
-    assert _attributes(reader) == {
-        "ufo.turn_terminal_total": {"status": "done"},
-        "ufo.model_round_ms": {},
-    }
-
-
-def test_a_call_site_cannot_pass_the_workspace_dimension(monkeypatch):
-    """The scope is the dimension's only source. A call site passing it is refused rather than
-    silently losing to the ambient value, so no series can be tagged with a workspace that did not
-    run the emission."""
-    _reader(monkeypatch)
-    with ws(uuid4()), pytest.raises(ValueError, match="workspace_id"):
-        o11y.emit_metric("turn_started_total", workspace_id=str(uuid4()))
-    with pytest.raises(ValueError, match="workspace_id"):
-        o11y.emit_histogram("model_round_ms", 1, workspace_id=str(uuid4()))
+    assert exporter.get_finished_spans()[0].attributes["ufo.workspace_id"] == str(workspace_id)
+    assert caplog.records[-1].ufo == {"workspace_id": str(workspace_id), "turn_id": "abc"}
 
 
 PROVIDER_RETRY_BAND_MS = int(

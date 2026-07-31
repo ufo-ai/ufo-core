@@ -833,18 +833,15 @@ async def test_the_ca_and_leaf_outlive_a_long_running_process() -> None:
     assert leaf.not_valid_after_utc <= ca.not_valid_after_utc
 
 
-def test_egress_metering_counts_under_the_workspace_whose_sandbox_reached_out(
+def test_egress_metering_counts_the_host_and_the_dimension_that_admitted_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """One proxy serves every workspace, so the counter has to say whose egress it counted. The run
-    token carries the workspace and the emitter reads it from the bound scope, so an unbound
-    `_meter` reports the whole fleet's egress as one deploy-level total and nothing says so."""
+    """The counter is a fleet total per metered host: one proxy serves every workspace."""
     reader = InMemoryMetricReader()
     provider = MeterProvider(metric_readers=[reader])
     monkeypatch.setattr(o11y.metrics, "get_meter", provider.get_meter)
     monkeypatch.setattr(o11y, "_counters", {})
-    run = RunToken(uuid4(), uuid4())
-    _egress(_fixed())._meter(SEARCH_HOST, run, (MeterRule(host=SEARCH_HOST, dimension="search"),))
+    _egress(_fixed())._meter(SEARCH_HOST, (MeterRule(host=SEARCH_HOST, dimension="search"),))
     points = [
         point
         for resource in reader.get_metrics_data().resource_metrics
@@ -854,7 +851,7 @@ def test_egress_metering_counts_under_the_workspace_whose_sandbox_reached_out(
         for point in metric.data.data_points
     ]
     assert [dict(point.attributes) for point in points] == [
-        {"host": SEARCH_HOST, "dimension": "search", "workspace_id": str(run.workspace_id)}
+        {"host": SEARCH_HOST, "dimension": "search"}
     ]
 
 

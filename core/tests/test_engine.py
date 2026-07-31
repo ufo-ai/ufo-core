@@ -1525,12 +1525,13 @@ class EveryEndModel:
         yield Usage(input_tokens=2, output_tokens=2)
 
 
-async def test_each_end_a_tool_call_has_is_metered_apart_under_its_workspace(
+async def test_each_end_a_tool_call_has_is_metered_apart(
     db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A metric silent on failure reads as nothing having failed, so each end a dispatch has counts
-    as itself, separated by whose fault it is. Each carries the workspace the turn ran under, so a
-    dashboard reads one team's tool time apart from another's."""
+    as itself, separated by whose fault it is. The turn runs under its workspace scope, as a
+    dispatched turn does, and none of the six series carries it: a workspace multiplies every other
+    dimension of every metric and is the one dimension that grows with the customer base."""
     reader = _metric_capture(monkeypatch)
 
     async def ok(ctx: ToolContext, args: BaseModel) -> ToolResult:
@@ -1572,21 +1573,19 @@ async def test_each_end_a_tool_call_has_is_metered_apart_under_its_workspace(
     with ws(turn.workspace_id):
         frame = await engine.run()
     assert frame.status == "done"
-    workspace = str(turn.workspace_id)
     points = _exported_metrics(reader)
     assert {
         (point.value, tuple(sorted(point.attributes.items())))
         for point in points["ufo.tool_call_total"]
     } == {
-        (1, (("outcome", "ok"), ("tool", "ok_tool"), ("workspace_id", workspace))),
-        (1, (("outcome", "handler_error"), ("tool", "error_tool"), ("workspace_id", workspace))),
+        (1, (("outcome", "ok"), ("tool", "ok_tool"))),
+        (1, (("outcome", "handler_error"), ("tool", "error_tool"))),
         (
             1,
             (
                 ("error_class", "RuntimeError"),
                 ("outcome", "handler_raised"),
                 ("tool", "raising_tool"),
-                ("workspace_id", workspace),
             ),
         ),
         (
@@ -1595,17 +1594,15 @@ async def test_each_end_a_tool_call_has_is_metered_apart_under_its_workspace(
                 ("error_class", "ValidationError"),
                 ("outcome", "invalid_call"),
                 ("tool", "strict_tool"),
-                ("workspace_id", workspace),
             ),
         ),
-        (1, (("outcome", "hook_denied"), ("tool", "denied_tool"), ("workspace_id", workspace))),
+        (1, (("outcome", "hook_denied"), ("tool", "denied_tool"))),
         (
             1,
             (
                 ("error_class", "KeyError"),
                 ("outcome", "invalid_call"),
                 ("tool", UNREGISTERED_TOOL),
-                ("workspace_id", workspace),
             ),
         ),
     }
@@ -1663,14 +1660,7 @@ async def test_a_call_whose_requester_will_not_bind_counts_as_an_unusable_call(
     assert result.is_error
     assert [
         dict(point.attributes) for point in _exported_metrics(reader)["ufo.tool_call_total"]
-    ] == [
-        {
-            "tool": "ok_tool",
-            "outcome": "invalid_call",
-            "error_class": "ValueError",
-            "workspace_id": str(turn.workspace_id),
-        }
-    ]
+    ] == [{"tool": "ok_tool", "outcome": "invalid_call", "error_class": "ValueError"}]
 
 
 async def test_a_store_fault_reached_through_the_bind_is_the_engines_and_not_the_models(
@@ -1702,14 +1692,7 @@ async def test_a_store_fault_reached_through_the_bind_is_the_engines_and_not_the
     assert result.is_error
     assert [
         dict(point.attributes) for point in _exported_metrics(reader)["ufo.tool_call_total"]
-    ] == [
-        {
-            "tool": "ok_tool",
-            "outcome": "step_failed",
-            "error_class": "OperationalError",
-            "workspace_id": str(turn.workspace_id),
-        }
-    ]
+    ] == [{"tool": "ok_tool", "outcome": "step_failed", "error_class": "OperationalError"}]
 
 
 async def test_a_cancelled_bind_counts_the_same_end_the_step_would_have(
@@ -1742,14 +1725,7 @@ async def test_a_cancelled_bind_counts_the_same_end_the_step_would_have(
         )
     assert [
         dict(point.attributes) for point in _exported_metrics(reader)["ufo.tool_call_total"]
-    ] == [
-        {
-            "tool": "ok_tool",
-            "outcome": "step_failed",
-            "error_class": "CancelledError",
-            "workspace_id": str(turn.workspace_id),
-        }
-    ]
+    ] == [{"tool": "ok_tool", "outcome": "step_failed", "error_class": "CancelledError"}]
 
 
 async def test_a_gating_hook_that_fails_closed_is_not_counted_as_policy(
@@ -1791,14 +1767,7 @@ async def test_a_gating_hook_that_fails_closed_is_not_counted_as_policy(
     assert result.is_error and "failed closed" in result.text
     assert [
         dict(point.attributes) for point in _exported_metrics(reader)["ufo.tool_call_total"]
-    ] == [
-        {
-            "tool": "ok_tool",
-            "outcome": "hook_failed",
-            "error_class": "ZeroDivisionError",
-            "workspace_id": str(turn.workspace_id),
-        }
-    ]
+    ] == [{"tool": "ok_tool", "outcome": "hook_failed", "error_class": "ZeroDivisionError"}]
 
 
 async def test_a_dispatch_that_raises_past_its_handler_counts_the_step_it_failed_in(
@@ -1823,14 +1792,7 @@ async def test_a_dispatch_that_raises_past_its_handler_counts_the_step_it_failed
         )
     assert [
         dict(point.attributes) for point in _exported_metrics(reader)["ufo.tool_call_total"]
-    ] == [
-        {
-            "tool": "shot",
-            "outcome": "step_failed",
-            "error_class": "RuntimeError",
-            "workspace_id": str(turn.workspace_id),
-        }
-    ]
+    ] == [{"tool": "shot", "outcome": "step_failed", "error_class": "RuntimeError"}]
 
 
 async def test_a_cancelled_dispatch_records_the_cancellation_and_not_a_success(
@@ -1857,14 +1819,7 @@ async def test_a_cancelled_dispatch_records_the_cancellation_and_not_a_success(
         )
     assert [
         dict(point.attributes) for point in _exported_metrics(reader)["ufo.tool_call_total"]
-    ] == [
-        {
-            "tool": "ok_tool",
-            "outcome": "step_failed",
-            "error_class": "CancelledError",
-            "workspace_id": str(turn.workspace_id),
-        }
-    ]
+    ] == [{"tool": "ok_tool", "outcome": "step_failed", "error_class": "CancelledError"}]
 
 
 HANDLER_SECONDS = 3.5
@@ -1920,8 +1875,8 @@ async def test_a_finished_turn_meters_its_wall_clock_its_rounds_and_its_outcome(
     db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The three numbers a turn reports at the end: how long the execution ran, how many model
-    rounds it took to get there, and how it ended. A turn runs inside its workspace's scope, so all
-    three carry that workspace and a dashboard reads one team's turns apart from another's."""
+    rounds it took to get there, and how it ended. The turn runs under its workspace scope, as a
+    dispatched turn does, and none of the three carries it."""
     clock = ManualClock()
     monkeypatch.setattr("ufo.loop.engine.time", clock)
     reader = _metric_capture(monkeypatch)
@@ -1930,28 +1885,16 @@ async def test_a_finished_turn_meters_its_wall_clock_its_rounds_and_its_outcome(
     with ws(turn.workspace_id):
         frame = await _engine(turn, ClockedToolCallingModel(clock), tmp_path, carrier=carrier).run()
     assert frame is not None and frame.status == "done"
-    workspace = str(turn.workspace_id)
     points = _exported_metrics(reader)
     (wall,) = points["ufo.turn_ms"]
-    assert (wall.count, wall.sum, wall.attributes["status"], wall.attributes["workspace_id"]) == (
-        1,
-        2 * ROUND_MS,
-        "done",
-        workspace,
-    )
+    assert (wall.count, wall.sum, dict(wall.attributes)) == (1, 2 * ROUND_MS, {"status": "done"})
     (rounds,) = points["ufo.turn_rounds_total"]
-    assert (rounds.value, rounds.attributes["status"], rounds.attributes["workspace_id"]) == (
-        2,
-        "done",
-        workspace,
-    )
+    assert (rounds.value, dict(rounds.attributes)) == (2, {"status": "done"})
     (terminal,) = points["ufo.turn_terminal_total"]
-    assert (
-        terminal.value,
-        terminal.attributes["status"],
-        terminal.attributes["error_class"],
-        terminal.attributes["workspace_id"],
-    ) == (1, "done", "", workspace)
+    assert (terminal.value, dict(terminal.attributes)) == (
+        1,
+        {"status": "done", "error_class": ""},
+    )
 
 
 async def test_a_failed_turn_meters_the_error_class_it_ended_on(
