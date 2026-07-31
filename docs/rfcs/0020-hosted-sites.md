@@ -115,10 +115,23 @@ is its first minter.
   route matches the path but not the method, and Starlette prefers a later route matching both, so
   the catch-all took a `POST /~t/{token}` and forwarded the token to the sandbox as its request
   path. Claimed on the segment boundary rather than as a three-character prefix, so a site asset
-  named `/~theme.css` is served rather than read as a malformed token. Every other
-  request — every method an app serves (GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS) —
-  reads its site off the Host, authorizes from that cookie, reads `conversation.sandbox_handle` for
-  the cookie's workspace, dials, and streams. The handle read is one owner-DSN query per request and
+  named `/~theme.css` is served rather than read as a malformed token. The view path is claimed a
+  second time for WebSocket, because a handshake matches no HTTP route: without it `/~t/{token}`
+  over WebSocket reached the catch-all and was forwarded to the sandbox as a request path, which is
+  the same leak on the other protocol. Every other
+  request — every method an app serves (GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS), and a
+  WebSocket handshake on any path — reads its site off the Host, authorizes from that cookie, reads
+  `conversation.sandbox_handle` for the cookie's workspace, dials, and streams or relays. Both
+  protocols pass one gate (`_dial_site`) and refuse with one `SiteRefusal`, the socket denying its
+  handshake with the response the proxy would have sent, so neither can admit what the other turns
+  away. The socket adds one check the proxy has no use for: the handshake's `Origin` must be the site
+  it addresses. A handshake is exempt from CORS, and every site is a label under one `base_host`, so
+  the browser counts two sites same-site and attaches the addressed site's host-only `ufo_site` cookie
+  to a socket opened from any other label — which without the check hands site B a bidirectional
+  channel into site A's own server for the hour A's session lasts, strictly more than HTTP ever gave
+  it, where CORS still withheld the response body. A missing `Origin` is refused with a mismatched
+  one, since the browser this constrains always sends one. The handle read is one owner-DSN query per
+  request and
   stays uncached: the origin's own cost (a fresh TLS handshake into the sandbox) dominates it by
   orders of magnitude, and a cache would have to be invalidated by every sandbox reap. No cookie, or
   a cookie or token naming another site, 403; a Host under no signed label 404; no handle or wrong
@@ -236,9 +249,11 @@ each host a `dashboard`.
 |---|---|---|
 | U1 sandbox ingress | `ingress_token`, `Carrier.dial` (e2b/docker/local), `ufoctl ingress`, infra Deployment, e2b `allow_public_traffic=False` | token → bytes stream from a live sandbox port; tampered/expired → 403; cleared handle → 503 |
 | U2 sites pack | `hosted_site` + migration, tool registration + audience defaults, `surface_token` seam, frame + selector + the not-signed-in page, visibility POST, `site` object kind, prompt section, `ingress_public_url` knob, `SurfaceContext.ingress_url`, ingress host-label addressing + per-site session cookie | site built in a DM: creator 200, other member 404; flip to `workspace`: other member 200; foreign room defaults private; two sites never share an origin |
+| U3 socket relay | WebSocket routes on the catch-all and the view path, `SiteRefusal`/`DialedSite` as the one gate both protocols pass, subprotocol negotiation, frame-type and close-code relay | a real client through a real ASGI server to a real WebSocket origin: `vite-hmr` selected, text and binary each relayed as themselves, `ufo_site` and the viewer's handshake fields withheld, every refusal the proxy's own status and line, `/~t/{token}` never reaching the site, a socket opened by another label refused |
 
-U1 has no sites knowledge and U2 consumes it. A third unit — a `?next=` return-to on `/login`, so a
-coworker bounced to sign in lands back on the site — was built and withdrawn (PR #839): the gateway
+U1 has no sites knowledge and U2 consumes it; U3 adds a protocol to U1 and needs no sites knowledge
+either. A further unit — a `?next=` return-to on `/login`, so a coworker bounced to sign in lands
+back on the site — was built and withdrawn (PR #839): the gateway
 sets no browser credential, so the redirect arrived anonymous, took a 401, and destroyed the token
 the page was holding, restarting the email-code walk it was meant to shorten. A working return-to
 has to end on a workspace-host URL that binds the cookie before forwarding, which spans the gateway,
@@ -290,9 +305,26 @@ permanent link opens.
   ingress, which alone holds that token, is the only way in. The ingress does not pre-warm.
 - **An app that redirects to its own absolute `{port}-{id}.e2b.app` address 401s**, since public
   port traffic is off. A `/`-rooted asset or `Location` is the site's own root and resolves.
-- **No WebSocket proxying.** The ingress forwards HTTP methods only, so a dev server's live
-  reload (Vite HMR) never connects; a `publish_website` app that needs a socket at runtime does
-  not work through the frame either.
+- **WebSockets are relayed, through the same gate as the proxy.** A dev server's live reload (the
+  webapp template's Vite HMR, on `/vite-hmr` of the site's own server) connects, and so does an app
+  whose protocol is not request/response. The handshake authorizes off the same Host, the same
+  `ufo_site` cookie, and the same dial, and it is denied with the very response the proxy would have
+  sent — one gate, one status, one sentence, so a socket cannot become the weaker of two doors into
+  the same bytes. Nothing is accepted until the site's own server has agreed, the subprotocol the
+  viewer is told is the one the site chose, and the site's own close code is what reaches the viewer.
+  A frame is bounded at `WEBSOCKET_MAX_MESSAGE_BYTES` in either direction by two separate
+  mechanisms — the client's `max_size` upstream, the ASGI server's `ws_max_size` for the viewer's
+  half — and permessage-deflate is off on both, since the bound is only as good as the failure it
+  produces. Measured on the upstream half: with deflate negotiated a message one byte over the bound
+  arrives clipped to exactly the bound, so a site's own protocol frame would be silently short — JSON
+  cut mid-object instead of a socket that ended. Uncompressed it raises at every size tried. The
+  viewer's half refuses an over-bound frame either way, so deflate is off there for uniformity rather
+  than against a measured clipping.
+  The count of sockets is not bounded, and deliberately so here: a socket
+  is dialed by the WebSocket client rather than the pooled `httpx` one, so it is outside
+  `UPSTREAM_MAX_CONNECTIONS`, and each viewer's socket holds one upstream connection open for as long
+  as it lasts. Capping them needs an answer for the viewer who is turned away, which is the same
+  question as the per-workspace fairness named below and belongs with it.
 - **A site sits one label under the apex, and both halves of that are measured.** Two deploy facts
   fix the address. The NLB admits only Cloudflare's ranges (`loadBalancerSourceRanges`), so a site
   published DNS-only resolves and then drops every connection — measured on
@@ -335,10 +367,12 @@ permanent link opens.
   for the rest of their life, since the flag is set at create. Closing them needs a one-time
   operator sweep or an `update_network({"allow_public_traffic": False})` on the resume path — ufo
   sets no egress rules, so that call's "omitted fields are cleared" caveat is a no-op here.
-- **No per-workspace fairness on the shared upstream pool.** The client is bounded
-  (`UPSTREAM_MAX_CONNECTIONS`) but the bound is process-wide: enough concurrent slow requests to
-  one workspace's site exhaust it and 502 every other workspace. U2 sizes the fairness bound
-  (per workspace, from the token's verified claims) once real traffic shapes exist.
+- **No per-workspace fairness on the shared upstream pool, and sockets are outside it.** The HTTP
+  client is bounded (`UPSTREAM_MAX_CONNECTIONS`) but the bound is process-wide: enough concurrent
+  slow requests to one workspace's site exhaust it and 502 every other workspace. A relayed
+  WebSocket is not in that pool at all and is held open for as long as the viewer keeps it, so it is
+  unbounded on both counts. One fairness bound per workspace, from the token's verified claims, would
+  cover both; it waits on real traffic shapes and on deciding what a turned-away viewer is told.
 - **A view token's claims are readable, not secret.** The token is signed, not encrypted, so its
   workspace id, conversation id, port, and expiry decode from any copy of the URL — a browser
   history entry, an access log, a `Referer` on an outbound link the site itself renders. It grants

@@ -1,7 +1,10 @@
+import asyncio
 import json
+import socket
 import threading
-from collections.abc import AsyncIterator, Iterator
-from dataclasses import dataclass
+from collections.abc import AsyncIterator, Iterator, Sequence
+from contextlib import suppress
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from uuid import UUID, uuid4
@@ -9,11 +12,18 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 import sqlalchemy as sa
+import uvicorn
+from websockets.asyncio.client import connect
+from websockets.asyncio.server import ServerConnection, serve
+from websockets.exceptions import ConnectionClosed, InvalidStatus
+from websockets.typing import Origin, Subprotocol
 
+from ufo import ingress_serve
 from ufo.bearer import UFO_TOKEN_SECRET_ENV
 from ufo.db import workspace_tx
 from ufo.ingress_serve import (
     CACHE_DIRECTIVE_HEADERS,
+    FOREIGN_ORIGIN,
     INGRESS_SESSION_COOKIE,
     INGRESS_SESSION_TTL_SECONDS,
     LINK_NOT_VALID,
@@ -22,6 +32,7 @@ from ufo.ingress_serve import (
     SITE_GONE,
     SITE_NOT_ANSWERING,
     UNCACHEABLE,
+    WEBSOCKET_MAX_MESSAGE_BYTES,
     WRONG_SITE,
     IngressServe,
     ingress_base_host,
@@ -800,3 +811,652 @@ async def test_dial_failure_is_503(db, monkeypatch: pytest.MonkeyPatch) -> None:
             got = await client.get(f"{_origin(conversation_id)}/")
     assert got.status_code == 503
     assert got.text == SITE_GONE
+
+
+VITE_SUBPROTOCOL = Subprotocol("vite-hmr")
+SOCKET_CLOSE_PATH = "/site-closes"
+SOCKET_ABORT_PATH = "/site-aborts"
+SOCKET_FLOOD_PATH = "/site-floods"
+SOCKET_LARGE_PATH = "/site-sends-large"
+SOCKET_PUSH_PATH = "/site-pushes"
+SOCKET_SINK_PATH = "/site-reads-only"
+LARGE_FRAME_BYTES = 2 * 1024 * 1024
+"""Over the WebSocket library's own 1 MiB default and under ours, so a frame this size proves the
+bound is the one this module sets. An over-bound frame alone would not: the default would reject it
+too, and the test would pass with the bound removed."""
+SITE_CLOSE_CODE = 1001
+SITE_CLOSE_REASON = "site is going away"
+SERVER_START_TICKS = 100
+HANDSHAKE_BYTES = 4096
+ABORT_ROUNDS = 3
+"""Enough resets to hit the window the failure needs — it opens only when the transport dies with no
+loop yield in between, so one round can miss it."""
+PUSH_INTERVAL_SECONDS = 0.01
+"""What a pushing site does between messages. Sending in a tight loop with no yield is a flood
+rather than a push: it starved the relay enough that one reset round passed the deadline on CI's
+slower shard while finishing in seconds locally. The window under test is the viewer's own reset,
+which pacing leaves untouched."""
+RELAY_DEADLINE_SECONDS = 30.0
+"""What the two sockets in series must beat. Losing the cancellation leaves the relay never
+returning, so the client waits on a close that never comes — a wedge that a bare assertion cannot
+see. A wedge never finishes, so a generous bound costs nothing but time on a real failure —
+ten times the slowest local run, and well below the runner's own kill."""
+OPEN_TIMEOUT_HEADROOM_SECONDS = 5.0
+"""What the refusal must beat, and the only thing that distinguishes the timeout being set from it
+being absent: the hung server never answers and never hangs up, so with `open_timeout` deleted the
+WebSocket client's own 10-second default still ends the wait and the refusal is still a 502 — just
+ten seconds later. Twenty-five times the shortened timeout the test sets, so the bound is a
+measurement rather than a race."""
+TICK_SECONDS = 0.02
+
+
+@dataclass
+class _SocketOrigin:
+    """A real WebSocket server standing in for the site's own, so the relay is asserted against a
+    real handshake, real subprotocol negotiation, and real frames rather than a fake of them. It
+    records what each handshake carried, which is how a test tells what the ingress forwarded from
+    what it withheld."""
+
+    port: int = 0
+    handshakes: list["_Handshake"] = field(default_factory=list)
+    received: list[int] = field(default_factory=list)
+    """The size of every message the site actually read, acknowledged back as a short count.
+
+    The viewer-to-site half of the frame bound is only visible from here. Echoing the payload
+    measures the bound on the *return* trip instead, where the upstream client's own cap refuses it
+    whatever the server was configured to accept — so the test passed with the server's bound
+    deleted. The count is small enough that no cap touches it, and awaiting it makes the assertion
+    positive rather than a check on an empty list."""
+
+    async def handle(self, connection: ServerConnection) -> None:
+        request = connection.request
+        assert request is not None
+        self.handshakes.append(
+            _Handshake(
+                path=request.path,
+                probe=request.headers.get("x-dial-probe") or "",
+                cookies=tuple(request.headers.get_all("cookie")),
+                header_names=tuple(name.lower() for name, _ in request.headers.raw_items()),
+                subprotocol=connection.subprotocol or "",
+            )
+        )
+        if request.path.startswith(SOCKET_CLOSE_PATH):
+            await connection.close(code=SITE_CLOSE_CODE, reason=SITE_CLOSE_REASON)
+            return
+        if request.path.startswith(SOCKET_ABORT_PATH):
+            connection.transport.abort()
+            return
+        if request.path.startswith(SOCKET_FLOOD_PATH):
+            await connection.send("x" * (WEBSOCKET_MAX_MESSAGE_BYTES + 1))
+            return
+        if request.path.startswith(SOCKET_LARGE_PATH):
+            await connection.send("x" * LARGE_FRAME_BYTES)
+            return
+        if request.path.startswith(SOCKET_PUSH_PATH):
+            with suppress(Exception):
+                while True:
+                    await connection.send("push")
+                    await asyncio.sleep(PUSH_INTERVAL_SECONDS)
+            return
+        if request.path.startswith(SOCKET_SINK_PATH):
+            with suppress(Exception):
+                async for message in connection:
+                    self.received.append(len(message))
+                    await connection.send(str(len(message)))
+            return
+        async for message in connection:
+            if isinstance(message, str):
+                await connection.send(f"echo:{message}")
+            else:
+                await connection.send(b"echo:" + message)
+
+
+@dataclass(frozen=True)
+class _Handshake:
+    path: str
+    probe: str
+    cookies: tuple[str, ...]
+    header_names: tuple[str, ...]
+    subprotocol: str
+
+
+def _select_subprotocol(
+    connection: ServerConnection, subprotocols: Sequence[Subprotocol]
+) -> Subprotocol | None:
+    """What a dev server does: take the subprotocol when it is offered, and serve the connection
+    without one when it is not. `serve(subprotocols=…)` would instead fail every handshake that
+    offers none, which no real site's server does."""
+    return VITE_SUBPROTOCOL if VITE_SUBPROTOCOL in subprotocols else None
+
+
+@pytest.fixture
+async def socket_origin() -> AsyncIterator[_SocketOrigin]:
+    origin = _SocketOrigin()
+    async with serve(
+        origin.handle,
+        "127.0.0.1",
+        0,
+        select_subprotocol=_select_subprotocol,
+        max_size=None,
+        compression=None,
+    ) as server:
+        origin.port = server.sockets[0].getsockname()[1]
+        yield origin
+
+
+@pytest.fixture
+async def socket_ingress(
+    socket_origin: _SocketOrigin, monkeypatch: pytest.MonkeyPatch
+) -> AsyncIterator[int]:
+    """The ingress under a real ASGI server, because `ASGITransport` speaks no WebSocket: the
+    handshake, the subprotocol, and the close code are the behavior under test, and all three live
+    in the protocol the transport skips."""
+    monkeypatch.setenv(UFO_TOKEN_SECRET_ENV, SECRET)
+    async with upstream_client() as upstream:
+        app = _server(_StubCarrier(socket_origin.port), upstream).app()
+        server = uvicorn.Server(
+            uvicorn.Config(
+                app,
+                host="127.0.0.1",
+                port=0,
+                log_config=None,
+                lifespan="off",
+                ws_max_size=WEBSOCKET_MAX_MESSAGE_BYTES,
+                ws_per_message_deflate=False,
+            )
+        )
+        serving = asyncio.create_task(server.serve())
+        for _ in range(SERVER_START_TICKS):
+            if server.started:
+                break
+            await asyncio.sleep(TICK_SECONDS)
+        assert server.started, "the ingress never bound a port"
+        try:
+            yield server.servers[0].sockets[0].getsockname()[1]
+        finally:
+            server.should_exit = True
+            await serving
+
+
+def _socket(
+    ingress_port: int,
+    conversation_id: UUID,
+    path: str,
+    session: str | None = None,
+    subprotocols: list[Subprotocol] | None = None,
+    site_port: int = 8000,
+    origin: str | None = None,
+) -> connect:
+    """Dial the ingress the way a framed site's own script does: the URI carries the site's origin
+    so the `Host` header names the site, while `host`/`port` put the connection on the loopback
+    address the test server actually bound. `max_size=None` because a browser imposes no frame cap
+    of its own — leaving the library's 1 MiB default here would make the viewer the thing that
+    refuses an oversized frame, and the bound under test is the ingress's."""
+    label = site_label(conversation_id, site_port)
+    headers = {} if session is None else {"cookie": f"{INGRESS_SESSION_COOKIE}={session}"}
+    return connect(
+        f"ws://{label}.{BASE_HOST}{path}",
+        additional_headers=headers,
+        subprotocols=subprotocols,
+        origin=Origin(origin or f"https://{label}.{BASE_HOST}"),
+        max_size=None,
+        host="127.0.0.1",
+        port=ingress_port,
+    )
+
+
+def _session(workspace_id: UUID, conversation_id: UUID, port: int = 8000) -> str:
+    return _token(workspace_id, conversation_id, port=port, kind=INGRESS_SESSION_KIND)
+
+
+async def test_a_site_socket_relays_both_frame_types_and_the_negotiated_subprotocol(
+    db, socket_ingress: int, socket_origin: _SocketOrigin
+) -> None:
+    """The whole point of the relay, in the shape a dev server's live reload uses it: a subprotocol
+    the site selects, a text frame carrying JSON, and a binary frame. Text relayed as bytes is the
+    failure that matters — a reload client reading JSON off a text frame cannot parse a binary one —
+    so both types are asserted to arrive as themselves."""
+    workspace_id, conversation_id = await _seed_conversation("stub:sbx-1")
+    async with _socket(
+        socket_ingress,
+        conversation_id,
+        "/hmr?token=abc",
+        session=_session(workspace_id, conversation_id),
+        subprotocols=[VITE_SUBPROTOCOL],
+    ) as viewer:
+        assert viewer.subprotocol == VITE_SUBPROTOCOL
+        await viewer.send('{"type":"update"}')
+        assert await viewer.recv() == 'echo:{"type":"update"}'
+        await viewer.send(b"\x00\x01\x02")
+        assert await viewer.recv() == b"echo:\x00\x01\x02"
+    handshake = socket_origin.handshakes[0]
+    assert handshake.path == "/hmr?token=abc"
+    assert handshake.subprotocol == VITE_SUBPROTOCOL
+    assert handshake.probe == "dialed"
+
+
+async def test_the_site_never_sees_the_session_cookie_or_the_viewers_handshake_headers(
+    db, socket_ingress: int, socket_origin: _SocketOrigin
+) -> None:
+    """`ufo_site` is cut out of the socket's `cookie` line for the reason it is cut out of the
+    proxy's: the site is agent-authored code, and a handshake it can read from its own log would
+    hand it an hour of access to itself. The handshake's own fields are withheld too — the upstream
+    connection ran its own handshake, so relaying the viewer's key or version would describe one
+    that never happened, and relaying `sec-websocket-protocol` would offer every subprotocol
+    twice."""
+    workspace_id, conversation_id = await _seed_conversation("stub:sbx-1")
+    async with _socket(
+        socket_ingress,
+        conversation_id,
+        "/hmr",
+        session=_session(workspace_id, conversation_id),
+        subprotocols=[VITE_SUBPROTOCOL],
+    ) as viewer:
+        await viewer.send("ping")
+        assert await viewer.recv() == "echo:ping"
+    handshake = socket_origin.handshakes[0]
+    assert handshake.cookies == ()
+    for once in ("sec-websocket-key", "sec-websocket-version", "sec-websocket-protocol"):
+        assert handshake.header_names.count(once) == 1, handshake.header_names
+
+
+async def test_a_socket_at_the_view_path_never_hands_the_token_to_the_site(
+    db, socket_ingress: int, socket_origin: _SocketOrigin
+) -> None:
+    """The leak the HTTP routes were split to close, reached over the other protocol. A handshake
+    matches no HTTP route, so without the socket's own claim on the view path `/~t/{token}` would
+    fall to the catch-all and be forwarded to the sandbox as a request path — handing agent-authored
+    code a credential good for fresh sessions until it expires. The token must not appear in
+    anything the site saw, and the bare view path must refuse as well: a route carrying no
+    `{view_path}` placeholder would bind that parameter from the query string."""
+    workspace_id, conversation_id = await _seed_conversation("stub:sbx-1")
+    view_token = _token(workspace_id, conversation_id)
+    session = _session(workspace_id, conversation_id)
+    for path in (
+        f"{INGRESS_VIEW_PATH}/{view_token}",
+        f"{INGRESS_VIEW_PATH}?view_path={view_token}",
+    ):
+        with pytest.raises(InvalidStatus) as refused:
+            async with _socket(socket_ingress, conversation_id, path, session=session):
+                pass
+        assert refused.value.response.status_code == 403
+        assert refused.value.response.body == LINK_NOT_VALID.encode(), path
+    assert socket_origin.handshakes == []
+
+
+async def test_a_socket_without_a_session_is_refused_as_the_proxy_refuses_it(
+    db, socket_ingress: int, socket_origin: _SocketOrigin
+) -> None:
+    """One gate, one answer. The socket denies its handshake with the response the proxy would have
+    sent — same status, same sentence — so a socket cannot become the weaker of two doors into the
+    same bytes, and nothing reaches the site before the cookie is checked."""
+    _, conversation_id = await _seed_conversation("stub:sbx-1")
+    with pytest.raises(InvalidStatus) as refused:
+        async with _socket(socket_ingress, conversation_id, "/hmr"):
+            pass
+    assert refused.value.response.status_code == 403
+    assert refused.value.response.body == SESSION_ENDED.encode()
+    assert socket_origin.handshakes == []
+
+
+async def test_a_socket_bearing_another_sites_session_is_refused(
+    db, socket_ingress: int, socket_origin: _SocketOrigin
+) -> None:
+    """A session is minted for one `(conversation, port)` and authorizes that origin alone, so one
+    site's own script cannot reach another site's server with the cookie it holds."""
+    workspace_id, conversation_id = await _seed_conversation("stub:sbx-1")
+    other = _session(workspace_id, conversation_id, port=9999)
+    with pytest.raises(InvalidStatus) as refused:
+        async with _socket(socket_ingress, conversation_id, "/hmr", session=other):
+            pass
+    assert refused.value.response.status_code == 403
+    assert refused.value.response.body == WRONG_SITE.encode()
+    assert socket_origin.handshakes == []
+
+
+async def test_a_socket_to_a_host_naming_no_site_is_refused(
+    db, socket_ingress: int, socket_origin: _SocketOrigin
+) -> None:
+    workspace_id, conversation_id = await _seed_conversation("stub:sbx-1")
+    session = _session(workspace_id, conversation_id)
+    with pytest.raises(InvalidStatus) as refused:
+        async with connect(
+            f"ws://not-a-label.{BASE_HOST}/hmr",
+            additional_headers={"cookie": f"{INGRESS_SESSION_COOKIE}={session}"},
+            origin=Origin(f"https://not-a-label.{BASE_HOST}"),
+            host="127.0.0.1",
+            port=socket_ingress,
+        ):
+            pass
+    assert refused.value.response.status_code == 404
+    assert refused.value.response.body == NO_SITE_HERE.encode()
+    assert socket_origin.handshakes == []
+
+
+async def test_a_socket_to_a_site_whose_sandbox_is_gone_is_refused(
+    db, socket_ingress: int, socket_origin: _SocketOrigin
+) -> None:
+    """The reaper clears `sandbox_handle`, and then there is nothing to dial. The socket says so
+    with the proxy's own 503 rather than accepting a connection it cannot relay."""
+    workspace_id, conversation_id = await _seed_conversation(None)
+    with pytest.raises(InvalidStatus) as refused:
+        async with _socket(
+            socket_ingress,
+            conversation_id,
+            "/hmr",
+            session=_session(workspace_id, conversation_id),
+        ):
+            pass
+    assert refused.value.response.status_code == 503
+    assert refused.value.response.body == SITE_GONE.encode()
+    assert socket_origin.handshakes == []
+
+
+async def test_the_sites_own_close_code_reaches_the_viewer(
+    db, socket_ingress: int, socket_origin: _SocketOrigin
+) -> None:
+    """A site's client reads the close code to decide whether to retry, so the site's own code and
+    reason are relayed rather than replaced by a generic one."""
+    workspace_id, conversation_id = await _seed_conversation("stub:sbx-1")
+    async with _socket(
+        socket_ingress,
+        conversation_id,
+        SOCKET_CLOSE_PATH,
+        session=_session(workspace_id, conversation_id),
+    ) as viewer:
+        with pytest.raises(ConnectionClosed):
+            await viewer.recv()
+    assert viewer.close_code == SITE_CLOSE_CODE
+    assert viewer.close_reason == SITE_CLOSE_REASON
+
+
+async def test_a_socket_opened_by_another_site_is_refused(
+    db, socket_ingress: int, socket_origin: _SocketOrigin
+) -> None:
+    """A handshake is exempt from CORS, and every site is a label under one `base_host` — so the
+    browser counts two sites same-site and attaches the addressed site's host-only `ufo_site` cookie
+    to a socket opened from any other label. Without this check site B holds a bidirectional channel
+    into site A's own server for the hour A's session lasts, which is strictly more than HTTP ever
+    gave it: there CORS still withheld the response body. A missing `Origin` is refused with a
+    mismatched one, since the browser this constrains always sends one."""
+    workspace_id, conversation_id = await _seed_conversation("stub:sbx-1")
+    session = _session(workspace_id, conversation_id)
+    _, neighbour = await _seed_conversation("stub:sbx-1")
+    foreign = f"https://{site_label(neighbour, 8000)}.{BASE_HOST}"
+    for origin in (foreign, f"https://{BASE_HOST}", "null"):
+        with pytest.raises(InvalidStatus) as refused:
+            async with _socket(
+                socket_ingress, conversation_id, "/hmr", session=session, origin=origin
+            ):
+                pass
+        assert refused.value.response.status_code == 403
+        assert refused.value.response.body == FOREIGN_ORIGIN.encode(), origin
+    with pytest.raises(InvalidStatus) as bare:
+        async with connect(
+            f"ws://{site_label(conversation_id, 8000)}.{BASE_HOST}/hmr",
+            additional_headers={"cookie": f"{INGRESS_SESSION_COOKIE}={session}"},
+            host="127.0.0.1",
+            port=socket_ingress,
+        ):
+            pass
+    assert bare.value.response.status_code == 403
+    assert bare.value.response.body == FOREIGN_ORIGIN.encode()
+    assert socket_origin.handshakes == []
+
+
+async def test_the_viewer_leaving_first_ends_the_relay(
+    db, socket_ingress: int, socket_origin: _SocketOrigin
+) -> None:
+    """The direction that did not finish is cancelled by the one that did. Without that the site's
+    reader waits forever on a socket nobody is reading and the relay never returns — and the failure
+    is a wedge, not a red assertion, so the deadline is what turns it into one. Twenty seconds
+    against a baseline under three."""
+    workspace_id, conversation_id = await _seed_conversation("stub:sbx-1")
+    await asyncio.wait_for(
+        _two_sockets_in_series(socket_ingress, workspace_id, conversation_id),
+        RELAY_DEADLINE_SECONDS,
+    )
+    assert len(socket_origin.handshakes) == 2
+
+
+async def _two_sockets_in_series(
+    ingress_port: int, workspace_id: UUID, conversation_id: UUID
+) -> None:
+    async with _socket(
+        ingress_port,
+        conversation_id,
+        "/hmr",
+        session=_session(workspace_id, conversation_id),
+    ) as viewer:
+        await viewer.send("ping")
+        assert await viewer.recv() == "echo:ping"
+    async with _socket(
+        ingress_port,
+        conversation_id,
+        "/hmr",
+        session=_session(workspace_id, conversation_id),
+    ) as second:
+        await second.send("again")
+        assert await second.recv() == "echo:again"
+
+
+async def test_a_subprotocol_the_site_declines_is_not_echoed_to_the_viewer(
+    db, socket_ingress: int, socket_origin: _SocketOrigin
+) -> None:
+    """The viewer is told what the site chose. Echoing the offer instead would have a client believe
+    a protocol is in force that the site never agreed to speak."""
+    workspace_id, conversation_id = await _seed_conversation("stub:sbx-1")
+    async with _socket(
+        socket_ingress,
+        conversation_id,
+        "/hmr",
+        session=_session(workspace_id, conversation_id),
+        subprotocols=[Subprotocol("some-other-protocol")],
+    ) as viewer:
+        assert viewer.subprotocol is None
+        await viewer.send("ping")
+        assert await viewer.recv() == "echo:ping"
+    assert socket_origin.handshakes[0].subprotocol == ""
+
+
+async def test_the_handshake_carries_one_of_every_negotiated_field(
+    db, socket_ingress: int, socket_origin: _SocketOrigin
+) -> None:
+    """`sec-websocket-extensions` belongs to the upstream handshake exactly as the key and version
+    do: relaying the viewer's would have the site negotiate compression against a connection that
+    never offered it. The upstream connection offers none of its own either — `compression=None` is
+    what makes the frame bound raise instead of clipping a message to it — so the site must see the
+    header no times at all, where a relayed one would show up once."""
+    workspace_id, conversation_id = await _seed_conversation("stub:sbx-1")
+    async with _socket(
+        socket_ingress,
+        conversation_id,
+        "/hmr",
+        session=_session(workspace_id, conversation_id),
+        subprotocols=[VITE_SUBPROTOCOL],
+    ) as viewer:
+        await viewer.send("ping")
+        assert await viewer.recv() == "echo:ping"
+    assert socket_origin.handshakes[0].header_names.count("sec-websocket-extensions") == 0
+
+
+async def test_a_frame_over_the_bound_ends_the_socket_in_both_directions(
+    db, socket_ingress: int, socket_origin: _SocketOrigin
+) -> None:
+    """Neither end's framing is ours to trust, so both halves are bounded and each half is a
+    different mechanism: `connect(max_size=…)` covers site to viewer, and the ASGI server's
+    `ws_max_size` — the same constant `run()` passes — covers viewer to site. Over the bound the
+    socket ends rather than the frame arriving whole.
+
+    A frame between the two libraries' own defaults and ours is what pins the bound to this module:
+    the WebSocket client defaults to 1 MiB and uvicorn to 16 MiB, so asserting only that an
+    over-bound frame is refused would pass with `max_size` deleted, since the library default would
+    refuse it too."""
+    workspace_id, conversation_id = await _seed_conversation("stub:sbx-1")
+    async with _socket(
+        socket_ingress,
+        conversation_id,
+        SOCKET_LARGE_PATH,
+        session=_session(workspace_id, conversation_id),
+    ) as large:
+        assert len(await large.recv()) == LARGE_FRAME_BYTES
+    async with _socket(
+        socket_ingress,
+        conversation_id,
+        SOCKET_FLOOD_PATH,
+        session=_session(workspace_id, conversation_id),
+    ) as viewer:
+        with pytest.raises(ConnectionClosed):
+            await viewer.recv()
+    async with _socket(
+        socket_ingress,
+        conversation_id,
+        SOCKET_SINK_PATH,
+        session=_session(workspace_id, conversation_id),
+    ) as sender:
+        await sender.send("y" * LARGE_FRAME_BYTES)
+        assert await sender.recv() == str(LARGE_FRAME_BYTES)
+        with pytest.raises(ConnectionClosed):
+            await sender.send("y" * (WEBSOCKET_MAX_MESSAGE_BYTES + 1))
+            await sender.recv()
+    assert socket_origin.received == [LARGE_FRAME_BYTES], socket_origin.received
+    assert len(socket_origin.handshakes) == 3
+
+
+async def test_a_site_that_vanishes_without_a_close_frame_ends_as_an_unexpected_condition(
+    db, socket_ingress: int, socket_origin: _SocketOrigin
+) -> None:
+    """1006 stands for a close this end only observed and RFC 6455 forbids sending it, so relaying
+    the site's code verbatim would put an illegal code on the wire. Substituted, not repeated."""
+    workspace_id, conversation_id = await _seed_conversation("stub:sbx-1")
+    async with _socket(
+        socket_ingress,
+        conversation_id,
+        SOCKET_ABORT_PATH,
+        session=_session(workspace_id, conversation_id),
+    ) as viewer:
+        with pytest.raises(ConnectionClosed):
+            await viewer.recv()
+    assert viewer.close_code not in (1005, 1006, 1015)
+    assert viewer.close_code == 1011
+
+
+async def test_a_socket_to_a_site_that_does_not_answer_is_refused_before_it_is_accepted(
+    db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing is accepted until the site's own server agrees, so a dial that reaches nothing is a
+    502 on the handshake rather than a socket the viewer holds open and nothing ever answers."""
+    monkeypatch.setenv(UFO_TOKEN_SECRET_ENV, SECRET)
+    workspace_id, conversation_id = await _seed_conversation("stub:sbx-1")
+    async with upstream_client() as upstream:
+        app = _server(_StubCarrier(_unused_port()), upstream).app()
+        server = uvicorn.Server(
+            uvicorn.Config(app, host="127.0.0.1", port=0, log_config=None, lifespan="off")
+        )
+        serving = asyncio.create_task(server.serve())
+        for _ in range(SERVER_START_TICKS):
+            if server.started:
+                break
+            await asyncio.sleep(TICK_SECONDS)
+        assert server.started, "the ingress never bound a port"
+        try:
+            with pytest.raises(InvalidStatus) as refused:
+                async with _socket(
+                    server.servers[0].sockets[0].getsockname()[1],
+                    conversation_id,
+                    "/hmr",
+                    session=_session(workspace_id, conversation_id),
+                ):
+                    pass
+        finally:
+            server.should_exit = True
+            await serving
+    assert refused.value.response.status_code == 502
+    assert refused.value.response.body == SITE_NOT_ANSWERING.encode()
+
+
+def _unused_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
+
+
+async def test_a_site_that_accepts_and_never_answers_the_handshake_times_out(
+    db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dead port refuses at once; a hung one would hold the viewer's handshake open forever, and a
+    site is agent-authored code that can hang. The open timeout is what makes the wait end, and the
+    refusal is the proxy's own 502 either way."""
+    monkeypatch.setenv(UFO_TOKEN_SECRET_ENV, SECRET)
+    monkeypatch.setattr(ingress_serve, "WEBSOCKET_OPEN_TIMEOUT_SECONDS", 0.2)
+    workspace_id, conversation_id = await _seed_conversation("stub:sbx-1")
+
+    async def accept_and_hang(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await reader.read(HANDSHAKE_BYTES)
+        await asyncio.Event().wait()
+
+    hung = await asyncio.start_server(accept_and_hang, "127.0.0.1", 0)
+    async with upstream_client() as upstream:
+        app = _server(_StubCarrier(hung.sockets[0].getsockname()[1]), upstream).app()
+        server = uvicorn.Server(
+            uvicorn.Config(app, host="127.0.0.1", port=0, log_config=None, lifespan="off")
+        )
+        serving = asyncio.create_task(server.serve())
+        for _ in range(SERVER_START_TICKS):
+            if server.started:
+                break
+            await asyncio.sleep(TICK_SECONDS)
+        assert server.started, "the ingress never bound a port"
+        started = asyncio.get_running_loop().time()
+        try:
+            with pytest.raises(InvalidStatus) as refused:
+                async with _socket(
+                    server.servers[0].sockets[0].getsockname()[1],
+                    conversation_id,
+                    "/hmr",
+                    session=_session(workspace_id, conversation_id),
+                ):
+                    pass
+            waited = asyncio.get_running_loop().time() - started
+        finally:
+            server.should_exit = True
+            await serving
+            hung.close()
+    assert waited < OPEN_TIMEOUT_HEADROOM_SECONDS, waited
+    assert refused.value.response.status_code == 502
+    assert refused.value.response.body == SITE_NOT_ANSWERING.encode()
+
+
+async def test_a_viewer_that_vanishes_mid_push_leaves_the_ingress_serving(
+    db, socket_ingress: int, socket_origin: _SocketOrigin
+) -> None:
+    """The relay's failure branch, reached the way it is reached in practice: a viewer whose
+    transport resets while the site is mid-push, with no loop yield in between. Three different
+    exception classes have escaped a named `except` here — Starlette's `RuntimeError`, a
+    `WebSocketDisconnect` out of the send, and an `AttributeError` from inside the ASGI server's own
+    protocol — so the branch catches any failure of the relay rather than a list, and what this pins
+    is the outcome that matters either way: the socket ends, and the next viewer of the same site is
+    served. A branch that let the exception escape leaves the handler wedged and this hangs."""
+    workspace_id, conversation_id = await _seed_conversation("stub:sbx-1")
+
+    async def abort_mid_push() -> None:
+        async with _socket(
+            socket_ingress,
+            conversation_id,
+            SOCKET_PUSH_PATH,
+            session=_session(workspace_id, conversation_id),
+        ) as viewer:
+            await viewer.recv()
+            viewer.transport.abort()
+
+    for _ in range(ABORT_ROUNDS):
+        await asyncio.wait_for(abort_mid_push(), RELAY_DEADLINE_SECONDS)
+    async with _socket(
+        socket_ingress,
+        conversation_id,
+        "/hmr",
+        session=_session(workspace_id, conversation_id),
+    ) as after:
+        await after.send("still here")
+        assert await after.recv() == "echo:still here"
+    assert len(socket_origin.handshakes) == ABORT_ROUNDS + 1

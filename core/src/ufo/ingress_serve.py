@@ -2,8 +2,10 @@
 every workspace, serving each sandbox port at its own signed origin, owner DSN with explicit
 workspace filters."""
 
+import asyncio
 import os
 from collections.abc import AsyncIterator, Mapping
+from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from http.cookiejar import CookieJar, DefaultCookiePolicy
@@ -13,9 +15,13 @@ from uuid import UUID
 import httpx
 import sqlalchemy as sa
 import uvicorn
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, WebSocket
 from fastapi.responses import RedirectResponse, Response, StreamingResponse
 from starlette.background import BackgroundTask
+from starlette.requests import HTTPConnection
+from websockets.asyncio.client import ClientConnection, connect
+from websockets.exceptions import WebSocketException
+from websockets.typing import Subprotocol
 
 from ufo.config import load_config
 from ufo.db import init_db, workspace_tx
@@ -27,13 +33,20 @@ from ufo.sandbox.ingress_token import (
     INGRESS_SESSION_KIND,
     INGRESS_VIEW_KIND,
     INGRESS_VIEW_PATH,
+    IngressClaims,
     IngressTokenError,
     ingress_secret,
     mint_ingress_token,
     verify_ingress_token,
 )
 from ufo.sandbox.select import select_carrier
-from ufo.sandbox.session import Carrier, SandboxHandle, SandboxUnreachable, sandbox_handle_id
+from ufo.sandbox.session import (
+    Carrier,
+    DialTarget,
+    SandboxHandle,
+    SandboxUnreachable,
+    sandbox_handle_id,
+)
 from ufo.schema import tables
 from ufo.sdk.http import set_session_cookie
 from ufo.workspace import ws
@@ -84,6 +97,43 @@ built site serves — so a hit would never reach this process and never see the 
 agent-authored code that typically sets no cache header at all, so this cannot be left to the
 origin, and an origin that asks for `public, max-age=…` must not be able to override it: the
 directive is set, and the origin's own is dropped."""
+WEBSOCKET_HANDSHAKE_HEADERS = frozenset(
+    {
+        "sec-websocket-key",
+        "sec-websocket-version",
+        "sec-websocket-extensions",
+        "sec-websocket-protocol",
+    }
+)
+"""The handshake's own fields, never forwarded. The upstream connection performs its own handshake,
+so the client library writes `sec-websocket-key` and `sec-websocket-version` itself and negotiates
+`sec-websocket-extensions` on its own terms; relaying the viewer's would describe a handshake that
+never happened. `sec-websocket-protocol` travels as `subprotocols` instead, so forwarding the header
+too would offer every subprotocol twice."""
+WEBSOCKET_MAX_MESSAGE_BYTES = 8 * 1024 * 1024
+"""The largest frame relayed in either direction. A site is agent-authored code and the viewer is
+whoever opened it, so neither end's framing is ours to trust: without a bound, one message sizes
+this process's memory. Generous next to a dev server's reload notices, small next to the pod.
+
+The bound is only as good as the failure it produces, so permessage-deflate is off on both halves —
+`compression=None` on the upstream connection, `ws_per_message_deflate=False` on the ASGI server,
+whose own default is `True`.
+
+Measured on the upstream half at this exact value: with deflate negotiated, a message one byte over
+the bound arrives *clipped to exactly the bound* rather than raising, so a site's own protocol frame
+would be silently short — JSON cut mid-object instead of a socket that ended. Uncompressed it raises
+at every size tried, which is the failure the relay can act on. The viewer's half is turned off for
+the same reason without the same evidence: an over-bound frame from a viewer is refused there with
+deflate either on or off, so this is the two halves failing alike rather than a fix for an observed
+clipping."""
+WEBSOCKET_OPEN_TIMEOUT_SECONDS = 10.0
+WEBSOCKET_CLOSE_UPSTREAM_GONE = 1011
+WEBSOCKET_CLOSE_NORMAL = 1000
+WEBSOCKET_UNSENDABLE_CLOSE_CODES = frozenset({1005, 1006, 1015})
+"""Codes RFC 6455 reserves for a local observation and forbids on the wire — no status received, an
+abnormal close with no frame at all, a failed TLS handshake. The site's close code is relayed so the
+site's own client sees why it ended, and these three are what the relay must substitute for rather
+than repeat."""
 PATH_SAFE_CHARACTERS = "/:@!$&'()*+,;="
 PROXY_METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
 VIEW_METHODS = ("GET", "HEAD")
@@ -107,6 +157,24 @@ LINK_NOT_VALID = "This link is expired or not valid. Open the site again to get 
 SESSION_ENDED = "This site needs a fresh link. Open it again in chat."
 SITE_GONE = "This site is no longer hosted. Ask the agent that built it to put it back up."
 SITE_NOT_ANSWERING = "This site is not answering."
+FOREIGN_ORIGIN = "This connection did not come from the site it addresses."
+
+
+@dataclass(frozen=True)
+class SiteRefusal:
+    """Why a connection reaches no site: an HTTP status and the line a viewer reads. The proxy
+    answers with it and the socket denies its handshake with it, so one gate produces both refusals
+    — the same status and the same sentence either way — and neither protocol can admit what the
+    other turns away."""
+
+    status: int
+    message: str
+
+
+@dataclass(frozen=True)
+class DialedSite:
+    claims: IngressClaims
+    target: DialTarget
 
 
 @dataclass(frozen=True)
@@ -148,6 +216,15 @@ class IngressServe:
             f"{INGRESS_VIEW_PATH}/{{view_path:path}}", self._open, methods=PROXY_METHODS
         )
         application.add_api_route("/{path:path}", self._proxy, methods=PROXY_METHODS)
+        # A WebSocket handshake matches no HTTP route, so the view path is claimed a second time
+        # here: without these two, `/~t/{token}` over WebSocket would reach the catch-all and be
+        # forwarded to the sandbox as a request path, which is the leak the HTTP routes above exist
+        # to close.
+        application.add_api_websocket_route(INGRESS_VIEW_PATH, self._no_socket_view)
+        application.add_api_websocket_route(
+            f"{INGRESS_VIEW_PATH}/{{view_path:path}}", self._no_socket_view
+        )
+        application.add_api_websocket_route("/{path:path}", self._socket)
         return application
 
     async def _no_view_token(self, request: Request) -> Response:
@@ -191,7 +268,7 @@ class IngressServe:
         set_session_cookie(response, INGRESS_SESSION_COOKIE, session, samesite="lax")
         return response
 
-    def _site(self, request: Request) -> tuple[UUID, int] | None:
+    def _site(self, request: HTTPConnection) -> tuple[UUID, int] | None:
         """The conversation and port this request's own origin addresses, or None when its Host
         names no site of this deploy's — a hostname outside the wildcard base, or a label this
         deploy's secret never signed."""
@@ -204,20 +281,29 @@ class IngressServe:
         except SiteLabelError:
             return None
 
-    async def _proxy(self, request: Request, path: str) -> Response:
-        site = self._site(request)
+    async def _dial_site(self, connection: HTTPConnection) -> DialedSite | SiteRefusal:
+        """The whole gate in front of a site's own server: which site this connection's Host
+        addresses, whether its session cookie authorizes that very site, and the live target the
+        addressed port is reachable at.
+
+        Shared by both protocols the ingress serves, because a socket that authorized differently
+        from the proxy would be a second door into the same bytes — and the weaker of two doors is
+        the one that decides. It takes an `HTTPConnection` rather than a `Request` for exactly that
+        reason: a WebSocket handshake carries the same Host, cookies, and claims, and is gated by
+        this same code rather than by a copy of it."""
+        site = self._site(connection)
         if site is None:
-            return Response(NO_SITE_HERE, status_code=404, media_type="text/plain")
+            return SiteRefusal(404, NO_SITE_HERE)
         try:
             claims = verify_ingress_token(
-                request.cookies.get(INGRESS_SESSION_COOKIE, ""),
+                connection.cookies.get(INGRESS_SESSION_COOKIE, ""),
                 datetime.now(UTC),
                 INGRESS_SESSION_KIND,
             )
         except IngressTokenError:
-            return Response(SESSION_ENDED, status_code=403, media_type="text/plain")
+            return SiteRefusal(403, SESSION_ENDED)
         if (claims.conversation_id, claims.port) != site:
-            return Response(WRONG_SITE, status_code=403, media_type="text/plain")
+            return SiteRefusal(403, WRONG_SITE)
         with ws(claims.workspace_id):
             stored = await self._stored_handle(claims.workspace_id, claims.conversation_id)
             container_id = None if stored is None else sandbox_handle_id(self.backend, stored)
@@ -228,7 +314,7 @@ class IngressServe:
                     stored_handle=stored,
                     backend=self.backend,
                 )
-                return Response(SITE_GONE, status_code=503, media_type="text/plain")
+                return SiteRefusal(503, SITE_GONE)
             handle = SandboxHandle(
                 conversation_id=claims.conversation_id, container_id=container_id
             )
@@ -240,25 +326,30 @@ class IngressServe:
                     conversation_id=str(claims.conversation_id),
                     error=repr(error),
                 )
-                return Response(SITE_GONE, status_code=503, media_type="text/plain")
-            scheme = "https" if target.tls else "http"
-            query = request.scope["query_string"].decode()
-            url = f"{scheme}://{target.host}/{quote(path, safe=PATH_SAFE_CHARACTERS)}"
-            if query:
-                url = f"{url}?{query}"
-            framed = any(header in request.headers for header in BODY_FRAMING_HEADERS)
-            upstream_request = httpx.Request(
-                request.method,
-                url,
-                headers=self._upstream_headers(request, target.headers),
-                content=request.stream() if framed else None,
-            )
+                return SiteRefusal(503, SITE_GONE)
+        return DialedSite(claims=claims, target=target)
+
+    async def _proxy(self, request: Request, path: str) -> Response:
+        dialed = await self._dial_site(request)
+        if isinstance(dialed, SiteRefusal):
+            return Response(dialed.message, status_code=dialed.status, media_type="text/plain")
+        target = dialed.target
+        scheme = "https" if target.tls else "http"
+        url = self._upstream_url(scheme, target.host, path, request.scope["query_string"])
+        framed = any(header in request.headers for header in BODY_FRAMING_HEADERS)
+        upstream_request = httpx.Request(
+            request.method,
+            url,
+            headers=self._upstream_headers(request, target.headers),
+            content=request.stream() if framed else None,
+        )
+        with ws(dialed.claims.workspace_id):
             try:
                 upstream = await self.client.send(upstream_request, stream=True)
             except httpx.HTTPError as error:
                 log_error(
                     "ingress.upstream_failed",
-                    conversation_id=str(claims.conversation_id),
+                    conversation_id=str(dialed.claims.conversation_id),
                     error=repr(error),
                 )
                 return Response(SITE_NOT_ANSWERING, status_code=502, media_type="text/plain")
@@ -283,6 +374,11 @@ class IngressServe:
                 raise
         return response
 
+    def _upstream_url(self, scheme: str, host: str, path: str, query_string: bytes) -> str:
+        url = f"{scheme}://{host}/{quote(path, safe=PATH_SAFE_CHARACTERS)}"
+        query = query_string.decode()
+        return f"{url}?{query}" if query else url
+
     async def _stored_handle(self, workspace_id: UUID, conversation_id: UUID) -> str | None:
         async with workspace_tx() as connection:
             row = (
@@ -296,11 +392,11 @@ class IngressServe:
         return None if row is None else row.sandbox_handle
 
     def _upstream_headers(
-        self, request: Request, dial_headers: Mapping[str, str]
+        self, request: HTTPConnection, dial_headers: Mapping[str, str]
     ) -> list[tuple[str, str]]:
         """Every header the origin sees, and the only ones it sees. The viewer's own, minus the
-        hop-by-hop set, `host`, and any name the dial supplies, with the dial's own appended so its
-        value is the one on the wire. Repeats arrive as repeats.
+        hop-by-hop set, `host`, the handshake's own fields, and any name the dial supplies, with the
+        dial's own appended so its value is the one on the wire. Repeats arrive as repeats.
 
         This is the whole list because the request is built as a bare `httpx.Request`: a client's
         `build_request` merges its own defaults under it, which would put an `accept`, a
@@ -317,6 +413,8 @@ class IngressServe:
         for name, value in request.headers.items():
             lowered = name.lower()
             if lowered in HOP_BY_HOP_HEADERS or lowered == "host" or lowered in dialed:
+                continue
+            if lowered in WEBSOCKET_HANDSHAKE_HEADERS:
                 continue
             if lowered == "cookie":
                 value = "; ".join(
@@ -369,6 +467,147 @@ class IngressServe:
                 yield chunk
         finally:
             await upstream.aclose()
+
+    async def _no_socket_view(self, websocket: WebSocket) -> None:
+        """The view path trades a token over HTTP and speaks no other protocol. Claimed for the
+        reason the proxy claims it: unclaimed, `/~t/{token}` falls to the catch-all, which forwards
+        its path to the sandbox — handing agent-authored code a token good for fresh sessions. One
+        parameter-less handler serves both routes, since FastAPI binds only what a handler
+        declares."""
+        await self._refuse(websocket, SiteRefusal(403, LINK_NOT_VALID))
+
+    async def _socket(self, websocket: WebSocket, path: str) -> None:
+        """Relay one WebSocket to the site's own server, so a site whose protocol is not
+        request/response works through the frame — a dev server's live reload, and an app that
+        pushes.
+
+        The gate is the proxy's — same Host, same session cookie, same dial — plus one check the
+        proxy has no use for. Nothing is accepted until the site's own server has agreed to the
+        connection, so a viewer never holds an open socket to a site that refused one, and the
+        subprotocol the viewer is told is the one the site chose, not an echo of what was asked."""
+        if not self._same_origin(websocket):
+            return await self._refuse(websocket, SiteRefusal(403, FOREIGN_ORIGIN))
+        dialed = await self._dial_site(websocket)
+        if isinstance(dialed, SiteRefusal):
+            return await self._refuse(websocket, dialed)
+        scheme = "wss" if dialed.target.tls else "ws"
+        url = self._upstream_url(scheme, dialed.target.host, path, websocket.scope["query_string"])
+        offered = [Subprotocol(name) for name in websocket.scope.get("subprotocols") or []]
+        with ws(dialed.claims.workspace_id):
+            try:
+                upstream = await connect(
+                    url,
+                    additional_headers=self._upstream_headers(websocket, dialed.target.headers),
+                    subprotocols=offered or None,
+                    max_size=WEBSOCKET_MAX_MESSAGE_BYTES,
+                    compression=None,
+                    open_timeout=WEBSOCKET_OPEN_TIMEOUT_SECONDS,
+                )
+            except (OSError, WebSocketException, TimeoutError) as error:
+                log_error(
+                    "ingress.socket_refused",
+                    conversation_id=str(dialed.claims.conversation_id),
+                    error=repr(error),
+                )
+                return await self._refuse(websocket, SiteRefusal(502, SITE_NOT_ANSWERING))
+            async with upstream:
+                await websocket.accept(subprotocol=upstream.subprotocol)
+                try:
+                    await self._relay(websocket, upstream)
+                except Exception as error:
+                    # Any failure of the relay, not an enumeration of its classes. Three spellings
+                    # of "the viewer is gone" have escaped a named tuple so far — `RuntimeError`
+                    # from Starlette's state machine, `WebSocketDisconnect` out of a send, and an
+                    # `AttributeError` raised inside the ASGI server's own protocol when the
+                    # transport resets with no loop yield in between — and the next one costs
+                    # another socket that ends with no record and no close frame. What the viewer
+                    # needs is the terminal state, which is the same whatever the class was.
+                    log_error(
+                        "ingress.socket_failed",
+                        conversation_id=str(dialed.claims.conversation_id),
+                        error=repr(error),
+                    )
+                    await self._end(websocket, WEBSOCKET_CLOSE_UPSTREAM_GONE, SITE_NOT_ANSWERING)
+
+    def _same_origin(self, websocket: WebSocket) -> bool:
+        """Whether this handshake was opened by the very site it addresses.
+
+        The socket's own check, with no counterpart on the proxy: a navigation or a subresource GET
+        carries no `Origin` at all, and CORS already keeps one site from *reading* another's HTTP
+        response. A handshake is exempt from CORS. Every site is a label under one `base_host`, so
+        the browser counts them same-site and attaches the addressed site's host-only `ufo_site`
+        cookie to a socket opened from any other label — which would hand site B a bidirectional
+        channel into site A's own server for the hour that session lasts. Host rather than the whole
+        origin, so the scheme a deploy terminates at does not enter it; absent rather than
+        mismatched is refused too, since the browser this exists to constrain always sends one."""
+        origin = websocket.headers.get("origin")
+        return bool(origin) and urlsplit(origin).hostname == websocket.url.hostname
+
+    async def _refuse(self, websocket: WebSocket, refusal: SiteRefusal) -> None:
+        """Refuse the handshake with the very response the proxy would have sent, through the
+        Websocket Denial Response extension. One gate, one answer: an unauthorized viewer reads the
+        same status and the same line whichever protocol it arrived on, where a bare policy close
+        would have said only that something was refused."""
+        await websocket.send_denial_response(
+            Response(refusal.message, status_code=refusal.status, media_type="text/plain")
+        )
+
+    async def _relay(self, viewer: WebSocket, upstream: ClientConnection) -> None:
+        """Both directions at once, ending as soon as either does. A socket has no request to
+        enclose it, so the end of one direction is the only signal the other is finished: the viewer
+        navigating away leaves the site's own reader with nothing to read, and a site that stops
+        leaves the viewer waiting on a socket that will never speak again. Whichever finishes first
+        cancels its twin, and its own exception — not the cancellation — is what surfaces."""
+        directions = (
+            asyncio.create_task(self._viewer_to_site(viewer, upstream)),
+            asyncio.create_task(self._site_to_viewer(upstream, viewer)),
+        )
+        done, pending = await asyncio.wait(directions, return_when=asyncio.FIRST_COMPLETED)
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        failures = [task.exception() for task in done]
+        for failure in failures:
+            if failure is not None:
+                raise failure
+
+    async def _viewer_to_site(self, viewer: WebSocket, upstream: ClientConnection) -> None:
+        """Text relayed as text and bytes as bytes: the frame type is part of the protocol a site
+        speaks, and a dev server reading JSON off a text frame gets a binary one it cannot parse if
+        this collapses them."""
+        while True:
+            message = await viewer.receive()
+            if message["type"] == "websocket.disconnect":
+                return
+            text = message.get("text")
+            await upstream.send(message["bytes"] if text is None else text)
+
+    async def _site_to_viewer(self, upstream: ClientConnection, viewer: WebSocket) -> None:
+        """The site's own close code reaches the viewer, since a site's client reads it to decide
+        whether to retry — except for the three codes RFC 6455 forbids sending, which stand for a
+        close this end only observed and are reported as an unexpected condition instead."""
+        with suppress(WebSocketException):
+            async for message in upstream:
+                if isinstance(message, str):
+                    await viewer.send_text(message)
+                else:
+                    await viewer.send_bytes(message)
+        code = upstream.close_code or WEBSOCKET_CLOSE_NORMAL
+        if code in WEBSOCKET_UNSENDABLE_CLOSE_CODES:
+            code = WEBSOCKET_CLOSE_UPSTREAM_GONE
+        await self._end(viewer, code, upstream.close_reason or "")
+
+    async def _end(self, viewer: WebSocket, code: int, reason: str) -> None:
+        """The terminal close, which must not raise on top of whatever brought us here.
+
+        A viewer that already went away leaves nothing to close, and the stack reports that at least
+        three ways: `RuntimeError` once Starlette's state machine holds the disconnect,
+        `WebSocketDisconnect` out of the send itself, and an `AttributeError` from inside the ASGI
+        server's own protocol when the transport resets with no loop yield in between. Naming the
+        classes is what kept missing one, and the next miss is a socket that ends with no close
+        frame at all. The connection is over however this raises, and that is what is committed."""
+        with suppress(Exception):
+            await viewer.close(code=code, reason=reason)
 
 
 def ingress_base_host(configured: str | None) -> str:
@@ -424,4 +663,10 @@ def run() -> None:
         client=upstream_client(),
     )
     log("ingress.starting", port=config.sandbox.ingress_port)
-    uvicorn.run(server.app(), host=INGRESS_BIND_HOST, port=config.sandbox.ingress_port)
+    uvicorn.run(
+        server.app(),
+        host=INGRESS_BIND_HOST,
+        port=config.sandbox.ingress_port,
+        ws_max_size=WEBSOCKET_MAX_MESSAGE_BYTES,
+        ws_per_message_deflate=False,
+    )
