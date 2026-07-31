@@ -134,19 +134,9 @@ BEDROCK_MODEL_SPECS = (
         "2026-01",
     ),
     _anthropic(
-        "anthropic.claude-opus-4-6-v1",
-        ModelPrice(5_000_000, 25_000_000, 500_000, 10_000_000),
-        "2025-08",
-    ),
-    _anthropic(
         "anthropic.claude-sonnet-5",
         ModelPrice(3_000_000, 15_000_000, 300_000, 6_000_000),
         "2026-01",
-    ),
-    _anthropic(
-        "anthropic.claude-sonnet-4-6",
-        ModelPrice(3_000_000, 15_000_000, 300_000, 6_000_000),
-        "2025-08",
     ),
     _openai(
         "openai.gpt-oss-20b",
