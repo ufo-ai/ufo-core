@@ -238,6 +238,7 @@ def _engine(
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         system_prompt=rendered_prompt("p"),
         model=model,
+        provider="anthropic",
         transcript=Transcript(blob=blob, conversation_id=turn.conversation_id),
         compaction=Compaction(
             client=model, model="claude-opus-4-8", blob=blob, conversation_id=turn.conversation_id

@@ -881,6 +881,8 @@ def _engine(
     requestable_credentials: CredentialRequests | None = None,
     memory: MemorySearch | None = None,
     skills: SkillRegistry = CORE_SKILL_REGISTRY,
+    provider: str = "anthropic",
+    model_id: str = "claude-opus-4-8",
 ) -> TurnEngine:
     carrier = carrier or RecordingCarrier()
     blob = FilesystemBlobStore(root=tmp_path)
@@ -888,9 +890,10 @@ def _engine(
     turn = turn.model_copy(update={"speaker_member_id": member_id})
     return TurnEngine(
         turn=turn,
-        agent=Agent(prompt="p", model="claude-opus-4-8"),
+        agent=Agent(prompt="p", model=model_id),
         system_prompt=rendered_prompt("p"),
         model=model,
+        provider=provider,
         transcript=Transcript(blob=blob, conversation_id=turn.conversation_id),
         compaction=compaction
         or Compaction(
@@ -1422,11 +1425,11 @@ async def test_every_model_round_meters_one_observation_and_its_tokens(
     assert frame.status == "done"
     points = _exported_metrics(reader)
     assert [(point.count, dict(point.attributes)) for point in points["ufo.model_round_ms"]] == [
-        (2, {"model": "claude-opus-4-8"})
+        (2, {"model": "claude-opus-4-8", "provider": "anthropic"})
     ]
     assert [
         (point.count, dict(point.attributes)) for point in points["ufo.model_first_event_ms"]
-    ] == [(2, {"model": "claude-opus-4-8"})]
+    ] == [(2, {"model": "claude-opus-4-8", "provider": "anthropic"})]
     assert {
         (point.attributes["kind"], point.attributes["model"], point.value)
         for point in points["ufo.model_round_tokens_total"]
@@ -1466,14 +1469,34 @@ async def test_a_failed_round_meters_its_error_class_and_the_tokens_it_already_s
     assert model.calls == 1
     points = _exported_metrics(reader)
     assert [dict(point.attributes) for point in points["ufo.model_round_ms"]] == [
-        {"model": "claude-opus-4-8", "error_class": "RuntimeError"}
+        {"model": "claude-opus-4-8", "provider": "anthropic", "error_class": "RuntimeError"}
     ]
     assert [dict(point.attributes) for point in points["ufo.model_first_event_ms"]] == [
-        {"model": "claude-opus-4-8"}
+        {"model": "claude-opus-4-8", "provider": "anthropic"}
     ]
     assert {
         (point.attributes["kind"], point.value) for point in points["ufo.model_round_tokens_total"]
     } == {("input", 9), ("output", 2), ("cache_read", 6), ("cache_write", 4)}
+
+
+async def test_a_round_pairs_its_model_with_the_route_that_served_it(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reader = _metric_capture(monkeypatch)
+    routes = (("claude-opus-4-8", "bedrock"), ("claude-sonnet-4-6", "openrouter"))
+    for model, provider in routes:
+        turn = await _seed_turn("queued", None)
+        frame = await _engine(turn, EchoModel(), tmp_path, model_id=model, provider=provider).run()
+        assert frame.status == "done"
+    points = _exported_metrics(reader)
+    for name in ("ufo.model_round_ms", "ufo.model_first_event_ms"):
+        assert {
+            (point.attributes["model"], point.attributes["provider"]) for point in points[name]
+        } == set(routes)
+    assert {
+        (point.attributes["model"], point.attributes["provider"], point.attributes["kind"])
+        for point in points["ufo.model_round_tokens_total"]
+    } == {(model, provider, kind) for model, provider in routes for kind in ("input", "output")}
 
 
 async def test_a_round_that_yielded_nothing_records_no_first_event_latency(
@@ -1487,7 +1510,7 @@ async def test_a_round_that_yielded_nothing_records_no_first_event_latency(
     assert "ufo.model_first_event_ms" not in points
     assert "ufo.model_round_tokens_total" not in points
     assert [dict(point.attributes) for point in points["ufo.model_round_ms"]] == [
-        {"model": "claude-opus-4-8", "error_class": "RuntimeError"}
+        {"model": "claude-opus-4-8", "provider": "anthropic", "error_class": "RuntimeError"}
     ]
 
 
@@ -1519,7 +1542,7 @@ async def test_a_streamed_rounds_timeout_keeps_the_class_the_client_retries_on(
         await _engine(turn, StreamTimeoutModel(), tmp_path).run()
     points = _exported_metrics(reader)
     assert [dict(point.attributes) for point in points["ufo.model_round_ms"]] == [
-        {"model": "claude-opus-4-8", "error_class": "ReadTimeout"}
+        {"model": "claude-opus-4-8", "provider": "anthropic", "error_class": "ReadTimeout"}
     ]
     (terminal,) = points["ufo.turn_terminal_total"]
     assert (terminal.attributes["status"], terminal.attributes["error_class"]) == (

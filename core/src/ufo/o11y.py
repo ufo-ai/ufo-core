@@ -56,8 +56,8 @@ METRICS = (
 )
 ERROR_CLASS_DIMENSION = "error_class"
 HISTOGRAMS = {
-    "model_round_ms": ("model", ERROR_CLASS_DIMENSION),
-    "model_first_event_ms": ("model",),
+    "model_round_ms": ("model", "provider", ERROR_CLASS_DIMENSION),
+    "model_first_event_ms": ("model", "provider"),
     "tool_call_ms": ("tool", "outcome", ERROR_CLASS_DIMENSION),
     "turn_ms": ("status",),
 }

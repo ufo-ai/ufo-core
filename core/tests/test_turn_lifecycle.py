@@ -634,6 +634,25 @@ async def test_turn_compaction_uses_the_models_context_window(
     assert windows != [STANDIN_REGISTRY.spec("claude-opus-4-8").context_window]
 
 
+async def test_a_turn_reads_its_provider_from_the_spec_registered_for_its_model(
+    surface: Turns, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    providers: list[str] = []
+    engine = loop_queue.TurnEngine
+
+    def capture_provider(**kwargs: object) -> object:
+        providers.append(str(kwargs["provider"]))
+        return engine(**kwargs)
+
+    monkeypatch.setattr(loop_queue, "TurnEngine", capture_provider)
+    seed = await _bootstrap(model=PINNED_MODEL)
+    turn_id = await surface.admit(seed, "ping")
+    _, terminal = await surface.consume(seed, turn_id)
+    assert terminal["status"] == "done"
+    assert providers == [STANDIN_REGISTRY.spec(PINNED_MODEL).provider]
+    assert providers != [STANDIN_REGISTRY.spec("claude-opus-4-8").provider]
+
+
 async def test_cost_ticks_stream_as_a_turn_accrues_spend(surface: Turns) -> None:
     seed = await _bootstrap()
     STREAM_GATE.arm()

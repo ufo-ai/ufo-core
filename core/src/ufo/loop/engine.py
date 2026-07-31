@@ -731,6 +731,7 @@ class TurnEngine:
     agent: Agent
     system_prompt: RenderedPrompt
     model: ModelClient
+    provider: str
     transcript: Transcript
     compaction: Compaction
     hub: Hub
@@ -1652,10 +1653,16 @@ class TurnEngine:
             "model_round_ms",
             wall_ms,
             model=request.model,
+            provider=self.provider,
             **({} if error is None else {"error_class": type(error).__name__}),
         )
         if first_event_ms is not None:
-            emit_histogram("model_first_event_ms", first_event_ms, model=request.model)
+            emit_histogram(
+                "model_first_event_ms",
+                first_event_ms,
+                model=request.model,
+                provider=self.provider,
+            )
         round_usage = _total_usage(usages)
         for kind, amount in (
             ("input", round_usage.input_tokens),
@@ -1664,7 +1671,13 @@ class TurnEngine:
             ("cache_write", round_usage.cache_write_tokens),
         ):
             if amount:
-                emit_metric("model_round_tokens_total", amount, model=request.model, kind=kind)
+                emit_metric(
+                    "model_round_tokens_total",
+                    amount,
+                    model=request.model,
+                    provider=self.provider,
+                    kind=kind,
+                )
         if error is not None:
             partial_calls = tuple(
                 f"[tool call: {call_names[call_id]}]\n{''.join(call_json[call_id])}"

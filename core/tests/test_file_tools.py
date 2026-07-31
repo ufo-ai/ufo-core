@@ -625,6 +625,7 @@ def _dispatch_engine(ctx: ToolContext, tools: ToolRegistry) -> TurnEngine:
         agent=ctx.agent,
         system_prompt=rendered_prompt("p"),
         model=_QuietModel(),
+        provider="anthropic",
         transcript=Transcript(blob=ctx.blob, conversation_id=ctx.turn.conversation_id),
         compaction=Compaction(
             client=_QuietModel(),

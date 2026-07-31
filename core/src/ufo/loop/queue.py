@@ -316,6 +316,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             agent=resolved,
             system_prompt=system_prompt,
             model=model,
+            provider=runtime.registry.spec(resolved.model).provider,
             transcript=Transcript(blob=runtime.blob, conversation_id=turn.conversation_id),
             compaction=Compaction(
                 client=model,

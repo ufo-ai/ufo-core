@@ -23,14 +23,14 @@ resource "datadog_metric_tag_configuration" "model_round_ms" {
   metric_name         = "ufo.model_round_ms"
   metric_type         = "distribution"
   include_percentiles = true
-  tags                = ["env", "error_class", "host", "model", "service"]
+  tags                = ["env", "error_class", "host", "model", "provider", "service"]
 }
 
 resource "datadog_metric_tag_configuration" "model_first_event_ms" {
   metric_name         = "ufo.model_first_event_ms"
   metric_type         = "distribution"
   include_percentiles = true
-  tags                = ["env", "host", "model", "service"]
+  tags                = ["env", "host", "model", "provider", "service"]
 }
 
 resource "datadog_metric_tag_configuration" "tool_call_ms" {
