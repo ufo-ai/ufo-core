@@ -93,6 +93,8 @@ from ufo.transcript import (
 from ufo.workspace import ws
 
 SURFACE = "test_surface"
+WRITEBACK_READ_INTERVAL_SECONDS = 0.01
+WEDGE_WATCHDOG_SECONDS = 30
 
 
 @dataclass
@@ -340,6 +342,34 @@ async def _set_writeback(turn_id: UUID, **values: object) -> None:
             .where(tables.writeback.c.turn_id == turn_id)
             .values(**values)
         )
+
+
+async def _await_status(turn_id: UUID, status: str, poller: asyncio.Task[None]) -> None:
+    """Read a writeback until it reaches `status`. A loaded runner stretches every read while the
+    scheduling this proves stays correct, so the bound is never how long the runner may take: a
+    poller that ended reports its own failure first, and `WEDGE_WATCHDOG_SECONDS` names a wedge
+    rather than hanging the shard for fifteen minutes and taking every other result with it."""
+    deadline = asyncio.get_running_loop().time() + WEDGE_WATCHDOG_SECONDS
+    while (await _writeback(turn_id)).status != status:
+        if poller.done():
+            await poller
+            raise AssertionError(f"the poller ended before {turn_id} reached {status}")
+        assert asyncio.get_running_loop().time() < deadline, (
+            f"the poller wedged before {turn_id} reached {status}"
+        )
+        await asyncio.sleep(WRITEBACK_READ_INTERVAL_SECONDS)
+
+
+async def _await_posted(waiter: asyncio.Future, poller: asyncio.Task[None], what: str) -> None:
+    """Wait for a post, on the same terms as `_await_status`: the poller ending re-raises whatever
+    ended it, so a crash reports its own cause instead of this wait's generic message, and the
+    watchdog names a wedge instead of hanging."""
+    await asyncio.wait(
+        (waiter, poller), timeout=WEDGE_WATCHDOG_SECONDS, return_when=asyncio.FIRST_COMPLETED
+    )
+    if poller.done():
+        await poller
+    assert waiter.done(), f"the poller ended or wedged before {what}"
 
 
 def _poller(
@@ -1232,6 +1262,10 @@ async def test_workspace_candidates_rotate_and_recover_from_cursor_deletion_and_
 
 
 async def test_a_slow_workspace_does_not_block_another_workspace(db: None, tmp_path) -> None:
+    """A workspace stuck in its post never holds another workspace's delivery.
+
+    No wait is bounded by how long a loaded runner may take, since the independence this proves has
+    no time semantics; each is bounded by the drain ending and by the wedge watchdog."""
     slow_workspace, _, _ = await _seed()
     fast_workspace, _, _ = await _seed()
     slow_turn = await _seed_turn(slow_workspace, "CSLOW:1.0", "done", "slow")
@@ -1243,23 +1277,28 @@ async def test_a_slow_workspace_does_not_block_another_workspace(db: None, tmp_p
     }
     surface = BlockingSurface(blocked_workspace=slow_workspace)
     drain = asyncio.create_task(_fleet_poller(contexts, surface).drain())
+    both_posted = asyncio.gather(surface.blocked.wait(), surface.fast.wait())
     try:
-        await asyncio.wait_for(surface.blocked.wait(), timeout=1)
-        await asyncio.wait_for(surface.fast.wait(), timeout=1)
-        deadline = asyncio.get_running_loop().time() + 1
-        while (await _writeback(fast_turn)).status != WRITEBACK_DELIVERED:
-            assert asyncio.get_running_loop().time() < deadline
-            await asyncio.sleep(0.01)
+        await _await_posted(both_posted, drain, "both workspaces posted")
+        await _await_status(fast_turn, WRITEBACK_DELIVERED, drain)
         assert fast_turn in surface.posted
     finally:
+        both_posted.cancel()
         surface.release.set()
-        await asyncio.wait_for(drain, timeout=1)
+        await asyncio.wait_for(drain, timeout=WEDGE_WATCHDOG_SECONDS)
     assert (await _writeback(slow_turn)).status == WRITEBACK_DELIVERED
 
 
 async def test_runner_pages_beyond_a_slow_workspace(
     db: None, tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A workspace stuck in its post occupies one in-flight slot, so the runner pages past it to a
+    workspace outside the first batch and delivers there while the stuck claim is still held.
+
+    No wait is bounded by how long a loaded runner may take, since the paging this proves has no
+    time semantics; each is bounded by the runner ending and by the wedge watchdog. `run()` loops
+    forever and logs every exception rather than raising, so the watchdog is what actually fails a
+    regression here — without it a broken pager hangs the shard and every other test in it."""
     monkeypatch.setattr(surface_module, "WRITEBACK_POLL_SECONDS", 0.01)
     monkeypatch.setattr(surface_module, "WRITEBACK_WORKSPACE_BATCH", 2)
     monkeypatch.setattr(surface_module, "WRITEBACK_WORKSPACE_IN_FLIGHT", 4)
@@ -1278,19 +1317,15 @@ async def test_runner_pages_beyond_a_slow_workspace(
     }
     surface = BlockingSurface(blocked_workspace=blocked_workspace)
     running = asyncio.create_task(_fleet_poller(contexts, surface).run())
+    blocked = asyncio.ensure_future(surface.blocked.wait())
     try:
-        await asyncio.wait_for(surface.blocked.wait(), timeout=1)
-        deadline = asyncio.get_running_loop().time() + 1
-        while (await _writeback(turns[later_workspace])).status != WRITEBACK_DELIVERED:
-            assert asyncio.get_running_loop().time() < deadline
-            await asyncio.sleep(0.01)
+        await _await_posted(blocked, running, "the slow workspace posted")
+        await _await_status(turns[later_workspace], WRITEBACK_DELIVERED, running)
         assert (await _writeback(turns[blocked_workspace])).status == WRITEBACK_CLAIMED
     finally:
+        blocked.cancel()
         surface.release.set()
-        deadline = asyncio.get_running_loop().time() + 1
-        while (await _writeback(turns[blocked_workspace])).status != WRITEBACK_DELIVERED:
-            assert asyncio.get_running_loop().time() < deadline
-            await asyncio.sleep(0.01)
+        await _await_status(turns[blocked_workspace], WRITEBACK_DELIVERED, running)
         running.cancel()
         await asyncio.gather(running, return_exceptions=True)
 
@@ -1500,6 +1535,13 @@ async def test_the_delivered_commit_never_contends_with_its_own_claim_renewal(
 async def test_claim_renewal_cancels_external_delivery_when_ownership_changes(
     db: None, tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A refresh that finds the claim taken abandons the delivery it was holding open, leaving the
+    row to its new owner.
+
+    The drain *ending* is this test's assertion, so unlike its siblings there is no event to race
+    it against: a poller that ignores the lost claim does nothing observable, because
+    `_refresh_claim` raises `_WritebackClaimLost`, which kills the renewal that would otherwise
+    keep counting. Failure here is silence, and `WEDGE_WATCHDOG_SECONDS` is what names it."""
     monkeypatch.setattr(surface_module, "WRITEBACK_CLAIM_REFRESH_SECONDS", 0.01)
     workspace_id, _, _ = await _seed()
     turn_id = await _seed_turn(workspace_id, "CSTOLEN:1.0", "done", "slow")
@@ -1507,15 +1549,17 @@ async def test_claim_renewal_cancels_external_delivery_when_ownership_changes(
     contexts = {workspace_id: _context(workspace_id, StubDbos(), blob)}
     surface = BlockingSurface(blocked_workspace=workspace_id)
     running = asyncio.create_task(_fleet_poller(contexts, surface, worker_id="worker-1").drain())
+    posted = asyncio.ensure_future(surface.blocked.wait())
     try:
-        await asyncio.wait_for(surface.blocked.wait(), timeout=1)
+        await _await_posted(posted, running, "the turn posted")
         await _set_writeback(
             turn_id,
             claimed_by="worker-2",
             claim_expires_at=datetime.now(UTC) + timedelta(seconds=60),
         )
-        await asyncio.wait_for(running, timeout=1)
+        await asyncio.wait_for(running, timeout=WEDGE_WATCHDOG_SECONDS)
     finally:
+        posted.cancel()
         surface.release.set()
         if not running.done():
             running.cancel()
