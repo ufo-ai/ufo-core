@@ -12,6 +12,7 @@ from opentelemetry.sdk.trace import TracerProvider
 
 from ufo import o11y
 from ufo.ext.loader import HOOK_TIMEOUT_SECONDS
+from ufo.loop.engine import MAIN_ROUND_LIMIT
 from ufo.models.anthropic import (
     INITIAL_RETRY_DELAY_SECONDS,
     MAX_EMPTY_PROVIDER_RETRIES,
@@ -161,10 +162,14 @@ LONGEST_BOUNDED_DISPATCH_MS = int(
 )
 
 
+MODEL_ROUND_WORST_CASE_MS = o11y.HISTOGRAMS["model_first_event_ms"][-1] + 1
+
+
 WORST_CASE_MS = {
     "model_first_event_ms": PROVIDER_RETRY_BAND_MS,
-    "model_round_ms": o11y.HISTOGRAMS["model_first_event_ms"][-1] + 1,
+    "model_round_ms": MODEL_ROUND_WORST_CASE_MS,
     "tool_call_ms": LONGEST_BOUNDED_DISPATCH_MS,
+    "turn_ms": MAIN_ROUND_LIMIT * MODEL_ROUND_WORST_CASE_MS,
 }
 
 
@@ -176,9 +181,11 @@ def test_registered_histograms_bucket_their_own_worst_case(monkeypatch):
     highest first-event latency there is. A dispatch's is `share_file` — the only tool that bounds
     two transfers of its own — inside the hook pair the step brackets every handler with, since the
     metered wall is the step and not the handler. A foreground subagent bounds its wall at nothing,
-    so the tail past this is deliberately unresolved; what has a bound has to land under one.
-    Everything above a top bound shares one bucket, where no percentile survives, so a dropped tail
-    fails here."""
+    so the tail past this is deliberately unresolved; what has a bound has to land under one. A turn
+    is up to `MAIN_ROUND_LIMIT` of those rounds, every one of them able to reach the worst case
+    charged one round here, so its own worst case is that product — charging a round any less would
+    contradict the line above it. Everything above a top bound shares one bucket, where no
+    percentile survives, so a dropped tail fails here."""
     reader = InMemoryMetricReader()
     provider = MeterProvider(metric_readers=[reader])
     monkeypatch.setattr(o11y.metrics, "get_meter", provider.get_meter)

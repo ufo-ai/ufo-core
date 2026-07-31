@@ -23,9 +23,12 @@ import psycopg
 import pytest
 import sqlalchemy as sa
 from dbos import DBOS, DBOSClient, SetWorkflowID
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from sqlalchemy.engine import make_url
 from ufo_ext_index_default import DefaultIndex
 
+from ufo import o11y
 from ufo.blob import FilesystemBlobStore
 from ufo.config import Config
 from ufo.connectors import ConnectorRegistry
@@ -204,14 +207,25 @@ async def _await_terminal(turn_id: UUID) -> TerminalFrame:
 
 @pytest.mark.serial
 async def test_crash_mid_turn_recovers_without_re_executing_completed_work(
-    db: None, dbos_launched: Config, tmp_path: Path
+    db: None, dbos_launched: Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The bash side effect lands exactly once across the crash and the recovery: the recorded
     round-one step replays from `operation_outputs`, never re-runs. The direct in-loop workflow
     call makes DBOS install its process-shared thread pool as this test loop's default executor;
     pytest-asyncio shuts the loop's default executor down at test end, which would kill that
     shared pool and leave every later queued workflow in this process PENDING forever — so the
-    finally hands the loop a sacrificial executor to shut down instead."""
+    finally hands the loop a sacrificial executor to shut down instead.
+
+    What the turn meters across the same crash: two executions start, the one that dies reaches no
+    exit and records nothing, and the one that finishes records its own wall clock — the replayed
+    round costs it milliseconds, so that number is this execution's work, never the crashed one's.
+    Its round count is the two rounds its loop walked, the replayed one included, and the terminal
+    is counted once, by the execution that wrote it."""
+    reader = InMemoryMetricReader()
+    provider = MeterProvider(metric_readers=[reader])
+    monkeypatch.setattr(o11y.metrics, "get_meter", provider.get_meter)
+    monkeypatch.setattr(o11y, "_counters", {})
+    monkeypatch.setattr(o11y, "_histograms", {})
     crashed = [False]
     registry = ModelRegistry(
         specs={
@@ -254,6 +268,19 @@ async def test_crash_mid_turn_recovers_without_re_executing_completed_work(
                 )
             ).all()
         assert [int(row.amount) for row in rows] == [6]
+        points = {
+            metric.name: metric.data.data_points
+            for resource in reader.get_metrics_data().resource_metrics
+            for scope in resource.scope_metrics
+            for metric in scope.metrics
+        }
+        assert sum(point.value for point in points["ufo.turn_started_total"]) == 2
+        (wall,) = points["ufo.turn_ms"]
+        assert (wall.count, wall.attributes["status"]) == (1, "done")
+        (rounds,) = points["ufo.turn_rounds_total"]
+        assert (rounds.value, rounds.attributes["status"]) == (2, "done")
+        (terminal,) = points["ufo.turn_terminal_total"]
+        assert (terminal.value, terminal.attributes["status"]) == (1, "done")
     finally:
         asyncio.get_running_loop().set_default_executor(ThreadPoolExecutor(max_workers=1))
         loop_queue._runtime.dbos.destroy()

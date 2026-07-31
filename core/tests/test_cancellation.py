@@ -3,7 +3,10 @@ from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 
+from ufo import o11y
 from ufo.cancellation import cancel_one_turn
 from ufo.db import workspace_tx
 from ufo.schema import tables
@@ -141,3 +144,73 @@ async def test_cancel_one_turn_leaves_the_row_live_when_the_workflow_cancel_faul
     with pytest.raises(sa.exc.SQLAlchemyError):
         await cancel_one_turn(_FaultyClient(), turn_id)
     assert await _status(turn_id) == "running"
+
+
+def _metric_reader(monkeypatch: pytest.MonkeyPatch) -> InMemoryMetricReader:
+    """Route the counter onto a reader this test reads back, installing no global meter provider.
+    The instrument cache holds one bound to the provider it was created against, so it is emptied
+    alongside it."""
+    reader = InMemoryMetricReader()
+    provider = MeterProvider(metric_readers=[reader])
+    monkeypatch.setattr(o11y.metrics, "get_meter", provider.get_meter)
+    monkeypatch.setattr(o11y, "_counters", {})
+    return reader
+
+
+def _terminal_counts(reader: InMemoryMetricReader) -> list[tuple[int, str, str]]:
+    """Every terminal counted so far, as (count, status, error class). The reader yields no data at
+    all until an instrument exists, which is the same answer as counting nothing."""
+    data = reader.get_metrics_data()
+    if data is None:
+        return []
+    return [
+        (point.value, point.attributes["status"], point.attributes["error_class"])
+        for resource in data.resource_metrics
+        for scope in resource.scope_metrics
+        for metric in scope.metrics
+        if metric.name == "ufo.turn_terminal_total"
+        for point in metric.data.data_points
+    ]
+
+
+async def test_the_cancelled_terminal_is_counted_once_by_the_call_that_wrote_it(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The turn's own execution never writes a cancelled row, and a turn cancelled before one
+    started has no execution at all, so this is where a cancelled turn joins the terminal counter —
+    once, from the call that made the transition."""
+    reader = _metric_reader(monkeypatch)
+    workspace_id, agent_id = await _workspace_agent()
+    turn_id = await _turn(workspace_id, agent_id, "queued")
+    assert await cancel_one_turn(_RecordingClient(), turn_id) is True
+    assert await cancel_one_turn(_RecordingClient(), turn_id) is False
+    assert _terminal_counts(reader) == [(1, "cancelled", "")]
+
+
+async def test_a_cancel_that_transitioned_nothing_counts_no_terminal(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The turn commits its own terminal inside the window between the status read and the update,
+    so the update matches nothing and the call returns False. A terminal it did not write is not
+    its to count — the row guard, not the pre-check, is what the counter follows."""
+    reader = _metric_reader(monkeypatch)
+    workspace_id, agent_id = await _workspace_agent()
+    turn_id = await _turn(workspace_id, agent_id, "running")
+
+    @dataclass
+    class _RacingClient:
+        async def cancel_workflow_async(self, workflow_id: str) -> None:
+            async with workspace_tx() as connection:
+                await connection.execute(
+                    sa.update(tables.turn)
+                    .values(
+                        status="done",
+                        terminal=TerminalFrame(status="done").model_dump(mode="json"),
+                        updated_at=sa.func.now(),
+                    )
+                    .where(tables.turn.c.id == turn_id)
+                )
+
+    assert await cancel_one_turn(_RacingClient(), turn_id) is False
+    assert await _status(turn_id) == "done"
+    assert _terminal_counts(reader) == []

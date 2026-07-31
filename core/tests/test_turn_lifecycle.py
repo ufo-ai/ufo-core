@@ -10,6 +10,8 @@ from uuid import UUID, uuid4
 import pytest
 import sqlalchemy as sa
 from dbos import DBOSClient
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncConnection
 from ufo_ext_index_default import DefaultIndex
@@ -19,6 +21,7 @@ from evals.driver import WorkspaceDriver
 from evals.harness.capability import CapabilityCase
 from evals.harness.scorers import exact_scorer
 from evals.harness.target import InProcessTarget
+from ufo import o11y
 from ufo.audience import conversation_audience
 from ufo.blob import FilesystemBlobStore
 from ufo.config import Config
@@ -869,13 +872,36 @@ async def _running_turn() -> tuple[UUID, UUID]:
     return workspace_id, turn_id
 
 
-async def test_backstop_terminal_carries_class_and_message(db: None) -> None:
+async def test_backstop_terminal_carries_class_and_message(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A failure outside the engine commits a terminal carrying the class AND the message — a bare
     class name gives the debugger and CLI nothing to act on (the 2026-07-21 wedge surfaced as a
-    naked \"RuntimeError\")."""
+    naked \"RuntimeError\"). No engine ran, so this write is also where the terminal is counted, and
+    the second call — the turn already failed — writes and counts nothing."""
+    reader = InMemoryMetricReader()
+    provider = MeterProvider(metric_readers=[reader])
+    monkeypatch.setattr(o11y.metrics, "get_meter", provider.get_meter)
+    monkeypatch.setattr(o11y, "_counters", {})
     _, turn_id = await _running_turn()
     await loop_queue._commit_failed_terminal(
         InProcessHub(), turn_id, RuntimeError("boom outside the engine")
+    )
+    await loop_queue._commit_failed_terminal(
+        InProcessHub(), turn_id, RuntimeError("boom outside the engine")
+    )
+    (terminal,) = [
+        point
+        for resource in reader.get_metrics_data().resource_metrics
+        for scope in resource.scope_metrics
+        for metric in scope.metrics
+        if metric.name == "ufo.turn_terminal_total"
+        for point in metric.data.data_points
+    ]
+    assert (terminal.value, terminal.attributes["status"], terminal.attributes["error_class"]) == (
+        1,
+        "failed",
+        "RuntimeError",
     )
     async with workspace_tx() as connection:
         row = (

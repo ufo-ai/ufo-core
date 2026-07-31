@@ -34,6 +34,7 @@ OTLP_LOGS_PATH = "v1/logs"
 METRICS = (
     "turn_started_total",
     "turn_terminal_total",
+    "turn_rounds_total",
     "turn_parked_total",
     "turn_round_budget_exhausted_total",
     "turn_context_overflow_recovered_total",
@@ -84,10 +85,35 @@ TOOL_CALL_MS_BUCKETS = (
     1_200_000,
     1_800_000,
 )
+TURN_MS_BUCKETS = (
+    100,
+    250,
+    500,
+    1_000,
+    2_500,
+    5_000,
+    10_000,
+    30_000,
+    60_000,
+    120_000,
+    300_000,
+    600_000,
+    1_200_000,
+    1_800_000,
+    3_600_000,
+    7_200_000,
+    10_800_000,
+    21_600_000,
+    43_200_000,
+    86_400_000,
+    172_800_000,
+    259_200_000,
+)
 HISTOGRAMS = {
     "model_round_ms": (*MODEL_FIRST_EVENT_MS_BUCKETS, 1_800_000),
     "model_first_event_ms": MODEL_FIRST_EVENT_MS_BUCKETS,
     "tool_call_ms": TOOL_CALL_MS_BUCKETS,
+    "turn_ms": TURN_MS_BUCKETS,
 }
 WORKSPACE_DIMENSION = "workspace_id"
 SENSITIVE_FIELD_KEYS = frozenset(
@@ -293,7 +319,9 @@ def emit_histogram(name: str, value: int, /, **dimensions: str) -> None:
     longest dispatch that has a bound at all — `share_file`'s two transfer timeouts inside the hook
     pair that brackets every handler. A foreground `spawn_subagent` is bounded by nothing but the
     child turn it awaits, so it shares the top bucket: that tail is what this metric declines to
-    resolve."""
+    resolve. A turn holds up to `MAIN_ROUND_LIMIT` rounds and the tool calls between them, each
+    round able to reach a round's own worst case, so it carries boundaries reaching that whole
+    product; production turns run for hours, which a round's ceiling cannot resolve at all."""
     boundaries = HISTOGRAMS.get(name)
     if boundaries is None:
         raise ValueError(f"unknown histogram: {name}")

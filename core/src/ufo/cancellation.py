@@ -14,6 +14,7 @@ import sqlalchemy as sa
 from dbos import DBOSClient
 
 from ufo.db import workspace_tx
+from ufo.o11y import emit_metric
 from ufo.schema import tables
 from ufo.schema.records import CANCELLED, NON_TERMINAL_STATUSES, TerminalFrame
 
@@ -32,7 +33,9 @@ async def cancel_one_turn(client: DBOSClient, turn_id: UUID) -> bool:
     untouched (returns False), so a cancel racing a turn's own `done` commit never disturbs it.
     `cancel_workflow_async` is a conditional update that silently no-ops on a workflow that is
     absent or already complete, so a queued turn never enqueued needs no special case — the cancel
-    is a no-op and the row is committed all the same."""
+    is a no-op and the row is committed all the same. This is where a cancelled turn is counted: the
+    turn's own execution never writes the row, and a turn cancelled before one started has no
+    execution at all."""
     async with workspace_tx() as connection:
         status = (
             await connection.execute(
@@ -55,4 +58,7 @@ async def cancel_one_turn(client: DBOSClient, turn_id: UUID) -> bool:
                 tables.turn.c.status.in_(NON_TERMINAL_STATUSES),
             )
         )
-    return result.rowcount == 1
+    if result.rowcount == 0:
+        return False
+    emit_metric("turn_terminal_total", status=CANCELLED, error_class="")
+    return True

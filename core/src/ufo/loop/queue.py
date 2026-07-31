@@ -47,7 +47,7 @@ from ufo.loop.subagents import SubagentRegistry, Subagents, subagent_system_prom
 from ufo.loop.transcript import Transcript
 from ufo.memory import MemorySearch
 from ufo.models.registry import ModelRegistry
-from ufo.o11y import log, warn
+from ufo.o11y import emit_metric, log, warn
 from ufo.sandbox.conversation import ConversationSandbox
 from ufo.sandbox.session import (
     RunToken,
@@ -384,7 +384,10 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
 
 
 async def _commit_failed_terminal(hub: Hub, turn_id: UUID, error: BaseException) -> None:
-    """The backstop for failures outside the engine: retries until the wait can end."""
+    """The backstop for failures outside the engine: retries until the wait can end. A setup fault
+    — loading the turn, attaching the sandbox — has no engine to count it, so the terminal it writes
+    is counted here, and only when this write is the transition: the engine's own failures commit
+    their terminal first and leave nothing for this update to match."""
     frame = TerminalFrame(
         status="failed",
         error_class=type(error).__name__,
@@ -394,7 +397,7 @@ async def _commit_failed_terminal(hub: Hub, turn_id: UUID, error: BaseException)
     while True:
         try:
             async with workspace_tx() as connection:
-                await connection.execute(
+                updated = await connection.execute(
                     sa.update(tables.turn)
                     .values(
                         status="failed",
@@ -405,6 +408,10 @@ async def _commit_failed_terminal(hub: Hub, turn_id: UUID, error: BaseException)
                         tables.turn.c.id == turn_id,
                         tables.turn.c.status.in_(("queued", "running")),
                     )
+                )
+            if updated.rowcount == 1:
+                emit_metric(
+                    "turn_terminal_total", status="failed", error_class=type(error).__name__
                 )
             await hub.publish(turn_id, Terminal(frame=frame))
             return

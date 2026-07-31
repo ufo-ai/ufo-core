@@ -84,6 +84,7 @@ from ufo.o11y import emit_histogram, emit_metric, log, turn_span
 from ufo.sandbox.session import TOOL_OUTPUT_DIR, SandboxSession
 from ufo.schema import tables
 from ufo.schema.records import (
+    CANCELLED,
     NON_TERMINAL_STATUSES,
     PARKED,
     RUNNING,
@@ -687,6 +688,44 @@ class TranscriptRepair:
                 await asyncio.sleep(TRANSCRIPT_WRITE_RETRY_SECONDS)
 
 
+PREEMPTED = "preempted"
+
+
+@dataclass
+class _TurnMeter:
+    """What one execution of a turn cost — its wall clock and the model rounds it ran — recorded
+    where that execution ends, under the exit it took: the terminal it committed or read back, the
+    cap it parked at, the cancel that ended it, or the executor pre-emption that took it away. The
+    exit is the execution's, never the row's, so a durable write that matched nothing still ends an
+    execution that ran; the counters of those writes stay behind their own transition guards.
+
+    The unit is the execution, not the turn, because this is workflow-body code: a crash-recovery
+    re-dispatch enters `run()` again with a fresh meter, and the steps it replays return from the
+    step log in milliseconds, so a second execution's wall clock covers the work still left rather
+    than the work the crashed one already did. The wall clock is therefore one observation per
+    execution that reached an exit — the population `turn_started_total` counts, less the ones that
+    reached none: an execution that died, and a duplicate dispatch that lost the running claim and
+    did no work — while the durable terminal a re-dispatch may find already written stays counted
+    once, by `turn_terminal_total`. A resumed park is a fresh execution the same way, so a cap held
+    for days never enters the wall clock. Rounds are counted where the loop enters one, which a
+    replay re-enters, so a recovered execution reports the turn's rounds to date against its own
+    wall. The first exit an execution reaches is the one it ended at; the unwinding past it (a
+    transcript write that fails after the terminal is durable and re-enters the commit) records
+    nothing further."""
+
+    started: float
+    rounds: int = 0
+    ended: bool = False
+
+    def exited(self, status: str) -> None:
+        if self.ended:
+            return
+        self.ended = True
+        emit_histogram("turn_ms", int((time.monotonic() - self.started) * 1000), status=status)
+        if self.rounds:
+            emit_metric("turn_rounds_total", self.rounds, status=status)
+
+
 @dataclass(frozen=True)
 class TurnEngine:
     turn: Turn
@@ -736,6 +775,7 @@ class TurnEngine:
 
     async def run(self) -> TerminalFrame | None:
         with turn_span(self.turn.id, self.turn.conversation_id, self.turn.traceparent):
+            meter = _TurnMeter(started=time.monotonic())
             emit_metric("turn_started_total")
             log(
                 "turn.started",
@@ -807,6 +847,7 @@ class TurnEngine:
                     denial = await self._commit(
                         "done",
                         usage_events,
+                        meter,
                         answer=inbound.denied,
                         unless_arrivals=pending_guard,
                         absorbed=tuple(absorbed_ids),
@@ -848,6 +889,7 @@ class TurnEngine:
                         arrival_log,
                         absorbed_ids,
                         requesters,
+                        meter,
                     )
                     await self.hooks.fire(
                         "stop",
@@ -859,6 +901,7 @@ class TurnEngine:
                     frame = await self._commit(
                         "done",
                         usage_events,
+                        meter,
                         answer=answer,
                         question=question,
                         credential_request=credential_request,
@@ -877,19 +920,22 @@ class TurnEngine:
                         await self._persist_inbound(tuple(arrival_log), founding_denial)
                     return frame
             except TurnParked as parked:
+                meter.exited(PARKED)
                 await self._park(parked.message, usage_events)
                 raise
             except DBOSWorkflowCancelledError:
+                meter.exited(CANCELLED)
                 await self._bill_cancelled(usage_events)
                 await self._release_unabsorbed(tuple(absorbed_ids))
                 await self._persist_inbound(tuple(arrival_log), founding_denial)
                 raise
             except asyncio.CancelledError:
+                meter.exited(PREEMPTED)
                 await self._bill_cancelled(usage_events)
                 await self._release_unabsorbed(tuple(absorbed_ids))
                 raise
             except Exception as error:
-                await self._commit("failed", usage_events, error=error)
+                await self._commit("failed", usage_events, meter, error=error)
                 await self._release_unabsorbed(tuple(absorbed_ids))
                 await self._persist_inbound(tuple(arrival_log), founding_denial)
                 raise
@@ -912,6 +958,7 @@ class TurnEngine:
         admission never folds into a live turn, so this turn's queue is empty by construction and
         the per-conversation partition runs a member's intents one at a time in order."""
         with turn_span(self.turn.id, self.turn.conversation_id, self.turn.traceparent):
+            meter = _TurnMeter(started=time.monotonic())
             emit_metric("turn_started_total")
             log("turn.started", turn_id=str(self.turn.id), seq=self.turn.seq, prompt_digest="")
             usage_events: list[Usage] = []
@@ -953,7 +1000,7 @@ class TurnEngine:
                 result = await self._dispatch_step(bound_context, bound_call)
                 if result.is_error:
                     frame = await self._commit(
-                        "failed", usage_events, error=IntentRefused(result.text)
+                        "failed", usage_events, meter, error=IntentRefused(result.text)
                     )
                 else:
                     dispatched_result = (
@@ -978,16 +1025,21 @@ class TurnEngine:
                     frame = await self._commit(
                         "done",
                         usage_events,
+                        meter,
                         answer=result.text,
                         connect_request=connect_request,
                         credential_request=credential_request,
                     )
                 await self._persist_transcript(await self._load_messages(), result.text, "", "")
                 return frame
-            except (DBOSWorkflowCancelledError, asyncio.CancelledError):
+            except DBOSWorkflowCancelledError:
+                meter.exited(CANCELLED)
+                raise
+            except asyncio.CancelledError:
+                meter.exited(PREEMPTED)
                 raise
             except Exception as error:
-                await self._commit("failed", usage_events, error=error)
+                await self._commit("failed", usage_events, meter, error=error)
                 raise
             finally:
                 await context.cleanup.drain()
@@ -1053,6 +1105,7 @@ class TurnEngine:
         arrival_log: list[Message],
         absorbed_ids: list[UUID],
         requesters: dict[UUID, ActiveMessage],
+        meter: _TurnMeter,
     ) -> tuple[
         tuple[Message, ...],
         str,
@@ -1111,6 +1164,7 @@ class TurnEngine:
             )
             self._reseed_loaded_skills(messages)
             usage_events.extend(compaction_usage)
+            meter.rounds += 1
             try:
                 messages, round_result = await self._stream_recovering_overflow(
                     messages, usage_events, system, active_requests=active_requests
@@ -2008,6 +2062,7 @@ class TurnEngine:
         self,
         status: TerminalStatus,
         usage_events: list[Usage],
+        meter: _TurnMeter,
         answer: str = "",
         error: BaseException | None = None,
         question: AskUserInput | None = None,
@@ -2020,11 +2075,16 @@ class TurnEngine:
         so a database outage delays the commit rather than losing it. With unless_arrivals the
         commit holds the conversation lock admission inserts under and yields None instead of
         committing while any arrival is unabsorbed — pending in the queue, or stamped by a drain
-        this execution never recorded — so a reply never closes over an unseen message."""
+        this execution never recorded — so a reply never closes over an unseen message.
+
+        The terminal counter counts the transition, so it is emitted only by the call that wrote it:
+        a commit that finds the row already terminal — a cancel that landed mid-turn — returns the
+        frame it read, which the cancel path already counted. The execution's own wall clock and
+        rounds are recorded either way, under the status it ended at."""
         delay = COMMIT_RETRY_INITIAL_SECONDS
         while True:
             try:
-                frame = await self._commit_once(
+                frame, committed = await self._commit_once(
                     status,
                     usage_events,
                     answer,
@@ -2047,7 +2107,13 @@ class TurnEngine:
         if frame is None:
             return None
         await self._publish(Terminal(frame=frame))
-        emit_metric("turn_terminal_total", status=frame.status)
+        if committed:
+            emit_metric(
+                "turn_terminal_total",
+                status=frame.status,
+                error_class=frame.error_class or "",
+            )
+        meter.exited(frame.status)
         log(
             "turn.terminal",
             turn_id=str(self.turn.id),
@@ -2067,7 +2133,7 @@ class TurnEngine:
         connect_request: ConnectRequest | None,
         unless_arrivals: bool,
         absorbed: tuple[UUID, ...],
-    ) -> TerminalFrame | None:
+    ) -> tuple[TerminalFrame | None, bool]:
         usage = _total_usage(usage_events)
         async with workspace_tx() as connection:
             if unless_arrivals:
@@ -2093,7 +2159,7 @@ class TurnEngine:
                     )
                 ).scalar_one()
                 if pending:
-                    return None
+                    return None, False
             await record_turn_usage(
                 connection,
                 self.turn.workspace_id,
@@ -2153,8 +2219,8 @@ class TurnEngine:
                         sa.select(tables.turn.c.terminal).where(tables.turn.c.id == self.turn.id)
                     )
                 ).one()
-                frame = TerminalFrame.model_validate(row.terminal)
-        return frame
+                return TerminalFrame.model_validate(row.terminal), False
+        return frame, True
 
     async def _park(self, message: str, usage_events: list[Usage]) -> None:
         """Hold the turn at a spend cap: bill this attempt's consumed tokens, commit the

@@ -72,6 +72,7 @@ from ufo.loop.engine import (
     MAX_TOOL_RESULT_CHARS,
     MODEL_TRUNCATED_ERROR_CLASS,
     OFFLOAD_NOTICE,
+    PREEMPTED,
     REQUEST_CREDENTIALS_TOOL,
     TOOL_IMAGE_BLOB_DIR,
     TOOL_IMAGE_EDGE_LIMIT,
@@ -94,6 +95,7 @@ from ufo.loop.engine import (
     _dispatch_segments,
     _final_act,
     _loaded_skill_closures,
+    _TurnMeter,
 )
 from ufo.loop.prompts.render import COMPACTION_SYSTEM_PROMPT, rendered_prompt
 from ufo.loop.transcript import Transcript
@@ -119,6 +121,8 @@ from ufo.objects import ObjectRef
 from ufo.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
 from ufo.schema import tables
 from ufo.schema.records import (
+    CANCELLED,
+    INTENT_ADMISSION,
     INTERNAL_ADMISSION,
     SCHEDULED_ADMISSION,
     Agent,
@@ -126,6 +130,7 @@ from ufo.schema.records import (
     ConnectRequest,
     CredentialRequest,
     TerminalFrame,
+    ToolIntent,
     Turn,
     TurnAdmissionSource,
     TurnContext,
@@ -624,6 +629,77 @@ class ClockedModel:
         yield TextDelta(text="answer")
         self.clock.now += REST_OF_STREAM_SECONDS
         yield Usage(input_tokens=11, output_tokens=5, cache_read_tokens=7, cache_write_tokens=3)
+
+
+ROUND_SECONDS = 30.0
+ROUND_MS = int(ROUND_SECONDS * 1000)
+ROUND_INPUT_TOKENS = 10_000
+
+
+@dataclass(frozen=True)
+class ClockedToolCallingModel:
+    """A two-round turn on a clock: one bash call, then the answer, each round taking
+    ROUND_SECONDS, so the turn's wall clock is a known multiple of its round count. Each round
+    reports enough tokens to price past a tight cap, so the same fake parks a turn at its second
+    round when one is set."""
+
+    clock: ManualClock
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        self.clock.now += ROUND_SECONDS
+        answered = any(
+            isinstance(message.content, tuple)
+            and any(isinstance(block, ToolResultBlock) for block in message.content)
+            for message in request.messages
+        )
+        if answered:
+            yield TextDelta(text="done")
+            yield Usage(input_tokens=ROUND_INPUT_TOKENS, output_tokens=1)
+            return
+        yield ToolCallStart(id="c1", name="bash")
+        yield ToolCallDelta(
+            id="c1", partial_json='{"command": "echo hi", "user_description": "running a check"}'
+        )
+        yield Usage(input_tokens=ROUND_INPUT_TOKENS, output_tokens=1)
+
+
+@dataclass(frozen=True)
+class InterruptedHandler:
+    """A dispatched tool the named interrupt reaches mid-call — a workflow cancel or the executor's
+    shutdown, the two events that end a turn without a terminal of its own."""
+
+    error: BaseException
+
+    async def __call__(self, ctx: ToolContext, args: BaseModel) -> ToolResult:
+        raise self.error
+
+
+@dataclass(frozen=True)
+class CancelBeforeTheCapModel:
+    """A cancel lands on the row while the round streams, and the round's tokens then breach a cap:
+    the park that follows writes nothing, because the row is already terminal. The execution still
+    ran a round."""
+
+    clock: ManualClock
+    turn_id: UUID
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        self.clock.now += ROUND_SECONDS
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.turn)
+                .values(
+                    status="cancelled",
+                    terminal=TerminalFrame(status="cancelled").model_dump(mode="json"),
+                    updated_at=sa.func.now(),
+                )
+                .where(tables.turn.c.id == self.turn_id)
+            )
+        yield ToolCallStart(id="c1", name="bash")
+        yield ToolCallDelta(
+            id="c1", partial_json='{"command": "echo hi", "user_description": "running a check"}'
+        )
+        yield Usage(input_tokens=ROUND_INPUT_TOKENS, output_tokens=1)
 
 
 STUB_AUTHORIZE_URL = "https://stub.test/oauth"
@@ -1319,9 +1395,15 @@ def _metric_capture(monkeypatch: pytest.MonkeyPatch) -> InMemoryMetricReader:
 def _exported_metrics(
     reader: InMemoryMetricReader,
 ) -> dict[str, Sequence[HistogramDataPoint | NumberDataPoint]]:
+    """What the run recorded, by metric name. The reader yields no data at all until an instrument
+    exists, which is the same answer as recording nothing — so a path that meters nothing reads back
+    as the empty mapping rather than raising."""
+    data = reader.get_metrics_data()
+    if data is None:
+        return {}
     return {
         metric.name: metric.data.data_points
-        for resource in reader.get_metrics_data().resource_metrics
+        for resource in data.resource_metrics
         for scope in resource.scope_metrics
         for metric in scope.metrics
     }
@@ -1832,6 +1914,332 @@ async def test_a_tool_calls_metered_wall_is_the_time_the_round_waited_on_it(
     assert [(point.sum, point.attributes["tool"]) for point in points["ufo.tool_call_ms"]] == [
         (int(HANDLER_SECONDS * 1000), "slow")
     ]
+
+
+async def test_a_finished_turn_meters_its_wall_clock_its_rounds_and_its_outcome(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The three numbers a turn reports at the end: how long the execution ran, how many model
+    rounds it took to get there, and how it ended. A turn runs inside its workspace's scope, so all
+    three carry that workspace and a dashboard reads one team's turns apart from another's."""
+    clock = ManualClock()
+    monkeypatch.setattr("ufo.loop.engine.time", clock)
+    reader = _metric_capture(monkeypatch)
+    turn = await _seed_turn("queued", None)
+    carrier = RecordingCarrier(result=ExecResult(stdout="hi\n", stderr="", exit_code=0))
+    with ws(turn.workspace_id):
+        frame = await _engine(turn, ClockedToolCallingModel(clock), tmp_path, carrier=carrier).run()
+    assert frame is not None and frame.status == "done"
+    workspace = str(turn.workspace_id)
+    points = _exported_metrics(reader)
+    (wall,) = points["ufo.turn_ms"]
+    assert (wall.count, wall.sum, wall.attributes["status"], wall.attributes["workspace_id"]) == (
+        1,
+        2 * ROUND_MS,
+        "done",
+        workspace,
+    )
+    (rounds,) = points["ufo.turn_rounds_total"]
+    assert (rounds.value, rounds.attributes["status"], rounds.attributes["workspace_id"]) == (
+        2,
+        "done",
+        workspace,
+    )
+    (terminal,) = points["ufo.turn_terminal_total"]
+    assert (
+        terminal.value,
+        terminal.attributes["status"],
+        terminal.attributes["error_class"],
+        terminal.attributes["workspace_id"],
+    ) == (1, "done", "", workspace)
+
+
+async def test_a_failed_turn_meters_the_error_class_it_ended_on(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Silence on failure would read as no turns failing, so the failing paths carry the same three
+    numbers — and the error class the terminal recorded, which is what a dashboard breaks down."""
+    reader = _metric_capture(monkeypatch)
+    turn = await _seed_turn("queued", None)
+    with pytest.raises(ModelStreamError):
+        await _engine(turn, StreamErrorModel(), tmp_path).run()
+    points = _exported_metrics(reader)
+    (wall,) = points["ufo.turn_ms"]
+    assert (wall.count, wall.attributes["status"]) == (1, "failed")
+    (rounds,) = points["ufo.turn_rounds_total"]
+    assert (rounds.value, rounds.attributes["status"]) == (1, "failed")
+    (terminal,) = points["ufo.turn_terminal_total"]
+    assert (terminal.value, terminal.attributes["status"], terminal.attributes["error_class"]) == (
+        1,
+        "failed",
+        "RuntimeError",
+    )
+
+
+async def test_a_cancelled_execution_meters_the_work_it_did_and_counts_no_terminal(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cancel writes the turn's terminal from outside the workflow, where it is counted. The
+    execution it interrupts still ran — its wall clock and its round are what this path reports."""
+    reader = _metric_capture(monkeypatch)
+    turn = await _seed_turn("queued", None)
+    with pytest.raises(DBOSWorkflowCancelledError):
+        await _engine(turn, WorkflowCancelModel(), tmp_path).run()
+    points = _exported_metrics(reader)
+    (wall,) = points["ufo.turn_ms"]
+    assert (wall.count, wall.attributes["status"]) == (1, "cancelled")
+    (rounds,) = points["ufo.turn_rounds_total"]
+    assert (rounds.value, rounds.attributes["status"]) == (1, "cancelled")
+    assert "ufo.turn_terminal_total" not in points
+
+
+async def test_a_parked_attempt_meters_its_own_wall_clock(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A park is not a terminal and its turn resumes as a fresh execution, so the attempt held at
+    the cap reports the wall clock and rounds it spent — the days it then waits belong to no
+    execution and enter no observation."""
+    clock = ManualClock()
+    monkeypatch.setattr("ufo.loop.engine.time", clock)
+    reader = _metric_capture(monkeypatch)
+    turn = await _seed_turn("queued", None)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.spend_cap).values(
+                id=uuid4(),
+                workspace_id=turn.workspace_id,
+                scope="workspace",
+                subject_id=None,
+                window_seconds=3600,
+                limit_micro_usd=1,
+                on_breach="park",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    carrier = RecordingCarrier(result=ExecResult(stdout="hi\n", stderr="", exit_code=0))
+    with pytest.raises(TurnParked):
+        await _engine(turn, ClockedToolCallingModel(clock), tmp_path, carrier=carrier).run()
+    points = _exported_metrics(reader)
+    (wall,) = points["ufo.turn_ms"]
+    assert (wall.count, wall.sum, wall.attributes["status"]) == (1, ROUND_MS, "parked")
+    (rounds,) = points["ufo.turn_rounds_total"]
+    assert (rounds.value, rounds.attributes["status"]) == (1, "parked")
+    assert "ufo.turn_terminal_total" not in points
+
+
+async def test_a_park_that_wrote_no_row_still_meters_the_execution(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cancel took the row between rounds, so the cap's park matches nothing and counts no park.
+    The execution ran a round and ended at that cap all the same — the wall clock belongs to the
+    execution, not to the write, so only `turn_parked_total` stays behind the transition guard."""
+    clock = ManualClock()
+    monkeypatch.setattr("ufo.loop.engine.time", clock)
+    reader = _metric_capture(monkeypatch)
+    turn = await _seed_turn("queued", None)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.spend_cap).values(
+                id=uuid4(),
+                workspace_id=turn.workspace_id,
+                scope="workspace",
+                subject_id=None,
+                window_seconds=3600,
+                limit_micro_usd=1,
+                on_breach="park",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    carrier = RecordingCarrier(result=ExecResult(stdout="hi\n", stderr="", exit_code=0))
+    model = CancelBeforeTheCapModel(clock=clock, turn_id=turn.id)
+    with pytest.raises(TurnParked):
+        await _engine(turn, model, tmp_path, carrier=carrier).run()
+    async with workspace_tx() as connection:
+        status = (
+            await connection.execute(
+                sa.select(tables.turn.c.status).where(tables.turn.c.id == turn.id)
+            )
+        ).scalar_one()
+    assert status == "cancelled"
+    points = _exported_metrics(reader)
+    (wall,) = points["ufo.turn_ms"]
+    assert (wall.count, wall.sum, wall.attributes["status"]) == (1, ROUND_MS, "parked")
+    (rounds,) = points["ufo.turn_rounds_total"]
+    assert (rounds.value, rounds.attributes["status"]) == (1, "parked")
+    assert "ufo.turn_parked_total" not in points
+
+
+async def test_an_executor_preemption_is_metered_apart_from_a_cancel(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pod death or deploy roll commits no terminal and DBOS re-runs the turn, so the execution it
+    takes away is not a cancelled turn: metering it as one would inflate the cancelled series with
+    executions nothing cancelled, against a terminal counter only a real cancel writes."""
+    reader = _metric_capture(monkeypatch)
+    turn = await _seed_turn("queued", None)
+    with pytest.raises(asyncio.CancelledError):
+        await _engine(turn, ExecutorDeathModel(), tmp_path).run()
+    points = _exported_metrics(reader)
+    (wall,) = points["ufo.turn_ms"]
+    assert (wall.count, wall.attributes["status"]) == (1, "preempted")
+    (rounds,) = points["ufo.turn_rounds_total"]
+    assert (rounds.value, rounds.attributes["status"]) == (1, "preempted")
+    assert "ufo.turn_terminal_total" not in points
+
+
+async def test_a_cancelled_execution_meters_before_the_writes_that_can_fail(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cancel handler persists the inbound so the next turn still sees it, and that write is not
+    best-effort. The execution ended when the cancel reached it, so its wall clock is recorded
+    before anything that can raise past it."""
+    reader = _metric_capture(monkeypatch)
+    turn = await _seed_turn("queued", None)
+
+    async def blob_fault(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("blob store down")
+
+    monkeypatch.setattr("ufo.loop.engine.TranscriptRepair.persist_inbound", blob_fault)
+    with pytest.raises(RuntimeError, match="blob store down"):
+        await _engine(turn, WorkflowCancelModel(), tmp_path).run()
+    points = _exported_metrics(reader)
+    (wall,) = points["ufo.turn_ms"]
+    assert (wall.count, wall.attributes["status"]) == (1, "cancelled")
+
+
+async def test_a_commit_onto_an_already_terminal_turn_counts_no_second_terminal(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The commit found the row terminal and read back the frame the cancel wrote. That terminal is
+    already counted where it was written; this execution reports only what it ran."""
+    reader = _metric_capture(monkeypatch)
+    turn = await _seed_turn("queued", None)
+    frame = await _engine(turn, CancelRacingModel(turn_id=turn.id), tmp_path).run()
+    assert frame is not None and frame.status == "cancelled"
+    points = _exported_metrics(reader)
+    (wall,) = points["ufo.turn_ms"]
+    assert (wall.count, wall.attributes["status"]) == (1, "cancelled")
+    (rounds,) = points["ufo.turn_rounds_total"]
+    assert (rounds.value, rounds.attributes["status"]) == (1, "cancelled")
+    assert "ufo.turn_terminal_total" not in points
+
+
+def test_an_execution_that_unwinds_past_its_exit_records_one_observation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The terminal is durable before the transcript write that follows it, and a write that fails
+    there re-enters the commit. The execution ended at the first exit it reached; what unwinds past
+    it is not a second turn."""
+    clock = ManualClock()
+    monkeypatch.setattr("ufo.loop.engine.time", clock)
+    reader = _metric_capture(monkeypatch)
+    meter = _TurnMeter(started=clock.now, rounds=3)
+    clock.now += ROUND_SECONDS
+    meter.exited("done")
+    clock.now += ROUND_SECONDS
+    meter.exited("failed")
+    points = _exported_metrics(reader)
+    (wall,) = points["ufo.turn_ms"]
+    assert (wall.count, wall.sum, wall.attributes["status"]) == (1, ROUND_MS, "done")
+    (rounds,) = points["ufo.turn_rounds_total"]
+    assert (rounds.value, rounds.attributes["status"]) == (3, "done")
+
+
+async def test_a_prepared_intent_turn_meters_its_wall_clock_and_no_rounds(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An intent turn dispatches the one verb its envelope names and commits, calling no model at
+    all. Its wall clock and its terminal are a turn's like any other; a zero on the round counter
+    would be no fact about it, so that series stays silent."""
+    reader = _metric_capture(monkeypatch)
+    turn = await _seed_turn("queued", None, admission_source=INTENT_ADMISSION)
+    owner = await _seeded_member(turn.workspace_id)
+    intent = ToolIntent(tool=REQUEST_CREDENTIALS_TOOL, input=REQUEST_INPUT)
+    turn = turn.model_copy(update={"inbound": intent.model_dump_json()})
+    requests = CredentialRequests(
+        fernet=Fernet(Fernet.generate_key()),
+        declared=frozenset({"sample_api"}),
+        fillable=frozenset({"sample_api"}),
+    )
+    frame = await _engine(
+        turn, object(), tmp_path, member_id=owner, requestable_credentials=requests
+    ).run_intent()
+    assert frame is not None and frame.status == "done"
+    assert frame.credential_request is not None
+    points = _exported_metrics(reader)
+    (wall,) = points["ufo.turn_ms"]
+    assert (wall.count, wall.attributes["status"]) == (1, "done")
+    (terminal,) = points["ufo.turn_terminal_total"]
+    assert (terminal.value, terminal.attributes["status"], terminal.attributes["error_class"]) == (
+        1,
+        "done",
+        "",
+    )
+    assert "ufo.turn_rounds_total" not in points
+
+
+async def test_an_interrupted_intent_turn_names_what_interrupted_it(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An intent turn is interrupted by the same two events a chat turn is, and it has to tell them
+    apart the same way: a deliberate cancel writes a terminal elsewhere, an executor pre-emption
+    writes none and lets DBOS re-run the turn."""
+    for interrupt, status in (
+        (DBOSWorkflowCancelledError("cancelled"), CANCELLED),
+        (asyncio.CancelledError(), PREEMPTED),
+    ):
+        reader = _metric_capture(monkeypatch)
+        turn = await _seed_turn("queued", None, admission_source=INTENT_ADMISSION)
+        owner = await _seeded_member(turn.workspace_id)
+        intent = ToolIntent(tool=REQUEST_CREDENTIALS_TOOL, input={})
+        turn = turn.model_copy(update={"inbound": intent.model_dump_json()})
+
+        tool = ToolDef(
+            name=REQUEST_CREDENTIALS_TOOL,
+            description="interrupted mid-dispatch",
+            input_model=_NoArgs,
+            handler=InterruptedHandler(interrupt),
+        )
+        engine = replace(
+            _engine(turn, object(), tmp_path, member_id=owner), tools=ToolRegistry((tool,))
+        )
+        with pytest.raises(type(interrupt)):
+            await engine.run_intent()
+        points = _exported_metrics(reader)
+        (wall,) = points["ufo.turn_ms"]
+        assert (wall.count, wall.attributes["status"]) == (1, status)
+        assert "ufo.turn_terminal_total" not in points
+
+
+async def test_a_refused_intent_meters_the_refusal_as_the_turn_it_failed(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refused intent commits a failed terminal without a model round, so the failing intent path
+    carries the same wall clock and outcome as any other failure — under the refusal's class."""
+    reader = _metric_capture(monkeypatch)
+    turn = await _seed_turn("queued", None, admission_source=INTENT_ADMISSION)
+    owner = await _seeded_member(turn.workspace_id)
+    intent = ToolIntent(tool=REQUEST_CREDENTIALS_TOOL, input=REQUEST_INPUT)
+    turn = turn.model_copy(update={"inbound": intent.model_dump_json()})
+    requests = CredentialRequests(
+        fernet=Fernet(Fernet.generate_key()), declared=frozenset(), fillable=frozenset()
+    )
+    frame = await _engine(
+        turn, object(), tmp_path, member_id=owner, requestable_credentials=requests
+    ).run_intent()
+    assert frame is not None and frame.status == "failed"
+    points = _exported_metrics(reader)
+    (wall,) = points["ufo.turn_ms"]
+    assert (wall.count, wall.attributes["status"]) == (1, "failed")
+    (terminal,) = points["ufo.turn_terminal_total"]
+    assert (terminal.value, terminal.attributes["status"], terminal.attributes["error_class"]) == (
+        1,
+        "failed",
+        "IntentRefused",
+    )
+    assert "ufo.turn_rounds_total" not in points
 
 
 async def test_terminal_records_cached_share_of_prompt_tokens(db: None, tmp_path: Path) -> None:
@@ -4557,7 +4965,10 @@ async def test_commit_retries_a_transient_failure_and_keeps_the_error(
     with ws(turn.workspace_id):
         async with asyncio.timeout(10):
             frame = await engine._commit(
-                "failed", [], error=ModelStreamError("APIStatusError", "boom")
+                "failed",
+                [],
+                _TurnMeter(started=0.0),
+                error=ModelStreamError("APIStatusError", "boom"),
             )
     assert frame is not None
     assert frame.error_class == "APIStatusError"
