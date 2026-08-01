@@ -834,10 +834,14 @@ def test_hosted_namespaces_hold_rollouts_until_nlb_targets_are_ready() -> None:
 def test_sandbox_proxy_nlb_routes_across_all_enabled_zones() -> None:
     for environment in DEPLOY_ENVIRONMENTS:
         terraform = (ROOT / "infra" / "envs" / environment / "ufo.tf").read_text()
+        _, start, remainder = terraform.partition("  sandbox_proxy_manifests = {")
+        assert start, environment
+        sandbox_proxy, end, _ = remainder.partition("\n  }\n\n  ufo_workload_manifests")
+        assert end, environment
         cross_zone = re.search(
             r'"service\.beta\.kubernetes\.io/aws-load-balancer-attributes"\s*=\s*'
             r'"load_balancing\.cross_zone\.enabled=true"',
-            terraform,
+            sandbox_proxy,
         )
         assert cross_zone, environment
 
@@ -860,6 +864,11 @@ def test_runtime_rollout_drains_before_the_proxy_gate(job_name: str) -> None:
     assert '--namespace "$NAMESPACE" rollout status deployment/ufo-sandbox-proxy' in script
     assert '--namespace "$NAMESPACE" rollout status deployment/ufo-ingress' in script
     assert '--namespace "$NAMESPACE" rollout status deployment/ufo-serve' in script
+    ingress = (
+        "kubectl --namespace ingress-nginx rollout status "
+        "deployment/ingress-nginx-controller --timeout=15m"
+    )
+    assert (ingress in script) is (job_name == "production_deploy")
 
 
 def test_deployment_gate_joins_every_selected_result() -> None:

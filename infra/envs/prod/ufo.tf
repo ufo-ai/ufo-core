@@ -148,10 +148,39 @@ resource "helm_release" "ingress_nginx" {
   version          = "4.11.3"
   namespace        = "ingress-nginx"
   create_namespace = true
+  timeout          = 900
 
   values = [yamlencode({
     controller = {
+      replicaCount         = 2
+      minAvailable         = 1
       ingressClassResource = { name = "nginx", default = false }
+      affinity = {
+        podAntiAffinity = {
+          requiredDuringSchedulingIgnoredDuringExecution = [{
+            labelSelector = {
+              matchLabels = {
+                "app.kubernetes.io/component" = "controller"
+                "app.kubernetes.io/instance"  = "ingress-nginx"
+                "app.kubernetes.io/name"      = "ingress-nginx"
+              }
+            }
+            topologyKey = "kubernetes.io/hostname"
+          }]
+        }
+      }
+      topologySpreadConstraints = [{
+        labelSelector = {
+          matchLabels = {
+            "app.kubernetes.io/component" = "controller"
+            "app.kubernetes.io/instance"  = "ingress-nginx"
+            "app.kubernetes.io/name"      = "ingress-nginx"
+          }
+        }
+        maxSkew           = 1
+        topologyKey       = "topology.kubernetes.io/zone"
+        whenUnsatisfiable = "DoNotSchedule"
+      }]
       service = {
         type                     = "LoadBalancer"
         loadBalancerSourceRanges = local.cloudflare_ipv4_ranges
@@ -159,6 +188,7 @@ resource "helm_release" "ingress_nginx" {
           "service.beta.kubernetes.io/aws-load-balancer-type"            = "external"
           "service.beta.kubernetes.io/aws-load-balancer-nlb-target-type" = "ip"
           "service.beta.kubernetes.io/aws-load-balancer-scheme"          = "internet-facing"
+          "service.beta.kubernetes.io/aws-load-balancer-attributes"      = "load_balancing.cross_zone.enabled=true"
         }
       }
     }

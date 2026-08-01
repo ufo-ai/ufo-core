@@ -55,6 +55,34 @@ def test_hosted_serve_receives_the_bedrock_region() -> None:
     assert '- {name: AWS_REGION, value: "${region}"}' in HOSTED_TEMPLATE.read_text()
 
 
+def test_production_ingress_survives_a_node_or_zone_loss() -> None:
+    _, start, remainder = PROD_CONFIG.read_text().partition(
+        'resource "helm_release" "ingress_nginx" {'
+    )
+    assert start
+    production, end, _ = remainder.partition("\n}\n")
+    assert end
+    assert re.search(r"^\s+replicaCount\s+= 2$", production, re.MULTILINE)
+    assert re.search(r"^\s+minAvailable\s+= 1$", production, re.MULTILINE)
+    assert re.search(r"^\s+timeout\s+= 900$", production, re.MULTILINE)
+    assert "requiredDuringSchedulingIgnoredDuringExecution" in production
+    assert "preferredDuringSchedulingIgnoredDuringExecution" not in production
+    for label in (
+        '"app.kubernetes.io/component" = "controller"',
+        '"app.kubernetes.io/instance"  = "ingress-nginx"',
+        '"app.kubernetes.io/name"      = "ingress-nginx"',
+    ):
+        assert production.count(label) == 2
+    assert 'topologyKey = "kubernetes.io/hostname"' in production
+    assert re.search(r"^\s+maxSkew\s+= 1$", production, re.MULTILINE)
+    assert 'topologyKey       = "topology.kubernetes.io/zone"' in production
+    assert 'whenUnsatisfiable = "DoNotSchedule"' in production
+    assert (
+        '"service.beta.kubernetes.io/aws-load-balancer-attributes"      = '
+        '"load_balancing.cross_zone.enabled=true"' in production
+    )
+
+
 def test_hosted_serve_rolls_all_replacements_before_draining() -> None:
     assert "maxSurge: 100%" in SERVE_DEPLOYMENT
     assert "maxUnavailable: 0" in SERVE_DEPLOYMENT

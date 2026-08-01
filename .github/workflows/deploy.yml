@@ -402,6 +402,7 @@ jobs:
           aws eks update-kubeconfig \
             --region "$AWS_REGION" \
             --name "$(terraform -chdir="$TF_DIR" output -raw cluster_name)"
+          kubectl --namespace ingress-nginx rollout status deployment/ingress-nginx-controller --timeout=15m
           NAMESPACE="$(terraform -chdir="$TF_DIR" output -raw system_namespace)"
           kubectl --namespace "$NAMESPACE" rollout status deployment/ufo-sandbox-proxy --timeout=15m
           kubectl --namespace "$NAMESPACE" rollout status deployment/ufo-ingress --timeout=15m
