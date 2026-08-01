@@ -19,6 +19,7 @@ REGENERABLE_RESOURCE_TYPES = frozenset(
         "cloudflare_workers_script",
         "cloudflare_zone_setting",
         "datadog_dashboard",
+        "datadog_metric_metadata",
         "datadog_metric_tag_configuration",
         "datadog_monitor",
         "helm_release",

@@ -293,6 +293,24 @@ def test_every_histogram_declares_the_tags_it_emits():
     assert text.count("include_percentiles = true") == len(o11y.HISTOGRAMS)
 
 
+def test_every_histogram_declares_its_unit():
+    """`emit_histogram` records milliseconds and Datadog does not learn that from the OTLP payload,
+    so the declaration is deployed config nothing else holds against the emitter. `type` is asserted
+    beside it because it is the load-bearing value: the provider reads the type back as `gauge`
+    whatever the metric is, so any other value leaves a `~ type` diff in every unattended apply."""
+    blocks = re.findall(
+        r'resource\s+"datadog_metric_metadata"\s+"\w+"\s+\{([^}]*)\}', PERCENTILE_CONFIG.read_text()
+    )
+    declared = {
+        name: (metric_type, unit)
+        for name, metric_type, unit in re.findall(
+            r'metric\s+=\s+"ufo\.(\w+)"[\s\S]*?type\s+=\s+"(\w+)"[\s\S]*?unit\s+=\s+"(\w+)"',
+            "".join(blocks),
+        )
+    }
+    assert declared == {name: ("gauge", "millisecond") for name in o11y.HISTOGRAMS}
+
+
 def test_emit_histogram_rejects_a_dimension_the_name_does_not_declare():
     """The allowlist is deployed config: a tag it omits is dropped at Datadog, so a call site that
     invents a dimension would emit a series whose new tag is readable nowhere. It fails at the one

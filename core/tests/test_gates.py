@@ -309,6 +309,7 @@ PROD_TF = Path("infra/envs/prod/datadog_aws.tf")
 INTEGRATION = 'resource "datadog_integration_aws_account" "ufo" {}\n'
 EXTERNAL_ID = 'resource "datadog_integration_aws_external_id" "ufo" {}\n'
 TAG_CONFIGURATION = 'resource "datadog_metric_tag_configuration" "turn_ms" {}\n'
+METRIC_METADATA = 'resource "datadog_metric_metadata" "turn_ms" {}\n'
 
 
 def test_shared_singleton_gate_flags_an_integration_declared_in_two_roots() -> None:
@@ -335,6 +336,16 @@ def test_shared_singleton_gate_covers_the_metric_tag_configuration() -> None:
         {TESTING_TF: TAG_CONFIGURATION, PROD_TF: TAG_CONFIGURATION}
     )
     assert failures and "datadog_metric_tag_configuration" in failures[0]
+
+
+def test_shared_singleton_gate_covers_the_metric_metadata() -> None:
+    """A metric's unit is org-wide and keyed by metric name, so a second root declaring it is two
+    states owning one object — and a unit reads correctly from either, which is what would make a
+    divergence here silent."""
+    failures = gates._shared_singleton_failures(
+        {TESTING_TF: METRIC_METADATA, PROD_TF: METRIC_METADATA}
+    )
+    assert failures and "datadog_metric_metadata" in failures[0]
 
 
 def test_env_terraform_reaches_every_environment_root() -> None:
