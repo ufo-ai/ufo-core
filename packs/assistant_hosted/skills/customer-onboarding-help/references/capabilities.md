@@ -62,8 +62,9 @@ keeps at least one seated admin, so the last one cannot be demoted.
 
 ## Scheduled and recurring work
 
-A customer can ask for recurring tasks, notifications, and reminders, or a one-time reminder, and the
-agent will run them on schedule and post the result.
+A customer can ask for recurring tasks, notifications, and reminders, and the agent will run them on
+a repeating schedule and post the result. Every scheduled task repeats; there is no one-time
+reminder.
 
 ## Slack behavior worth knowing
 

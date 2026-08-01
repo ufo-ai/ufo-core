@@ -317,6 +317,19 @@ CASES = (
         ),
     ),
     CapabilityCase(
+        "one-time-reminder",
+        "Can you remind me once tomorrow morning, or do reminders have to repeat?",
+        corpus_scorer("capabilities.md", "not-yet.md"),
+        samples=3,
+        digest_tag="onboarding:one-time-reminder",
+        rubric=(
+            "The answer says the platform has no one-time reminder and every scheduled task uses "
+            "a repeating schedule.",
+            "The answer does not say cron or invent a run_at or 'run once' field, a one-time or "
+            "one-shot toggle, or a settings page.",
+        ),
+    ),
+    CapabilityCase(
         "second-workspace",
         "We run a second brand off the same email domain. Can we get its own separate workspace so "
         "the two do not mix?",

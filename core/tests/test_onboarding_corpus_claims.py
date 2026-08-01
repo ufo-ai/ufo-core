@@ -28,6 +28,8 @@ SLACK_CONNECT = "control/src/ufo_control/gateway_slack_connect.py"
 AUDIENCE = "core/src/ufo/audience.py"
 MEMBERS = "core/src/ufo/members.py"
 SEATS = "core/src/ufo/seats.py"
+SCHEDULED_TASKS = "extensions/scheduled_tasks/ufo_ext_scheduled_tasks/tools.py"
+SCHEDULING = "core/src/ufo/scheduling.py"
 
 
 @dataclass(frozen=True)
@@ -195,6 +197,39 @@ CLAIMS = (
         phrase="Room-scoped memory",
         source=AUDIENCE,
         pattern=r'ROOM_AUDIENCE_PREFIX = "room:"',
+    ),
+    Claim(
+        claim="there is no one-time reminder — every scheduled task repeats",
+        corpus="references/not-yet.md",
+        phrase="there is no one-shot scheduling",
+        source=SCHEDULED_TASKS,
+        pattern=(
+            r"if validated_schedule is None or spec\.prompt is None:\n"
+            r'\s+raise ValueError\("creating a scheduled task requires schedule and prompt"\)'
+        ),
+    ),
+    Claim(
+        claim="there is no one-time reminder",
+        corpus="references/capabilities.md",
+        phrase="there is no one-time reminder",
+        source=SCHEDULED_TASKS,
+        pattern=(
+            r"if validated_schedule is None or spec\.prompt is None:\n"
+            r'\s+raise ValueError\("creating a scheduled task requires schedule and prompt"\)'
+        ),
+    ),
+    Claim(
+        claim="an expiry stops a scheduled task from running again",
+        corpus="references/not-yet.md",
+        phrase="A schedule that should stop can carry an expiry instead",
+        source=SCHEDULING,
+        pattern=(
+            r"if task\.expires_at is None or task\.expires_at > now:\n"
+            r"\s+return False\n"
+            r"\s+async with workspace_tx\(\) as connection:\n"
+            r"\s+await connection\.execute\(\n"
+            r"\s+sa\.delete\(tables\.scheduled_task\)"
+        ),
     ),
 )
 
