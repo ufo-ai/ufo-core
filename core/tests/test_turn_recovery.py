@@ -96,6 +96,59 @@ class _CrashOnceModel:
         yield Usage(input_tokens=2, output_tokens=2)
 
 
+@dataclass(frozen=True)
+class _CrashAfterBindFailureModel:
+    crashed: list[bool]
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        results = tuple(
+            block
+            for message in request.messages
+            if isinstance(message.content, tuple)
+            for block in message.content
+            if isinstance(block, ToolResultBlock)
+        )
+        if results:
+            if not self.crashed[0]:
+                self.crashed[0] = True
+                raise _WorkerCrash("killed after a transient bind failure")
+            aligned = (
+                len(results) == 2
+                and results[0].tool_use_id == "r1"
+                and results[0].is_error
+                and isinstance(results[0].content, str)
+                and "transient bind" in results[0].content
+                and results[1].tool_use_id == "r2"
+                and not results[1].is_error
+                and isinstance(results[1].content, str)
+                and "beta" in results[1].content
+            )
+            yield TextDelta(text="recovered" if aligned else "crossed")
+            yield Usage(input_tokens=1, output_tokens=1)
+            return
+        yield ToolCallStart(id="r1", name="read")
+        yield ToolCallDelta(
+            id="r1",
+            partial_json=json.dumps(
+                {
+                    "file_path": "/workspace/alpha.txt",
+                    "user_description": "opening alpha",
+                }
+            ),
+        )
+        yield ToolCallStart(id="r2", name="read")
+        yield ToolCallDelta(
+            id="r2",
+            partial_json=json.dumps(
+                {
+                    "file_path": "/workspace/beta.txt",
+                    "user_description": "opening beta",
+                }
+            ),
+        )
+        yield Usage(input_tokens=2, output_tokens=2)
+
+
 async def _seed_turn(model: str = "claude-opus-4-8") -> tuple[UUID, UUID, UUID]:
     workspace_id, member_id, agent_id, conversation_id, turn_id = (uuid4() for _ in range(5))
     async with workspace_tx() as connection:
@@ -281,6 +334,66 @@ async def test_crash_mid_turn_recovers_without_re_executing_completed_work(
         assert (rounds.value, rounds.attributes["status"]) == (2, "done")
         (terminal,) = points["ufo.turn_terminal_total"]
         assert (terminal.value, terminal.attributes["status"]) == (1, "done")
+    finally:
+        asyncio.get_running_loop().set_default_executor(ThreadPoolExecutor(max_workers=1))
+        loop_queue._runtime.dbos.destroy()
+        loop_queue.reset_runtime()
+        if saved is not None:
+            loop_queue.init_runtime(saved)
+
+
+@pytest.mark.serial
+async def test_bind_failure_keeps_dispatch_step_count_stable_on_recovery(
+    db: None, dbos_launched: Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    crashed = [False]
+    registry = ModelRegistry(
+        specs={
+            spec.id: replace(
+                spec,
+                client=lambda spec, key: _CrashAfterBindFailureModel(crashed=crashed),
+                key_slot="",
+                key_env="",
+            )
+            for spec in CORE_MODEL_SPECS
+        },
+        pricing=CORE_PRICING,
+        auto_model="claude-opus-4-8",
+    )
+    workspace_id, conversation_id, turn_id = await _seed_turn()
+    workspace = tmp_path / "workspaces" / str(conversation_id)
+    await asyncio.to_thread(workspace.mkdir, parents=True)
+    await asyncio.to_thread((workspace / "alpha.txt").write_text, "alpha\n")
+    await asyncio.to_thread((workspace / "beta.txt").write_text, "beta\n")
+    original_authorize = loop_queue.SandboxAuthorizer.authorize
+    second_bind_started = asyncio.Event()
+    binds = 0
+
+    async def authorize(authorizer: loop_queue.SandboxAuthorizer, acting_member_id: UUID | None):
+        nonlocal binds
+        binds += 1
+        if binds == 1:
+            async with asyncio.timeout(5):
+                await second_bind_started.wait()
+            raise RuntimeError("transient bind")
+        second_bind_started.set()
+        return await original_authorize(authorizer, acting_member_id)
+
+    monkeypatch.setattr(loop_queue.SandboxAuthorizer, "authorize", authorize)
+    saved = loop_queue._runtime
+    loop_queue.reset_runtime()
+    _install_runtime(dbos_launched, registry, tmp_path / "workspaces")
+    try:
+        with SetWorkflowID(str(turn_id)):
+            with pytest.raises(_WorkerCrash):
+                await loop_queue.turn_workflow(str(workspace_id), str(turn_id))
+
+        DBOS._recover_pending_workflows(["local"])
+        terminal = await _await_terminal(turn_id)
+
+        assert terminal.status == "done"
+        assert terminal.text == "recovered"
+        assert binds == 4
     finally:
         asyncio.get_running_loop().set_default_executor(ThreadPoolExecutor(max_workers=1))
         loop_queue._runtime.dbos.destroy()

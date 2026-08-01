@@ -88,6 +88,7 @@ from ufo.loop.engine import (
     UNTRUSTED_RESULT_OPEN,
     ActiveMessage,
     Arrival,
+    DispatchResult,
     ModelStreamError,
     TurnEngine,
     TurnParked,
@@ -1027,7 +1028,8 @@ async def test_dispatch_binds_only_active_message_requesters_and_strips_the_ref(
         arrival: ActiveMessage(member_id=uuid4(), rendered="arrival request"),
     }
 
-    bound = await engine._dispatch(
+    bound = await _dispatch(
+        engine,
         context,
         ToolUseBlock(
             id="bound",
@@ -1036,12 +1038,14 @@ async def test_dispatch_binds_only_active_message_requesters_and_strips_the_ref(
         ),
         requesters,
     )
-    common = await engine._dispatch(
+    common = await _dispatch(
+        engine,
         context,
         ToolUseBlock(id="common", name="authority_probe", input={}),
         requesters,
     )
-    founding = await engine._dispatch(
+    founding = await _dispatch(
+        engine,
         context,
         ToolUseBlock(
             id="founding",
@@ -1077,7 +1081,8 @@ async def test_dispatch_binds_only_active_message_requesters_and_strips_the_ref(
     assert authorized == [requesters[arrival].member_id, None, founder]
 
     for index, invalid in enumerate((str(uuid4()), "not-a-ref", None)):
-        result = await engine._dispatch(
+        result = await _dispatch(
+            engine,
             context,
             ToolUseBlock(
                 id=f"invalid-{index}",
@@ -1694,6 +1699,23 @@ def _dispatch_context(engine: TurnEngine) -> ToolContext:
     )
 
 
+async def _dispatch(
+    engine: TurnEngine,
+    context: ToolContext,
+    call: ToolUseBlock,
+    requesters: dict[UUID, ActiveMessage],
+) -> ToolResultBlock:
+    bound = await engine._bind_or_error(context, call, requesters)
+    return await engine._dispatch(bound)
+
+
+async def _dispatch_step(
+    engine: TurnEngine, context: ToolContext, call: ToolUseBlock
+) -> DispatchResult:
+    bound = await engine._bind_or_error(context, call, {})
+    return await engine._dispatch_step(bound)
+
+
 async def test_a_call_whose_requester_will_not_bind_counts_as_an_unusable_call(
     db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1713,7 +1735,8 @@ async def test_a_call_whose_requester_will_not_bind_counts_as_an_unusable_call(
         ),
     )
     with ws(turn.workspace_id):
-        result = await engine._dispatch(
+        result = await _dispatch(
+            engine,
             _dispatch_context(engine),
             ToolUseBlock(id="c1", name="ok_tool", input={"requested_by": "not-a-ref"}),
             {},
@@ -1747,8 +1770,8 @@ async def test_a_store_fault_reached_through_the_bind_is_the_engines_and_not_the
         sandbox_for=unreachable_store,
     )
     with ws(turn.workspace_id):
-        result = await engine._dispatch(
-            _dispatch_context(engine), ToolUseBlock(id="c1", name="ok_tool", input={}), {}
+        result = await _dispatch(
+            engine, _dispatch_context(engine), ToolUseBlock(id="c1", name="ok_tool", input={}), {}
         )
     assert result.is_error
     assert [
@@ -1781,8 +1804,8 @@ async def test_a_cancelled_bind_counts_the_same_end_the_step_would_have(
         sandbox_for=cancelled_mid_bind,
     )
     with ws(turn.workspace_id), pytest.raises(asyncio.CancelledError):
-        await engine._dispatch(
-            _dispatch_context(engine), ToolUseBlock(id="c1", name="ok_tool", input={}), {}
+        await _dispatch(
+            engine, _dispatch_context(engine), ToolUseBlock(id="c1", name="ok_tool", input={}), {}
         )
     assert [
         dict(point.attributes) for point in _exported_metrics(reader)["ufo.tool_call_total"]
@@ -1823,8 +1846,8 @@ async def test_a_gating_hook_that_fails_closed_is_not_counted_as_policy(
         ),
     )
     with ws(turn.workspace_id):
-        result = await engine._dispatch_step(
-            _dispatch_context(engine), ToolUseBlock(id="c1", name="ok_tool", input={})
+        result = await _dispatch_step(
+            engine, _dispatch_context(engine), ToolUseBlock(id="c1", name="ok_tool", input={})
         )
     assert result.is_error and "failed closed" in result.text
     assert [
@@ -1849,8 +1872,8 @@ async def test_a_dispatch_that_raises_past_its_handler_counts_the_step_it_failed
         _engine(turn, EchoModel(), tmp_path), tools=ToolRegistry((_image_result_tool("shot"),))
     )
     with ws(turn.workspace_id), pytest.raises(RuntimeError, match="blob store down"):
-        await engine._dispatch_step(
-            _dispatch_context(engine), ToolUseBlock(id="c1", name="shot", input={})
+        await _dispatch_step(
+            engine, _dispatch_context(engine), ToolUseBlock(id="c1", name="shot", input={})
         )
     assert [
         dict(point.attributes) for point in _exported_metrics(reader)["ufo.tool_call_total"]
@@ -1876,8 +1899,8 @@ async def test_a_cancelled_dispatch_records_the_cancellation_and_not_a_success(
         ),
     )
     with ws(turn.workspace_id), pytest.raises(asyncio.CancelledError):
-        await engine._dispatch_step(
-            _dispatch_context(engine), ToolUseBlock(id="c1", name="ok_tool", input={})
+        await _dispatch_step(
+            engine, _dispatch_context(engine), ToolUseBlock(id="c1", name="ok_tool", input={})
         )
     assert [
         dict(point.attributes) for point in _exported_metrics(reader)["ufo.tool_call_total"]
@@ -1904,8 +1927,8 @@ async def test_a_handler_raising_untrusted_content_keeps_its_own_series(
         ),
     )
     with ws(turn.workspace_id):
-        result = await engine._dispatch_step(
-            _dispatch_context(engine), ToolUseBlock(id="c1", name="ok_tool", input={})
+        result = await _dispatch_step(
+            engine, _dispatch_context(engine), ToolUseBlock(id="c1", name="ok_tool", input={})
         )
     assert result.is_error
     assert [
@@ -4234,15 +4257,15 @@ async def test_dispatch_bounds_an_oversize_error_result_and_leaves_within_cap_un
         grants=engine.grants,
     )
 
-    big_error = await engine._dispatch(
-        context, ToolUseBlock(id="c2", name="big_error", input={}), {}
+    big_error = await _dispatch(
+        engine, context, ToolUseBlock(id="c2", name="big_error", input={}), {}
     )
     assert big_error.is_error
     assert isinstance(big_error.content, str)
     assert big_error.content.startswith("b" * MAX_TOOL_RESULT_CHARS)
     assert big_error.content.endswith(f"\n…[truncated 500 of {total} chars]")
 
-    small = await engine._dispatch(context, ToolUseBlock(id="c3", name="small", input={}), {})
+    small = await _dispatch(engine, context, ToolUseBlock(id="c3", name="small", input={}), {})
     assert small.content == "c" * (MAX_TOOL_RESULT_CHARS - 1)
 
 
@@ -4268,7 +4291,7 @@ async def test_dispatch_offloads_an_oversize_nonerror_result_and_keeps_a_preview
         artifact_token_secret=engine.artifact_token_secret,
         grants=engine.grants,
     )
-    block = await engine._dispatch(context, ToolUseBlock(id="c1", name="big", input={}), {})
+    block = await _dispatch(engine, context, ToolUseBlock(id="c1", name="big", input={}), {})
     assert not block.is_error
     path = f"{TOOL_OUTPUT_DIR}/c1.txt"
     assert block.content == full[:TOOL_RESULT_PREVIEW_CHARS] + OFFLOAD_NOTICE.format(
@@ -4307,7 +4330,7 @@ async def test_dispatch_bounds_the_result_when_the_offload_write_fails(
     )
 
     with caplog.at_level(logging.INFO, logger="ufo"):
-        block = await engine._dispatch(context, ToolUseBlock(id="c1", name="big", input={}), {})
+        block = await _dispatch(engine, context, ToolUseBlock(id="c1", name="big", input={}), {})
 
     assert not block.is_error
     assert block.content == _bounded(full)
@@ -4346,7 +4369,7 @@ async def test_dispatch_bounds_the_result_when_the_offload_directory_cannot_be_r
     )
 
     with caplog.at_level(logging.INFO, logger="ufo"):
-        block = await engine._dispatch(context, ToolUseBlock(id="c1", name="big", input={}), {})
+        block = await _dispatch(engine, context, ToolUseBlock(id="c1", name="big", input={}), {})
 
     assert not block.is_error
     assert block.content == _bounded(full)
@@ -4377,7 +4400,8 @@ async def test_dispatch_offload_preview_is_walled_for_an_untrusted_tool(
         artifact_token_secret=engine.artifact_token_secret,
         grants=engine.grants,
     )
-    block = await engine._dispatch(
+    block = await _dispatch(
+        engine,
         context,
         ToolUseBlock(id="c1", name="big_untrusted", input={}),
         {},
@@ -4418,7 +4442,7 @@ async def test_dispatch_offloads_on_the_handler_text_not_the_walled_result(
         artifact_token_secret=engine.artifact_token_secret,
         grants=engine.grants,
     )
-    block = await engine._dispatch(context, ToolUseBlock(id="c1", name="at_cap", input={}), {})
+    block = await _dispatch(engine, context, ToolUseBlock(id="c1", name="at_cap", input={}), {})
     assert not block.is_error
     assert block.content == (
         UNTRUSTED_RESULT_NOTICE.format(source="at_cap")
@@ -4453,7 +4477,9 @@ async def test_dispatch_walls_a_result_marked_untrusted_by_its_handler(
         artifact_token_secret=engine.artifact_token_secret,
         grants=engine.grants,
     )
-    block = await engine._dispatch(context, ToolUseBlock(id="c1", name="spawn_probe", input={}), {})
+    block = await _dispatch(
+        engine, context, ToolUseBlock(id="c1", name="spawn_probe", input={}), {}
+    )
     assert not block.is_error
     assert block.content == (
         UNTRUSTED_RESULT_NOTICE.format(source="spawn_probe")
@@ -4485,7 +4511,9 @@ async def test_dispatch_walls_an_untrusted_content_error(db: None, tmp_path: Pat
         artifact_token_secret=engine.artifact_token_secret,
         grants=engine.grants,
     )
-    block = await engine._dispatch(context, ToolUseBlock(id="c1", name="spawn_probe", input={}), {})
+    block = await _dispatch(
+        engine, context, ToolUseBlock(id="c1", name="spawn_probe", input={}), {}
+    )
     assert block.is_error
     assert block.content.startswith(UNTRUSTED_RESULT_NOTICE.format(source="spawn_probe"))
     assert block.content.endswith(UNTRUSTED_RESULT_CLOSE)
@@ -4523,7 +4551,7 @@ async def test_dispatch_folds_tool_image_content_into_the_tool_result_block(
         artifact_token_secret=engine.artifact_token_secret,
         grants=engine.grants,
     )
-    result = await engine._dispatch(context, ToolUseBlock(id="c1", name="shot", input={}), {})
+    result = await _dispatch(engine, context, ToolUseBlock(id="c1", name="shot", input={}), {})
     assert not result.is_error
     assert result.content == (
         TextBlock(text="chart.png"),
@@ -4568,7 +4596,7 @@ async def test_dispatch_step_offloads_image_bytes_to_a_blob_reference(
     )
     call = ToolUseBlock(id="c1", name="shot", input={})
 
-    step = await engine._dispatch_step(context, call)
+    step = await _dispatch_step(engine, context, call)
     serialized = step.model_dump_json()
     assert payload not in serialized
     assert len(serialized) < 1_000
@@ -4578,7 +4606,7 @@ async def test_dispatch_step_offloads_image_bytes_to_a_blob_reference(
     assert ref.media_type == "image/png"
     assert (await engine.blob.get(ref.blob_key)).decode() == payload
 
-    rehydrated = await engine._dispatch(context, call, {})
+    rehydrated = await _dispatch(engine, context, call, {})
     assert rehydrated.content == (
         TextBlock(text="chart.png"),
         ImageBlock(source=ImageSource(media_type="image/png", data=payload)),
@@ -4620,7 +4648,7 @@ async def test_dispatch_step_bounds_oversized_tool_images(db: None, tmp_path: Pa
         grants=engine.grants,
     )
 
-    step = await engine._dispatch_step(context, ToolUseBlock(id="c1", name="shot", input={}))
+    step = await _dispatch_step(engine, context, ToolUseBlock(id="c1", name="shot", input={}))
 
     bounded_ref, small_ref = step.image_refs
     stored = Image.open(BytesIO(b64decode((await engine.blob.get(bounded_ref.blob_key)).decode())))
@@ -4658,7 +4686,7 @@ async def test_dispatch_step_survives_a_decompression_bomb(
     )
 
     with caplog.at_level("INFO", logger="ufo"):
-        step = await engine._dispatch_step(context, ToolUseBlock(id="c1", name="shot", input={}))
+        step = await _dispatch_step(engine, context, ToolUseBlock(id="c1", name="shot", input={}))
 
     (image_ref,) = step.image_refs
     assert (await engine.blob.get(image_ref.blob_key)).decode() == payload
@@ -4700,7 +4728,7 @@ async def test_dispatch_keeps_an_error_result_str_typed_and_drops_image_content(
         artifact_token_secret=engine.artifact_token_secret,
         grants=engine.grants,
     )
-    result = await engine._dispatch(context, ToolUseBlock(id="c1", name="shot", input={}), {})
+    result = await _dispatch(engine, context, ToolUseBlock(id="c1", name="shot", input={}), {})
     assert result.is_error
     assert result.content == "render failed"
 

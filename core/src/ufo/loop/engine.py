@@ -2,8 +2,8 @@
 terminal commit.
 
 `run()` is the body of the `turn_workflow` DBOS workflow. Its non-deterministic, side-effecting
-units are DBOS steps — each model round (`_stream_once`), each tool dispatch (`_dispatch`), each
-arrival drain (`_claim_arrivals`), and each compaction (`Compaction._compact`). On a crash the
+units are DBOS steps — each model round (`_stream_once`), each tool dispatch (`_dispatch_step`),
+each arrival drain (`_claim_arrivals`), and each compaction (`Compaction._compact`). On a crash the
 workflow re-dispatches under the same `workflow_id`: every recorded step replays from DBOS's
 `operation_outputs` without re-executing — completed rounds are not re-called, completed tools not
 re-applied, drained arrivals not re-consumed — and execution resumes at the first unrecorded step.
@@ -349,8 +349,25 @@ class ActiveMessage:
     rendered: str
 
 
+@dataclass(frozen=True)
+class _BoundToolCall:
+    context: ToolContext
+    call: ToolUseBlock
+
+
+@dataclass(frozen=True)
+class _RejectedToolCall:
+    call: ToolUseBlock
+    text: str
+    outcome: str
+    error_class: str
+
+
+type _DispatchInput = _BoundToolCall | _RejectedToolCall
+
+
 class ImageRef(BaseModel):
-    """A tool-result image the `_dispatch` step offloaded to the blob store instead of returning its
+    """A tool-result image `_dispatch_step` offloaded to the blob store instead of returning its
     base64 bytes inline. A DBOS step's output is serialized into the system-DB step log, so a
     browser screenshot returned inline would write tens of KB of base64 into every checkpoint (and
     replay it on recovery) — the exact regression the offload avoids. The blob key is deterministic
@@ -363,7 +380,7 @@ class ImageRef(BaseModel):
 
 
 class DispatchResult(BaseModel):
-    """The `_dispatch` step's memoized output: a tool result decomposed into its serialization-safe
+    """The `_dispatch_step` memoized output: a tool result decomposed into serialization-safe
     parts — the text (already bounded), the error flag, and any image blocks replaced by blob
     references. Keeping images out of `content` keeps the step log bounded even for a
     screenshot-heavy browser turn; the workflow reassembles the `ToolResultBlock` (rehydrating the
@@ -996,8 +1013,8 @@ class TurnEngine:
                         member_id=self.turn.speaker_member_id, rendered=self.turn.inbound
                     )
                 }
-                bound_context, bound_call = await self._bind_requester(context, call, requesters)
-                result = await self._dispatch_step(bound_context, bound_call)
+                bound = await self._bind_or_error(context, call, requesters)
+                result = await self._dispatch_step(bound)
                 if result.is_error:
                     frame = await self._commit(
                         "failed", usage_events, meter, error=IntentRefused(result.text)
@@ -1005,19 +1022,19 @@ class TurnEngine:
                 else:
                     dispatched_result = (
                         ToolResultBlock(
-                            tool_use_id=bound_call.id,
+                            tool_use_id=call.id,
                             content=result.text,
                             is_error=False,
                         ),
                     )
                     connect_request = _final_act(
-                        (bound_call,),
+                        (call,),
                         dispatched_result,
                         CONNECT_ACCOUNT_TOOL,
                         ConnectRequest,
                     )
                     credential_request = _final_act(
-                        (bound_call,),
+                        (call,),
                         dispatched_result,
                         REQUEST_CREDENTIALS_TOOL,
                         CredentialRequest,
@@ -1236,8 +1253,19 @@ class TurnEngine:
                         ),
                     )
                     continue
+                bound = await asyncio.gather(
+                    *(self._bind_or_error(context, call, requesters) for call in segment),
+                    return_exceptions=True,
+                )
+                failures = [outcome for outcome in bound if isinstance(outcome, BaseException)]
+                if failures:
+                    raise failures[0]
                 dispatched = await asyncio.gather(
-                    *(self._dispatch(context, call, requesters) for call in segment),
+                    *(
+                        self._dispatch(item)
+                        for item in bound
+                        if not isinstance(item, BaseException)
+                    ),
                     return_exceptions=True,
                 )
                 failures = [outcome for outcome in dispatched if isinstance(outcome, BaseException)]
@@ -1734,49 +1762,32 @@ class TurnEngine:
             _loaded_skill_closures(messages, self.skills), preloaded=self.preload
         )
 
-    async def _dispatch(
+    async def _bind_or_error(
         self,
         context: ToolContext,
         call: ToolUseBlock,
         requesters: dict[UUID, ActiveMessage],
-    ) -> ToolResultBlock:
-        """One tool call, assembled from its memoized `_dispatch_step`. The step returns the result
-        with any image blocks offloaded to blob references (so no image bytes serialize into the
-        step log); here — outside the step, in the workflow body — the referenced images are read
-        back from the blob and rehydrated into the `ToolResultBlock` the model sees. The blob read
-        is a deterministic keyed fetch, so a crash-recovery replay reassembles the same result from
-        the same blobs the first run wrote; the rehydrated bytes ride a step *input* (the messages
-        list) which DBOS does not persist, so they never re-enter the checkpoint.
-
-        A `requested_by` the model wrote that names no active inbound message fails the bind, and
-        the model reads that as the tool's error — the same unusable-call class the step counts, so
-        it is counted here, where the step it precedes never runs. Only the ref's own `ValueError`
-        is the model's doing: the bind also resolves the acting member's sandbox, which reaches a
-        store, so a fault out of that is the engine's and counts as one. A cancellation landing on
-        the bind counts as the same end the step's own does, and is re-raised rather than folded
-        into an is_error result — cancelling a turn must not read to the model as a tool that
-        failed. This runs in the workflow body rather than a step, so a recovery attempt that
-        re-executes the bind counts it again: the attempt genuinely re-ran it."""
+    ) -> _DispatchInput:
         started = time.monotonic()
         try:
             context, call = await self._bind_requester(context, call, requesters)
+            return _BoundToolCall(context=context, call=call)
         except asyncio.CancelledError as error:
             _meter_dispatch(self.tools, call, started, "step_failed", type(error).__name__)
             raise
         except Exception as error:
-            _meter_dispatch(
-                self.tools,
-                call,
-                started,
-                "invalid_call" if isinstance(error, ValueError) else "step_failed",
-                type(error).__name__,
+            return _RejectedToolCall(
+                call=call,
+                text=f"{type(error).__name__}: {error}",
+                outcome="invalid_call" if isinstance(error, ValueError) else "step_failed",
+                error_class=type(error).__name__,
             )
-            return ToolResultBlock(
-                tool_use_id=call.id,
-                content=f"{type(error).__name__}: {error}",
-                is_error=True,
-            )
-        result = await self._dispatch_step(context, call)
+
+    def _dispatch(self, bound: _DispatchInput) -> Awaitable[ToolResultBlock]:
+        return self._dispatch_result(self._dispatch_step(bound))
+
+    async def _dispatch_result(self, step: Awaitable[DispatchResult]) -> ToolResultBlock:
+        result = await step
         if not result.image_refs:
             return ToolResultBlock(
                 tool_use_id=result.tool_use_id, content=result.text, is_error=result.is_error
@@ -1866,11 +1877,13 @@ class TurnEngine:
         return path
 
     @DBOS.step(preemptible=True)
-    async def _dispatch_step(self, context: ToolContext, call: ToolUseBlock) -> DispatchResult:
-        """Run one tool call end to end, memoized as a DBOS step keyed after its round: the recorded
-        `DispatchResult` replays on a crash-recovery re-run without re-invoking the handler, so a
-        side-effecting tool's external write is never re-applied. A bad name or bad arguments become
-        an is_error result before any hook fires (there is no validated input to police). Then
+    async def _dispatch_step(self, bound: _DispatchInput) -> DispatchResult:
+        """Run one resolved binding in the DBOS step claimed for it in model order. A rejected bind
+        claims the same step and records its error, so bind latency or outcome cannot change step
+        order or count on recovery. The recorded `DispatchResult` replays without rebinding or
+        re-invoking the handler, so a side-effecting tool's external write is never re-applied. A
+        bad requester, name, or arguments becomes an is_error result before any hook fires (there
+        is no validated input to police). Then
         pre_tool_use may Deny
         (the tool never dispatches) or ModifyInput (fold the args); the handler runs in the sandbox
         with the folded args (a raising handler is an is_error result). A non-error result over
@@ -1909,9 +1922,18 @@ class TurnEngine:
         like a policy Deny and counts as `hook_failed`, so an extension hook that crashes or hangs
         is not read as policy. Inside the step is where it counts: the recorded result replays on a
         crash-recovery re-run without re-entering the body, so a replayed turn re-counts nothing."""
+        call = bound.call
         started = time.monotonic()
         outcome, error_class = "ok", None
         try:
+            if isinstance(bound, _RejectedToolCall):
+                outcome, error_class = bound.outcome, bound.error_class
+                return DispatchResult(
+                    tool_use_id=call.id,
+                    text=bound.text,
+                    is_error=True,
+                )
+            context = bound.context
             await self._publish_activity(call)
             try:
                 tool = self.tools.get(call.name)
