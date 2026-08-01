@@ -2,7 +2,6 @@
 
 import asyncio
 import os
-import shutil
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -50,11 +49,6 @@ class BlobStore(Protocol):
 
     async def put(self, key: str, data: bytes) -> None: ...
 
-    async def put_file(self, key: str, source: Path) -> None:
-        """Store a local file's bytes under `key`, streaming from disk so the whole file never sits
-        in memory — the large-attachment write, distinct from the in-memory `put`."""
-        ...
-
     async def get(self, key: str) -> bytes: ...
 
     async def exists(self, key: str) -> bool: ...
@@ -85,13 +79,6 @@ class FilesystemBlobStore:
         await asyncio.to_thread(path.parent.mkdir, parents=True, exist_ok=True)
         temp = path.with_name(f"{path.name}.{uuid4().hex}.tmp")
         await asyncio.to_thread(temp.write_bytes, data)
-        await asyncio.to_thread(temp.replace, path)
-
-    async def put_file(self, key: str, source: Path) -> None:
-        path = self._resolve(key)
-        await asyncio.to_thread(path.parent.mkdir, parents=True, exist_ok=True)
-        temp = path.with_name(f"{path.name}.{uuid4().hex}.tmp")
-        await asyncio.to_thread(shutil.copyfile, source, temp)
         await asyncio.to_thread(temp.replace, path)
 
     async def get(self, key: str) -> bytes:
@@ -198,40 +185,6 @@ class S3BlobStore:
     async def put(self, key: str, data: bytes) -> None:
         client = await self._client()
         await client.put_object(Bucket=self.bucket, Key=key, Body=data)
-
-    async def put_file(self, key: str, source: Path) -> None:
-        stat = await asyncio.to_thread(source.stat)
-        size = stat.st_size
-        client = await self._client()
-        if size == 0:
-            await client.put_object(Bucket=self.bucket, Key=key, Body=b"")
-            return
-        created = await client.create_multipart_upload(Bucket=self.bucket, Key=key)
-        upload_id = created["UploadId"]
-        fd = await asyncio.to_thread(os.open, source, os.O_RDONLY)
-        try:
-            parts: list[dict[str, object]] = []
-            for number, offset in enumerate(range(0, size, S3_MULTIPART_PART_BYTES), start=1):
-                chunk = await asyncio.to_thread(os.pread, fd, S3_MULTIPART_PART_BYTES, offset)
-                part = await client.upload_part(
-                    Bucket=self.bucket,
-                    Key=key,
-                    PartNumber=number,
-                    UploadId=upload_id,
-                    Body=chunk,
-                )
-                parts.append({"ETag": part["ETag"], "PartNumber": number})
-            await client.complete_multipart_upload(
-                Bucket=self.bucket,
-                Key=key,
-                UploadId=upload_id,
-                MultipartUpload={"Parts": parts},
-            )
-        except Exception:
-            await client.abort_multipart_upload(Bucket=self.bucket, Key=key, UploadId=upload_id)
-            raise
-        finally:
-            await asyncio.to_thread(os.close, fd)
 
     async def get(self, key: str) -> bytes:
         client = await self._client()
