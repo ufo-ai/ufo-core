@@ -156,7 +156,7 @@ def test_pull_request_plans_active_deployment_inputs() -> None:
     assert isinstance(environment, dict)
     assert environment["DEPLOY_PATHS_PATTERN"] == (
         r"^(\.github/workflows/deploy\.yml$|"
-        r"infra/(envs/(testing|edge)|modules/(platform|edge)|templates)/)"
+        r"infra/(envs/(testing|prod|edge)|modules/(platform|edge)|templates)/)"
     )
     script = selector["run"]
     assert isinstance(script, str)
@@ -191,12 +191,7 @@ def test_runtime_authorization_changes_are_split_across_deploys() -> None:
             gate.validate_deploy_change(("infra/modules/platform/iam.tf", runtime_path))
 
 
-def test_select_step_executes_the_gate_for_non_pull_request_triggers(tmp_path: Path) -> None:
-    """The `BASE_SHA`/`HEAD_SHA` fallbacks exist for push and `workflow_dispatch` — the triggers
-    where a real IAM+runtime deploy lands — so prove the script the runner executes: it resolves
-    the fallbacks (including the literal `main` base), runs the real gate over the real diff, and
-    a boundary-spanning dispatch dies before any deploy output. String assertions on the YAML
-    cannot prove execution."""
+def test_select_step_executes_the_gate_across_triggers(tmp_path: Path) -> None:
     step = _step("changes", "Select deployment work")
     environment = step["env"]
     assert isinstance(environment, dict)
@@ -255,6 +250,14 @@ def test_select_step_executes_the_gate_for_non_pull_request_triggers(tmp_path: P
 
     git("init", "-b", "main")
     seed = commit()
+
+    git("checkout", "-b", "production-plan")
+    production_head = commit("infra/envs/prod/main.tf")
+    code, output, stderr = run_select("pull_request", seed, production_head)
+    assert code == 0, stderr
+    assert "deploy=true" in output
+
+    git("checkout", "main")
     runtime_head = commit("core/src/ufo/serve.py")
 
     code, output, stderr = run_select("push", seed, runtime_head)
@@ -298,6 +301,41 @@ def test_plans_run_only_for_selected_deployment_inputs() -> None:
         assert isinstance(job, dict)
         assert job["needs"] == "changes"
         assert job["if"] == "needs.changes.outputs.deploy == 'true'"
+
+    production = jobs["production"]
+    assert isinstance(production, dict)
+    assert production["needs"] == "changes"
+    assert production["if"] == (
+        "github.event_name == 'pull_request' && needs.changes.outputs.deploy == 'true'"
+    )
+
+
+def test_pull_requests_plan_production_foundation_without_applying() -> None:
+    jobs = _workflow(WORKFLOWS / "deploy.yml")["jobs"]
+    assert isinstance(jobs, dict)
+    rollout = jobs["rollout"]
+    assert isinstance(rollout, dict)
+    rollout_steps = rollout["steps"]
+    assert isinstance(rollout_steps, list)
+    image_tag = next(step for step in rollout_steps if step.get("name") == "Image tag")
+    assert 'echo "IMAGE_TAG=$TAG" >> "$GITHUB_ENV"' in image_tag["run"]
+
+    production = jobs["production"]
+    assert isinstance(production, dict)
+    assert production["env"] == {"TF_DIR": "infra/envs/prod"}
+    steps = production["steps"]
+    assert isinstance(steps, list)
+    names = [step.get("name") for step in steps if isinstance(step, dict)]
+    assert "Terraform init" in names
+    assert "Terraform foundation plan" in names
+    assert not any("terraform apply" in step.get("run", "") for step in steps)
+    plan = next(step for step in steps if step.get("name") == "Terraform foundation plan")
+    assert plan["working-directory"] == "${{ env.TF_DIR }}"
+    assert plan["env"] == {"TF_VAR_cloudflare_api_token": "${{ secrets.CLOUDFLARE_API_TOKEN }}"}
+    assert (
+        plan["run"] == "terraform plan -input=false -no-color -lock=false "
+        "-target=module.platform.module.eks"
+    )
 
 
 def test_only_testing_owns_account_global_resources() -> None:
@@ -470,12 +508,12 @@ def test_runtime_rollout_drains_before_the_proxy_gate() -> None:
     assert '--namespace "$NAMESPACE" rollout status deployment/ufo-serve' in script
 
 
-def test_deployment_gate_joins_platform_and_edge_results() -> None:
+def test_deployment_gate_joins_every_selected_result() -> None:
     jobs = _workflow(WORKFLOWS / "deploy.yml")["jobs"]
     assert isinstance(jobs, dict)
     deploy = jobs["deploy"]
     assert isinstance(deploy, dict)
-    assert deploy["needs"] == ["changes", "rollout", "edge"]
+    assert deploy["needs"] == ["changes", "rollout", "edge", "production"]
     assert deploy["if"] == "always()"
     steps = deploy["steps"]
     assert isinstance(steps, list)
@@ -485,14 +523,52 @@ def test_deployment_gate_joins_platform_and_edge_results() -> None:
     assert environment == {
         "CHANGES_RESULT": "${{ needs.changes.result }}",
         "DEPLOY_SELECTED": "${{ needs.changes.outputs.deploy }}",
+        "EVENT_NAME": "${{ github.event_name }}",
         "ROLLOUT_RESULT": "${{ needs.rollout.result }}",
         "EDGE_RESULT": "${{ needs.edge.result }}",
+        "PRODUCTION_RESULT": "${{ needs.production.result }}",
     }
     script = gate["run"]
     assert isinstance(script, str)
     for variable in environment:
         assert f'"${variable}"' in script
     assert gate["id"] == "gate"
+
+
+@pytest.mark.parametrize(
+    ("selected", "event", "rollout", "edge", "production", "accepted"),
+    [
+        ("true", "pull_request", "success", "success", "success", True),
+        ("true", "push", "success", "success", "skipped", True),
+        ("false", "push", "skipped", "skipped", "skipped", True),
+        ("true", "pull_request", "success", "success", "skipped", False),
+        ("true", "push", "success", "success", "success", False),
+        ("true", "push", "failure", "success", "skipped", False),
+        ("false", "push", "skipped", "skipped", "success", False),
+        ("invalid", "push", "success", "success", "skipped", False),
+    ],
+)
+def test_deployment_gate_accepts_only_expected_results(
+    selected: str,
+    event: str,
+    rollout: str,
+    edge: str,
+    production: str,
+    accepted: bool,
+) -> None:
+    gate = _step("deploy", "Require the selected deployment work")
+    script = gate["run"]
+    assert isinstance(script, str)
+    environment = {
+        "CHANGES_RESULT": "success",
+        "DEPLOY_SELECTED": selected,
+        "EDGE_RESULT": edge,
+        "EVENT_NAME": event,
+        "PRODUCTION_RESULT": production,
+        "ROLLOUT_RESULT": rollout,
+    }
+    run = subprocess.run(["bash", "-e", "-c", script], env=os.environ | environment)
+    assert (run.returncode == 0) is accepted
 
 
 def test_every_main_deploy_conclusion_reaches_datadog(tmp_path: Path) -> None:

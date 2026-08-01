@@ -2,9 +2,8 @@ name: Deploy (testing)
 
 # Merge to main → build the images at the commit short SHA, push to ECR (immutable, skip-if-present
 # so re-runs are idempotent), publish the E2B sandbox template, then terraform apply pins that tag —
-# the hosted-service rollout. Every PR gets one `deployment` gate: changes to testing or edge inputs
-# plan both Terraform roots; everything else is a no-op. workflow_dispatch redeploys a
-# chosen tag. AWS auth is GitHub OIDC → the github-deploy role (no static keys). The edge job
+# the hosted-service rollout. workflow_dispatch redeploys a chosen tag. AWS auth is GitHub OIDC →
+# the github-deploy role (no static keys). The edge job
 # applies envs/edge — the zone-level Cloudflare worker fronting both apexes — from its own state,
 # in parallel with the platform rollout.
 on:
@@ -51,7 +50,7 @@ jobs:
         id: select
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before || 'origin/main' }}
-          DEPLOY_PATHS_PATTERN: ^(\.github/workflows/deploy\.yml$|infra/(envs/(testing|edge)|modules/(platform|edge)|templates)/)
+          DEPLOY_PATHS_PATTERN: ^(\.github/workflows/deploy\.yml$|infra/(envs/(testing|prod|edge)|modules/(platform|edge)|templates)/)
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           git diff --name-only --no-renames "$BASE_SHA...$HEAD_SHA" > "$RUNNER_TEMP/deploy-paths"
@@ -217,9 +216,37 @@ jobs:
           TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: terraform apply -auto-approve -input=false
 
+  production:
+    needs: changes
+    if: github.event_name == 'pull_request' && needs.changes.outputs.deploy == 'true'
+    runs-on: ubuntu-latest
+    env:
+      TF_DIR: infra/envs/prod
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.14.9"
+
+      - name: Terraform init
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform init -input=false
+
+      - name: Terraform foundation plan
+        working-directory: ${{ env.TF_DIR }}
+        env:
+          TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: terraform plan -input=false -no-color -lock=false -target=module.platform.module.eks
+
   deploy:
     name: deployment
-    needs: [changes, rollout, edge]
+    needs: [changes, rollout, edge, production]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -228,18 +255,26 @@ jobs:
         env:
           CHANGES_RESULT: ${{ needs.changes.result }}
           DEPLOY_SELECTED: ${{ needs.changes.outputs.deploy }}
+          EVENT_NAME: ${{ github.event_name }}
           ROLLOUT_RESULT: ${{ needs.rollout.result }}
           EDGE_RESULT: ${{ needs.edge.result }}
+          PRODUCTION_RESULT: ${{ needs.production.result }}
         run: |
           test "$CHANGES_RESULT" = "success"
           case "$DEPLOY_SELECTED" in
             true)
               test "$ROLLOUT_RESULT" = "success"
               test "$EDGE_RESULT" = "success"
+              if [ "$EVENT_NAME" = "pull_request" ]; then
+                test "$PRODUCTION_RESULT" = "success"
+              else
+                test "$PRODUCTION_RESULT" = "skipped"
+              fi
               ;;
             false)
               test "$ROLLOUT_RESULT" = "skipped"
               test "$EDGE_RESULT" = "skipped"
+              test "$PRODUCTION_RESULT" = "skipped"
               echo "No deployment-relevant changes."
               ;;
             *)
