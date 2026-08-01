@@ -23,6 +23,11 @@ MONITORS = {
 RUN_URL = "https://github.com/metalcraftai/ufo/actions/runs/30120902872"
 DATADOG_STATUS_OK = 0
 DATADOG_STATUS_CRITICAL = 2
+STORAGE_QUERY = (
+    "min(last_30m):avg:aws.rds.free_storage_space{dbinstanceidentifier:"
+    "${module.platform.db_instance_identifier}} / avg:aws.rds.total_storage_space"
+    "{dbinstanceidentifier:${module.platform.db_instance_identifier}} < 0.05"
+)
 
 
 def _code(source: str) -> str:
@@ -232,6 +237,14 @@ def _facets(reported: dict[str, object]) -> set[str]:
     assert isinstance(tags, list)
     named = {str(tag).split(":", 1)[0] for tag in tags}
     return named | {"host"} if reported.get("host_name") else named
+
+
+@pytest.mark.parametrize("environment", DEPLOY_ENVIRONMENTS)
+def test_database_storage_monitor_tracks_allocation(environment: str) -> None:
+    assert _monitor_attribute("db_storage_low", "query", environment) == STORAGE_QUERY
+    assert _monitor_attribute("db_storage_low", "critical", environment) == "0.05"
+    assert _monitor_attribute("db_storage_low", "warning", environment) == "0.08"
+    assert _monitor_attribute("db_storage_low", "evaluation_delay", environment) == "900"
 
 
 def test_every_main_push_triggers_deployment() -> None:

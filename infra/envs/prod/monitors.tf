@@ -66,3 +66,19 @@ resource "datadog_monitor" "source_sync_failed" {
 
   tags = ["env:prod", "managed-by:terraform"]
 }
+
+resource "datadog_monitor" "db_storage_low" {
+  name    = "ufo prod database is low on storage"
+  type    = "query alert"
+  query   = "min(last_30m):avg:aws.rds.free_storage_space{dbinstanceidentifier:${module.platform.db_instance_identifier}} / avg:aws.rds.total_storage_space{dbinstanceidentifier:${module.platform.db_instance_identifier}} < 0.05"
+  message = "Free storage on the database is under 5% of its allocation — past the point where autoscaling should have grown the disk. Check whether it has reached `rds_max_allocated_storage`. @ops@flyingobject.ai @slack-alerts"
+
+  monitor_thresholds {
+    critical = 0.05
+    warning  = 0.08
+  }
+
+  evaluation_delay = 900
+
+  tags = ["env:prod", "managed-by:terraform"]
+}
