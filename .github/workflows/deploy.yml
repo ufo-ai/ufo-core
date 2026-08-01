@@ -240,6 +240,15 @@ jobs:
         working-directory: infra/envs/edge
         run: terraform apply -input=false "$RUNNER_TEMP/edge.tfplan"
 
+      - name: Gate public doors
+        if: github.event_name != 'pull_request'
+        shell: bash
+        run: |
+          for HOST in flyingobject.ai testing.flyingobject.ai; do
+            curl -fsS "https://$HOST/ufo" | grep -F 'UFO_URL="${UFO_URL:-https://'"$HOST"'}"'
+            curl -fsS "https://$HOST/fleet" | jq -e '.craft | type == "number" and . >= 0' >/dev/null
+          done
+
   production:
     needs: changes
     if: github.event_name == 'pull_request' && needs.changes.outputs.deploy == 'true'

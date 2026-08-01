@@ -389,9 +389,15 @@ test("the worker uses its configured environment origin", async () => {
       new Request(`https://${host}/`, { headers: { "user-agent": "Mozilla/5.0" } }),
       doorEnv,
     );
-    const reply = await fresh.fetch(new Request(`https://${host}/ufo`), doorEnv);
-    assert.equal(await reply.text(), `origin:${origin}/ufo`);
-    assert.deepEqual(outbound.slice(start), [`${origin}/fleet`, `${origin}/ufo`]);
+    const installer = await fresh.fetch(new Request(`https://${host}/ufo`), doorEnv);
+    const fleet = await fresh.fetch(new Request(`https://${host}/fleet`), doorEnv);
+    assert.equal(await installer.text(), `origin:${origin}/ufo`);
+    assert.deepEqual(await fleet.json(), { craft: 0 });
+    assert.deepEqual(outbound.slice(start), [
+      `${origin}/fleet`,
+      `${origin}/ufo`,
+      `${origin}/fleet`,
+    ]);
   }
 });
 

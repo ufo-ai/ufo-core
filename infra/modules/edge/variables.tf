@@ -20,6 +20,5 @@ variable "account_id" {
 
 variable "origin_base" {
   type        = string
-  description = "This door's gateway base URL: /ufo proxies its stamped client script, the landing page counts its fleet (/fleet)."
+  description = "This door's gateway base URL."
 }
-

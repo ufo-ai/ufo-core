@@ -1,7 +1,7 @@
 # Onboarding
 
-Onboarding is CLI-first: the apex's public face is a Cloudflare edge worker (landing card,
-waitlist, `/ufo`), and the terminal client is the primary onboarding renderer. The gateway serves
+Onboarding is CLI-first: the apex's public face is a Cloudflare edge worker, and the terminal
+client is the primary onboarding renderer. The gateway serves
 the client script and drives every screen server-side as directives over
 `POST /v1/onboard/{channel}`. A browser sign-in (`GET /login` + `POST /v1/onboard/web`) is a
 second renderer over the identical machine — see "Web login" below.
@@ -11,12 +11,8 @@ second renderer over the identical machine — see "Web login" below.
 ```text
                 Cloudflare edge — apex (infra/modules/edge)
                +--------------------------------------------+
-curl / ------->|  GET /            CLI UA -> landing card   |
-browser ------>|                   other UA -> landing site |
-               |  POST /waitlist   email -> D1 + mail queue |
-               |  queue consumer   confirmation email       |
-               |  GET /ufo         proxy of gateway /ufo    |
-               |  GET /login       302 -> app.<host>/login  |
+curl / ------->|  public door -> environment origin         |
+browser ------>|  waitlist -> D1 + mail queue               |
                +----------------------+---------------------+
                                       | origin (apex ingress)
                                       v
@@ -48,22 +44,10 @@ browser ------>| web (ufo_session) · debug (ufo_debug)      |
 
 ## The apex edge
 
-One worker per apex fronts `flyingobject.ai` and `testing.flyingobject.ai`, claiming only four
-paths. Every other request passes through to what its host serves:
-
-- `GET /` — curl/wget/httpie get the text landing card (craft, the two counters, install
-  one-liner); any other agent lands on that apex's site.
-- `POST /waitlist -d email=…` — the one join, reached from either renderer: a curl user types the
-  command the card prints, a browser clicks any craft (or the page's `Join Waitlist` hail, the
-  keyboard route) and the panel posts the same form encoding, rendering the returned ack
-  verbatim. Records the email in a per-apex D1 database, idempotent, with a
-  positional ack; D1 tracks the confirmation's queued and sent states, so a duplicate repairs a
-  failed publish without resending delivered mail. Delivery retries five times before its terminal
-  failure is logged and re-armed by the dead-letter consumer. The card's waitlist counter reads D1
-  (≤1h stale per isolate, busted on join); its workspace counter reads the gateway's `/fleet`.
-- `GET /ufo` — proxies the gateway's stamped `/ufo` from that environment's `origin_base`.
-- `GET /login` — 302 to `app.<host>/login`. Sign-in lives on the app host (the sole authenticated
-  host), so the apex carries no signed-in state and the session cookie is set and read same-origin.
+One worker per apex fronts `flyingobject.ai` and `testing.flyingobject.ai`. Each uses its own
+`origin_base` for gateway-backed responses, its own D1 waitlist database, and its own confirmation
+queue. Unmatched requests pass through to what that host serves. Sign-in lives on the app host, so
+the apex carries no signed-in state and the session cookie stays same-origin.
 
 ## Terminal onboarding flow
 
@@ -379,7 +363,7 @@ the deploy Slack app's env secrets, and its `slack_connect` / `slack_app_manifes
 
 ```text
 infra/modules/edge/
-  worker.js               apex landing card, waitlist mail, /ufo proxy
+  worker.js               public edge behavior
   worker.test.mjs         its behavior proof (node --test, ci checks job)
 
 control/src/ufo_control/

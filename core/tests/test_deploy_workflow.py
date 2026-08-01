@@ -153,6 +153,30 @@ case "$1 $2" in
 esac
 """
 
+DOOR_CURL_STUB = """#!/bin/sh
+printf '%s\\n' "$*" >> "$DOOR_CALLS"
+URL=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    https://*) URL="$1" ;;
+  esac
+  shift
+done
+HOST="${URL#https://}"
+HOST="${HOST%%/*}"
+case "$URL" in
+  */ufo)
+    [ "$BAD_HOST" != "$HOST" ] || HOST=wrong.example
+    printf 'UFO_URL="${UFO_URL:-https://%s}"\\n' "$HOST"
+    ;;
+  */fleet)
+    [ "$BAD_FLEET_HOST" != "$HOST" ] || { printf '{"craft":"unknown"}\\n'; exit; }
+    [ "$NEGATIVE_FLEET_HOST" != "$HOST" ] || { printf '{"craft":-1}\\n'; exit; }
+    printf '{"craft":1}\\n'
+    ;;
+esac
+"""
+
 
 def _run_production_prerequisites(
     tmp_path: Path,
@@ -493,6 +517,62 @@ def test_plans_run_only_for_selected_deployment_inputs() -> None:
         "github.event_name != 'pull_request' && needs.changes.outputs.deploy == 'true'"
     )
     assert production_deploy["environment"] == "production"
+
+
+def test_edge_gates_both_live_public_doors(tmp_path: Path) -> None:
+    step = _step("edge", "Gate public doors")
+    jobs = _workflow(WORKFLOWS / "deploy.yml")["jobs"]
+    assert isinstance(jobs, dict)
+    edge = jobs["edge"]
+    assert isinstance(edge, dict)
+    steps = edge["steps"]
+    assert isinstance(steps, list)
+    names = [item.get("name") for item in steps if isinstance(item, dict)]
+    assert names.index("Terraform apply") < names.index("Gate public doors")
+    assert step["if"] == "github.event_name != 'pull_request'"
+    assert step["shell"] == "bash"
+    script = step["run"]
+    assert isinstance(script, str)
+    curl = tmp_path / "curl"
+    curl.write_text(DOOR_CURL_STUB)
+    curl.chmod(0o755)
+    calls = tmp_path / "door-calls"
+    environment = {
+        "PATH": f"{tmp_path}:{os.environ['PATH']}",
+        "BAD_HOST": "",
+        "BAD_FLEET_HOST": "",
+        "NEGATIVE_FLEET_HOST": "",
+        "DOOR_CALLS": str(calls),
+    }
+    subprocess.run(["bash", "-e", "-o", "pipefail", "-c", script], check=True, env=environment)
+    invoked = calls.read_text().splitlines()
+    assert len(invoked) == 4
+    for host in ("flyingobject.ai", "testing.flyingobject.ai"):
+        assert any(f"https://{host}/ufo" in call for call in invoked)
+        assert any(f"https://{host}/fleet" in call for call in invoked)
+    environment["BAD_HOST"] = "testing.flyingobject.ai"
+    failed = subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", script],
+        capture_output=True,
+        env=environment,
+    )
+    assert failed.returncode != 0
+    environment["BAD_HOST"] = ""
+    environment["NEGATIVE_FLEET_HOST"] = "testing.flyingobject.ai"
+    failed = subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", script],
+        capture_output=True,
+        env=environment,
+    )
+    assert failed.returncode != 0
+    environment["NEGATIVE_FLEET_HOST"] = ""
+    environment["BAD_FLEET_HOST"] = "testing.flyingobject.ai"
+    failed = subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", script],
+        capture_output=True,
+        env=environment,
+    )
+    assert failed.returncode != 0
 
 
 def test_pull_requests_plan_production_foundation_without_applying() -> None:
