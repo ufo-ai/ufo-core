@@ -192,11 +192,38 @@ def _permalink(params: httpx.QueryParams) -> str:
     return f"https://acme.slack.com/archives/{channel}/p{stamp}?thread_ts={ts}&cid={channel}"
 
 
+def _page(
+    request: httpx.Request, messages: tuple[dict[str, object], ...]
+) -> list[dict[str, object]]:
+    """Slack's own paging: `oldest`/`latest` bound the range inclusively, and the page fills with
+    the *earliest* messages in it, so bounding only the top answers with the thread's first reply.
+    The message named by `ts` always returns, so a thread read carries its parent whatever the
+    range — which is why a reader after one message searches the page instead of trusting it."""
+
+    def stamp(message: dict[str, object]) -> float:
+        return float(str(message.get("ts") or 0))
+
+    params = request.url.params
+    oldest = float(params.get("oldest") or 0)
+    latest = float(params.get("latest") or "inf")
+    inclusive = params.get("inclusive") == "true"
+    within = [
+        message
+        for message in messages
+        if (oldest < stamp(message) < latest) or (inclusive and stamp(message) in (oldest, latest))
+    ]
+    ordered = sorted(within, key=stamp)
+    page = ordered[: int(params.get("limit", len(ordered)))]
+    root = [message for message in messages if str(message.get("ts")) == params.get("ts")]
+    return (root if root and root[0] not in page else []) + page
+
+
 def _mock_transport(
     recorder: list[httpx.Request],
     users: dict[str, str],
     unconfirmed: AbstractSet[str] = frozenset(),
     channels: dict[str, dict[str, object] | None] | None = None,
+    messages: tuple[dict[str, object], ...] = (),
 ) -> httpx.MockTransport:
     def handler(request: httpx.Request) -> httpx.Response:
         recorder.append(request)
@@ -230,7 +257,7 @@ def _mock_transport(
             slack.SLACK_CONVERSATIONS_REPLIES_URL,
             slack.SLACK_CONVERSATIONS_HISTORY_URL,
         ):
-            return httpx.Response(200, json={"ok": True, "messages": []})
+            return httpx.Response(200, json={"ok": True, "messages": _page(request, messages)})
         if url == slack.SLACK_GET_PERMALINK_URL:
             return httpx.Response(
                 200, json={"ok": True, "permalink": _permalink(request.url.params)}
@@ -1194,6 +1221,16 @@ async def test_one_mention_admits_exactly_one_turn(db: None, tmp_path, monkeypat
     assert spawned[1] == spawned[0]
 
 
+def _thread_fetches(recorder: list[httpx.Request]) -> list[httpx.Request]:
+    """The ambient thread reads. The attachment read hits the same endpoint and is the only one
+    that anchors with `latest`."""
+    return [
+        request
+        for request in _fetches(recorder, slack.SLACK_CONVERSATIONS_REPLIES_URL)
+        if "latest" not in request.url.params
+    ]
+
+
 def _ambient_transport(
     recorder: list[httpx.Request], replies: object = (), history: object = ()
 ) -> httpx.MockTransport:
@@ -1297,7 +1334,7 @@ async def test_mid_thread_mention_prepends_unseen_thread_history(
             EVENTS_PATH, content=body, headers=_sign(body, int(time.time()))
         )
     assert response.status_code == 200
-    fetches = _fetches(recorder, slack.SLACK_CONVERSATIONS_REPLIES_URL)
+    fetches = _thread_fetches(recorder)
     assert len(fetches) == 1
     params = fetches[0].url.params
     assert params["channel"] == "C7"
@@ -1349,7 +1386,7 @@ async def test_new_mention_prepends_recent_channel_history(db: None, tmp_path, m
     assert params["latest"] == "1700000180.000400"
     assert params["inclusive"] == "false"
     assert params["limit"] == str(slack.AMBIENT_CHANNEL_FETCH_LIMIT)
-    assert not _fetches(recorder, slack.SLACK_CONVERSATIONS_REPLIES_URL)
+    assert not _thread_fetches(recorder)
     inbound = await _turn_inbound(workspace_id)
     mark = _marker(inbound)
     assert inbound == (
@@ -1374,7 +1411,7 @@ async def test_thread_root_mention_in_a_quiet_channel_admits_the_plain_body(
             EVENTS_PATH, content=body, headers=_sign(body, int(time.time()))
         )
     assert response.status_code == 200
-    assert not _fetches(recorder, slack.SLACK_CONVERSATIONS_REPLIES_URL)
+    assert not _thread_fetches(recorder)
     assert len(_fetches(recorder, slack.SLACK_CONVERSATIONS_HISTORY_URL)) == 1
     assert (
         _fenced(_marker(inbound := await _turn_inbound(workspace_id)), "<@UBOT00000> hi") == inbound
@@ -1422,7 +1459,7 @@ async def test_replies_fetch_failure_still_admits(db: None, tmp_path, monkeypatc
             EVENTS_PATH, content=body, headers=_sign(body, int(time.time()))
         )
     assert response.status_code == 200
-    assert len(_fetches(recorder, slack.SLACK_CONVERSATIONS_REPLIES_URL)) == 1
+    assert len(_thread_fetches(recorder)) == 1
     assert member_message_text(await _turn_inbound(workspace_id)) == "<@UBOT00000> ping"
 
 
@@ -1554,7 +1591,7 @@ async def test_participating_thread_admits_unmentioned_replies_on_the_transcript
             "C1:1700000360.000700",
         ),
     ]
-    assert len(_fetches(recorder, slack.SLACK_CONVERSATIONS_REPLIES_URL)) == 1
+    assert len(_thread_fetches(recorder)) == 1
     assert not _fetches(recorder, slack.SLACK_CONVERSATIONS_HISTORY_URL)
 
 
@@ -1629,7 +1666,7 @@ async def test_a_bare_conversation_row_is_not_participation(
     assert turns[0].startswith(
         f"<channel_context_{_marker(turns[0])}>\n{slack.AMBIENT_THREAD_NOTE}\n"
     )
-    assert len(_fetches(recorder, slack.SLACK_CONVERSATIONS_REPLIES_URL)) == 1
+    assert len(_thread_fetches(recorder)) == 1
 
 
 async def test_dm_links_member_by_email_and_status_anchors_to_the_message(
@@ -5817,3 +5854,222 @@ async def test_each_question_row_takes_its_own_answer(db: None, tmp_path, monkey
     assert "v2 · Tag?" in rewrites[0]["blocks"][2]["elements"][0]["text"]
     assert [block["type"] for block in rewrites[1]["blocks"]] == ["markdown", "context", "actions"]
     assert "Ship" in rewrites[1]["blocks"][1]["elements"][0]["text"]
+
+
+async def test_a_mention_that_arrives_only_as_app_mention_is_still_answered(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """A mention that invites the app to a channel it was not in arrives as `app_mention` only,
+    since no `message` reaches an app that was not there. Five of thirteen fleet channels arrived
+    that way."""
+    workspace_id, _ = await _seed()
+    _, client, _ = await _mount(monkeypatch, workspace_id, tmp_path, [])
+    inciting = _event_body(
+        type="app_mention",
+        user="U1",
+        channel="CNEW",
+        ts="7.0",
+        text=f"<@{BOT_USER_ID}> what can you do here",
+    )
+
+    async with client:
+        response = await client.post(
+            EVENTS_PATH, content=inciting, headers=_sign(inciting, int(time.time()))
+        )
+
+    assert response.json() == {"ok": True}
+    async with workspace_tx() as connection:
+        keys = (
+            (
+                await connection.execute(
+                    sa.select(tables.turn.c.idempotency_key).where(
+                        tables.turn.c.workspace_id == workspace_id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert list(keys) == ["CNEW:7.0"]
+
+
+@pytest.mark.parametrize("mention_first", (True, False))
+async def test_either_delivery_of_one_mention_founds_a_turn_holding_its_attachment(
+    db: None, tmp_path, monkeypatch, mention_first: bool
+) -> None:
+    """Both deliveries share `channel:ts`, so whichever admits first is the whole turn. Reading the
+    attachments from the message rather than the delivery makes the order stop mattering."""
+    file = {
+        "id": "F9",
+        "name": "data.csv",
+        "url_private_download": "https://files.slack.com/files-pri/T-F9/data.csv",
+        "mimetype": "text/csv",
+    }
+    text = f"<@{BOT_USER_ID}> see file"
+    workspace_id, _ = await _seed()
+    recorder: list[httpx.Request] = []
+    transport = _mock_transport(
+        recorder, {}, messages=({"ts": "5.0", "user": "U1", "text": text, "files": [file]},)
+    )
+    _, client, _ = await _mount_transport(monkeypatch, workspace_id, tmp_path, transport)
+    mention = _event_body(
+        type="app_mention", user="U1", channel="C1", ts="5.0", text=text, channel_type="channel"
+    )
+    message = _event_body(
+        type="message",
+        user="U1",
+        channel="C1",
+        ts="5.0",
+        text=text,
+        channel_type="channel",
+        files=[file],
+    )
+
+    async with client:
+        for body in (mention, message) if mention_first else (message, mention):
+            response = await client.post(
+                EVENTS_PATH, content=body, headers=_sign(body, int(time.time()))
+            )
+            assert response.status_code == 200
+
+    async with workspace_tx() as connection:
+        rows = (
+            await connection.execute(
+                sa.select(tables.turn.c.id, tables.turn.c.conversation_id).where(
+                    tables.turn.c.workspace_id == workspace_id
+                )
+            )
+        ).all()
+    assert len(rows) == 1
+    turn = (await _load_turn(rows[0].id))[0]
+    assert "data.csv" in turn.inbound
+    landed = _workspace_file(tmp_path, rows[0].conversation_id, f"{slack.SLACK_INBOX_DIR}/data.csv")
+    assert landed.read_bytes() == b"INBOUND-BYTES"
+
+
+async def test_the_attachment_read_asks_the_thread_for_the_one_message_it_names(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """A mid-thread mention with traffic ahead of it, which is what makes the range matter: a page
+    fills with the earliest messages in it, so a read bounded only at the top answers with the
+    parent and the first reply and never reaches the mention. The attachment is on the mention."""
+    file = {
+        "id": "F9",
+        "name": "deep.csv",
+        "url_private_download": "https://files.slack.com/files-pri/T-F9/deep.csv",
+        "mimetype": "text/csv",
+    }
+    workspace_id, _ = await _seed()
+    recorder: list[httpx.Request] = []
+    transport = _mock_transport(
+        recorder,
+        {},
+        messages=(
+            {"ts": "1.0", "user": "U2", "text": "the thread parent, which every page carries"},
+            {"ts": "2.0", "user": "U2", "text": "an earlier reply the range must exclude"},
+            {"ts": "3.0", "user": "U3", "text": "and another"},
+            {"ts": "9.9", "user": "U1", "text": "deep", "files": [file]},
+        ),
+    )
+    _, client, _ = await _mount_transport(monkeypatch, workspace_id, tmp_path, transport)
+    mention = _event_body(
+        type="app_mention",
+        user="U1",
+        channel="C1",
+        ts="9.9",
+        thread_ts="1.0",
+        text=f"<@{BOT_USER_ID}> see the file",
+    )
+
+    async with client:
+        response = await client.post(
+            EVENTS_PATH, content=mention, headers=_sign(mention, int(time.time()))
+        )
+
+    assert response.status_code == 200
+    read = _fetches(recorder, slack.SLACK_CONVERSATIONS_REPLIES_URL)[0]
+    assert read.url.params["ts"] == "1.0"
+    assert read.url.params["latest"] == "9.9"
+    assert read.url.params["oldest"] == "9.9"
+    assert read.url.params["inclusive"] == "true"
+    async with workspace_tx() as connection:
+        turn_id = (
+            await connection.execute(
+                sa.select(tables.turn.c.id).where(tables.turn.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+    assert "deep.csv" in (await _load_turn(turn_id))[0].inbound
+
+
+async def test_the_attachment_read_refuses_a_message_it_did_not_ask_for(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """`latest` is a bound, so a vanished target comes back as a different message. Adopting it
+    would attach a document the member never sent."""
+    root_file = {
+        "id": "FROOT",
+        "name": "someone-elses.csv",
+        "url_private_download": "https://files.slack.com/files-pri/T-FROOT/someone-elses.csv",
+    }
+    workspace_id, _ = await _seed()
+    recorder: list[httpx.Request] = []
+    transport = _mock_transport(
+        recorder, {}, messages=({"ts": "1.0", "user": "U1", "text": "root", "files": [root_file]},)
+    )
+    _, client, _ = await _mount_transport(monkeypatch, workspace_id, tmp_path, transport)
+    mention = _event_body(
+        type="app_mention",
+        user="U1",
+        channel="C1",
+        ts="9.9",
+        thread_ts="1.0",
+        text=f"<@{BOT_USER_ID}> what do you make of this",
+    )
+
+    async with client:
+        response = await client.post(
+            EVENTS_PATH, content=mention, headers=_sign(mention, int(time.time()))
+        )
+
+    assert response.status_code == 200
+    async with workspace_tx() as connection:
+        turn_id = (
+            await connection.execute(
+                sa.select(tables.turn.c.id).where(tables.turn.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+    assert "someone-elses.csv" not in (await _load_turn(turn_id))[0].inbound
+
+
+@pytest.mark.parametrize("replies", (None, ()), ids=("read fails", "message not returned"))
+async def test_an_attachment_read_that_comes_back_empty_still_answers(
+    db: None, tmp_path, monkeypatch, replies: object
+) -> None:
+    """A member's question does not wait on their attachment."""
+    workspace_id, _ = await _seed()
+    recorder: list[httpx.Request] = []
+    _, client, _ = await _mount_transport(
+        monkeypatch, workspace_id, tmp_path, _ambient_transport(recorder, replies=replies)
+    )
+    mention = _event_body(
+        type="app_mention",
+        user="U1",
+        channel="C1",
+        ts="9.9",
+        thread_ts="1.0",
+        text=f"<@{BOT_USER_ID}> see the file",
+    )
+
+    async with client:
+        response = await client.post(
+            EVENTS_PATH, content=mention, headers=_sign(mention, int(time.time()))
+        )
+
+    assert response.status_code == 200
+    async with workspace_tx() as connection:
+        turn = (
+            await connection.execute(
+                sa.select(tables.turn.c.id).where(tables.turn.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+    assert "F9" not in (await _load_turn(turn))[0].inbound

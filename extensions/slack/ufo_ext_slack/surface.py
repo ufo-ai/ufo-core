@@ -1053,6 +1053,40 @@ def _inbound_files(event: Mapping[str, object]) -> tuple[InboundFile, ...]:
     return tuple(files)
 
 
+async def _declared_files(
+    bot_token: str, channel: str, ts: str, root_ts: str | None
+) -> tuple[InboundFile, ...]:
+    """`ts` addresses the thread, since Slack answers a reply's own `ts` with `thread_not_found`,
+    and `oldest`/`latest` bound the range to the one message. Both ends matter: a page fills with
+    the earliest messages in its range, so bounding only the top answers with the thread's first
+    reply. The parent rides along in every page, so the result is searched, not read off the
+    front."""
+    try:
+        async with httpx.AsyncClient(timeout=AMBIENT_FETCH_TIMEOUT_SECONDS) as client:
+            payload = await _slack_ok(
+                client.get(
+                    SLACK_CONVERSATIONS_REPLIES_URL,
+                    params={
+                        "channel": channel,
+                        "ts": root_ts or ts,
+                        "oldest": ts,
+                        "latest": ts,
+                        "inclusive": "true",
+                    },
+                    headers={"Authorization": f"Bearer {bot_token}"},
+                )
+            )
+    except Exception as error:
+        _LOG.warning("slack attachment read failed for %s:%s: %s", channel, ts, error)
+        return ()
+    messages = payload.get("messages")
+    for message in messages if isinstance(messages, list) else ():
+        if isinstance(message, dict) and message.get("ts") == ts:
+            return _inbound_files(message)
+    _LOG.warning("slack attachment read missed %s:%s in thread %s", channel, ts, root_ts or ts)
+    return ()
+
+
 async def oauth_callback(ctx: SurfaceContext, request: Request) -> Response:
     """Complete an "Add to Slack" install: verify the sealed install `state` the owner minted names
     this workspace, exchange the returned code for the workspace's bot token, and land the three
@@ -1268,17 +1302,26 @@ async def _to_inbound(
     conversation_id = None if is_dm else await _participating_conversation(ctx, queue_key)
     if not addressed and conversation_id is None:
         return None
+    audience = _room_audience(
+        ctx, payload, event, channel, audience_known=conversation_id is not None
+    )
+    files = _inbound_files(event)
+    if files or event.get("type") != "app_mention":
+        resolved = await audience
+    else:
+        resolved, files = await asyncio.gather(
+            audience,
+            _declared_files(await ctx.credential(SLACK_BOT_TOKEN_SLOT), channel, ts, root_ts),
+        )
     return Inbound(
         slack_user_id=user,
         queue_key=queue_key,
         message_id=f"{channel}:{ts}",
         ts=ts,
         is_dm=is_dm,
-        audience=await _room_audience(
-            ctx, payload, event, channel, audience_known=conversation_id is not None
-        ),
+        audience=resolved,
         body=str(event.get("text") or ""),
-        files=_inbound_files(event),
+        files=files,
         conversation_id=conversation_id,
     )
 
