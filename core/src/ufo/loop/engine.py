@@ -80,7 +80,7 @@ from ufo.models.interface import (
     ToolUseBlock,
 )
 from ufo.models.pricing import Pricing
-from ufo.o11y import emit_histogram, emit_metric, log, turn_span
+from ufo.o11y import emit_histogram, emit_metric, log, turn_profile, turn_span
 from ufo.sandbox.session import TOOL_OUTPUT_DIR, SandboxSession
 from ufo.schema import tables
 from ufo.schema.records import (
@@ -497,14 +497,20 @@ def _bounded(content: str) -> str:
 
 
 def _meter_dispatch(
-    tools: ToolRegistry, call: ToolUseBlock, started: float, outcome: str, error_class: str | None
+    tools: ToolRegistry,
+    call: ToolUseBlock,
+    started: float,
+    outcome: str,
+    error_class: str | None,
+    profile: str,
 ) -> None:
     """One count and one wall-clock observation for a dispatched call, so a dashboard reads which
     tool the fleet spends its time in and where that time fails. `outcome` separates the ends a
     dispatch has by whose fault each one is — the model's, the tool's, a policy hook's, or the
     engine's — because a metric that reports only the successes reads as nothing having failed, and
     one that folds an infrastructure fault into a refusal reads as policy working as designed.
-    `error_class` rides every end that carries an exception.
+    `error_class` rides every end that carries an exception, and `profile` separates the dispatches
+    a subagent makes from the main agent's.
 
     The wall clock is what the round waited on. A name the registry does not hold reports as
     UNREGISTERED_TOOL — the name arrives on an assistant message the model wrote, so passing it
@@ -513,6 +519,7 @@ def _meter_dispatch(
     dimensions = {
         "tool": call.name if registered else UNREGISTERED_TOOL,
         "outcome": outcome,
+        "profile": profile,
         **({} if error_class is None else {"error_class": error_class}),
     }
     emit_metric("tool_call_total", **dimensions)
@@ -730,6 +737,7 @@ class _TurnMeter:
     nothing further."""
 
     started: float
+    profile: str
     rounds: int = 0
     ended: bool = False
 
@@ -737,9 +745,14 @@ class _TurnMeter:
         if self.ended:
             return
         self.ended = True
-        emit_histogram("turn_ms", int((time.monotonic() - self.started) * 1000), status=status)
+        emit_histogram(
+            "turn_ms",
+            int((time.monotonic() - self.started) * 1000),
+            status=status,
+            profile=self.profile,
+        )
         if self.rounds:
-            emit_metric("turn_rounds_total", self.rounds, status=status)
+            emit_metric("turn_rounds_total", self.rounds, status=status, profile=self.profile)
 
 
 @dataclass(frozen=True)
@@ -790,15 +803,28 @@ class TurnEngine:
             return
         raise ValueError(f"a subagent turn's tool set may not name a tool {FINISH_TOOL!r}")
 
+    @property
+    def profile(self) -> str:
+        """This turn's `profile` telemetry dimension — its subagent profile, or `main`."""
+        return turn_profile(self.turn.subagent_profile)
+
     async def run(self) -> TerminalFrame | None:
-        with turn_span(self.turn.id, self.turn.conversation_id, self.turn.traceparent):
-            meter = _TurnMeter(started=time.monotonic())
-            emit_metric("turn_started_total")
+        with turn_span(
+            self.turn.id,
+            self.turn.conversation_id,
+            self.turn.traceparent,
+            self.turn.subagent_profile,
+            self.turn.parent_turn_id,
+        ):
+            meter = _TurnMeter(started=time.monotonic(), profile=self.profile)
+            emit_metric("turn_started_total", profile=self.profile)
             log(
                 "turn.started",
                 turn_id=str(self.turn.id),
                 seq=self.turn.seq,
                 prompt_digest=self.system_prompt.digest,
+                profile=self.profile,
+                parent_turn_id=str(self.turn.parent_turn_id or ""),
             )
             usage_events: list[Usage] = []
             arrival_log: list[Message] = []
@@ -974,10 +1000,23 @@ class TurnEngine:
         model call, so it never crosses the per-round check. Arrivals cannot exist: an intent
         admission never folds into a live turn, so this turn's queue is empty by construction and
         the per-conversation partition runs a member's intents one at a time in order."""
-        with turn_span(self.turn.id, self.turn.conversation_id, self.turn.traceparent):
-            meter = _TurnMeter(started=time.monotonic())
-            emit_metric("turn_started_total")
-            log("turn.started", turn_id=str(self.turn.id), seq=self.turn.seq, prompt_digest="")
+        with turn_span(
+            self.turn.id,
+            self.turn.conversation_id,
+            self.turn.traceparent,
+            self.turn.subagent_profile,
+            self.turn.parent_turn_id,
+        ):
+            meter = _TurnMeter(started=time.monotonic(), profile=self.profile)
+            emit_metric("turn_started_total", profile=self.profile)
+            log(
+                "turn.started",
+                turn_id=str(self.turn.id),
+                seq=self.turn.seq,
+                prompt_digest="",
+                profile=self.profile,
+                parent_turn_id=str(self.turn.parent_turn_id or ""),
+            )
             usage_events: list[Usage] = []
             context = ToolContext(
                 sandbox=self.sandbox,
@@ -1682,6 +1721,7 @@ class TurnEngine:
             wall_ms,
             model=request.model,
             provider=self.provider,
+            profile=self.profile,
             **({} if error is None else {"error_class": type(error).__name__}),
         )
         if first_event_ms is not None:
@@ -1690,6 +1730,7 @@ class TurnEngine:
                 first_event_ms,
                 model=request.model,
                 provider=self.provider,
+                profile=self.profile,
             )
         round_usage = _total_usage(usages)
         for kind, amount in (
@@ -1705,6 +1746,7 @@ class TurnEngine:
                     model=request.model,
                     provider=self.provider,
                     kind=kind,
+                    profile=self.profile,
                 )
         if error is not None:
             partial_calls = tuple(
@@ -1773,7 +1815,9 @@ class TurnEngine:
             context, call = await self._bind_requester(context, call, requesters)
             return _BoundToolCall(context=context, call=call)
         except asyncio.CancelledError as error:
-            _meter_dispatch(self.tools, call, started, "step_failed", type(error).__name__)
+            _meter_dispatch(
+                self.tools, call, started, "step_failed", type(error).__name__, self.profile
+            )
             raise
         except Exception as error:
             return _RejectedToolCall(
@@ -2039,7 +2083,7 @@ class TurnEngine:
             outcome, error_class = "step_failed", type(error).__name__
             raise
         finally:
-            _meter_dispatch(self.tools, call, started, outcome, error_class)
+            _meter_dispatch(self.tools, call, started, outcome, error_class, self.profile)
 
     async def _bounded_image(self, image: ImageBlock) -> ImageBlock:
         source = image.source
@@ -2146,6 +2190,7 @@ class TurnEngine:
                 "turn_terminal_total",
                 status=frame.status,
                 error_class=frame.error_class or "",
+                profile=self.profile,
             )
         meter.exited(frame.status)
         log(
@@ -2153,6 +2198,8 @@ class TurnEngine:
             turn_id=str(self.turn.id),
             status=frame.status,
             error_class=frame.error_class or "",
+            profile=self.profile,
+            parent_turn_id=str(self.turn.parent_turn_id or ""),
         )
         return frame
 
@@ -2292,7 +2339,7 @@ class TurnEngine:
                 )
         if updated.rowcount == 1:
             await self._publish(Parked(message=message))
-            emit_metric("turn_parked_total")
+            emit_metric("turn_parked_total", profile=self.profile)
             log("turn.parked", turn_id=str(self.turn.id))
 
     async def _publish(self, frame: LiveFrame) -> None:

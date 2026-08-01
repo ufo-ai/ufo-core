@@ -47,7 +47,7 @@ from ufo.loop.subagents import SubagentRegistry, Subagents, subagent_system_prom
 from ufo.loop.transcript import Transcript
 from ufo.memory import MemorySearch
 from ufo.models.registry import ModelRegistry
-from ufo.o11y import emit_metric, log, warn
+from ufo.o11y import emit_metric, log, turn_profile, warn
 from ufo.sandbox.conversation import ConversationSandbox
 from ufo.sandbox.session import (
     RunToken,
@@ -389,7 +389,10 @@ async def _commit_failed_terminal(hub: Hub, turn_id: UUID, error: BaseException)
     """The backstop for failures outside the engine: retries until the wait can end. A setup fault
     — loading the turn, attaching the sandbox — has no engine to count it, so the terminal it writes
     is counted here, and only when this write is the transition: the engine's own failures commit
-    their terminal first and leave nothing for this update to match."""
+    their terminal first and leave nothing for this update to match.
+
+    The `profile` rides back off that same write, so the count carries the turn's real profile
+    without a second read to fail in a path that has already run out of ways to report."""
     frame = TerminalFrame(
         status="failed",
         error_class=type(error).__name__,
@@ -399,21 +402,27 @@ async def _commit_failed_terminal(hub: Hub, turn_id: UUID, error: BaseException)
     while True:
         try:
             async with workspace_tx() as connection:
-                updated = await connection.execute(
-                    sa.update(tables.turn)
-                    .values(
-                        status="failed",
-                        terminal=frame.model_dump(mode="json"),
-                        updated_at=sa.func.now(),
+                transitioned = (
+                    await connection.execute(
+                        sa.update(tables.turn)
+                        .values(
+                            status="failed",
+                            terminal=frame.model_dump(mode="json"),
+                            updated_at=sa.func.now(),
+                        )
+                        .where(
+                            tables.turn.c.id == turn_id,
+                            tables.turn.c.status.in_(("queued", "running")),
+                        )
+                        .returning(tables.turn.c.subagent_profile)
                     )
-                    .where(
-                        tables.turn.c.id == turn_id,
-                        tables.turn.c.status.in_(("queued", "running")),
-                    )
-                )
-            if updated.rowcount == 1:
+                ).one_or_none()
+            if transitioned is not None:
                 emit_metric(
-                    "turn_terminal_total", status="failed", error_class=type(error).__name__
+                    "turn_terminal_total",
+                    status="failed",
+                    error_class=type(error).__name__,
+                    profile=turn_profile(transitioned.subagent_profile),
                 )
             await hub.publish(turn_id, Terminal(frame=frame))
             return

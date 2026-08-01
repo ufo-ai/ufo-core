@@ -16,28 +16,28 @@ resource "datadog_metric_tag_configuration" "turn_ms" {
   metric_name         = "ufo.turn_ms"
   metric_type         = "distribution"
   include_percentiles = true
-  tags                = ["env", "host", "service", "status"]
+  tags                = ["env", "host", "profile", "service", "status"]
 }
 
 resource "datadog_metric_tag_configuration" "model_round_ms" {
   metric_name         = "ufo.model_round_ms"
   metric_type         = "distribution"
   include_percentiles = true
-  tags                = ["env", "error_class", "host", "model", "provider", "service"]
+  tags                = ["env", "error_class", "host", "model", "profile", "provider", "service"]
 }
 
 resource "datadog_metric_tag_configuration" "model_first_event_ms" {
   metric_name         = "ufo.model_first_event_ms"
   metric_type         = "distribution"
   include_percentiles = true
-  tags                = ["env", "host", "model", "provider", "service"]
+  tags                = ["env", "host", "model", "profile", "provider", "service"]
 }
 
 resource "datadog_metric_tag_configuration" "tool_call_ms" {
   metric_name         = "ufo.tool_call_ms"
   metric_type         = "distribution"
   include_percentiles = true
-  tags                = ["env", "error_class", "host", "outcome", "service", "tool"]
+  tags                = ["env", "error_class", "host", "outcome", "profile", "service", "tool"]
 }
 
 # The unit each latency distribution is in. Datadog does not read it off the OTLP payload, so without

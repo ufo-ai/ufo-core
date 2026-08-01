@@ -845,7 +845,7 @@ async def test_failure_commits_terminal_bills_nothing_preserves_inbound(
     assert _bodies(stored) == ["explode"]
 
 
-async def _running_turn() -> tuple[UUID, UUID]:
+async def _running_turn(subagent_profile: str | None = None) -> tuple[UUID, UUID]:
     workspace_id, agent_id, conversation_id, turn_id = uuid4(), uuid4(), uuid4(), uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
@@ -884,6 +884,7 @@ async def _running_turn() -> tuple[UUID, UUID]:
                 seq=1,
                 status="running",
                 inbound="explode",
+                subagent_profile=subagent_profile,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -897,12 +898,14 @@ async def test_backstop_terminal_carries_class_and_message(
     """A failure outside the engine commits a terminal carrying the class AND the message — a bare
     class name gives the debugger and CLI nothing to act on (the 2026-07-21 wedge surfaced as a
     naked \"RuntimeError\"). No engine ran, so this write is also where the terminal is counted, and
-    the second call — the turn already failed — writes and counts nothing."""
+    the second call — the turn already failed — writes and counts nothing. The count carries the
+    profile off the row this write matched, so a setup fault that only ever hits subagents is
+    readable as that profile's rather than as the fleet's."""
     reader = InMemoryMetricReader()
     provider = MeterProvider(metric_readers=[reader])
     monkeypatch.setattr(o11y.metrics, "get_meter", provider.get_meter)
     monkeypatch.setattr(o11y, "_counters", {})
-    _, turn_id = await _running_turn()
+    _, turn_id = await _running_turn("coding")
     await loop_queue._commit_failed_terminal(
         InProcessHub(), turn_id, RuntimeError("boom outside the engine")
     )
@@ -917,11 +920,12 @@ async def test_backstop_terminal_carries_class_and_message(
         if metric.name == "ufo.turn_terminal_total"
         for point in metric.data.data_points
     ]
-    assert (terminal.value, terminal.attributes["status"], terminal.attributes["error_class"]) == (
-        1,
-        "failed",
-        "RuntimeError",
-    )
+    assert (
+        terminal.value,
+        terminal.attributes["status"],
+        terminal.attributes["error_class"],
+        terminal.attributes["profile"],
+    ) == (1, "failed", "RuntimeError", "coding")
     async with workspace_tx() as connection:
         row = (
             await connection.execute(

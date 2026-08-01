@@ -14,7 +14,7 @@ import sqlalchemy as sa
 from dbos import DBOSClient
 
 from ufo.db import workspace_tx
-from ufo.o11y import emit_metric
+from ufo.o11y import emit_metric, turn_profile
 from ufo.schema import tables
 from ufo.schema.records import CANCELLED, NON_TERMINAL_STATUSES, TerminalFrame
 
@@ -37,12 +37,14 @@ async def cancel_one_turn(client: DBOSClient, turn_id: UUID) -> bool:
     turn's own execution never writes the row, and a turn cancelled before one started has no
     execution at all."""
     async with workspace_tx() as connection:
-        status = (
+        row = (
             await connection.execute(
-                sa.select(tables.turn.c.status).where(tables.turn.c.id == turn_id)
+                sa.select(tables.turn.c.status, tables.turn.c.subagent_profile).where(
+                    tables.turn.c.id == turn_id
+                )
             )
-        ).scalar_one_or_none()
-    if status not in NON_TERMINAL_STATUSES:
+        ).one_or_none()
+    if row is None or row.status not in NON_TERMINAL_STATUSES:
         return False
     await client.cancel_workflow_async(str(turn_id))
     async with workspace_tx() as connection:
@@ -60,5 +62,10 @@ async def cancel_one_turn(client: DBOSClient, turn_id: UUID) -> bool:
         )
     if result.rowcount == 0:
         return False
-    emit_metric("turn_terminal_total", status=CANCELLED, error_class="")
+    emit_metric(
+        "turn_terminal_total",
+        status=CANCELLED,
+        error_class="",
+        profile=turn_profile(row.subagent_profile),
+    )
     return True

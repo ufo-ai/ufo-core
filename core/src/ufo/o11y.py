@@ -56,11 +56,13 @@ METRICS = (
     "source_sync_failed_total",
 )
 ERROR_CLASS_DIMENSION = "error_class"
+PROFILE_DIMENSION = "profile"
+MAIN_PROFILE = "main"
 HISTOGRAMS = {
-    "model_round_ms": ("model", "provider", ERROR_CLASS_DIMENSION),
-    "model_first_event_ms": ("model", "provider"),
-    "tool_call_ms": ("tool", "outcome", ERROR_CLASS_DIMENSION),
-    "turn_ms": ("status",),
+    "model_round_ms": ("model", "provider", ERROR_CLASS_DIMENSION, PROFILE_DIMENSION),
+    "model_first_event_ms": ("model", "provider", PROFILE_DIMENSION),
+    "tool_call_ms": ("tool", "outcome", ERROR_CLASS_DIMENSION, PROFILE_DIMENSION),
+    "turn_ms": ("status", PROFILE_DIMENSION),
 }
 HISTOGRAM_AGGREGATION: dict[type, Aggregation] = {
     HistogramInstrument: ExponentialBucketHistogramAggregation()
@@ -255,17 +257,36 @@ def current_traceparent() -> str | None:
     return carrier.get(TRACEPARENT_HEADER)
 
 
+def turn_profile(subagent_profile: str | None) -> str:
+    """The `profile` dimension for one turn: the subagent profile it runs under, or `main` for a
+    member-facing turn. The profile name, never the turn's agent or id — the set of profiles a
+    deploy declares is fixed and small, so the dimension costs a bounded number of series per
+    metric while separating a subagent's latency and steps from the main agent's."""
+    return subagent_profile or MAIN_PROFILE
+
+
 @contextmanager
-def turn_span(turn_id: UUID, conversation_id: UUID, traceparent: str | None) -> Iterator[Span]:
+def turn_span(
+    turn_id: UUID,
+    conversation_id: UUID,
+    traceparent: str | None,
+    subagent_profile: str | None,
+    parent_turn_id: UUID | None,
+) -> Iterator[Span]:
     """Open the SERVER span wrapping one durable turn, tagged with the ambient workspace.
     `traceparent` parents the span on the trace that admitted the turn — a subagent's turn lands
-    in the trace of the turn that spawned it; None roots a fresh trace (a member-facing turn)."""
+    in the trace of the turn that spawned it; None roots a fresh trace (a member-facing turn).
+    The profile and the spawning turn are attributes as well as the parent link, so a trace search
+    can select one profile's turns without walking every trace to its root; `main` for a
+    member-facing turn, matching the `profile` metric dimension."""
     attributes = cast(
         dict[str, str],
         redact_payload(
             {
                 "ufo.turn_id": str(turn_id),
                 "ufo.conversation_id": str(conversation_id),
+                "ufo.profile": turn_profile(subagent_profile),
+                **({} if parent_turn_id is None else {"ufo.parent_turn_id": str(parent_turn_id)}),
                 **{f"ufo.{key}": value for key, value in _ambient_scope().items()},
             }
         ),

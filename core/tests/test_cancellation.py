@@ -47,7 +47,9 @@ async def _workspace_agent() -> tuple[UUID, UUID]:
     return workspace_id, agent_id
 
 
-async def _turn(workspace_id: UUID, agent_id: UUID, status: str) -> UUID:
+async def _turn(
+    workspace_id: UUID, agent_id: UUID, status: str, subagent_profile: str | None = None
+) -> UUID:
     conversation_id, turn_id = uuid4(), uuid4()
     terminal = None if status in ("queued", "running", "parked") else TerminalFrame(status=status)
     async with workspace_tx() as connection:
@@ -72,6 +74,7 @@ async def _turn(workspace_id: UUID, agent_id: UUID, status: str) -> UUID:
                 seq=1,
                 status=status,
                 inbound="x",
+                subagent_profile=subagent_profile,
                 terminal=None if terminal is None else terminal.model_dump(mode="json"),
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
@@ -127,6 +130,18 @@ async def test_cancel_one_turn_leaves_a_terminal_turn_untouched(db: None) -> Non
     assert await _status(done) == "done"
 
 
+async def test_cancel_one_turn_reports_nothing_cancelled_for_a_turn_that_does_not_exist(
+    db: None,
+) -> None:
+    """A turn id with no row — a reconciler pass racing a workspace wipe, or a stale id from a
+    caller — returns False and asks DBOS to cancel nothing, rather than faulting on the read the
+    profile now rides along on."""
+    await _workspace_agent()
+    client = _RecordingClient()
+    assert await cancel_one_turn(client, uuid4()) is False
+    assert client.cancelled == []
+
+
 async def test_cancel_one_turn_leaves_the_row_live_when_the_workflow_cancel_faults(
     db: None,
 ) -> None:
@@ -157,14 +172,19 @@ def _metric_reader(monkeypatch: pytest.MonkeyPatch) -> InMemoryMetricReader:
     return reader
 
 
-def _terminal_counts(reader: InMemoryMetricReader) -> list[tuple[int, str, str]]:
-    """Every terminal counted so far, as (count, status, error class). The reader yields no data at
-    all until an instrument exists, which is the same answer as counting nothing."""
+def _terminal_counts(reader: InMemoryMetricReader) -> list[tuple[int, str, str, str]]:
+    """Every terminal counted so far, as (count, status, error class, profile). The reader yields no
+    data at all until an instrument exists, which is the same answer as counting nothing."""
     data = reader.get_metrics_data()
     if data is None:
         return []
     return [
-        (point.value, point.attributes["status"], point.attributes["error_class"])
+        (
+            point.value,
+            point.attributes["status"],
+            point.attributes["error_class"],
+            point.attributes["profile"],
+        )
         for resource in data.resource_metrics
         for scope in resource.scope_metrics
         for metric in scope.metrics
@@ -178,13 +198,15 @@ async def test_the_cancelled_terminal_is_counted_once_by_the_call_that_wrote_it(
 ) -> None:
     """The turn's own execution never writes a cancelled row, and a turn cancelled before one
     started has no execution at all, so this is where a cancelled turn joins the terminal counter —
-    once, from the call that made the transition."""
+    once, from the call that made the transition. The count carries the cancelled turn's own
+    profile: `cancel_subagent` reaches this primitive with a subagent's turn, so a cancel storm
+    inside one profile stays readable as that profile's rather than the main agent's."""
     reader = _metric_reader(monkeypatch)
     workspace_id, agent_id = await _workspace_agent()
-    turn_id = await _turn(workspace_id, agent_id, "queued")
+    turn_id = await _turn(workspace_id, agent_id, "queued", "coding")
     assert await cancel_one_turn(_RecordingClient(), turn_id) is True
     assert await cancel_one_turn(_RecordingClient(), turn_id) is False
-    assert _terminal_counts(reader) == [(1, "cancelled", "")]
+    assert _terminal_counts(reader) == [(1, "cancelled", "", "coding")]
 
 
 async def test_a_cancel_that_transitioned_nothing_counts_no_terminal(

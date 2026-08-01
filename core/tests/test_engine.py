@@ -24,6 +24,9 @@ from opentelemetry.sdk.metrics.export import (
     InMemoryMetricReader,
     NumberDataPoint,
 )
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from PIL import Image
 from pydantic import BaseModel, ConfigDict
 
@@ -1430,11 +1433,11 @@ async def test_every_model_round_meters_one_observation_and_its_tokens(
     assert frame.status == "done"
     points = _exported_metrics(reader)
     assert [(point.count, dict(point.attributes)) for point in points["ufo.model_round_ms"]] == [
-        (2, {"model": "claude-opus-4-8", "provider": "anthropic"})
+        (2, {"model": "claude-opus-4-8", "provider": "anthropic", "profile": "main"})
     ]
     assert [
         (point.count, dict(point.attributes)) for point in points["ufo.model_first_event_ms"]
-    ] == [(2, {"model": "claude-opus-4-8", "provider": "anthropic"})]
+    ] == [(2, {"model": "claude-opus-4-8", "provider": "anthropic", "profile": "main"})]
     assert {
         (point.attributes["kind"], point.attributes["model"], point.value)
         for point in points["ufo.model_round_tokens_total"]
@@ -1474,10 +1477,15 @@ async def test_a_failed_round_meters_its_error_class_and_the_tokens_it_already_s
     assert model.calls == 1
     points = _exported_metrics(reader)
     assert [dict(point.attributes) for point in points["ufo.model_round_ms"]] == [
-        {"model": "claude-opus-4-8", "provider": "anthropic", "error_class": "RuntimeError"}
+        {
+            "model": "claude-opus-4-8",
+            "provider": "anthropic",
+            "profile": "main",
+            "error_class": "RuntimeError",
+        }
     ]
     assert [dict(point.attributes) for point in points["ufo.model_first_event_ms"]] == [
-        {"model": "claude-opus-4-8", "provider": "anthropic"}
+        {"model": "claude-opus-4-8", "provider": "anthropic", "profile": "main"}
     ]
     assert {
         (point.attributes["kind"], point.value) for point in points["ufo.model_round_tokens_total"]
@@ -1515,7 +1523,12 @@ async def test_a_round_that_yielded_nothing_records_no_first_event_latency(
     assert "ufo.model_first_event_ms" not in points
     assert "ufo.model_round_tokens_total" not in points
     assert [dict(point.attributes) for point in points["ufo.model_round_ms"]] == [
-        {"model": "claude-opus-4-8", "provider": "anthropic", "error_class": "RuntimeError"}
+        {
+            "model": "claude-opus-4-8",
+            "provider": "anthropic",
+            "profile": "main",
+            "error_class": "RuntimeError",
+        }
     ]
 
 
@@ -1547,7 +1560,12 @@ async def test_a_streamed_rounds_timeout_keeps_the_class_the_client_retries_on(
         await _engine(turn, StreamTimeoutModel(), tmp_path).run()
     points = _exported_metrics(reader)
     assert [dict(point.attributes) for point in points["ufo.model_round_ms"]] == [
-        {"model": "claude-opus-4-8", "provider": "anthropic", "error_class": "ReadTimeout"}
+        {
+            "model": "claude-opus-4-8",
+            "provider": "anthropic",
+            "profile": "main",
+            "error_class": "ReadTimeout",
+        }
     ]
     (terminal,) = points["ufo.turn_terminal_total"]
     assert (terminal.attributes["status"], terminal.attributes["error_class"]) == (
@@ -1644,13 +1662,14 @@ async def test_each_end_a_tool_call_has_is_metered_apart(
         (point.value, tuple(sorted(point.attributes.items())))
         for point in points["ufo.tool_call_total"]
     } == {
-        (1, (("outcome", "ok"), ("tool", "ok_tool"))),
-        (1, (("outcome", "handler_error"), ("tool", "error_tool"))),
+        (1, (("outcome", "ok"), ("profile", "main"), ("tool", "ok_tool"))),
+        (1, (("outcome", "handler_error"), ("profile", "main"), ("tool", "error_tool"))),
         (
             1,
             (
                 ("error_class", "RuntimeError"),
                 ("outcome", "handler_raised"),
+                ("profile", "main"),
                 ("tool", "raising_tool"),
             ),
         ),
@@ -1659,15 +1678,17 @@ async def test_each_end_a_tool_call_has_is_metered_apart(
             (
                 ("error_class", "ValidationError"),
                 ("outcome", "invalid_call"),
+                ("profile", "main"),
                 ("tool", "strict_tool"),
             ),
         ),
-        (1, (("outcome", "hook_denied"), ("tool", "denied_tool"))),
+        (1, (("outcome", "hook_denied"), ("profile", "main"), ("tool", "denied_tool"))),
         (
             1,
             (
                 ("error_class", "KeyError"),
                 ("outcome", "invalid_call"),
+                ("profile", "main"),
                 ("tool", UNREGISTERED_TOOL),
             ),
         ),
@@ -1744,7 +1765,14 @@ async def test_a_call_whose_requester_will_not_bind_counts_as_an_unusable_call(
     assert result.is_error
     assert [
         dict(point.attributes) for point in _exported_metrics(reader)["ufo.tool_call_total"]
-    ] == [{"tool": "ok_tool", "outcome": "invalid_call", "error_class": "ValueError"}]
+    ] == [
+        {
+            "tool": "ok_tool",
+            "outcome": "invalid_call",
+            "profile": "main",
+            "error_class": "ValueError",
+        }
+    ]
 
 
 async def test_a_store_fault_reached_through_the_bind_is_the_engines_and_not_the_models(
@@ -1776,7 +1804,14 @@ async def test_a_store_fault_reached_through_the_bind_is_the_engines_and_not_the
     assert result.is_error
     assert [
         dict(point.attributes) for point in _exported_metrics(reader)["ufo.tool_call_total"]
-    ] == [{"tool": "ok_tool", "outcome": "step_failed", "error_class": "OperationalError"}]
+    ] == [
+        {
+            "tool": "ok_tool",
+            "outcome": "step_failed",
+            "profile": "main",
+            "error_class": "OperationalError",
+        }
+    ]
 
 
 async def test_a_cancelled_bind_counts_the_same_end_the_step_would_have(
@@ -1809,7 +1844,14 @@ async def test_a_cancelled_bind_counts_the_same_end_the_step_would_have(
         )
     assert [
         dict(point.attributes) for point in _exported_metrics(reader)["ufo.tool_call_total"]
-    ] == [{"tool": "ok_tool", "outcome": "step_failed", "error_class": "CancelledError"}]
+    ] == [
+        {
+            "tool": "ok_tool",
+            "outcome": "step_failed",
+            "profile": "main",
+            "error_class": "CancelledError",
+        }
+    ]
 
 
 async def test_a_gating_hook_that_fails_closed_is_not_counted_as_policy(
@@ -1852,7 +1894,14 @@ async def test_a_gating_hook_that_fails_closed_is_not_counted_as_policy(
     assert result.is_error and "failed closed" in result.text
     assert [
         dict(point.attributes) for point in _exported_metrics(reader)["ufo.tool_call_total"]
-    ] == [{"tool": "ok_tool", "outcome": "hook_failed", "error_class": o11y.OTHER_ERROR_CLASS}]
+    ] == [
+        {
+            "tool": "ok_tool",
+            "outcome": "hook_failed",
+            "profile": "main",
+            "error_class": o11y.OTHER_ERROR_CLASS,
+        }
+    ]
 
 
 async def test_a_dispatch_that_raises_past_its_handler_counts_the_step_it_failed_in(
@@ -1877,7 +1926,14 @@ async def test_a_dispatch_that_raises_past_its_handler_counts_the_step_it_failed
         )
     assert [
         dict(point.attributes) for point in _exported_metrics(reader)["ufo.tool_call_total"]
-    ] == [{"tool": "shot", "outcome": "step_failed", "error_class": "RuntimeError"}]
+    ] == [
+        {
+            "tool": "shot",
+            "outcome": "step_failed",
+            "profile": "main",
+            "error_class": "RuntimeError",
+        }
+    ]
 
 
 async def test_a_cancelled_dispatch_records_the_cancellation_and_not_a_success(
@@ -1904,7 +1960,14 @@ async def test_a_cancelled_dispatch_records_the_cancellation_and_not_a_success(
         )
     assert [
         dict(point.attributes) for point in _exported_metrics(reader)["ufo.tool_call_total"]
-    ] == [{"tool": "ok_tool", "outcome": "step_failed", "error_class": "CancelledError"}]
+    ] == [
+        {
+            "tool": "ok_tool",
+            "outcome": "step_failed",
+            "profile": "main",
+            "error_class": "CancelledError",
+        }
+    ]
 
 
 async def test_a_handler_raising_untrusted_content_keeps_its_own_series(
@@ -1933,7 +1996,14 @@ async def test_a_handler_raising_untrusted_content_keeps_its_own_series(
     assert result.is_error
     assert [
         dict(point.attributes) for point in _exported_metrics(reader)["ufo.tool_call_total"]
-    ] == [{"tool": "ok_tool", "outcome": "handler_raised", "error_class": "UntrustedContentError"}]
+    ] == [
+        {
+            "tool": "ok_tool",
+            "outcome": "handler_raised",
+            "profile": "main",
+            "error_class": "UntrustedContentError",
+        }
+    ]
 
 
 HANDLER_SECONDS = 3.5
@@ -2001,14 +2071,98 @@ async def test_a_finished_turn_meters_its_wall_clock_its_rounds_and_its_outcome(
     assert frame is not None and frame.status == "done"
     points = _exported_metrics(reader)
     (wall,) = points["ufo.turn_ms"]
-    assert (wall.count, wall.sum, dict(wall.attributes)) == (1, 2 * ROUND_MS, {"status": "done"})
+    assert (wall.count, wall.sum, dict(wall.attributes)) == (
+        1,
+        2 * ROUND_MS,
+        {"status": "done", "profile": "main"},
+    )
     (rounds,) = points["ufo.turn_rounds_total"]
-    assert (rounds.value, dict(rounds.attributes)) == (2, {"status": "done"})
+    assert (rounds.value, dict(rounds.attributes)) == (2, {"status": "done", "profile": "main"})
     (terminal,) = points["ufo.turn_terminal_total"]
     assert (terminal.value, dict(terminal.attributes)) == (
         1,
-        {"status": "done", "error_class": ""},
+        {"status": "done", "error_class": "", "profile": "main"},
     )
+
+
+async def test_a_subagent_turn_meters_under_its_profile(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same numbers a member-facing turn reports as `main`, a subagent's turn reports under the
+    profile it ran as — and so does every tool call it dispatched and every token it spent, which is
+    what separates a coding subagent's latency, steps and spend from the work the main agent did."""
+    reader = _metric_capture(monkeypatch)
+    turn = (await _seed_turn("queued", None)).model_copy(update={"subagent_profile": "coding"})
+    carrier = RecordingCarrier(result=ExecResult(stdout="hi\n", stderr="", exit_code=0))
+    with ws(turn.workspace_id):
+        frame = await _engine(turn, ToolCallingModel(), tmp_path, carrier=carrier).run()
+    assert frame is not None and frame.status == "done"
+    points = _exported_metrics(reader)
+    assert [dict(point.attributes) for point in points["ufo.turn_ms"]] == [
+        {"status": "done", "profile": "coding"}
+    ]
+    assert [dict(point.attributes) for point in points["ufo.tool_call_ms"]] == [
+        {"tool": "bash", "outcome": "ok", "profile": "coding"}
+    ]
+    assert {point.attributes["profile"] for point in points["ufo.turn_rounds_total"]} == {"coding"}
+    assert {point.attributes["profile"] for point in points["ufo.turn_terminal_total"]} == {
+        "coding"
+    }
+    assert [dict(point.attributes) for point in points["ufo.turn_started_total"]] == [
+        {"profile": "coding"}
+    ]
+    assert {
+        (point.attributes["kind"], point.attributes["profile"])
+        for point in points["ufo.model_round_tokens_total"]
+    } == {("input", "coding"), ("output", "coding")}
+
+
+async def test_both_entry_points_name_the_profile_and_the_spawning_turn_on_the_span_and_the_logs(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A chat turn and an intent turn open the same span and write the same two lifecycle
+    records, so a live subagent failure is attributable from either without joining the two: the
+    profile it ran as and the turn that spawned it. Both are asserted by value on a turn carrying
+    both, because the two arguments sit adjacent and are the same shape — a span whose profile reads
+    as a turn id is the wiring crossed over, which the main-facing turn's two Nones cannot catch."""
+    exporter = InMemorySpanExporter()
+    tracer_provider = TracerProvider()
+    tracer_provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(o11y.trace, "get_tracer", tracer_provider.get_tracer)
+    parent_turn_id = uuid4()
+    spawned = {"subagent_profile": "coding", "parent_turn_id": parent_turn_id}
+    chat = (await _seed_turn("queued", None)).model_copy(update=spawned)
+    intent_turn = await _seed_turn("queued", None, admission_source=INTENT_ADMISSION)
+    owner = await _seeded_member(intent_turn.workspace_id)
+    intent = ToolIntent(tool=REQUEST_CREDENTIALS_TOOL, input=REQUEST_INPUT)
+    intent_turn = intent_turn.model_copy(update={"inbound": intent.model_dump_json(), **spawned})
+    requests = CredentialRequests(
+        fernet=Fernet(Fernet.generate_key()),
+        declared=frozenset({"sample_api"}),
+        fillable=frozenset({"sample_api"}),
+    )
+    with caplog.at_level(logging.INFO, logger="ufo"):
+        chat_frame = await _engine(chat, EchoModel(), tmp_path).run()
+        intent_frame = await _engine(
+            intent_turn, object(), tmp_path, member_id=owner, requestable_credentials=requests
+        ).run_intent()
+    assert chat_frame is not None and chat_frame.status == "done"
+    assert intent_frame is not None and intent_frame.status == "done"
+    spawn = ("coding", str(parent_turn_id))
+    assert [
+        (span.attributes["ufo.profile"], span.attributes["ufo.parent_turn_id"])
+        for span in exporter.get_finished_spans()
+    ] == [spawn, spawn]
+    assert [
+        (record.getMessage(), record.ufo["profile"], record.ufo["parent_turn_id"])
+        for record in caplog.records
+        if record.getMessage() in ("turn.started", "turn.terminal")
+    ] == [
+        ("turn.started", *spawn),
+        ("turn.terminal", *spawn),
+        ("turn.started", *spawn),
+        ("turn.terminal", *spawn),
+    ]
 
 
 async def test_a_failed_turn_meters_the_error_class_it_ended_on(
@@ -2055,7 +2209,8 @@ async def test_a_parked_attempt_meters_its_own_wall_clock(
 ) -> None:
     """A park is not a terminal and its turn resumes as a fresh execution, so the attempt held at
     the cap reports the wall clock and rounds it spent — the days it then waits belong to no
-    execution and enter no observation."""
+    execution and enter no observation. The park itself is counted under the profile that hit the
+    cap, so a cap holding one profile's work is readable as that profile's."""
     clock = ManualClock()
     monkeypatch.setattr("ufo.loop.engine.time", clock)
     reader = _metric_capture(monkeypatch)
@@ -2082,6 +2237,8 @@ async def test_a_parked_attempt_meters_its_own_wall_clock(
     assert (wall.count, wall.sum, wall.attributes["status"]) == (1, ROUND_MS, "parked")
     (rounds,) = points["ufo.turn_rounds_total"]
     assert (rounds.value, rounds.attributes["status"]) == (1, "parked")
+    (parked,) = points["ufo.turn_parked_total"]
+    assert (parked.value, dict(parked.attributes)) == (1, {"profile": "main"})
     assert "ufo.turn_terminal_total" not in points
 
 
@@ -2192,7 +2349,7 @@ def test_an_execution_that_unwinds_past_its_exit_records_one_observation(
     clock = ManualClock()
     monkeypatch.setattr("ufo.loop.engine.time", clock)
     reader = _metric_capture(monkeypatch)
-    meter = _TurnMeter(started=clock.now, rounds=3)
+    meter = _TurnMeter(started=clock.now, profile="main", rounds=3)
     clock.now += ROUND_SECONDS
     meter.exited("done")
     clock.now += ROUND_SECONDS
@@ -2227,7 +2384,9 @@ async def test_a_prepared_intent_turn_meters_its_wall_clock_and_no_rounds(
     assert frame.credential_request is not None
     points = _exported_metrics(reader)
     (wall,) = points["ufo.turn_ms"]
-    assert (wall.count, wall.attributes["status"]) == (1, "done")
+    assert (wall.count, dict(wall.attributes)) == (1, {"status": "done", "profile": "main"})
+    (started,) = points["ufo.turn_started_total"]
+    assert (started.value, dict(started.attributes)) == (1, {"profile": "main"})
     (terminal,) = points["ufo.turn_terminal_total"]
     assert (terminal.value, terminal.attributes["status"], terminal.attributes["error_class"]) == (
         1,
@@ -3791,6 +3950,8 @@ async def test_the_terminal_log_carries_the_error_class_and_never_the_message(
     assert len(terminal) == 1
     assert terminal[0]["status"] == "failed"
     assert terminal[0]["error_class"] == "RuntimeError"
+    assert terminal[0]["profile"] == "main"
+    assert terminal[0]["parent_turn_id"] == ""
     assert "error_message" not in terminal[0]
 
 
@@ -5029,7 +5190,7 @@ async def test_commit_retries_a_transient_failure_and_keeps_the_error(
             frame = await engine._commit(
                 "failed",
                 [],
-                _TurnMeter(started=0.0),
+                _TurnMeter(started=0.0, profile="main"),
                 error=ModelStreamError("APIStatusError", "boom"),
             )
     assert frame is not None

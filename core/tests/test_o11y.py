@@ -134,7 +134,7 @@ def test_logs_and_spans_carry_the_workspace_and_metrics_carry_none(monkeypatch, 
     with ws(workspace_id), caplog.at_level(logging.INFO, logger="ufo"):
         o11y.emit_metric("turn_started_total")
         o11y.emit_histogram("model_round_ms", 12, model="claude-opus-4-8")
-        with o11y.turn_span(uuid4(), uuid4(), None):
+        with o11y.turn_span(uuid4(), uuid4(), None, None, None):
             pass
         o11y.log("turn.started", turn_id="abc")
     assert _attributes(reader) == {
@@ -322,6 +322,26 @@ def test_emit_histogram_rejects_a_dimension_the_name_does_not_declare():
         o11y.emit_histogram("turn_ms", 1, status="done", outcome="ok")
 
 
+def test_a_subagent_profile_splits_the_latency_series_from_the_main_agents(monkeypatch):
+    """What the dimension buys: a subagent's turns and tool calls are readable apart from the main
+    agent's, one series per profile rather than one per turn. A turn with no profile is the main
+    agent and reports as `main`, so no series carries an empty tag and the profiles sum to the
+    fleet."""
+    reader = _reader(monkeypatch)
+    for profile in (o11y.turn_profile("coding"), o11y.turn_profile(None)):
+        o11y.emit_histogram("turn_ms", 12, status="done", profile=profile)
+        o11y.emit_histogram("tool_call_ms", 3, tool="bash", outcome="ok", profile=profile)
+    assert {
+        metric.name: sorted(point.attributes["profile"] for point in metric.data.data_points)
+        for resource in reader.get_metrics_data().resource_metrics
+        for scope in resource.scope_metrics
+        for metric in scope.metrics
+    } == {
+        "ufo.turn_ms": ["coding", "main"],
+        "ufo.tool_call_ms": ["coding", "main"],
+    }
+
+
 def test_histograms_resolve_a_millisecond_and_a_day_as_delta_exponential(monkeypatch):
     """The production pairing, held against the SDK that implements it. One instrument carries a
     cached file read and a turn that ran for a day: an exponential histogram spends buckets on
@@ -397,10 +417,30 @@ def test_init_o11y_ships_histograms_as_delta_exponential(monkeypatch):
 
 
 def test_turn_span_yields_and_closes():
-    with o11y.turn_span(uuid4(), uuid4(), None) as span:
+    with o11y.turn_span(uuid4(), uuid4(), None, None, None) as span:
         assert isinstance(span, trace.Span)
         assert trace.get_current_span() is span
     assert trace.get_current_span() is trace.INVALID_SPAN
+
+
+def test_a_turn_span_carries_its_profile_and_the_turn_that_spawned_it(monkeypatch):
+    """A subagent's span sits inside the spawning turn's trace, so the profile and the parent turn
+    are attributes too: a trace search selects one profile's turns without walking every trace to
+    its root. A member-facing turn has no parent to name and reports as `main`."""
+    exporter = InMemorySpanExporter()
+    tracer_provider = TracerProvider()
+    tracer_provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(o11y.trace, "get_tracer", tracer_provider.get_tracer)
+    parent_turn_id = uuid4()
+    with o11y.turn_span(uuid4(), uuid4(), None, "coding", parent_turn_id):
+        pass
+    with o11y.turn_span(uuid4(), uuid4(), None, None, None):
+        pass
+    subagent, main = exporter.get_finished_spans()
+    assert subagent.attributes["ufo.profile"] == "coding"
+    assert subagent.attributes["ufo.parent_turn_id"] == str(parent_turn_id)
+    assert main.attributes["ufo.profile"] == "main"
+    assert "ufo.parent_turn_id" not in main.attributes
 
 
 def test_current_traceparent_is_none_without_an_active_span():
@@ -421,7 +461,7 @@ def test_traceparent_round_trips_a_turn_span_into_the_capturing_trace():
     with trace.use_span(capturing):
         traceparent = o11y.current_traceparent()
     assert traceparent == "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
-    with o11y.turn_span(uuid4(), uuid4(), traceparent) as span:
+    with o11y.turn_span(uuid4(), uuid4(), traceparent, None, None) as span:
         assert span.get_span_context().trace_id == 0x0AF7651916CD43DD8448EB211C80319C
 
 
