@@ -122,7 +122,6 @@ metadata:
   name: ufo-gateway
   namespace: ${namespace}
   annotations:
-    cert-manager.io/cluster-issuer: ${cluster_issuer}
     external-dns.alpha.kubernetes.io/hostname: ${apex_host},${gateway_origin_host}
     external-dns.alpha.kubernetes.io/cloudflare-proxied: "true"
 spec:
@@ -155,6 +154,16 @@ spec:
               service:
                 name: ufo-gateway
                 port: {name: http}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: ufo-gateway-tls
+  namespace: ${namespace}
+spec:
+  secretName: ufo-gateway-tls
+  issuerRef: {name: ${cluster_issuer}, kind: ClusterIssuer}
+  dnsNames: [${apex_host}, ${gateway_origin_host}]
 ---
 # The shared egress proxy meters every workspace sandbox through one service. It runs
 # from the ufo bundle image (`ufoctl proxy`), opens the RLS-bypassing owner DSN and scopes every
@@ -372,7 +381,6 @@ metadata:
   name: ufo-ingress
   namespace: ${namespace}
   annotations:
-    cert-manager.io/cluster-issuer: ${cluster_issuer}
     external-dns.alpha.kubernetes.io/hostname: "*.${apex_host}"
     external-dns.alpha.kubernetes.io/cloudflare-proxied: "true"
 spec:
@@ -390,6 +398,16 @@ spec:
               service:
                 name: ufo-ingress
                 port: {name: ingress}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: ufo-ingress-tls
+  namespace: ${namespace}
+spec:
+  secretName: ufo-ingress-tls
+  issuerRef: {name: ${cluster_issuer}, kind: ClusterIssuer}
+  dnsNames: ["*.${apex_host}"]
 ---
 # The shared serve fleet is one Deployment serving turns for every workspace. It runs the
 # bundle image (`ufoctl serve`) over the ufo-serve Secret's ufo.toml (mounted over the image's baked
@@ -509,7 +527,6 @@ metadata:
   name: ufo-serve
   namespace: ${namespace}
   annotations:
-    cert-manager.io/cluster-issuer: ${cluster_issuer}
     external-dns.alpha.kubernetes.io/hostname: ${shared_host}
     external-dns.alpha.kubernetes.io/cloudflare-proxied: "true"
 spec:
@@ -545,3 +562,13 @@ spec:
               service:
                 name: ufo-serve
                 port: {name: http}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: ufo-serve-tls
+  namespace: ${namespace}
+spec:
+  secretName: ufo-serve-tls
+  issuerRef: {name: ${cluster_issuer}, kind: ClusterIssuer}
+  dnsNames: [${shared_host}]

@@ -492,9 +492,22 @@ jobs:
             --name "$(terraform -chdir="$TF_DIR" output -raw cluster_name)"
           kubectl --namespace ingress-nginx rollout status deployment/ingress-nginx-controller --timeout=15m
           NAMESPACE="$(terraform -chdir="$TF_DIR" output -raw system_namespace)"
+          kubectl --namespace "$NAMESPACE" wait --for=condition=Ready --timeout=15m \
+            externalsecret/ufo-control-secrets \
+            externalsecret/ufo-platform-secrets \
+            externalsecret/ufo-gateway-slack-connect \
+            externalsecret/ufo-egress-ca \
+            externalsecret/datadog-api-key
+          kubectl --namespace "$NAMESPACE" wait --for=condition=Ready --timeout=15m \
+            certificate/ufo-gateway-tls \
+            certificate/ufo-ingress-tls \
+            certificate/ufo-serve-tls
+          kubectl --namespace "$NAMESPACE" rollout status deployment/ufo-gateway --timeout=15m
           kubectl --namespace "$NAMESPACE" rollout status deployment/ufo-sandbox-proxy --timeout=15m
           kubectl --namespace "$NAMESPACE" rollout status deployment/ufo-ingress --timeout=15m
           kubectl --namespace "$NAMESPACE" rollout status deployment/ufo-serve --timeout=15m
+          kubectl --namespace "$NAMESPACE" rollout status deployment/otel-collector --timeout=15m
+          kubectl --namespace "$NAMESPACE" rollout status daemonset/otel-logs-agent --timeout=15m
 
       - name: Gate sandbox egress proxy TLS
         env:

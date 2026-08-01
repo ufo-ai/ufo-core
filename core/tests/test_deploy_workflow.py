@@ -2,6 +2,7 @@ import importlib.util
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -1374,14 +1375,122 @@ def test_runtime_rollout_drains_before_the_proxy_gate(job_name: str) -> None:
     assert isinstance(script, str)
     assert "output -raw cluster_name" in script
     assert 'NAMESPACE="$(terraform -chdir="$TF_DIR" output -raw system_namespace)"' in script
-    assert '--namespace "$NAMESPACE" rollout status deployment/ufo-sandbox-proxy' in script
-    assert '--namespace "$NAMESPACE" rollout status deployment/ufo-ingress' in script
-    assert '--namespace "$NAMESPACE" rollout status deployment/ufo-serve' in script
     ingress = (
         "kubectl --namespace ingress-nginx rollout status "
         "deployment/ingress-nginx-controller --timeout=15m"
     )
     assert (ingress in script) is (job_name == "production_deploy")
+    templates = ROOT / "infra" / "templates"
+    manifests = [
+        document
+        for name in ("hosted", "observability", "cluster-services")
+        for document in yaml.safe_load_all(
+            re.sub(r"\$\{([^}]+)\}", r"\1", (templates / f"{name}.yaml.tpl").read_text())
+        )
+        if isinstance(document, dict)
+    ]
+    readiness_resources = {
+        f"{document['kind'].lower()}/{document['metadata']['name']}"
+        for document in manifests
+        if document.get("kind") in {"Certificate", "ExternalSecret"}
+    }
+    rollout_resources = {
+        f"{document['kind'].lower()}/{document['metadata']['name']}"
+        for document in manifests
+        if document.get("kind") in {"DaemonSet", "Deployment", "StatefulSet"}
+    }
+    assert readiness_resources == {
+        "certificate/ufo-gateway-tls",
+        "certificate/ufo-ingress-tls",
+        "certificate/ufo-serve-tls",
+        "externalsecret/ufo-control-secrets",
+        "externalsecret/ufo-platform-secrets",
+        "externalsecret/ufo-gateway-slack-connect",
+        "externalsecret/ufo-egress-ca",
+        "externalsecret/datadog-api-key",
+    }
+    assert rollout_resources == {
+        "daemonset/otel-logs-agent",
+        "deployment/otel-collector",
+        "deployment/ufo-gateway",
+        "deployment/ufo-sandbox-proxy",
+        "deployment/ufo-ingress",
+        "deployment/ufo-serve",
+    }
+    commands = [
+        shlex.split(line)
+        for line in script.replace("\\\n", " ").splitlines()
+        if line.strip().startswith("kubectl ")
+    ]
+    namespaced = [command for command in commands if command[1:3] == ["--namespace", "$NAMESPACE"]]
+    wait_commands = [command for command in namespaced if command[3] == "wait"]
+    rollout_commands = [command for command in namespaced if command[3] == "rollout"]
+    assert len(namespaced) == len(wait_commands) + len(rollout_commands)
+    assert all(
+        command[:6]
+        == [
+            "kubectl",
+            "--namespace",
+            "$NAMESPACE",
+            "wait",
+            "--for=condition=Ready",
+            "--timeout=15m",
+        ]
+        for command in wait_commands
+    )
+    assert all(
+        len(command) == 7
+        and command[3:5] == ["rollout", "status"]
+        and command[-1] == "--timeout=15m"
+        for command in rollout_commands
+    )
+    gated_readiness = {resource for command in wait_commands for resource in command[6:]}
+    gated_rollouts = {command[5] for command in rollout_commands}
+    expected_production = job_name == "production_deploy"
+    assert gated_readiness == (readiness_resources if expected_production else set())
+    testing_rollouts = {
+        "deployment/ufo-sandbox-proxy",
+        "deployment/ufo-ingress",
+        "deployment/ufo-serve",
+    }
+    assert gated_rollouts == (rollout_resources if expected_production else testing_rollouts)
+
+
+def test_runtime_certificates_match_ingress_tls() -> None:
+    source = (ROOT / "infra" / "templates" / "hosted.yaml.tpl").read_text()
+    documents = [
+        yaml.safe_load(re.sub(r"\$\{([^}]+)\}", r"\1", document))
+        for document in source.split("\n---\n")
+        if re.search(r"^kind: (?:Ingress|Certificate)$", document, re.MULTILINE)
+    ]
+    ingresses = sorted(
+        (
+            tls["secretName"],
+            tls["secretName"],
+            tuple(tls["hosts"]),
+        )
+        for document in documents
+        if document["kind"] == "Ingress"
+        for tls in document["spec"]["tls"]
+    )
+    certificates = sorted(
+        (
+            document["metadata"]["name"],
+            document["spec"]["secretName"],
+            tuple(document["spec"]["dnsNames"]),
+        )
+        for document in documents
+        if document["kind"] == "Certificate"
+    )
+    assert (
+        certificates
+        == ingresses
+        == [
+            ("ufo-gateway-tls", "ufo-gateway-tls", ("apex_host", "gateway_origin_host")),
+            ("ufo-ingress-tls", "ufo-ingress-tls", ("*.apex_host",)),
+            ("ufo-serve-tls", "ufo-serve-tls", ("shared_host",)),
+        ]
+    )
 
 
 def test_deployment_gate_joins_every_selected_result() -> None:
