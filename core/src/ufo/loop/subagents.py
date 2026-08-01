@@ -54,8 +54,9 @@ SUBAGENT_POLL_SECONDS = 0.1
 PRELOAD_PROMPT_CHAR_BOUND = 200_000
 FINISH_CONTRACT = (
     "End the turn by calling the `finish` tool with your final answer — its input schema is the "
-    "output contract. Text outside that call is working narration; only the finish payload "
-    "reaches the parent."
+    "output contract. Do not write a final prose message before it, and do not emit text alongside "
+    "it. The spawn returns only the finish payload to the parent; it does not return preceding "
+    "messages or tool output."
 )
 
 SUBAGENT_OUTPUT_DISCIPLINE = (

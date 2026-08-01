@@ -149,7 +149,8 @@ CONNECT_ACCOUNT_TOOL = "connect_account"
 FINISH_TOOL = "finish"
 FINISH_DESCRIPTION = (
     "End the turn and return your final answer to the parent agent. Call it alone, once the work "
-    "is done; its input schema is the output contract."
+    "is done, without writing a prose answer before it or emitting text alongside it; its input "
+    "schema is the output contract. The spawn does not return preceding messages or tool output."
 )
 FINISH_PROMPT = "End the turn now: call finish with your final answer."
 FORCE_FINISH_PROMPT = (

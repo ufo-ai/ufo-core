@@ -28,7 +28,7 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from PIL import Image
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from ufo import o11y
 from ufo.accounting import record_turn_usage
@@ -68,6 +68,7 @@ from ufo.loop.compaction import (
 from ufo.loop.engine import (
     ASK_USER_TOOL,
     FINISH_ALONE,
+    FINISH_DESCRIPTION,
     FINISH_PROMPT,
     FINISH_TOOL,
     FORCE_FINAL_PROMPT,
@@ -120,6 +121,7 @@ from ufo.models.interface import (
     ToolCallDelta,
     ToolCallStart,
     ToolResultBlock,
+    ToolSchema,
     ToolUseBlock,
 )
 from ufo.objects import ObjectRef
@@ -423,8 +425,11 @@ class NeverAnsweringModel:
         yield Usage(input_tokens=1, output_tokens=1)
 
 
+REPORT_SUMMARY_DESCRIPTION = "Complete result returned through finish."
+
+
 class _Report(BaseModel):
-    summary: str
+    summary: str = Field(description=REPORT_SUMMARY_DESCRIPTION)
 
 
 def _tool_results(request: ModelRequest, errored: bool | None = None) -> bool:
@@ -440,14 +445,10 @@ def _tool_results(request: ModelRequest, errored: bool | None = None) -> bool:
 
 @dataclass
 class FinishCallingModel:
-    """Narrates and calls bash in round one, then ends by calling finish — so a subagent turn's
-    terminal comes from the finish payload, never the narration. Records each round's
-    offered tool names so a test can assert finish rode beside the registry's set."""
-
-    offered: list[tuple[str, ...]] = field(default_factory=list)
+    offered: list[tuple[ToolSchema, ...]] = field(default_factory=list)
 
     async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
-        self.offered.append(tuple(tool.name for tool in request.tools))
+        self.offered.append(request.tools)
         if _tool_results(request):
             yield ToolCallStart(id="f1", name=FINISH_TOOL)
             yield ToolCallDelta(id="f1", partial_json=json.dumps({"summary": "the answer"}))
@@ -3371,7 +3372,12 @@ async def test_a_lone_valid_finish_call_ends_a_subagent_turn_with_its_payload(
     frame = await engine.run()
     assert frame.status == "done"
     assert frame.text == _Report(summary="the answer").model_dump_json()
-    assert all(FINISH_TOOL in offer for offer in model.offered)
+    assert all(any(tool.name == FINISH_TOOL for tool in offer) for offer in model.offered)
+    finish = next(tool for tool in model.offered[0] if tool.name == FINISH_TOOL)
+    assert finish.description == FINISH_DESCRIPTION
+    assert finish.input_schema["properties"]["summary"]["description"] == (
+        REPORT_SUMMARY_DESCRIPTION
+    )
     stored = await engine.transcript.read()
     assert stored is not None
     assert stored.messages[-1] == Message(role="assistant", content=frame.text)
@@ -3388,6 +3394,11 @@ async def test_a_subagent_prose_ending_closes_through_one_forced_finish_round(
     assert frame.text == _Report(summary="wrapped").model_dump_json()
     assert model.forced is not None
     assert tuple(tool.name for tool in model.forced.tools) == (FINISH_TOOL,)
+    (finish,) = model.forced.tools
+    assert finish.description == FINISH_DESCRIPTION
+    assert finish.input_schema["properties"]["summary"]["description"] == (
+        REPORT_SUMMARY_DESCRIPTION
+    )
     assert model.forced.tool_choice == FINISH_TOOL
     assert model.forced.reasoning == "off"
     assert model.forced.messages[-1] == Message(role="user", content=FINISH_PROMPT)

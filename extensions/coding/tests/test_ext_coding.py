@@ -65,6 +65,29 @@ def test_coding_manifest_registers_a_single_coding_profile() -> None:
     assert profile.output_model.model_validate({"result": "fixed"}).result == "fixed"
 
 
+def test_coding_result_keeps_headlines_soft_bounded() -> None:
+    result = "x" * 10_000
+    assert coding.CodingOutput.model_validate({"result": result}).result == result
+
+    schema = coding.CodingOutput.model_json_schema()["properties"]["result"]
+    assert "maxLength" not in schema
+    assert "headlines" in schema["description"].casefold()
+    assert "complete findings when no durable report exists" in schema["description"].casefold()
+    assert "without repeating" in schema["description"].casefold()
+
+
+def test_coding_prompt_returns_headlines_without_generating_a_handoff_report() -> None:
+    assert "Do not narrate routine tool calls" in coding.CODING_PROMPT
+    assert "memory for a later model round in this turn" in coding.CODING_PROMPT
+    assert "Never write a final prose message" in coding.CODING_PROMPT
+    assert "Only the `finish` payload is returned through the spawn" in coding.CODING_PROMPT
+    assert "Document every task-relevant finding" in coding.CODING_PROMPT
+    assert "Make it complete; working text does not count" in coding.CODING_PROMPT
+    assert "the finish result is an index, not a copy" in coding.CODING_PROMPT
+    assert "Do not create a report solely for the handoff" in coding.CODING_PROMPT
+    assert "Do not repeat their findings in the result" in coding.CODING_PROMPT
+
+
 def test_coding_tools_are_core_builtins_plus_the_repl_and_exclude_the_forbidden_ones() -> None:
     profile = coding.CODING_PROFILE
     builtin_names = {tool.name for tool in BUILTIN_TOOLS}
@@ -143,6 +166,7 @@ def test_coding_prompt_wraps_with_citation_and_fills_the_skill_index() -> None:
     assert "- extension-skill: A turn-specific coding workflow." in prompt
     assert "<citation_instructions>" in prompt
     assert "software-engineering task" in prompt
+    assert "keep it a short summary, put bulk output in a workspace file" not in prompt
     assert prompt.endswith(FINISH_CONTRACT)
     assert "list_skills" not in coding.CODING_PROFILE.tool_names
 

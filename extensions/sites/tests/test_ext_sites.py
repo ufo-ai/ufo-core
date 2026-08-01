@@ -215,6 +215,11 @@ def test_the_website_building_profile_names_only_meaningful_tools() -> None:
     assert WEBSITE_BUILDING_PROFILE.max_rounds == 100
 
 
+def test_the_website_building_profile_finishes_without_a_prose_final() -> None:
+    assert "call `finish` directly" in WEBSITE_BUILDING_PROFILE.prompt
+    assert "give a final message" not in WEBSITE_BUILDING_PROFILE.prompt
+
+
 async def test_website_builds_and_lists_the_output(tmp_path: Path) -> None:
     sandbox = FakeSandbox(
         scripted={"ls -1A": ExecResult(stdout="index.html\nstyle.css\n", stderr="", exit_code=0)}

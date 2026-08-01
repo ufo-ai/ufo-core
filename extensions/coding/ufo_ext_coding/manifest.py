@@ -2,7 +2,7 @@
 `coding` and `code-review` skills the agent loads on demand.
 
 `spawn_subagent("coding", {"objective": ...})` runs a child that explores a repo, edits code, runs
-tests, and reports a self-contained result. The profile names only tool names — bash/read/write/
+tests, and reports a result. The profile names only tool names — bash/read/write/
 edit/glob/grep to work the code, load_skill to pull a workflow, share_file to hand back
 an artifact, and js_repl to exercise Node code — so the pack is self-contained and carries no
 cross-extension import. Core wraps the prompt with the shared citation/formatting discipline and
@@ -69,7 +69,10 @@ class CodingInput(BaseModel):
 
 
 class CodingOutput(BaseModel):
-    result: str
+    result: str = Field(
+        description="Complete findings when no durable report exists; otherwise headlines and "
+        "pointers without repeating the report.",
+    )
 
 
 GIT_APP_ID_ENV = "GITHUB_APP_ID"

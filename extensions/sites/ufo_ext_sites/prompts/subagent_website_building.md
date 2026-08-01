@@ -33,4 +33,4 @@ CRITICAL: after modifying ANY website files, you MUST bring the site up with sta
 For a formal document deliverable rather than a web page, use Office formats (.docx, .pptx, .xlsx), not Markdown — load the corresponding office skill.
 </deliverable_formats>
 
-When you have completed your task, give a final message summarizing what you built, what you validated in the sandbox, and the file you shared.
+When you have completed your task, call `finish` directly with what you built, what you validated in the sandbox, and the file you shared.
