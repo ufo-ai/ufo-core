@@ -31,6 +31,7 @@ module "platform" {
   )
 
   # HA across AZs for prod.
+  az_count                  = 3
   single_nat_gateway        = false
   node_instance_types       = ["m6i.large"]
   node_min_size             = 3

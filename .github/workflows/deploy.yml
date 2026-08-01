@@ -302,6 +302,16 @@ jobs:
           missing() {
             awk -v desired="$1" -v owned="$2" 'BEGIN { value = desired - owned; if (value < 0) value = 0; print value }'
           }
+          standard_vcpus() {
+            COUNTS=$(jq -r '[.[] | select(.[1] == null) | .[0] | select(test("^(?:[acdhmrtz][0-9]|i(?:[0-9]|m[0-9]|s[0-9]))"))] | group_by(.)[] | [length, .[0]] | @tsv' <<< "$1") || return
+            TOTAL=0
+            while read -r COUNT INSTANCE_TYPE; do
+              test -n "$INSTANCE_TYPE" || continue
+              DEFAULT_VCPUS=$(aws ec2 describe-instance-types --instance-types "$INSTANCE_TYPE" --query 'InstanceTypes[0].VCpuInfo.DefaultVCpus' --output text) || return
+              TOTAL=$((TOTAL + COUNT * DEFAULT_VCPUS))
+            done <<< "$COUNTS"
+            printf '%s\n' "$TOTAL"
+          }
           nat_zones() {
             for SUBNET in $1; do
               SUBNET_ZONE=$(aws ec2 describe-subnets --subnet-ids "$SUBNET" --query 'Subnets[0].AvailabilityZone' --output text) || return
@@ -337,6 +347,16 @@ jobs:
           OWNED=$(aws elasticache describe-cache-clusters --query 'sum(CacheClusters[?starts_with(CacheClusterId, `prod-redis-`)].NumCacheNodes)' --output json)
           REQUIRED=$(missing 2 "$OWNED")
           check_headroom elasticache L-DFE45DF3 "$REQUIRED" "$USED"
+          INSTANCES=$(aws ec2 describe-instances --filters Name=instance-state-name,Values=pending,running,shutting-down --query 'Reservations[].Instances[].[InstanceType,InstanceLifecycle]' --output json)
+          USED=$(standard_vcpus "$INSTANCES")
+          PROD_INSTANCES=$(aws ec2 describe-instances --filters Name=instance-state-name,Values=pending,running Name=tag:aws:eks:cluster-name,Values=prod-cluster --query 'Reservations[].Instances[].[InstanceType,InstanceLifecycle]' --output json)
+          OWNED=$(standard_vcpus "$PROD_INSTANCES")
+          REQUIRED=$(missing 28 "$OWNED")
+          check_headroom ec2 L-1216C47A "$REQUIRED" "$USED"
+          USED=$(aws elbv2 describe-load-balancers --query 'length(LoadBalancers[?Type == `network`])' --output json)
+          OWNED=$(aws resourcegroupstaggingapi get-resources --resource-type-filters elasticloadbalancing:loadbalancer --tag-filters Key=elbv2.k8s.aws/cluster,Values=prod-cluster --query 'length(ResourceTagMappingList[?contains(ResourceARN, `:loadbalancer/net/`)])' --output json)
+          REQUIRED=$(missing 2 "$OWNED")
+          check_headroom elasticloadbalancing L-69A177A2 "$REQUIRED" "$USED"
 
           NAT_SUBNETS=$(aws ec2 describe-nat-gateways --filter Name=state,Values=pending,available,deleting --query 'NatGateways[].SubnetId' --output text)
           PROD_NAT_SUBNETS=$(aws ec2 describe-nat-gateways --filter Name=state,Values=pending,available Name=tag:flyingobject.ai/environment,Values=prod --query 'NatGateways[].SubnetId' --output text)

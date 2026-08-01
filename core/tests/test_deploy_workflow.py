@@ -23,6 +23,7 @@ MONITORS = {
 RUN_URL = "https://github.com/metalcraftai/ufo/actions/runs/30120902872"
 DATADOG_STATUS_OK = 0
 DATADOG_STATUS_CRITICAL = 2
+M6I_LARGE_DEFAULT_VCPUS = 2
 STORAGE_QUERY = (
     "min(last_30m):avg:aws.rds.free_storage_space{dbinstanceidentifier:"
     "${module.platform.db_instance_identifier}} / avg:aws.rds.total_storage_space"
@@ -103,8 +104,23 @@ fi
 case "$1 $2" in
   "sts get-caller-identity") printf '%s\n' "$AWS_ACCOUNT" ;;
   "sesv2 get-account") printf '%s %s\n' "$SES_ACCESS" "$SES_SENDING" ;;
-  "service-quotas get-service-quota") printf '%s\n' "$AWS_QUOTA" ;;
+  "service-quotas get-service-quota")
+    case "$*" in
+      *L-1216C47A*) printf '%s\n' "$AWS_VCPU_QUOTA" ;;
+      *L-69A177A2*) printf '%s\n' "$AWS_NLB_QUOTA" ;;
+      *) printf '%s\n' "$AWS_QUOTA" ;;
+    esac
+    ;;
   "ec2 describe-availability-zones") printf '%s\n' 'us-east-1a us-east-1b us-east-1c' ;;
+  "ec2 describe-instances")
+    case "$*" in
+      *prod-cluster*) printf '%s\n' "$AWS_INSTANCES_OWNED" ;;
+      *) printf '%s\n' "$AWS_INSTANCES_USED" ;;
+    esac
+    ;;
+  "ec2 describe-instance-types") printf '%s\n' "$AWS_DEFAULT_VCPUS" ;;
+  "elbv2 describe-load-balancers") printf '%s\n' "$AWS_NLB_USED" ;;
+  "resourcegroupstaggingapi get-resources") printf '%s\n' "$AWS_NLB_OWNED" ;;
   "ec2 describe-nat-gateways")
     case "$*" in
       *"tag:flyingobject.ai/environment,Values=prod"*) printf '%s\n' "$AWS_PROD_NAT_SUBNETS" ;;
@@ -154,6 +170,13 @@ def _run_production_prerequisites(
     owned: str = "0",
     text_owned: str | None = None,
     prod_nat_subnets: str = "",
+    instances_used: str = "[]",
+    instances_owned: str = "[]",
+    default_vcpus: str = "2",
+    vcpu_quota: str = "256",
+    nlb_used: str = "0",
+    nlb_owned: str = "0",
+    nlb_quota: str = "50",
 ) -> tuple[subprocess.CompletedProcess[bytes], str]:
     script = _step("production_access", "Check production prerequisites")["run"]
     assert isinstance(script, str)
@@ -170,7 +193,13 @@ def _run_production_prerequisites(
             "AWS_FAIL": failed_command,
             "AWS_FAILED_ONCE": str(tmp_path / "aws-failed-once"),
             "AWS_FAIL_ONCE": failed_once_command,
+            "AWS_DEFAULT_VCPUS": default_vcpus,
+            "AWS_INSTANCES_OWNED": instances_owned,
+            "AWS_INSTANCES_USED": instances_used,
             "AWS_NAT_SUBNETS": nat_subnets,
+            "AWS_NLB_OWNED": nlb_owned,
+            "AWS_NLB_QUOTA": nlb_quota,
+            "AWS_NLB_USED": nlb_used,
             "AWS_OWNED": owned,
             "AWS_PROD_NAT_SUBNETS": prod_nat_subnets,
             "AWS_QUOTA": quota,
@@ -178,6 +207,7 @@ def _run_production_prerequisites(
             "AWS_TEXT_OWNED": owned if text_owned is None else text_owned,
             "AWS_TEXT_USED": used if text_used is None else text_used,
             "AWS_USED": used,
+            "AWS_VCPU_QUOTA": vcpu_quota,
             "SES_ACCESS": ses_access,
             "SES_SENDING": ses_sending,
         },
@@ -558,11 +588,28 @@ def test_production_prerequisites_fail_before_terraform(
             "L-1194D53C",
             "L-7B6409FD",
             "L-DFE45DF3",
+            "L-1216C47A",
+            "L-69A177A2",
             "L-FE5A380F",
         ):
             assert code in invoked
         assert invoked.count("describe-nat-gateways") == 2
         assert invoked.count("describe-subnets") == 1
+        assert "Name=tag:aws:eks:cluster-name,Values=prod-cluster" in invoked
+        assert "Key=elbv2.k8s.aws/cluster,Values=prod-cluster" in invoked
+        instance_calls = [
+            call for call in invoked.splitlines() if call.startswith("ec2 describe-instances ")
+        ]
+        assert len(instance_calls) == 2
+        total = next(call for call in instance_calls if "prod-cluster" not in call)
+        production = next(call for call in instance_calls if "prod-cluster" in call)
+        assert "Name=instance-state-name,Values=pending,running,shutting-down" in total
+        assert "Name=instance-state-name,Values=pending,running " in production
+        assert "shutting-down" not in production
+        assert invoked.count("Reservations[].Instances[].[InstanceType,InstanceLifecycle]") == 2
+        assert "length(LoadBalancers[?Type == `network`])" in invoked
+        assert "--resource-type-filters elasticloadbalancing:loadbalancer" in invoked
+        assert "contains(ResourceARN, `:loadbalancer/net/`)" in invoked
 
 
 @pytest.mark.parametrize(
@@ -573,12 +620,108 @@ def test_production_prerequisites_fail_before_terraform(
         "eks list-clusters",
         "rds describe-db-instances",
         "elasticache describe-cache-clusters",
+        "ec2 describe-instances",
+        "ec2 describe-instance-types",
+        "elbv2 describe-load-balancers",
+        "resourcegroupstaggingapi get-resources",
         "ec2 describe-availability-zones",
     ],
 )
 def test_production_prerequisite_queries_fail_loud(tmp_path: Path, failed_command: str) -> None:
-    run, _ = _run_production_prerequisites(tmp_path, failed_command=failed_command)
+    instances_used = (
+        '[["m6i.large", null]]' if failed_command == "ec2 describe-instance-types" else "[]"
+    )
+    run, _ = _run_production_prerequisites(
+        tmp_path,
+        failed_command=failed_command,
+        instances_used=instances_used,
+    )
     assert run.returncode == 42
+
+
+@pytest.mark.parametrize(
+    ("vcpu_quota", "nlb_quota"),
+    [("15", "50"), ("256", "1")],
+)
+def test_production_prerequisites_reject_regional_capacity_shortages(
+    tmp_path: Path, vcpu_quota: str, nlb_quota: str
+) -> None:
+    run, _ = _run_production_prerequisites(
+        tmp_path,
+        vcpu_quota=vcpu_quota,
+        nlb_quota=nlb_quota,
+    )
+    assert run.returncode != 0
+
+
+def test_production_vcpu_quota_uses_standard_on_demand_instance_defaults(
+    tmp_path: Path,
+) -> None:
+    run, invoked = _run_production_prerequisites(
+        tmp_path,
+        instances_used=(
+            '[["m6i.large", null], ["m6i.large", null], ["im4gn.large", null], '
+            '["is4gen.medium", null], ["m6i.large", "spot"], ["g5.xlarge", null], '
+            '["inf2.xlarge", null], ["mac2.metal", null], ["trn1.2xlarge", null], '
+            '["hpc7g.4xlarge", null]]'
+        ),
+        instances_owned='[["m6i.large", null]]',
+    )
+    assert run.returncode == 0
+    assert "ec2 L-1216C47A 26 8" in run.stdout.decode().splitlines()
+    assert invoked.count("describe-instance-types") == 4
+    assert (
+        "ec2 describe-instance-types --instance-types m6i.large "
+        "--query InstanceTypes[0].VCpuInfo.DefaultVCpus --output text"
+    ) in invoked
+    script = _step("production_access", "Check production prerequisites")["run"]
+    assert isinstance(script, str)
+    assert 'select(test("^(?:[acdhmrtz][0-9]|i(?:[0-9]|m[0-9]|s[0-9]))"))' in script
+
+
+def test_production_vcpu_reservation_matches_the_node_group() -> None:
+    production = (ROOT / "infra" / "envs" / "prod" / "main.tf").read_text()
+    eks = (ROOT / "infra" / "modules" / "platform" / "eks.tf").read_text()
+    instance_types = re.search(
+        r'^  node_instance_types += +\["([^"]+)"\]$', production, re.MULTILINE
+    )
+    max_size = re.search(r"^  node_max_size += +(\d+)$", production, re.MULTILINE)
+    az_count = re.search(r"^  az_count += +(\d+)$", production, re.MULTILINE)
+    assert instance_types and instance_types.group(1) == "m6i.large"
+    assert max_size and az_count
+    assert "use_latest_ami_release_version = true" in eks
+
+    script = _step("production_access", "Check production prerequisites")["run"]
+    assert isinstance(script, str)
+    reservation = re.search(
+        r'REQUIRED=\$\(missing (\d+) "\$OWNED"\)\ncheck_headroom ec2 L-1216C47A',
+        script,
+    )
+    assert reservation
+    max_nodes = int(max_size.group(1))
+    nodes = max_nodes + 2 * int(az_count.group(1))
+    assert int(reservation.group(1)) == nodes * M6I_LARGE_DEFAULT_VCPUS
+
+
+def test_production_nlb_reservation_matches_the_services() -> None:
+    production = (ROOT / "infra" / "envs" / "prod" / "ufo.tf").read_text()
+    load_balancers = production.count(
+        '"service.beta.kubernetes.io/aws-load-balancer-nlb-target-type"'
+    )
+    script = _step("production_access", "Check production prerequisites")["run"]
+    assert isinstance(script, str)
+    reservation = re.search(
+        r'REQUIRED=\$\(missing (\d+) "\$OWNED"\)\n'
+        r"check_headroom elasticloadbalancing L-69A177A2",
+        script,
+    )
+    assert reservation
+    assert int(reservation.group(1)) == load_balancers == 2
+
+
+def test_production_vcpu_inventory_parse_fails_loud(tmp_path: Path) -> None:
+    run, _ = _run_production_prerequisites(tmp_path, instances_used="{")
+    assert run.returncode != 0
 
 
 def test_production_prerequisite_nat_lookup_fails_loud(tmp_path: Path) -> None:
@@ -624,6 +767,8 @@ def test_production_prerequisites_report_computed_headroom(tmp_path: Path) -> No
         "eks L-1194D53C 0 2",
         "rds L-7B6409FD 0 2",
         "elasticache L-DFE45DF3 1 2",
+        "ec2 L-1216C47A 28 0",
+        "elasticloadbalancing L-69A177A2 2 0",
         "vpc L-FE5A380F 1 2",
         "vpc L-FE5A380F 1 2",
         "vpc L-FE5A380F 1 2",
@@ -641,13 +786,15 @@ def test_production_prerequisites_combine_paginated_inventory(tmp_path: Path) ->
         nat_subnets="",
     )
     assert run.returncode == 0
-    assert invoked.count("--output json") == 10
+    assert invoked.count("--output json") == 14
     assert run.stdout.decode().splitlines() == [
         "vpc L-F678F1CE 0 5",
         "ec2 L-0263D0A3 2 5",
         "eks L-1194D53C 0 5",
         "rds L-7B6409FD 0 5",
         "elasticache L-DFE45DF3 1 5",
+        "ec2 L-1216C47A 28 0",
+        "elasticloadbalancing L-69A177A2 2 0",
         "vpc L-FE5A380F 1 0",
         "vpc L-FE5A380F 1 0",
         "vpc L-FE5A380F 1 0",
@@ -655,11 +802,16 @@ def test_production_prerequisites_combine_paginated_inventory(tmp_path: Path) ->
 
 
 def test_production_prerequisites_reserve_only_missing_capacity(tmp_path: Path) -> None:
+    instances = json.dumps([["m6i.large", None]] * 4)
     run, invoked = _run_production_prerequisites(
         tmp_path,
         quota="5",
         used="4",
         owned="3",
+        instances_used=instances,
+        instances_owned=instances,
+        nlb_used="4",
+        nlb_owned="2",
         nat_subnets=" ".join(["subnet-a"] * 4 + ["subnet-b"] * 4 + ["subnet-c"] * 4),
         prod_nat_subnets="subnet-a subnet-b subnet-c",
     )
@@ -671,6 +823,8 @@ def test_production_prerequisites_reserve_only_missing_capacity(tmp_path: Path) 
         "eks L-1194D53C 0 4",
         "rds L-7B6409FD 0 4",
         "elasticache L-DFE45DF3 0 4",
+        "ec2 L-1216C47A 20 8",
+        "elasticloadbalancing L-69A177A2 0 4",
         "vpc L-FE5A380F 0 4",
         "vpc L-FE5A380F 0 4",
         "vpc L-FE5A380F 0 4",
