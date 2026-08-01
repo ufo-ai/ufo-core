@@ -126,28 +126,32 @@ under the surface's own path, and each referenced asset is actually served.
 ```
 extensions/web/
   frontend/                   source, never served
-    tailwind.config.ts        the design system: tokens as theme, nothing themed elsewhere
-    portal.html               skeleton + entry <script type="module">
+    index.html                skeleton + entry <script type="module">
     src/
+      theme.css               the design system: one @theme block, nothing themed elsewhere
       main.tsx                boot, session, router mount
-      kernel/                 fence, registry, and the eight primitives
-      components/             shadcn/ui, vendored and themed
+      kernel/                 panel (the fence), listing, table, form, pager
+      components/ui/          shadcn/ui, vendored and themed — button, field, table, sheet
       views/
-        Listing.tsx           the generic declared-listing component
+        registry.tsx          Record<WorkspaceTab, WorkspaceView> — one map, no second list
+        Sources.tsx           a declaration plus a payload projection
         Chat.tsx              layout-bearing
-        Conversation.tsx      layout-bearing (turn tree, file pane)
-        Artifact.tsx          layout-bearing (pinned viewer)
+        Conversations.tsx     layout-bearing (turn tree, file pane)
+        Artifacts.tsx         declared, with a detail pane
         Admin.tsx             layout-bearing (workspace administration)
   ufo_ext_web/
     static/                   build output (`outDir: ../ufo_ext_web/static`), gitignored,
                               shipped via `artifacts`, and what `surface.py` serves
 ```
 
-The served path stays inside the Python package, where `surface.py:88-89` already reads
-`static/portal.html` at import and where the debugger's `outDir: ../ufo_ext_debugger/static` points.
-Vite names an HTML output after its input, so the entry keeps the name `portal.html` and the build
-emits exactly the path the package already reads — no rename, and no second answer to which file is
-served. Only the source tree is new, and it sits outside the package because it is never served.
+The served path stays inside the Python package, where the debugger's
+`outDir: ../ufo_ext_debugger/static` also points. What shipped is `frontend/index.html` as the entry
+and `surface.py:91-92` reading `static/index.html`, guarded — `read_text() if PORTAL_FILE.is_file()
+else None`, raising at request time rather than at import, so a missing build names the npm command
+instead of breaking extension import for every web test. (An earlier draft of this section reasoned
+from an unguarded read of `static/portal.html` and concluded the entry must keep that name; both
+halves were wrong about the code as built.) Only the source tree is new, and it sits outside the
+package because it is never served.
 
 Ten units editing ten files conflict where they genuinely overlap (the registry line) instead of
 everywhere.
@@ -211,37 +215,47 @@ Small and owned centrally, because these are exactly the things that must not be
 Most portal views are the same view: fetch a projection, render rows with per-row actions, page,
 show an empty state. That is a declaration, not code:
 
-```js
-register(listing({
-  id: 'sources',
-  placement: 'workspace',
-  label: 'Sources',
-  read: 'workspace/sources',
-  key: 'sources',
+```tsx
+export const SOURCES: ListingSpec<SourcesPayload, SourceRow> = {
+  read: "/workspace/sources",
+  rows,                                    // payload → one uniform row list
+  rowKey: (row) => row.key,
   columns: [
-    { field: 'backend', label: 'source' },
-    { field: 'streams', label: 'streams', render: joinSorted },
-    { field: 'owner_email', label: 'owner' },
-    { field: 'shared', label: 'access', render: (v) => v ? 'shared' : 'private' },
-    { field: 'next_sync_at', label: 'next sync', render: minute },
+    { field: "backend", label: "source" },
+    { field: "streams", label: "streams" },
+    { field: "access", label: "access" },
+    { field: "next_sync", label: "next sync" },
   ],
-  actions: ['source.resync', 'source.share', 'source.remove'],   // RFC 0022 declarations
-  empty: 'No sources are registered. Register one in chat …',
-}));
+  empty: "No sources are registered. Register one in chat …",
+  actions: (row, { act, busy }) => …,      // controls that post one intent
+};
 ```
 
-`actions` names RFC 0022 `MemberAction` declarations; the kernel renders each control, derives its
-form from the action's `submit_model`, submits the intent, and renders the callee's outcome
-verbatim.
-Sources, credentials, artifacts, sites, tasks, skills, connections, and usage all collapse to
-declarations of this shape. Memory does not: RFC 0022 places its paging on the hand-written side and
-this RFC follows. So the hand-written set is chat, the conversations debugger, the artifact viewer,
-memory, and the administration view — their value *is* layout — and each registers identically, so
-the kernel does not care which kind a view is.
+`columns[].field` is `keyof Row`, so a typo is a compile error rather than a blank cell, and
+`render` receives that field's exact value type. `actions` is a **render function**, not a list of
+names: RFC 0022 was closed, so there is no `MemberAction` declaration to name and no
+`submit_model`-derived form. The kernel still owns the mutation machinery uniformly — `act` posts
+one prepared intent on the main agent's lane, raises `busy` so a control cannot post twice, hands
+an applied outcome to the placement, and states a refusal in place.
 
-The payoff is in the predictable changes: **a new column** is one line; **a new action** is one
-declaration on the kind (RFC 0022) plus one name here; **a new listing view** is one declaration
-and no kernel edit; **copy** lives beside the declaration where a gate can check it.
+Each adopter earned exactly one capability, which is a real matrix rather than speculative
+generality: sites contributed `unavailable`, artifacts `paged` and `detail`, sources `rows` and
+`actions`. Credentials, tasks, skills, connections, and usage follow the same shape. Memory does
+not: its paging sits on the hand-written side. So the hand-written set is chat, the conversations
+debugger, the artifact viewer, memory, and the administration view — their value *is* layout — and
+each registers identically, so the kernel does not care which kind a view is.
+
+**A view's label and renderer are one entry, because three lists made "one declaration, no kernel
+edit" false.** Reachability was governed by `WORKSPACE_TABS`, `WORKSPACE_LABELS`, and a ternary
+chain in `Workspace.tsx`. The label map and the chain are gone; `WORKSPACE_TABS` remains and is
+still what orders the sidebar, but `Record<WorkspaceTab, WorkspaceView>` totality now makes a tab
+without its view a **compile error** — the paired-edit trap that shipped a silently empty sidebar
+twice during wave 2 cannot recur.
+
+The payoff is in the predictable changes: **a new column** is one line; **a new listing view** is
+one declaration and one registry entry; **copy** lives beside the declaration where a gate can
+check it. An **action** is a render function on the declaration, not a name resolved elsewhere —
+RFC 0022, which would have supplied that, is not being built.
 
 ### 4. The design system
 
@@ -288,12 +302,13 @@ declaration, the manifest gains one point:
 Manifest(
     name="sites",
     portal_views=(PortalView(id="sites", placement="workspace", label="Sites",
-                             read="…", columns=…, actions=…, empty=…),),
+                             read="…", columns=…, empty=…),),
 )
 ```
 
-Core validates declarations at boot in the registry that already validates kinds and tools (unknown
-field → fail loud, duplicate id → fail loud, an action naming no declaration → fail loud). The
+No `actions` field: RFC 0022 was closed, so nothing can consume one, and a field with no consumer
+does not ship. Core validates declarations at boot in the registry that already validates kinds and
+tools (unknown field → fail loud, duplicate id → fail loud, unknown placement → fail loud). The
 portal fetches the deploy's view declarations and renders them. **An extension ships a portal view
 without a line of portal code**, which is the property the long-term third-party story needs and the
 short-term first-party one already wants — sites and memory both had to be special-cased into the
@@ -325,16 +340,27 @@ designed into a corner (hence `placement`, `id`, and a versioned declaration sch
 - **The repetitive view stops being code.** Twelve hand-written renderers become declarations plus
   four layout modules; the fence, the empty state, the error arm, and paging exist once.
 - **Predictable changes get cheap**: a column, an action, a view, a copy string, a theme.
-- **Testing changes shape, and the toolchain shrinks the risk rather than adding to it.** Today's
-  proof is a mutation-red walk over hand-written markup through a hand-rolled stub DOM. Under
-  vitest + React Testing Library the stub goes away and the mutation discipline stays: the fence and
-  the eight primitives get the mutation treatment once, and a declared
-  view is proven by its declaration and its envelope — the columns it names, the actions it offers,
-  the read it calls — not by re-walking generated DOM. A layout-bearing view keeps its own walk. The
-  bar unit 1 must clear is concrete: the restructured tests still red on the real defects this wave
-  produced — a dropped fence arm, a `try` enclosing only the initial fetch, a byte bound cut in
-  characters, a viewer that survives navigation. Trading merge pain for test blindness is still the
-  way this goes wrong; jsdom makes it less likely, not impossible.
+- **Testing changes shape, and this RFC's first answer was wrong.** It proposed that a declared view
+  be proven "by its declaration and its envelope — the columns it names, the actions it offers, the
+  read it calls — not by re-walking generated DOM." Unit 3 wrote that test and measured it: twelve
+  renderer mutations (columns reversed, every cell reading the first declared field, `render`
+  ignored, empty copy never shown, an unavailable payload treated as a normal read, cursor never
+  appended, pager never rendered, an actions column rendered without a declaration, refusal notice
+  dropped, an applied outcome never reaching the placement, detail never rendered, the busy flag
+  never raised) each red a rendering test, and **the declaration-only test survived all twelve** —
+  it asserts the declaration equals itself, so it passes while the renderer ignores `columns`
+  entirely.
+  Tautological, not caught-elsewhere. The test stays in the suite under a name saying so, so the
+  next reader meets the counter-evidence rather than rediscovering it.
+
+  What replaces it is three-part, and each part covers what the others cannot. **Types** retire a
+  whole class of test: `Column<Row>` is a distributive mapped type, so `field` must be `keyof Row`
+  and `render` receives that field's exact value type — a field-name typo is a compile error, not a
+  blank cell. **The renderer is mutation-tested once**, those twelve legs, for everything generic.
+  **Each adopter carries one thin payload-binding test**, the leg types cannot reach: payload types
+  are hand-written, so a server-side key rename type-checks and yields blank cells. Trading merge
+  pain for test blindness is still the way this goes wrong; jsdom and `tsc` make it less likely, not
+  impossible.
 - **A new dependency surface.** npm packages in the portal's path are a supply-chain and upgrade
   cost the single file did not have. Lockfile committed, dependencies few and justified, and the
   runtime origin rule unchanged — nothing is fetched from a third-party host at run time.
@@ -418,14 +444,17 @@ missing.
    build's placement: assets produced at image-build time, served by `ufoctl serve`, built in CI
    before the tests that need them, and a dev loop that does not make a Python change require an
    npm invocation. That is where an adopted build fails, not in the editor.
-2. **How is a declared view tested?** This is the document's one concentrated risk, and it is
-   deliberately left open: unit 3 settles it against three real views before units 4–5 mechanize
-   the rest. The toolchain shrinks it — jsdom replaces the stub substrate — without answering it,
-   because the question is what a generated view's proof *asserts*, not what it runs on.
-3. **Does `listing()` cover a view with per-row heterogeneity?** Sources renders grouped bindings
-   and plain rows differently today. Either the declaration grows a row-variant concept — the
-   generic machinery this RFC otherwise avoids — or that view stays hand-written. Unit 3 includes
-   sources precisely to find out.
+2. **How is a declared view tested? — answered, against this RFC's own proposal.** Declaration-only
+   proof is tautological: measured in unit 3, it survived all twelve renderer mutations. The shipped
+   answer is types for field binding, one mutation-tested renderer, and a payload-binding test per
+   adopter. See the consequence above; this was the document's one concentrated risk and it resolved
+   by refutation, not by confirmation.
+3. **Does `listing()` cover a view with per-row heterogeneity? — answered: yes, and the premise was
+   wrong.** This RFC predicted sources as the likely holdout needing a row-variant concept. The
+   heterogeneity is in the **payload**, not the table: all seven columns are identical for grouped
+   bindings and bare streams, and only the values are computed differently. A `rows: (payload) =>
+   Row[]` projection normalizes them into one uniform list, so `Sources.tsx` became a declaration
+   plus a projection — a 177-line component retired with no row-variant concept added.
 4. **Where does chat live?** It is the one view that is neither a listing nor a static layout: it
    holds a live SSE stream, optimistic composer state, and handoff renderers. It stays hand-written
    here, but if the kernel's fence and drawer end up serving it too, the "layout-bearing" category
@@ -460,9 +489,11 @@ missing.
 2. **The fence and the primitives.** One `load()` owning the token, abort, error, and empty; the 19
    hand-written fences delete; the harness gains a kernel fixture that mutation-tests them once.
 3. **`listing()` + the first three declarations** (sources, artifacts, sites — one mutating, one
-   layout-adjacent, one extension-owned). Each PR deletes the renderer it replaces. This is where
-   the test-shape question is settled in practice.
-4. **The remaining declared views**, one per PR, mechanical once unit 3 lands.
+   paged with a detail pane, one minimal). Sites is *not* extension-owned, as an earlier draft of
+   this list said: it was an inline component reading a core route, and nothing in unit 3 tests
+   extension ownership. That property arrives in unit 5. Each PR deletes the renderer it replaces.
+   This is where the test-shape question was settled in practice — by refuting the proposal above.
+4. **The remaining declared views**, one PR, mechanical once unit 3 lands.
 5. **`portal_views` in the manifest**, boot validation, and sites moving from a special case to a
    declaration — the proof that an extension can contribute a view without touching the portal.
    **The sample extension must declare one too**: `gates.py:221-223` requires the sample's non-empty
@@ -475,5 +506,6 @@ missing.
    the answer belongs in this unit rather than after it.
 
 Units 1–2 are worth doing whether or not 3–5 follow: they remove the merge bottleneck and the
-most-copied defect surface. Unit 5 depends on RFC 0022's `MemberAction` for its actions half; the
-read-only half stands alone.
+most-copied defect surface. **RFC 0022 was closed**, so unit 5 ships its read-only half only — a
+declaration carries its read and its presentation, never actions, and no `actions` field reaches the
+manifest until something can consume one.

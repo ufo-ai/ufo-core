@@ -1,16 +1,13 @@
 import { useEffect, useState } from "react";
 
-import { Pager, type Placement } from "@/kernel/pager";
+import type { ListingSpec } from "@/kernel/listing";
 import { day } from "@/views/Tasks";
 import { formatSize } from "@/views/Chat";
 import { Sheet } from "@/components/ui/sheet";
-import { Table, Td, Th } from "@/components/ui/table";
-import { Panel, usePanelRead } from "@/kernel/panel";
 
 const VIEWER_TEXT_BYTES = 64 * 1024;
 
 type Artifact = {
-  id: string;
   filename: string;
   subject: string | null;
   media_type: string;
@@ -33,70 +30,37 @@ function isText(entry: Artifact): boolean {
   return entry.media_type.startsWith("text/") || entry.media_type === "application/json";
 }
 
-export function Artifacts({
-  place,
-  onPlace,
-}: {
-  place: Placement;
-  onPlace: (place: Placement) => void;
-}) {
-  const params = new URLSearchParams();
-  if (place.after) params.set("after", place.after);
-  const search = params.toString();
-  const state = usePanelRead<ArtifactsPayload>(
-    "/workspace/artifacts" + (search ? "?" + search : ""),
-  );
-  const [opened, setOpened] = useState<Artifact | null>(null);
-
-  return (
-    <Panel
-      state={state}
-      empty={(payload) => (payload.artifacts.length ? null : "No shared files yet.")}
-    >
-      {(payload) => {
-        return (
-          <>
-            <Table>
-              <thead>
-                <tr>
-                  {["file", "subject", "type", "size", "date"].map((column) => (
-                    <Th key={column}>{column}</Th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {payload.artifacts.map((entry) => (
-                  <tr key={entry.id}>
-                    <Td>
-                      {entry.url ? (
-                        <button
-                          type="button"
-                          onClick={() => setOpened(entry)}
-                          className="border-0 bg-transparent p-0 text-left text-inherit underline"
-                        >
-                          {isImage(entry) ? <Thumb entry={entry} /> : null}
-                          <span>{entry.filename}</span>
-                        </button>
-                      ) : (
-                        entry.filename
-                      )}
-                    </Td>
-                    <Td>{entry.subject}</Td>
-                    <Td>{entry.media_type}</Td>
-                    <Td>{formatSize(entry.size_bytes)}</Td>
-                    <Td>{day(entry.created_at)}</Td>
-                  </tr>
-                ))}
-              </tbody>
-            </Table>
-            <Pager payload={payload} place={place} onPlace={onPlace} />
-            {opened ? <Viewer entry={opened} onClose={() => setOpened(null)} /> : null}
-          </>
-        );
-      }}
-    </Panel>
-  );
-}
+export const ARTIFACTS: ListingSpec<ArtifactsPayload, Artifact> = {
+  read: "/workspace/artifacts",
+  paged: true,
+  rows: (payload) => payload.artifacts,
+  rowKey: (entry) => entry.created_at + "|" + entry.filename,
+  columns: [
+    {
+      field: "filename",
+      label: "file",
+      render: (filename, entry, { open }) =>
+        entry.url ? (
+          <button
+            type="button"
+            onClick={() => open(entry)}
+            className="border-0 bg-transparent p-0 text-left text-inherit underline"
+          >
+            {isImage(entry) ? <Thumb entry={entry} /> : null}
+            <span>{filename}</span>
+          </button>
+        ) : (
+          filename
+        ),
+    },
+    { field: "subject", label: "subject" },
+    { field: "media_type", label: "type" },
+    { field: "size_bytes", label: "size", render: (bytes) => formatSize(bytes) },
+    { field: "created_at", label: "date", render: (stamp) => day(stamp) },
+  ],
+  empty: "No shared files yet.",
+  detail: (entry, close) => <Viewer entry={entry} onClose={close} />,
+};
 
 function Thumb({ entry }: { entry: Artifact }) {
   const [failed, setFailed] = useState(false);

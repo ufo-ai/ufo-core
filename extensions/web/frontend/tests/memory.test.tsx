@@ -152,3 +152,30 @@ test("a memory carrying no memory ref offers no correction", async () => {
   expect(await screen.findByText("source/page-7")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Correct" })).toBeNull();
 });
+
+test("narrowing by kind keeps what the member has typed in the search box", async () => {
+  wire({
+    "/workspace/memory": () =>
+      json({
+        available: true,
+        kinds: ["fact", "preference"],
+        matches: [MATCH],
+        older: null,
+        newer: null,
+      }),
+  });
+  open();
+
+  const box = await screen.findByPlaceholderText("Search memory…");
+  await userEvent.type(box, "half-written");
+  await userEvent.click(await screen.findByRole("button", { name: "preference" }));
+
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "preference" }).getAttribute("aria-current")).toBe(
+      "true",
+    ),
+  );
+  expect((screen.getByPlaceholderText("Search memory…") as HTMLInputElement).value).toBe(
+    "half-written",
+  );
+});

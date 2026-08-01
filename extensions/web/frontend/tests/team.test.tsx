@@ -115,6 +115,42 @@ test("the sidebar offers Team, and selecting it reads the roster", async () => {
   expect(await screen.findByText("lead@example.com")).toBeTruthy();
 });
 
+test("an outcome notice does not follow the member to another view", async () => {
+  wire({
+    "/workspace/team": () => json(ROSTER),
+    "/workspace/credentials": () =>
+      json({
+        slots: [
+          {
+            name: "openai",
+            slot: "OPENAI_API_KEY",
+            extension: "models",
+            description: "the key",
+            filled: true,
+          },
+        ],
+      }),
+    "/transcript": () => json({ messages: [] }),
+    "/intents": () => json({ applied: true, message: "Added member@example.com." }),
+  });
+  render(<App agents={[AGENT]} member={ADMIN} />);
+
+  await userEvent.click(await screen.findByRole("button", { name: "Team" }));
+  await userEvent.type(await screen.findByPlaceholderText("email@example.com"), "new@example.com");
+  await userEvent.click(screen.getByRole("button", { name: "Add member" }));
+  expect(await screen.findByText("Added member@example.com.")).toBeTruthy();
+
+  await userEvent.click(screen.getByRole("button", { name: "Credentials" }));
+
+  expect(await screen.findByText("OPENAI_API_KEY")).toBeTruthy();
+  expect(screen.queryByText("Added member@example.com.")).toBeNull();
+
+  await userEvent.click(screen.getByRole("button", { name: "Team" }));
+
+  expect(await screen.findByText("lead@example.com")).toBeTruthy();
+  expect(screen.queryByText("Added member@example.com.")).toBeNull();
+});
+
 test("a failed roster read states the fault through the shared fence", async () => {
   wire({ "/workspace/team": () => new Response("nope", { status: 500 }) });
   render(<App agents={[AGENT]} member={ADMIN} />);

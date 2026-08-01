@@ -2,12 +2,12 @@ import { useCallback, useEffect, useState } from "react";
 
 import { Admin } from "@/views/Admin";
 import { AgentPane } from "@/views/AgentPane";
+import { WORKSPACE_VIEWS } from "@/views/registry";
 import { Workspace } from "@/views/Workspace";
 import { MainAgentProvider } from "@/lib/mainAgent";
 import { cn } from "@/lib/cn";
 import {
   AGENT_TABS,
-  WORKSPACE_LABELS,
   WORKSPACE_TABS,
   agentHash,
   parseHash,
@@ -84,7 +84,7 @@ export function App({ agents, member }: AppProps) {
                 current={route.kind === "workspace" && route.view === name}
                 onClick={() => openWorkspace(name)}
               >
-                {WORKSPACE_LABELS[name]}
+                {WORKSPACE_VIEWS[name].label}
               </SidebarButton>
             </li>
           ))}

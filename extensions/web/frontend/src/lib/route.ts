@@ -18,16 +18,6 @@ export const WORKSPACE_TABS = [
   "usage",
 ] as const;
 
-export const WORKSPACE_LABELS: Record<WorkspaceTab, string> = {
-  team: "Team",
-  sources: "Sources",
-  credentials: "Credentials",
-  memory: "Memory",
-  artifacts: "Artifacts",
-  sites: "Sites",
-  usage: "Usage",
-};
-
 export type AgentTab = (typeof AGENT_TABS)[number];
 export type WorkspaceTab = (typeof WORKSPACE_TABS)[number];
 

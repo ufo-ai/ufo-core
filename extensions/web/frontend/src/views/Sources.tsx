@@ -1,11 +1,6 @@
-import { useState } from "react";
-
-import type { Placement } from "@/kernel/pager";
 import { Button } from "@/components/ui/button";
-import { Table, Td, Th } from "@/components/ui/table";
-import { Notice, Panel, PanelEmpty, usePanelRead } from "@/kernel/panel";
-import { postIntent } from "@/lib/api";
-import { useMainAgent } from "@/lib/mainAgent";
+import type { ListingSpec } from "@/kernel/listing";
+import { day } from "@/views/Tasks";
 
 type Source = {
   name: string | null;
@@ -19,159 +14,134 @@ type Source = {
   next_sync_at: string;
 };
 
-export function Sources({
-  place,
-  onPlace,
-}: {
-  place: Placement;
-  onPlace: (place: Placement) => void;
-}) {
-  const mainAgent = useMainAgent();
-  const [notice, setNotice] = useState(place.notice ?? "");
-  const [busy, setBusy] = useState(false);
-  const state = usePanelRead<{ sources: Source[] }>("/workspace/sources");
+type SourcesPayload = { sources: Source[] };
 
-  async function act(envelope: unknown) {
-    if (!mainAgent) return;
-    setBusy(true);
-    const outcome = await postIntent(mainAgent.id, envelope);
-    setBusy(false);
-    if (outcome.applied) {
-      onPlace({ notice: outcome.message });
-      return;
+type SourceSpec = {
+  provider: string;
+  streams: string[];
+  account_id: string | null;
+  base_url: string | null;
+  shared: boolean;
+};
+
+type SourceRow = {
+  key: string;
+  name: string | null;
+  backend: string;
+  streams: string;
+  owner: string;
+  access: string;
+  errors: string;
+  next_sync: string | null;
+  shared: boolean;
+  apply: SourceSpec | null;
+};
+
+function rows(payload: SourcesPayload): SourceRow[] {
+  const bindings = new Map<string, Source[]>();
+  const plain: Source[] = [];
+  for (const entry of payload.sources) {
+    if (entry.name === null) {
+      plain.push(entry);
+      continue;
     }
-    setNotice(outcome.message);
+    bindings.set(entry.name, (bindings.get(entry.name) ?? []).concat(entry));
   }
 
-  return (
-    <Panel state={state}>
-      {(payload) => {
-        const bindings = new Map<string, Source[]>();
-        const plain: Source[] = [];
-        for (const entry of payload.sources) {
-          if (entry.name === null) {
-            plain.push(entry);
-            continue;
-          }
-          const streams = bindings.get(entry.name) ?? [];
-          streams.push(entry);
-          bindings.set(entry.name, streams);
-        }
+  const bound: SourceRow[] = [...bindings].map(([name, streams]) => {
+    const first = streams[0];
+    const names = streams.map((entry) => entry.stream).sort();
+    return {
+      key: name,
+      name,
+      backend: first.backend,
+      streams: names.join(", "),
+      owner: first.owner_email || "—",
+      access: first.shared ? "shared" : "private",
+      errors: String(streams.reduce((total, entry) => total + entry.consecutive_errors, 0)),
+      next_sync: day(streams.map((entry) => entry.next_sync_at).sort()[0]),
+      shared: first.shared,
+      apply: {
+        provider: first.backend,
+        streams: names,
+        account_id: first.account_id,
+        base_url: first.base_url,
+        shared: first.shared,
+      },
+    };
+  });
 
-        if (!bindings.size && !plain.length) {
-          return (
-            <>
-              <PanelEmpty>
-                No sources are registered. Register one in chat — the agent connects the account or
-                credential it needs as part of the request.
-              </PanelEmpty>
-              <Notice>{notice}</Notice>
-            </>
-          );
-        }
-
-        return (
-          <>
-            <Table>
-              <thead>
-                <tr>
-                  {["source", "streams", "owner", "access", "errors", "next sync", ""].map(
-                    (column, index) => (
-                      <Th key={index}>{column}</Th>
-                    ),
-                  )}
-                </tr>
-              </thead>
-              <tbody>
-                {[...bindings].map(([name, streams]) => {
-                  const first = streams[0];
-                  const names = streams.map((entry) => entry.stream).sort();
-                  const spec = {
-                    provider: first.backend,
-                    streams: names,
-                    account_id: first.account_id,
-                    base_url: first.base_url,
-                    shared: first.shared,
-                  };
-                  return (
-                    <tr key={name}>
-                      <Td>{first.backend}</Td>
-                      <Td>{names.join(", ")}</Td>
-                      <Td>{first.owner_email || "—"}</Td>
-                      <Td>{first.shared ? "shared" : "private"}</Td>
-                      <Td>
-                        {String(
-                          streams.reduce((total, entry) => total + entry.consecutive_errors, 0),
-                        )}
-                      </Td>
-                      <Td>
-                        {streams
-                          .map((entry) => entry.next_sync_at)
-                          .sort()[0]
-                          .replace("T", " ")
-                          .slice(0, 16)}
-                      </Td>
-                      <Td>
-                        <div className="flex flex-wrap gap-xs">
-                          <Button
-                            variant="row"
-                            disabled={busy}
-                            onClick={() =>
-                              act({
-                                verb: "apply",
-                                kind: "source",
-                                name,
-                                spec: { ...spec, resync: true },
-                              })
-                            }
-                          >
-                            Resync
-                          </Button>
-                          {first.shared ? null : (
-                            <Button
-                              variant="row"
-                              disabled={busy}
-                              onClick={() =>
-                                act({
-                                  verb: "apply",
-                                  kind: "source",
-                                  name,
-                                  spec: { ...spec, shared: true },
-                                })
-                              }
-                            >
-                              Share
-                            </Button>
-                          )}
-                          <Button
-                            variant="row"
-                            disabled={busy}
-                            onClick={() => act({ verb: "delete", kind: "source", name })}
-                          >
-                            Remove
-                          </Button>
-                        </div>
-                      </Td>
-                    </tr>
-                  );
-                })}
-                {plain.map((entry, index) => (
-                  <tr key={"plain-" + index}>
-                    <Td>{entry.backend}</Td>
-                    <Td>—</Td>
-                    <Td>{entry.owner_email || "—"}</Td>
-                    <Td>{entry.shared ? "shared" : "private"}</Td>
-                    <Td>{String(entry.consecutive_errors)}</Td>
-                    <Td>{entry.next_sync_at.replace("T", " ").slice(0, 16)}</Td>
-                    <Td />
-                  </tr>
-                ))}
-              </tbody>
-            </Table>
-            <Notice>{notice}</Notice>
-          </>
-        );
-      }}
-    </Panel>
+  return bound.concat(
+    plain.map((entry, index) => ({
+      key: "plain-" + index,
+      name: null,
+      backend: entry.backend,
+      streams: "—",
+      owner: entry.owner_email || "—",
+      access: entry.shared ? "shared" : "private",
+      errors: String(entry.consecutive_errors),
+      next_sync: day(entry.next_sync_at),
+      shared: entry.shared,
+      apply: null,
+    })),
   );
 }
+
+export const SOURCES: ListingSpec<SourcesPayload, SourceRow> = {
+  read: "/workspace/sources",
+  rows,
+  rowKey: (row) => row.key,
+  columns: [
+    { field: "backend", label: "source" },
+    { field: "streams", label: "streams" },
+    { field: "owner", label: "owner" },
+    { field: "access", label: "access" },
+    { field: "errors", label: "errors" },
+    { field: "next_sync", label: "next sync" },
+  ],
+  empty:
+    "No sources are registered. Register one in chat — the agent connects the account or " +
+    "credential it needs as part of the request.",
+  actions: (row, { act, busy }) =>
+    row.apply === null || row.name === null ? null : (
+      <div className="flex flex-wrap gap-xs">
+        <Button
+          variant="row"
+          disabled={busy}
+          onClick={() =>
+            act({
+              verb: "apply",
+              kind: "source",
+              name: row.name,
+              spec: { ...row.apply, resync: true },
+            })
+          }
+        >
+          Resync
+        </Button>
+        {row.shared ? null : (
+          <Button
+            variant="row"
+            disabled={busy}
+            onClick={() =>
+              act({
+                verb: "apply",
+                kind: "source",
+                name: row.name,
+                spec: { ...row.apply, shared: true },
+              })
+            }
+          >
+            Share
+          </Button>
+        )}
+        <Button
+          variant="row"
+          disabled={busy}
+          onClick={() => act({ verb: "delete", kind: "source", name: row.name })}
+        >
+          Remove
+        </Button>
+      </div>
+    ),
+};
