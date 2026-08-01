@@ -6,6 +6,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+from itertools import pairwise
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -650,7 +651,8 @@ def test_pull_requests_plan_production_foundation_without_applying() -> None:
         "  -target=module.platform.module.eks \\\n"
         "  -target=module.platform.aws_secretsmanager_secret.api_keys \\\n"
         "  -target=module.platform.aws_secretsmanager_secret.gateway_slack_connect \\\n"
-        '  -var "e2b_template=$E2B_TEMPLATE"\n'
+        '  -var "e2b_template=$E2B_TEMPLATE" \\\n'
+        '  -var "deployment_id=plan"\n'
     )
 
 
@@ -1242,11 +1244,14 @@ def test_production_deploy_rejects_missing_inputs_before_role_assumption() -> No
     assert steps[1] == {"uses": "actions/checkout@v4"}
     assert step["env"] == {
         "ANTHROPIC_API_KEY": "${{ secrets.ANTHROPIC_API_KEY }}",
+        "BROWSERBASE_API_KEY": "${{ secrets.BROWSERBASE_API_KEY }}",
         "CLOUDFLARE_API_TOKEN": "${{ secrets.CLOUDFLARE_API_TOKEN }}",
         "DD_API_KEY": "${{ secrets.DD_API_KEY }}",
         "DD_APP_KEY": "${{ secrets.DD_APP_KEY }}",
         "E2B_API_KEY": "${{ secrets.E2B_API_KEY }}",
+        "EXA_API_KEY": "${{ secrets.EXA_API_KEY }}",
         "OPENAI_API_KEY": "${{ secrets.OPENAI_API_KEY }}",
+        "TURBOPUFFER_API_KEY": "${{ secrets.TURBOPUFFER_API_KEY }}",
     }
     required = (*step["env"], "E2B_TEMPLATE", "IMAGE_TAG")
     environment = dict.fromkeys(required, "present")
@@ -1276,7 +1281,9 @@ def test_production_deploy_applies_guarded_foundation_then_runtime() -> None:
     secrets = _step("production_deploy", "Write production runtime secrets")
     runtime_plan = _step("production_deploy", "Terraform plan")
     runtime_guard = _step("production_deploy", "Reject destructive changes")
+    refresh = _step("production_deploy", "Refresh production runtime secrets")
     runtime_apply = _step("production_deploy", "Terraform apply")
+    rollout = _step("production_deploy", "Wait for runtime rollout")
     assert foundation_plan["run"] == (
         "terraform plan -input=false -no-color \\\n"
         '  -out="$RUNNER_TEMP/production-foundation.tfplan" \\\n'
@@ -1285,7 +1292,8 @@ def test_production_deploy_applies_guarded_foundation_then_runtime() -> None:
         "  -target=module.platform.aws_secretsmanager_secret.platform \\\n"
         "  -target=module.platform.aws_secretsmanager_secret.api_keys \\\n"
         "  -target=module.platform.aws_secretsmanager_secret.gateway_slack_connect \\\n"
-        '  -var "image_tag=$IMAGE_TAG" -var "e2b_template=$E2B_TEMPLATE"\n'
+        '  -var "image_tag=$IMAGE_TAG" -var "e2b_template=$E2B_TEMPLATE" \\\n'
+        '  -var "deployment_id=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"\n'
     )
     assert foundation_guard["run"] == (
         'terraform show -json "$RUNNER_TEMP/production-foundation.tfplan" | '
@@ -1298,9 +1306,12 @@ def test_production_deploy_applies_guarded_foundation_then_runtime() -> None:
         "name": "Write production runtime secrets",
         "env": {
             "ANTHROPIC_API_KEY": "${{ secrets.ANTHROPIC_API_KEY }}",
+            "BROWSERBASE_API_KEY": "${{ secrets.BROWSERBASE_API_KEY }}",
             "DD_API_KEY": "${{ secrets.DD_API_KEY }}",
             "E2B_API_KEY": "${{ secrets.E2B_API_KEY }}",
+            "EXA_API_KEY": "${{ secrets.EXA_API_KEY }}",
             "OPENAI_API_KEY": "${{ secrets.OPENAI_API_KEY }}",
+            "TURBOPUFFER_API_KEY": "${{ secrets.TURBOPUFFER_API_KEY }}",
             "PRODUCTION_DEPLOYMENT_ID": "${{ github.run_id }}",
         },
         "run": (
@@ -1313,13 +1324,22 @@ def test_production_deploy_applies_guarded_foundation_then_runtime() -> None:
     }
     assert runtime_plan["run"] == (
         'terraform plan -input=false -no-color -out="$RUNNER_TEMP/production.tfplan" '
-        '-var "image_tag=$IMAGE_TAG" -var "e2b_template=$E2B_TEMPLATE"'
+        '-var "image_tag=$IMAGE_TAG" -var "e2b_template=$E2B_TEMPLATE" '
+        '-var "deployment_id=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"'
     )
     assert runtime_guard["run"] == (
         'terraform show -json "$RUNNER_TEMP/production.tfplan" | '
         'python "$GITHUB_WORKSPACE/.github/scripts/terraform_plan_guard.py"'
     )
     assert runtime_apply["run"] == 'terraform apply -input=false "$RUNNER_TEMP/production.tfplan"'
+    assert refresh["run"] == (
+        "aws eks update-kubeconfig \\\n"
+        '  --region "$AWS_REGION" \\\n'
+        '  --name "$(terraform -chdir="$TF_DIR" output -raw cluster_name)"\n'
+        'NAMESPACE="$(terraform -chdir="$TF_DIR" output -raw system_namespace)"\n'
+        "python infra/production_secret_sync.py \\\n"
+        '  "$NAMESPACE" "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"\n'
+    )
     assert all(
         step.get("if") is None
         for step in (
@@ -1329,32 +1349,23 @@ def test_production_deploy_applies_guarded_foundation_then_runtime() -> None:
             runtime_plan,
             runtime_guard,
             secrets,
+            refresh,
             runtime_apply,
+            rollout,
         )
     )
-    assert [
-        steps.index(step)
-        for step in (
-            foundation_plan,
-            foundation_guard,
-            foundation_apply,
-            runtime_plan,
-            runtime_guard,
-            secrets,
-            runtime_apply,
-        )
-    ] == sorted(
-        steps.index(step)
-        for step in (
-            foundation_plan,
-            foundation_guard,
-            foundation_apply,
-            runtime_plan,
-            runtime_guard,
-            secrets,
-            runtime_apply,
-        )
+    order = (
+        foundation_plan,
+        foundation_guard,
+        foundation_apply,
+        runtime_plan,
+        runtime_guard,
+        secrets,
+        refresh,
+        runtime_apply,
+        rollout,
     )
+    assert all(steps.index(before) < steps.index(after) for before, after in pairwise(order))
 
 
 @pytest.mark.parametrize("job_name", ["rollout", "production_deploy"])
@@ -1559,6 +1570,52 @@ def test_runtime_certificates_match_ingress_tls() -> None:
             ("ufo-serve-tls", "ufo-serve-tls", ("shared_host",)),
         ]
     )
+
+
+def test_runtime_secret_consumers_roll_once_per_production_deploy() -> None:
+    templates = ROOT / "infra" / "templates"
+    manifests = [
+        document
+        for source in (
+            re.sub(
+                r"(?m)^%\{ (?:if workload_ha|endif) \}\n?",
+                "",
+                (templates / name).read_text(),
+            )
+            for name in (
+                "hosted.yaml.tpl",
+                "observability.yaml.tpl",
+                "cluster-services.yaml.tpl",
+            )
+        )
+        for document in yaml.safe_load_all(re.sub(r"\$\{([^}]+)\}", r"\1", source))
+        if isinstance(document, dict)
+    ]
+    secret_names = {
+        document["spec"].get("target", {}).get("name", document["metadata"]["name"])
+        for document in manifests
+        if document.get("kind") == "ExternalSecret"
+    }
+    consumers = {
+        document["metadata"]["name"]: document["spec"]["template"]["metadata"]["annotations"]
+        for document in manifests
+        if document.get("kind") in {"DaemonSet", "Deployment", "StatefulSet"}
+        and any(name in json.dumps(document["spec"]["template"]["spec"]) for name in secret_names)
+    }
+    assert consumers == {
+        name: {"flyingobject.ai/deployment-id": "deployment_id"}
+        for name in (
+            "otel-collector",
+            "ufo-gateway",
+            "ufo-ingress",
+            "ufo-sandbox-proxy",
+            "ufo-serve",
+        )
+    }
+    production = (ROOT / "infra" / "envs" / "prod" / "ufo.tf").read_text()
+    testing = (ROOT / "infra" / "envs" / "testing" / "ufo.tf").read_text()
+    assert len(re.findall(r"deployment_id\s+= var\.deployment_id", production)) == 2
+    assert len(re.findall(r'deployment_id\s+= "testing"', testing)) == 2
 
 
 def test_deployment_gate_joins_every_selected_result() -> None:

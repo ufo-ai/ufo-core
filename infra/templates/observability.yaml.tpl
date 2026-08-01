@@ -60,6 +60,7 @@ spec:
   template:
     metadata:
       labels: {app.kubernetes.io/name: otel-collector}
+      annotations: {flyingobject.ai/deployment-id: "${deployment_id}"}
     spec:
       containers:
         - name: collector

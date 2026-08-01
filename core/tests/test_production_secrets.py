@@ -1,11 +1,15 @@
+import importlib
 import json
 import os
 import re
 import subprocess
+import textwrap
+import tomllib
 from hashlib import sha256
 from pathlib import Path
 
 import pytest
+import yaml
 
 import infra.production_secrets as production_secrets
 from infra.production_secrets import (
@@ -28,9 +32,12 @@ def _environment(deployment_id: str = "run-1") -> dict[str, str]:
         DEPLOYMENT_ID_ENV: deployment_id,
         GATEWAY_SECRET_ID_ENV: "generated/gateway",
         "ANTHROPIC_API_KEY": "anthropic-value",
+        "BROWSERBASE_API_KEY": "browserbase-value",
         "DD_API_KEY": "datadog-value",
         "E2B_API_KEY": "e2b-value",
+        "EXA_API_KEY": "exa-value",
         "OPENAI_API_KEY": "openai-value",
+        "TURBOPUFFER_API_KEY": "turbopuffer-value",
     }
 
 
@@ -86,6 +93,66 @@ def test_secret_schema_matches_terraform() -> None:
         )
 
 
+def test_configured_production_backends_receive_platform_credentials() -> None:
+    source = (ROOT / "infra" / "envs" / "prod" / "ufo.tf").read_text()
+    _, start, remainder = source.partition("  serve_config = <<-TOML\n")
+    config_source, end, _ = remainder.partition("  TOML\n")
+    assert start and end
+    providers_source, serve, _ = textwrap.dedent(config_source).partition("\n[serve]\n")
+    assert serve
+    config = tomllib.loads(providers_source)
+    providers = (
+        (config["memory"]["index_backend"], "indexes"),
+        (config["research"]["search_provider"], "search"),
+        (config["browser"]["cdp_provider"], "cdp"),
+    )
+    manifests = list(
+        yaml.safe_load_all(
+            re.sub(
+                r"\$\{([^}]+)\}",
+                r"\1",
+                (ROOT / "infra" / "templates" / "cluster-services.yaml.tpl").read_text(),
+            )
+        )
+    )
+    platform = next(
+        document
+        for document in manifests
+        if document.get("kind") == "ExternalSecret"
+        and document["metadata"]["name"] == "ufo-platform-secrets"
+    )
+    projections = {
+        item["secretKey"]: item["remoteRef"]["property"] for item in platform["spec"]["data"]
+    }
+    hosted = re.sub(
+        r"(?m)^%\{ (?:if workload_ha|endif) \}\n?",
+        "",
+        (ROOT / "infra" / "templates" / "hosted.yaml.tpl").read_text(),
+    )
+    documents = list(yaml.safe_load_all(re.sub(r"\$\{([^}]+)\}", r"\1", hosted)))
+    serve = next(
+        document
+        for document in documents
+        if document.get("kind") == "Deployment" and document["metadata"]["name"] == "ufo-serve"
+    )
+    (container,) = serve["spec"]["template"]["spec"]["containers"]
+    assert {item["secretRef"]["name"] for item in container["envFrom"]} == {"ufo-platform-secrets"}
+    for provider, point in providers:
+        manifest = importlib.import_module(f"ufo_ext_{provider}").manifest()
+        match point:
+            case "indexes":
+                assert any(item.name == provider for item in manifest.indexes)
+            case "search":
+                assert any(item.backend == provider for item in manifest.search_providers)
+            case "cdp":
+                assert any(item.backend == provider for item in manifest.cdp_providers)
+        (slot,) = manifest.credentials
+        environment_name = slot.name.upper()
+        property_name = slot.name.replace("_", "-")
+        assert projections[environment_name] == property_name
+        assert API_KEY_INPUTS[property_name] == environment_name
+
+
 def test_production_secret_writes_preserve_owned_values() -> None:
     writes = production_secret_writes(
         _environment(), _payload(API_KEYS_PROPERTIES), _payload(GATEWAY_PROPERTIES)
@@ -94,9 +161,12 @@ def test_production_secret_writes_preserve_owned_values() -> None:
     api_keys = json.loads(writes[0].payload)
     assert set(api_keys) == API_KEYS_PROPERTIES
     assert api_keys["anthropic-api-key"] == "anthropic-value"
+    assert api_keys["browserbase-api-key"] == "browserbase-value"
     assert api_keys["datadog-api-key"] == "datadog-value"
     assert api_keys["e2b-api-key"] == "e2b-value"
+    assert api_keys["exa-api-key"] == "exa-value"
     assert api_keys["openai-api-key"] == "openai-value"
+    assert api_keys["turbopuffer-api-key"] == "turbopuffer-value"
     assert all(
         api_keys[name] == f"owned-{name}" for name in API_KEYS_PROPERTIES - API_KEY_INPUTS.keys()
     )
@@ -108,7 +178,15 @@ def test_production_secret_writes_preserve_owned_values() -> None:
         sha256(f"run-1\0{write.secret_id}\0".encode() + write.payload).hexdigest()
         for write in writes
     ]
-    values = ["anthropic-value", "datadog-value", "e2b-value", "openai-value"]
+    values = [
+        "anthropic-value",
+        "browserbase-value",
+        "datadog-value",
+        "e2b-value",
+        "exa-value",
+        "openai-value",
+        "turbopuffer-value",
+    ]
     assert all(value not in part for write in writes for value in values for part in write.command)
 
 
@@ -270,9 +348,12 @@ def test_main_initializes_missing_production_values(
     if secret_id.endswith("api-keys"):
         expected = dict.fromkeys(API_KEYS_PROPERTIES, "") | {
             "anthropic-api-key": "anthropic-value",
+            "browserbase-api-key": "browserbase-value",
             "datadog-api-key": "datadog-value",
             "e2b-api-key": "e2b-value",
+            "exa-api-key": "exa-value",
             "openai-api-key": "openai-value",
+            "turbopuffer-api-key": "turbopuffer-value",
         }
     else:
         expected = {"bot-token": ""}

@@ -173,9 +173,9 @@ bot token (`UFO_CONTROL_SLACK_CONNECT_BOT_TOKEN`, its own Secret through an expl
 gateway startup.
 
 Production runtime secret containers have no Terraform-managed version. The deployment initializes
-missing documents with their exact schemas, refreshes Anthropic, Datadog, E2B, and OpenAI from
-repository secrets, and preserves every other production-owned value. It validates both complete
-documents before writing either one and sends values to AWS Secrets Manager through stdin.
+missing documents with their exact schemas, refreshes configured repository secrets, and preserves
+every other production-owned value. It validates both complete documents before writing either one
+and sends values to AWS Secrets Manager through stdin.
 
 ## Web login
 

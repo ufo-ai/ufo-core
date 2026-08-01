@@ -188,6 +188,7 @@ data "kubectl_file_documents" "hosted" {
   content = templatefile("${path.module}/../../templates/hosted.yaml.tpl", {
     registry                         = module.platform.ecr_registry
     image_tag                        = var.image_tag
+    deployment_id                    = "testing"
     namespace                        = local.system_namespace
     apex_host                        = module.platform.hostname
     gateway_origin_host              = local.gateway_origin_host
@@ -233,7 +234,8 @@ data "kubectl_file_documents" "cluster_services" {
 # Shared OpenTelemetry collection.
 data "kubectl_file_documents" "observability" {
   content = templatefile("${path.module}/../../templates/observability.yaml.tpl", {
-    namespace = local.system_namespace
+    namespace     = local.system_namespace
+    deployment_id = "testing"
     # 0.114.0 pinned by its amd64 digest: the :0.115.0 tag does not exist and the :0.116.0 build's
     # binary fails to exec on the nodes; this digest is verified running the datadog exporter.
     collector_image = "otel/opentelemetry-collector-contrib@sha256:94ac10da6c15fdad4f8091c4292a8c6814b467cd3bcf575ba2279e9dc6346e63"

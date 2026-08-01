@@ -66,6 +66,7 @@ spec:
   template:
     metadata:
       labels: {app: ufo-gateway}
+      annotations: {flyingobject.ai/deployment-id: "${deployment_id}"}
     spec:
 %{ if workload_ha }
       affinity:
@@ -224,6 +225,7 @@ spec:
   template:
     metadata:
       labels: {app: ufo-sandbox-proxy}
+      annotations: {flyingobject.ai/deployment-id: "${deployment_id}"}
     spec:
 %{ if workload_ha }
       affinity:
@@ -363,6 +365,7 @@ spec:
   template:
     metadata:
       labels: {app: ufo-ingress}
+      annotations: {flyingobject.ai/deployment-id: "${deployment_id}"}
     spec:
 %{ if workload_ha }
       affinity:
@@ -532,6 +535,7 @@ spec:
   template:
     metadata:
       labels: {app: ufo-serve}
+      annotations: {flyingobject.ai/deployment-id: "${deployment_id}"}
     spec:
 %{ if workload_ha }
       affinity:

@@ -285,7 +285,8 @@ jobs:
             -target=module.platform.module.eks \
             -target=module.platform.aws_secretsmanager_secret.api_keys \
             -target=module.platform.aws_secretsmanager_secret.gateway_slack_connect \
-            -var "e2b_template=$E2B_TEMPLATE"
+            -var "e2b_template=$E2B_TEMPLATE" \
+            -var "deployment_id=plan"
 
       - name: Reject destructive changes
         working-directory: ${{ env.TF_DIR }}
@@ -422,13 +423,16 @@ jobs:
       - name: Require production inputs
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          BROWSERBASE_API_KEY: ${{ secrets.BROWSERBASE_API_KEY }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           DD_API_KEY: ${{ secrets.DD_API_KEY }}
           DD_APP_KEY: ${{ secrets.DD_APP_KEY }}
           E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
+          EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          TURBOPUFFER_API_KEY: ${{ secrets.TURBOPUFFER_API_KEY }}
         run: |
-          for name in ANTHROPIC_API_KEY CLOUDFLARE_API_TOKEN DD_API_KEY DD_APP_KEY E2B_API_KEY OPENAI_API_KEY E2B_TEMPLATE IMAGE_TAG; do
+          for name in ANTHROPIC_API_KEY BROWSERBASE_API_KEY CLOUDFLARE_API_TOKEN DD_API_KEY DD_APP_KEY E2B_API_KEY EXA_API_KEY OPENAI_API_KEY TURBOPUFFER_API_KEY E2B_TEMPLATE IMAGE_TAG; do
             if [ -z "${!name}" ]; then
               echo "::error::$name is required"
               exit 1
@@ -467,7 +471,8 @@ jobs:
             -target=module.platform.aws_secretsmanager_secret.platform \
             -target=module.platform.aws_secretsmanager_secret.api_keys \
             -target=module.platform.aws_secretsmanager_secret.gateway_slack_connect \
-            -var "image_tag=$IMAGE_TAG" -var "e2b_template=$E2B_TEMPLATE"
+            -var "image_tag=$IMAGE_TAG" -var "e2b_template=$E2B_TEMPLATE" \
+            -var "deployment_id=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
 
       - name: Reject destructive foundation changes
         working-directory: ${{ env.TF_DIR }}
@@ -481,7 +486,7 @@ jobs:
         working-directory: ${{ env.TF_DIR }}
         env:
           TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: terraform plan -input=false -no-color -out="$RUNNER_TEMP/production.tfplan" -var "image_tag=$IMAGE_TAG" -var "e2b_template=$E2B_TEMPLATE"
+        run: terraform plan -input=false -no-color -out="$RUNNER_TEMP/production.tfplan" -var "image_tag=$IMAGE_TAG" -var "e2b_template=$E2B_TEMPLATE" -var "deployment_id=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
 
       - name: Reject destructive changes
         working-directory: ${{ env.TF_DIR }}
@@ -490,14 +495,26 @@ jobs:
       - name: Write production runtime secrets
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          BROWSERBASE_API_KEY: ${{ secrets.BROWSERBASE_API_KEY }}
           DD_API_KEY: ${{ secrets.DD_API_KEY }}
           E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
+          EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          TURBOPUFFER_API_KEY: ${{ secrets.TURBOPUFFER_API_KEY }}
           PRODUCTION_DEPLOYMENT_ID: ${{ github.run_id }}
         run: |
           PRODUCTION_API_KEYS_SECRET_ID="$(terraform -chdir="$TF_DIR" output -raw api_keys_secret_id)" \
           PRODUCTION_GATEWAY_SECRET_ID="$(terraform -chdir="$TF_DIR" output -raw gateway_secret_id)" \
             python infra/production_secrets.py
+
+      - name: Refresh production runtime secrets
+        run: |
+          aws eks update-kubeconfig \
+            --region "$AWS_REGION" \
+            --name "$(terraform -chdir="$TF_DIR" output -raw cluster_name)"
+          NAMESPACE="$(terraform -chdir="$TF_DIR" output -raw system_namespace)"
+          python infra/production_secret_sync.py \
+            "$NAMESPACE" "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
 
       - name: Terraform apply
         working-directory: ${{ env.TF_DIR }}

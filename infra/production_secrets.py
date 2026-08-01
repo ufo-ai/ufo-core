@@ -14,9 +14,12 @@ API_KEYS_SECRET_ID_ENV = "PRODUCTION_API_KEYS_SECRET_ID"
 GATEWAY_SECRET_ID_ENV = "PRODUCTION_GATEWAY_SECRET_ID"
 API_KEY_INPUTS = {
     "anthropic-api-key": "ANTHROPIC_API_KEY",
+    "browserbase-api-key": "BROWSERBASE_API_KEY",
     "datadog-api-key": "DD_API_KEY",
     "e2b-api-key": "E2B_API_KEY",
+    "exa-api-key": "EXA_API_KEY",
     "openai-api-key": "OPENAI_API_KEY",
+    "turbopuffer-api-key": "TURBOPUFFER_API_KEY",
 }
 API_KEYS_PROPERTIES = frozenset(
     {

@@ -9,6 +9,15 @@ variable "image_tag" {
   description = "Tag for the ufo-control gateway image. deploy.yml passes the git short SHA."
 }
 
+variable "deployment_id" {
+  type = string
+
+  validation {
+    condition     = var.deployment_id != ""
+    error_message = "deployment_id must not be empty."
+  }
+}
+
 variable "e2b_template" {
   type = string
 
