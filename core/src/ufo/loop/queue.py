@@ -74,6 +74,7 @@ from ufo.tools.registry import ToolRegistry
 from ufo.workspace import ws
 
 GIT_PROXY_AUTH_CONFIG = (("http.proxyAuthMethod", "basic"),)
+CONVERSATION_ID_ENV = "UFO_CONVERSATION_ID"
 TURN_QUEUE_POLL_SECONDS = 0.1
 FAILED_TERMINAL_RETRY_SECONDS = 1.0
 FAILED_TERMINAL_RETRY_MAX_SECONDS = 30.0
@@ -514,12 +515,24 @@ async def _open_sandbox(
     the signed token on the first CONNECT as every other client already does, and rides every turn
     whether or not it holds a grant or a key. A workspace holding a git credential adds that host's
     extraheader to the same config, so `git clone` and `git push` authenticate off the sentinel the
-    proxy swaps."""
+    proxy swaps.
+
+    The run token names the turn to the proxy, and carries the workspace, the turn and the acting
+    member but no conversation id, so a process in the container cannot recover the conversation
+    from it. `CONVERSATION_ID_ENV` states the conversation in plain text, which is what lets work a
+    turn leaves outside the workspace — a branch, a commit, a pull request — be joined back to the
+    record that produced it. The conversation is the id worth stating rather than the turn: this
+    opener runs every turn but keys the container on the conversation, so a follow-up turn resumes
+    the same clone and a turn id would rename work the turn before it already pushed.
+    Re-authorization keeps the export: `SandboxSession.authorize` rewrites only `PROXY_ENV_NAMES`
+    and drops only the connector CLI vars it is handed, carrying everything else across
+    unchanged."""
     run = RunToken(workspace_id=turn.workspace_id, turn_id=turn.id)
     return await sandboxes.open(
         turn.conversation_id,
         run_tokens.encode(run),
         {
+            CONVERSATION_ID_ENV: str(turn.conversation_id),
             **_git_config_env(
                 (
                     *GIT_PROXY_AUTH_CONFIG,

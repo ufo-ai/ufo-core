@@ -9,6 +9,7 @@ import ufo_ext_coding.connect as connect
 import ufo_ext_coding.manifest as coding
 
 from ufo.ext.loader import skill_registry
+from ufo.loop.queue import CONVERSATION_ID_ENV
 from ufo.loop.subagents import FINISH_CONTRACT, subagent_system_prompt
 from ufo.tools.builtins import BUILTIN_TOOLS
 
@@ -59,6 +60,18 @@ def test_both_prompt_ends_carry_the_source_through_the_objective() -> None:
     assert "the objective names where the member asked" in coding.CODING_PROMPT
     assert "Requested in: <source>" in coding.CODING_PROMPT
     assert "input carries" not in coding.CODING_PROMPT
+
+
+def test_the_prompt_spends_the_conversation_identity_the_engine_actually_exports() -> None:
+    """The subagent has no connector tool, so it opens a PR through `gh` in bash — nothing on the
+    engine side stamps the conversation onto the branch or the PR body. The prompt is that
+    guarantee, and it is worth only as much as the variable it names: pinned against the engine's
+    own export so a rename on either side fails here rather than silently producing `ufo/-slug`
+    branches."""
+    assert CONVERSATION_ID_ENV == "UFO_CONVERSATION_ID"
+    assert f"${CONVERSATION_ID_ENV}" in coding.CODING_PROMPT
+    assert "ufo/<first 8 characters of $UFO_CONVERSATION_ID>-<short-slug>" in coding.CODING_PROMPT
+    assert "`Ufo-Conversation-Id: <the full value>` trailer" in coding.CODING_PROMPT
 
 
 def test_extended_context_survives_the_spawn_payload_serialization() -> None:

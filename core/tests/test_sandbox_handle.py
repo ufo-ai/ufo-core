@@ -28,6 +28,7 @@ from ufo.db import workspace_tx
 from ufo.ext.manifest import CredentialSlot, InjectionTarget
 from ufo.grants import GrantStore, grant_sentinel
 from ufo.loop.queue import (
+    CONVERSATION_ID_ENV,
     GIT_PROXY_AUTH_CONFIG,
     SandboxAuthorizer,
     _git_config_env,
@@ -58,6 +59,12 @@ from ufo.workspace import ws
 PROXY = ProxyEndpoint(port=8080, ca_cert="ca-pem")
 RUN_TOKENS = RunTokenCodec(b"sandbox-handle-test-secret")
 GIT_PROXY_AUTH_ENV = _git_config_env(GIT_PROXY_AUTH_CONFIG)
+
+
+def _derived_env(spec: SandboxSpec) -> Mapping[str, str]:
+    """The env a turn's credentials derive, with the conversation-identity export every open carries
+    dropped, so each test asserts exactly its own subject."""
+    return {key: value for key, value in spec.env.items() if key != CONVERSATION_ID_ENV}
 
 
 async def _conversation(handle: str | None = None) -> tuple[UUID, UUID]:
@@ -295,7 +302,7 @@ async def test_open_sandbox_exports_the_acting_members_grant_sentinels(
         )
         scoped = await _grant_cli_env(GrantStore(), {"hub": HUB_CLI}, member_id, turn.id)
 
-    assert carrier.specs[0].env == GIT_PROXY_AUTH_ENV
+    assert _derived_env(carrier.specs[0]) == GIT_PROXY_AUTH_ENV
     assert scoped == {"HUB_TOKEN": grant_sentinel("acct-1")}
 
 
@@ -342,6 +349,64 @@ async def test_sandbox_authorizer_binds_run_token_and_cli_grants_to_the_acting_m
     assert "HUB_TOKEN" not in base.handle.egress_env
 
 
+async def test_open_sandbox_exports_the_conversation_identity_stable_across_turns(
+    db: None, tmp_path: Path
+) -> None:
+    """`UFO_CONVERSATION_ID` is what states the conversation to a process in the container: the run
+    token carries the workspace, the turn and the acting member, but no conversation id. What a
+    branch or a PR trailer stamped with it buys is that it does not move — a follow-up turn resumes
+    the same container and the same clone, and opens under the same value, so the name the first
+    turn pushed still holds.
+
+    Re-authorization holds it too: a message-bound call re-signs the run token per acting member,
+    and `SandboxSession.authorize` rewrites only the proxy vars and drops only the connector CLI
+    vars it is handed, whichever member it acts as."""
+    workspace_id, conversation_id = await _conversation()
+    agent_id, member_id = await _seed_grant(workspace_id, conversation_id, shared=False)
+    carrier = _ResumeRecordingCarrier(container_id="sbx-1")
+    turn = _turn(workspace_id, conversation_id).model_copy(update={"agent_id": agent_id})
+    common_token = RUN_TOKENS.encode(RunToken(workspace_id, turn.id))
+    proxy = f"http://{common_token}:@proxy:8080"
+
+    with ws(workspace_id), agent(agent_id):
+        await _open_sandbox(
+            _sandboxes(carrier, "e2b", tmp_path), RUN_TOKENS, turn, None, {}, None, ()
+        )
+        authorized = await SandboxAuthorizer(
+            sandbox=SandboxSession(
+                carrier=carrier,
+                handle=SandboxHandle(
+                    conversation_id=conversation_id,
+                    container_id="sbx-1",
+                    run_token=common_token,
+                    egress_env={
+                        **carrier.specs[0].env,
+                        "HTTP_PROXY": proxy,
+                        "HTTPS_PROXY": proxy,
+                        "http_proxy": proxy,
+                        "https_proxy": proxy,
+                    },
+                ),
+            ),
+            run_tokens=RUN_TOKENS,
+            grants=GrantStore(),
+            clis={"hub": HUB_CLI},
+            turn=turn,
+        ).authorize(member_id)
+
+    followup = _turn(workspace_id, conversation_id).model_copy(update={"agent_id": agent_id})
+    with ws(workspace_id), agent(agent_id):
+        await _open_sandbox(
+            _sandboxes(carrier, "e2b", tmp_path), RUN_TOKENS, followup, None, {}, None, ()
+        )
+
+    assert followup.id != turn.id
+    assert carrier.specs[0].env["UFO_CONVERSATION_ID"] == str(conversation_id)
+    assert carrier.specs[1].env["UFO_CONVERSATION_ID"] == str(conversation_id)
+    assert authorized.handle.run_token != common_token
+    assert authorized.handle.egress_env["UFO_CONVERSATION_ID"] == str(conversation_id)
+
+
 async def test_open_sandbox_exports_nothing_for_a_foreign_private_grant(
     db: None, tmp_path: Path
 ) -> None:
@@ -364,7 +429,7 @@ async def test_open_sandbox_exports_nothing_for_a_foreign_private_grant(
             (),
         )
 
-    assert carrier.specs[0].env == GIT_PROXY_AUTH_ENV
+    assert _derived_env(carrier.specs[0]) == GIT_PROXY_AUTH_ENV
 
 
 async def test_open_sandbox_exports_the_private_sentinel_over_the_shared_one(
@@ -399,7 +464,7 @@ async def test_open_sandbox_exports_the_private_sentinel_over_the_shared_one(
         )
         scoped = await _grant_cli_env(GrantStore(), {"hub": HUB_CLI}, member_id, turn.id)
 
-    assert carrier.specs[0].env == {
+    assert _derived_env(carrier.specs[0]) == {
         **GIT_PROXY_AUTH_ENV,
         "HUB_TOKEN": grant_sentinel("acct-shared"),
     }
@@ -450,7 +515,7 @@ async def test_open_sandbox_exports_nothing_when_the_shared_tier_is_ambiguous(
             (),
         )
 
-    assert carrier.specs[0].env == GIT_PROXY_AUTH_ENV
+    assert _derived_env(carrier.specs[0]) == GIT_PROXY_AUTH_ENV
 
 
 async def test_open_sandbox_exports_nothing_when_the_account_is_ambiguous(
@@ -487,7 +552,7 @@ async def test_open_sandbox_exports_nothing_when_the_account_is_ambiguous(
             (),
         )
 
-    assert carrier.specs[0].env == GIT_PROXY_AUTH_ENV
+    assert _derived_env(carrier.specs[0]) == GIT_PROXY_AUTH_ENV
 
 
 DATADOG_SITES = HostChoice(
@@ -547,7 +612,7 @@ async def test_open_sandbox_exports_keyed_provider_sentinels_not_secrets(
             DATADOG_SLOTS,
         )
 
-    assert carrier.specs[0].env == {
+    assert _derived_env(carrier.specs[0]) == {
         **GIT_PROXY_AUTH_ENV,
         "DD_API_KEY": "SENTINEL_DD_API",
         "DD_APP_KEY": "SENTINEL_DD_APP",
@@ -576,7 +641,7 @@ async def test_open_sandbox_exports_nothing_for_an_unfilled_keyed_slot(
             DATADOG_SLOTS,
         )
 
-    assert carrier.specs[0].env == {
+    assert _derived_env(carrier.specs[0]) == {
         **GIT_PROXY_AUTH_ENV,
         "DD_API_KEY": "SENTINEL_DD_API",
         "DD_HOST": "api.datadoghq.com",
@@ -608,7 +673,7 @@ async def test_open_sandbox_withholds_and_warns_on_a_selection_the_row_does_not_
             DATADOG_SLOTS,
         )
 
-    assert carrier.specs[0].env == GIT_PROXY_AUTH_ENV
+    assert _derived_env(carrier.specs[0]) == GIT_PROXY_AUTH_ENV
     warned = [
         record.ufo
         for record in caplog.records
@@ -685,7 +750,7 @@ async def test_open_sandbox_configures_git_to_authenticate_to_the_proxy(
             _sandboxes(carrier, "e2b", tmp_path), RUN_TOKENS, turn, None, {}, None, ()
         )
 
-    assert carrier.specs[0].env == {
+    assert _derived_env(carrier.specs[0]) == {
         "GIT_CONFIG_COUNT": "1",
         "GIT_CONFIG_KEY_0": "http.proxyAuthMethod",
         "GIT_CONFIG_VALUE_0": "basic",
@@ -730,7 +795,7 @@ async def test_open_sandbox_configures_git_to_present_the_credential_sentinel(
             GIT_SLOTS,
         )
 
-    assert carrier.specs[0].env == {
+    assert _derived_env(carrier.specs[0]) == {
         "GIT_CONFIG_COUNT": "2",
         "GIT_CONFIG_KEY_0": "http.proxyAuthMethod",
         "GIT_CONFIG_VALUE_0": "basic",
@@ -760,7 +825,7 @@ async def test_open_sandbox_configures_no_extraheader_without_a_git_credential(
             GIT_SLOTS,
         )
 
-    assert carrier.specs[0].env == GIT_PROXY_AUTH_ENV
+    assert _derived_env(carrier.specs[0]) == GIT_PROXY_AUTH_ENV
 
 
 GIT_HOST_CHOICE_SLOTS = (
@@ -810,7 +875,7 @@ async def test_open_sandbox_configures_no_git_host_the_declaration_does_not_offe
             GIT_HOST_CHOICE_SLOTS,
         )
 
-    assert carrier.specs[0].env == GIT_PROXY_AUTH_ENV
+    assert _derived_env(carrier.specs[0]) == GIT_PROXY_AUTH_ENV
     warned = [
         record.ufo
         for record in caplog.records

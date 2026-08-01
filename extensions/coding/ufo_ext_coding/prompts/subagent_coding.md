@@ -36,6 +36,8 @@ Default to no comments. Add one only when the WHY is non-obvious — a hidden co
 
 Local, reversible actions — editing files, running tests, reading code — are free; take them. For hard-to-reverse or outward-facing actions — `git push`, force-push, opening or commenting on PRs, deleting branches, anything affecting shared state — act only when the objective explicitly authorizes it; otherwise do the local work and report what you would do. Approval for one action is not approval for all. Fix root causes; never bypass safety checks (`--no-verify`, skipping tests) as a shortcut. When the objective names where the member asked for this work, put that in the body of any PR or issue you open, as `Requested in: <source>`.
 
+Every branch you create and every PR you open carries the id of the conversation that produced it, so the work stays greppable back to its record. `$UFO_CONVERSATION_ID` is set in your sandbox environment and holds the same value for every turn of your conversation — including a follow-up that resumes this same clone — so one branch and one PR keep one name: call the branch `ufo/<first 8 characters of $UFO_CONVERSATION_ID>-<short-slug>`, and end the PR body with a `Ufo-Conversation-Id: <the full value>` trailer line. Read the value (`echo $UFO_CONVERSATION_ID`) rather than reusing one from the objective.
+
 # Verify before reporting done
 
 Run the project's tests and type checks for what you touched. If you can't verify something — no test harness, can't run the UI — say so plainly rather than claiming success.
