@@ -155,7 +155,7 @@ def test_pull_request_plans_active_deployment_inputs() -> None:
     environment = selector["env"]
     assert isinstance(environment, dict)
     assert environment["DEPLOY_PATHS_PATTERN"] == (
-        r"^(\.github/workflows/deploy\.yml$|"
+        r"^(\.github/(workflows/deploy\.yml|scripts/terraform_plan_guard\.py)$|"
         r"infra/(envs/(testing|prod|edge)|modules/(platform|edge)|templates)/)"
     )
     script = selector["run"]
@@ -258,6 +258,13 @@ def test_select_step_executes_the_gate_across_triggers(tmp_path: Path) -> None:
     assert "deploy=true" in output
 
     git("checkout", "main")
+    git("checkout", "-b", "guard")
+    guard_head = commit(".github/scripts/terraform_plan_guard.py")
+    code, output, stderr = run_select("pull_request", seed, guard_head)
+    assert code == 0, stderr
+    assert "deploy=true" in output
+
+    git("checkout", "main")
     runtime_head = commit("core/src/ufo/serve.py")
 
     code, output, stderr = run_select("push", seed, runtime_head)
@@ -334,8 +341,73 @@ def test_pull_requests_plan_production_foundation_without_applying() -> None:
     assert plan["env"] == {"TF_VAR_cloudflare_api_token": "${{ secrets.CLOUDFLARE_API_TOKEN }}"}
     assert (
         plan["run"] == "terraform plan -input=false -no-color -lock=false "
-        "-target=module.platform.module.eks"
+        '-out="$RUNNER_TEMP/production.tfplan" -target=module.platform.module.eks'
     )
+
+
+@pytest.mark.parametrize(
+    ("job_name", "plan_name", "step_name", "working_directory"),
+    [
+        ("rollout", "testing", "Terraform plan", "${{ env.TF_DIR }}"),
+        ("edge", "edge", "Terraform plan", "infra/envs/edge"),
+        ("production", "production", "Terraform foundation plan", "${{ env.TF_DIR }}"),
+    ],
+)
+def test_saved_plans_reject_destructive_changes(
+    job_name: str,
+    plan_name: str,
+    step_name: str,
+    working_directory: str,
+) -> None:
+    jobs = _workflow(WORKFLOWS / "deploy.yml")["jobs"]
+    assert isinstance(jobs, dict)
+    job = jobs[job_name]
+    assert isinstance(job, dict)
+    steps = job["steps"]
+    assert isinstance(steps, list)
+    setup = next(step for step in steps if step.get("uses") == "hashicorp/setup-terraform@v3")
+    assert setup["with"]["terraform_wrapper"] == "false"
+    plan = _step(job_name, step_name)
+    guard = _step(job_name, "Reject destructive changes")
+    plan_path = f"$RUNNER_TEMP/{plan_name}.tfplan"
+    assert f'-out="{plan_path}"' in plan["run"]
+    assert plan["working-directory"] == working_directory
+    assert guard["working-directory"] == working_directory
+    assert guard.get("if") is None
+    assert guard["run"] == (
+        f'terraform show -json "{plan_path}" | '
+        'python "$GITHUB_WORKSPACE/.github/scripts/terraform_plan_guard.py"'
+    )
+    assert steps.index(plan) < steps.index(guard)
+
+
+@pytest.mark.parametrize("job_name", ["rollout", "edge"])
+def test_mutating_plans_lock_state_and_preserve_inputs(job_name: str) -> None:
+    script = _step(job_name, "Terraform plan")["run"]
+    assert isinstance(script, str)
+    assert "LOCK=true" in script
+    assert 'if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then\n  LOCK=false\nfi' in script
+    assert '-input=false -no-color -lock="$LOCK"' in script
+
+
+def test_rollout_plan_pins_the_selected_image_tag() -> None:
+    script = _step("rollout", "Terraform plan")["run"]
+    assert '-var "image_tag=$IMAGE_TAG"' in script
+
+
+@pytest.mark.parametrize(
+    ("job_name", "plan_name"),
+    [("rollout", "testing"), ("edge", "edge")],
+)
+def test_apply_uses_the_guarded_plan(job_name: str, plan_name: str) -> None:
+    plan = _step(job_name, "Terraform plan")
+    guard = _step(job_name, "Reject destructive changes")
+    apply = _step(job_name, "Terraform apply")
+    assert plan.get("if") is None
+    assert apply["if"] == "github.event_name != 'pull_request'"
+    assert apply["run"] == f'terraform apply -input=false "$RUNNER_TEMP/{plan_name}.tfplan"'
+    steps = _workflow(WORKFLOWS / "deploy.yml")["jobs"][job_name]["steps"]
+    assert steps.index(guard) < steps.index(apply)
 
 
 def test_only_testing_owns_account_global_resources() -> None:

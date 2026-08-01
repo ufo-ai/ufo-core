@@ -50,7 +50,7 @@ jobs:
         id: select
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before || 'origin/main' }}
-          DEPLOY_PATHS_PATTERN: ^(\.github/workflows/deploy\.yml$|infra/(envs/(testing|prod|edge)|modules/(platform|edge)|templates)/)
+          DEPLOY_PATHS_PATTERN: ^(\.github/(workflows/deploy\.yml|scripts/terraform_plan_guard\.py)$|infra/(envs/(testing|prod|edge)|modules/(platform|edge)|templates)/)
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           git diff --name-only --no-renames "$BASE_SHA...$HEAD_SHA" > "$RUNNER_TEMP/deploy-paths"
@@ -146,22 +146,26 @@ jobs:
         working-directory: ${{ env.TF_DIR }}
         run: terraform init -input=false
 
-      # image_tag via -var: it must beat the placeholder in terraform.tfvars (tfvars beats TF_VAR_*).
-      # -lock=false: plans are read-only and run outside the deploy concurrency group, so they must
-      # not contend for the state lock a concurrent apply holds.
       - name: Terraform plan
-        if: github.event_name == 'pull_request'
         working-directory: ${{ env.TF_DIR }}
         env:
           TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: terraform plan -input=false -no-color -lock=false -var "image_tag=$IMAGE_TAG"
+        run: |
+          LOCK=true
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            LOCK=false
+          fi
+          terraform plan -input=false -no-color -lock="$LOCK" \
+            -out="$RUNNER_TEMP/testing.tfplan" -var "image_tag=$IMAGE_TAG"
+
+      - name: Reject destructive changes
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform show -json "$RUNNER_TEMP/testing.tfplan" | python "$GITHUB_WORKSPACE/.github/scripts/terraform_plan_guard.py"
 
       - name: Terraform apply
         if: github.event_name != 'pull_request'
         working-directory: ${{ env.TF_DIR }}
-        env:
-          TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: terraform apply -auto-approve -input=false -var "image_tag=$IMAGE_TAG"
+        run: terraform apply -input=false "$RUNNER_TEMP/testing.tfplan"
 
       - name: Wait for runtime rollout
         if: github.event_name != 'pull_request'
@@ -197,24 +201,31 @@ jobs:
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "1.14.9"
+          terraform_wrapper: false
 
       - name: Terraform init
         working-directory: infra/envs/edge
         run: terraform init -input=false
 
       - name: Terraform plan
-        if: github.event_name == 'pull_request'
         working-directory: infra/envs/edge
         env:
           TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: terraform plan -input=false -no-color -lock=false
+        run: |
+          LOCK=true
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            LOCK=false
+          fi
+          terraform plan -input=false -no-color -lock="$LOCK" -out="$RUNNER_TEMP/edge.tfplan"
+
+      - name: Reject destructive changes
+        working-directory: infra/envs/edge
+        run: terraform show -json "$RUNNER_TEMP/edge.tfplan" | python "$GITHUB_WORKSPACE/.github/scripts/terraform_plan_guard.py"
 
       - name: Terraform apply
         if: github.event_name != 'pull_request'
         working-directory: infra/envs/edge
-        env:
-          TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: terraform apply -auto-approve -input=false
+        run: terraform apply -input=false "$RUNNER_TEMP/edge.tfplan"
 
   production:
     needs: changes
@@ -233,6 +244,7 @@ jobs:
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "1.14.9"
+          terraform_wrapper: false
 
       - name: Terraform init
         working-directory: ${{ env.TF_DIR }}
@@ -242,7 +254,11 @@ jobs:
         working-directory: ${{ env.TF_DIR }}
         env:
           TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: terraform plan -input=false -no-color -lock=false -target=module.platform.module.eks
+        run: terraform plan -input=false -no-color -lock=false -out="$RUNNER_TEMP/production.tfplan" -target=module.platform.module.eks
+
+      - name: Reject destructive changes
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform show -json "$RUNNER_TEMP/production.tfplan" | python "$GITHUB_WORKSPACE/.github/scripts/terraform_plan_guard.py"
 
   deploy:
     name: deployment

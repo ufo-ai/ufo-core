@@ -1,0 +1,373 @@
+import importlib.util
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).parents[2]
+GUARD = ROOT / ".github" / "scripts" / "terraform_plan_guard.py"
+PERSISTENT_DELETIONS = (
+    ("module.platform.module.rds.module.db_instance.aws_db_instance.this[0]", "aws_db_instance"),
+    ("module.platform.aws_ecr_repository.this", "aws_ecr_repository"),
+    (
+        "module.platform.aws_elasticache_replication_group.redis",
+        "aws_elasticache_replication_group",
+    ),
+    ("module.platform.module.eks.aws_eks_cluster.this[0]", "aws_eks_cluster"),
+    (
+        "module.platform.module.eks.aws_cloudwatch_log_group.this[0]",
+        "aws_cloudwatch_log_group",
+    ),
+    ("module.platform.aws_iam_policy.app_s3", "aws_iam_policy"),
+    (
+        "module.platform.module.eks.aws_iam_openid_connect_provider.oidc[0]",
+        "aws_iam_openid_connect_provider",
+    ),
+    ("aws_iam_role.datadog", "aws_iam_role"),
+    ("aws_iam_role_policy.datadog_rds_metrics", "aws_iam_role_policy"),
+    ("module.platform.module.eks.module.kms.aws_kms_key.this[0]", "aws_kms_key"),
+    ("module.platform.aws_s3_bucket.blob", "aws_s3_bucket"),
+    ("module.platform.aws_s3_bucket_ownership_controls.blob", "aws_s3_bucket_ownership_controls"),
+    ("module.platform.aws_s3_bucket_public_access_block.blob", "aws_s3_bucket_public_access_block"),
+    ("module.platform.aws_s3_bucket_versioning.blob", "aws_s3_bucket_versioning"),
+    ("module.platform.aws_secretsmanager_secret.postgres", "aws_secretsmanager_secret"),
+    ("module.platform.aws_sesv2_email_identity.onboard", "aws_sesv2_email_identity"),
+    ("module.prod.cloudflare_d1_database.waitlist", "cloudflare_d1_database"),
+    ("cloudflare_dns_record.ses_dkim", "cloudflare_dns_record"),
+    ("module.prod.cloudflare_queue.waitlist_email", "cloudflare_queue"),
+    ("datadog_integration_aws_account.ufo", "datadog_integration_aws_account"),
+    ("datadog_integration_aws_external_id.ufo", "datadog_integration_aws_external_id"),
+    ("module.platform.random_id.serve_credential_key", "random_id"),
+    ("module.platform.random_password.rds", "random_password"),
+    ("module.platform.tls_private_key.egress_ca", "tls_private_key"),
+    ("module.platform.module.vpc.aws_nat_gateway.this[0]", "aws_nat_gateway"),
+    ("module.platform.module.vpc.aws_subnet.private[0]", "aws_subnet"),
+    ("module.platform.module.vpc.aws_vpc.this[0]", "aws_vpc"),
+)
+REGENERABLE_TYPE_DELETIONS = (
+    ("module.platform.aws_acm_certificate.sandbox_proxy", "aws_acm_certificate"),
+    ("module.platform.aws_ecr_lifecycle_policy.this", "aws_ecr_lifecycle_policy"),
+    ("module.platform.aws_elasticache_subnet_group.redis", "aws_elasticache_subnet_group"),
+    (
+        "module.platform.aws_s3_bucket_server_side_encryption_configuration.blob",
+        "aws_s3_bucket_server_side_encryption_configuration",
+    ),
+    (
+        "module.platform.aws_secretsmanager_secret_version.postgres[0]",
+        "aws_secretsmanager_secret_version",
+    ),
+    ("module.platform.aws_security_group.rds", "aws_security_group"),
+    ("module.platform.aws_security_group_rule.rds_from_nodes", "aws_security_group_rule"),
+    ("module.prod.cloudflare_queue_consumer.waitlist_email", "cloudflare_queue_consumer"),
+    ("cloudflare_ruleset.https_redirect", "cloudflare_ruleset"),
+    ("module.prod.cloudflare_workers_route.edge", "cloudflare_workers_route"),
+    ("module.prod.cloudflare_workers_script.edge", "cloudflare_workers_script"),
+    ("cloudflare_zone_setting.always_use_https", "cloudflare_zone_setting"),
+    ("datadog_dashboard.database", "datadog_dashboard"),
+    ("datadog_metric_tag_configuration.turn_ms", "datadog_metric_tag_configuration"),
+    ("datadog_monitor.telemetry_silent", "datadog_monitor"),
+    ("helm_release.ingress_nginx", "helm_release"),
+    ("kubectl_manifest.ufo", "kubectl_manifest"),
+    ("kubernetes_namespace_v1.ufo_system", "kubernetes_namespace_v1"),
+    ("module.platform.kubernetes_secret.cloudflare_api_token", "kubernetes_secret"),
+    ("kubernetes_secret_v1.ufo_serve", "kubernetes_secret_v1"),
+    ("module.platform.tls_cert_request.sandbox_proxy", "tls_cert_request"),
+    ("module.platform.tls_locally_signed_cert.sandbox_proxy", "tls_locally_signed_cert"),
+    ("module.platform.tls_self_signed_cert.egress_ca", "tls_self_signed_cert"),
+)
+REGENERABLE_MODULE_DELETIONS = (
+    (
+        'module.platform.module.eks.aws_ec2_tag.cluster_primary_security_group["Environment"]',
+        "aws_ec2_tag",
+    ),
+    ('module.platform.module.eks.aws_eks_addon.this["coredns"]', "aws_eks_addon"),
+    (
+        'module.platform.module.eks.aws_eks_addon.before_compute["vpc-cni"]',
+        "aws_eks_addon",
+    ),
+    (
+        'module.platform.module.eks.aws_eks_access_entry.this["arn:aws:iam::899147036157:root"]',
+        "aws_eks_access_entry",
+    ),
+    (
+        'module.platform.module.eks.aws_eks_access_policy_association.this["arn:aws:iam::899147036157:root_admin"]',
+        "aws_eks_access_policy_association",
+    ),
+    (
+        'module.platform.module.eks.module.eks_managed_node_group["default"].aws_eks_node_group.this[0]',
+        "aws_eks_node_group",
+    ),
+    (
+        'module.platform.module.eks.aws_iam_role_policy_attachment.this["AmazonEKSClusterPolicy"]',
+        "aws_iam_role_policy_attachment",
+    ),
+    (
+        'module.platform.module.eks.module.kms.aws_kms_alias.this["cluster"]',
+        "aws_kms_alias",
+    ),
+    (
+        'module.platform.module.eks.module.eks_managed_node_group["default"].aws_launch_template.this[0]',
+        "aws_launch_template",
+    ),
+    (
+        'module.platform.module.eks.module.eks_managed_node_group["default"].module.user_data.null_resource.validate_cluster_service_cidr',
+        "null_resource",
+    ),
+    (
+        "module.platform.module.eks.time_sleep.this[0]",
+        "time_sleep",
+    ),
+    (
+        'module.platform.module.irsa_app_s3.aws_iam_role_policy_attachment.this["s3"]',
+        "aws_iam_role_policy_attachment",
+    ),
+    (
+        "module.platform.module.irsa_external_secrets.aws_iam_role_policy_attachment.external_secrets[0]",
+        "aws_iam_role_policy_attachment",
+    ),
+    (
+        'module.platform.module.irsa_gateway_ses.aws_iam_role_policy_attachment.this["ses"]',
+        "aws_iam_role_policy_attachment",
+    ),
+    (
+        "module.platform.module.irsa_lb_controller.aws_iam_role_policy_attachment.load_balancer_controller[0]",
+        "aws_iam_role_policy_attachment",
+    ),
+    (
+        "module.platform.module.rds.module.db_parameter_group.aws_db_parameter_group.this[0]",
+        "aws_db_parameter_group",
+    ),
+    (
+        "module.platform.module.rds.module.db_subnet_group.aws_db_subnet_group.this[0]",
+        "aws_db_subnet_group",
+    ),
+    ("module.platform.module.vpc.aws_default_network_acl.this[0]", "aws_default_network_acl"),
+    (
+        "module.platform.module.vpc.aws_default_route_table.default[0]",
+        "aws_default_route_table",
+    ),
+    (
+        "module.platform.module.vpc.aws_default_security_group.this[0]",
+        "aws_default_security_group",
+    ),
+    ("module.platform.module.vpc.aws_eip.nat[0]", "aws_eip"),
+    ("module.platform.module.vpc.aws_internet_gateway.this[0]", "aws_internet_gateway"),
+    ("module.platform.module.vpc.aws_route.private_nat_gateway[0]", "aws_route"),
+    ("module.platform.module.vpc.aws_route_table.private[0]", "aws_route_table"),
+    (
+        "module.platform.module.vpc.aws_route_table_association.private[0]",
+        "aws_route_table_association",
+    ),
+)
+
+
+def _guard():
+    spec = importlib.util.spec_from_file_location("terraform_plan_guard", GUARD)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _change(address: str, resource_type: str, actions: list[object]) -> dict[str, object]:
+    return {
+        "address": address,
+        "type": resource_type,
+        "change": {"actions": actions},
+    }
+
+
+def _run(plan: object) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(GUARD)],
+        input=json.dumps(plan),
+        capture_output=True,
+        text=True,
+    )
+
+
+@pytest.mark.parametrize("actions", [["delete"], ["delete", "create"], ["create", "delete"]])
+@pytest.mark.parametrize(("address", "resource_type"), PERSISTENT_DELETIONS)
+def test_rejects_persistent_deletions(address: str, resource_type: str, actions: list[str]) -> None:
+    plan = {"resource_changes": [_change(address, resource_type, actions)]}
+    assert _guard().rejected_deletions(plan) == [f"{address} ({'/'.join(actions)})"]
+
+
+@pytest.mark.parametrize("actions", [["delete"], ["delete", "create"], ["create", "delete"]])
+@pytest.mark.parametrize(
+    ("address", "resource_type"),
+    REGENERABLE_TYPE_DELETIONS + REGENERABLE_MODULE_DELETIONS,
+)
+def test_allows_regenerable_deletions(address: str, resource_type: str, actions: list[str]) -> None:
+    plan = {"resource_changes": [_change(address, resource_type, actions)]}
+    assert _guard().rejected_deletions(plan) == []
+
+
+def test_regenerable_cases_cover_the_guard_tables() -> None:
+    guard = _guard()
+    assert {resource_type for _, resource_type in REGENERABLE_TYPE_DELETIONS} == (
+        guard.REGENERABLE_RESOURCE_TYPES
+    )
+    for prefix, resource_types in guard.REGENERABLE_MODULE_RESOURCE_TYPES.items():
+        assert {
+            resource_type
+            for address, resource_type in REGENERABLE_MODULE_DELETIONS
+            if address.startswith(f"{prefix}.")
+        } == resource_types
+    assert all(
+        any(address.startswith(f"{prefix}.") for prefix in guard.REGENERABLE_MODULE_RESOURCE_TYPES)
+        for address, _ in REGENERABLE_MODULE_DELETIONS
+    )
+
+
+def test_local_cases_name_declared_resources() -> None:
+    declared = set()
+    roots = (
+        (ROOT / "infra" / "envs" / "testing", ""),
+        (ROOT / "infra" / "envs" / "prod", ""),
+        (ROOT / "infra" / "envs" / "edge", ""),
+        (ROOT / "infra" / "modules" / "platform", "module.platform."),
+        (ROOT / "infra" / "modules" / "edge", "module.prod."),
+        (ROOT / "infra" / "modules" / "edge", "module.testing."),
+    )
+    for root, prefix in roots:
+        for path in sorted(root.glob("*.tf")):
+            declared.update(
+                f"{prefix}{resource_type}.{name}"
+                for resource_type, name in re.findall(
+                    r'^resource "([^"]+)" "([^"]+)"', path.read_text(), re.MULTILINE
+                )
+            )
+    cases = REGENERABLE_TYPE_DELETIONS + tuple(
+        (address, resource_type)
+        for address, resource_type in PERSISTENT_DELETIONS
+        if not address.startswith(
+            (
+                "module.platform.module.eks.",
+                "module.platform.module.rds.",
+                "module.platform.module.vpc.",
+            )
+        )
+    )
+    assert {address.split("[", maxsplit=1)[0] for address, _ in cases} <= declared
+
+
+@pytest.mark.parametrize("actions", [["create"], ["update"], ["no-op"], ["read"]])
+def test_allows_non_deletions(actions: list[str]) -> None:
+    plan = {"resource_changes": [_change("example.resource", "future_resource", actions)]}
+    assert _guard().rejected_deletions(plan) == []
+
+
+@pytest.mark.parametrize(
+    "address",
+    (
+        "module.platform.module.other.time_sleep.this",
+        "module.platform.module.eks_other.time_sleep.this",
+    ),
+)
+def test_rejects_module_scoped_type_outside_its_module(address: str) -> None:
+    plan = {"resource_changes": [_change(address, "time_sleep", ["delete"])]}
+    assert _guard().rejected_deletions(plan) == [f"{address} (delete)"]
+
+
+def test_rejects_an_unknown_resource_deletion() -> None:
+    plan = {"resource_changes": [_change("future.database", "future_database", ["delete"])]}
+    assert _guard().rejected_deletions(plan) == ["future.database (delete)"]
+
+
+@pytest.mark.parametrize(
+    "plan",
+    [{"format_version": "1.2"}, {"format_version": "1.2", "resource_changes": []}],
+)
+def test_allows_a_plan_with_no_resource_changes(plan: object) -> None:
+    assert _guard().rejected_deletions(plan) == []
+
+
+@pytest.mark.parametrize(
+    ("plan", "error"),
+    [
+        ({"resource_changes": None}, "invalid resource_changes"),
+        ({"resource_changes": "none"}, "invalid resource_changes"),
+        ({}, "no resource_changes list"),
+        ([], "no resource_changes list"),
+    ],
+)
+def test_rejects_invalid_plan_shapes(plan: object, error: str) -> None:
+    with pytest.raises(ValueError, match=error):
+        _guard().rejected_deletions(plan)
+
+
+@pytest.mark.parametrize(
+    ("resource", "error"),
+    [
+        ({"type": "aws_s3_bucket", "change": {"actions": ["delete"]}}, "invalid shape"),
+        ({"address": "bucket", "change": {"actions": ["delete"]}}, "invalid shape"),
+        ({"address": "bucket", "type": "aws_s3_bucket", "change": {}}, "invalid shape"),
+        (_change("bucket", "aws_s3_bucket", [["delete"]]), "actions must be strings"),
+    ],
+)
+def test_rejects_invalid_resource_shapes(resource: object, error: str) -> None:
+    with pytest.raises(ValueError, match=error):
+        _guard().rejected_deletions({"resource_changes": [resource]})
+
+
+def test_entrypoint_reports_every_rejected_address() -> None:
+    plan = {
+        "resource_changes": [
+            _change("module.platform.random_password.rds", "random_password", ["delete", "create"]),
+            _change("module.platform.aws_db_instance.this", "aws_db_instance", ["delete"]),
+        ]
+    }
+    rejected = _run(plan)
+    assert rejected.returncode == 1
+    assert rejected.stdout == ""
+    assert rejected.stderr == (
+        "Terraform resources cannot be deleted or replaced:\n"
+        "module.platform.aws_db_instance.this (delete)\n"
+        "module.platform.random_password.rds (delete/create)\n"
+    )
+
+
+def test_entrypoint_accepts_a_clean_plan() -> None:
+    allowed = _run({"format_version": "1.2"})
+    assert allowed.returncode == 0
+    assert allowed.stdout == ""
+    assert allowed.stderr == ""
+
+
+def test_entrypoint_reports_malformed_json_without_a_traceback() -> None:
+    rejected = subprocess.run(
+        [sys.executable, str(GUARD)],
+        input="not-json",
+        capture_output=True,
+        text=True,
+    )
+    assert rejected.returncode == 1
+    assert rejected.stdout == ""
+    assert rejected.stderr
+    assert "Traceback" not in rejected.stderr
+
+
+@pytest.mark.parametrize(
+    ("plan", "error"),
+    [
+        (
+            {"resource_changes": "none"},
+            "Terraform plan JSON has an invalid resource_changes value",
+        ),
+        ({}, "Terraform plan JSON has no resource_changes list"),
+        ({"resource_changes": [{}]}, "Terraform resource change has an invalid shape"),
+        (
+            {"resource_changes": [_change("bucket", "aws_s3_bucket", [["delete"]])]},
+            "Terraform resource actions must be strings",
+        ),
+    ],
+)
+def test_entrypoint_reports_invalid_plans_without_a_traceback(plan: object, error: str) -> None:
+    rejected = _run(plan)
+    assert rejected.returncode == 1
+    assert rejected.stdout == ""
+    assert rejected.stderr == f"{error}\n"
