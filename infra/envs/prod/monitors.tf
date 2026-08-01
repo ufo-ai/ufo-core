@@ -21,6 +21,19 @@ resource "datadog_monitor" "telemetry_silent" {
   tags = ["env:prod", "managed-by:terraform"]
 }
 
+resource "datadog_monitor" "deploy_failed" {
+  name    = "ufo prod deploy failed on main"
+  type    = "service check"
+  query   = "\"ufo.deploy.main\".over(\"env:prod\").by(\"host\").last(1).count_by_status()"
+  message = "Production deploy failed on main: the fleet is still running the previous images. Open the run linked from the check, then fix forward or revert. @slack-alerts @ops@flyingobject.ai"
+
+  monitor_thresholds {
+    critical = 1
+  }
+
+  tags = ["env:prod", "managed-by:terraform"]
+}
+
 # The database a turn could not reach. Serve holds no connection pool — a pooled connection binds
 # to one event loop and this process runs several — so every transaction dials Postgres fresh and
 # a single lost packet ends whatever was waiting on it. Postgres never sees the connection, so no

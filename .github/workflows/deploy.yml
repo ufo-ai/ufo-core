@@ -423,7 +423,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Require the selected deployment work
-        id: gate
         env:
           CHANGES_RESULT: ${{ needs.changes.result }}
           DEPLOY_SELECTED: ${{ needs.changes.outputs.deploy }}
@@ -474,17 +473,21 @@ jobs:
           DEPLOY_CHECK: ufo.deploy.main
           DD_STATUS_OK: "0"
           DD_STATUS_CRITICAL: "2"
-          GATE_OUTCOME: ${{ steps.gate.outcome }}
+          TESTING_RESULT: ${{ needs.rollout.result }}
+          PROD_RESULT: ${{ needs.production_deploy.result }}
+          EDGE_RESULT: ${{ needs.edge.result }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           test -n "$DD_API_KEY" || { echo 'DD_API_KEY secret is unset' >&2; exit 1; }
-          if [ "$GATE_OUTCOME" = success ]; then
-            STATUS="$DD_STATUS_OK"
-          else
-            STATUS="$DD_STATUS_CRITICAL"
-          fi
+          test "$TESTING_RESULT" = success && \
+            { test "$EDGE_RESULT" = success || { test "$PROD_RESULT" != success && test "$EDGE_RESULT" = skipped; }; } && \
+            TESTING_STATUS="$DD_STATUS_OK" || TESTING_STATUS="$DD_STATUS_CRITICAL"
+          test "$PROD_RESULT" = success && test "$EDGE_RESULT" = success && PROD_STATUS="$DD_STATUS_OK" || PROD_STATUS="$DD_STATUS_CRITICAL"
           curl -sS --fail-with-body -X POST "$DD_CHECK_URL" \
             -H "DD-API-KEY: $DD_API_KEY" -H 'Content-Type: application/json' \
-            -d "$(jq -n --arg check "$DEPLOY_CHECK" --argjson status "$STATUS" --arg url "$RUN_URL" \
-              '[{check: $check, host_name: "github-actions", status: $status, message: $url,
-                 tags: ["env:testing"]}]')"
+            -d "$(jq -n --arg check "$DEPLOY_CHECK" --argjson testing "$TESTING_STATUS" \
+              --argjson prod "$PROD_STATUS" --arg url "$RUN_URL" \
+              '[{check: $check, host_name: "github-actions", status: $testing, message: $url,
+                 tags: ["env:testing"]},
+                {check: $check, host_name: "github-actions", status: $prod, message: $url,
+                 tags: ["env:prod"]}]')"

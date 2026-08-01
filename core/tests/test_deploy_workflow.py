@@ -89,15 +89,16 @@ done
 """
 
 
-def _report(tmp_path: Path, outcome: str) -> tuple[str, dict[str, object]]:
-    """Run the workflow's reporting step for one gate outcome, with curl replaced by a recorder."""
+def _report(
+    tmp_path: Path, testing_result: str, prod_result: str, edge_result: str = "success"
+) -> tuple[str, dict[str, dict[str, object]]]:
     step = _step("deploy", "Report the deploy conclusion to Datadog")
     environment = step["env"]
     assert isinstance(environment, dict)
     script = step["run"]
     assert isinstance(script, str)
 
-    stubs = tmp_path / outcome
+    stubs = tmp_path / f"{testing_result}-{prod_result}-{edge_result}"
     stubs.mkdir()
     curl = stubs / "curl"
     curl.write_text(CURL_STUB)
@@ -114,20 +115,27 @@ def _report(tmp_path: Path, outcome: str) -> tuple[str, dict[str, object]]:
             "CURL_URL": str(url),
             "DD_API_KEY": "deploy-reporter-key",
             **literals,
-            "GATE_OUTCOME": outcome,
+            "TESTING_RESULT": testing_result,
+            "PROD_RESULT": prod_result,
+            "EDGE_RESULT": edge_result,
             "RUN_URL": RUN_URL,
         },
     )
     submitted = json.loads(payload.read_text())
     assert isinstance(submitted, list)
-    assert len(submitted) == 1
-    reported = submitted[0]
-    assert isinstance(reported, dict)
-    return url.read_text(), reported
+    assert len(submitted) == len(DEPLOY_ENVIRONMENTS)
+    reports = {}
+    for reported in submitted:
+        assert isinstance(reported, dict)
+        tags = reported["tags"]
+        assert isinstance(tags, list)
+        environment = next(str(tag).split(":", 1)[1] for tag in tags if str(tag).startswith("env:"))
+        reports[environment] = reported
+    assert set(reports) == set(DEPLOY_ENVIRONMENTS)
+    return url.read_text(), reports
 
 
 def _facets(reported: dict[str, object]) -> set[str]:
-    """The facet names a submitted check carries, which is all a monitor may group by."""
     tags = reported["tags"]
     assert isinstance(tags, list)
     named = {str(tag).split(":", 1)[0] for tag in tags}
@@ -904,7 +912,6 @@ def test_deployment_gate_joins_every_selected_result() -> None:
     assert isinstance(script, str)
     for variable in environment:
         assert f'"${variable}"' in script
-    assert gate["id"] == "gate"
 
 
 @pytest.mark.parametrize(
@@ -965,37 +972,74 @@ def test_deployment_gate_accepts_only_expected_results(
 def test_every_main_deploy_conclusion_reaches_datadog(tmp_path: Path) -> None:
     step = _step("deploy", "Report the deploy conclusion to Datadog")
     assert step["if"] == "always() && github.ref_name == 'main'"
+    assert step["env"] == {
+        "DD_CHECK_URL": "https://api.us5.datadoghq.com/api/v1/check_run",
+        "DEPLOY_CHECK": "ufo.deploy.main",
+        "DD_STATUS_OK": "0",
+        "DD_STATUS_CRITICAL": "2",
+        "TESTING_RESULT": "${{ needs.rollout.result }}",
+        "PROD_RESULT": "${{ needs.production_deploy.result }}",
+        "EDGE_RESULT": "${{ needs.edge.result }}",
+        "RUN_URL": (
+            "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        ),
+    }
 
-    api_url = re.search(r'^  api_url += +"(\S+)"$', MONITORS["testing"].read_text(), re.MULTILINE)
-    assert api_url
+    api_urls = {
+        re.search(r'^  api_url += +"(\S+)"$', path.read_text(), re.MULTILINE).group(1)
+        for path in MONITORS.values()
+    }
+    assert len(api_urls) == 1
 
-    posted_to, failed = _report(tmp_path, "failure")
-    assert urlparse(posted_to).hostname == urlparse(api_url.group(1)).hostname
-    assert failed["message"] == RUN_URL
+    posted_to, testing_failed = _report(tmp_path, "failure", "skipped", "skipped")
+    assert urlparse(posted_to).hostname == urlparse(api_urls.pop()).hostname
+    assert {report["message"] for report in testing_failed.values()} == {RUN_URL}
+    assert {report["status"] for report in testing_failed.values()} == {DATADOG_STATUS_CRITICAL}
 
-    _, succeeded = _report(tmp_path, "success")
-    assert succeeded["message"] == RUN_URL
+    _, succeeded = _report(tmp_path, "success", "success")
+    assert {report["message"] for report in succeeded.values()} == {RUN_URL}
+
+    _, edge_failed = _report(tmp_path, "success", "success", "failure")
+    assert {report["status"] for report in edge_failed.values()} == {DATADOG_STATUS_CRITICAL}
+
+    _, edge_skipped = _report(tmp_path, "success", "success", "skipped")
+    assert {report["status"] for report in edge_skipped.values()} == {DATADOG_STATUS_CRITICAL}
+
+    for prod_result in ("failure", "skipped"):
+        _, prod_failed = _report(tmp_path, "success", prod_result, "skipped")
+        assert prod_failed["testing"]["status"] == DATADOG_STATUS_OK
+        assert prod_failed["prod"]["status"] == DATADOG_STATUS_CRITICAL
 
 
-def test_the_deploy_monitor_watches_the_check_the_reporter_submits(tmp_path: Path) -> None:
-    query = _monitor_attribute("deploy_failed", "query")
+@pytest.mark.parametrize("environment", DEPLOY_ENVIRONMENTS)
+def test_the_deploy_monitor_watches_the_check_the_reporter_submits(
+    tmp_path: Path, environment: str
+) -> None:
+    query = _monitor_attribute("deploy_failed", "query", environment)
     parsed = re.fullmatch(
         r'"([\w.]+)"\.over\("([^"]+)"\)\.by\("([^"]+)"\)\.last\((\d+)\)\.count_by_status\(\)', query
     )
     assert parsed
     check, scope, grouping = parsed.group(1), parsed.group(2), parsed.group(3)
     submissions = int(parsed.group(4))
-    assert 1 <= int(_monitor_attribute("deploy_failed", "critical")) <= submissions
+    assert 1 <= int(_monitor_attribute("deploy_failed", "critical", environment)) <= submissions
 
-    _, failed = _report(tmp_path, "failure")
-    _, succeeded = _report(tmp_path, "success")
+    failed_results = (
+        ("failure", "skipped", "skipped")
+        if environment == "testing"
+        else ("success", "skipped", "skipped")
+    )
+    _, failed_run = _report(tmp_path, *failed_results)
+    _, succeeded = _report(tmp_path, "success", "success")
+    failed = failed_run[environment]
+    succeeded_report = succeeded[environment]
     assert failed["check"] == check
-    assert succeeded["check"] == check
+    assert succeeded_report["check"] == check
     assert scope in failed["tags"]
-    assert scope in succeeded["tags"]
+    assert scope in succeeded_report["tags"]
     assert grouping in _facets(failed)
     assert failed["status"] == DATADOG_STATUS_CRITICAL
-    assert succeeded["status"] == DATADOG_STATUS_OK
+    assert succeeded_report["status"] == DATADOG_STATUS_OK
 
 
 @pytest.mark.parametrize("environment", DEPLOY_ENVIRONMENTS)
