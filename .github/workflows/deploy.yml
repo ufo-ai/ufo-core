@@ -245,6 +245,8 @@ jobs:
         shell: bash
         run: |
           for HOST in flyingobject.ai testing.flyingobject.ai; do
+            curl -fsS "https://$HOST/" | grep -F "curl https://$HOST/waitlist"
+            test "$(curl -fsS -o /dev/null -w '%{http_code} %{redirect_url}' "https://$HOST/login")" = "302 https://app.$HOST/login"
             curl -fsS "https://$HOST/ufo" | grep -F 'UFO_URL="${UFO_URL:-https://'"$HOST"'}"'
             curl -fsS "https://$HOST/fleet" | jq -e '.craft | type == "number" and . >= 0' >/dev/null
           done
