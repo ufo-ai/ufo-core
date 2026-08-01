@@ -59,11 +59,22 @@ def test_claude_code_review_skill_keeps_prose_findings_out_of_the_gate() -> None
     assert "the author answers them in a reply, without a new head" in skill
     assert "For each validated issue, blocking or advisory" in skill
     assert "- Blocking findings of either kind: `gh pr review <number> --request-changes" in skill
-    assert "- No blocking findings: `gh pr review <number> --approve`" in skill
+    assert "- No blocking findings: `gh pr review <number> --approve --body" in skill
     assert "must be fixed before merge" not in skill
     assert skill.index("Validate every returned finding") < skill.index(
         "### Blocking and advisory findings"
     )
+
+
+def test_claude_code_review_skill_keeps_published_text_terse() -> None:
+    prose = " ".join(SKILL.read_text().split())
+
+    assert "one paragraph of at most 60 words" in prose
+    assert "State only the failure, its consequence, and the required change" in prose
+    assert "Do not narrate the investigation, restate the diff, or include test commands" in prose
+    assert "The verdict body is one sentence" in prose
+    assert "Never repeat inline evidence in the verdict" in prose
+    assert "Round 2. Two blocking findings: sandbox expiry; synchronous file encoding." in prose
 
 
 def test_claude_code_review_skill_verifies_prior_rounds_instead_of_re_deriving() -> None:

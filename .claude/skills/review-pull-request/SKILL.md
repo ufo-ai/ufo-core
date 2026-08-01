@@ -84,6 +84,11 @@ Validate every returned finding against the exact diff and surrounding code. Kee
 are grounded there; drop the rest. Run a focused test only when it is necessary to prove or disprove
 a finding. Whether a kept finding blocks the merge is decided below, after validation, never here.
 
+Publish each inline finding as one paragraph of at most 60 words. State only the failure, its
+consequence, and the required change. Do not narrate the investigation, restate the diff, or include
+test commands. The inline anchor supplies the file and line; quote only the words needed to identify
+the defect.
+
 Two further drops on a follow-up round. With `anchor_sha` set, drop a new finding on a file no
 commit in `<anchor_sha>..<head sha>` touched: the earlier round saw that content and published
 nothing, and raising it now buys a round for code this pull request is done with. The range bounds
@@ -143,6 +148,10 @@ worth — drop it and leave it to the author.
 Re-read `headRefOid` immediately before writing. If it changed, do not comment on or review the new
 head from stale evidence.
 
+The verdict body is one sentence: the round, finding counts, and terse subjects separated by
+semicolons. Never repeat inline evidence in the verdict. Example: `Round 2. Two blocking findings:
+sandbox expiry; synchronous file encoding.`
+
 Open the verdict body with `Round <rounds + 1>.`, or `Round unknown.` where `rounds` came back
 `null` — the count is what makes a cycling review visible to the author and to the human who has to
 break it, and neither can see it from the inline list. The self-review marker below is the one
@@ -151,8 +160,8 @@ verdict that carries no body, so a round published that way carries no count.
 For each validated issue, blocking or advisory, create one inline comment with
 `mcp__github_inline_comment__create_inline_comment`. Then submit exactly one decisive review:
 
-- Blocking findings of either kind: `gh pr review <number> --request-changes --body "<reason>"`
-- No blocking findings: `gh pr review <number> --approve`, naming any advisory findings in the body
+- Blocking findings of either kind: `gh pr review <number> --request-changes --body "<verdict>"`
+- No blocking findings: `gh pr review <number> --approve --body "<verdict>"`
 
 If GitHub refuses that command only because Claude authored the pull request, re-read the full
 current head SHA. If it still matches the reviewed head, post one pull request comment containing
