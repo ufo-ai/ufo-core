@@ -19,6 +19,7 @@ terraform {
 
 locals {
   waitlist_sender = "no-reply@flyingobject.ai"
+  landing_html    = replace(file("${path.module}/landing.html"), "__HOSTNAME__", var.hostname)
 }
 
 resource "cloudflare_d1_database" "waitlist" {
@@ -47,7 +48,7 @@ resource "cloudflare_workers_script" "edge" {
     replace(
       file("${path.module}/worker.js"),
       "\"__LANDING_HTML__\"",
-      jsonencode(file("${path.module}/landing.html")),
+      jsonencode(local.landing_html),
     ),
     "\"__WAITLIST_SENDER__\"",
     jsonencode(local.waitlist_sender),

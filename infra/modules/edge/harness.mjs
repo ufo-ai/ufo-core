@@ -3,13 +3,19 @@ import { readFile } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
 
 const moduleDir = new URL(".", import.meta.url);
-export const LANDING_PAGE = await readFile(new URL("landing.html", moduleDir), "utf8");
-const source = (await readFile(new URL("worker.js", moduleDir), "utf8"))
-  .replace('"__LANDING_HTML__"', JSON.stringify(LANDING_PAGE))
-  .replace('"__WAITLIST_SENDER__"', JSON.stringify("no-reply@flyingobject.ai"));
+const landingTemplate = await readFile(new URL("landing.html", moduleDir), "utf8");
+const sourceTemplate = await readFile(new URL("worker.js", moduleDir), "utf8");
+export const landingPage = (hostname) => landingTemplate.replaceAll("__HOSTNAME__", hostname);
+export const LANDING_PAGE = landingPage("flyingobject.ai");
 
 // Each tag is a distinct module, so a test gets its own isolate-level caches.
-export async function importWorker(tag) {
+export async function importWorker(tag, hostname = "flyingobject.ai") {
+  const source = sourceTemplate
+    .replace(
+      '"__LANDING_HTML__"',
+      JSON.stringify(landingPage(hostname)),
+    )
+    .replace('"__WAITLIST_SENDER__"', JSON.stringify("no-reply@flyingobject.ai"));
   const tagged = `${source}\n// ${tag}`;
   return (await import(`data:text/javascript;base64,${Buffer.from(tagged).toString("base64")}`))
     .default;

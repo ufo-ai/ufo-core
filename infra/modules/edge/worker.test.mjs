@@ -2,19 +2,19 @@ import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
-import { LANDING_PAGE, d1, importWorker } from "./harness.mjs";
+import { LANDING_PAGE, d1, importWorker, landingPage } from "./harness.mjs";
 
 const worker = await importWorker("shared");
 
 const EMAIL_LEDGER =
   "create table if not exists waitlist_email (email text primary key, queued_at text, sent_at text)";
 
-const passedThrough = [];
+const outbound = [];
 let fleetReply = () => Response.json({ craft: 0 });
 globalThis.fetch = async (input) => {
   const url = input instanceof Request ? input.url : input;
+  outbound.push(url);
   if (url.endsWith("/fleet")) return fleetReply();
-  passedThrough.push(url);
   return new Response(`origin:${url}`);
 };
 
@@ -76,9 +76,16 @@ test("browser landing hides the terminal hint from sight", () => {
 
 test("every front door serves its own embedded page to browsers", async () => {
   for (const host of ["flyingobject.ai", "testing.flyingobject.ai"]) {
-    const reply = await request(`https://${host}/?utm_source=card`, { ua: "Mozilla/5.0" });
+    const fresh = await importWorker(`page-${host}`, host);
+    const reply = await fresh.fetch(
+      new Request(`https://${host}/?utm_source=card`, {
+        headers: { "user-agent": "Mozilla/5.0" },
+      }),
+      { ...env, ORIGIN_BASE: `https://origin.${host}` },
+    );
+    const page = await reply.text();
     assert.equal(reply.headers.get("content-type"), "text/html; charset=utf-8");
-    assert.equal(await reply.text(), LANDING_PAGE.replace("__FLEET_N__", "0"));
+    assert.equal(page, landingPage(host).replace("__FLEET_N__", "0"));
   }
 });
 
@@ -368,9 +375,24 @@ test("GET /waitlist answers with usage for the requested host", async () => {
   assert.match(await reply.text(), /curl https:\/\/testing\.flyingobject\.ai\/waitlist/);
 });
 
-test("/ufo proxies the gateway's stamped client script", async () => {
-  const reply = await request("https://flyingobject.ai/ufo");
-  assert.equal(await reply.text(), "origin:https://testing.flyingobject.ai/ufo");
+test("the worker uses its configured environment origin", async () => {
+  const doors = [
+    ["prod", "flyingobject.ai", "https://origin.flyingobject.ai"],
+    ["testing", "testing.flyingobject.ai", "https://origin.testing.flyingobject.ai"],
+    ["binding", "door.example", "https://origin.example"],
+  ];
+  for (const [name, host, origin] of doors) {
+    const fresh = await importWorker(`door-${name}`);
+    const start = outbound.length;
+    const doorEnv = { ...env, ORIGIN_BASE: origin };
+    await fresh.fetch(
+      new Request(`https://${host}/`, { headers: { "user-agent": "Mozilla/5.0" } }),
+      doorEnv,
+    );
+    const reply = await fresh.fetch(new Request(`https://${host}/ufo`), doorEnv);
+    assert.equal(await reply.text(), `origin:${origin}/ufo`);
+    assert.deepEqual(outbound.slice(start), [`${origin}/fleet`, `${origin}/ufo`]);
+  }
 });
 
 test("any other path passes through untouched", async () => {

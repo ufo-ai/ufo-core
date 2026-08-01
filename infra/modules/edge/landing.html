@@ -1,10 +1,10 @@
 <!doctype html>
-<!-- Terminal interface: curl https://flyingobject.ai -->
+<!-- Terminal interface: curl https://__HOSTNAME__ -->
 <html lang="en">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<meta name="description" content="flyingobject.ai is a terminal-native site. Open it with curl https://flyingobject.ai" />
+<meta name="description" content="__HOSTNAME__ is a terminal-native site. Open it with curl https://__HOSTNAME__" />
 <title>ufo</title>
 <style>
   /* The craft's shimmer palette — the only colors used. */
@@ -116,11 +116,11 @@
       <p id="ack" class="ack" role="status"></p>
     </form>
   </dialog>
-  <span hidden aria-hidden="true">Terminal interface: curl https://flyingobject.ai</span>
+  <span hidden aria-hidden="true">Terminal interface: curl https://__HOSTNAME__</span>
 
 <script>
 "use strict";
-console.info("Terminal interface: curl https://flyingobject.ai");
+console.info("Terminal interface: curl https://__HOSTNAME__");
 /* ═══════════════════════════════════════════════════════════════════════
    ufo morph — JavaScript port of the Python renderer, flown as a fleet:
    one craft aloft per workspace (the worker substitutes the count below).

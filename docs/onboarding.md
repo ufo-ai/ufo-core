@@ -12,7 +12,7 @@ second renderer over the identical machine — see "Web login" below.
                 Cloudflare edge — apex (infra/modules/edge)
                +--------------------------------------------+
 curl / ------->|  GET /            CLI UA -> landing card   |
-browser ------>|                   other UA -> prod site    |
+browser ------>|                   other UA -> landing site |
                |  POST /waitlist   email -> D1 + mail queue |
                |  queue consumer   confirmation email       |
                |  GET /ufo         proxy of gateway /ufo    |
@@ -48,12 +48,11 @@ browser ------>| web (ufo_session) · debug (ufo_debug)      |
 
 ## The apex edge
 
-One worker fronts both apexes (`flyingobject.ai`, `testing.flyingobject.ai`), claiming only four
-paths — every other request passes through to what the host serves:
+One worker per apex fronts `flyingobject.ai` and `testing.flyingobject.ai`, claiming only four
+paths. Every other request passes through to what its host serves:
 
 - `GET /` — curl/wget/httpie get the text landing card (craft, the two counters, install
-  one-liner); any other agent lands on the one site at the prod apex — proxied on the site's own
-  host, a redirect (query intact) from any other.
+  one-liner); any other agent lands on that apex's site.
 - `POST /waitlist -d email=…` — the one join, reached from either renderer: a curl user types the
   command the card prints, a browser clicks any craft (or the page's `Join Waitlist` hail, the
   keyboard route) and the panel posts the same form encoding, rendering the returned ack
@@ -62,8 +61,7 @@ paths — every other request passes through to what the host serves:
   failed publish without resending delivered mail. Delivery retries five times before its terminal
   failure is logged and re-armed by the dead-letter consumer. The card's waitlist counter reads D1
   (≤1h stale per isolate, busted on join); its workspace counter reads the gateway's `/fleet`.
-- `GET /ufo` — proxies the gateway's stamped `/ufo` from the module's `origin_base`; both apexes
-  point at the one live fleet.
+- `GET /ufo` — proxies the gateway's stamped `/ufo` from that environment's `origin_base`.
 - `GET /login` — 302 to `app.<host>/login`. Sign-in lives on the app host (the sole authenticated
   host), so the apex carries no signed-in state and the session cookie is set and read same-origin.
 

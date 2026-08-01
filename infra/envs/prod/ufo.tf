@@ -77,8 +77,8 @@ locals {
     manifest if strcontains(path, "/jobs/ufo-migrate-")
   ])
 
-  # The member-facing host for the shared serve fleet.
-  shared_host = "app.${module.platform.hostname}"
+  shared_host         = "app.${module.platform.hostname}"
+  gateway_origin_host = "origin.${module.platform.hostname}"
 
   # The shared fleet configuration.
   serve_config = <<-TOML
@@ -190,6 +190,7 @@ data "kubectl_file_documents" "hosted" {
     image_tag                        = var.image_tag
     namespace                        = local.system_namespace
     apex_host                        = module.platform.hostname
+    gateway_origin_host              = local.gateway_origin_host
     shared_host                      = local.shared_host
     cluster_issuer                   = "letsencrypt"
     ingress_class                    = "nginx"

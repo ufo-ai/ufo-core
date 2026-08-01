@@ -320,11 +320,18 @@ def test_deploy_change_gate_entrypoint_exits_nonzero_on_the_boundary(tmp_path: P
 def test_plans_run_only_for_selected_deployment_inputs() -> None:
     jobs = _workflow(WORKFLOWS / "deploy.yml")["jobs"]
     assert isinstance(jobs, dict)
-    for name in ("rollout", "edge"):
-        job = jobs[name]
-        assert isinstance(job, dict)
-        assert job["needs"] == "changes"
-        assert job["if"] == "needs.changes.outputs.deploy == 'true'"
+    rollout = jobs["rollout"]
+    assert isinstance(rollout, dict)
+    assert rollout["needs"] == "changes"
+    assert rollout["if"] == "needs.changes.outputs.deploy == 'true'"
+
+    edge = jobs["edge"]
+    assert isinstance(edge, dict)
+    assert edge["needs"] == ["changes", "production_deploy"]
+    assert edge["if"] == (
+        "!cancelled() && needs.changes.outputs.deploy == 'true' && "
+        "(github.event_name == 'pull_request' || needs.production_deploy.result == 'success')"
+    )
 
     production = jobs["production"]
     assert isinstance(production, dict)
@@ -1002,3 +1009,65 @@ def test_source_sync_failure_monitor_consumes_the_reported_metric(environment: s
     assert "{{stream.name}}" in message
     assert _monitor_attribute("source_sync_failed", "critical", environment) == "1"
     assert _monitor_attribute("source_sync_failed", "require_full_window", environment) == "false"
+
+
+def test_edge_doors_use_separate_environment_origins() -> None:
+    source = (ROOT / "infra" / "envs" / "edge" / "main.tf").read_text()
+    doors = dict(
+        re.findall(
+            r'module "(?:prod|testing)" \{.*?hostname\s*=\s*"([^"]+)".*?'
+            r'origin_base\s*=\s*"([^"]+)"',
+            source,
+            re.DOTALL,
+        )
+    )
+    assert doors == {
+        "flyingobject.ai": "https://origin.flyingobject.ai",
+        "testing.flyingobject.ai": "https://origin.testing.flyingobject.ai",
+    }
+    hosted = (ROOT / "infra" / "templates" / "hosted.yaml.tpl").read_text()
+    assert "${apex_host},${gateway_origin_host}" in hosted
+    assert "hosts: [${apex_host}, ${gateway_origin_host}]" in hosted
+    origin = re.search(
+        r"    - host: \$\{gateway_origin_host\}\n.*?(?=\n---)",
+        hosted,
+        re.DOTALL,
+    )
+    assert origin
+    assert (
+        origin.group(0)
+        == """    - host: ${gateway_origin_host}
+      http:
+        paths:
+          - path: /ufo
+            pathType: Exact
+            backend:
+              service:
+                name: ufo-gateway
+                port: {name: http}
+          - path: /fleet
+            pathType: Exact
+            backend:
+              service:
+                name: ufo-gateway
+                port: {name: http}"""
+    )
+    for environment in DEPLOY_ENVIRONMENTS:
+        ufo = (ROOT / "infra" / "envs" / environment / "ufo.tf").read_text()
+        assert 'gateway_origin_host = "origin.${module.platform.hostname}"' in ufo
+        assert "gateway_origin_host              = local.gateway_origin_host" in ufo
+
+
+def test_edge_worker_artifact_substitutes_every_placeholder() -> None:
+    module = ROOT / "infra" / "modules" / "edge"
+    terraform = (module / "main.tf").read_text()
+    assert (
+        'landing_html    = replace(file("${path.module}/landing.html"), '
+        '"__HOSTNAME__", var.hostname)' in terraform
+    )
+    assert '"\\"__LANDING_HTML__\\"",\n      jsonencode(local.landing_html)' in terraform
+    assert '"\\"__WAITLIST_SENDER__\\"",\n    jsonencode(local.waitlist_sender)' in terraform
+    assert (module / "landing.html").read_text().count("__HOSTNAME__") == 5
+    worker = (module / "worker.js").read_text()
+    assert worker.count('"__LANDING_HTML__"') == 1
+    assert worker.count('"__WAITLIST_SENDER__"') == 1

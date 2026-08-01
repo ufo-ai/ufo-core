@@ -123,12 +123,12 @@ metadata:
   namespace: ${namespace}
   annotations:
     cert-manager.io/cluster-issuer: ${cluster_issuer}
-    external-dns.alpha.kubernetes.io/hostname: ${apex_host}
+    external-dns.alpha.kubernetes.io/hostname: ${apex_host},${gateway_origin_host}
     external-dns.alpha.kubernetes.io/cloudflare-proxied: "true"
 spec:
   ingressClassName: ${ingress_class}
   tls:
-    - hosts: [${apex_host}]
+    - hosts: [${apex_host}, ${gateway_origin_host}]
       secretName: ufo-gateway-tls
   rules:
     - host: ${apex_host}
@@ -136,6 +136,21 @@ spec:
         paths:
           - path: /
             pathType: Prefix
+            backend:
+              service:
+                name: ufo-gateway
+                port: {name: http}
+    - host: ${gateway_origin_host}
+      http:
+        paths:
+          - path: /ufo
+            pathType: Exact
+            backend:
+              service:
+                name: ufo-gateway
+                port: {name: http}
+          - path: /fleet
+            pathType: Exact
             backend:
               service:
                 name: ufo-gateway
@@ -346,8 +361,8 @@ spec:
 # `sites.` prefix. Proxying is not optional here — the NLB admits only Cloudflare's ranges
 # (`loadBalancerSourceRanges`), so a DNS-only site address resolves and then drops every connection.
 # The wildcard rule is the last resort for this apex: nginx matches an exact server name ahead of a
-# wildcard, so ${shared_host} and the apex itself keep their own rules, and any other unclaimed name
-# lands here and is refused for naming no site. Our own certificate needs no proxied record —
+# wildcard, and any unclaimed name lands here and is refused for naming no site. The certificate
+# needs no proxied record —
 # cert-manager issues it over DNS-01.
 # Every proxied response carries `Cache-Control: private, no-store` from the ingress, since a shared
 # cache that stored a site's bytes would answer later requests without the cookie check.

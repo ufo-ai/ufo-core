@@ -3,9 +3,7 @@ name: Deploy (testing)
 # Merge to main → build the images at the commit short SHA, push to ECR (immutable, skip-if-present
 # so re-runs are idempotent), publish the E2B sandbox template, then terraform apply pins that tag —
 # the hosted-service rollout. workflow_dispatch redeploys a chosen tag. AWS auth is GitHub OIDC
-# (no static keys). The edge job
-# applies envs/edge — the zone-level Cloudflare worker fronting both apexes — from its own state,
-# in parallel with the platform rollout.
+# (no static keys).
 on:
   push:
     branches: [main]
@@ -200,8 +198,10 @@ jobs:
             --proxy-url "$(terraform -chdir="$TF_DIR" output -raw sandbox_proxy_url)"
 
   edge:
-    needs: changes
-    if: needs.changes.outputs.deploy == 'true'
+    needs: [changes, production_deploy]
+    if: >-
+      !cancelled() && needs.changes.outputs.deploy == 'true' &&
+      (github.event_name == 'pull_request' || needs.production_deploy.result == 'success')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
