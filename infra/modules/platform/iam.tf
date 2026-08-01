@@ -51,7 +51,7 @@ data "aws_iam_policy_document" "app_s3" {
 }
 
 resource "aws_iam_policy" "app_s3" {
-  name   = "${local.name}-app-s3"
+  name   = local.app_s3_role_name
   policy = data.aws_iam_policy_document.app_s3.json
   tags   = local.tags
 }
@@ -60,7 +60,7 @@ module "irsa_app_s3" {
   source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
   version = "~> 5.48"
 
-  role_name        = "${local.name}-app-s3"
+  role_name        = local.app_s3_role_name
   role_policy_arns = { s3 = aws_iam_policy.app_s3.arn }
 
   assume_role_condition_test = "StringLike"
@@ -72,4 +72,3 @@ module "irsa_app_s3" {
   }
   tags = local.tags
 }
-

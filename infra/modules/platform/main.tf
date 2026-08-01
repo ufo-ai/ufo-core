@@ -9,7 +9,8 @@ locals {
 
   azs = slice(data.aws_availability_zones.available.names, 0, var.az_count)
 
-  ecr_registry = "${data.aws_caller_identity.current.account_id}.dkr.ecr.${var.region}.amazonaws.com"
+  ecr_registry     = "${data.aws_caller_identity.current.account_id}.dkr.ecr.${var.region}.amazonaws.com"
+  app_s3_role_name = "${local.name}-app-s3"
 
   # The gateway, shared serve fleet, proxy, and observability stack run here.
   system_namespace = "ufo-system"

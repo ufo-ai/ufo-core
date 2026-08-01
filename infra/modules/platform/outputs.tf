@@ -41,7 +41,7 @@ output "egress_ca_cert" {
 
 output "app_s3_role_arn" {
   description = "IRSA role annotated on the ufo-serve ServiceAccount for blob bucket access."
-  value       = module.irsa_app_s3.iam_role_arn
+  value       = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${local.app_s3_role_name}"
 }
 
 output "gateway_ses_role_arn" {

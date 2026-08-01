@@ -29,6 +29,18 @@ def test_app_s3_trusts_serve_in_every_ufo_namespace() -> None:
     assert 'namespace_service_accounts = ["ufo-*:ufo-serve"]' in APP_S3_MODULE
 
 
+def test_app_s3_role_name_is_plan_known_and_shared() -> None:
+    platform = Path(__file__).resolve().parents[2] / "infra/modules/platform"
+    assert 'app_s3_role_name = "${local.name}-app-s3"' in (platform / "main.tf").read_text()
+    iam = IAM_MODULE.read_text()
+    assert "name   = local.app_s3_role_name" in iam
+    assert "role_name        = local.app_s3_role_name" in iam
+    assert (
+        'value       = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:'
+        'role/${local.app_s3_role_name}"' in (platform / "outputs.tf").read_text()
+    )
+
+
 def test_platform_iam_grants_no_sandbox_identity() -> None:
     """The sandbox reaches nothing under a cloud role: the workspace lives on the carrier's own
     filesystem and artifact PUTs are presigned serve-side, so the platform carries no sandbox-fs
