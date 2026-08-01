@@ -20,13 +20,16 @@ from uuid import UUID, uuid4
 import pytest
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
+from dbos import DBOSClient
 
 from ufo.agent_scope import agent
+from ufo.audience import SHARED_AUDIENCE
 from ufo.connectors import CliCredential, ForwardedResponse
 from ufo.credentials import CredentialStore, HostChoice
 from ufo.db import workspace_tx
 from ufo.ext.manifest import CredentialSlot, InjectionTarget
 from ufo.grants import GrantStore, grant_sentinel
+from ufo.loop.profiles import CORE_SUBAGENT_PROFILES, GENERAL_PURPOSE
 from ufo.loop.queue import (
     CONVERSATION_ID_ENV,
     GIT_PROXY_AUTH_CONFIG,
@@ -35,6 +38,7 @@ from ufo.loop.queue import (
     _grant_cli_env,
     _open_sandbox,
 )
+from ufo.loop.subagents import SubagentRegistry, Subagents
 from ufo.sandbox.conversation import (
     SANDBOX_IMAGE_REF,
     WORKSPACE_WRITE_MAX_BYTES,
@@ -1099,3 +1103,76 @@ class _TruncatingCarrier:
 
     async def dial(self, handle: SandboxHandle, port: int) -> DialTarget:
         raise AssertionError("the listing never dials a port")
+
+
+async def test_a_subagent_turn_opens_the_sandbox_of_the_member_conversation(
+    db: None, tmp_path: Path
+) -> None:
+    """One sandbox per member conversation, not one per delegation: a subagent inherits its
+    spawner's `sandbox_conversation_id` at admission, so the sandbox it opens is the member's — the
+    files it writes are the ones the parent reads, and a port it brings up is served by a sandbox
+    that outlives the child turn."""
+    workspace_id, member_conversation = await _conversation()
+    child = _turn(workspace_id, uuid4()).model_copy(
+        update={"sandbox_conversation_id": member_conversation}
+    )
+
+    with ws(workspace_id):
+        handle = await _open_sandbox(
+            _sandboxes(LocalCarrier(), "local", tmp_path), RUN_TOKENS, child, None, {}, None, ()
+        )
+
+    assert handle.conversation_id == member_conversation
+    assert handle.workspace_host_path == str(
+        (tmp_path / "workspaces" / str(member_conversation)).resolve()
+    )
+    assert await _stored_handle(member_conversation) == "local:local"
+
+
+async def test_a_spawned_child_inherits_the_sandbox_conversation(db: None) -> None:
+    """Admission is where the sharing is decided, so it is asserted here rather than inferred from
+    the field's presence. A child spawned by a member's own turn inherits that conversation; a child
+    spawned by a subagent inherits what the subagent already carries, which is still the member's —
+    that is what makes the resolution one field read instead of a walk up the spawn chain."""
+    workspace_id, member_conversation = await _conversation()
+    async with workspace_tx() as connection:
+        agent_id = (
+            await connection.execute(
+                sa.select(tables.agent.c.id).where(tables.agent.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+    member_turn = _turn(workspace_id, member_conversation).model_copy(update={"agent_id": agent_id})
+    assert member_turn.sandbox_conversation_id is None
+
+    child_conversation = await _admitted_child(workspace_id, member_turn)
+    assert child_conversation == member_conversation
+
+    subagent_turn = member_turn.model_copy(
+        update={
+            "id": uuid4(),
+            "conversation_id": uuid4(),
+            "sandbox_conversation_id": member_conversation,
+        }
+    )
+    assert await _admitted_child(workspace_id, subagent_turn) == member_conversation
+
+
+async def _admitted_child(workspace_id: UUID, parent: Turn) -> UUID | None:
+    """Spawn one child through the real `_admit` and read back the sandbox conversation it wrote."""
+    spawner = Subagents(
+        client=cast(DBOSClient, None),
+        registry=SubagentRegistry(CORE_SUBAGENT_PROFILES),
+        parent=parent,
+        audience=SHARED_AUDIENCE,
+    )
+    conversation_id, turn_id = uuid4(), uuid4()
+    with ws(workspace_id):
+        await spawner._admit(conversation_id, turn_id, GENERAL_PURPOSE, "{}")
+        async with workspace_tx() as connection:
+            return (
+                await connection.execute(
+                    sa.select(tables.conversation.c.sandbox_conversation_id).where(
+                        tables.conversation.c.id == conversation_id
+                    )
+                )
+            ).scalar_one()

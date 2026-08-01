@@ -463,6 +463,7 @@ async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, Audience]:
                     tables.turn.c.terminal,
                     tables.turn.c.parent_turn_id,
                     tables.turn.c.subagent_profile,
+                    tables.conversation.c.sandbox_conversation_id,
                     tables.turn.c.traceparent,
                     tables.agent.c.prompt,
                     tables.agent.c.model,
@@ -497,6 +498,7 @@ async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, Audience]:
         terminal=None if row.terminal is None else TerminalFrame.model_validate(row.terminal),
         parent_turn_id=row.parent_turn_id,
         subagent_profile=row.subagent_profile,
+        sandbox_conversation_id=row.sandbox_conversation_id,
         traceparent=row.traceparent,
     )
     return (
@@ -515,8 +517,13 @@ async def _open_sandbox(
     credentials: CredentialStore | None,
     slots: tuple[CredentialSlot, ...],
 ) -> SandboxHandle:
-    """Open the conversation's sandbox for this turn, under the turn's signed run token and the env
-    its credentials derive.
+    """Open the sandbox this turn runs in, under the turn's signed run token and the env its
+    credentials derive.
+
+    `sandbox_conversation_id` is the conversation that owns it, which a subagent inherits from the
+    turn that spawned it at admission — so a delegation reuses the member's sandbox rather than
+    provisioning another, and the files a child writes are the ones the parent reads. Unset means
+    the turn's own conversation.
 
     git is the one sandbox client that will not present the run token unprompted: its default
     `http.proxyAuthMethod=anyauth` waits for a `407` challenge the proxy never sends, so its CONNECT
@@ -538,7 +545,7 @@ async def _open_sandbox(
     unchanged."""
     run = RunToken(workspace_id=turn.workspace_id, turn_id=turn.id)
     return await sandboxes.open(
-        turn.conversation_id,
+        turn.sandbox_conversation_id or turn.conversation_id,
         run_tokens.encode(run),
         {
             CONVERSATION_ID_ENV: str(turn.conversation_id),

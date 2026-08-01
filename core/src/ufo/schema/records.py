@@ -226,6 +226,7 @@ class Turn(BaseModel):
     terminal: TerminalFrame | None = None
     parent_turn_id: UUID | None = None
     subagent_profile: str | None = None
+    sandbox_conversation_id: UUID | None = None
     traceparent: str | None = None
 
     @field_validator("created_at", "updated_at")

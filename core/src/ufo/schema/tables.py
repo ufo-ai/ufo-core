@@ -118,6 +118,7 @@ conversation = sa.Table(
         default=_conversation_audience,
         server_default="shared",
     ),
+    sa.Column("sandbox_conversation_id", sa.Uuid, nullable=True),
     sa.Column("sandbox_handle", sa.Text, nullable=True),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),

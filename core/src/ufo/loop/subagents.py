@@ -335,7 +335,10 @@ class Subagents:
         self, conversation_id: UUID, turn_id: UUID, profile: str, inbound: str
     ) -> bool:
         """Insert the child conversation and its first turn, stamped with the spawning turn's
-        traceparent so the child's span joins the parent's trace. The inserts do nothing on
+        traceparent so the child's span joins the parent's trace, and with the spawning turn's own
+        sandbox conversation — a subagent runs where the turn that spawned it runs, so the files it
+        writes are the ones the parent reads. Inherited here rather than resolved per turn, so a
+        grandchild carries the same one. The inserts do nothing on
         conflict, so a deterministic (`dedup_key`) child re-admitted by a recovery re-run of the
         spawning step settles on the rows already there — the first run's child stands, never a
         duplicate."""
@@ -348,6 +351,9 @@ class Subagents:
                     workspace_id=self.parent.workspace_id,
                     agent_id=self.parent.agent_id,
                     surface=SUBAGENT_SURFACE,
+                    sandbox_conversation_id=(
+                        self.parent.sandbox_conversation_id or self.parent.conversation_id
+                    ),
                     queue_key=str(turn_id),
                     member_id=audience_member(self.audience),
                     audience=str(self.audience),
