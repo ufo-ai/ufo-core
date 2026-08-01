@@ -6,10 +6,6 @@ output "cluster_name" {
   value = module.platform.cluster_name
 }
 
-output "ecr_repository_urls" {
-  value = module.platform.ecr_repository_urls
-}
-
 output "sandbox_proxy_url" {
   value = "https://sandbox-proxy.${module.platform.hostname}"
 }

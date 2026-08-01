@@ -5,7 +5,7 @@ locals {
 }
 
 resource "aws_ecr_repository" "this" {
-  for_each = toset(local.ecr_repositories)
+  for_each = var.owns_account_resources ? toset(local.ecr_repositories) : toset([])
 
   name                 = each.value
   image_tag_mutability = "IMMUTABLE"

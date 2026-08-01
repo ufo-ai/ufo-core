@@ -20,6 +20,10 @@ DATADOG_STATUS_OK = 0
 DATADOG_STATUS_CRITICAL = 2
 
 
+def _code(source: str) -> str:
+    return re.sub(r"(?m)^\s*(?:#|//).*$|\s+(?:#|//).*$", "", source)
+
+
 def _deploy_change_gate():
     path = ROOT / ".github" / "scripts" / "deploy_change_gate.py"
     spec = importlib.util.spec_from_file_location("deploy_change_gate", path)
@@ -294,6 +298,103 @@ def test_plans_run_only_for_selected_deployment_inputs() -> None:
         assert isinstance(job, dict)
         assert job["needs"] == "changes"
         assert job["if"] == "needs.changes.outputs.deploy == 'true'"
+
+
+def test_only_testing_owns_account_global_resources() -> None:
+    ecr = _code((ROOT / "infra" / "modules" / "platform" / "ecr.tf").read_text())
+    ses = _code((ROOT / "infra" / "modules" / "platform" / "ses.tf").read_text())
+
+    ownership = re.compile(r"^\s*owns_account_resources\s*=\s*(true|false)\s*$", re.MULTILINE)
+    terraform = tuple(
+        path for path in (ROOT / "infra").rglob("*.tf") if ".terraform" not in path.parts
+    )
+    environment_sources = {
+        root: _code("\n".join(path.read_text() for path in sorted(root.glob("*.tf"))))
+        for root in (ROOT / "infra" / "envs").iterdir()
+        if root.is_dir()
+    }
+    platform_sources = {
+        root: source
+        for root, source in environment_sources.items()
+        if "../../modules/platform" in source
+    }
+    ownership_by_root = {}
+    for root, source in platform_sources.items():
+        matches = ownership.findall(source)
+        assert len(matches) == 1, root
+        ownership_by_root[root.relative_to(ROOT)] = matches[0]
+    assert {root for root, owns in ownership_by_root.items() if owns == "true"} == {
+        Path("infra/envs/testing")
+    }
+    assert ownership_by_root[Path("infra/envs/prod")] == "false"
+
+    ecr_repository = re.search(
+        r'^resource\s+"aws_ecr_repository"\s+"this"\s*{\s*$\n(.*?)^}\s*$',
+        ecr,
+        re.DOTALL | re.MULTILINE,
+    )
+    assert ecr_repository
+    assert re.search(
+        r"^\s*for_each\s*=\s*var\.owns_account_resources \? "
+        r"toset\(local\.ecr_repositories\) : toset\(\[\]\)\s*$",
+        ecr_repository.group(1),
+        re.MULTILINE,
+    )
+    ses_identity = re.search(
+        r'^resource\s+"aws_sesv2_email_identity"\s+"onboard"\s*{\s*$\n(.*?)^}\s*$',
+        ses,
+        re.DOTALL | re.MULTILINE,
+    )
+    assert ses_identity
+    assert re.search(
+        r"^\s*count\s*=\s*var\.owns_account_resources \? 1 : 0\s*$",
+        ses_identity.group(1),
+        re.MULTILINE,
+    )
+    identity_moves = [
+        block
+        for block in re.findall(r"^moved\s*{\s*$\n(.*?)^}\s*$", ses, re.DOTALL | re.MULTILINE)
+        if re.search(r"^\s*from\s*=\s*aws_sesv2_email_identity\.onboard\s*$", block, re.MULTILINE)
+    ]
+    assert len(identity_moves) == 1
+    assert re.search(
+        r"^\s*to\s*=\s*aws_sesv2_email_identity\.onboard\[0\]\s*$",
+        identity_moves[0],
+        re.MULTILINE,
+    )
+
+    assert {
+        path.relative_to(ROOT)
+        for path in terraform
+        if re.search(r'resource\s+"aws_ecr_repository"\s+"', path.read_text())
+    } == {Path("infra/modules/platform/ecr.tf")}
+    assert {
+        path.relative_to(ROOT)
+        for path in terraform
+        if re.search(r'resource\s+"aws_sesv2_email_identity"\s+"', path.read_text())
+    } == {Path("infra/modules/platform/ses.tf")}
+    assert not {
+        path.relative_to(ROOT)
+        for path in terraform
+        if re.search(r'data\s+"aws_sesv2_email_identity"\s+"', path.read_text())
+    }
+    assert {
+        root.relative_to(ROOT)
+        for root, source in environment_sources.items()
+        if "_domainkey" in source or "module.platform.ses_dkim_records" in source
+    } == {Path("infra/envs/testing")}
+    assert (
+        "module.platform.ses_dkim_records"
+        in environment_sources[ROOT / "infra" / "envs" / "testing"]
+    )
+
+    prod = environment_sources[ROOT / "infra" / "envs" / "prod"]
+    assert not re.search(r'^\s*provider\s+"cloudflare"\s*{', prod, re.MULTILINE)
+    assert not re.search(r"^\s*cloudflare\s*=\s*{", prod, re.MULTILINE)
+    assert (
+        "registry.terraform.io/cloudflare/cloudflare"
+        not in (ROOT / "infra" / "envs" / "prod" / ".terraform.lock.hcl").read_text()
+    )
 
 
 def test_proxy_gate_dials_the_rolled_proxy_with_the_shared_ca() -> None:

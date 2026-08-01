@@ -18,7 +18,8 @@ module "platform" {
   dns_zone_name        = "flyingobject.ai"
   cloudflare_api_token = var.cloudflare_api_token
 
-  ses_sender = var.ses_sender
+  ses_sender             = var.ses_sender
+  owns_account_resources = false
 
   # Static cluster-admins (applier-independent — see eks.tf for why creator-perms is off): the
   # github-deploy role (deploy.yml's terraform apply drives the helm/kubectl providers), the account

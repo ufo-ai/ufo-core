@@ -1,9 +1,8 @@
 # Transactional email for onboarding verification codes (the gateway extension's claim machine,
-# RFC 0011 §4). This verifies the sending domain (Easy DKIM) and grants ses:SendEmail for that
-# identity, scoped to the From address. The grant lands on a
+# RFC 0011 §4). This grants ses:SendEmail for the sending-domain identity, scoped to the From
+# address. The grant lands on a
 # dedicated IRSA role annotated on the gateway's ServiceAccount (ufo-system:ufo-gateway) — the pod
 # exchanges its projected web identity at STS; the FromAddress condition pins it to ses_sender.
-# Each env materializes ses_dkim_records in the Cloudflare zone to verify the domain.
 #
 # After apply: request SES production access to send beyond the verified set (a new account is
 # sandboxed to verified recipients only).
@@ -20,12 +19,13 @@ variable "ses_sender" {
 
 locals {
   gateway_ses_role_name = "${local.name}-gateway-ses"
-  # The verified identity is the sender's domain. It is SES-account-global, so a second env in the
-  # same AWS account must reference this identity (data source), not recreate it.
+  # The verified identity is the sender's domain. It is SES-account-global.
   ses_domain = element(split("@", var.ses_sender), 1)
 }
 
 resource "aws_sesv2_email_identity" "onboard" {
+  count = var.owns_account_resources ? 1 : 0
+
   email_identity = local.ses_domain
 
   dkim_signing_attributes {
@@ -34,11 +34,16 @@ resource "aws_sesv2_email_identity" "onboard" {
   tags = local.tags
 }
 
+moved {
+  from = aws_sesv2_email_identity.onboard
+  to   = aws_sesv2_email_identity.onboard[0]
+}
+
 data "aws_iam_policy_document" "gateway_ses" {
   statement {
     sid       = "SendOnboardingEmail"
     actions   = ["ses:SendEmail"]
-    resources = [aws_sesv2_email_identity.onboard.arn]
+    resources = ["arn:aws:ses:${var.region}:${data.aws_caller_identity.current.account_id}:identity/${local.ses_domain}"]
     condition {
       test     = "StringEquals"
       variable = "ses:FromAddress"
@@ -75,12 +80,12 @@ module "irsa_gateway_ses" {
 }
 
 output "ses_dkim_records" {
-  description = "DKIM CNAMEs for the sending domain; each env materializes them in the Cloudflare zone."
-  value = [
-    for token in aws_sesv2_email_identity.onboard.dkim_signing_attributes[0].tokens : {
+  description = "DKIM CNAMEs for the sending domain."
+  value = var.owns_account_resources ? [
+    for token in aws_sesv2_email_identity.onboard[0].dkim_signing_attributes[0].tokens : {
       name  = "${token}._domainkey.${local.ses_domain}"
       type  = "CNAME"
       value = "${token}.dkim.amazonses.com"
     }
-  ]
+  ] : []
 }

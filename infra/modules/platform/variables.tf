@@ -35,6 +35,11 @@ variable "tags" {
   description = "Extra tags applied to every taggable resource."
 }
 
+variable "owns_account_resources" {
+  type        = bool
+  description = "Whether this environment owns the account-wide ECR repositories and SES domain identity."
+}
+
 # ---- Networking ----
 
 variable "vpc_cidr" {

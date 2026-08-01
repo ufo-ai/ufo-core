@@ -19,10 +19,6 @@ output "ecr_registry" {
   value = local.ecr_registry
 }
 
-output "ecr_repository_urls" {
-  value = { for k, r in aws_ecr_repository.this : k => r.repository_url }
-}
-
 output "system_namespace" {
   description = "The namespace the hosted processes run in; External Secrets and IRSA target it."
   value       = local.system_namespace
