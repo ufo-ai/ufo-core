@@ -1199,6 +1199,38 @@ def test_production_deploy_consumes_the_protected_role_and_artifacts() -> None:
     assert credentials["with"]["role-to-assume"] == "${{ env.DEPLOY_ROLE_ARN }}"
 
 
+def test_production_deploy_rejects_missing_inputs_before_role_assumption() -> None:
+    jobs = _workflow(WORKFLOWS / "deploy.yml")["jobs"]
+    assert isinstance(jobs, dict)
+    job = jobs["production_deploy"]
+    assert isinstance(job, dict)
+    steps = job["steps"]
+    assert isinstance(steps, list)
+    step = _step("production_deploy", "Require production inputs")
+    assert steps[0] == step
+    assert steps[1] == {"uses": "actions/checkout@v4"}
+    assert step["env"] == {
+        "ANTHROPIC_API_KEY": "${{ secrets.ANTHROPIC_API_KEY }}",
+        "CLOUDFLARE_API_TOKEN": "${{ secrets.CLOUDFLARE_API_TOKEN }}",
+        "DD_API_KEY": "${{ secrets.DD_API_KEY }}",
+        "DD_APP_KEY": "${{ secrets.DD_APP_KEY }}",
+        "E2B_API_KEY": "${{ secrets.E2B_API_KEY }}",
+        "OPENAI_API_KEY": "${{ secrets.OPENAI_API_KEY }}",
+    }
+    required = (*step["env"], "E2B_TEMPLATE", "IMAGE_TAG")
+    environment = dict.fromkeys(required, "present")
+    subprocess.run(["bash", "-e", "-o", "pipefail", "-c", step["run"]], check=True, env=environment)
+    for missing in required:
+        failed = subprocess.run(
+            ["bash", "-e", "-o", "pipefail", "-c", step["run"]],
+            capture_output=True,
+            env=environment | {missing: ""},
+        )
+        assert failed.returncode != 0
+        assert failed.stdout.decode() == f"::error::{missing} is required\n"
+        assert b"present" not in failed.stdout + failed.stderr
+
+
 def test_production_deploy_applies_guarded_foundation_then_runtime() -> None:
     jobs = _workflow(WORKFLOWS / "deploy.yml")["jobs"]
     assert isinstance(jobs, dict)

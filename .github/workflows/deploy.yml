@@ -417,6 +417,22 @@ jobs:
       E2B_TEMPLATE: ${{ needs.rollout.outputs.sandbox_template }}
       TF_DIR: infra/envs/prod
     steps:
+      - name: Require production inputs
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          DD_API_KEY: ${{ secrets.DD_API_KEY }}
+          DD_APP_KEY: ${{ secrets.DD_APP_KEY }}
+          E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          for name in ANTHROPIC_API_KEY CLOUDFLARE_API_TOKEN DD_API_KEY DD_APP_KEY E2B_API_KEY OPENAI_API_KEY E2B_TEMPLATE IMAGE_TAG; do
+            if [ -z "${!name}" ]; then
+              echo "::error::$name is required"
+              exit 1
+            fi
+          done
+
       - uses: actions/checkout@v4
 
       - uses: astral-sh/setup-uv@v5
