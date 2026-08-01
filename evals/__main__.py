@@ -51,6 +51,15 @@ from evals.gdpval_100.runner import (
 from evals.gdpval_100.runner import (
     WORKFLOW_WAIT_SECONDS as GDPVAL_WORKFLOW_WAIT_SECONDS,
 )
+from evals.handbook.runner import (
+    HANDBOOK_BACKENDS,
+    HANDBOOK_PACKS,
+    IngestDeps,
+    load_handbook,
+)
+from evals.handbook.runner import (
+    WORKFLOW_WAIT_SECONDS as HANDBOOK_WORKFLOW_WAIT_SECONDS,
+)
 from evals.harness.harness import EvalReport, digest_payload
 from evals.harness.judge import ModelJudge
 from evals.harness.registry import EvalTask, selected_tasks
@@ -104,7 +113,7 @@ from ufo.config import Config, config_path, load_config
 from ufo.credentials import CredentialRequests, CredentialStore, install_credential_requests
 from ufo.db import dispose_db, init_db
 from ufo.ext.context import context_for
-from ufo.ext.loader import load_manifests, skill_registry
+from ufo.ext.loader import embed_backend, index_backend, load_manifests, skill_registry
 from ufo.governance import prompt_digest
 from ufo.loop.prompts.render import render_system_prompt
 from ufo.models.registry import ModelRegistry, model_registry
@@ -172,6 +181,20 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--gdpval-task", action="append", default=[], metavar="TASK_ID")
     parser.add_argument("--jobbench", type=Path, metavar="SNAPSHOT")
     parser.add_argument("--jobbench-case", action="append", default=[], metavar="CASE_ID")
+    parser.add_argument(
+        "--handbook",
+        type=Path,
+        metavar="CHECKOUT",
+        help="HANDBOOK.md checkout at the pinned revision",
+    )
+    parser.add_argument("--handbook-task", action="append", default=[], metavar="TASK_ID")
+    parser.add_argument(
+        "--handbook-ingest",
+        type=Path,
+        metavar="STAGING",
+        help="index each task's policy documents as a synced source before its turn, staging the "
+        "extracted text under STAGING — the deployment a company running ufo would have",
+    )
     parser.add_argument("--skill-loading-case", action="append", default=[], metavar="CASE_NAME")
     parser.add_argument(
         "--jobbench-submissions",
@@ -224,6 +247,10 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("--gdpval-task requires --gdpval-100")
     if args.jobbench_case and args.jobbench is None:
         parser.error("--jobbench-case requires --jobbench")
+    if args.handbook_task and args.handbook is None:
+        parser.error("--handbook-task requires --handbook")
+    if args.handbook_ingest is not None and args.handbook is None:
+        parser.error("--handbook-ingest requires --handbook")
     if args.skill_loading_case and "skill_loading" not in names:
         parser.error("--skill-loading-case requires --only skill_loading")
     if (args.wandr_subset is not None or args.wandr_case) and args.wandr is None:
@@ -241,6 +268,7 @@ def main(argv: list[str] | None = None) -> None:
             args.compaction,
             args.wandr,
             args.issue_recall,
+            args.handbook,
         )
     )
     if requested_runs > 1:
@@ -282,6 +310,16 @@ def main(argv: list[str] | None = None) -> None:
             if args.wandr is not None
             else None
         )
+        handbook_tasks = (
+            load_handbook(
+                args.handbook,
+                _credential_store(load_config()),
+                tuple(args.handbook_task),
+                _handbook_ingest(load_config(), args.handbook_ingest),
+            )
+            if args.handbook is not None
+            else None
+        )
         tasks = _tasks(
             names,
             memory_run,
@@ -291,6 +329,7 @@ def main(argv: list[str] | None = None) -> None:
             gdpval_run,
             jobbench_tasks,
             wandr_tasks,
+            handbook_tasks,
             args.mcp_atlas_data,
             args.mcp_atlas_samples,
             hle_run,
@@ -382,6 +421,15 @@ def main(argv: list[str] | None = None) -> None:
         )
     if wandr_tasks is not None and config.pack.name not in WANDR_PACKS:
         parser.error(f"wandr requires [pack] name in {WANDR_PACKS}, found {config.pack.name!r}")
+    if handbook_tasks is not None and config.pack.name not in HANDBOOK_PACKS:
+        parser.error(
+            f"handbook requires [pack] name in {HANDBOOK_PACKS}, found {config.pack.name!r}"
+        )
+    if handbook_tasks is not None and config.sandbox.backend not in HANDBOOK_BACKENDS:
+        parser.error(
+            f"handbook grades the conversation workspace on the host, so it requires "
+            f"[sandbox] backend in {HANDBOOK_BACKENDS}, found {config.sandbox.backend!r}"
+        )
     if any(task.name == "cos_workflows" for task in tasks) and (
         config.pack.name not in COS_WORKFLOWS_PACKS
     ):
@@ -422,6 +470,8 @@ def main(argv: list[str] | None = None) -> None:
         workflow_wait_seconds = JOBBENCH_WORKFLOW_WAIT_SECONDS
     if wandr_tasks is not None:
         workflow_wait_seconds = WANDR_WORKFLOW_WAIT_SECONDS
+    if handbook_tasks is not None:
+        workflow_wait_seconds = HANDBOOK_WORKFLOW_WAIT_SECONDS
     if tasks and all(task.name == "document_visual" for task in tasks):
         workflow_wait_seconds = DOCUMENT_VISUAL_WORKFLOW_WAIT_SECONDS
     reports, agent_prompt = asyncio.run(
@@ -759,6 +809,33 @@ async def _mcp_atlas_target(
     )
 
 
+def _handbook_ingest(config: Config, staging_root: Path | None) -> IngestDeps | None:
+    """The ingested arm's dependencies, or None for the default arm that leaves the policy documents
+    in the workspace. Built here because the suite loads before the run opens its own backends."""
+    if staging_root is None:
+        return None
+    manifests = load_manifests(config.pack.name)
+    credentials = _credential_store(config)
+    return IngestDeps(
+        staging_root=staging_root,
+        blob=blob_store_for(config.blob),
+        index=index_backend(manifests, config.memory.index_backend, credentials),
+        embed=embed_backend(manifests, config.memory.embed_backend, credentials),
+        manifests=manifests,
+        postgres=config.database.url.startswith("postgresql"),
+    )
+
+
+def _credential_store(config: Config) -> CredentialStore:
+    """The store a suite writes BYOK slots through — the handbook environment points the workspace's
+    `mcp_servers` slot at its own services. Fails loud when the deploy has no credential key: a
+    silently unwritten slot would leave the agent with no way to reach the environment."""
+    key = os.environ.get(config.credentials.key_env)
+    if not key:
+        raise ValueError(f"writing a workspace credential requires {config.credentials.key_env}")
+    return CredentialStore(fernet=Fernet(key.encode()))
+
+
 def _model_leg(
     registry: ModelRegistry,
     model: str | None,
@@ -794,6 +871,7 @@ def _tasks(
     gdpval_run: GDPvalCalibration | None = None,
     jobbench_tasks: tuple[EvalTask, ...] | None = None,
     wandr_tasks: tuple[EvalTask, ...] | None = None,
+    handbook_tasks: tuple[EvalTask, ...] | None = None,
     mcp_atlas_data: Path | None = None,
     mcp_atlas_samples: int | None = None,
     hle_run: HLEGoldRun | None = None,
@@ -806,6 +884,8 @@ def _tasks(
         return selected_tasks(jobbench_tasks, names)
     if wandr_tasks is not None:
         return selected_tasks(wandr_tasks, names)
+    if handbook_tasks is not None:
+        return selected_tasks(handbook_tasks, names)
     mcp_atlas = (
         (load_mcp_atlas_task(mcp_atlas_data, mcp_atlas_samples),)
         if mcp_atlas_data is not None

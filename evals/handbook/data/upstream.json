@@ -1,0 +1,345 @@
+{
+  "file_tool_sets": [
+    "syntara_ds_all"
+  ],
+  "license": "Apache-2.0",
+  "repository": "surge-ai/handbook",
+  "revision": "72f9a6591782b8e7d9ebbcb2e2f72c9c2357fdd1",
+  "tasks": [
+    {
+      "rubrics": 25,
+      "task_id": "finance_meridian_partners_158b9045",
+      "tree_sha256": "sha256:ab3b903f1687cdae6cf5960d4a14fb792bee871475c535b90156fc5ed69c66cf"
+    },
+    {
+      "rubrics": 9,
+      "task_id": "finance_meridian_partners_19d57538",
+      "tree_sha256": "sha256:58b0d8b01878a80d001662f43fada576c0c8c9b326a0070cc92bf7a057d8f532"
+    },
+    {
+      "rubrics": 19,
+      "task_id": "finance_meridian_partners_331accf1",
+      "tree_sha256": "sha256:21cfc16824b0a52add67236bb2eb49a2a93ec5a6784c020d484b476d24c0cac1"
+    },
+    {
+      "rubrics": 16,
+      "task_id": "finance_meridian_partners_4dace65e",
+      "tree_sha256": "sha256:9831d203d183bbe9791b9f5c8fe4a4f8eb4e52672923b097821f929a9709fb2f"
+    },
+    {
+      "rubrics": 8,
+      "task_id": "finance_meridian_partners_a0895480",
+      "tree_sha256": "sha256:76e60b27e242dfa5e2457450681e8fdaac7b7adc4f12861d7bcace91bd396429"
+    },
+    {
+      "rubrics": 7,
+      "task_id": "finance_meridian_partners_cc2fc143",
+      "tree_sha256": "sha256:7197f402db90fc1ca65eeea0c5e72583ea2c28c283ee42bcfea4cca7b3dd1475"
+    },
+    {
+      "rubrics": 7,
+      "task_id": "finance_sunshine_set_6b9398f4",
+      "tree_sha256": "sha256:6a494883afaa847e8438f3dcd9e411dd79c75ef7623e50f98744a2313538438e"
+    },
+    {
+      "rubrics": 14,
+      "task_id": "finance_sunshine_set_7c041148",
+      "tree_sha256": "sha256:5f18dee49984ca352a6c7eefa6e212c52867fea688ecf97a01b30bc902ba1076"
+    },
+    {
+      "rubrics": 15,
+      "task_id": "finance_sunshine_set_b0b8129d",
+      "tree_sha256": "sha256:1e086ff86e692f05a1bc630e10a81772902a9bf5cb1e7b6e426e730dc4bbf6f4"
+    },
+    {
+      "rubrics": 16,
+      "task_id": "finance_sunshine_set_b581c493",
+      "tree_sha256": "sha256:8159bed1e6747f991c32cdbf0da6b45022568b4880ccd8dae21b40d1d7603ba7"
+    },
+    {
+      "rubrics": 6,
+      "task_id": "finance_sunshine_set_d9d532c1",
+      "tree_sha256": "sha256:abe2fc6fe61863494b3ad9ad639b67746e3d7c7f27adc5a5058874c415af3b7b"
+    },
+    {
+      "rubrics": 13,
+      "task_id": "finance_sunshine_set_ebac9768",
+      "tree_sha256": "sha256:09bb81ba336bc8c73660520b8cc99f00afd63e2a9962c76fca11c704738ee5c3"
+    },
+    {
+      "rubrics": 21,
+      "task_id": "hr_crestwood_university_1b602061",
+      "tree_sha256": "sha256:ebe1c45c03b176050568408cd4d6065b3ea35e808c6b3678692c370ae66b8a79"
+    },
+    {
+      "rubrics": 14,
+      "task_id": "hr_crestwood_university_2071c562",
+      "tree_sha256": "sha256:cae0bb8e439f163e5165b5fc3b363b7fbe496ffa2a2d90b0622fe3c9c918de7e"
+    },
+    {
+      "rubrics": 21,
+      "task_id": "hr_crestwood_university_79786c46",
+      "tree_sha256": "sha256:a2cd8b3a4186ceb8a10ec5ae0db52c7a6db93cd178e6e9fa8c477a3d7feed32b"
+    },
+    {
+      "rubrics": 8,
+      "task_id": "hr_crestwood_university_d93daa01",
+      "tree_sha256": "sha256:2a9fbc335226fd07de19eb041a7e2559d84529afd8c99dcd114782dd0c22afe2"
+    },
+    {
+      "rubrics": 20,
+      "task_id": "hr_crestwood_university_da394eac",
+      "tree_sha256": "sha256:1b8a95e53683d911747f5b915a9c3e6d2244efa1bc739590fcdf7a40f0b1defd"
+    },
+    {
+      "rubrics": 18,
+      "task_id": "hr_crestwood_university_ee4d1791",
+      "tree_sha256": "sha256:248b42d2e02a299deef16f16297678b8d7ce129912dab38dd2acb301dde85c02"
+    },
+    {
+      "rubrics": 11,
+      "task_id": "hr_ridgeline_gear_co_2deeab56",
+      "tree_sha256": "sha256:264c519023da37d97c1089a85684c9750333614cd49a42a82da7854178025d36"
+    },
+    {
+      "rubrics": 19,
+      "task_id": "hr_ridgeline_gear_co_44e4c745",
+      "tree_sha256": "sha256:2e81d8630f842898a2d38ea931c19853ec7b51e02499844aa637d7475b66e460"
+    },
+    {
+      "rubrics": 11,
+      "task_id": "hr_ridgeline_gear_co_6950ff2b",
+      "tree_sha256": "sha256:233df31b752358768d260c560bf722337d528346cd440947db275934a6077424"
+    },
+    {
+      "rubrics": 10,
+      "task_id": "hr_ridgeline_gear_co_6d4d0f70",
+      "tree_sha256": "sha256:d88a4e36a3e03fcf91e7997eea61774dee81b1d0cd32ed9f0445e5a517f8273d"
+    },
+    {
+      "rubrics": 7,
+      "task_id": "hr_ridgeline_gear_co_6e501f78",
+      "tree_sha256": "sha256:07728823f0ed39f248f916914927155004fc4bd136cf4f4fd4356354fcda6906"
+    },
+    {
+      "rubrics": 11,
+      "task_id": "hr_ridgeline_gear_co_929c1527",
+      "tree_sha256": "sha256:b4aaf02071c0801a1495580d453a98c60e52ea3359cc0f42ebb75a628cde9d9f"
+    },
+    {
+      "rubrics": 11,
+      "task_id": "hr_ridgeline_gear_co_b337f86b",
+      "tree_sha256": "sha256:bf46935bcf6e23e0cffd2af788b9b8166e2751134e9819a00278912faa9d9e15"
+    },
+    {
+      "rubrics": 15,
+      "task_id": "insurance_mojave_crest_assurance_company_187e3a8c",
+      "tree_sha256": "sha256:e76bbed69f3aa30a4df3858f3e910d21015f2016d005e37fe76a6f013e2c0c56"
+    },
+    {
+      "rubrics": 7,
+      "task_id": "insurance_mojave_crest_assurance_company_2a800bf7",
+      "tree_sha256": "sha256:b2c758b1ae4ee6d35c9d1973f799cf18fe288c736ed301183454de2088119772"
+    },
+    {
+      "rubrics": 14,
+      "task_id": "insurance_mojave_crest_assurance_company_4d2a2588",
+      "tree_sha256": "sha256:d060a65a5e6204886a14a6e5dbbb5652544449f3ced67e51c42f92900822296e"
+    },
+    {
+      "rubrics": 12,
+      "task_id": "insurance_mojave_crest_assurance_company_5122b4da",
+      "tree_sha256": "sha256:85e5a077d0f1780cb3a5e772d0d014ccf2a7b3645644fcf4bad7f93656250af8"
+    },
+    {
+      "rubrics": 9,
+      "task_id": "insurance_mojave_crest_assurance_company_7245b8dd",
+      "tree_sha256": "sha256:ed63ac600e4ff8ee256b8e353e986432035a3285a574674dbabde9c65021461b"
+    },
+    {
+      "rubrics": 19,
+      "task_id": "insurance_mojave_crest_assurance_company_ab59bcf7",
+      "tree_sha256": "sha256:356e8e6586b199a17b26443b29d523761997e57c63e506c9418e9b0f19451464"
+    },
+    {
+      "rubrics": 16,
+      "task_id": "insurance_vanguard_shield_mutual_177fce83",
+      "tree_sha256": "sha256:5ae94029692867f5aa9a92fe3c7220fc02eb27446def36c22e755bbea4117824"
+    },
+    {
+      "rubrics": 12,
+      "task_id": "insurance_vanguard_shield_mutual_4321b8e9",
+      "tree_sha256": "sha256:b80114c737dce0125253058201c00fa898ef3f367de6d9ef337882631539a98c"
+    },
+    {
+      "rubrics": 7,
+      "task_id": "insurance_vanguard_shield_mutual_82da8d17",
+      "tree_sha256": "sha256:39d6b489073b4fe71aa32299c2d548c3e216dbb722ad8927cdb5654906b94b1e"
+    },
+    {
+      "rubrics": 16,
+      "task_id": "insurance_vanguard_shield_mutual_89007056",
+      "tree_sha256": "sha256:e0ead7ae02372dde1148036616a8714e14eeaafc1ef93062bc5ab3455702bbe5"
+    },
+    {
+      "rubrics": 11,
+      "task_id": "insurance_vanguard_shield_mutual_90ff0751",
+      "tree_sha256": "sha256:ee2601295bd19b284ec317ea222d87c1fb2b45c0d173e8ccc0c710a06bcc7b9d"
+    },
+    {
+      "rubrics": 12,
+      "task_id": "insurance_vanguard_shield_mutual_9b2f7a29",
+      "tree_sha256": "sha256:789f50caa92db2c9a0891068479320bf362721106eb095c525028a9358a46ff0"
+    },
+    {
+      "rubrics": 10,
+      "task_id": "insurance_vanguard_shield_mutual_fe30fce5",
+      "tree_sha256": "sha256:ca750e0e1e65255ad83a60a5968789983946661b80d57983b5d915bc5550766c"
+    },
+    {
+      "rubrics": 13,
+      "task_id": "logistics_gear_sytems_inc_0807b5a6",
+      "tree_sha256": "sha256:54ba57f720520be3aaae5325c897677cab91a51ff5657acdb7b69d312b270ac1"
+    },
+    {
+      "rubrics": 10,
+      "task_id": "logistics_gear_sytems_inc_502e8c5e",
+      "tree_sha256": "sha256:1da3729f5bab201fe99034f5499f0ba5dce6d81ca069476e73798622d998b47c"
+    },
+    {
+      "rubrics": 19,
+      "task_id": "logistics_gear_sytems_inc_74170ae1",
+      "tree_sha256": "sha256:d0bbf696f451acc545ade0072fc43d583a4a4fcd0791cd8f333e25762553a42a"
+    },
+    {
+      "rubrics": 6,
+      "task_id": "logistics_gear_sytems_inc_9b60992d",
+      "tree_sha256": "sha256:b3e7085b097758b7f4e34a68fdfc12f8fcc4fc4a194325193d44b391fc79a09b"
+    },
+    {
+      "rubrics": 17,
+      "task_id": "logistics_gear_sytems_inc_ad2ff597",
+      "tree_sha256": "sha256:734d0149a42ada2b53e6f27c91a2e92d8a5b3f87133f8c2088a31ccdc85ce275"
+    },
+    {
+      "rubrics": 13,
+      "task_id": "logistics_gear_sytems_inc_dba0375e",
+      "tree_sha256": "sha256:cbb4de382a502482d6c81b7b05e34ff7e1a5349964a54194b596365f7f676a82"
+    },
+    {
+      "rubrics": 15,
+      "task_id": "logistics_prairie_star_creamery_27470081",
+      "tree_sha256": "sha256:abec64a90959c2377562d6d5df9f1eac41920dd2a3c0e7ffdf87eb0856e51682"
+    },
+    {
+      "rubrics": 11,
+      "task_id": "logistics_prairie_star_creamery_4a2f4b1a",
+      "tree_sha256": "sha256:a372e639d1c4711eff45ba6ec2c085a9eb759840e66ee7f6ac912a2748649787"
+    },
+    {
+      "rubrics": 3,
+      "task_id": "logistics_prairie_star_creamery_7b63c60d",
+      "tree_sha256": "sha256:3b9f6b444d1c721dc8b6266d2837d96f16f7fe38bb6f6932d26b5c5deb8226f0"
+    },
+    {
+      "rubrics": 15,
+      "task_id": "logistics_prairie_star_creamery_861b2650",
+      "tree_sha256": "sha256:faae96324b66bb6ec2863a65bd270d65ddcade8e61303f3100b37aa962579b02"
+    },
+    {
+      "rubrics": 4,
+      "task_id": "logistics_prairie_star_creamery_a9dc52cb",
+      "tree_sha256": "sha256:726f9abf966ecffcb172aeaa4e813469de9667b6be130606589e38db8e8a0341"
+    },
+    {
+      "rubrics": 9,
+      "task_id": "logistics_prairie_star_creamery_f382586a",
+      "tree_sha256": "sha256:20c9d75e7a0219c6e646a30122b7080c1f0f69098745f5c2ceeb1e97b77b4a44"
+    },
+    {
+      "rubrics": 12,
+      "task_id": "medical_careig_specialty_pharmacy_08ae3378",
+      "tree_sha256": "sha256:44963870a5b44f6707dc55c9f7d7499160a41a30130c7f3ab4f12bd9e02858c4"
+    },
+    {
+      "rubrics": 18,
+      "task_id": "medical_careig_specialty_pharmacy_3c62ee67",
+      "tree_sha256": "sha256:921db118410d77249bf2606a7c3b54a50e8f89a36e0bc489e18a41608e01ec81"
+    },
+    {
+      "rubrics": 8,
+      "task_id": "medical_careig_specialty_pharmacy_d3e312a5",
+      "tree_sha256": "sha256:2cce09f95828f28dac5e6b675f9eb113ea8bdecefa26bcd2c0fdb5a7f2081d1f"
+    },
+    {
+      "rubrics": 12,
+      "task_id": "medical_careig_specialty_pharmacy_d4619b8b",
+      "tree_sha256": "sha256:5b3683709be643e6ff51a5fa08edcf3667bb7036200ff258c218ddfc7bcee4e3"
+    },
+    {
+      "rubrics": 14,
+      "task_id": "medical_careig_specialty_pharmacy_ea622238",
+      "tree_sha256": "sha256:7417d149abe86170f7c3624e83ae6fe0c4631d3e9052edef4b9f42a9d639e574"
+    },
+    {
+      "rubrics": 17,
+      "task_id": "medical_careig_specialty_pharmacy_f5947c33",
+      "tree_sha256": "sha256:67650b9f324a8f5cd4ee62915a8c70500124269850b5d78585a8539648f66cee"
+    },
+    {
+      "rubrics": 7,
+      "task_id": "medical_careig_specialty_pharmacy_f6d19d30",
+      "tree_sha256": "sha256:b3d9a28cf864777ab7489ecbdc66ef1109f9df4188a0e0df118952403902d04c"
+    },
+    {
+      "rubrics": 25,
+      "task_id": "medical_pathfinder_billing_and_coding_073e602b",
+      "tree_sha256": "sha256:5b569e4734b2a78ee5fa4cc6f96aea62502fe898a088164462e561296cf06a9f"
+    },
+    {
+      "rubrics": 5,
+      "task_id": "medical_pathfinder_billing_and_coding_1d8667fc",
+      "tree_sha256": "sha256:ec355d7b569d985a8291ab4596b05d9e71024d5b1a2d9cee411e13de6cbd1f8c"
+    },
+    {
+      "rubrics": 5,
+      "task_id": "medical_pathfinder_billing_and_coding_9d274282",
+      "tree_sha256": "sha256:d2a9cf3d68a46e18f338b057027566ce48ffee1a7abc289176bc5db38810381b"
+    },
+    {
+      "rubrics": 6,
+      "task_id": "medical_pathfinder_billing_and_coding_a25684b9",
+      "tree_sha256": "sha256:36524c9c4264fa5ced464c0268cba94fd74e240c227b7341186a35491c6336da"
+    },
+    {
+      "rubrics": 7,
+      "task_id": "medical_pathfinder_billing_and_coding_a70deabc",
+      "tree_sha256": "sha256:debe26bd7e63aa3c41bf0b25f09a6924d0f1d4c9c02f80b2f6dd8cc96e8e1521"
+    },
+    {
+      "rubrics": 10,
+      "task_id": "medical_pathfinder_billing_and_coding_bbf1a560",
+      "tree_sha256": "sha256:a569a258d4ea1a63256342c1722e8a0d962266ec334494449860700d4bf95491"
+    },
+    {
+      "rubrics": 27,
+      "task_id": "medical_pathfinder_billing_and_coding_c01deb6e",
+      "tree_sha256": "sha256:96825d542f129e3b11c73981e4a2990ef18f06057e54c0c751ca7f27666f30f3"
+    },
+    {
+      "rubrics": 19,
+      "task_id": "medical_pathfinder_billing_and_coding_ec505b6b",
+      "tree_sha256": "sha256:437dd5b4d3d1fe53f66738c4b493e954ac21505225aeb9429db11c260eeee98a"
+    }
+  ],
+  "tool_sets": [
+    "syntara_ds_all",
+    "google_mail_contacts",
+    "slack_core",
+    "google_mail_core",
+    "google_calendar_core",
+    "jira_core",
+    "shopify_core"
+  ],
+  "verifier_sha256": "sha256:4733740445c418c250de7265661301a789a7509f851399bee9f76d27d2f50b7c"
+}

@@ -8,6 +8,8 @@ would, one turn per invoke) and the member's LLM leg (a scripted message list)."
 
 import asyncio
 from dataclasses import dataclass, field
+from pathlib import Path
+from tempfile import gettempdir
 from typing import cast
 from uuid import UUID, uuid4
 
@@ -113,6 +115,9 @@ class ScriptedMember:
 @dataclass
 class DbConversations:
     workspace_id: UUID
+
+    def workspace_path(self, conversation_id: UUID, rel: str) -> Path:
+        return Path(gettempdir()) / "eval-scenario-workspaces" / str(conversation_id) / rel
 
     async def open(self, case_name: str, member_key: str | None = None) -> UUID:
         conversation_id = uuid4()

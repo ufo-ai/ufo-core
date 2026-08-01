@@ -210,11 +210,15 @@ class MemorySearchService:
             for item in recall_tier:
                 if item is not None and item.memory_id not in recalled:
                     recalled[item.memory_id] = item
-        sources: dict[UUID, SourceMatch] = {}
+        # Keyed by the passage, not the page. Each leg already returns one passage per page — the
+        # one that answered that query — and the queries run in parallel over the same documents,
+        # so keying by page discarded every leg's passage but the first. Identical passages still
+        # have to collapse, which is what the text half of the key does.
+        sources: dict[tuple[UUID, str], SourceMatch] = {}
         for source_tier in zip_longest(*source_legs):
             for match in source_tier:
-                if match is not None and match.page_id not in sources:
-                    sources[match.page_id] = match
+                if match is not None and (match.page_id, match.text) not in sources:
+                    sources[(match.page_id, match.text)] = match
         matches = tuple(
             MemoryMatch(
                 kind=item.item_class,

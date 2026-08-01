@@ -11,7 +11,7 @@ from base64 import b64encode
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from hashlib import sha256
-from inspect import getmodule, getsource
+from inspect import getmodule, getsource, isfunction, ismethod
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from uuid import UUID
@@ -52,9 +52,14 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class CapabilityVerdict:
+    """`excluded` marks a case the harness could not put a capability question to — its environment
+    was not the one the case describes. Neither pass nor fail: counting it as a failure charges the
+    model for the harness."""
+
     passed: bool
     reason: str
     evidence: JsonObject = field(default_factory=dict)
+    excluded: bool = False
 
 
 @dataclass(frozen=True)
@@ -146,7 +151,9 @@ class StoredCompaction(BaseModel):
 
 @dataclass(frozen=True)
 class CapabilityOutput:
-    """The answer, tool trajectory, artifacts, and allowlisted log visible to a grader."""
+    """The answer, tool trajectory, artifacts, and allowlisted log visible to a grader.
+    `workspace_dir` is the host directory the turn's `/workspace` was served from, so a grader can
+    read what the turn left on disk rather than only what it submitted."""
 
     response: str
     calls: tuple[ToolInvocation, ...]
@@ -159,6 +166,7 @@ class CapabilityOutput:
     compaction_records: tuple[StoredCompaction, ...] = ()
     tokens: int = 0
     cost_micro_usd: int = 0
+    workspace_dir: Path | None = None
 
     @property
     def tools(self) -> tuple[str, ...]:
@@ -168,15 +176,18 @@ class CapabilityOutput:
 type Grader = Callable[[CapabilityOutput], Awaitable[CapabilityVerdict]]
 type CapabilityFollowup = Callable[[CapabilityOutput], Awaitable[str | None]]
 type EvalSeed = Callable[[UUID, UUID], Awaitable[None]]
+type WorkspacePrepare = Callable[[UUID, Path], Awaitable[None]]
 
 
-def source_digest(hook: CapabilityFollowup | EvalSeed) -> str:
+def source_digest(hook: CapabilityFollowup | EvalSeed | WorkspacePrepare) -> str:
     """A case hook's identity: its own source plus its defining module's, so editing the hook — or a
-    helper the module's hooks share — moves the suite digest by itself."""
-    module = getmodule(hook)
+    helper the module's hooks share — moves the suite digest by itself. A hook carrying state is a
+    callable object rather than a function, and its source is its class's."""
+    target = hook if isfunction(hook) or ismethod(hook) else type(hook)
+    module = getmodule(target)
     if module is None:
         raise RuntimeError(f"case hook {hook!r} has no source module to digest")
-    return sha256(f"{getsource(hook)}\n{getsource(module)}".encode()).hexdigest()
+    return sha256(f"{getsource(target)}\n{getsource(module)}".encode()).hexdigest()
 
 
 @runtime_checkable
@@ -248,8 +259,11 @@ class CapabilityCase:
     — both reach the model judge only after the deterministic grader passes, and both require a
     judge model on the task. `seed`, when set, receives (workspace_id, agent_id) before the case's
     conversation opens and establishes the state the case runs against, resetting whatever it
-    owns. `undelivered` seeds rounds the agent ran before the case message arrived, so they answer
-    the last of the `prior_messages`."""
+    owns. `prepare`, when set, runs once the conversation's workspace directory exists and its files
+    are staged, and before the turn opens, receiving (workspace_id, that directory) — for a case
+    whose external environment must read the very files the agent will write, which `seed` runs too
+    early to know. `undelivered` seeds rounds the agent ran before the case message arrived, so they
+    answer the last of the `prior_messages`."""
 
     name: str
     message: str
@@ -266,6 +280,7 @@ class CapabilityCase:
     references: tuple[CapabilityReference, ...] = ()
     followup: CapabilityFollowup | None = None
     seed: EvalSeed | None = None
+    prepare: WorkspacePrepare | None = None
 
     def __post_init__(self) -> None:
         paths = tuple(reference.path for reference in self.references)
@@ -326,6 +341,8 @@ class CapabilityCase:
             payload["followup"] = source_digest(self.followup)
         if self.seed is not None:
             payload["seed"] = source_digest(self.seed)
+        if self.prepare is not None:
+            payload["prepare"] = source_digest(self.prepare)
         return payload
 
 
@@ -415,6 +432,14 @@ async def run_capability_case(case: CapabilityCase, target: CapabilityTarget) ->
                 excluded=True,
             )
     passed = bool(winning_indexes)
+    if not passed and all(sample.verdict.excluded for sample in samples):
+        return EvalCaseResult(
+            name=case.name,
+            passed=False,
+            reason=verdict.reason,
+            evidence=evidence,
+            excluded=True,
+        )
     reason = (
         verdict.reason
         if passed

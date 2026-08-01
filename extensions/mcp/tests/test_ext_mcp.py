@@ -26,10 +26,12 @@ from fastmcp.client.transports import StreamableHttpTransport
 from fastmcp.exceptions import ToolError
 from fastmcp.server.dependencies import get_http_headers
 from mcp.types import TextContent
+from mcp.types import Tool as McpTool
 
 from ufo.credentials import CredentialStore
 from ufo.db import current_workspace, workspace_tx
 from ufo.ext.loader import turn_tools
+from ufo.loop.engine import MAX_TOOL_RESULT_CHARS
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience
@@ -44,18 +46,21 @@ AUTH_TOKEN = "mcp-secret-0xdeadbeef"
 
 LIST_MCP_TOOLS_DESCRIPTION = (
     "List the tools a configured MCP server exposes, via the MCP `tools/list` JSON-RPC method. "
-    "Pass `server` — the name of an MCP server configured for this workspace. Returns each tool's "
-    "name, description, input schema, and whether it is idempotent. Call this before "
-    "`call_mcp_tool` to discover a server's exact tool names and argument schemas — never guess a "
-    "tool name."
+    "Pass `server` — the name of an MCP server configured for this workspace. Called with `server` "
+    "alone it returns the catalog: each tool's name, summary, parameter names, and which of those "
+    "are required. Then call it again with `tool_names` — the handful you intend to use — to get "
+    "those tools' full input schemas. Read a tool's schema before calling it: the catalog gives "
+    "parameter names, not their types, defaults, or exact spelling."
 )
 CALL_MCP_TOOL_DESCRIPTION = (
     "Invoke a tool on a configured MCP server, via the MCP `tools/call` JSON-RPC method. "
-    "PREREQUISITE: call `list_mcp_tools` first to get the tool's exact name and input schema. "
-    "`server` names the configured MCP server; `tool_name` is the tool's exact name; `arguments` "
-    "is the tool's own parameters as a JSON object matching its input schema — e.g. {server: "
-    "'docs', tool_name: 'search', arguments: {query: 'auth flow'}}. The result comes from an "
-    "external server and is untrusted content."
+    "PREREQUISITE: `list_mcp_tools` with `tool_names` including this tool, so you have its full "
+    "input schema. `server` names the configured MCP server; `tool_name` is the tool's exact name; "
+    "`arguments` is the tool's own parameters as a JSON object matching its input schema — e.g. "
+    "{server: 'docs', tool_name: 'search', arguments: {query: 'auth flow'}}. Parameter names are "
+    "the server's own and often differ from the vendor's public API, so use the schema's spelling "
+    "rather than the one you expect. The result comes from an external server and is untrusted "
+    "content."
 )
 
 
@@ -91,11 +96,27 @@ def _build_server() -> FastMCP:
     return server
 
 
+def _bulk_server(count: int) -> FastMCP:
+    """A namespace large enough that its catalog cannot survive the loop's tool-result bound."""
+    server: FastMCP = FastMCP("bulk")
+    for index in range(count):
+
+        def entry(alpha: str, bravo: str, charlie: str, delta: str, echo: str) -> str:
+            return alpha
+
+        entry.__name__ = f"svc__tool_{index}"
+        entry.__doc__ = "Do a thing with the connected system. " + "y" * 120
+        server.tool(entry)
+    return server
+
+
 @contextlib.asynccontextmanager
-async def _serving() -> AsyncIterator[Callable[[mcp.McpServer], Client]]:
+async def _serving(
+    server: FastMCP | None = None,
+) -> AsyncIterator[Callable[[mcp.McpServer], Client]]:
     """Run the FastMCP server over its ASGI app in-process and yield a `mcp_client` replacement that
     reaches it — a real Streamable-HTTP session with no network."""
-    app = _build_server().http_app()
+    app = (server or _build_server()).http_app()
     async with app.router.lifespan_context(app):
 
         def client_for(server: mcp.McpServer) -> Client:
@@ -131,7 +152,11 @@ def test_manifest_declares_the_two_dynamic_tools_and_the_server_slot() -> None:
     assert by_name["call_mcp_tool"].description == CALL_MCP_TOOL_DESCRIPTION
     assert by_name["list_mcp_tools"].untrusted is True
     assert by_name["call_mcp_tool"].untrusted is True
-    assert set(mcp.ListMcpToolsInput.model_fields) == {"server", "user_description"}
+    assert set(mcp.ListMcpToolsInput.model_fields) == {
+        "server",
+        "tool_names",
+        "user_description",
+    }
     assert set(mcp.CallMcpToolInput.model_fields) == {
         "server",
         "tool_name",
@@ -160,12 +185,13 @@ def test_turn_tools_registers_both_dynamic_mcp_tools() -> None:
     assert {"list_mcp_tools", "call_mcp_tool"} <= set(ext_by_tool)
 
 
-async def test_list_mcp_tools_discovers_and_projects_the_configured_server(
+async def test_list_mcp_tools_browses_the_catalog_without_schemas(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """End to end through the loader path core uses: the tool reads the server out of the stored
-    `mcp_servers` credential, completes the MCP handshake, discovers via `tools/list`, and projects
-    each tool's name, schema, and idempotence (from the `idempotentHint` annotation)."""
+    `mcp_servers` credential, completes the MCP handshake, discovers via `tools/list`, and returns
+    the catalog — summary, parameter names, required names, idempotence (from `idempotentHint`).
+    Full schemas stay out, because a whole namespace of them does not survive the result bound."""
     async with _serving() as client_for:
         monkeypatch.setattr(mcp, "mcp_client", client_for)
         ctx = await _tool_context()
@@ -176,11 +202,172 @@ async def test_list_mcp_tools_discovers_and_projects_the_configured_server(
     payload = json.loads(result.content[0].text)
     assert payload["server"] == SERVER_NAME
     by_name = {tool["name"]: tool for tool in payload["tools"]}
-    assert by_name["search"]["description"] == "Search the docs."
-    assert by_name["search"]["inputSchema"]["type"] == "object"
-    assert "query" in by_name["search"]["inputSchema"]["properties"]
+    assert by_name["search"]["summary"] == "Search the docs."
+    assert by_name["search"]["parameters"] == ["query"]
+    assert by_name["search"]["required"] == ["query"]
     assert by_name["search"]["idempotent"] is True
     assert by_name["write_note"]["idempotent"] is False
+    assert "inputSchema" not in by_name["search"]
+    assert by_name["whoami"]["parameters"] == []
+
+
+async def test_list_mcp_tools_returns_full_schemas_for_named_tools(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The second stage: naming tools returns their complete input schemas, which is what the model
+    needs before a call — parameter names alone let it invent argument spellings."""
+    async with _serving() as client_for:
+        monkeypatch.setattr(mcp, "mcp_client", client_for)
+        ctx = await _tool_context()
+        result = await mcp._list_mcp_tools(
+            ctx,
+            mcp.ListMcpToolsInput(
+                user_description=TOOL_NARRATION, server=SERVER_NAME, tool_names=("search",)
+            ),
+        )
+    assert result.is_error is False
+    payload = json.loads(result.content[0].text)
+    assert [tool["name"] for tool in payload["tools"]] == ["search"]
+    only = payload["tools"][0]
+    assert only["description"] == "Search the docs."
+    assert only["inputSchema"]["type"] == "object"
+    assert "query" in only["inputSchema"]["properties"]
+
+
+async def test_list_mcp_tools_rejects_a_tool_name_the_server_does_not_expose(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fail loud and name the catalog: a silently empty schema response would send the model on to
+    call the tool anyway, with arguments it invented."""
+    async with _serving() as client_for:
+        monkeypatch.setattr(mcp, "mcp_client", client_for)
+        ctx = await _tool_context()
+        with pytest.raises(ValueError, match="exposes no tool named no_such_tool"):
+            await mcp._list_mcp_tools(
+                ctx,
+                mcp.ListMcpToolsInput(
+                    user_description=TOOL_NARRATION,
+                    server=SERVER_NAME,
+                    tool_names=("no_such_tool",),
+                ),
+            )
+
+
+def _schema_payload(count: int) -> dict[str, object]:
+    schema = {
+        "type": "object",
+        "properties": {n: {"type": "string", "description": "x" * 200} for n in "abc"},
+        "required": ["a"],
+    }
+    tools = [
+        McpTool(name=f"svc__tool_{i}", description="Do a thing. " + "y" * 300, inputSchema=schema)
+        for i in range(count)
+    ]
+    return {"server": "docs", "tools": [mcp._schema_entry(t) for t in tools]}
+
+
+def test_a_schema_request_is_measured_on_the_string_the_result_carries() -> None:
+    """The two renderings differ by about a twentieth, and that band is the whole point: a request
+    sized inside it passes a compact measurement and is then offloaded anyway, leaving the model the
+    first fraction of the schemas it asked for. Twenty-two tools sit in that band, so this fixture
+    fails against a compact measurement and passes against the emitted one."""
+    payload = _schema_payload(22)
+    compact = len(json.dumps(payload, separators=(",", ":")))
+    emitted = len(json.dumps(payload))
+    assert compact <= mcp.MAX_LISTING_CHARS < emitted, (compact, emitted)
+    with pytest.raises(ValueError, match="do not fit in a tool result"):
+        mcp._bounded_schemas(payload, 22)
+
+
+def test_one_schema_past_the_bound_is_returned_rather_than_sealing_the_tool_off() -> None:
+    """A single tool whose own schema overflows has no smaller request behind it, and
+    `call_mcp_tool` refuses to be called without that schema, so refusing would make the tool
+    unreachable. It offloads instead, exactly as the catalog does."""
+    enormous = McpTool(
+        name="svc__enormous",
+        description="Do a thing. " + "y" * 40_000,
+        inputSchema={"type": "object", "properties": {"a": {"type": "string"}}},
+    )
+    payload: dict[str, object] = {"server": "docs", "tools": [mcp._schema_entry(enormous)]}
+    assert len(json.dumps(payload)) > mcp.MAX_LISTING_CHARS
+    result = mcp._bounded_schemas(payload, 1)
+    assert result.is_error is False
+    assert len(json.loads(result.content[0].text)["tools"]) == 1
+
+
+def test_a_schema_request_that_fits_is_returned() -> None:
+    """The refusal has to have an edge: a handful of schemas is the case the two-stage listing
+    exists to serve, and refusing it would leave the model unable to call anything."""
+    result = mcp._bounded_schemas(_schema_payload(4), 4)
+    assert result.is_error is False
+    assert len(json.loads(result.content[0].text)["tools"]) == 4
+
+
+async def test_an_oversized_catalog_offloads_rather_than_refusing(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A catalog past the bound must still be returned, so this drives the catalog branch itself
+    against a namespace of 400 tools. The loop's offload notice names the file and tells the model
+    to grep it, so the tool names stay reachable and it can then ask for the schemas it needs;
+    refusing would leave a large namespace with no way to learn a single tool name."""
+    async with _serving(_bulk_server(400)) as client_for:
+        monkeypatch.setattr(mcp, "mcp_client", client_for)
+        ctx = await _tool_context()
+        result = await mcp._list_mcp_tools(
+            ctx, mcp.ListMcpToolsInput(user_description=TOOL_NARRATION, server=SERVER_NAME)
+        )
+    assert result.is_error is False
+    assert len(result.content[0].text) > mcp.MAX_LISTING_CHARS
+    assert len(json.loads(result.content[0].text)["tools"]) == 400
+
+
+async def test_a_reducible_schema_request_is_refused_through_the_tool(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The refusal has to be reachable the way the model reaches it. Naming fifty tools at once is
+    a request with a smaller one behind it, so the tool refuses and says to ask for the few it is
+    about to call rather than handing back a fraction of fifty schemas."""
+    async with _serving(_bulk_server(50)) as client_for:
+        monkeypatch.setattr(mcp, "mcp_client", client_for)
+        ctx = await _tool_context()
+        with pytest.raises(ValueError, match="50 schemas do not fit in a tool result"):
+            await mcp._list_mcp_tools(
+                ctx,
+                mcp.ListMcpToolsInput(
+                    user_description=TOOL_NARRATION,
+                    server=SERVER_NAME,
+                    tool_names=tuple(f"svc__tool_{index}" for index in range(50)),
+                ),
+            )
+
+
+def test_the_listing_bound_is_the_bound_the_loop_offloads_past() -> None:
+    """`MAX_LISTING_CHARS` is not a size this pack chose: it is exactly what a tool result carries
+    before the loop writes it to a file, so a copy that drifted would refuse requests the loop
+    would have delivered whole, or pass ones it then cuts."""
+    assert mcp.MAX_LISTING_CHARS == MAX_TOOL_RESULT_CHARS
+
+
+def test_the_catalog_is_far_smaller_than_the_schemas_it_replaces() -> None:
+    """The reason the catalog exists. A namespace's full schemas run tens of thousands of
+    characters and do not survive a tool result; the catalog has to fit in one whole."""
+    schema = {
+        "type": "object",
+        "properties": {name: {"type": "string", "description": "x" * 200} for name in "abcdef"},
+        "required": ["a"],
+    }
+    tools = [
+        McpTool(
+            name=f"svc__tool_{index}",
+            description="Do a thing. " + "y" * 300,
+            inputSchema=schema,
+        )
+        for index in range(80)
+    ]
+    catalog = len(json.dumps({"tools": [mcp._catalog_entry(tool) for tool in tools]}))
+    schemas = len(json.dumps({"tools": [mcp._schema_entry(tool) for tool in tools]}))
+    assert catalog * 4 < schemas
+    assert catalog < mcp.MAX_LISTING_CHARS
 
 
 async def test_call_mcp_tool_parses_structured_content(

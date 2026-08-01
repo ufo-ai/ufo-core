@@ -18,7 +18,7 @@ from ufo_ext_embed_openai import EMBED_DIM
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.events import MEMORY_RECALL_EVENT
 from ufo_ext_memory.objects import MEMORY_OBJECT, MemoryObjects
-from ufo_ext_memory.store import MemoryIndexer, memory_item
+from ufo_ext_memory.store import MemoryIndexer, SourceMatch, memory_item
 
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
@@ -732,6 +732,42 @@ async def test_memory_search_interleaves_per_query_results(
         for line in found.content[0].text.splitlines()
     ]
     assert bodies == ["a-one", "b-one", "a-two"]
+
+
+async def test_memory_search_keeps_each_legs_passage_of_one_document(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`search_sources` returns one passage per page — the one that answered that query — so a leg
+    per query is the only way a manual yields more than one paragraph. Keying the fusion by page
+    discarded all but the first, leaving the agent searching over and over for a section it could
+    never be handed. Identical passages still collapse: the queries overlap."""
+    page = uuid4()
+
+    def _match(text: str) -> SourceMatch:
+        return SourceMatch(
+            page_id=page, subject="shared", text=text, score=0.5, created_at=datetime.now(UTC)
+        )
+
+    legs = {
+        "putaway": (_match("13.4 Putaway authorisation"),),
+        "template": (_match("Template 24 — the post format"),),
+        "formats": (_match("Template 24 — the post format"),),
+    }
+
+    class _Store:
+        async def recall(self, query, subjects, limit, start, end, *, source_reader):
+            return ()
+
+        async def search_sources(self, query, subjects, limit, start, end, *, source_reader):
+            return legs[query]
+
+    monkeypatch.setattr(memory, "store_for", lambda ext: _Store())
+    ctx = _tool_ctx(_ext(object(), object()), None, tmp_path)
+    with ws(uuid4()):
+        found = await _run("memory_search", ctx, queries=["putaway", "template", "formats"])
+    text = found.content[0].text
+    assert "13.4 Putaway authorisation" in text
+    assert text.count("Template 24 — the post format") == 1, "an identical passage must collapse"
 
 
 async def test_the_memory_object_kind_is_sealed_against_a_speaking_member(

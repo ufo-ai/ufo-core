@@ -206,6 +206,10 @@ class InProcessTarget:
             await self.conversations.stage(
                 conversation_id, f"references/{reference.path}", reference.source
             )
+        if case.prepare is not None:
+            await case.prepare(
+                ws_current().workspace_id, self.conversations.workspace_path(conversation_id, "")
+            )
         try:
             turn_id = await self.ctx.invoke(
                 conversation_id,
@@ -221,7 +225,10 @@ class InProcessTarget:
             if self.logs is not None:
                 await self.logs.discard(turn_id)
             return result
-        output = result.output
+        output = replace(
+            result.output,
+            workspace_dir=self.conversations.workspace_path(conversation_id, ""),
+        )
         if self.logs is not None:
             log = await self.logs.read(turn_id)
             if log is None:

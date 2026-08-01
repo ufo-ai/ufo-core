@@ -23,6 +23,7 @@ import re
 from fastmcp import Client
 from fastmcp.client.transports import StreamableHttpTransport
 from mcp.types import TextContent as McpTextContent
+from mcp.types import Tool as McpTool
 from pydantic import BaseModel, Field, field_validator
 
 from ufo.sdk.context import JsonValue
@@ -39,21 +40,27 @@ MAX_MCP_REQUEST_BYTES = ONE_MIB
 MAX_MCP_RESPONSE_BYTES = ONE_MIB
 MCP_TIMEOUT_SECONDS = 30.0
 MCP_URL_RE = re.compile(r"^https?://.+")
+MAX_SUMMARY_CHARS = 160
+# What the loop's tool-result bound carries before it offloads.
+MAX_LISTING_CHARS = 25_600
 
 LIST_MCP_TOOLS_DESCRIPTION = (
     "List the tools a configured MCP server exposes, via the MCP `tools/list` JSON-RPC method. "
-    "Pass `server` — the name of an MCP server configured for this workspace. Returns each tool's "
-    "name, description, input schema, and whether it is idempotent. Call this before "
-    "`call_mcp_tool` to discover a server's exact tool names and argument schemas — never guess a "
-    "tool name."
+    "Pass `server` — the name of an MCP server configured for this workspace. Called with `server` "
+    "alone it returns the catalog: each tool's name, summary, parameter names, and which of those "
+    "are required. Then call it again with `tool_names` — the handful you intend to use — to get "
+    "those tools' full input schemas. Read a tool's schema before calling it: the catalog gives "
+    "parameter names, not their types, defaults, or exact spelling."
 )
 CALL_MCP_TOOL_DESCRIPTION = (
     "Invoke a tool on a configured MCP server, via the MCP `tools/call` JSON-RPC method. "
-    "PREREQUISITE: call `list_mcp_tools` first to get the tool's exact name and input schema. "
-    "`server` names the configured MCP server; `tool_name` is the tool's exact name; `arguments` "
-    "is the tool's own parameters as a JSON object matching its input schema — e.g. {server: "
-    "'docs', tool_name: 'search', arguments: {query: 'auth flow'}}. The result comes from an "
-    "external server and is untrusted content."
+    "PREREQUISITE: `list_mcp_tools` with `tool_names` including this tool, so you have its full "
+    "input schema. `server` names the configured MCP server; `tool_name` is the tool's exact name; "
+    "`arguments` is the tool's own parameters as a JSON object matching its input schema — e.g. "
+    "{server: 'docs', tool_name: 'search', arguments: {query: 'auth flow'}}. Parameter names are "
+    "the server's own and often differ from the vendor's public API, so use the schema's spelling "
+    "rather than the one you expect. The result comes from an external server and is untrusted "
+    "content."
 )
 
 
@@ -82,6 +89,11 @@ class McpServersConfig(BaseModel):
 
 class ListMcpToolsInput(BaseModel):
     server: str = Field(description="The name of an MCP server configured for this workspace.")
+    tool_names: tuple[str, ...] = Field(
+        default=(),
+        description="Exact tool names to return full input schemas for. Omit to browse the "
+        "server's catalog first.",
+    )
     user_description: str = Field(
         description="Which connected system you are checking what you can do with, in plain "
         "language for the activity timeline."
@@ -125,22 +137,69 @@ async def _server(ctx: ToolContext, name: str) -> McpServer:
 
 
 async def _list_mcp_tools(ctx: ToolContext, args: ListMcpToolsInput) -> ToolResult:
+    """Two stages, because one server's full catalog does not fit in a tool result.
+
+    A sizable namespace answers `tools/list` with every tool's complete JSON Schema — tens of
+    thousands of characters, well past the result bound. So the default response carries each
+    tool's summary and parameter names, small enough to survive whole, and full schemas come back
+    only for the tools the model asks for."""
     server = await _server(ctx, args.server)
     async with mcp_client(server) as client:
         tools = await client.list_tools()
-    discovered: list[JsonValue] = []
-    for tool in tools:
-        annotations = tool.annotations
-        idempotent = bool(annotations.idempotentHint) if annotations is not None else False
-        discovered.append(
-            {
-                "name": tool.name,
-                "description": tool.description or "",
-                "inputSchema": tool.inputSchema,
-                "idempotent": idempotent,
-            }
+    if not args.tool_names:
+        catalog: list[JsonValue] = [_catalog_entry(tool) for tool in tools]
+        return _json_result({"server": args.server, "tools": catalog})
+    by_name = {tool.name: tool for tool in tools}
+    unknown = [name for name in args.tool_names if name not in by_name]
+    if unknown:
+        raise ValueError(
+            f"server {args.server!r} exposes no tool named {', '.join(unknown)}; "
+            f"list without tool_names to see the catalog"
         )
-    return _json_result({"server": args.server, "tools": discovered})
+    schemas: list[JsonValue] = [_schema_entry(by_name[name]) for name in args.tool_names]
+    return _bounded_schemas({"server": args.server, "tools": schemas}, len(args.tool_names))
+
+
+def _idempotent(tool: McpTool) -> bool:
+    annotations = tool.annotations
+    return bool(annotations.idempotentHint) if annotations is not None else False
+
+
+def _catalog_entry(tool: McpTool) -> JsonValue:
+    """One tool as the catalog shows it: what it does, what it takes, what it insists on. The
+    summary is the description's first sentence — enough to choose between tools, and the rest
+    arrives with the schema."""
+    schema = tool.inputSchema or {}
+    properties = schema.get("properties") or {}
+    required = schema.get("required") or []
+    summary = _summary(tool.description or "")
+    parameters: list[JsonValue] = list(sorted(properties))
+    mandatory: list[JsonValue] = list(sorted(n for n in required if isinstance(n, str)))
+    return {
+        "name": tool.name,
+        "summary": summary,
+        "parameters": parameters,
+        "required": mandatory,
+        "idempotent": _idempotent(tool),
+    }
+
+
+def _summary(description: str) -> str:
+    """The first sentence of the first line. MCP descriptions are commonly docstrings whose opening
+    line is the summary and whose remainder is an `Args:` block, so splitting on sentences alone
+    drags that block in and truncates mid-word."""
+    first_line = description.strip().split("\n")[0].strip()
+    sentence, _, _ = first_line.partition(". ")
+    return sentence[:MAX_SUMMARY_CHARS]
+
+
+def _schema_entry(tool: McpTool) -> JsonValue:
+    return {
+        "name": tool.name,
+        "description": tool.description or "",
+        "inputSchema": tool.inputSchema,
+        "idempotent": _idempotent(tool),
+    }
 
 
 async def _call_mcp_tool(ctx: ToolContext, args: CallMcpToolInput) -> ToolResult:
@@ -166,6 +225,26 @@ def _bounded(text: str) -> str:
     if len(text.encode()) > MAX_MCP_RESPONSE_BYTES:
         raise McpError("MCP result exceeds the byte bound")
     return text
+
+
+def _bounded_schemas(payload: dict[str, JsonValue], tools: int) -> ToolResult:
+    """Refuse a schema request the loop would offload, and only when a smaller one exists.
+
+    A catalog that overflows still offloads usefully: the loop's notice names the file and tells
+    the model to grep it, so the tool names — all the catalog carries — stay reachable, and it can
+    then ask for the few schemas it needs. Refusing would leave it with nothing. Several schemas
+    are the opposite: the model asked for exact spellings, and a preview of the first fraction is
+    what sent it guessing in the first place. A single schema past the bound has no smaller request
+    behind it and `call_mcp_tool` requires it, so it offloads rather than sealing that tool off.
+
+    Measured on the string `_json_result` emits, not a compact rendering: the two differ by about a
+    twentieth, which is the width of the band where a request passes the check and is cut anyway."""
+    if tools > 1 and len(json.dumps(payload)) > MAX_LISTING_CHARS:
+        raise ValueError(
+            f"{tools} schemas do not fit in a tool result; ask for the few tools you are about to "
+            "call"
+        )
+    return _json_result(payload)
 
 
 def _json_result(payload: dict[str, JsonValue]) -> ToolResult:

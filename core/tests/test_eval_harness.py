@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from functools import partial
 from json import dumps, loads
 from pathlib import Path
+from tempfile import gettempdir
 from types import SimpleNamespace
 from typing import cast
 from urllib.parse import parse_qs, urlparse
@@ -64,6 +65,7 @@ from evals.harness.capability import (
     _page_images,
     grading_statement,
     run_capability_case,
+    source_digest,
 )
 from evals.harness.harness import EvalCaseResult, EvalMetric, EvalReport
 from evals.harness.judge import (
@@ -845,6 +847,7 @@ class StubWorker:
     expected_head: tuple[Message, ...] = ()
     seq: int = 1
     idempotency_keys: list[str] = field(default_factory=list)
+    order: list[str] | None = None
     tokens: int = 0
     cost_micro_usd: int = 0
     child_tokens: int = 0
@@ -854,6 +857,8 @@ class StubWorker:
         self, conversation_id: UUID, agent_id: UUID, message: str, idempotency_key: str
     ) -> UUID:
         self.idempotency_keys.append(idempotency_key)
+        if self.order is not None:
+            self.order.append("invoke")
         if self.expected_reference is not None:
             path, content = self.expected_reference
             assert self.workspace_root is not None
@@ -1160,6 +1165,12 @@ class StaticTurnLogReader:
 class DbConversations:
     workspace_id: UUID
 
+    async def stage(self, conversation_id: UUID, path: str, source: Path) -> None:
+        raise AssertionError("this double stages no references")
+
+    def workspace_path(self, conversation_id: UUID, rel: str) -> Path:
+        return Path(gettempdir()) / "eval-harness-workspaces" / str(conversation_id) / rel
+
     async def open(
         self,
         case_name: str,
@@ -1196,6 +1207,10 @@ class DbConversations:
                     updated_at=sa.func.now(),
                 )
             )
+        for item in workspace_files:
+            target = self.workspace_path(conversation_id, item.path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(item.content)
         return conversation_id
 
 
@@ -1357,6 +1372,109 @@ async def test_a_capability_seed_establishes_state_before_the_conversation_opens
     assert case.payload()["seed"] != CapabilityCase("x", "y", case.grader).payload().get("seed")
 
 
+def test_source_digest_identifies_a_hook_that_carries_state() -> None:
+    """A hook holding its dependencies is a callable object, not a function, and `getsource` refuses
+    an instance. Two hooks of the same class differ only in what they hold, so they share a digest;
+    editing the class has to move it, which is what keeps a suite digest honest."""
+
+    @dataclass(frozen=True)
+    class Prepared:
+        marker: str
+
+        async def __call__(self, workspace_id: UUID, workspace_dir: Path) -> None:
+            return None
+
+    first, second = Prepared("a"), Prepared("b")
+    assert source_digest(first) == source_digest(second)
+
+    async def plain(workspace_id: UUID, workspace_dir: Path) -> None:
+        return None
+
+    assert source_digest(plain) != source_digest(first)
+
+
+async def test_prepare_runs_after_the_workspace_exists_and_the_grader_reads_it(
+    db: None, tmp_path
+) -> None:
+    """`prepare` and `workspace_dir` exist for an environment that must see the very files the
+    agent will write, so both are exercised through a real target rather than a hand-built output:
+    prepare has to run after `open` (which stages the files) and before the turn, and the directory
+    the grader is handed has to be the one that was staged into."""
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    order: list[str] = []
+    worker = StubWorker(blob, workspace_id, _research_transcript(), order=order)
+    ctx = _context(blob, worker)
+    conversations = DbConversations(workspace_id)
+    seen: dict[str, Path] = {}
+
+    async def prepare(prepared_workspace: UUID, workspace_dir: Path) -> None:
+        order.append("prepare")
+        seen["prepare"] = workspace_dir
+        assert prepared_workspace == workspace_id
+        assert (workspace_dir / "handbook.txt").read_text() == "hold over 2%"
+
+    async def grade(output: CapabilityOutput) -> CapabilityVerdict:
+        order.append("grade")
+        assert output.workspace_dir is not None
+        seen["grade"] = output.workspace_dir
+        return CapabilityVerdict(True, "graded")
+
+    target = InProcessTarget(
+        ctx=ctx,
+        agent_id=agent_id,
+        conversations=conversations,
+        outcome=CorpusOutcome(ctx),
+        blob=blob,
+    )
+    case = CapabilityCase(
+        "prepared-case",
+        "find the record then remember it",
+        grade,
+        workspace_files=(WorkspaceFile(path="handbook.txt", content=b"hold over 2%"),),
+        prepare=prepare,
+    )
+
+    with ws(workspace_id):
+        result = await run_capability_case(case, target)
+
+    assert result.passed, result.reason
+    assert order == ["prepare", "invoke", "grade"]
+    assert seen["prepare"] == seen["grade"]
+    assert case.payload()["prepare"] != CapabilityCase("x", "y", grade).payload().get("prepare")
+
+
+async def test_a_grader_that_excludes_its_sample_excludes_the_case(db: None, tmp_path) -> None:
+    """A grader excludes when the harness failed to hold the environment the case describes, so the
+    case must leave the run as excluded rather than as a capability failure — scoring it as a
+    failure charges the model for our defect and moves the reported rate. Driven through a real
+    target, because `run_capability_case` is the only place a verdict becomes a case result."""
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    ctx = _context(blob, StubWorker(blob, workspace_id, _research_transcript()))
+
+    async def grade(output: CapabilityOutput) -> CapabilityVerdict:
+        return CapabilityVerdict(False, "environment contaminated", excluded=True)
+
+    target = InProcessTarget(
+        ctx=ctx,
+        agent_id=agent_id,
+        conversations=DbConversations(workspace_id),
+        outcome=CorpusOutcome(ctx),
+        blob=blob,
+    )
+    case = CapabilityCase("excluded-case", "find the record", grade)
+
+    with ws(workspace_id):
+        result = await run_capability_case(case, target)
+
+    assert result.excluded is True
+    assert result.passed is False
+    assert result.reason == "environment contaminated"
+
+
 async def test_a_case_carrying_undelivered_rounds_seeds_them_before_the_turn_runs(
     db: None, tmp_path
 ) -> None:
@@ -1443,6 +1561,12 @@ async def test_in_process_target_reads_durable_compaction_state(
     @dataclass(frozen=True)
     class ExistingConversation:
         conversation_id: UUID
+
+        async def stage(self, conversation_id: UUID, path: str, source: Path) -> None:
+            raise AssertionError("this double stages no references")
+
+        def workspace_path(self, conversation_id: UUID, rel: str) -> Path:
+            return Path(gettempdir()) / "eval-harness-workspaces" / str(conversation_id) / rel
 
         async def open(
             self,
