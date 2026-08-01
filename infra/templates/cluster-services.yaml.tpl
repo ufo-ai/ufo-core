@@ -56,7 +56,6 @@ spec:
   refreshInterval: 1h
   secretStoreRef: {name: ufo-aws-sm, kind: ClusterSecretStore}
   target: {name: ufo-platform-secrets}
-  # Model keys arrive empty until populated out-of-band.
   data:
     - {secretKey: ANTHROPIC_API_KEY, remoteRef: {key: ${secret_api_keys}, property: anthropic-api-key}}
     - {secretKey: AWS_BEARER_TOKEN_BEDROCK, remoteRef: {key: ${secret_api_keys}, property: bedrock-api-key}}

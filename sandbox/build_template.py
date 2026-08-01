@@ -34,12 +34,12 @@ from pathlib import Path
 from e2b import Sandbox, Template
 from e2b.sandbox.commands.command_handle import CommandExitException
 from ufo_ext_e2b import (
-    E2B_TEMPLATE_NAME,
     PLAYWRIGHT_BROWSERS_DIR,
     SANDBOX_ENV,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
+E2B_TEMPLATE_NAME = "ufo-sbx"
 SBX_BIN_DIR = "/usr/local/bin"
 UFO_DIR = "/etc/ufo"
 # The in-sandbox binaries live in core beside the local carrier, which installs them onto its
@@ -304,8 +304,9 @@ def main() -> None:
         print(f"{E2B_TEMPLATE_NAME} up to date")
         return
     info = Template.build(e2b_template(), name=E2B_TEMPLATE_NAME)
-    verify_published_template(E2B_TEMPLATE_NAME)
-    print(info.template_id)
+    reference = f"{info.name}:{info.build_id}"
+    verify_published_template(reference)
+    print(reference)
 
 
 if __name__ == "__main__":

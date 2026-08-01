@@ -1,8 +1,3 @@
-# Platform secrets live in AWS Secrets Manager; External Secrets projects them into ufo-system.
-# Terraform generates the
-# platform-internal material (DB owner password, role-derivation seed, token secrets) and SEEDS empty
-# containers for third-party API keys — those values are set out-of-band so they never enter state.
-
 resource "random_password" "rds" {
   length  = 32
   special = false # RDS master password disallows several specials; keep it URL-safe.
@@ -138,13 +133,14 @@ resource "aws_secretsmanager_secret_version" "platform" {
   })
 }
 
-# Third-party API keys are seeded empty and filled out-of-band.
 resource "aws_secretsmanager_secret" "api_keys" {
   name = "${local.secret_prefix}/api-keys"
   tags = local.tags
 }
 
 resource "aws_secretsmanager_secret_version" "api_keys" {
+  count = var.manage_runtime_secret_versions ? 1 : 0
+
   secret_id = aws_secretsmanager_secret.api_keys.id
   secret_string = jsonencode({
     "anthropic-api-key"                      = ""
@@ -175,24 +171,34 @@ resource "aws_secretsmanager_secret_version" "api_keys" {
   })
 
   lifecycle {
-    ignore_changes = [secret_string] # Values are managed out-of-band.
+    ignore_changes = [secret_string]
   }
 }
 
-# The signup Slack Connect bot token — UFO's own operator-workspace app (control/slack-connect-app.yaml),
-# outbound Web API only. Its own secret, not an api-keys property: only the gateway pod reads it, so it
-# is never projected into ufo-platform-secrets and never reaches serve, an extension, or a workspace
-# credential slot. Seeded empty; the real token is populated out-of-band and never enters state.
+moved {
+  from = aws_secretsmanager_secret_version.api_keys
+  to   = aws_secretsmanager_secret_version.api_keys[0]
+}
+
 resource "aws_secretsmanager_secret" "gateway_slack_connect" {
   name = "${local.secret_prefix}/gateway-slack-connect"
   tags = local.tags
 }
 
 resource "aws_secretsmanager_secret_version" "gateway_slack_connect" {
-  secret_id     = aws_secretsmanager_secret.gateway_slack_connect.id
-  secret_string = jsonencode({ "bot-token" = "" })
+  count = var.manage_runtime_secret_versions ? 1 : 0
+
+  secret_id = aws_secretsmanager_secret.gateway_slack_connect.id
+  secret_string = jsonencode({
+    "bot-token" = ""
+  })
 
   lifecycle {
-    ignore_changes = [secret_string] # The token is managed out-of-band.
+    ignore_changes = [secret_string]
   }
+}
+
+moved {
+  from = aws_secretsmanager_secret_version.gateway_slack_connect
+  to   = aws_secretsmanager_secret_version.gateway_slack_connect[0]
 }

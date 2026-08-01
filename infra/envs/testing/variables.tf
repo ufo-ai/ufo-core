@@ -15,6 +15,15 @@ variable "image_tag" {
   description = "Tag for the ufo-control gateway image. deploy.yml passes the git short SHA."
 }
 
+variable "e2b_template" {
+  type = string
+
+  validation {
+    condition     = var.e2b_template != ""
+    error_message = "e2b_template must not be empty."
+  }
+}
+
 variable "letsencrypt_email" {
   type        = string
   default     = "ops@flyingobject.ai"

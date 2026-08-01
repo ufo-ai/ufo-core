@@ -188,8 +188,23 @@ lives only in the operator workspace, makes outbound Web API calls only, and hol
 bot token (`UFO_CONTROL_SLACK_CONNECT_BOT_TOKEN`, its own Secret through an explicit `secretKeyRef`
 — never `ufo-platform-secrets`, `ufo-serve`, an extension, or a workspace `CredentialSlot`).
 `UFO_CONTROL_SLACK_CONNECT_ENABLED` defaults to false; enabled, a missing token or team ID fails
-gateway startup. Rotation is: update the Secrets Manager value, wait for External Secrets, restart
-the gateway deployment.
+gateway startup.
+
+Production runtime secret containers have no Terraform-managed version. The first production deploy
+creates the containers, then stops with `has no current value` until the operator bootstraps them and
+reruns the deploy. Prepare `/tmp/ufo-production-runtime-secrets.json` with exactly two objects:
+`api-keys` holds every property in `infra/production_secrets.py`'s `API_KEYS_PROPERTIES`, and
+`gateway-slack-connect` holds `bot-token`. Bootstrap or replace those production-owned values with:
+
+```bash
+PRODUCTION_API_KEYS_SECRET_ID="$(terraform -chdir=infra/envs/prod output -raw api_keys_secret_id)" \
+PRODUCTION_GATEWAY_SECRET_ID="$(terraform -chdir=infra/envs/prod output -raw gateway_secret_id)" \
+  uv run python infra/production_secrets.py bootstrap < /tmp/ufo-production-runtime-secrets.json
+```
+
+The script validates both complete documents before writing either one and sends values to AWS
+Secrets Manager through stdin. Deploys preserve those values and refresh the Datadog, E2B, and
+OpenAI keys from repository secrets.
 
 ## Web login
 

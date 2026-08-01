@@ -29,6 +29,16 @@ def _code(source: str) -> str:
     return re.sub(r"(?m)^\s*(?:#|//).*$|\s+(?:#|//).*$", "", source)
 
 
+def _terraform_block(source: str, kind: str, name: str) -> str:
+    block = re.search(
+        rf'^{kind} "[^"]+" "{name}" {{\n(.*?)^}}\n',
+        source,
+        re.DOTALL | re.MULTILINE,
+    )
+    assert block, name
+    return block.group(1)
+
+
 def _deploy_change_gate():
     path = ROOT / ".github" / "scripts" / "deploy_change_gate.py"
     spec = importlib.util.spec_from_file_location("deploy_change_gate", path)
@@ -161,7 +171,8 @@ def test_pull_request_plans_active_deployment_inputs() -> None:
     assert isinstance(environment, dict)
     assert environment["DEPLOY_PATHS_PATTERN"] == (
         r"^(\.github/(workflows/deploy\.yml|scripts/terraform_plan_guard\.py)$|"
-        r"infra/(envs/(testing|prod|edge)|modules/(platform|edge)|templates)/)"
+        r"infra/production_secrets\.py$|"
+        r"infra/(production-access|envs/(testing|prod|edge)|modules/(platform|edge)|templates)/)"
     )
     script = selector["run"]
     assert isinstance(script, str)
@@ -189,6 +200,7 @@ def test_runtime_authorization_changes_are_split_across_deploys() -> None:
         "core/src/ufo/serve.py",
         "extensions/e2b/ufo_ext_e2b.py",
         "infra/envs/prod/ufo.tf",
+        "infra/production_secrets.py",
         "infra/templates/hosted.yaml.tpl",
         "sandbox/build_template.py",
     ):
@@ -320,6 +332,17 @@ def test_plans_run_only_for_selected_deployment_inputs() -> None:
     assert production["if"] == (
         "github.event_name == 'pull_request' && needs.changes.outputs.deploy == 'true'"
     )
+    production_access = jobs["production_access"]
+    assert isinstance(production_access, dict)
+    assert production_access["needs"] == "changes"
+    assert production_access["if"] == "needs.changes.outputs.deploy == 'true'"
+    production_deploy = jobs["production_deploy"]
+    assert isinstance(production_deploy, dict)
+    assert production_deploy["needs"] == ["changes", "production_access", "rollout"]
+    assert production_deploy["if"] == (
+        "github.event_name != 'pull_request' && needs.changes.outputs.deploy == 'true'"
+    )
+    assert production_deploy["environment"] == "production"
 
 
 def test_pull_requests_plan_production_foundation_without_applying() -> None:
@@ -327,14 +350,29 @@ def test_pull_requests_plan_production_foundation_without_applying() -> None:
     assert isinstance(jobs, dict)
     rollout = jobs["rollout"]
     assert isinstance(rollout, dict)
+    assert rollout["outputs"] == {
+        "image_tag": "${{ steps.image_tag.outputs.image_tag }}",
+        "sandbox_template": "${{ steps.sandbox_template.outputs.sandbox_template }}",
+    }
     rollout_steps = rollout["steps"]
     assert isinstance(rollout_steps, list)
     image_tag = next(step for step in rollout_steps if step.get("name") == "Image tag")
+    assert image_tag["id"] == "image_tag"
     assert 'echo "IMAGE_TAG=$TAG" >> "$GITHUB_ENV"' in image_tag["run"]
+    assert 'echo "image_tag=$TAG" >> "$GITHUB_OUTPUT"' in image_tag["run"]
+    sandbox_template = next(
+        step for step in rollout_steps if step.get("name") == "Select sandbox template"
+    )
+    assert sandbox_template["id"] == "sandbox_template"
+    assert "E2B_TEMPLATE=$(uv run python sandbox/build_template.py)" in sandbox_template["run"]
+    assert 'echo "sandbox_template=$E2B_TEMPLATE" >> "$GITHUB_OUTPUT"' in sandbox_template["run"]
 
     production = jobs["production"]
     assert isinstance(production, dict)
-    assert production["env"] == {"TF_DIR": "infra/envs/prod"}
+    assert production["env"] == {
+        "E2B_TEMPLATE": "ufo-sbx",
+        "TF_DIR": "infra/envs/prod",
+    }
     steps = production["steps"]
     assert isinstance(steps, list)
     names = [step.get("name") for step in steps if isinstance(step, dict)]
@@ -345,9 +383,33 @@ def test_pull_requests_plan_production_foundation_without_applying() -> None:
     assert plan["working-directory"] == "${{ env.TF_DIR }}"
     assert plan["env"] == {"TF_VAR_cloudflare_api_token": "${{ secrets.CLOUDFLARE_API_TOKEN }}"}
     assert (
-        plan["run"] == "terraform plan -input=false -no-color -lock=false "
-        '-out="$RUNNER_TEMP/production.tfplan" -target=module.platform.module.eks'
+        plan["run"] == "terraform plan -input=false -no-color -lock=false \\\n"
+        '  -out="$RUNNER_TEMP/production.tfplan" \\\n'
+        "  -target=module.platform.module.eks \\\n"
+        "  -target=module.platform.aws_secretsmanager_secret.api_keys \\\n"
+        "  -target=module.platform.aws_secretsmanager_secret.gateway_slack_connect \\\n"
+        '  -var "e2b_template=$E2B_TEMPLATE"\n'
     )
+
+
+def test_hosted_runtime_receives_the_selected_sandbox_template() -> None:
+    template = (ROOT / "infra" / "templates" / "hosted.yaml.tpl").read_text()
+    documents = template.split("\n---\n")
+    for name in ("ufo-ingress", "ufo-serve"):
+        deployment = next(
+            document
+            for document in documents
+            if re.search(rf"^kind: Deployment\nmetadata:\n  name: {name}$", document, re.MULTILINE)
+        )
+        assert '- {name: E2B_TEMPLATE, value: "${e2b_template}"}' in deployment
+    for environment in DEPLOY_ENVIRONMENTS:
+        root = ROOT / "infra" / "envs" / environment
+        assert (
+            "e2b_template                     = var.e2b_template" in (root / "ufo.tf").read_text()
+        )
+        variables = (root / "variables.tf").read_text()
+        assert 'variable "e2b_template"' in variables
+        assert 'condition     = var.e2b_template != ""' in variables
 
 
 @pytest.mark.parametrize(
@@ -356,6 +418,13 @@ def test_pull_requests_plan_production_foundation_without_applying() -> None:
         ("rollout", "testing", "Terraform plan", "${{ env.TF_DIR }}"),
         ("edge", "edge", "Terraform plan", "infra/envs/edge"),
         ("production", "production", "Terraform foundation plan", "${{ env.TF_DIR }}"),
+        (
+            "production_access",
+            "production-access",
+            "Terraform plan",
+            "infra/production-access",
+        ),
+        ("production_deploy", "production", "Terraform plan", "${{ env.TF_DIR }}"),
     ],
 )
 def test_saved_plans_reject_destructive_changes(
@@ -386,7 +455,7 @@ def test_saved_plans_reject_destructive_changes(
     assert steps.index(plan) < steps.index(guard)
 
 
-@pytest.mark.parametrize("job_name", ["rollout", "edge"])
+@pytest.mark.parametrize("job_name", ["rollout", "edge", "production_access"])
 def test_mutating_plans_lock_state_and_preserve_inputs(job_name: str) -> None:
     script = _step(job_name, "Terraform plan")["run"]
     assert isinstance(script, str)
@@ -395,21 +464,36 @@ def test_mutating_plans_lock_state_and_preserve_inputs(job_name: str) -> None:
     assert '-input=false -no-color -lock="$LOCK"' in script
 
 
-def test_rollout_plan_pins_the_selected_image_tag() -> None:
+def test_rollout_plan_pins_the_selected_artifacts() -> None:
     script = _step("rollout", "Terraform plan")["run"]
     assert '-var "image_tag=$IMAGE_TAG"' in script
+    assert '-var "e2b_template=$E2B_TEMPLATE"' in script
 
 
 @pytest.mark.parametrize(
-    ("job_name", "plan_name"),
-    [("rollout", "testing"), ("edge", "edge")],
+    ("job_name", "plan_name", "step_name", "apply_condition"),
+    [
+        ("rollout", "testing", "Terraform plan", "github.event_name != 'pull_request'"),
+        ("edge", "edge", "Terraform plan", "github.event_name != 'pull_request'"),
+        (
+            "production_access",
+            "production-access",
+            "Terraform plan",
+            "github.event_name != 'pull_request'",
+        ),
+    ],
 )
-def test_apply_uses_the_guarded_plan(job_name: str, plan_name: str) -> None:
-    plan = _step(job_name, "Terraform plan")
+def test_apply_uses_the_guarded_plan(
+    job_name: str,
+    plan_name: str,
+    step_name: str,
+    apply_condition: str,
+) -> None:
+    plan = _step(job_name, step_name)
     guard = _step(job_name, "Reject destructive changes")
     apply = _step(job_name, "Terraform apply")
     assert plan.get("if") is None
-    assert apply["if"] == "github.event_name != 'pull_request'"
+    assert apply.get("if") == apply_condition
     assert apply["run"] == f'terraform apply -input=false "$RUNNER_TEMP/{plan_name}.tfplan"'
     steps = _workflow(WORKFLOWS / "deploy.yml")["jobs"][job_name]["steps"]
     assert steps.index(guard) < steps.index(apply)
@@ -512,14 +596,198 @@ def test_only_testing_owns_account_global_resources() -> None:
     )
 
 
-def test_proxy_gate_dials_the_rolled_proxy_with_the_shared_ca() -> None:
+def test_production_deploy_role_trusts_only_the_main_production_workflow() -> None:
+    source = _code((ROOT / "infra" / "production-access" / "main.tf").read_text())
+    trust = _terraform_block(source, "data", "github_trust")
+    workflow_name = _workflow(WORKFLOWS / "deploy.yml")["name"]
+    assert isinstance(workflow_name, str)
+    assert [
+        path
+        for path in (*WORKFLOWS.glob("*.yml"), *WORKFLOWS.glob("*.yaml"))
+        if _workflow(path).get("name") == workflow_name
+    ] == [WORKFLOWS / "deploy.yml"]
+    assert len(re.findall(r"^  statement \{", trust, re.MULTILINE)) == 1
+    assert re.search(
+        r'principals \{\n\s+type\s+=\s+"Federated"\n'
+        r'\s+identifiers\s+=\s+\["arn:aws:iam::\$\{data\.aws_caller_identity\.current'
+        r'\.account_id}:oidc-provider/token\.actions\.githubusercontent\.com"\]\n\s+}',
+        trust,
+    )
+    conditions = {
+        "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+        "token.actions.githubusercontent.com:sub": (
+            "repo:${var.github_repo}:environment:production"
+        ),
+        "token.actions.githubusercontent.com:ref": "refs/heads/main",
+        "token.actions.githubusercontent.com:environment": "production",
+        "token.actions.githubusercontent.com:workflow": workflow_name,
+    }
+    assert len(re.findall(r"^    condition \{", trust, re.MULTILINE)) == len(conditions)
+    for variable, value in conditions.items():
+        assert re.search(
+            r'condition \{\n\s+test\s+=\s+"StringEquals"\n'
+            rf'\s+variable\s+=\s+"{re.escape(variable)}"\n'
+            rf'\s+values\s+=\s+\["{re.escape(value)}"\]\n\s+}}',
+            trust,
+        )
+    assert "pull_request" not in trust
+    assert 'type = "AWS"' not in re.sub(r"\s+", " ", trust)
+
+    role = _terraform_block(source, "resource", "github_production_deploy")
+    assert re.search(r'^  name\s+=\s+"github-production-deploy"$', role, re.MULTILINE)
+    assert re.search(
+        r"^  assume_role_policy\s+=\s+data\.aws_iam_policy_document\.github_trust\.json$",
+        role,
+        re.MULTILINE,
+    )
+    attachment = _terraform_block(source, "resource", "administrator")
+    assert re.search(
+        r"^  role\s+=\s+aws_iam_role\.github_production_deploy\.name$",
+        attachment,
+        re.MULTILINE,
+    )
+    assert re.search(
+        r'^  policy_arn\s+=\s+"arn:aws:iam::aws:policy/AdministratorAccess"$',
+        attachment,
+        re.MULTILINE,
+    )
+    prod = _code((ROOT / "infra" / "envs" / "prod" / "main.tf").read_text())
+    assert (
+        "arn:aws:iam::${data.aws_caller_identity.current.account_id}:"
+        "role/github-production-deploy" in prod
+    )
+    assert "role/github-deploy" not in prod
+
+
+def test_production_deploy_consumes_the_protected_role_and_artifacts() -> None:
     jobs = _workflow(WORKFLOWS / "deploy.yml")["jobs"]
     assert isinstance(jobs, dict)
-    rollout = jobs["rollout"]
-    assert isinstance(rollout, dict)
-    steps = rollout["steps"]
+    job = jobs["production_deploy"]
+    assert isinstance(job, dict)
+    assert job["environment"] == "production"
+    assert job["env"] == {
+        "DEPLOY_ROLE_ARN": "arn:aws:iam::899147036157:role/github-production-deploy",
+        "E2B_TEMPLATE": "${{ needs.rollout.outputs.sandbox_template }}",
+        "IMAGE_TAG": "${{ needs.rollout.outputs.image_tag }}",
+        "TF_DIR": "infra/envs/prod",
+    }
+    steps = job["steps"]
+    assert isinstance(steps, list)
+    credentials = next(
+        step for step in steps if step.get("uses") == "aws-actions/configure-aws-credentials@v4"
+    )
+    assert credentials["with"]["role-to-assume"] == "${{ env.DEPLOY_ROLE_ARN }}"
+
+
+def test_production_deploy_applies_guarded_foundation_then_runtime() -> None:
+    jobs = _workflow(WORKFLOWS / "deploy.yml")["jobs"]
+    assert isinstance(jobs, dict)
+    job = jobs["production_deploy"]
+    assert isinstance(job, dict)
+    steps = job["steps"]
+    assert isinstance(steps, list)
+
+    foundation_plan = _step("production_deploy", "Terraform foundation plan")
+    foundation_guard = _step("production_deploy", "Reject destructive foundation changes")
+    foundation_apply = _step("production_deploy", "Terraform foundation apply")
+    secrets = _step("production_deploy", "Write production runtime secrets")
+    runtime_plan = _step("production_deploy", "Terraform plan")
+    runtime_guard = _step("production_deploy", "Reject destructive changes")
+    runtime_apply = _step("production_deploy", "Terraform apply")
+    assert foundation_plan["run"] == (
+        "terraform plan -input=false -no-color \\\n"
+        '  -out="$RUNNER_TEMP/production-foundation.tfplan" \\\n'
+        "  -target=module.platform.module.eks \\\n"
+        "  -target=module.platform.aws_secretsmanager_secret.postgres \\\n"
+        "  -target=module.platform.aws_secretsmanager_secret.platform \\\n"
+        "  -target=module.platform.aws_secretsmanager_secret.api_keys \\\n"
+        "  -target=module.platform.aws_secretsmanager_secret.gateway_slack_connect \\\n"
+        '  -var "image_tag=$IMAGE_TAG" -var "e2b_template=$E2B_TEMPLATE"\n'
+    )
+    assert foundation_guard["run"] == (
+        'terraform show -json "$RUNNER_TEMP/production-foundation.tfplan" | '
+        'python "$GITHUB_WORKSPACE/.github/scripts/terraform_plan_guard.py"'
+    )
+    assert foundation_apply["run"] == (
+        'terraform apply -input=false "$RUNNER_TEMP/production-foundation.tfplan"'
+    )
+    assert secrets == {
+        "name": "Write production runtime secrets",
+        "env": {
+            "DD_API_KEY": "${{ secrets.DD_API_KEY }}",
+            "E2B_API_KEY": "${{ secrets.E2B_API_KEY }}",
+            "OPENAI_API_KEY": "${{ secrets.OPENAI_API_KEY }}",
+            "PRODUCTION_DEPLOYMENT_ID": "${{ github.run_id }}",
+        },
+        "run": (
+            'PRODUCTION_API_KEYS_SECRET_ID="$(terraform -chdir="$TF_DIR" '
+            'output -raw api_keys_secret_id)" \\\n'
+            'PRODUCTION_GATEWAY_SECRET_ID="$(terraform -chdir="$TF_DIR" '
+            'output -raw gateway_secret_id)" \\\n'
+            "  python infra/production_secrets.py\n"
+        ),
+    }
+    assert runtime_plan["run"] == (
+        'terraform plan -input=false -no-color -out="$RUNNER_TEMP/production.tfplan" '
+        '-var "image_tag=$IMAGE_TAG" -var "e2b_template=$E2B_TEMPLATE"'
+    )
+    assert runtime_guard["run"] == (
+        'terraform show -json "$RUNNER_TEMP/production.tfplan" | '
+        'python "$GITHUB_WORKSPACE/.github/scripts/terraform_plan_guard.py"'
+    )
+    assert runtime_apply["run"] == 'terraform apply -input=false "$RUNNER_TEMP/production.tfplan"'
+    assert all(
+        step.get("if") is None
+        for step in (
+            foundation_plan,
+            foundation_guard,
+            foundation_apply,
+            runtime_plan,
+            runtime_guard,
+            secrets,
+            runtime_apply,
+        )
+    )
+    assert [
+        steps.index(step)
+        for step in (
+            foundation_plan,
+            foundation_guard,
+            foundation_apply,
+            runtime_plan,
+            runtime_guard,
+            secrets,
+            runtime_apply,
+        )
+    ] == sorted(
+        steps.index(step)
+        for step in (
+            foundation_plan,
+            foundation_guard,
+            foundation_apply,
+            runtime_plan,
+            runtime_guard,
+            secrets,
+            runtime_apply,
+        )
+    )
+
+
+@pytest.mark.parametrize("job_name", ["rollout", "production_deploy"])
+def test_proxy_gate_dials_the_rolled_proxy_with_the_shared_ca(job_name: str) -> None:
+    jobs = _workflow(WORKFLOWS / "deploy.yml")["jobs"]
+    assert isinstance(jobs, dict)
+    job = jobs[job_name]
+    assert isinstance(job, dict)
+    steps = job["steps"]
     assert isinstance(steps, list)
     gate = next(step for step in steps if step.get("name") == "Gate sandbox egress proxy TLS")
+    if job_name == "rollout":
+        selector = next(step for step in steps if step.get("name") == "Select sandbox template")
+        assert 'echo "E2B_TEMPLATE=$E2B_TEMPLATE" >> "$GITHUB_ENV"' in selector["run"]
+        assert steps.index(selector) < steps.index(gate)
+    else:
+        assert job["env"]["E2B_TEMPLATE"] == "${{ needs.rollout.outputs.sandbox_template }}"
     script = gate["run"]
     assert isinstance(script, str)
     assert "output -raw sandbox_proxy_ca_cert" in script
@@ -567,10 +835,11 @@ def test_sandbox_proxy_nlb_routes_across_all_enabled_zones() -> None:
         assert cross_zone, environment
 
 
-def test_runtime_rollout_drains_before_the_proxy_gate() -> None:
-    rollout = _workflow(WORKFLOWS / "deploy.yml")["jobs"]["rollout"]
-    assert isinstance(rollout, dict)
-    steps = rollout["steps"]
+@pytest.mark.parametrize("job_name", ["rollout", "production_deploy"])
+def test_runtime_rollout_drains_before_the_proxy_gate(job_name: str) -> None:
+    job = _workflow(WORKFLOWS / "deploy.yml")["jobs"][job_name]
+    assert isinstance(job, dict)
+    steps = job["steps"]
     assert isinstance(steps, list)
     names = [step.get("name") for step in steps if isinstance(step, dict)]
     wait = names.index("Wait for runtime rollout")
@@ -582,6 +851,7 @@ def test_runtime_rollout_drains_before_the_proxy_gate() -> None:
     assert "output -raw cluster_name" in script
     assert 'NAMESPACE="$(terraform -chdir="$TF_DIR" output -raw system_namespace)"' in script
     assert '--namespace "$NAMESPACE" rollout status deployment/ufo-sandbox-proxy' in script
+    assert '--namespace "$NAMESPACE" rollout status deployment/ufo-ingress' in script
     assert '--namespace "$NAMESPACE" rollout status deployment/ufo-serve' in script
 
 
@@ -590,7 +860,14 @@ def test_deployment_gate_joins_every_selected_result() -> None:
     assert isinstance(jobs, dict)
     deploy = jobs["deploy"]
     assert isinstance(deploy, dict)
-    assert deploy["needs"] == ["changes", "rollout", "edge", "production"]
+    assert deploy["needs"] == [
+        "changes",
+        "rollout",
+        "edge",
+        "production",
+        "production_access",
+        "production_deploy",
+    ]
     assert deploy["if"] == "always()"
     steps = deploy["steps"]
     assert isinstance(steps, list)
@@ -604,6 +881,8 @@ def test_deployment_gate_joins_every_selected_result() -> None:
         "ROLLOUT_RESULT": "${{ needs.rollout.result }}",
         "EDGE_RESULT": "${{ needs.edge.result }}",
         "PRODUCTION_RESULT": "${{ needs.production.result }}",
+        "PRODUCTION_ACCESS_RESULT": "${{ needs.production_access.result }}",
+        "PRODUCTION_DEPLOY_RESULT": "${{ needs.production_deploy.result }}",
     }
     script = gate["run"]
     assert isinstance(script, str)
@@ -613,16 +892,31 @@ def test_deployment_gate_joins_every_selected_result() -> None:
 
 
 @pytest.mark.parametrize(
-    ("selected", "event", "rollout", "edge", "production", "accepted"),
+    (
+        "selected",
+        "event",
+        "rollout",
+        "edge",
+        "production",
+        "access",
+        "production_deploy",
+        "accepted",
+    ),
     [
-        ("true", "pull_request", "success", "success", "success", True),
-        ("true", "push", "success", "success", "skipped", True),
-        ("false", "push", "skipped", "skipped", "skipped", True),
-        ("true", "pull_request", "success", "success", "skipped", False),
-        ("true", "push", "success", "success", "success", False),
-        ("true", "push", "failure", "success", "skipped", False),
-        ("false", "push", "skipped", "skipped", "success", False),
-        ("invalid", "push", "success", "success", "skipped", False),
+        ("true", "pull_request", "success", "success", "success", "success", "skipped", True),
+        ("true", "push", "success", "success", "skipped", "success", "success", True),
+        ("false", "push", "skipped", "skipped", "skipped", "skipped", "skipped", True),
+        ("true", "pull_request", "success", "success", "skipped", "success", "skipped", False),
+        ("true", "pull_request", "success", "success", "success", "failure", "skipped", False),
+        ("true", "pull_request", "success", "success", "success", "success", "success", False),
+        ("true", "push", "success", "success", "success", "success", "success", False),
+        ("true", "push", "failure", "success", "skipped", "success", "success", False),
+        ("true", "push", "success", "success", "skipped", "failure", "success", False),
+        ("true", "push", "success", "success", "skipped", "success", "failure", False),
+        ("false", "push", "skipped", "skipped", "success", "skipped", "skipped", False),
+        ("false", "push", "skipped", "skipped", "skipped", "success", "skipped", False),
+        ("false", "push", "skipped", "skipped", "skipped", "skipped", "success", False),
+        ("invalid", "push", "success", "success", "skipped", "success", "success", False),
     ],
 )
 def test_deployment_gate_accepts_only_expected_results(
@@ -631,6 +925,8 @@ def test_deployment_gate_accepts_only_expected_results(
     rollout: str,
     edge: str,
     production: str,
+    access: str,
+    production_deploy: str,
     accepted: bool,
 ) -> None:
     gate = _step("deploy", "Require the selected deployment work")
@@ -642,6 +938,8 @@ def test_deployment_gate_accepts_only_expected_results(
         "EDGE_RESULT": edge,
         "EVENT_NAME": event,
         "PRODUCTION_RESULT": production,
+        "PRODUCTION_ACCESS_RESULT": access,
+        "PRODUCTION_DEPLOY_RESULT": production_deploy,
         "ROLLOUT_RESULT": rollout,
     }
     run = subprocess.run(["bash", "-e", "-c", script], env=os.environ | environment)

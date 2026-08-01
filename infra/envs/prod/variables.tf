@@ -9,6 +9,15 @@ variable "image_tag" {
   description = "Tag for the ufo-control gateway image. deploy.yml passes the git short SHA."
 }
 
+variable "e2b_template" {
+  type = string
+
+  validation {
+    condition     = var.e2b_template != ""
+    error_message = "e2b_template must not be empty."
+  }
+}
+
 variable "letsencrypt_email" {
   type        = string
   default     = "ops@flyingobject.ai"
@@ -36,7 +45,7 @@ variable "cloudflare_api_token" {
 variable "slack_connect_enabled" {
   type        = bool
   default     = false
-  description = "Send each newly invited customer a Slack Connect invitation from the operator Slack workspace. Requires the out-of-band bot token and slack_connect_team_id."
+  description = "Send each newly invited customer a Slack Connect invitation from the operator Slack workspace. Requires the bot token and slack_connect_team_id."
 }
 
 variable "slack_connect_team_id" {

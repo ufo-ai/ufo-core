@@ -38,7 +38,7 @@ from ufo_ext_e2b import (
     E2B_API_KEY_ENV,
     E2B_LIFECYCLE,
     E2B_NETWORK,
-    E2B_TEMPLATE_NAME,
+    E2B_TEMPLATE_ENV,
     ENSURE_WORKSPACE_COMMAND,
     EXEC_LEASE_MARGIN_SECONDS,
     EXEC_TIMEOUT_CODE,
@@ -905,6 +905,7 @@ async def test_a_stored_sandbox_the_provider_no_longer_has_opens_a_fresh_one(
 
 def _clear_e2b_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(E2B_API_KEY_ENV, raising=False)
+    monkeypatch.delenv(E2B_TEMPLATE_ENV, raising=False)
 
 
 def test_build_e2b_carrier_requires_an_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -913,14 +914,22 @@ def test_build_e2b_carrier_requires_an_api_key(monkeypatch: pytest.MonkeyPatch) 
         build_e2b_carrier()
 
 
+def test_build_e2b_carrier_requires_a_template(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_e2b_env(monkeypatch)
+    monkeypatch.setenv(E2B_API_KEY_ENV, "sk-env")
+    with pytest.raises(RuntimeError, match=E2B_TEMPLATE_ENV):
+        build_e2b_carrier()
+
+
 def test_build_e2b_carrier_reads_the_template_and_key_from_the_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _clear_e2b_env(monkeypatch)
     monkeypatch.setenv(E2B_API_KEY_ENV, "sk-env")
+    monkeypatch.setenv(E2B_TEMPLATE_ENV, "ufo-sbx:build-1")
     carrier = build_e2b_carrier()
     assert carrier.api_key == "sk-env"
-    assert carrier.template == E2B_TEMPLATE_NAME
+    assert carrier.template == "ufo-sbx:build-1"
 
 
 def test_config_backend_e2b_resolves_the_extension_contributed_carrier(
@@ -931,6 +940,7 @@ def test_config_backend_e2b_resolves_the_extension_contributed_carrier(
     backend to an extension's without core naming e2b."""
     _clear_e2b_env(monkeypatch)
     monkeypatch.setenv(E2B_API_KEY_ENV, "sk-env")
+    monkeypatch.setenv(E2B_TEMPLATE_ENV, "ufo-sbx:build-1")
     config = Config(
         database=DatabaseConfig(url="sqlite+aiosqlite:///carrier.db"),
         blob=BlobConfig(backend="filesystem", root=Path("blobs")),
@@ -939,7 +949,7 @@ def test_config_backend_e2b_resolves_the_extension_contributed_carrier(
     carrier, off_cluster = select_carrier(config, (e2b_ext.manifest(),))
     assert isinstance(carrier, E2BCarrier)
     assert off_cluster
-    assert carrier.template == E2B_TEMPLATE_NAME
+    assert carrier.template == "ufo-sbx:build-1"
 
 
 def test_e2b_backend_without_proxy_public_url_fails_closed(

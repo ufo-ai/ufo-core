@@ -132,10 +132,10 @@ resource "kubernetes_secret_v1" "ufo_serve" {
     namespace = local.system_namespace
   }
   data = {
-    "ufo.toml"                  = local.serve_config
-    UFO_CONTROL_SERVE_DSN       = module.platform.serve_dsn
-    UFO_CREDENTIAL_KEY          = module.platform.serve_credential_key
-    UFO_ARTIFACT_TOKEN_SECRET   = module.platform.serve_artifact_token
+    "ufo.toml"                = local.serve_config
+    UFO_CONTROL_SERVE_DSN     = module.platform.serve_dsn
+    UFO_CREDENTIAL_KEY        = module.platform.serve_credential_key
+    UFO_ARTIFACT_TOKEN_SECRET = module.platform.serve_artifact_token
   }
   depends_on = [kubernetes_namespace_v1.ufo_system]
 }
@@ -194,6 +194,7 @@ data "kubectl_file_documents" "hosted" {
     cluster_issuer                   = "letsencrypt"
     ingress_class                    = "nginx"
     bundle_image                     = local.bundle_image
+    e2b_template                     = var.e2b_template
     serve_role_arn                   = module.platform.app_s3_role_arn
     prestop_seconds                  = local.prestop_seconds
     termination_grace_period_seconds = local.prestop_seconds + local.request_shutdown_seconds + local.graceful_shutdown_seconds + 60

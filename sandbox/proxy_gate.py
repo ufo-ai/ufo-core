@@ -14,7 +14,7 @@ from e2b import Sandbox
 from ufo_ext_e2b import (
     CA_INSTALL_TIMEOUT_SECONDS,
     CA_STAGING_PATH,
-    E2B_TEMPLATE_NAME,
+    E2B_TEMPLATE_ENV,
     INSTALL_CA_COMMAND,
 )
 
@@ -41,6 +41,7 @@ SANDBOX_TIMEOUT_SECONDS = (
 class ProxyTlsGate:
     public_url: str
     ca_cert: str
+    template: str
 
     def run(self) -> None:
         parsed = urlsplit(self.public_url)
@@ -66,7 +67,7 @@ class ProxyTlsGate:
             )
         )
         probe = f"{curl}; printf '\\n%s' $?"
-        sandbox = Sandbox.create(template=E2B_TEMPLATE_NAME, timeout=SANDBOX_TIMEOUT_SECONDS)
+        sandbox = Sandbox.create(template=self.template, timeout=SANDBOX_TIMEOUT_SECONDS)
         try:
             sandbox.files.write(CA_STAGING_PATH, self.ca_cert, user="root")
             sandbox.commands.run(
@@ -116,7 +117,10 @@ def main() -> None:
     ca_cert = os.environ.get(EGRESS_CA_CERT_ENV)
     if not ca_cert:
         raise RuntimeError(f"{EGRESS_CA_CERT_ENV} is required")
-    ProxyTlsGate(public_url=args.proxy_url, ca_cert=ca_cert).run()
+    template = os.environ.get(E2B_TEMPLATE_ENV)
+    if not template:
+        raise RuntimeError(f"{E2B_TEMPLATE_ENV} is required")
+    ProxyTlsGate(public_url=args.proxy_url, ca_cert=ca_cert, template=template).run()
 
 
 if __name__ == "__main__":

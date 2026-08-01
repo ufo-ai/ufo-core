@@ -1,3 +1,4 @@
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
@@ -72,16 +73,23 @@ def test_gate_installs_system_trust_then_waits_for_proxy_and_probes_tls(
 ) -> None:
     sandbox = _Sandbox()
     clock = _Clock()
+    created = []
     monkeypatch.setattr(
         proxy_gate,
         "Sandbox",
-        SimpleNamespace(create=lambda **kwargs: sandbox),
+        SimpleNamespace(create=lambda **kwargs: created.append(kwargs) or sandbox),
     )
     monkeypatch.setattr(proxy_gate, "monotonic", clock.monotonic)
     monkeypatch.setattr(proxy_gate, "sleep", clock.sleep)
 
-    proxy_gate.ProxyTlsGate("https://sandbox-proxy.test", "ca-pem").run()
+    proxy_gate.ProxyTlsGate("https://sandbox-proxy.test", "ca-pem", "ufo-sbx:build-1").run()
 
+    assert created == [
+        {
+            "template": "ufo-sbx:build-1",
+            "timeout": proxy_gate.SANDBOX_TIMEOUT_SECONDS,
+        }
+    ]
     assert sandbox.files.writes == [(CA_STAGING_PATH, "ca-pem", "root")]
     assert sandbox.commands.calls[0] == (
         INSTALL_CA_COMMAND,
@@ -120,7 +128,7 @@ def test_gate_bounds_pending_transport(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(proxy_gate, "sleep", clock.sleep)
 
     with pytest.raises(RuntimeError, match="curl exit 28"):
-        proxy_gate.ProxyTlsGate("https://sandbox-proxy.test", "ca-pem").run()
+        proxy_gate.ProxyTlsGate("https://sandbox-proxy.test", "ca-pem", "ufo-sbx:build-1").run()
 
     assert len(sandbox.commands.calls[1:]) == pending_probes
     assert clock.sleeps == [proxy_gate.PROBE_DELAY_SECONDS] * (pending_probes - 1)
@@ -156,7 +164,7 @@ def test_gate_fails_fast_on_non_pending_results(
     monkeypatch.setattr(proxy_gate, "sleep", lambda _: pytest.fail("gate retried"))
 
     with pytest.raises(RuntimeError, match=error):
-        proxy_gate.ProxyTlsGate("https://sandbox-proxy.test", "ca-pem").run()
+        proxy_gate.ProxyTlsGate("https://sandbox-proxy.test", "ca-pem", "ufo-sbx:build-1").run()
 
     assert len(sandbox.commands.calls[1:]) == 1
     assert sandbox.killed
@@ -172,7 +180,23 @@ def test_gate_rejects_a_plaintext_proxy_before_booting_a_sandbox(
     )
 
     with pytest.raises(RuntimeError, match="HTTPS"):
-        proxy_gate.ProxyTlsGate("http://sandbox-proxy.test:8888", "ca-pem").run()
+        proxy_gate.ProxyTlsGate("http://sandbox-proxy.test:8888", "ca-pem", "ufo-sbx:build-1").run()
+
+
+def test_main_passes_the_required_environment_to_the_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected = proxy_gate.ProxyTlsGate("https://sandbox-proxy.test", "ca-pem", "ufo-sbx:build-1")
+
+    def run(gate: proxy_gate.ProxyTlsGate) -> None:
+        assert gate == expected
+
+    monkeypatch.setenv(proxy_gate.EGRESS_CA_CERT_ENV, expected.ca_cert)
+    monkeypatch.setenv(proxy_gate.E2B_TEMPLATE_ENV, expected.template)
+    monkeypatch.setattr(proxy_gate.ProxyTlsGate, "run", run)
+    monkeypatch.setattr(sys, "argv", ["proxy-gate", "--proxy-url", expected.public_url])
+
+    proxy_gate.main()
 
 
 def test_deploy_runs_the_live_proxy_gate_after_apply() -> None:

@@ -81,9 +81,12 @@ output "secret_names" {
   }
 }
 
-output "api_keys_secret_arn" {
-  description = "Set real API-key values here, out-of-band (TF seeds it empty)."
-  value       = aws_secretsmanager_secret.api_keys.arn
+output "api_keys_secret_id" {
+  value = aws_secretsmanager_secret.api_keys.id
+}
+
+output "gateway_secret_id" {
+  value = aws_secretsmanager_secret.gateway_slack_connect.id
 }
 
 output "hostname" {

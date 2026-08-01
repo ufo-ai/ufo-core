@@ -44,8 +44,6 @@ data "aws_iam_policy_document" "github_trust" {
     }
   }
 
-  # Also assumable by account principals so humans can get cluster access for local ops (this role is
-  # the sole EKS cluster admin once creator-perms are off): `aws sts assume-role` then kubectl/terraform.
   statement {
     effect  = "Allow"
     actions = ["sts:AssumeRole"]

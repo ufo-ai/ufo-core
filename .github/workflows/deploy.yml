@@ -2,8 +2,8 @@ name: Deploy (testing)
 
 # Merge to main → build the images at the commit short SHA, push to ECR (immutable, skip-if-present
 # so re-runs are idempotent), publish the E2B sandbox template, then terraform apply pins that tag —
-# the hosted-service rollout. workflow_dispatch redeploys a chosen tag. AWS auth is GitHub OIDC →
-# the github-deploy role (no static keys). The edge job
+# the hosted-service rollout. workflow_dispatch redeploys a chosen tag. AWS auth is GitHub OIDC
+# (no static keys). The edge job
 # applies envs/edge — the zone-level Cloudflare worker fronting both apexes — from its own state,
 # in parallel with the platform rollout.
 on:
@@ -50,7 +50,7 @@ jobs:
         id: select
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before || 'origin/main' }}
-          DEPLOY_PATHS_PATTERN: ^(\.github/(workflows/deploy\.yml|scripts/terraform_plan_guard\.py)$|infra/(envs/(testing|prod|edge)|modules/(platform|edge)|templates)/)
+          DEPLOY_PATHS_PATTERN: ^(\.github/(workflows/deploy\.yml|scripts/terraform_plan_guard\.py)$|infra/production_secrets\.py$|infra/(production-access|envs/(testing|prod|edge)|modules/(platform|edge)|templates)/)
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           git diff --name-only --no-renames "$BASE_SHA...$HEAD_SHA" > "$RUNNER_TEMP/deploy-paths"
@@ -65,6 +65,9 @@ jobs:
     needs: changes
     if: needs.changes.outputs.deploy == 'true'
     runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.image_tag.outputs.image_tag }}
+      sandbox_template: ${{ steps.sandbox_template.outputs.sandbox_template }}
     steps:
       - uses: actions/checkout@v4
 
@@ -78,6 +81,7 @@ jobs:
       # Deploys tag the commit short SHA; a PR plans against the newest pushed bundle image so the
       # aws_ecr_image digest lookup resolves.
       - name: Image tag
+        id: image_tag
         run: |
           TAG="${{ inputs.image_tag }}"
           if [ -z "$TAG" ] && [ "${{ github.event_name }}" = "pull_request" ]; then
@@ -88,6 +92,7 @@ jobs:
             TAG="${GITHUB_SHA::8}"
           fi
           echo "IMAGE_TAG=$TAG" >> "$GITHUB_ENV"
+          echo "image_tag=$TAG" >> "$GITHUB_OUTPUT"
 
       - uses: astral-sh/setup-uv@v5
         if: github.event_name != 'pull_request'
@@ -117,13 +122,19 @@ jobs:
             docker push "$ECR_REGISTRY/ufo:$IMAGE_TAG"
           fi
 
-      # The hosted carrier is E2B: the sandbox artifact is the `ufo-sbx` template, published and
-      # boot-verified from the same layer definition the docker carrier renders. No ECR image.
-      - name: Publish E2B sandbox template
-        if: github.event_name != 'pull_request'
+      - name: Select sandbox template
+        id: sandbox_template
         env:
           E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
-        run: uv run python sandbox/build_template.py
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            E2B_TEMPLATE=ufo-sbx
+          else
+            E2B_TEMPLATE=$(uv run python sandbox/build_template.py)
+          fi
+          test -n "$E2B_TEMPLATE"
+          echo "E2B_TEMPLATE=$E2B_TEMPLATE" >> "$GITHUB_ENV"
+          echo "sandbox_template=$E2B_TEMPLATE" >> "$GITHUB_OUTPUT"
 
       - name: Build + push gateway image
         if: github.event_name != 'pull_request'
@@ -156,7 +167,8 @@ jobs:
             LOCK=false
           fi
           terraform plan -input=false -no-color -lock="$LOCK" \
-            -out="$RUNNER_TEMP/testing.tfplan" -var "image_tag=$IMAGE_TAG"
+            -out="$RUNNER_TEMP/testing.tfplan" -var "image_tag=$IMAGE_TAG" \
+            -var "e2b_template=$E2B_TEMPLATE"
 
       - name: Reject destructive changes
         working-directory: ${{ env.TF_DIR }}
@@ -175,6 +187,7 @@ jobs:
             --name "$(terraform -chdir="$TF_DIR" output -raw cluster_name)"
           NAMESPACE="$(terraform -chdir="$TF_DIR" output -raw system_namespace)"
           kubectl --namespace "$NAMESPACE" rollout status deployment/ufo-sandbox-proxy --timeout=15m
+          kubectl --namespace "$NAMESPACE" rollout status deployment/ufo-ingress --timeout=15m
           kubectl --namespace "$NAMESPACE" rollout status deployment/ufo-serve --timeout=15m
 
       - name: Gate sandbox egress proxy TLS
@@ -232,6 +245,7 @@ jobs:
     if: github.event_name == 'pull_request' && needs.changes.outputs.deploy == 'true'
     runs-on: ubuntu-latest
     env:
+      E2B_TEMPLATE: ufo-sbx
       TF_DIR: infra/envs/prod
     steps:
       - uses: actions/checkout@v4
@@ -254,15 +268,156 @@ jobs:
         working-directory: ${{ env.TF_DIR }}
         env:
           TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: terraform plan -input=false -no-color -lock=false -out="$RUNNER_TEMP/production.tfplan" -target=module.platform.module.eks
+        run: |
+          terraform plan -input=false -no-color -lock=false \
+            -out="$RUNNER_TEMP/production.tfplan" \
+            -target=module.platform.module.eks \
+            -target=module.platform.aws_secretsmanager_secret.api_keys \
+            -target=module.platform.aws_secretsmanager_secret.gateway_slack_connect \
+            -var "e2b_template=$E2B_TEMPLATE"
 
       - name: Reject destructive changes
         working-directory: ${{ env.TF_DIR }}
         run: terraform show -json "$RUNNER_TEMP/production.tfplan" | python "$GITHUB_WORKSPACE/.github/scripts/terraform_plan_guard.py"
 
+  production_access:
+    needs: changes
+    if: needs.changes.outputs.deploy == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.14.9"
+          terraform_wrapper: false
+
+      - name: Terraform init
+        working-directory: infra/production-access
+        run: terraform init -input=false
+
+      - name: Terraform plan
+        working-directory: infra/production-access
+        run: |
+          LOCK=true
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            LOCK=false
+          fi
+          terraform plan -input=false -no-color -lock="$LOCK" -out="$RUNNER_TEMP/production-access.tfplan"
+
+      - name: Reject destructive changes
+        working-directory: infra/production-access
+        run: terraform show -json "$RUNNER_TEMP/production-access.tfplan" | python "$GITHUB_WORKSPACE/.github/scripts/terraform_plan_guard.py"
+
+      - name: Terraform apply
+        if: github.event_name != 'pull_request'
+        working-directory: infra/production-access
+        run: terraform apply -input=false "$RUNNER_TEMP/production-access.tfplan"
+
+  production_deploy:
+    needs: [changes, production_access, rollout]
+    if: github.event_name != 'pull_request' && needs.changes.outputs.deploy == 'true'
+    environment: production
+    runs-on: ubuntu-latest
+    env:
+      DEPLOY_ROLE_ARN: arn:aws:iam::899147036157:role/github-production-deploy
+      IMAGE_TAG: ${{ needs.rollout.outputs.image_tag }}
+      E2B_TEMPLATE: ${{ needs.rollout.outputs.sandbox_template }}
+      TF_DIR: infra/envs/prod
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.14.9"
+          terraform_wrapper: false
+
+      - name: Terraform init
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform init -input=false
+
+      - name: Terraform foundation plan
+        working-directory: ${{ env.TF_DIR }}
+        env:
+          TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          terraform plan -input=false -no-color \
+            -out="$RUNNER_TEMP/production-foundation.tfplan" \
+            -target=module.platform.module.eks \
+            -target=module.platform.aws_secretsmanager_secret.postgres \
+            -target=module.platform.aws_secretsmanager_secret.platform \
+            -target=module.platform.aws_secretsmanager_secret.api_keys \
+            -target=module.platform.aws_secretsmanager_secret.gateway_slack_connect \
+            -var "image_tag=$IMAGE_TAG" -var "e2b_template=$E2B_TEMPLATE"
+
+      - name: Reject destructive foundation changes
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform show -json "$RUNNER_TEMP/production-foundation.tfplan" | python "$GITHUB_WORKSPACE/.github/scripts/terraform_plan_guard.py"
+
+      - name: Terraform foundation apply
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform apply -input=false "$RUNNER_TEMP/production-foundation.tfplan"
+
+      - name: Terraform plan
+        working-directory: ${{ env.TF_DIR }}
+        env:
+          TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: terraform plan -input=false -no-color -out="$RUNNER_TEMP/production.tfplan" -var "image_tag=$IMAGE_TAG" -var "e2b_template=$E2B_TEMPLATE"
+
+      - name: Reject destructive changes
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform show -json "$RUNNER_TEMP/production.tfplan" | python "$GITHUB_WORKSPACE/.github/scripts/terraform_plan_guard.py"
+
+      - name: Write production runtime secrets
+        env:
+          DD_API_KEY: ${{ secrets.DD_API_KEY }}
+          E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          PRODUCTION_DEPLOYMENT_ID: ${{ github.run_id }}
+        run: |
+          PRODUCTION_API_KEYS_SECRET_ID="$(terraform -chdir="$TF_DIR" output -raw api_keys_secret_id)" \
+          PRODUCTION_GATEWAY_SECRET_ID="$(terraform -chdir="$TF_DIR" output -raw gateway_secret_id)" \
+            python infra/production_secrets.py
+
+      - name: Terraform apply
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform apply -input=false "$RUNNER_TEMP/production.tfplan"
+
+      - name: Wait for runtime rollout
+        run: |
+          aws eks update-kubeconfig \
+            --region "$AWS_REGION" \
+            --name "$(terraform -chdir="$TF_DIR" output -raw cluster_name)"
+          NAMESPACE="$(terraform -chdir="$TF_DIR" output -raw system_namespace)"
+          kubectl --namespace "$NAMESPACE" rollout status deployment/ufo-sandbox-proxy --timeout=15m
+          kubectl --namespace "$NAMESPACE" rollout status deployment/ufo-ingress --timeout=15m
+          kubectl --namespace "$NAMESPACE" rollout status deployment/ufo-serve --timeout=15m
+
+      - name: Gate sandbox egress proxy TLS
+        env:
+          E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
+        run: |
+          UFO_EGRESS_CA_CERT="$(terraform -chdir="$TF_DIR" output -raw sandbox_proxy_ca_cert)" \
+            uv run python sandbox/proxy_gate.py \
+            --proxy-url "$(terraform -chdir="$TF_DIR" output -raw sandbox_proxy_url)"
+
   deploy:
     name: deployment
-    needs: [changes, rollout, edge, production]
+    needs: [changes, rollout, edge, production, production_access, production_deploy]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -275,22 +430,29 @@ jobs:
           ROLLOUT_RESULT: ${{ needs.rollout.result }}
           EDGE_RESULT: ${{ needs.edge.result }}
           PRODUCTION_RESULT: ${{ needs.production.result }}
+          PRODUCTION_ACCESS_RESULT: ${{ needs.production_access.result }}
+          PRODUCTION_DEPLOY_RESULT: ${{ needs.production_deploy.result }}
         run: |
           test "$CHANGES_RESULT" = "success"
           case "$DEPLOY_SELECTED" in
             true)
               test "$ROLLOUT_RESULT" = "success"
               test "$EDGE_RESULT" = "success"
+              test "$PRODUCTION_ACCESS_RESULT" = "success"
               if [ "$EVENT_NAME" = "pull_request" ]; then
                 test "$PRODUCTION_RESULT" = "success"
+                test "$PRODUCTION_DEPLOY_RESULT" = "skipped"
               else
                 test "$PRODUCTION_RESULT" = "skipped"
+                test "$PRODUCTION_DEPLOY_RESULT" = "success"
               fi
               ;;
             false)
               test "$ROLLOUT_RESULT" = "skipped"
               test "$EDGE_RESULT" = "skipped"
               test "$PRODUCTION_RESULT" = "skipped"
+              test "$PRODUCTION_ACCESS_RESULT" = "skipped"
+              test "$PRODUCTION_DEPLOY_RESULT" = "skipped"
               echo "No deployment-relevant changes."
               ;;
             *)

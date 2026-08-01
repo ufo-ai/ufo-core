@@ -71,7 +71,7 @@ from ufo.sdk.sandbox import (
 
 CARRIER_NAME = "e2b"
 E2B_API_KEY_ENV = "E2B_API_KEY"
-E2B_TEMPLATE_NAME = "ufo-sbx"
+E2B_TEMPLATE_ENV = "E2B_TEMPLATE"
 NODE_GLOBAL_MODULES = "/usr/local/lib/node_modules"
 PLAYWRIGHT_BROWSERS_DIR = "/usr/local/lib/playwright"
 TRAFFIC_ACCESS_HEADER = "e2b-traffic-access-token"
@@ -499,15 +499,13 @@ class E2BCarrier:
 
 
 def build_e2b_carrier() -> E2BCarrier:
-    """Build the carrier the `[sandbox] backend = "e2b"` deploy selects: the template and API key
-    are `E2B_TEMPLATE_NAME` and `E2B_API_KEY`. `sandbox/build_template.py` publishes that same
-    constant from the shared image definition, so the E2B image and Docker image never drift. A
-    missing key fails loud at boot rather than on the first turn. `serve` calls this once, only
-    when the deploy selects `e2b`."""
     key = os.environ.get(E2B_API_KEY_ENV)
     if not key:
         raise RuntimeError(f"e2b carrier selected but {E2B_API_KEY_ENV} is not set")
-    return E2BCarrier(api_key=key, template=E2B_TEMPLATE_NAME)
+    template = os.environ.get(E2B_TEMPLATE_ENV)
+    if not template:
+        raise RuntimeError(f"e2b carrier selected but {E2B_TEMPLATE_ENV} is not set")
+    return E2BCarrier(api_key=key, template=template)
 
 
 def manifest() -> Manifest:

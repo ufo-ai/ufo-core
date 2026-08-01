@@ -18,6 +18,7 @@ RUNTIME_PATHS = frozenset(
         "hosted.toml",
         "infra/envs/prod/ufo.tf",
         "infra/envs/testing/ufo.tf",
+        "infra/production_secrets.py",
         "infra/templates/hosted.yaml.tpl",
         "pyproject.toml",
         "uv.lock",

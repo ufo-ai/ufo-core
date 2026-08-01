@@ -6,6 +6,11 @@ expected sets and the rendered Dockerfile is asserted to carry the whole install
 render targets (E2B template, Docker image) share `apply_layers`, so this offline check over the
 Dockerfile render also covers what the E2B template bakes."""
 
+import sys
+from types import SimpleNamespace
+
+from e2b.template.types import BuildInfo
+
 import sandbox.build_template as build_template
 from sandbox.build_template import (
     APT_PACKAGES,
@@ -160,3 +165,38 @@ def test_gh_install_is_covered_by_the_drift_digest(monkeypatch) -> None:
     before = build_definition_digest()
     monkeypatch.setattr(build_template, "GH_INSTALL_COMMAND", "changed")
     assert build_definition_digest() != before
+
+
+def test_publish_returns_the_exact_build_reference(monkeypatch, capsys) -> None:
+    created = []
+    sandbox = SimpleNamespace(
+        commands=SimpleNamespace(run=lambda *args, **kwargs: SimpleNamespace(exit_code=0)),
+        kill=lambda: None,
+    )
+    monkeypatch.setattr(sys, "argv", ["build-sandbox-template"])
+    monkeypatch.setattr(build_template, "e2b_template", lambda: object())
+    monkeypatch.setattr(
+        build_template.Template,
+        "build",
+        lambda template, name: BuildInfo(
+            template_id="template-1",
+            build_id="build-1",
+            name=name,
+            alias=name,
+        ),
+    )
+    monkeypatch.setattr(
+        build_template,
+        "Sandbox",
+        SimpleNamespace(create=lambda **kwargs: created.append(kwargs) or sandbox),
+    )
+
+    build_template.main()
+
+    assert created == [
+        {
+            "template": "ufo-sbx:build-1",
+            "timeout": build_template.READY_VERIFY_TIMEOUT_SECONDS,
+        }
+    ]
+    assert capsys.readouterr().out == "ufo-sbx:build-1\n"

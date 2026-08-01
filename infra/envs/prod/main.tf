@@ -18,18 +18,14 @@ module "platform" {
   dns_zone_name        = "flyingobject.ai"
   cloudflare_api_token = var.cloudflare_api_token
 
-  ses_sender             = var.ses_sender
-  owns_account_resources = false
+  ses_sender                     = var.ses_sender
+  owns_account_resources         = false
+  manage_runtime_secret_versions = false
 
-  # Static cluster-admins (applier-independent — see eks.tf for why creator-perms is off): the
-  # github-deploy role (deploy.yml's terraform apply drives the helm/kubectl providers), the account
-  # root, and the Identity Center admin permission set. An entry for the root principal does NOT cover
-  # a role assumed through it, so without the SSO role every human kubectl is rejected and cluster
-  # access has to be laundered through the deploy role.
   cluster_admin_principal_arns = concat(
     [
       "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root",
-      "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/github-deploy",
+      "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/github-production-deploy",
     ],
     tolist(data.aws_iam_roles.sso_admin.arns),
   )

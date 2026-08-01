@@ -1,8 +1,3 @@
-# The shared in-cluster OpenTelemetry collector receives every hosted process's telemetry and
-# the collector forwards traces/metrics/logs to Datadog with the contrib image's native datadog
-# exporter. The Datadog API key arrives via External Secrets (the datadog-api-key Secret, synced from
-# the api-keys Secrets Manager entry) and MUST be populated out-of-band before deploy — an empty key
-# fails the datadog exporter at startup.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -103,8 +98,6 @@ spec:
     - {name: otlp-grpc, port: 4317, targetPort: otlp-grpc}
     - {name: otlp-http, port: 4318, targetPort: otlp-http}
 ---
-# The collector alone reads DD_API_KEY. Reuses the ClusterSecretStore that
-# cluster-services.yaml.tpl defines. The value arrives empty from api-keys until set out-of-band.
 apiVersion: external-secrets.io/v1beta1
 kind: ExternalSecret
 metadata:
