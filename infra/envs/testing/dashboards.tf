@@ -13,11 +13,12 @@ resource "datadog_dashboard" "database" {
   widget {
     note_definition {
       content          = <<-EOT
-        Serve holds no connection pool: a pooled connection binds to one event loop and the process
-        runs several, so every transaction dials Postgres fresh. Read the first graph before the
-        rest — the instance can look healthy on every CloudWatch series while turns die on connects
-        Postgres never received. Those series land minutes after the minute they describe; they
-        answer capacity questions, never incident ones.
+        Every event loop holds its own pool, so a transaction waits twice: for a slot, then for a
+        dial only if no warm connection is free. Read the first three graphs before the rest — the
+        instance can look healthy on every CloudWatch series while turns die waiting on a connection
+        Postgres never received, and the pool graphs are what say whether the wait was ours or the
+        network's. The CloudWatch series land minutes after the minute they describe; they answer
+        capacity questions, never incident ones.
       EOT
       background_color = "yellow"
       font_size        = "14"
@@ -36,9 +37,41 @@ resource "datadog_dashboard" "database" {
     }
   }
 
+  # The wait that precedes both of the graphs around it. A pool filling shows here as a rising tail
+  # long before it shows anywhere else, and a wait that ends at `pool_timeout` is what the exhaustion
+  # count is the other end of.
   widget {
     timeseries_definition {
-      title = "connections"
+      title = "how long a transaction waited for a connection"
+      request {
+        q            = "p95:ufo.db_tx_acquire_ms{env:testing} by {path}"
+        display_type = "line"
+      }
+      request {
+        q            = "p99:ufo.db_tx_acquire_ms{env:testing} by {path}"
+        display_type = "line"
+      }
+    }
+  }
+
+  # The half of the unavailable count that is ours rather than the network's: both raise a
+  # `TimeoutError`, so this is the only thing that separates the fleet at its own ceiling from a lost
+  # packet.
+  widget {
+    timeseries_definition {
+      title = "pools exhausted at their ceiling (client side)"
+      request {
+        q            = "sum:ufo.db_pool_exhausted_total{env:testing} by {path}.as_count()"
+        display_type = "bars"
+      }
+    }
+  }
+
+  # 268 is what every pool ceiling in `core/src/ufo/db.py` adds to, and 397 is where this instance
+  # refuses. Between them is the fleet holding connections it did not budget for.
+  widget {
+    timeseries_definition {
+      title = "connections (fleet budget 268, refused at 397)"
       request {
         q            = "avg:aws.rds.database_connections{dbinstanceidentifier:${module.platform.db_instance_identifier}}"
         display_type = "line"

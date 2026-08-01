@@ -34,16 +34,36 @@ resource "datadog_monitor" "deploy_failed" {
   tags = ["env:prod", "managed-by:terraform"]
 }
 
-# The database a turn could not reach. Serve holds no connection pool — a pooled connection binds
-# to one event loop and this process runs several — so every transaction dials Postgres fresh and
-# a single lost packet ends whatever was waiting on it. Postgres never sees the connection, so no
+# The database a turn could not reach. Each event loop holds its own pool, so a transaction is
+# normally handed a warm connection; the ones that still dial — a loop's first touch, a recycled
+# connection, the replacement `pool_pre_ping` opens for one the database dropped — are where a lost
+# packet still ends whatever was waiting on it. Postgres never sees that connection, so no
 # database-side metric can show this; the count is taken in `db._opened`, where the wait happens.
 # Any occurrence is a turn or a job that died, so the threshold is one.
 resource "datadog_monitor" "db_tx_unavailable" {
   name    = "ufo prod could not reach the database"
   type    = "query alert"
   query   = "sum(last_15m):sum:ufo.db_tx_unavailable_total{env:prod}.as_count() >= 1"
-  message = "A transaction never opened: {{value}} in 15 minutes. Serve dials Postgres per transaction, so this is a turn or job that ended with no answer. Check RDS reachability and connection count before assuming a blip. @ops@flyingobject.ai @slack-alerts"
+  message = "A transaction never opened: {{value}} in 15 minutes. This is a turn or job that ended with no answer. Read `db_pool_exhausted_total` first — it is what says whether the fleet hit its own ceiling — then RDS reachability and connection count. @ops@flyingobject.ai @slack-alerts"
+
+  monitor_thresholds {
+    critical = 1
+  }
+
+  tags = ["env:prod", "managed-by:terraform"]
+}
+
+# The fleet at its own ceiling, which the count above cannot distinguish: SQLAlchemy raises its own
+# `TimeoutError` when a checkout waits out `pool_timeout`, and a lost dial raises the builtin one, so
+# both arrive under the same `error_class`. This is the half that is ours to fix — a pool sized too
+# small for the loop it serves, or a transaction held open across a network await — rather than the
+# network's. Prod runs a `db.m6g.large`, so a pool exhausted here is a shape problem, never a ceiling
+# the instance imposed.
+resource "datadog_monitor" "db_pool_exhausted" {
+  name    = "ufo prod exhausted a database connection pool"
+  type    = "query alert"
+  query   = "sum(last_15m):sum:ufo.db_pool_exhausted_total{env:prod}.as_count() >= 1"
+  message = "A transaction waited out the pool timeout and never got a connection: {{value}} in 15 minutes. The database was reachable — this fleet ran out of its own slots. Check `db_tx_acquire_ms` for which path queued and whether a transaction is held across an await. @ops@flyingobject.ai @slack-alerts"
 
   monitor_thresholds {
     critical = 1

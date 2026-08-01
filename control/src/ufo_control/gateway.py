@@ -253,10 +253,10 @@ def gateway_app() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        """Every environment read precedes `init_db`, so a misconfigured deploy fails startup before
-        the shared engine exists and never leaves one half-initialized. The schema the deploy shaped
-        is a precondition of the same kind — a replica issues no DDL, so an absent ledger fails
-        startup naming the verb that shapes it. The Slack Connect inviter
+        """Every environment read precedes `init_db`, so a misconfigured deploy fails startup on the
+        environment rather than on the first request. The schema the deploy shaped is a precondition
+        of the same kind — a replica issues no DDL, so an absent
+        ledger fails startup naming the verb that shapes it. The Slack Connect inviter
         then runs as a task beside the request path, never inside it: onboarding resolves a
         workspace and signs the member in whether or not Slack is reachable."""
         nonlocal state

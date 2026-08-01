@@ -1,19 +1,24 @@
 import asyncio
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import sqlalchemy as sa
 from cryptography.fernet import Fernet
 from fastapi import FastAPI
+from sqlalchemy.engine import make_url
 
+import ufo.db
 from ufo import serve
 from ufo.bearer import UFO_TOKEN_SECRET_ENV
 from ufo.blob import FilesystemBlobStore, S3BlobStore
 from ufo.config import BlobConfig, Config, DatabaseConfig, SandboxConfig
 from ufo.credentials import CredentialStore
+from ufo.db import dispose_db, init_db, workspace_tx
 from ufo.ext.manifest import CredentialSlot, InjectionTarget, Manifest
 from ufo.models.catalog import CORE_PRICING
 from ufo.proxy_serve import OWNER_DSN_ENV, model_rule_base
@@ -78,6 +83,41 @@ def _local_config() -> Config:
 
 def _blob() -> FilesystemBlobStore:
     return FilesystemBlobStore(root=Path("/tmp/blobs"))
+
+
+def test_one_shot_closes_the_throwaway_loops_connections(database_url: str, tmp_path: Path) -> None:
+    """The boot steps `run()` drives through `_one_shot` each get a throwaway `asyncio.run` loop,
+    and the wrapper closes that loop's pooled connections before it closes — a socket abandoned to
+    a closed loop is one nothing left in the process can close. The empty registry is not that
+    property: popping the key alone would satisfy it. Disposal replaces the engine's pool, so that
+    replacement is what is asserted.
+
+    On sqlite this opens its own copy rather than `database_url`, which is the session-scoped
+    template every other test reaches through a private copy of."""
+    url = database_url
+    if url.startswith("sqlite"):
+        private = tmp_path / "one_shot.db"
+        shutil.copy(make_url(url).database or "", private)
+        url = f"sqlite+aiosqlite:///{private}"
+    init_db(url)
+    escaped: list[tuple[object, object]] = []
+    try:
+
+        async def touch() -> int:
+            async with workspace_tx() as connection:
+                loop = asyncio.get_running_loop()
+                engine = next(
+                    built for (held, _), built in ufo.db._APP.engines.items() if held is loop
+                )
+                escaped.append((engine, engine.pool))
+                return (await connection.execute(sa.text("select 1"))).scalar_one()
+
+        assert serve._one_shot(touch()) == 1
+        engine, pool_before = escaped[0]
+        assert engine.pool is not pool_before  # type: ignore[attr-defined]
+        assert engine not in ufo.db._APP.engines.values()
+    finally:
+        asyncio.run(dispose_db())
 
 
 def test_launch_jobs_reuses_the_boot_runtime(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1,13 +1,16 @@
+import asyncio
 import os
 import shutil
 import socket
 import sqlite3
+import threading
 import warnings
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -17,12 +20,27 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+from sqlalchemy.engine import make_url
+from sqlalchemy.ext.asyncio import AsyncEngine
 from ufo_testsupport.tables import reset_workspace_data
 
+import ufo.db
 from ufo import o11y
-from ufo.db import MIGRATIONS_DIR, _build_engine, _opened, apply_migrations, workspace_tx
+from ufo.db import (
+    MIGRATIONS_DIR,
+    WORKSPACE_GUC,
+    _build_engine,
+    _opened,
+    apply_migrations,
+    dispose_db,
+    init_db,
+    init_owner_db,
+    owner_tx,
+    workspace_tx,
+)
 from ufo.ext.loader import migration_locations
 from ufo.schema import tables
+from ufo.workspace import ws
 
 
 @dataclass
@@ -936,25 +954,35 @@ async def test_a_refused_connect_counts_under_the_class_the_driver_really_raises
     through the dialect, so both are taken from the real stack rather than guessed at as the
     `OperationalError` a SQLAlchemy-shaped guess would reach for.
 
-    `_build_engine` is the whole engine path — the async engine this deployment builds, `NullPool`
-    and all, then a real connect — so it answers the question a bare driver connect cannot:
-    whether the dialect re-wraps the driver's `OSError` on the way out. It does not, and a release
-    that started to would fail here rather than send production to `other`. That a refused connect
-    surfaces from `_build_engine` at all is the same reason `_opened` only ever meets one after
-    boot: `_first_connect` re-raises, so a database down at startup fails `init_db`, and NullPool
-    then dials fresh for every later transaction — the incident this counter exists to report. Both
-    harvested classes then travel the rest of the way, through `_opened` to an exact attribute dict,
-    so neither entry in the allowlist is held by a name mirrored between two lists.
+    A pooled engine builds without dialing, so the dial is driven here: `connect()` on the engine
+    this deployment builds runs the whole path — pool, dialect, driver — which answers what a bare
+    driver connect cannot, whether the dialect re-wraps the driver's `OSError` on the way out. It
+    does not, and a release that started to would fail here rather than send production to `other`.
+    A pool is what makes this counter rare rather than impossible: a warm connection answers most
+    transactions, and the ones that still dial — a loop's first touch, a recycled connection, the
+    replacement `pool_pre_ping` opens for one the database dropped — are where the incident it
+    reports lives. Both harvested classes then travel the rest of the way, through `_opened` to an
+    exact attribute dict, so neither entry in the allowlist is held by a name mirrored between two
+    lists.
 
     The refusal is taken from a privileged port, which nothing in this suite can bind: an ephemeral
     port picked by binding and releasing is free for any parallel worker to take between the release
     and the connect, and a worker that binds it as a server answers the TCP handshake and then never
     speaks Postgres, which hangs the read rather than refusing it. A port that cannot be bound at
     all has no such window."""
+
+    async def dial(url: str) -> None:
+        engine = _build_engine(url, ufo.db._APP)
+        try:
+            async with engine.connect():
+                pass
+        finally:
+            await engine.dispose()
+
     with pytest.raises(ConnectionRefusedError) as refused:
-        _build_engine("postgresql+asyncpg://ufo:ufo@127.0.0.1:1/ufo_test")
+        await dial("postgresql+asyncpg://ufo:ufo@127.0.0.1:1/ufo_test")
     with pytest.raises(socket.gaierror) as unresolved:
-        _build_engine("postgresql+asyncpg://ufo:ufo@no-such-host.invalid:5432/ufo_test")
+        await dial("postgresql+asyncpg://ufo:ufo@no-such-host.invalid:5432/ufo_test")
 
     reader = InMemoryMetricReader()
     provider = MeterProvider(metric_readers=[reader])
@@ -983,6 +1011,524 @@ def test_the_unavailable_count_is_a_registered_metric() -> None:
     count exists to report — the instrumentation destroying the error it was added to surface. The
     test above mocks the emit away to read its arguments, so this is what holds the name."""
     o11y.emit_metric("db_tx_unavailable_total", path="workspace", error_class="TimeoutError")
+    o11y.emit_metric("db_pool_exhausted_total", path="workspace")
+    o11y.emit_histogram("db_tx_acquire_ms", 1, path="workspace")
+
+
+async def test_a_saturated_pool_is_counted_apart_from_a_lost_dial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The two failures share a class name — SQLAlchemy raises its own `TimeoutError` when a
+    checkout waits out `pool_timeout`, and a lost dial raises the builtin one — so `error_class`
+    cannot tell an operator whether the fleet hit its ceiling or the network dropped a packet. The
+    saturation count is what separates them, and it is emitted beside the unavailable count rather
+    than instead of it: a transaction that never opened is still a transaction that never opened."""
+    counted: list[tuple[str, dict[str, str]]] = []
+    monkeypatch.setattr(
+        o11y, "emit_metric", lambda name, **dimensions: counted.append((name, dimensions))
+    )
+
+    with pytest.raises(sa.exc.TimeoutError):
+        async with _opened(_RefusingEngine(sa.exc.TimeoutError("pool limit reached")), "workspace"):
+            pass
+    with pytest.raises(TimeoutError):
+        async with _opened(_RefusingEngine(TimeoutError()), "owner"):
+            pass
+
+    assert counted == [
+        ("db_pool_exhausted_total", {"path": "workspace"}),
+        ("db_tx_unavailable_total", {"path": "workspace", "error_class": "TimeoutError"}),
+        ("db_tx_unavailable_total", {"path": "owner", "error_class": "TimeoutError"}),
+    ]
+
+
+async def test_the_acquire_wait_is_recorded_whether_or_not_the_transaction_opens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pool that is filling shows up as a wait long before it shows up as a failure, and the wait
+    that ends in a failure is the one worth the most — it is the queue at its longest, so the
+    `finally` that records it is what the assertion below is really holding."""
+    recorded: list[tuple[str, int, dict[str, str]]] = []
+    monkeypatch.setattr(
+        o11y,
+        "emit_histogram",
+        lambda name, value, **dimensions: recorded.append((name, value, dimensions)),
+    )
+    monkeypatch.setattr(o11y, "emit_metric", lambda name, **dimensions: None)
+    clock = iter((10.0, 10.25, 20.0, 20.5))
+    monkeypatch.setattr(ufo.db, "time", SimpleNamespace(monotonic=lambda: next(clock)))
+
+    async with _opened(_RefusingEngine(None), "workspace"):
+        pass
+    with pytest.raises(TimeoutError):
+        async with _opened(_RefusingEngine(TimeoutError()), "owner"):
+            pass
+
+    assert recorded == [
+        ("db_tx_acquire_ms", 250, {"path": "workspace"}),
+        ("db_tx_acquire_ms", 500, {"path": "owner"}),
+    ]
+
+
+def _current_engine() -> AsyncEngine:
+    loop = asyncio.get_running_loop()
+    return next(engine for (held, _), engine in ufo.db._APP.engines.items() if held is loop)
+
+
+async def _touch() -> None:
+    async with workspace_tx() as connection:
+        await connection.execute(sa.text("select 1"))
+
+
+async def _touch_and_dispose() -> None:
+    await _touch()
+    await _current_engine().dispose()
+
+
+async def test_rls_guc_does_not_leak_across_a_reused_connection(
+    db: None, database_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE pooling safety invariant: `set_config(..., true)` is `SET LOCAL`, so a pooled connection
+    handed to the next checkout carries no residual workspace GUC. A single-connection pool forces
+    physical reuse (equal backend pids prove it), and a non-superuser probe role — the test user is
+    a superuser, which bypasses RLS — proves rows pinned under one workspace are invisible under
+    another and that an unbound read still fails closed."""
+    if not database_url.startswith("postgresql"):
+        pytest.skip("RLS is a postgres mechanism")
+    url = make_url(database_url)
+    role = f"rls_probe_{url.database}"
+    probe_url = url.set(username=role, password="rls-probe").render_as_string(hide_password=False)
+    predicate = f"workspace_id = current_setting('{WORKSPACE_GUC}')::uuid"
+    async with workspace_tx() as connection:
+        await connection.execute(sa.text("create table rls_probe (workspace_id uuid not null)"))
+        await connection.execute(sa.text("alter table rls_probe enable row level security"))
+        await connection.execute(
+            sa.text(
+                f"create policy rls_probe_ws on rls_probe "
+                f"using ({predicate}) with check ({predicate})"
+            )
+        )
+        await connection.execute(sa.text(f'drop role if exists "{role}"'))
+        await connection.execute(sa.text(f"create role \"{role}\" login password 'rls-probe'"))
+        await connection.execute(sa.text(f'grant select, insert on rls_probe to "{role}"'))
+    await dispose_db()
+    monkeypatch.setattr(ufo.db, "_APP", replace(ufo.db._APP, size=1, overflow=0, engines={}))
+    init_db(probe_url)
+    try:
+        workspace_a, workspace_b = uuid4(), uuid4()
+        with ws(workspace_a):
+            async with workspace_tx() as connection:
+                pid_a = (await connection.execute(sa.text("select pg_backend_pid()"))).scalar_one()
+                await connection.execute(
+                    sa.text("insert into rls_probe values (cast(:ws as uuid))"),
+                    {"ws": str(workspace_a)},
+                )
+        with ws(workspace_b):
+            async with workspace_tx() as connection:
+                pid_b = (await connection.execute(sa.text("select pg_backend_pid()"))).scalar_one()
+                rows = (await connection.execute(sa.text("select * from rls_probe"))).all()
+        assert pid_a == pid_b
+        assert rows == []
+        with pytest.raises(sa.exc.DBAPIError):
+            async with workspace_tx() as connection:
+                await connection.execute(sa.text("select * from rls_probe"))
+    finally:
+        await dispose_db()
+        init_db(database_url)
+        async with workspace_tx() as connection:
+            await connection.execute(sa.text("drop table rls_probe"))
+            await connection.execute(sa.text(f'drop role "{role}"'))
+        await dispose_db()
+        init_db(database_url)
+
+
+async def test_same_loop_resolves_the_same_engine(db: None) -> None:
+    await _touch()
+    first = _current_engine()
+    await _touch()
+    assert _current_engine() is first
+
+
+async def test_engines_are_per_loop(db: None) -> None:
+    await _touch()
+    main_engine = _current_engine()
+    seen: list[AsyncEngine] = []
+
+    async def capture() -> None:
+        await _touch()
+        seen.append(_current_engine())
+        await _current_engine().dispose()
+
+    thread = threading.Thread(target=lambda: asyncio.run(capture()))
+    thread.start()
+    thread.join()
+    assert seen[0] is not main_engine
+
+
+async def test_dead_loop_entries_are_pruned(db: None) -> None:
+    thread = threading.Thread(target=lambda: asyncio.run(_touch_and_dispose()))
+    thread.start()
+    thread.join()
+    assert any(held.is_closed() for held, _ in ufo.db._APP.engines)
+    await _touch()
+    assert not any(held.is_closed() for held, _ in ufo.db._APP.engines)
+
+
+async def test_dispose_loop_engines_closes_the_connection_not_just_the_key(db: None) -> None:
+    """What keeps a throwaway boot loop from abandoning a live connection. Dropping the registry key
+    is not the property — a pooled connection whose loop then closes is a socket nothing in the
+    process can ever close — so this holds the *close*: disposal replaces the engine's pool, and
+    the one the escaped engine's connection was checked into is gone. Remove the
+    `await engine.dispose()` from `dispose_loop_engines` and this fails, where a key-only assertion
+    passes."""
+    await _touch()
+    main_engine = _current_engine()
+    escaped: list[tuple[AsyncEngine, object]] = []
+
+    async def one_shot() -> None:
+        await _touch()
+        engine = _current_engine()
+        escaped.append((engine, engine.pool))
+        await ufo.db.dispose_loop_engines()
+
+    thread = threading.Thread(target=lambda: asyncio.run(one_shot()))
+    thread.start()
+    thread.join()
+    engine, pool_before = escaped[0]
+    assert engine.pool is not pool_before
+    assert not any(held.is_closed() for held, _ in ufo.db._APP.engines)
+    assert _current_engine() is main_engine
+
+
+async def test_dispose_db_closes_a_live_foreign_loops_engine(db: None) -> None:
+    """A loop still running when teardown starts is the shape this suite has — a session worker
+    beside the test's own loop. Only that loop can close its connections, so they close *through* it
+    rather than dropped (which would strand them) or left open (which contends with whatever runs
+    next). The handoff is scheduled on that loop rather than awaited from this one, so the foreign
+    engine's pool is read after its loop has drained `_disposing`; both pools are asserted replaced,
+    which is what disposal does and what popping a key alone does not."""
+    await _touch()
+    ready, release = threading.Event(), threading.Event()
+    escaped: list[tuple[AsyncEngine, object]] = []
+
+    async def hold() -> None:
+        await _touch()
+        engine = _current_engine()
+        escaped.append((engine, engine.pool))
+        ready.set()
+        await asyncio.to_thread(release.wait)
+        await asyncio.gather(*list(ufo.db._disposing))
+
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=lambda: loop.run_until_complete(hold()))
+    thread.start()
+    try:
+        ready.wait()
+        mine = _current_engine()
+        mine_pool = mine.pool
+        await dispose_db()
+        assert mine.pool is not mine_pool
+        assert not ufo.db._APP.engines
+        assert ufo.db._app_url is None
+    finally:
+        release.set()
+        thread.join()
+        loop.close()
+    foreign, foreign_pool = escaped[0]
+    assert foreign.pool is not foreign_pool
+
+
+class _LoopThatClosesInTheWindow:
+    """An event loop that reports itself open and then refuses the handoff — the one interleaving a
+    check cannot exclude, since the loop can close between `is_closed()` returning False and
+    `call_soon_threadsafe` being reached. Standing in for the loop, never for the assertion: what is
+    asserted is what `dispose_db` does when a handoff is refused."""
+
+    def is_closed(self) -> bool:
+        return False
+
+    def call_soon_threadsafe(self, *_: object) -> None:
+        raise RuntimeError("Event loop is closed")
+
+
+async def test_a_loop_that_closes_mid_teardown_neither_raises_nor_holds_the_rest(
+    db: None,
+) -> None:
+    """The failure has to stay inside teardown: seventeen callers are a bare
+    `finally: await dispose_db()`, so a raise here replaces what drove the teardown, and an early
+    exit would leave the pools after it untouched — the owner registry is iterated second, so its
+    connections would stay open. The refused entry is dropped, because a loop that closed can no
+    longer close anything."""
+    await _touch()
+    doomed = _LoopThatClosesInTheWindow()
+    ufo.db._APP.engines[(doomed, "postgresql+asyncpg://doomed/app")] = _build_engine(
+        "sqlite+aiosqlite:///doomed-app.db", ufo.db._APP
+    )
+    ufo.db._OWNER.engines[(doomed, "postgresql+asyncpg://doomed/owner")] = _build_engine(
+        "sqlite+aiosqlite:///doomed-owner.db", ufo.db._OWNER
+    )
+
+    await dispose_db()
+
+    assert not ufo.db._APP.engines
+    assert not ufo.db._OWNER.engines
+    assert ufo.db._app_url is None
+
+
+async def test_dispose_db_clears_registries_and_reinit_works(db: None) -> None:
+    """Re-initializes with the URL the fixture opened, not the `database_url` parameter: on sqlite
+    that parameter is the session-scoped template the fixture handed this test a private copy of."""
+    private = ufo.db._app_url
+    assert private is not None
+    await _touch()
+    await dispose_db()
+    assert not ufo.db._APP.engines
+    assert not ufo.db._OWNER.engines
+    with pytest.raises(RuntimeError):
+        async with workspace_tx():
+            pass
+    init_db(private)
+    await _touch()
+
+
+async def test_one_loop_holds_one_engine_per_url(db: None, database_url: str) -> None:
+    """The url is half the registry key, and this is what fails if it leaves. Two urls on one loop
+    have to resolve two engines: an entry a foreign loop left behind would otherwise be handed to a
+    caller that re-initialized against a different database, which would read and write the previous
+    one. Both dialects, since the key is not dialect-specific — the second url is the same database
+    reached through the other driver on postgres, a second file on sqlite."""
+    first = ufo.db._app_url
+    assert first is not None
+    if first.startswith("sqlite"):
+        second = f"sqlite+aiosqlite:///{Path(make_url(first).database or '').parent / 'other.db'}"
+        shutil.copy(make_url(first).database or "", make_url(second).database or "")
+    else:
+        second = (
+            make_url(first)
+            .set(drivername="postgresql+psycopg")
+            .render_as_string(hide_password=False)
+        )
+    mine = ufo.db._engine_for(first, ufo.db._APP)
+    other = ufo.db._engine_for(second, ufo.db._APP)
+    try:
+        assert other is not mine
+        assert ufo.db._engine_for(first, ufo.db._APP) is mine
+    finally:
+        await other.dispose()
+        ufo.db._APP.engines.pop((asyncio.get_running_loop(), second), None)
+
+
+async def test_owner_tx_without_an_owner_url_resolves_the_app_engine(db: None) -> None:
+    """`ufoctl ingress`, `ufoctl proxy`, and every one-shot verb open one URL, never an owner one.
+    Building a second pool for that same URL would double their connection ceiling for nothing, so
+    the fallback is the app pool's own engine — the identity, not a copy of the sizing."""
+    await _touch()
+    mine = _current_engine()
+    async with owner_tx() as connection:
+        await connection.execute(sa.text("select 1"))
+    loop = asyncio.get_running_loop()
+    assert not any(held is loop for held, _ in ufo.db._OWNER.engines)
+    assert [key for key in ufo.db._APP.engines if key[0] is loop] == [(loop, ufo.db._app_url)]
+    assert _current_engine() is mine
+
+
+async def test_an_owner_url_gets_its_own_smaller_pool(db: None, database_url: str) -> None:
+    """On the fleet `serve` sets both URLs, and then the owner pool is a second ceiling on the same
+    instance. Its consumers are serial — the sweeps' enumeration and the heartbeat — so it is sized
+    apart, and the budget in `db.py` counts it apart."""
+    if not database_url.startswith("postgresql"):
+        pytest.skip("sqlite holds no pool to size")
+    assert ufo.db._app_url is not None
+    init_owner_db(ufo.db._app_url)
+    async with owner_tx() as connection:
+        await connection.execute(sa.text("select 1"))
+    owner_engine = next(iter(ufo.db._OWNER.engines.values()))
+    await _touch()
+    assert owner_engine is not _current_engine()
+    assert owner_engine.pool.size() == ufo.db.OWNER_POOL_SIZE
+    assert _current_engine().pool.size() == ufo.db.POOL_SIZE
+
+
+async def test_pool_class_matches_dialect(db: None, database_url: str) -> None:
+    await _touch()
+    expected = "NullPool" if database_url.startswith("sqlite") else "AsyncAdaptedQueuePool"
+    assert type(_current_engine().pool).__name__ == expected
+
+
+def test_the_dial_is_bounded_and_the_pool_is_named() -> None:
+    """asyncpg's default connect timeout is 60 seconds — longer than any turn will wait, and the
+    whole of #834 — so the dial a replacement checkout drives is bounded next to the connect. The
+    application name is what attributes a connection to its pool in `pg_stat_activity`, which is
+    what the soak reads: without it both registries and DBOS's own pool arrive indistinguishable.
+    Both spellings are asserted: a driver refuses the other's kwarg rather than ignoring it."""
+    asyncpg = ufo.db._pool_kwargs("postgresql+asyncpg://ufo:ufo@localhost/ufo", ufo.db._OWNER)
+    assert asyncpg["connect_args"] == {
+        "timeout": ufo.db.CONNECT_TIMEOUT_SECONDS,
+        "server_settings": {"application_name": "ufo_owner"},
+        "prepared_statement_cache_size": 0,
+    }
+    assert asyncpg["pool_pre_ping"] is True
+    assert asyncpg["pool_timeout"] == ufo.db.POOL_TIMEOUT_SECONDS
+
+    psycopg = ufo.db._pool_kwargs("postgresql+psycopg://ufo:ufo@localhost/ufo", ufo.db._APP)
+    assert psycopg["connect_args"] == {
+        "connect_timeout": ufo.db.CONNECT_TIMEOUT_SECONDS,
+        "application_name": "ufo_app",
+        "prepare_threshold": None,
+    }
+
+
+async def test_every_driver_a_composition_root_opens_can_actually_connect(
+    database_url: str,
+) -> None:
+    """`ufoctl proxy` and `ufoctl ingress` open a psycopg DSN (`proxy_serve.owner_dsn` rewrites
+    the scheme), and `serve` opens asyncpg. A connect kwarg is per-driver, and the
+    wrong one is refused rather than ignored — psycopg rejects asyncpg's `timeout` as an unknown
+    connection option — so asserting the kwarg dict alone would have left both those deployments
+    unable to open a single connection. This drives a real connect through each driver instead."""
+    if not database_url.startswith("postgresql"):
+        pytest.skip("one postgres instance, two drivers")
+    psycopg_url = make_url(database_url).set(drivername="postgresql+psycopg")
+    for url in (database_url, psycopg_url.render_as_string(hide_password=False)):
+        engine = _build_engine(url, ufo.db._APP)
+        try:
+            async with engine.connect() as connection:
+                named = await connection.execute(
+                    sa.text("select current_setting('application_name')")
+                )
+                assert named.scalar_one() == "ufo_app"
+        finally:
+            await engine.dispose()
+
+
+async def test_a_warm_connection_survives_ddl_from_another_process(
+    db: None, database_url: str
+) -> None:
+    """The regression pooling made reachable, driven end to end rather than asserted as a kwarg.
+    asyncpg caches 100 prepared statements per connection and a pooled connection carries them for
+    `pool_recycle`, while the `ufo-migrate` Job runs alembic against a live fleet — so a plan whose
+    table changed underneath is `InvalidCachedStatementError` on the next execute. The DDL lands
+    on a second connection, exactly as it does from outside the process, and the warm connection
+    has to keep working.
+
+    Two details are load-bearing. `select *` is what `add column` changes the result descriptor of,
+    which is what a cached plan goes stale against — a select naming its columns survives the DDL
+    with the cache at its default, so it would prove nothing. And the rollback is what lets the DDL
+    take its lock: a `connect()` that has executed is inside a transaction until told otherwise, and
+    asyncpg's plan cache is per DBAPI connection, so releasing the transaction does not release the
+    cache this is about. The DDL connection takes a `lock_timeout` so a rollback that stops
+    happening fails this test instead of wedging on the warm connection's lock."""
+    if not database_url.startswith("postgresql"):
+        pytest.skip("prepared statements are a postgres mechanism")
+    engine = _build_engine(database_url, ufo.db._APP)
+    table = "plan_cache_probe"
+    try:
+        async with engine.connect() as setup:
+            await setup.execute(sa.text(f"create table {table} (id int)"))
+            await setup.commit()
+        async with engine.connect() as warm:
+            for _ in range(8):
+                await warm.execute(sa.text(f"select * from {table}"))
+            await warm.rollback()
+            async with engine.connect() as elsewhere:
+                await elsewhere.execute(sa.text("set lock_timeout = '5s'"))
+                await elsewhere.execute(sa.text(f"alter table {table} add column added int"))
+                await elsewhere.commit()
+            await warm.execute(sa.text(f"select * from {table}"))
+        async with engine.connect() as teardown:
+            await teardown.execute(sa.text(f"drop table {table}"))
+            await teardown.commit()
+    finally:
+        await engine.dispose()
+
+
+async def test_a_committed_psycopg_connection_survives_ddl_from_another_process(
+    db: None, database_url: str
+) -> None:
+    """The psycopg half, which needs a committed transaction to show at all: psycopg discards its
+    plan cache on rollback, so a rollback-shaped probe proves nothing here — and commit is the path
+    `ufoctl proxy` and `ufoctl ingress` run. Eight committed selects, DDL from another connection,
+    then the same statement: with the cache at its default this raises `FeatureNotSupported: cached
+    plan must not change result type`."""
+    if not database_url.startswith("postgresql"):
+        pytest.skip("prepared statements are a postgres mechanism")
+    url = make_url(database_url).set(drivername="postgresql+psycopg")
+    engine = _build_engine(url.render_as_string(hide_password=False), ufo.db._APP)
+    table = "psycopg_plan_cache_probe"
+    try:
+        async with engine.connect() as setup:
+            await setup.execute(sa.text(f"create table {table} (id int)"))
+            await setup.commit()
+        async with engine.connect() as warm:
+            for _ in range(8):
+                await warm.execute(sa.text(f"select * from {table}"))
+                await warm.commit()
+            async with engine.connect() as elsewhere:
+                await elsewhere.execute(sa.text("set lock_timeout = '5s'"))
+                await elsewhere.execute(sa.text(f"alter table {table} add column added int"))
+                await elsewhere.commit()
+            await warm.execute(sa.text(f"select * from {table}"))
+        async with engine.connect() as teardown:
+            await teardown.execute(sa.text(f"drop table {table}"))
+            await teardown.commit()
+    finally:
+        await engine.dispose()
+
+
+async def test_dispose_loop_engines_closes_the_owner_pool_too(db: None) -> None:
+    """Both of `_one_shot`'s production callers reach the database through `owner_tx`, so the
+    engine a throwaway boot loop abandons is the owner one — skipping that registry is the leak
+    this function exists to prevent, and the app pool's proof cannot see it.
+
+    The owner url is the one the fixture opened, never the `database_url` parameter: on sqlite that
+    parameter is the session template every later test copies, and binding a writer to it takes the
+    one writer slot the fixture's private copy exists to keep separate."""
+    private = ufo.db._app_url
+    assert private is not None
+    init_owner_db(private)
+    escaped: list[tuple[AsyncEngine, object]] = []
+
+    async def one_shot() -> None:
+        async with owner_tx() as connection:
+            await connection.execute(sa.text("select 1"))
+        loop = asyncio.get_running_loop()
+        engine = next(built for (held, _), built in ufo.db._OWNER.engines.items() if held is loop)
+        escaped.append((engine, engine.pool))
+        await ufo.db.dispose_loop_engines()
+
+    thread = threading.Thread(target=lambda: asyncio.run(one_shot()))
+    thread.start()
+    thread.join()
+    engine, pool_before = escaped[0]
+    assert engine.pool is not pool_before
+    assert not ufo.db._OWNER.engines
+
+
+async def test_a_pool_at_its_ceiling_raises_the_class_the_saturation_count_branches_on(
+    db: None, database_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The premise the saturation mechanism rests on, taken from SQLAlchemy rather than from a
+    fake: `db_pool_exhausted_total` is emitted only where `_opened` sees SQLAlchemy's own
+    `TimeoutError`, so a real pool at its ceiling raising anything else leaves the metric silent and
+    the operator reading the fleet's ceiling as a network fault. A one-connection pool with checkout
+    wait driven to zero reaches that ceiling on the second concurrent transaction."""
+    if not database_url.startswith("postgresql"):
+        pytest.skip("sqlite holds no pool to exhaust")
+    counted: list[str] = []
+    monkeypatch.setattr(o11y, "emit_metric", lambda name, **dimensions: counted.append(name))
+    monkeypatch.setattr(ufo.db, "POOL_TIMEOUT_SECONDS", 0)
+    pinned = replace(ufo.db._APP, size=1, overflow=0, engines={})
+    monkeypatch.setattr(ufo.db, "_APP", pinned)
+    try:
+        async with workspace_tx():
+            with pytest.raises(sa.exc.TimeoutError):
+                async with workspace_tx():
+                    pass
+    finally:
+        for engine in pinned.engines.values():
+            await engine.dispose()
+
+    assert counted == ["db_pool_exhausted_total", "db_tx_unavailable_total"]
 
 
 async def test_agent_reasoning_is_constrained(db: None) -> None:
@@ -1127,7 +1673,7 @@ def test_a_migrated_sqlite_file_needs_no_journal_conversion_from_its_readers(
         (str(uuid4()), "2026-01-01", "2026-01-01"),
     )
     try:
-        _build_engine(f"sqlite+aiosqlite:///{copy}")
+        _build_engine(f"sqlite+aiosqlite:///{copy}", ufo.db._APP)
     finally:
         holder.rollback()
         holder.close()

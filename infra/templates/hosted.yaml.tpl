@@ -314,7 +314,8 @@ spec:
             limits: {cpu: "2", memory: 768Mi}
           volumeMounts:
             - {name: config, mountPath: /app/ufo.toml, subPath: ufo.toml}
-          # No /healthz on the raw CONNECT proxy; a TCP probe confirms the bind after fail-loud boot.
+          # No /healthz on the raw CONNECT proxy; a TCP probe confirms the bind. The bind is all it
+          # confirms — the database is dialed per transaction, not at boot (#1009).
           readinessProbe:
             tcpSocket: {port: proxy}
             initialDelaySeconds: 10
@@ -418,7 +419,8 @@ spec:
             limits: {cpu: "2", memory: 768Mi}
           volumeMounts:
             - {name: config, mountPath: /app/ufo.toml, subPath: ufo.toml}
-          # No /healthz on the raw reverse proxy; a TCP probe confirms the bind after fail-loud boot.
+          # No /healthz on the raw reverse proxy; a TCP probe confirms the bind. The bind is all it
+          # confirms — the database is dialed per transaction, not at boot (#1009).
           readinessProbe:
             tcpSocket: {port: ingress}
             initialDelaySeconds: 10

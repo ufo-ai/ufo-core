@@ -3,9 +3,10 @@
 import asyncio
 import os
 import threading
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from typing import Any
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
@@ -31,7 +32,7 @@ from ufo.credentials import (
     CredentialStore,
     install_credential_requests,
 )
-from ufo.db import current_workspace, init_db, init_owner_db
+from ufo.db import current_workspace, dispose_loop_engines, init_db, init_owner_db
 from ufo.ext.context import CredentialAccess, context_for
 from ufo.ext.loader import (
     CORE_OBJECT_KINDS,
@@ -160,7 +161,7 @@ def run() -> None:
     credentials = CredentialStore(fernet=Fernet(key.encode()))
     init_owner_db(_shared_owner_dsn(config))
     instance_id = uuid4()
-    asyncio.run(record_fleet_seat(instance_id))
+    _one_shot(record_fleet_seat(instance_id))
     heartbeat = Heartbeat(instance_id=instance_id)
     threading.Thread(
         target=lambda: asyncio.run(heartbeat.run()), name="instance-heartbeat", daemon=True
@@ -290,6 +291,21 @@ def run() -> None:
         _stop_executor(dbos, heartbeat, config.serve.graceful_shutdown_seconds)
 
 
+def _one_shot[T](coro: Coroutine[Any, Any, T]) -> T:
+    """Drive one DB-touching step on a throwaway loop, disposing that loop's engines before the loop
+    closes — a pooled connection abandoned to a closed loop can never be closed again, by this
+    process or any other. The loops that persist (uvicorn's, DBOS's, the heartbeat thread's) keep
+    their engines for the life of the process, which is what makes a pool worth holding at all."""
+
+    async def step() -> T:
+        try:
+            return await coro
+        finally:
+            await dispose_loop_engines()
+
+    return asyncio.run(step())
+
+
 def _stop_executor(dbos: DBOS, heartbeat: Heartbeat, graceful_shutdown_seconds: int) -> None:
     """Drain, then retire the seat only when the executor emptied. `DBOS.destroy` waits out the
     drain window, then force-cancels surviving workflow coroutines — a cancelled workflow writes
@@ -304,7 +320,7 @@ def _stop_executor(dbos: DBOS, heartbeat: Heartbeat, graceful_shutdown_seconds: 
     if active:
         log("serve.seat_kept_for_active_workflows", workflows=len(active))
         return
-    asyncio.run(heartbeat.retire())
+    _one_shot(heartbeat.retire())
 
 
 def _shared_owner_dsn(config: Config) -> str:

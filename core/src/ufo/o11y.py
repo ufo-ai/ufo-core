@@ -51,6 +51,7 @@ METRICS = (
     "sandbox_tool_output_dir_reclaimed_total",
     "tool_offload_failed_total",
     "db_tx_unavailable_total",
+    "db_pool_exhausted_total",
     "model_round_tokens_total",
     "tool_call_total",
     "source_sync_failed_total",
@@ -59,6 +60,7 @@ ERROR_CLASS_DIMENSION = "error_class"
 PROFILE_DIMENSION = "profile"
 MAIN_PROFILE = "main"
 HISTOGRAMS = {
+    "db_tx_acquire_ms": ("path",),
     "model_round_ms": ("model", "provider", ERROR_CLASS_DIMENSION, PROFILE_DIMENSION),
     "model_first_event_ms": ("model", "provider", PROFILE_DIMENSION),
     "tool_call_ms": ("tool", "outcome", ERROR_CLASS_DIMENSION, PROFILE_DIMENSION),

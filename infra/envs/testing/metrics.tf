@@ -12,6 +12,13 @@
 # A tag configuration is keyed by metric name alone, so one root owns it: this one, the only root
 # the deploy pipeline applies. Both fleets' metrics are configured from here, prod's included.
 
+resource "datadog_metric_tag_configuration" "db_tx_acquire_ms" {
+  metric_name         = "ufo.db_tx_acquire_ms"
+  metric_type         = "distribution"
+  include_percentiles = true
+  tags                = ["env", "host", "path", "service"]
+}
+
 resource "datadog_metric_tag_configuration" "turn_ms" {
   metric_name         = "ufo.turn_ms"
   metric_type         = "distribution"
@@ -50,6 +57,12 @@ resource "datadog_metric_tag_configuration" "tool_call_ms" {
 # unattended by `deploy.yml`. Measured at provider 3.91.0: `gauge` plans clean, `distribution`
 # re-diffs, and a fresh create with `gauge` leaves the API reporting `distribution` unchanged, so
 # this settles the plan without touching what Datadog stores.
+resource "datadog_metric_metadata" "db_tx_acquire_ms" {
+  metric = "ufo.db_tx_acquire_ms"
+  type   = "gauge"
+  unit   = "millisecond"
+}
+
 resource "datadog_metric_metadata" "turn_ms" {
   metric = "ufo.turn_ms"
   type   = "gauge"

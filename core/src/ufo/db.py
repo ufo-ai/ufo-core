@@ -1,23 +1,30 @@
 """The tenancy boundary: module-private engines, workspace_tx as the only scoped session source.
 
-Isolation is set per transaction from an ambient workspace, so one serve process (one connection
-pool) safely serves many workspaces: a request/turn/job sets `current_workspace` at its boundary,
-and `workspace_tx` pins the RLS GUC (`app.workspace_id`) for that transaction. The serve role is an
-RLS *subject* with no pinned default, so a transaction that never set the workspace fails closed —
-the policy's `current_setting` errors on the unset GUC, never a leak.
+Isolation is set per transaction from an ambient workspace, so one serve process safely serves many
+workspaces: a request/turn/job sets `current_workspace` at its boundary, and `workspace_tx` pins the
+RLS GUC (`app.workspace_id`) for that transaction. The serve role is an RLS *subject* with no pinned
+default, so a transaction that never set the workspace fails closed — the policy's `current_setting`
+errors on the unset GUC, never a leak. Pooled-connection reuse never carries a workspace across
+checkouts: the GUC is pinned with `set_config(..., is_local=true)` — `SET LOCAL` — which Postgres
+clears at transaction end.
 
 `owner_tx` is the one exception: the RLS-bypassing read the cross-workspace background sweeps
 enumerate through — never a scoped read, and the caller re-binds each row under `with ws(...)`.
+
+Engines pool connections per event loop: an asyncpg connection binds to the loop that created it,
+and surfaces and DBOS workflows run on different loops in the same process, so each loop lazily
+builds and keeps its own engine for the process's life (the pattern `S3BlobStore._client` uses).
 """
 
 import asyncio
 import os
 import sqlite3
-import threading
+import time
 import warnings
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -33,110 +40,252 @@ from sqlalchemy.pool import NullPool
 MIGRATIONS_DIR = Path(__file__).parent / "schema" / "migrations"
 SQLITE_BUSY_TIMEOUT_MS = 5_000
 WORKSPACE_GUC = "app.workspace_id"
+# Every pool below is a ceiling one event loop can reach, and the fleet's total is what has to fit.
+# Measured on the testing instance 2026-07-31: `max_connections` 400, `superuser_reserved` 3, so 397
+# are the fleet's to spend. Every `hosted.yaml.tpl` deployment is the literal `replicas: 2` with no
+# HorizontalPodAutoscaler, so the count has no user term. Every `init_db` root is counted,
+# not just serve's:
+#
+#   ufo-serve           2 pods x 3 loops (uvicorn, DBOS, heartbeat) x (5 + 10)   =  90 app
+#                       2 pods x 3 loops x (2 + 3)                               =  30 owner
+#   ufo-ingress         2 pods x 1 loop x (5 + 10)                               =  30
+#   ufo-sandbox-proxy   2 pods x 1 loop x (5 + 10)                               =  30
+#   ufo-gateway         2 pods x 1 loop x (5 + 10) through this module            =  30
+#                       2 pods x asyncpg `max_size` 4 (its own control-plane pool) =   8
+#   DBOS executor       2 pods x 20 on `*_dbos`, same instance (`max_overflow` 0) =  40
+#   DBOS client         2 pods x 5 on `*_dbos`                                    =  10
+#                                                                       ceiling  = 268 of 397
+#
+# The owner registry is sized apart because its consumers are serial — the background sweeps'
+# enumeration and the heartbeat, never a fan-out — and a pod with no owner DSN spends nothing on
+# it at all: `owner_tx` resolves the app pool's engine rather than a second pool for one URL. A PR
+# preview deploys its own serve against this instance, which is what the remaining 129 is held for.
+#
+# `db_connections_high` brackets these two numbers: it warns above what the fleet is entitled to and
+# alerts below where Postgres refuses.
+POOL_SIZE = 5
+MAX_OVERFLOW = 10
+OWNER_POOL_SIZE = 2
+OWNER_MAX_OVERFLOW = 3
+POOL_TIMEOUT_SECONDS = 10
+POOL_RECYCLE_SECONDS = 1800
+CONNECT_TIMEOUT_SECONDS = 10
+ASYNCPG_DRIVER = "asyncpg"
 
-_engine: AsyncEngine | None = None
-_owner_engine: AsyncEngine | None = None
+
+@dataclass(frozen=True)
+class _Pool:
+    """One registry of per-loop engines and the ceiling each of them holds. `application_name` is
+    what attributes a connection to its pool in `pg_stat_activity`, which is otherwise blind to
+    which of a pod's registries opened it."""
+
+    application_name: str
+    size: int
+    overflow: int
+    engines: dict[tuple[asyncio.AbstractEventLoop, str], AsyncEngine] = field(default_factory=dict)
+
+
+_APP = _Pool(application_name="ufo_app", size=POOL_SIZE, overflow=MAX_OVERFLOW)
+_OWNER = _Pool(application_name="ufo_owner", size=OWNER_POOL_SIZE, overflow=OWNER_MAX_OVERFLOW)
+
+_app_url: str | None = None
+_owner_url: str | None = None
+_disposing: set[asyncio.Task[None]] = set()
 
 current_workspace: ContextVar[UUID | None] = ContextVar("current_workspace", default=None)
 
 
-def _build_engine(url: str) -> AsyncEngine:
-    """NullPool: a pooled connection binds to one event loop, and surfaces and DBOS
-    workflows run on different loops in the same process. The engine's one-time first-connect
-    (dialect init, guarded by the pool's first-connect mutex held across async I/O) is completed
-    here, single-threaded, before the engine is published — a first-connect driven concurrently
-    from two loops deadlocks that mutex, so an engine is never shared until it is past it."""
-    engine = create_async_engine(url, poolclass=NullPool)
+def _build_engine(url: str, pool: _Pool) -> AsyncEngine:
+    """A pool for postgres, `NullPool` for sqlite — whose single-writer semantics are the
+    `begin immediate` listener below, not a pool. `pool_pre_ping` is what survives an RDS failover
+    or an idle-killed connection, and the dial it replaces one with is bounded here: asyncpg's own
+    default is 60 seconds, longer than any caller of this module is willing to wait."""
+    engine = create_async_engine(url, **_pool_kwargs(url, pool))
     if engine.dialect.name == "sqlite":
         sa.event.listen(engine.sync_engine, "connect", _sqlite_on_connect)
         sa.event.listen(engine.sync_engine, "begin", _sqlite_begin_immediate)
-    _first_connect(engine)
+    return engine
+
+
+def _pool_kwargs(url: str, pool: _Pool) -> dict[str, Any]:
+    parsed = make_url(url)
+    if parsed.get_backend_name() == "sqlite":
+        return {"poolclass": NullPool}
+    return {
+        "pool_size": pool.size,
+        "max_overflow": pool.overflow,
+        "pool_timeout": POOL_TIMEOUT_SECONDS,
+        "pool_recycle": POOL_RECYCLE_SECONDS,
+        "pool_pre_ping": True,
+        **_driver_kwargs(parsed.get_driver_name(), pool),
+    }
+
+
+def _driver_kwargs(driver: str, pool: _Pool) -> dict[str, Any]:
+    """Bounding the dial and naming the pool are one intent in two drivers' spellings, and a
+    kwarg meant for the other driver is refused rather than ignored: psycopg rejects `timeout` as an
+    unknown connection option, and `ufoctl proxy` and `ufoctl ingress` both open a psycopg DSN
+    (`proxy_serve.owner_dsn`), so one shape for both would fail their every connection.
+
+    Both drivers cache plans per connection — asyncpg 100 statements, psycopg after five uses — and
+    a pooled connection carries them for `pool_recycle`. DDL arrives from outside this process, the
+    `ufo-migrate` Job running alembic against a live fleet, and a plan that outlives its table is
+    `InvalidCachedStatementError` on asyncpg and `FeatureNotSupported` on psycopg. psycopg discards
+    its cache on rollback, which is why only a committed transaction shows it — the path `ufoctl
+    proxy` and `ufoctl ingress` actually run. Each setting rides in `connect_args` because it is its
+    driver's own argument, not a dialect one."""
+    if driver == ASYNCPG_DRIVER:
+        return {
+            "connect_args": {
+                "timeout": CONNECT_TIMEOUT_SECONDS,
+                "server_settings": {"application_name": pool.application_name},
+                "prepared_statement_cache_size": 0,
+            }
+        }
+    return {
+        "connect_args": {
+            "connect_timeout": CONNECT_TIMEOUT_SECONDS,
+            "application_name": pool.application_name,
+            "prepare_threshold": None,
+        }
+    }
+
+
+def _engine_for(url: str, pool: _Pool) -> AsyncEngine:
+    """The running loop's engine for `pool` and `url`, built on first touch. Sync throughout: there
+    is no await between the lookup and the store, so two tasks on one loop cannot interleave here,
+    and two loops write different keys — no lock is reachable by either. The url is part of the key
+    so a re-`init_db` against a different database can never be served an engine still bound to the
+    previous one. The sweep drops entries whose loop is gone but cannot dispose them: the loop that
+    owns those sockets is the only thing that could close them and it is already closed, so
+    `dispose_loop_engines` is what prevents that leak and this is only what keeps the registry
+    bounded. It snapshots the keys because the serve, DBOS, and heartbeat loops run on different
+    threads and insert here concurrently."""
+    key = (asyncio.get_running_loop(), url)
+    for stale in [held for held in list(pool.engines) if held[0].is_closed()]:
+        pool.engines.pop(stale, None)
+    engine = pool.engines.get(key)
+    if engine is None:
+        engine = pool.engines[key] = _build_engine(url, pool)
     return engine
 
 
 def init_db(url: str) -> None:
-    global _engine
-    if _engine is not None:
+    global _app_url
+    if _app_url is not None:
         raise RuntimeError("db already initialized")
-    _engine = _build_engine(url)
+    _app_url = url
 
 
 def init_owner_db(url: str) -> None:
-    """The RLS-bypassing owner-role engine `owner_tx` enumerates through, built from the owner DSN
-    (`UFO_OWNER_DSN`, the same secret the shared proxy opens). It owns the tables and is never
-    FORCEd RLS, so it reads across every workspace — the one cross-tenant path. `serve` always sets
-    it (and `ufoctl proxy` opens the owner DSN as its sole `init_db` engine); a one-shot `ufoctl`
-    verb opens no owner engine, so `owner_tx` falls to `_engine` and its own role scopes it."""
-    global _owner_engine
-    if _owner_engine is not None:
+    """The RLS-bypassing owner-role URL `owner_tx` enumerates through (`UFO_OWNER_DSN`, the same
+    secret the shared proxy opens). Its role owns the tables and is never FORCEd RLS, so it reads
+    across every workspace — the one cross-tenant path. `serve` always sets it; `ufoctl ingress`,
+    `ufoctl proxy`, and one-shot verbs set no owner URL, so `owner_tx` falls to the app pool and
+    that URL's own role scopes it."""
+    global _owner_url
+    if _owner_url is not None:
         raise RuntimeError("owner db already initialized")
-    _owner_engine = _build_engine(url)
-
-
-def _first_connect(engine: AsyncEngine) -> None:
-    """Force the engine's one-time dialect initialization on a private loop off any caller loop, so
-    it is complete before the engine is driven concurrently from multiple event loops. Runs on its
-    own thread — a fresh thread never has a running loop, so this is uniform whether init_db is
-    called from a composition root or from within a running loop — and re-raises on the caller."""
-    error: list[BaseException] = []
-
-    def run() -> None:
-        loop = asyncio.new_event_loop()
-        try:
-            loop.run_until_complete(_open_and_close(engine))
-        except BaseException as caught:
-            error.append(caught)
-        finally:
-            loop.close()
-
-    thread = threading.Thread(target=run)
-    thread.start()
-    thread.join()
-    if error:
-        raise error[0]
-
-
-async def _open_and_close(engine: AsyncEngine) -> None:
-    async with engine.connect():
-        pass
+    _owner_url = url
 
 
 async def dispose_db() -> None:
-    global _engine, _owner_engine
-    if _engine is not None:
-        await _engine.dispose()
-        _engine = None
-    if _owner_engine is not None:
-        await _owner_engine.dispose()
-        _owner_engine = None
+    """Teardown — a CLI verb's `finally`, a test's fixture. The urls clear first, before anything
+    can fail, so a teardown that cannot finish never leaves the next `init_db` refusing, and no
+    caller sees an exception: seventeen of them are a bare `finally: await dispose_db()`, where a
+    raise would replace whatever drove teardown.
+
+    A connection can only be closed by the loop that opened it. This loop's engines are disposed
+    here and awaited. Another loop's are handed to that loop and *not* awaited: waiting on a loop
+    this one does not drive is a wait with no end. An entry whose loop is already closed is
+    unreachable by anything and only its key goes. Each entry leaves the registry before its
+    handoff, so the foreign loop is never runnable with an engine both registered and disposing."""
+    global _app_url, _owner_url
+    loop = asyncio.get_running_loop()
+    _app_url = None
+    _owner_url = None
+    for pool in (_APP, _OWNER):
+        for held in [key for key in list(pool.engines) if key[0] is loop]:
+            engine = pool.engines.pop(held, None)
+            if engine is not None:
+                await engine.dispose()
+        for held in list(pool.engines):
+            engine = pool.engines.pop(held, None)
+            if engine is not None and not held[0].is_closed():
+                _hand_off(held[0], engine)
+
+
+def _hand_off(loop: asyncio.AbstractEventLoop, engine: AsyncEngine) -> None:
+    """Ask `loop` to dispose `engine`. `call_soon_threadsafe` raises exactly when that loop closed
+    after the caller looked, which is the one race a check cannot remove — and a closed loop can no
+    longer close anything, so there is nothing left to do about it."""
+    try:
+        loop.call_soon_threadsafe(_dispose_on_this_loop, engine)
+    except RuntimeError:
+        return
+
+
+def _dispose_on_this_loop(engine: AsyncEngine) -> None:
+    """Runs on the loop that owns `engine`'s connections, which is the only loop that can close
+    them. Holding the engine as an argument is what keeps it reachable between `dispose_db` removing
+    its registry entry and this running, and `_disposing` is what keeps the task itself from being
+    collected before it finishes."""
+    task = asyncio.ensure_future(engine.dispose())
+    _disposing.add(task)
+    task.add_done_callback(_disposing.discard)
+
+
+async def dispose_loop_engines() -> None:
+    """Dispose and drop the running loop's engines, keeping the urls initialized. The steps `serve`
+    drives on throwaway `asyncio.run` loops call this before their loop closes, so no pooled
+    connection is abandoned to a dead loop; the persistent loops keep theirs for the process's
+    life."""
+    loop = asyncio.get_running_loop()
+    for pool in (_APP, _OWNER):
+        for held in [key for key in list(pool.engines) if key[0] is loop]:
+            engine = pool.engines.pop(held, None)
+            if engine is not None:
+                await engine.dispose()
 
 
 @asynccontextmanager
 async def _opened(engine: AsyncEngine, path: str) -> AsyncIterator[AsyncConnection]:
-    """Begin a transaction, counting the ones that never begin. NullPool means every transaction
-    dials Postgres fresh, so there is no warm connection to absorb a lost packet: a single one costs
-    whatever was waiting on it. The database side cannot see this — it never receives the
-    connection — so the count has to be taken here, where the wait actually happens. Only the
-    acquisition is watched; a failure inside the caller's transaction is the caller's own.
+    """Begin a transaction, timing the acquisition and counting the ones that never begin. A
+    transaction waits twice before it runs — for a slot in this loop's pool, then for a dial if the
+    pool has no warm connection to hand it — and the database sees neither: a connection that
+    never arrives is not one Postgres ever receives, so the count has to be taken here, where the
+    wait happens. Only the acquisition is watched; a failure inside the caller's transaction is the
+    caller's own.
+
+    A pool exhausted at its ceiling raises `sqlalchemy.exc.TimeoutError`, whose class name is the
+    bare `TimeoutError` a lost dial raises too — one is this fleet reaching its own ceiling, the
+    other is the network, and nothing in the unavailable count's dimensions separates them. So
+    saturation carries its own name.
 
     `emit_metric` is imported here because `o11y` reads this module's ambient workspace, the same
     cycle `apply_migrations` breaks the same way."""
-    from ufo.o11y import emit_metric
+    from ufo.o11y import emit_histogram, emit_metric
 
     async with AsyncExitStack() as stack:
+        started = time.monotonic()
         try:
             connection = await stack.enter_async_context(engine.begin())
         except Exception as error:
+            if isinstance(error, sa.exc.TimeoutError):
+                emit_metric("db_pool_exhausted_total", path=path)
             emit_metric("db_tx_unavailable_total", path=path, error_class=type(error).__name__)
             raise
+        finally:
+            elapsed = round((time.monotonic() - started) * 1000)
+            emit_histogram("db_tx_acquire_ms", elapsed, path=path)
         yield connection
 
 
 @asynccontextmanager
 async def workspace_tx() -> AsyncIterator[AsyncConnection]:
-    if _engine is None:
+    if _app_url is None:
         raise RuntimeError("db not initialized (init_db runs in the composition root)")
-    async with _opened(_engine, "workspace") as connection:
+    async with _opened(_engine_for(_app_url, _APP), "workspace") as connection:
         workspace_id = current_workspace.get()
         if workspace_id is not None and connection.dialect.name == "postgresql":
             await connection.execute(
@@ -150,16 +299,16 @@ async def workspace_tx() -> AsyncIterator[AsyncConnection]:
 async def owner_tx() -> AsyncIterator[AsyncConnection]:
     """The one cross-workspace read path: a transaction that pins NO workspace GUC, so it enumerates
     every workspace this deploy serves. The background sweeps find their work across workspaces
-    through it, then re-scope each unit under `with ws(row.workspace_id)`. With an owner engine set
-    (`serve`, and `ufoctl proxy`, which opens the owner DSN) it bypasses RLS through the owner role;
-    without one it falls to the sole `init_db` engine, whose own role scopes it — the local
-    single-role deploy a one-shot `ufoctl` verb runs against. It threads no workspace and sets no
-    GUC, so nothing it yields is a tenant boundary: never read a row's contents through it beyond
-    the identifiers needed to re-bind that row's own workspace."""
-    engine = _owner_engine or _engine
-    if engine is None:
+    through it, then re-scope each unit under `with ws(row.workspace_id)`. With an owner URL set
+    (`serve`) it bypasses RLS through the owner role; without one it falls to the app pool — the
+    same engine `workspace_tx` resolves, never a second pool for one URL — and that URL's own role
+    scopes it. It threads no workspace and sets no GUC, so nothing it yields is a tenant boundary:
+    never read a row's contents through it beyond the identifiers needed to re-bind that row's own
+    workspace."""
+    url, pool = (_app_url, _APP) if _owner_url is None else (_owner_url, _OWNER)
+    if url is None:
         raise RuntimeError("db not initialized (init_db runs in the composition root)")
-    async with _opened(engine, "owner") as connection:
+    async with _opened(_engine_for(url, pool), "owner") as connection:
         yield connection
 
 
