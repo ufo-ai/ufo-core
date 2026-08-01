@@ -53,6 +53,7 @@ METRICS = (
     "db_tx_unavailable_total",
     "model_round_tokens_total",
     "tool_call_total",
+    "source_sync_failed_total",
 )
 ERROR_CLASS_DIMENSION = "error_class"
 HISTOGRAMS = {
@@ -102,12 +103,14 @@ ERROR_CLASSES = frozenset(
         "ConnectionResetError",
         "CrashShutdownError",
         "CredentialValueInvalid",
+        "CursorExpired",
         "DataError",
         "DatabaseDroppedError",
         "DeadlineExceededError",
         "DiskFullError",
         "FileExistsError",
         "FileNotFoundError",
+        "HTTPStatusError",
         "IdleSessionTimeoutError",
         "InsufficientResourcesError",
         "IntentRefused",

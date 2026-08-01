@@ -38,3 +38,18 @@ resource "datadog_monitor" "db_tx_unavailable" {
 
   tags = ["env:prod", "managed-by:terraform"]
 }
+
+resource "datadog_monitor" "source_sync_failed" {
+  name    = "ufo prod source sync failed"
+  type    = "query alert"
+  query   = "sum(last_15m):sum:ufo.source_sync_failed_total{env:prod} by {provider,stream}.as_count() >= 1"
+  message = "{{provider.name}} {{stream.name}} source sync failed {{value}} times in 15 minutes. Search source_sync.failed for the source, account, error class, and next attempt. @ops@flyingobject.ai @slack-alerts"
+
+  monitor_thresholds {
+    critical = 1
+  }
+
+  require_full_window = false
+
+  tags = ["env:prod", "managed-by:terraform"]
+}

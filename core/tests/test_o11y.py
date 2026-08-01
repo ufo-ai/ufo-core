@@ -39,6 +39,7 @@ from ufo.loop.engine import IntentRefused
 from ufo.models import anthropic as anthropic_models
 from ufo.models import openai as openai_models
 from ufo.models.interface import ModelRefusal, ModelResponseTruncated
+from ufo.sources.sync import CursorExpired
 from ufo.tools.context import UntrustedContentError
 from ufo.workspace import ws
 
@@ -186,11 +187,13 @@ CAUGHT_ERROR_ROOTS = (
 MEASURED_DRIVER_ERRORS = (ConnectionRefusedError, socket.gaierror)
 NAMED_ERRORS = (
     CredentialValueInvalid,
+    CursorExpired,
     IntentRefused,
     ModelRefusal,
     ModelResponseTruncated,
     UntrustedContentError,
     asyncio.CancelledError,
+    httpx.HTTPStatusError,
     sa.exc.OperationalError,
     ValidationError,
     KeyError,

@@ -8,13 +8,17 @@ from pathlib import Path
 from typing import ClassVar
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
+import httpx
 import pytest
 import sqlalchemy as sa
 import ufo_ext_memory.manifest as memory_manifest
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from ufo_ext_embed_openai import EMBED_DIM
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.store import MemoryStore, PageIndexer, mem_page, recall_subjects
 
+from ufo import o11y
 from ufo.audience import conversation_audience
 from ufo.blob import FilesystemBlobStore
 from ufo.config import SourceConfig, SourceEntry
@@ -48,9 +52,13 @@ from ufo.jobs import (
 )
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
+from ufo.sources import rest, sync
+from ufo.sources.backend import ConnectorSourceConfig
 from ufo.sources.sync import (
     FOLDER_BACKEND,
+    SOURCE_SYNC_FAILED_METRIC,
     SOURCE_SYNC_JOB,
+    SYNC_PROVIDER_FAULT_MAX_CHARS,
     CorePageFeed,
     CursorExpired,
     FolderSource,
@@ -1763,11 +1771,18 @@ async def _seed_prior_page(workspace_id: UUID, source_id: UUID, source_ref: str)
 
 
 async def test_cursor_expired_clears_stored_cursor_and_next_run_refetches(
-    db: None, database_url: str, tmp_path: Path
+    db: None,
+    database_url: str,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A source on an expiring delta token must recover: when the backend raises `CursorExpired`,
     the driver clears the stored cursor so the next run refetches from scratch rather than
-    re-failing on the dead cursor forever."""
+    re-failing on the dead cursor forever. The reported run says which of the two it was:
+    `cursor_reset` separates a failure that dropped its cursor from one that resumed it, and the
+    counter carries the class itself rather than sharing one bucket with every unlisted class."""
+    reader = _meter(monkeypatch)
     workspace_id = await _workspace()
     source_id = await _seed_scripted_source(workspace_id, "stale-token")
     page = Page(
@@ -1785,11 +1800,22 @@ async def test_cursor_expired_clears_stored_cursor_and_next_run_refetches(
         tmp_path / "blobs",
     )
 
-    await _sync(driver)
+    with caplog.at_level(logging.INFO, logger="ufo"):
+        await _sync(driver)
     expired = await _source_state(source_id)
     assert backend.cursors == ["stale-token"]
     assert expired["cursor"] is None
     assert expired["consecutive_errors"] == 1
+    failure = _events(caplog, "source_sync.failed")[0]
+    assert failure.ufo["cursor_reset"] is True
+    assert failure.ufo["error_class"] == "CursorExpired"
+    assert _metric_points(reader, SYNC_METRIC) == [
+        {
+            "provider": SCRIPTED_BACKEND,
+            "stream": "",
+            "error_class": "CursorExpired",
+        }
+    ]
 
     await _make_due()
     await _sync(driver)
@@ -1985,10 +2011,11 @@ async def test_delta_delete_tombstones_only_named_page_never_blanket_sweeps(
 
 
 async def test_snapshot_fetch_tombstones_prior_pages_absent_from_the_fetch(
-    db: None, database_url: str, tmp_path: Path
+    db: None, database_url: str, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """A `snapshot=True` fetch is an authoritative full collection: a prior page the fetch no longer
-    holds is swept to a tombstone, while a page still present stays active."""
+    holds is swept to a tombstone, while a page still present stays active. The sweep names no
+    delete refs of its own, so what the run reports it tombstoned is counted off the write."""
     workspace_id = await _workspace()
     source_id = await _seed_scripted_source(workspace_id, None)
     gone_id = await _seed_prior_page(workspace_id, source_id, "gone/doc")
@@ -2003,26 +2030,29 @@ async def test_snapshot_fetch_tombstones_prior_pages_absent_from_the_fetch(
         [SyncResult(pages=(kept,), snapshot=True)], database_url, tmp_path / "blobs"
     )
 
-    await _sync(driver)
+    with caplog.at_level(logging.INFO, logger="ufo"):
+        await _sync(driver)
     assert await _tombstone(gone_id) is True  # absent from the authoritative snapshot → swept
     assert await _tombstone(kept_id) is False
+    synced = _events(caplog, "source_sync.ok")[0]
+    assert (synced.ufo["pages_fetched"], synced.ufo["pages_written"]) == (1, 1)
+    assert synced.ufo["pages_tombstoned"] == 1  # the swept page, named by no delete ref
 
 
 async def test_stream_skipped_records_a_skip_not_a_failure_and_never_tombstones(
-    db: None, database_url: str, tmp_path: Path
+    db: None,
+    database_url: str,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A backend that raises `StreamSkipped` (a scope/plan gate) records a skip, not a failure: the
-    error counter stays reset and the cursor is held, and the source's existing pages are never
-    swept. A sibling that raises a real error still fails, and a healthy sibling still syncs — the
-    both-ends proof that a controlled skip suppresses snapshot delete-detection while a genuine
-    fault does not."""
     workspace_id = await _workspace()
     skipped_id = await _seed_scripted_source(workspace_id, "held-cursor")
     kept_id = await _seed_prior_page(workspace_id, skipped_id, "kept/doc")
     good = tmp_path / "good"
     good.mkdir()
     (good / "doc.md").write_text("the wifi password is maple syrup")
-    missing = tmp_path / "missing"  # never created → FolderSource._read raises FileNotFoundError
+    missing = tmp_path / "missing"
     driver = SyncDriver(
         backends={
             SCRIPTED_BACKEND: _ScriptedSource(
@@ -2036,20 +2066,384 @@ async def test_stream_skipped_records_a_skip_not_a_failure_and_never_tombstones(
     await _register_folder(good)
     await _register_folder(missing)
     baseline = (await _source_state(skipped_id))["next_sync_at"]
+    real_log = sync.log
+
+    def _log_gone(event: str, **fields: object) -> None:
+        real_log(event, **fields)
+        raise RuntimeError("log pipeline unreachable")
+
+    monkeypatch.setattr(sync, "log", _log_gone)
+
+    with caplog.at_level(logging.INFO, logger="ufo"):
+        await _sync(driver)
+
+    skips = _events(caplog, "source_sync.skipped")
+    assert len(skips) == 1
+    assert skips[0].ufo == {
+        "workspace_id": str(workspace_id),
+        "source_id": str(skipped_id),
+        "provider": SCRIPTED_BACKEND,
+        "stream": "",
+        "reason": "github: org scope not granted (403)",
+    }
+    skip_state = await _source_state(skipped_id)
+    assert skip_state["consecutive_errors"] == 0
+    assert skip_state["cursor"] == "held-cursor"
+    assert skip_state["next_sync_at"] > baseline
+    assert await _tombstone(kept_id) is False
+
+    failed_id = source_row_id(workspace_id, FOLDER_BACKEND, {"root": str(missing)})
+    assert (await _source_state(failed_id))["consecutive_errors"] == 1
+
+    active = [page for page in await _pages() if page["tombstone"] in (False, 0)]
+    assert len(active) == 2
+
+
+CONNECTOR_PROVIDER = "slack"
+CONNECTOR_STREAM = "messages"
+CONNECTOR_ACCOUNT = "ca_T0ACME"
+SYNC_METRIC = f"ufo.{SOURCE_SYNC_FAILED_METRIC}"
+
+
+class _ConnectorSource:
+    """The scripted backend under a connector's config shape: one provider stream for one account,
+    which is what a registered Slack or GitHub source row is."""
+
+    config_model: ClassVar[type[ConnectorSourceConfig]] = ConnectorSourceConfig
+
+    def __init__(self, outcomes: list[SyncResult | Exception]) -> None:
+        self._outcomes = outcomes
+
+    async def fetch(
+        self, config: ConnectorSourceConfig, cursor: str | None, auth: SourceAuth
+    ) -> SyncResult:
+        outcome = self._outcomes.pop(0)
+        match outcome:
+            case Exception():
+                raise outcome
+            case _:
+                return outcome
+
+
+class _NeverOpens:
+    """A transaction that never opens, the way one fails against a pool with nothing left."""
+
+    async def __aenter__(self) -> object:
+        raise TimeoutError("connection pool exhausted")
+
+    async def __aexit__(self, *_: object) -> None: ...
+
+
+async def _seed_connector_source(workspace_id: UUID) -> UUID:
+    source_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.source).values(
+                id=source_id,
+                workspace_id=workspace_id,
+                backend=CONNECTOR_PROVIDER,
+                config={"account": CONNECTOR_ACCOUNT, "stream": CONNECTOR_STREAM},
+                cursor=None,
+                next_sync_at=sa.func.now(),
+                claimed_by=None,
+                claim_expires_at=None,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return source_id
+
+
+def _connector_driver(
+    outcomes: list[SyncResult | Exception], database_url: str, blob_root: Path
+) -> SyncDriver:
+    return SyncDriver(
+        backends={CONNECTOR_PROVIDER: _ConnectorSource(outcomes)},
+        blob=FilesystemBlobStore(root=blob_root),
+        postgres=database_url.startswith("postgresql"),
+    )
+
+
+def _meter(monkeypatch: pytest.MonkeyPatch) -> InMemoryMetricReader:
+    reader = InMemoryMetricReader()
+    provider = MeterProvider(metric_readers=[reader])
+    monkeypatch.setattr(o11y.metrics, "get_meter", provider.get_meter)
+    monkeypatch.setattr(o11y, "_counters", {})
+    return reader
+
+
+def _metric_points(reader: InMemoryMetricReader, name: str) -> list[dict[str, str]]:
+    return [
+        dict(point.attributes or {})
+        for resource in reader.get_metrics_data().resource_metrics
+        for scope in resource.scope_metrics
+        for metric in scope.metrics
+        if metric.name == name
+        for point in metric.data.data_points
+    ]
+
+
+def _events(caplog: pytest.LogCaptureFixture, event: str) -> list[logging.LogRecord]:
+    return [record for record in caplog.records if record.message == event]
+
+
+def _utc(when: datetime) -> datetime:
+    return when if when.tzinfo is not None else when.replace(tzinfo=UTC)
+
+
+async def test_a_failed_stream_reports_its_provider_stream_and_cause(
+    db: None,
+    database_url: str,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The event names the provider stream, the account, the class that raised, how many runs in a
+    row have failed and when the backoff lets the next one start — the same numbers the row lands on
+    — at error severity, where a sweep for failures looks. The counter carries provider and stream,
+    so an alert points at the source rather than at whatever the failure exhausted."""
+    reader = _meter(monkeypatch)
+    workspace_id = await _workspace()
+    source_id = await _seed_connector_source(workspace_id)
+    driver = _connector_driver(
+        [RuntimeError("provider 500: conversations.history")], database_url, tmp_path / "blobs"
+    )
+
+    with caplog.at_level(logging.INFO, logger="ufo"):
+        await _sync(driver)
+
+    state = await _source_state(source_id)
+    assert state["consecutive_errors"] == 1
+    failures = _events(caplog, "source_sync.failed")
+    assert len(failures) == 1
+    assert failures[0].levelno == logging.ERROR
+    assert failures[0].ufo == {
+        "workspace_id": str(workspace_id),
+        "source_id": str(source_id),
+        "provider": CONNECTOR_PROVIDER,
+        "stream": CONNECTOR_STREAM,
+        "account_id": CONNECTOR_ACCOUNT,
+        "error_class": "RuntimeError",
+        "provider_fault": "",
+        "consecutive_errors": 1,
+        "next_sync_at": _utc(state["next_sync_at"]).isoformat(),
+        "cursor_reset": False,
+    }
+    assert _metric_points(reader, SYNC_METRIC) == [
+        {
+            "provider": CONNECTOR_PROVIDER,
+            "stream": CONNECTOR_STREAM,
+            "error_class": "RuntimeError",
+        }
+    ]
+
+
+async def test_a_stream_whose_transaction_never_opened_still_reports_the_failure(
+    db: None,
+    database_url: str,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pool-exhaustion shape: every transaction after the claim times out, so the release that
+    would have counted the error cannot write either and the run dies with the error. The event is
+    emitted before that release, so the stream, its provider and the `TimeoutError` are on record
+    even though the row itself never took the error."""
+    workspace_id = await _workspace()
+    source_id = await _seed_connector_source(workspace_id)
+    driver = _connector_driver([SyncResult(pages=())], database_url, tmp_path / "blobs")
+    opened = 0
+    real_tx = sync.workspace_tx
+
+    def _only_the_claim_opens() -> object:
+        nonlocal opened
+        opened += 1
+        return real_tx() if opened == 1 else _NeverOpens()
+
+    monkeypatch.setattr(sync, "workspace_tx", _only_the_claim_opens)
+
+    with caplog.at_level(logging.INFO, logger="ufo"), pytest.raises(TimeoutError):
+        await _sync(driver)
+
+    monkeypatch.undo()
+    failures = _events(caplog, "source_sync.failed")
+    assert [
+        (record.ufo["provider"], record.ufo["stream"], record.ufo["error_class"])
+        for record in failures
+    ] == [(CONNECTOR_PROVIDER, CONNECTOR_STREAM, "TimeoutError")]
+    assert failures[0].ufo["consecutive_errors"] == 1
+    assert (await _source_state(source_id))["consecutive_errors"] == 0
+
+
+async def test_a_synced_stream_reports_what_it_wrote(
+    db: None,
+    database_url: str,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reader = _meter(monkeypatch)
+    workspace_id = await _workspace()
+    source_id = await _seed_connector_source(workspace_id)
+    gone_id = await _seed_prior_page(workspace_id, source_id, "C1/1600000000.1")
+    page = Page(
+        source_ref="C1/1700000000.1",
+        body="the deploy is green",
+        stream=CONNECTOR_STREAM,
+        title="#general",
+    )
+    driver = _connector_driver(
+        [
+            SyncResult(pages=(page,), deletes=("C1/1600000000.1", "C1/1500000000.1")),
+            SyncResult(pages=(page.model_copy(update={"title": "#deploys"}),)),
+        ],
+        database_url,
+        tmp_path / "blobs",
+    )
+
+    with caplog.at_level(logging.INFO, logger="ufo"):
+        await _sync(driver)
+        await _make_due()
+        await _sync(driver)
+
+    synced = _events(caplog, "source_sync.ok")
+    assert [record.levelno for record in synced] == [logging.INFO, logging.INFO]
+    assert synced[0].ufo == {
+        "workspace_id": str(workspace_id),
+        "source_id": str(source_id),
+        "provider": CONNECTOR_PROVIDER,
+        "stream": CONNECTOR_STREAM,
+        "account_id": CONNECTOR_ACCOUNT,
+        "pages_fetched": 1,
+        "pages_written": 1,
+        "pages_tombstoned": 1,
+    }
+    assert await _tombstone(gone_id) is True
+    assert (synced[1].ufo["pages_written"], synced[1].ufo["pages_tombstoned"]) == (1, 0)
+    assert not _events(caplog, "source_sync.failed")
+    assert reader.get_metrics_data() is None
+
+
+async def test_a_provider_fault_reports_its_status_and_url_and_never_its_body_or_a_key(
+    db: None,
+    database_url: str,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The record an operator reads must not be where a secret lands. A status error's message is
+    built out of the provider's response body, and a header a protocol rejects is quoted raw — the
+    key a member pasted with a trailing newline — so neither message reaches the pipeline: the fault
+    renders as the status and URL of the request that drew it, query dropped, and any other class is
+    named by `error_class` alone. On the counter a status is a class of its own, not a bucket it
+    shares with an extension's crash."""
+    reader = _meter(monkeypatch)
+    workspace_id = await _workspace()
+    await _seed_connector_source(workspace_id)
+    request = httpx.Request(
+        "GET", "https://slack.com/api/conversations.history?token=xoxb-SUPERSECRET&limit=200"
+    )
+    body = '{"ok":false,"error":"invalid_auth","provided":"xoxb-SUPERSECRET"}'
+    with pytest.raises(httpx.HTTPStatusError) as raised:
+        rest._raise_for_status(httpx.Response(401, text=body, request=request))
+    rejected_header = httpx.LocalProtocolError("Illegal header value b'Bearer xoxb-SUPERSECRET\\n'")
+    driver = _connector_driver([raised.value, rejected_header], database_url, tmp_path / "blobs")
+
+    with caplog.at_level(logging.INFO, logger="ufo"):
+        await _sync(driver)
+        await _make_due()
+        await _sync(driver)
+
+    failures = _events(caplog, "source_sync.failed")
+    assert [(record.ufo["error_class"], record.ufo["provider_fault"]) for record in failures] == [
+        ("HTTPStatusError", "401 GET https://slack.com/api/conversations.history"),
+        ("LocalProtocolError", ""),
+    ]
+    assert not [record for record in failures if "SUPERSECRET" in str(record.ufo)]
+    assert _metric_points(reader, SYNC_METRIC) == [
+        {
+            "provider": CONNECTOR_PROVIDER,
+            "stream": CONNECTOR_STREAM,
+            "error_class": "HTTPStatusError",
+        },
+        {
+            "provider": CONNECTOR_PROVIDER,
+            "stream": CONNECTOR_STREAM,
+            "error_class": "LocalProtocolError",
+        },
+    ]
+
+
+async def test_a_provider_fault_is_bounded_before_it_reaches_the_record(
+    db: None, database_url: str, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The URL is the provider's, not ours: a path built out of ids and filters runs as long as the
+    provider cares to make it, so the rendering is capped where it is emitted."""
+    workspace_id = await _workspace()
+    await _seed_connector_source(workspace_id)
+    request = httpx.Request(
+        "GET", "https://slack.com/api/" + "c" * (SYNC_PROVIDER_FAULT_MAX_CHARS * 2)
+    )
+    with pytest.raises(httpx.HTTPStatusError) as raised:
+        rest._raise_for_status(httpx.Response(429, text="ratelimited", request=request))
+    driver = _connector_driver([raised.value], database_url, tmp_path / "blobs")
+
+    with caplog.at_level(logging.INFO, logger="ufo"):
+        await _sync(driver)
+
+    fault = _events(caplog, "source_sync.failed")[0].ufo["provider_fault"]
+    assert fault.startswith("429 GET https://slack.com/api/c")
+    assert len(fault) == SYNC_PROVIDER_FAULT_MAX_CHARS
+
+
+async def test_telemetry_that_raises_never_breaks_the_sync_run(
+    db: None,
+    database_url: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await _workspace()
+    failing_id = await _seed_connector_source(workspace_id)
+    good = tmp_path / "good"
+    good.mkdir()
+    (good / "doc.md").write_text("the wifi password is maple syrup")
+    driver = SyncDriver(
+        backends={
+            CONNECTOR_PROVIDER: _ConnectorSource([RuntimeError("provider 500")]),
+            FOLDER_BACKEND: FolderSource(),
+        },
+        blob=FilesystemBlobStore(root=tmp_path / "blobs"),
+        postgres=database_url.startswith("postgresql"),
+    )
+    await _register_folder(good)
+
+    def _collector_gone(*_: object, **__: object) -> None:
+        raise RuntimeError("collector unreachable")
+
+    failure: list[tuple[object, object, object]] = []
+    success: list[tuple[object, object, object]] = []
+
+    def _log_error_gone(event: str, **fields: object) -> None:
+        assert event == "source_sync.failed"
+        failure.append((fields["provider"], fields["stream"], fields["error_class"]))
+        raise RuntimeError("log pipeline unreachable")
+
+    def _log_gone(event: str, **fields: object) -> None:
+        assert event == "source_sync.ok"
+        success.append((fields["provider"], fields["stream"], fields["pages_written"]))
+        raise RuntimeError("log pipeline unreachable")
+
+    monkeypatch.setattr(sync, "emit_metric", _collector_gone)
+    monkeypatch.setattr(sync, "log_error", _log_error_gone)
+    monkeypatch.setattr(sync, "log", _log_gone)
 
     await _sync(driver)
 
-    skip_state = await _source_state(skipped_id)
-    assert skip_state["consecutive_errors"] == 0  # a skip is not a failure
-    assert skip_state["cursor"] == "held-cursor"  # cursor held, not reset
-    assert skip_state["next_sync_at"] > baseline  # rescheduled and released, not stuck claimed
-    assert await _tombstone(kept_id) is False  # existing page not swept — no snapshot delete
-
-    failed_id = source_row_id(workspace_id, FOLDER_BACKEND, {"root": str(missing)})
-    assert (await _source_state(failed_id))["consecutive_errors"] == 1  # real error still fails
-
-    active = [page for page in await _pages() if page["tombstone"] in (False, 0)]
-    assert len(active) == 2  # the held page and the healthy sibling's page, both synced
+    assert (await _source_state(failing_id))["consecutive_errors"] == 1
+    assert len(await _pages()) == 1
+    assert await _claims(driver) == ()
+    assert failure == [(CONNECTOR_PROVIDER, CONNECTOR_STREAM, "RuntimeError")]
+    assert success == [(FOLDER_BACKEND, "", 1)]
 
 
 def test_source_sync_and_turn_dispatch_register_as_core_jobs(

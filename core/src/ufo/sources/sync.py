@@ -15,18 +15,21 @@ revision, and `PageFeed` — the seam threaded onto an extension's context — r
 to a downstream indexer under a `(revision, id)` cursor. The core `page` row carries source
 substrate and browse metadata;
 derivation state lives in the indexer's own mirror. The driver polls; it never fires on the writes
-it makes."""
+it makes. `source_sync.failed` and `source_sync_failed_total` name a failed provider stream;
+`source_sync.ok` records what a successful run wrote."""
 
 import asyncio
 import hashlib
 import json
 from collections.abc import Awaitable, Callable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import ClassVar, Protocol, TypeVar
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
+import httpx
 import sqlalchemy as sa
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -36,7 +39,7 @@ from ufo.blob import BlobStore
 from ufo.config import SourceConfig, SourceEntry
 from ufo.connectors import AuthProxy, SourceCredentialResolver
 from ufo.db import owner_tx, workspace_tx
-from ufo.o11y import log
+from ufo.o11y import emit_metric, log, log_error
 from ufo.schema import tables
 from ufo.subjects import SHARED_SUBJECT
 
@@ -48,6 +51,8 @@ SOURCE_ERROR_BACKOFF_CAP_SECONDS = 3600
 CLAIM_LEASE_SECONDS = 300
 DUE_BATCH_MAX_SOURCES = 50
 SOURCE_BLOB_PREFIX = "sources"
+SOURCE_SYNC_FAILED_METRIC = "source_sync_failed_total"
+SYNC_PROVIDER_FAULT_MAX_CHARS = 500
 
 
 def normalize_page_timestamp(value: str) -> str:
@@ -326,6 +331,19 @@ def _rescheduled(claimed: ClaimedSource, when: datetime) -> sa.Case[datetime]:
     )
 
 
+def _stream_tags(source: ClaimedSource) -> dict[str, str]:
+    """Which provider stream a sync outcome belongs to, as metric dimensions. A connector row is one
+    provider stream for one account (`ConnectorSourceConfig`), so the pair names the source a member
+    registered; a backend whose config declares no stream — the folder source — reports an empty
+    one, keeping the series bounded by the backends' own vocabulary."""
+    return {"provider": source.backend, "stream": _config_value(source, "stream")}
+
+
+def _config_value(source: ClaimedSource, key: str) -> str:
+    value = source.config.get(key)
+    return value if isinstance(value, str) else ""
+
+
 @dataclass(frozen=True)
 class PageBrowse:
     id: UUID
@@ -386,23 +404,19 @@ class SyncDriver:
                 result = await self._fetch(source)
                 await self._commit(source, result)
             except StreamSkipped as skipped:
-                log(
-                    "source_sync.skipped",
-                    source_id=str(source.source_id),
-                    backend=source.backend,
-                    reason=skipped.reason,
-                )
+                with suppress(Exception):
+                    log(
+                        "source_sync.skipped",
+                        source_id=str(source.source_id),
+                        **_stream_tags(source),
+                        reason=skipped.reason,
+                    )
                 await self._skip(source)
             except Exception as error:
                 cursor_reset = isinstance(error, CursorExpired)
-                log(
-                    "source_sync.failed",
-                    source_id=str(source.source_id),
-                    backend=source.backend,
-                    error_class=type(error).__name__,
-                    cursor_reset=cursor_reset,
-                )
-                await self._release(source, cursor_reset)
+                errors, next_sync_at = self._error_backoff(source, datetime.now(UTC))
+                self._report_failed(source, error, cursor_reset, errors, next_sync_at)
+                await self._release(source, cursor_reset, errors, next_sync_at)
 
     async def _claim_due(self, claim: str) -> tuple[ClaimedSource, ...]:
         now = datetime.now(UTC)
@@ -509,7 +523,7 @@ class SyncDriver:
             elif existing[2] != browse:
                 metadata.append(browse)
         deleted = [page_id_for(source.source_id, ref) for ref in result.deletes]
-        await self._write(
+        tombstoned = await self._write(
             source,
             result.next_cursor,
             changed,
@@ -518,6 +532,7 @@ class SyncDriver:
             deleted,
             result.snapshot,
         )
+        self._report_ok(source, len(result.pages), len(changed) + len(metadata), tombstoned)
 
     async def _prior_pages(self, source_id: UUID) -> dict[UUID, tuple[str, bool, PageBrowse]]:
         async with workspace_tx() as connection:
@@ -562,8 +577,10 @@ class SyncDriver:
         fetched: list[UUID],
         deleted: list[UUID],
         snapshot: bool,
-    ) -> None:
-        """Persist one fetched batch. The database orders material changes for `PageFeed`."""
+    ) -> int:
+        """Persist one fetched batch and return how many pages it tombstoned — the delete refs that
+        named a live row plus the snapshot sweep, which names no refs at all. The database orders
+        material changes for `PageFeed`."""
         now = datetime.now(UTC)
         async with workspace_tx() as connection:
             workspace_id = (await connection.execute(sa.select(tables.workspace.c.id))).scalar_one()
@@ -623,8 +640,9 @@ class SyncDriver:
                     )
                     .where(tables.page.c.id == browse_page.id)
                 )
+            tombstoned = 0
             if deleted:
-                await connection.execute(
+                swept = await connection.execute(
                     sa.update(tables.page)
                     .values(tombstone=True, updated_at=now)
                     .where(
@@ -633,8 +651,9 @@ class SyncDriver:
                         tables.page.c.id.in_(deleted),
                     )
                 )
+                tombstoned += swept.rowcount
             if snapshot:
-                await connection.execute(
+                swept = await connection.execute(
                     sa.update(tables.page)
                     .values(tombstone=True, updated_at=now)
                     .where(
@@ -643,6 +662,7 @@ class SyncDriver:
                         tables.page.c.id.not_in(fetched),
                     )
                 )
+                tombstoned += swept.rowcount
             await connection.execute(
                 sa.update(tables.page)
                 .values(subject=subject, updated_at=now)
@@ -670,27 +690,89 @@ class SyncDriver:
                     tables.source.c.removed_at.is_(None),
                 )
             )
+        return tombstoned
 
-    async def _release(self, source: ClaimedSource, cursor_reset: bool) -> None:
-        """Free a source whose fetch or commit raised: clear its claim, count the error, and push
-        next_sync_at forward by a bounded exponential backoff (base interval doubling per
-        consecutive error, capped) so a persistently-failing source neither blocks its siblings this
-        run nor hammers its provider every lease cycle — the backoff is this driver's own
-        rescheduling, so a resync requested while the failing sync ran stands instead
-        (`_rescheduled`). On `CursorExpired` the stored cursor is cleared so the next run refetches
-        from scratch; otherwise it resumes where it left off. A successful sync resets the counter
-        and the interval in `_write`."""
+    def _report_ok(
+        self, source: ClaimedSource, fetched: int, written: int, tombstoned: int
+    ) -> None:
+        with suppress(Exception):
+            log(
+                "source_sync.ok",
+                source_id=str(source.source_id),
+                **_stream_tags(source),
+                account_id=_config_value(source, "account"),
+                pages_fetched=fetched,
+                pages_written=written,
+                pages_tombstoned=tombstoned,
+            )
+
+    def _error_backoff(self, source: ClaimedSource, now: datetime) -> tuple[int, datetime]:
+        """A failing source's new error count and the moment its backoff lets the next run start:
+        the base interval doubling per consecutive error, capped. Computed before `_release` so the
+        failure event reports them even when the release is the transaction that cannot write."""
         errors = source.consecutive_errors + 1
         backoff = min(
             SOURCE_SYNC_INTERVAL_SECONDS * 2 ** (errors - 1), SOURCE_ERROR_BACKOFF_CAP_SECONDS
         )
-        now = datetime.now(UTC)
+        return errors, now + timedelta(seconds=backoff)
+
+    def _report_failed(
+        self,
+        source: ClaimedSource,
+        error: Exception,
+        cursor_reset: bool,
+        errors: int,
+        next_sync_at: datetime,
+    ) -> None:
+        """One stream's failure as evidence: which provider stream and account failed, what class
+        raised, how many runs in a row have failed now, and when the backoff lets the next one
+        start. The exception's own text stays out of the record — h11 quotes the raw header value it
+        rejects, which is the credential a member pasted, and `_raise_for_status` builds a status
+        error's message out of the provider's response body — so a provider fault renders as the
+        status and URL of the request that drew it, query dropped, bounded; any other class is named
+        by `error_class` alone. The log goes first and each emission is suppressed on its own: this
+        sits on the failure path, where a telemetry fault would replace the error it exists to
+        report and strand the claim the release is about to free, and where a fault reaching the
+        collector would leave a count with nothing to search."""
+        tags = _stream_tags(source)
+        error_class = type(error).__name__
+        with suppress(Exception):
+            fault = (
+                f"{error.response.status_code} {error.request.method} "
+                f"{error.request.url.copy_with(query=None)}"
+                if isinstance(error, httpx.HTTPStatusError)
+                else ""
+            )
+            log_error(
+                "source_sync.failed",
+                source_id=str(source.source_id),
+                **tags,
+                account_id=_config_value(source, "account"),
+                error_class=error_class,
+                provider_fault=fault[:SYNC_PROVIDER_FAULT_MAX_CHARS],
+                consecutive_errors=errors,
+                next_sync_at=next_sync_at.isoformat(),
+                cursor_reset=cursor_reset,
+            )
+        with suppress(Exception):
+            emit_metric(SOURCE_SYNC_FAILED_METRIC, **tags, error_class=error_class)
+
+    async def _release(
+        self, source: ClaimedSource, cursor_reset: bool, errors: int, next_sync_at: datetime
+    ) -> None:
+        """Free a source whose fetch or commit raised: clear its claim, count the error, and push
+        next_sync_at forward by the bounded exponential backoff `_error_backoff` computed, so a
+        persistently-failing source neither blocks its siblings this run nor hammers its provider
+        every lease cycle — the backoff is this driver's own rescheduling, so a resync requested
+        while the failing sync ran stands instead (`_rescheduled`). On `CursorExpired` the stored
+        cursor is cleared so the next run refetches from scratch; otherwise it resumes where it left
+        off. A successful sync resets the counter and the interval in `_write`."""
         async with workspace_tx() as connection:
             await connection.execute(
                 sa.update(tables.source)
                 .values(
                     cursor=None if cursor_reset else source.cursor,
-                    next_sync_at=_rescheduled(source, now + timedelta(seconds=backoff)),
+                    next_sync_at=_rescheduled(source, next_sync_at),
                     consecutive_errors=errors,
                     claimed_by=None,
                     claim_expires_at=None,

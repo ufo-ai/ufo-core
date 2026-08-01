@@ -11,10 +11,15 @@ from urllib.parse import urlparse
 import pytest
 import yaml
 
+from ufo.sources.sync import SOURCE_SYNC_FAILED_METRIC
+
 ROOT = Path(__file__).parents[2]
 WORKFLOWS = ROOT / ".github" / "workflows"
-MONITORS = ROOT / "infra" / "envs" / "testing" / "monitors.tf"
 DEPLOY_ENVIRONMENTS = ("testing", "prod")
+MONITORS = {
+    environment: ROOT / "infra" / "envs" / environment / "monitors.tf"
+    for environment in DEPLOY_ENVIRONMENTS
+}
 RUN_URL = "https://github.com/metalcraftai/ufo/actions/runs/30120902872"
 DATADOG_STATUS_OK = 0
 DATADOG_STATUS_CRITICAL = 2
@@ -51,10 +56,10 @@ def _step(job: str, name: str) -> dict[str, object]:
     return found[0]
 
 
-def _monitor_attribute(resource: str, attribute: str) -> str:
+def _monitor_attribute(resource: str, attribute: str, environment: str = "testing") -> str:
     block = re.search(
         rf'resource "datadog_monitor" "{resource}" {{\n(.*?)\n}}\n',
-        MONITORS.read_text(),
+        MONITORS[environment].read_text(),
         re.DOTALL,
     )
     assert block, resource
@@ -647,7 +652,7 @@ def test_every_main_deploy_conclusion_reaches_datadog(tmp_path: Path) -> None:
     step = _step("deploy", "Report the deploy conclusion to Datadog")
     assert step["if"] == "always() && github.ref_name == 'main'"
 
-    api_url = re.search(r'^  api_url += +"(\S+)"$', MONITORS.read_text(), re.MULTILINE)
+    api_url = re.search(r'^  api_url += +"(\S+)"$', MONITORS["testing"].read_text(), re.MULTILINE)
     assert api_url
 
     posted_to, failed = _report(tmp_path, "failure")
@@ -679,9 +684,23 @@ def test_the_deploy_monitor_watches_the_check_the_reporter_submits(tmp_path: Pat
     assert succeeded["status"] == DATADOG_STATUS_OK
 
 
-def test_every_monitor_notifies_a_reachable_handle() -> None:
-    monitors = re.findall(r'resource "datadog_monitor" "(\w+)"', MONITORS.read_text())
+@pytest.mark.parametrize("environment", DEPLOY_ENVIRONMENTS)
+def test_every_monitor_notifies_a_reachable_handle(environment: str) -> None:
+    monitors = re.findall(r'resource "datadog_monitor" "(\w+)"', MONITORS[environment].read_text())
     assert monitors
     for monitor in monitors:
-        message = _monitor_attribute(monitor, "message")
+        message = _monitor_attribute(monitor, "message", environment)
         assert re.search(r"@(?:slack-[\w-]+|[\w.-]+@[\w.-]+)", message), monitor
+
+
+@pytest.mark.parametrize("environment", DEPLOY_ENVIRONMENTS)
+def test_source_sync_failure_monitor_consumes_the_reported_metric(environment: str) -> None:
+    assert _monitor_attribute("source_sync_failed", "query", environment) == (
+        f"sum(last_15m):sum:ufo.{SOURCE_SYNC_FAILED_METRIC}{{env:{environment}}} "
+        "by {provider,stream}.as_count() >= 1"
+    )
+    message = _monitor_attribute("source_sync_failed", "message", environment)
+    assert "{{provider.name}}" in message
+    assert "{{stream.name}}" in message
+    assert _monitor_attribute("source_sync_failed", "critical", environment) == "1"
+    assert _monitor_attribute("source_sync_failed", "require_full_window", environment) == "false"
