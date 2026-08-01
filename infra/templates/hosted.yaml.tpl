@@ -67,6 +67,24 @@ spec:
     metadata:
       labels: {app: ufo-gateway}
     spec:
+%{ if workload_ha }
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels: {app: ufo-gateway}
+                topologyKey: kubernetes.io/hostname
+      topologySpreadConstraints:
+        - labelSelector:
+            matchLabels: {app: ufo-gateway}
+          maxSkew: 1
+          matchLabelKeys: [pod-template-hash]
+          nodeTaintsPolicy: Honor
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+%{ endif }
       serviceAccountName: ufo-gateway
       enableServiceLinks: false
       containers:
@@ -115,6 +133,19 @@ spec:
   selector: {app: ufo-gateway}
   ports:
     - {name: http, port: 80, targetPort: http}
+%{ if workload_ha }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: ufo-gateway
+  namespace: ${namespace}
+spec:
+  minAvailable: 1
+  unhealthyPodEvictionPolicy: AlwaysAllow
+  selector:
+    matchLabels: {app: ufo-gateway}
+%{ endif }
 ---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -194,6 +225,24 @@ spec:
     metadata:
       labels: {app: ufo-sandbox-proxy}
     spec:
+%{ if workload_ha }
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels: {app: ufo-sandbox-proxy}
+                topologyKey: kubernetes.io/hostname
+      topologySpreadConstraints:
+        - labelSelector:
+            matchLabels: {app: ufo-sandbox-proxy}
+          maxSkew: 1
+          matchLabelKeys: [pod-template-hash]
+          nodeTaintsPolicy: Honor
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+%{ endif }
       terminationGracePeriodSeconds: ${termination_grace_period_seconds}
       serviceAccountName: ufo-sandbox-proxy
       enableServiceLinks: false
@@ -278,6 +327,19 @@ spec:
             secretName: ufo-serve
             items:
               - {key: ufo.toml, path: ufo.toml}
+%{ if workload_ha }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: ufo-sandbox-proxy
+  namespace: ${namespace}
+spec:
+  minAvailable: 1
+  unhealthyPodEvictionPolicy: AlwaysAllow
+  selector:
+    matchLabels: {app: ufo-sandbox-proxy}
+%{ endif }
 ---
 # The sandbox ingress is the inbound twin of the egress proxy: a generic token-gated reverse proxy
 # from a public hostname to a conversation's live sandbox port. It runs from the ufo bundle image
@@ -302,6 +364,24 @@ spec:
     metadata:
       labels: {app: ufo-ingress}
     spec:
+%{ if workload_ha }
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels: {app: ufo-ingress}
+                topologyKey: kubernetes.io/hostname
+      topologySpreadConstraints:
+        - labelSelector:
+            matchLabels: {app: ufo-ingress}
+          maxSkew: 1
+          matchLabelKeys: [pod-template-hash]
+          nodeTaintsPolicy: Honor
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+%{ endif }
       terminationGracePeriodSeconds: ${termination_grace_period_seconds}
       enableServiceLinks: false
       containers:
@@ -350,6 +430,19 @@ spec:
             secretName: ufo-serve
             items:
               - {key: ufo.toml, path: ufo.toml}
+%{ if workload_ha }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: ufo-ingress
+  namespace: ${namespace}
+spec:
+  minAvailable: 1
+  unhealthyPodEvictionPolicy: AlwaysAllow
+  selector:
+    matchLabels: {app: ufo-ingress}
+%{ endif }
 ---
 apiVersion: v1
 kind: Service
@@ -440,6 +533,24 @@ spec:
     metadata:
       labels: {app: ufo-serve}
     spec:
+%{ if workload_ha }
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels: {app: ufo-serve}
+                topologyKey: kubernetes.io/hostname
+      topologySpreadConstraints:
+        - labelSelector:
+            matchLabels: {app: ufo-serve}
+          maxSkew: 1
+          matchLabelKeys: [pod-template-hash]
+          nodeTaintsPolicy: Honor
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+%{ endif }
       terminationGracePeriodSeconds: ${termination_grace_period_seconds}
       serviceAccountName: ufo-serve
       enableServiceLinks: false
@@ -501,6 +612,19 @@ spec:
             secretName: ufo-serve
             items:
               - {key: ufo.toml, path: ufo.toml}
+%{ if workload_ha }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: ufo-serve
+  namespace: ${namespace}
+spec:
+  minAvailable: 1
+  unhealthyPodEvictionPolicy: AlwaysAllow
+  selector:
+    matchLabels: {app: ufo-serve}
+%{ endif }
 ---
 apiVersion: v1
 kind: Service

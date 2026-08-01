@@ -1,6 +1,8 @@
 import re
 from pathlib import Path
 
+import yaml
+
 from ufo.serve import RESERVED_HOST_PREFIXES
 
 HOSTED_TEMPLATE = Path(__file__).resolve().parents[2] / "infra/templates/hosted.yaml.tpl"
@@ -22,6 +24,26 @@ SERVE_DEPLOYMENT = (
 )
 TESTING_CONFIG = Path(__file__).resolve().parents[2] / "infra/envs/testing/ufo.tf"
 PROD_CONFIG = Path(__file__).resolve().parents[2] / "infra/envs/prod/ufo.tf"
+PRODUCTION_WORKLOADS = ("ufo-gateway", "ufo-sandbox-proxy", "ufo-ingress", "ufo-serve")
+
+
+def _documents(workload_ha: bool) -> list[dict[str, object]]:
+    rendered = re.sub(
+        r"%\{ if workload_ha \}\n(.*?)%\{ endif \}\n",
+        lambda match: match.group(1) if workload_ha else "",
+        HOSTED_TEMPLATE.read_text(),
+        flags=re.DOTALL,
+    )
+    rendered = re.sub(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}", "value", rendered)
+    return list(yaml.safe_load_all(rendered))
+
+
+def _document(documents: list[dict[str, object]], kind: str, name: str) -> dict[str, object]:
+    return next(
+        document
+        for document in documents
+        if document["kind"] == kind and document["metadata"]["name"] == name
+    )
 
 
 def test_app_s3_trusts_serve_in_every_ufo_namespace() -> None:
@@ -81,6 +103,52 @@ def test_production_ingress_survives_a_node_or_zone_loss() -> None:
         '"service.beta.kubernetes.io/aws-load-balancer-attributes"      = '
         '"load_balancing.cross_zone.enabled=true"' in production
     )
+
+
+def test_production_workloads_survive_a_node_or_zone_loss() -> None:
+    assert re.search(r"^\s+workload_ha\s+= true$", PROD_CONFIG.read_text(), re.MULTILINE)
+    documents = _documents(True)
+    for name in PRODUCTION_WORKLOADS:
+        deployment = _document(documents, "Deployment", name)
+        pod = deployment["spec"]["template"]["spec"]
+        assert pod["affinity"]["podAntiAffinity"] == {
+            "preferredDuringSchedulingIgnoredDuringExecution": [
+                {
+                    "podAffinityTerm": {
+                        "labelSelector": {"matchLabels": {"app": name}},
+                        "topologyKey": "kubernetes.io/hostname",
+                    },
+                    "weight": 100,
+                }
+            ]
+        }
+        assert pod["topologySpreadConstraints"] == [
+            {
+                "labelSelector": {"matchLabels": {"app": name}},
+                "maxSkew": 1,
+                "matchLabelKeys": ["pod-template-hash"],
+                "nodeTaintsPolicy": "Honor",
+                "topologyKey": "topology.kubernetes.io/zone",
+                "whenUnsatisfiable": "DoNotSchedule",
+            }
+        ]
+        budget = _document(documents, "PodDisruptionBudget", name)
+        assert budget["spec"] == {
+            "minAvailable": 1,
+            "selector": {"matchLabels": {"app": name}},
+            "unhealthyPodEvictionPolicy": "AlwaysAllow",
+        }
+
+
+def test_testing_workloads_keep_the_current_placement() -> None:
+    assert re.search(r"^\s+workload_ha\s+= false$", TESTING_CONFIG.read_text(), re.MULTILINE)
+    documents = _documents(False)
+    assert not [document for document in documents if document["kind"] == "PodDisruptionBudget"]
+    for name in PRODUCTION_WORKLOADS:
+        deployment = _document(documents, "Deployment", name)
+        pod = deployment["spec"]["template"]["spec"]
+        assert "affinity" not in pod
+        assert "topologySpreadConstraints" not in pod
 
 
 def test_hosted_serve_rolls_all_replacements_before_draining() -> None:

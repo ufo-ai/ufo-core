@@ -1383,10 +1383,15 @@ def test_runtime_rollout_drains_before_the_proxy_gate(job_name: str) -> None:
     templates = ROOT / "infra" / "templates"
     manifests = [
         document
-        for name in ("hosted", "observability", "cluster-services")
-        for document in yaml.safe_load_all(
-            re.sub(r"\$\{([^}]+)\}", r"\1", (templates / f"{name}.yaml.tpl").read_text())
+        for source in (
+            re.sub(
+                r"(?m)^%\{ (?:if workload_ha|endif) \}\n?",
+                "",
+                (templates / f"{name}.yaml.tpl").read_text(),
+            )
+            for name in ("hosted", "observability", "cluster-services")
         )
+        for document in yaml.safe_load_all(re.sub(r"\$\{([^}]+)\}", r"\1", source))
         if isinstance(document, dict)
     ]
     readiness_resources = {

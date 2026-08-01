@@ -197,6 +197,7 @@ data "kubectl_file_documents" "hosted" {
     bundle_image                     = local.bundle_image
     e2b_template                     = var.e2b_template
     serve_role_arn                   = module.platform.app_s3_role_arn
+    workload_ha                      = false
     prestop_seconds                  = local.prestop_seconds
     termination_grace_period_seconds = local.prestop_seconds + local.request_shutdown_seconds + local.graceful_shutdown_seconds + 60
 
