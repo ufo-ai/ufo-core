@@ -194,7 +194,7 @@ function Question({ agent, question }: { agent: Agent; question: ChatQuestion })
       <div>{question.title}</div>
       {asked.map((entry, index) =>
         answered.includes(index) ? null : (
-          <div key={index} className="qrow flex flex-col gap-xs">
+          <div key={index} className="flex flex-col gap-xs">
             <div>{entry.header ? entry.header + " — " + entry.question : entry.question}</div>
             {buttonable(entry) ? (
               <div className="flex flex-wrap gap-xs">

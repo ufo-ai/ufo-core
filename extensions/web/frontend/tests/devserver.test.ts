@@ -11,8 +11,8 @@ test("a page navigation is served by this server, not the fleet's built tree", (
 });
 
 test("the module under edit is served by this server", () => {
-  expect(routed("GET", "/surface/web/static/src/portal.js")).toBe(
-    "/surface/web/static/src/portal.js"
+  expect(routed("GET", "/surface/web/static/src/main.tsx")).toBe(
+    "/surface/web/static/src/main.tsx"
   );
   expect(routed("GET", "/surface/web/static")).toBe("/surface/web/static");
 });

@@ -179,3 +179,14 @@ test("an answer whose response is not json ends the wait rather than hanging", a
   await userEvent.click(await screen.findByRole("button", { name: "Work" }));
   expect(await screen.findByText("Network error — try again.")).toBeTruthy();
 });
+
+test("an answer the server refuses states its status rather than hanging", async () => {
+  await asked(ENTRY);
+  wire({
+    "/transcript": () => json({ messages: [] }),
+    "/chat": () => new Response("nope", { status: 503 }),
+  });
+
+  await userEvent.click(await screen.findByRole("button", { name: "Work" }));
+  expect(await screen.findByText("Error 503 — try again.")).toBeTruthy();
+});

@@ -281,7 +281,7 @@ test("Escape dismisses the viewer", async () => {
   await waitFor(() => expect(screen.queryByText("body")).toBeNull());
 });
 
-test("a body arriving after the viewer closed never paints over the listing", async () => {
+test("closing the viewer discards a body still in flight", async () => {
   let releaseFirst: ((value: Response) => void) | null = null;
   vi.stubGlobal(
     "fetch",

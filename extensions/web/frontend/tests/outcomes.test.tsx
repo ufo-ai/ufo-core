@@ -100,6 +100,7 @@ test("a stored credential states the slot it stored and re-reads the listing", a
         message: "",
         turn_id: TURN_ID,
         credentials: {
+          reason: "models authenticates with this value.",
           sealed: "seal-token",
           prompts: [{ slot: "OPENAI_API_KEY", prompt: "the key" }],
         },
@@ -154,4 +155,76 @@ test("two acts in a row each re-read, even though the server answers one constan
   const again = await screen.findAllByRole("button", { name: "Clear" });
   await userEvent.click(again[1]);
   await waitFor(() => expect(reads).toBe(3));
+});
+
+const REQUESTED = {
+  applied: true,
+  message: "",
+  turn_id: TURN_ID,
+  credentials: {
+    reason: "models authenticates with this value.",
+    sealed: "seal-token",
+    prompts: [{ slot: "OPENAI_API_KEY", prompt: "the key" }],
+  },
+};
+
+test("an empty slot offers Set, and a refused act states the refusal in place", async () => {
+  location.hash = "#/workspace/credentials";
+  wire({
+    "/workspace/credentials": () => json({ slots: [{ ...SLOT, filled: false }] }),
+    "/intents": () => json({ applied: false, message: "Only an admin may set it." }),
+  });
+  render(<App agents={[AGENT]} member={ADMIN} />);
+
+  await userEvent.click(await screen.findByRole("button", { name: "Set" }));
+
+  expect(await screen.findByText("Only an admin may set it.")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Clear" })).toBe(null);
+});
+
+test("a workspace with no declared slots says so", async () => {
+  location.hash = "#/workspace/credentials";
+  wire({ "/workspace/credentials": () => json({ slots: [] }) });
+  render(<App agents={[AGENT]} member={ADMIN} />);
+
+  expect(await screen.findByText("No credential slots are declared.")).toBeTruthy();
+});
+
+test("the secret field hides what a member types and refuses whitespace", async () => {
+  location.hash = "#/workspace/credentials";
+  const posts: string[] = [];
+  wire({
+    "/workspace/credentials": () => json({ slots: [SLOT] }),
+    "/intents": () => json(REQUESTED),
+    "/credentials": (_url, init) => {
+      posts.push(String(init?.body));
+      return json({ stored: true });
+    },
+  });
+  render(<App agents={[AGENT]} member={ADMIN} />);
+
+  await userEvent.click(await screen.findByRole("button", { name: "Replace" }));
+  const field = await screen.findByPlaceholderText("OPENAI_API_KEY");
+  expect(field.getAttribute("type")).toBe("password");
+
+  await userEvent.type(field, "   ");
+  await userEvent.click(screen.getByRole("button", { name: "Store" }));
+  expect(posts.length).toBe(0);
+});
+
+test("a refused store states the reason the server gave and keeps the field", async () => {
+  location.hash = "#/workspace/credentials";
+  wire({
+    "/workspace/credentials": () => json({ slots: [SLOT] }),
+    "/intents": () => json(REQUESTED),
+    "/credentials": () => new Response("that seal has expired", { status: 400 }),
+  });
+  render(<App agents={[AGENT]} member={ADMIN} />);
+
+  await userEvent.click(await screen.findByRole("button", { name: "Replace" }));
+  await userEvent.type(await screen.findByPlaceholderText("OPENAI_API_KEY"), "sk-live");
+  await userEvent.click(screen.getByRole("button", { name: "Store" }));
+
+  expect(await screen.findByText("the key — that seal has expired.")).toBeTruthy();
+  expect(screen.getByPlaceholderText("OPENAI_API_KEY")).toBeTruthy();
 });

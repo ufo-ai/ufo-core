@@ -1606,7 +1606,7 @@ def test_only_declared_asset_suffixes_are_served(tmp_path: Path) -> None:
     (assets / "chunks.js").mkdir()
     (assets / "index-abc.js").write_text("boot()")
     (assets / "index-abc.css").write_text("body{}")
-    (assets / "index-abc.js.map").write_text('{"sources":["portal.js"]}')
+    (assets / "index-abc.js.map").write_text('{"sources":["main.tsx"]}')
     (assets / ".DS_Store").write_bytes(b"\x00")
 
     served = load_assets(assets)

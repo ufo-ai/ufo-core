@@ -21,7 +21,7 @@ type Conversation = {
   created_at: string;
   last_turn_at: string | null;
   readable: boolean;
-  disclosable?: boolean;
+  disclosable: boolean;
 };
 
 type Turn = {

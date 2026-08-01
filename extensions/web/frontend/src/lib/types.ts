@@ -58,7 +58,7 @@ export type CredentialPrompt = { slot: string; prompt: string; stored?: boolean 
 
 export type CredentialRequest = {
   sealed: string;
-  reason?: string;
+  reason: string;
   prompts: CredentialPrompt[];
 };
 

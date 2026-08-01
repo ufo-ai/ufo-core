@@ -44,8 +44,8 @@ test("the rule routes each request through the predicate", async () => {
   const routed = (method: string, url: string) =>
     bypass({ method, url } as never, undefined as never, undefined as never);
   expect(routed("GET", "/surface/web")).toBe("/index.html");
-  expect(routed("GET", "/surface/web/static/src/portal.js")).toBe(
-    "/surface/web/static/src/portal.js"
+  expect(routed("GET", "/surface/web/static/src/main.tsx")).toBe(
+    "/surface/web/static/src/main.tsx"
   );
   expect(routed("GET", "/surface/web/static")).toBe("/surface/web/static");
   expect(routed("POST", "/surface/web")).toBeUndefined();
