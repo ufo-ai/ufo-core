@@ -172,21 +172,10 @@ bot token (`UFO_CONTROL_SLACK_CONNECT_BOT_TOKEN`, its own Secret through an expl
 `UFO_CONTROL_SLACK_CONNECT_ENABLED` defaults to false; enabled, a missing token or team ID fails
 gateway startup.
 
-Production runtime secret containers have no Terraform-managed version. The first production deploy
-creates the containers, then stops with `has no current value` until the operator bootstraps them and
-reruns the deploy. Prepare `/tmp/ufo-production-runtime-secrets.json` with exactly two objects:
-`api-keys` holds every property in `infra/production_secrets.py`'s `API_KEYS_PROPERTIES`, and
-`gateway-slack-connect` holds `bot-token`. Bootstrap or replace those production-owned values with:
-
-```bash
-PRODUCTION_API_KEYS_SECRET_ID="$(terraform -chdir=infra/envs/prod output -raw api_keys_secret_id)" \
-PRODUCTION_GATEWAY_SECRET_ID="$(terraform -chdir=infra/envs/prod output -raw gateway_secret_id)" \
-  uv run python infra/production_secrets.py bootstrap < /tmp/ufo-production-runtime-secrets.json
-```
-
-The script validates both complete documents before writing either one and sends values to AWS
-Secrets Manager through stdin. Deploys preserve those values and refresh the Datadog, E2B, and
-OpenAI keys from repository secrets.
+Production runtime secret containers have no Terraform-managed version. The deployment initializes
+missing documents with their exact schemas, refreshes Anthropic, Datadog, E2B, and OpenAI from
+repository secrets, and preserves every other production-owned value. It validates both complete
+documents before writing either one and sends values to AWS Secrets Manager through stdin.
 
 ## Web login
 

@@ -5,6 +5,7 @@ imports a core internal."""
 
 import json
 
+import pytest
 import ufo_ext_coding.connect as connect
 import ufo_ext_coding.manifest as coding
 
@@ -14,6 +15,40 @@ from ufo.loop.subagents import FINISH_CONTRACT, subagent_system_prompt
 from ufo.tools.builtins import BUILTIN_TOOLS
 
 TOOL_NARRATION = "connecting their GitHub"
+
+
+def test_empty_github_app_registration_is_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in (
+        coding.GIT_APP_ID_ENV,
+        coding.GIT_APP_CLIENT_ID_ENV,
+        coding.GIT_APP_SECRET_ENV,
+        coding.GIT_APP_KEY_ENV,
+    ):
+        monkeypatch.setenv(name, "")
+    assert coding.github_app_id() is None
+
+
+@pytest.mark.parametrize(
+    "missing",
+    (
+        coding.GIT_APP_ID_ENV,
+        coding.GIT_APP_CLIENT_ID_ENV,
+        coding.GIT_APP_SECRET_ENV,
+        coding.GIT_APP_KEY_ENV,
+    ),
+)
+def test_partial_github_app_registration_fails(
+    monkeypatch: pytest.MonkeyPatch, missing: str
+) -> None:
+    for name in (
+        coding.GIT_APP_ID_ENV,
+        coding.GIT_APP_CLIENT_ID_ENV,
+        coding.GIT_APP_SECRET_ENV,
+        coding.GIT_APP_KEY_ENV,
+    ):
+        monkeypatch.setenv(name, "" if name == missing else "value")
+    with pytest.raises(RuntimeError, match=missing):
+        coding.github_app_id()
 
 
 def test_coding_manifest_registers_a_single_coding_profile() -> None:

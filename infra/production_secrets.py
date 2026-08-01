@@ -13,6 +13,7 @@ DEPLOYMENT_ID_ENV = "PRODUCTION_DEPLOYMENT_ID"
 API_KEYS_SECRET_ID_ENV = "PRODUCTION_API_KEYS_SECRET_ID"
 GATEWAY_SECRET_ID_ENV = "PRODUCTION_GATEWAY_SECRET_ID"
 API_KEY_INPUTS = {
+    "anthropic-api-key": "ANTHROPIC_API_KEY",
     "datadog-api-key": "DD_API_KEY",
     "e2b-api-key": "E2B_API_KEY",
     "openai-api-key": "OPENAI_API_KEY",
@@ -48,14 +49,13 @@ API_KEYS_PROPERTIES = frozenset(
 )
 GATEWAY_PROPERTIES = frozenset({"bot-token"})
 SECRET_INPUTS = frozenset(API_KEY_INPUTS.values())
-BOOTSTRAP_PROPERTIES = frozenset({"api-keys", "gateway-slack-connect"})
 
 
 @dataclass(frozen=True)
 class SecretWrite:
     secret_id: str
     payload: bytes
-    deployment_id: str | None
+    deployment_id: str
 
     @property
     def command(self) -> tuple[str, ...]:
@@ -70,8 +70,6 @@ class SecretWrite:
             "--secret-string",
             "file:///dev/stdin",
         )
-        if self.deployment_id is None:
-            return (*command, "--no-cli-pager")
         return (
             *command,
             "--client-request-token",
@@ -127,36 +125,13 @@ def production_secret_writes(
     )
 
 
-def bootstrap_secret_writes(
-    environment: Mapping[str, str], bootstrap_payload: bytes
-) -> tuple[SecretWrite, ...]:
-    try:
-        value = json.loads(bootstrap_payload)
-    except json.JSONDecodeError as error:
-        raise RuntimeError("production bootstrap input must contain valid JSON") from error
-    if not isinstance(value, dict) or set(value) != BOOTSTRAP_PROPERTIES:
-        raise RuntimeError("production bootstrap input must contain the exact secret documents")
-    api_keys_secret_id = _required(environment, API_KEYS_SECRET_ID_ENV)
-    gateway_secret_id = _required(environment, GATEWAY_SECRET_ID_ENV)
-    api_keys = _payload(
-        json.dumps(value["api-keys"]).encode(), API_KEYS_PROPERTIES, api_keys_secret_id
-    )
-    gateway = _payload(
-        json.dumps(value["gateway-slack-connect"]).encode(),
-        GATEWAY_PROPERTIES,
-        gateway_secret_id,
-    )
-    return (
-        SecretWrite(api_keys_secret_id, _json(api_keys), None),
-        SecretWrite(gateway_secret_id, _json(gateway), None),
-    )
-
-
 def _aws_environment(environment: Mapping[str, str]) -> dict[str, str]:
     return {name: value for name, value in environment.items() if name not in SECRET_INPUTS}
 
 
-def _read_secret(secret_id: str, environment: Mapping[str, str]) -> bytes:
+def _read_secret(
+    secret_id: str, properties: frozenset[str], environment: Mapping[str, str]
+) -> bytes:
     result = subprocess.run(
         (
             "aws",
@@ -182,24 +157,21 @@ def _read_secret(secret_id: str, environment: Mapping[str, str]) -> bytes:
         result.returncode == 254
         and b"An error occurred (ResourceNotFoundException)" in result.stderr
     ):
-        raise RuntimeError(f"{secret_id} has no current value")
+        return _json(dict.fromkeys(properties, ""))
     result.check_returncode()
     raise AssertionError
 
 
 def main(arguments: Sequence[str] = ()) -> None:
-    if tuple(arguments) == ("bootstrap",):
-        writes = bootstrap_secret_writes(os.environ, sys.stdin.buffer.read())
-    elif arguments:
-        raise RuntimeError("usage: production_secrets.py [bootstrap]")
-    else:
-        api_keys_secret_id = _required(os.environ, API_KEYS_SECRET_ID_ENV)
-        gateway_secret_id = _required(os.environ, GATEWAY_SECRET_ID_ENV)
-        writes = production_secret_writes(
-            os.environ,
-            _read_secret(api_keys_secret_id, os.environ),
-            _read_secret(gateway_secret_id, os.environ),
-        )
+    if arguments:
+        raise RuntimeError("usage: production_secrets.py")
+    api_keys_secret_id = _required(os.environ, API_KEYS_SECRET_ID_ENV)
+    gateway_secret_id = _required(os.environ, GATEWAY_SECRET_ID_ENV)
+    writes = production_secret_writes(
+        os.environ,
+        _read_secret(api_keys_secret_id, API_KEYS_PROPERTIES, os.environ),
+        _read_secret(gateway_secret_id, GATEWAY_PROPERTIES, os.environ),
+    )
     for write in writes:
         subprocess.run(
             write.command,

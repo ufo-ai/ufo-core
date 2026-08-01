@@ -1233,6 +1233,7 @@ def test_production_deploy_applies_guarded_foundation_then_runtime() -> None:
     assert secrets == {
         "name": "Write production runtime secrets",
         "env": {
+            "ANTHROPIC_API_KEY": "${{ secrets.ANTHROPIC_API_KEY }}",
             "DD_API_KEY": "${{ secrets.DD_API_KEY }}",
             "E2B_API_KEY": "${{ secrets.E2B_API_KEY }}",
             "OPENAI_API_KEY": "${{ secrets.OPENAI_API_KEY }}",

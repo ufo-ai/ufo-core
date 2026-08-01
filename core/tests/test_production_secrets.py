@@ -2,7 +2,6 @@ import json
 import os
 import re
 import subprocess
-import sys
 from hashlib import sha256
 from pathlib import Path
 
@@ -16,7 +15,6 @@ from infra.production_secrets import (
     DEPLOYMENT_ID_ENV,
     GATEWAY_PROPERTIES,
     GATEWAY_SECRET_ID_ENV,
-    bootstrap_secret_writes,
     main,
     production_secret_writes,
 )
@@ -29,6 +27,7 @@ def _environment(deployment_id: str = "run-1") -> dict[str, str]:
         API_KEYS_SECRET_ID_ENV: "generated/api-keys",
         DEPLOYMENT_ID_ENV: deployment_id,
         GATEWAY_SECRET_ID_ENV: "generated/gateway",
+        "ANTHROPIC_API_KEY": "anthropic-value",
         "DD_API_KEY": "datadog-value",
         "E2B_API_KEY": "e2b-value",
         "OPENAI_API_KEY": "openai-value",
@@ -94,6 +93,7 @@ def test_production_secret_writes_preserve_owned_values() -> None:
     assert [write.secret_id for write in writes] == ["generated/api-keys", "generated/gateway"]
     api_keys = json.loads(writes[0].payload)
     assert set(api_keys) == API_KEYS_PROPERTIES
+    assert api_keys["anthropic-api-key"] == "anthropic-value"
     assert api_keys["datadog-api-key"] == "datadog-value"
     assert api_keys["e2b-api-key"] == "e2b-value"
     assert api_keys["openai-api-key"] == "openai-value"
@@ -108,76 +108,12 @@ def test_production_secret_writes_preserve_owned_values() -> None:
         sha256(f"run-1\0{write.secret_id}\0".encode() + write.payload).hexdigest()
         for write in writes
     ]
-    values = ["datadog-value", "e2b-value", "openai-value"]
+    values = ["anthropic-value", "datadog-value", "e2b-value", "openai-value"]
     assert all(value not in part for write in writes for value in values for part in write.command)
-
-
-def _bootstrap_payload() -> bytes:
-    return json.dumps(
-        {
-            "api-keys": json.loads(_payload(API_KEYS_PROPERTIES)),
-            "gateway-slack-connect": json.loads(_payload(GATEWAY_PROPERTIES)),
-        }
-    ).encode()
-
-
-def test_bootstrap_secret_writes_accept_production_owned_values() -> None:
-    writes = bootstrap_secret_writes(_environment(), _bootstrap_payload())
-    assert [write.secret_id for write in writes] == ["generated/api-keys", "generated/gateway"]
-    assert json.loads(writes[0].payload) == json.loads(_payload(API_KEYS_PROPERTIES))
-    assert json.loads(writes[1].payload) == json.loads(_payload(GATEWAY_PROPERTIES))
-    assert all("file:///dev/stdin" in write.command for write in writes)
-    assert all("--client-request-token" not in write.command for write in writes)
-    values = [item for write in writes for item in json.loads(write.payload).values()]
-    assert all(value not in part for write in writes for value in values for part in write.command)
-
-
-@pytest.mark.parametrize(
-    ("payload", "error"),
-    (
-        (b"not-json", "must contain valid JSON"),
-        (
-            b'["api-keys","gateway-slack-connect"]',
-            "must contain the exact secret documents",
-        ),
-        (b'{"api-keys":{}}', "must contain the exact secret documents"),
-        (
-            json.dumps(json.loads(_bootstrap_payload()) | {"unknown": {}}).encode(),
-            "must contain the exact secret documents",
-        ),
-        (
-            json.dumps(
-                json.loads(_bootstrap_payload()) | {"api-keys": {"unknown": "value"}}
-            ).encode(),
-            "generated/api-keys must contain the exact secret properties",
-        ),
-        (
-            json.dumps(
-                json.loads(_bootstrap_payload()) | {"gateway-slack-connect": ["bot-token"]}
-            ).encode(),
-            "generated/gateway must contain the exact secret properties",
-        ),
-        (
-            json.dumps(
-                json.loads(_bootstrap_payload()) | {"gateway-slack-connect": {"bot-token": None}}
-            ).encode(),
-            "generated/gateway properties must be strings",
-        ),
-    ),
-)
-def test_bootstrap_secret_writes_reject_invalid_document(payload: bytes, error: str) -> None:
-    with pytest.raises(RuntimeError, match=error):
-        bootstrap_secret_writes(_environment(), payload)
-
-
-@pytest.mark.parametrize("name", [API_KEYS_SECRET_ID_ENV, GATEWAY_SECRET_ID_ENV])
-def test_bootstrap_secret_writes_reject_missing_secret_ids(name: str) -> None:
-    with pytest.raises(RuntimeError, match=name):
-        bootstrap_secret_writes(_environment() | {name: ""}, _bootstrap_payload())
 
 
 def test_main_rejects_unknown_arguments() -> None:
-    with pytest.raises(RuntimeError, match=r"usage: production_secrets\.py \[bootstrap\]"):
+    with pytest.raises(RuntimeError, match=r"usage: production_secrets\.py"):
         main(("unknown",))
 
 
@@ -313,37 +249,34 @@ def test_main_preserves_production_values_through_stdin(
     ]
 
 
-def test_bootstrap_main_writes_production_values_through_stdin(tmp_path: Path) -> None:
-    _stub_aws(tmp_path)
-    environment, output = _stub_environment(tmp_path)
-
-    result = subprocess.run(
-        [sys.executable, str(ROOT / "infra" / "production_secrets.py"), "bootstrap"],
-        input=_bootstrap_payload(),
-        capture_output=True,
-        env=environment,
-        check=True,
-    )
-
-    calls = [json.loads(line) for line in output.read_text().splitlines()]
-    writes = bootstrap_secret_writes(environment, _bootstrap_payload())
-    assert result.stdout == b""
-    assert [call["argv"] for call in calls] == [list(write.command[1:]) for write in writes]
-    assert [call["stdin"].encode() for call in calls] == [write.payload for write in writes]
-    assert all(value is None for call in calls for value in call["inputs"].values())
-
-
 @pytest.mark.parametrize("secret_id", ["generated/api-keys", "generated/gateway"])
-def test_main_rejects_missing_production_values(
+def test_main_initializes_missing_production_values(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, secret_id: str
 ) -> None:
     _stub_aws(tmp_path)
-    environment, _ = _stub_environment(tmp_path)
+    environment, output = _stub_environment(tmp_path)
     environment["AWS_STUB_MISSING_ID"] = secret_id
     monkeypatch.setattr(production_secrets.os, "environ", environment)
 
-    with pytest.raises(RuntimeError, match=rf"{re.escape(secret_id)} has no current value"):
-        main()
+    main()
+
+    calls = [json.loads(line) for line in output.read_text().splitlines()]
+    puts = [call for call in calls if call["argv"][1] == "put-secret-value"]
+    assert len(puts) == 2
+    written = {
+        call["argv"][call["argv"].index("--secret-id") + 1]: json.loads(call["stdin"])
+        for call in puts
+    }
+    if secret_id.endswith("api-keys"):
+        expected = dict.fromkeys(API_KEYS_PROPERTIES, "") | {
+            "anthropic-api-key": "anthropic-value",
+            "datadog-api-key": "datadog-value",
+            "e2b-api-key": "e2b-value",
+            "openai-api-key": "openai-value",
+        }
+    else:
+        expected = {"bot-token": ""}
+    assert written[secret_id] == expected
 
 
 def test_main_propagates_read_failure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

@@ -93,17 +93,16 @@ def github_app_id() -> str | None:
     """The deploy's App registration, all of it or none: an id without a client id or a readable key
     is a deploy whose members would be told to connect GitHub and then silently answered with
     member-token-only mode, with no signal which half is missing."""
-    app_id = os.environ.get(GIT_APP_ID_ENV)
-    if app_id is None:
+    registration = {
+        name: os.environ.get(name)
+        for name in (GIT_APP_ID_ENV, GIT_APP_CLIENT_ID_ENV, GIT_APP_SECRET_ENV, GIT_APP_KEY_ENV)
+    }
+    if not any(registration.values()):
         return None
-    missing = [
-        name
-        for name in (GIT_APP_CLIENT_ID_ENV, GIT_APP_SECRET_ENV, GIT_APP_KEY_ENV)
-        if not os.environ.get(name)
-    ]
+    missing = [name for name, value in registration.items() if not value]
     if missing:
-        raise RuntimeError(f"{GIT_APP_ID_ENV} is set but {', '.join(missing)} is not")
-    return app_id
+        raise RuntimeError(f"{', '.join(missing)} must be set with the GitHub App registration")
+    return registration[GIT_APP_ID_ENV]
 
 
 GIT_CREDENTIAL = CredentialSlot(
