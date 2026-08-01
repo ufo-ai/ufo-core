@@ -20,6 +20,8 @@ import tempfile
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
+from stat import S_ISREG
+from uuid import uuid4
 
 from ufo.sandbox.session import (
     NO_PROXY_HOSTS,
@@ -37,6 +39,8 @@ LOCAL_PROXY_HOST = "127.0.0.1"
 CA_FILENAME = "egress-ca.pem"
 EXEC_TIMEOUT_CODE = 124
 READ_CHUNK_BYTES = 1024 * 1024
+WORKSPACE_WRITE_PREFIX = "ufo-write-"
+MODE_BITS = 0o777
 SANDBOX_BINARIES = ("sbx", "sbxfs")
 
 
@@ -144,10 +148,36 @@ class LocalCarrier:
 
     async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None:
         """The workspace is a host directory, so the copy-in is a host write under it — off the
-        loop, since the filesystem has no async API."""
-        target = _host_path(handle, path)
+        loop, since the filesystem has no async API. Written beside the target and renamed onto it,
+        so a reader of the path sees the whole of one write or the whole of the one before: two
+        writers racing the same path are ordinary here, since a surface may deliver a file twice.
+
+        The sidecar's name is its own, not the target's with a suffix, so the longest filename that
+        fits a directory still fits; it is removed on any failure, since the workspace listing is
+        the member's own file list and an orphan would appear in it as a file they never made. It is
+        the target's sibling, so a target that is the workspace root is refused before any byte is
+        written: the root's sibling is another conversation's workspace. A rename installs a new
+        inode, so an overwrite carries the mode across and an executable a turn produced stays
+        executable for the turn that runs it — read once and without following links, so a delete
+        racing the write still ends in a created file and a symlinked target cannot pull an outside
+        file's mode onto an in-workspace one. Permission bits only: setuid, setgid and sticky do not
+        survive a copy-in through any other carrier."""
+        target = _write_target(handle, path)
         await asyncio.to_thread(target.parent.mkdir, parents=True, exist_ok=True)
-        await asyncio.to_thread(target.write_bytes, content)
+        try:
+            existing = await asyncio.to_thread(os.lstat, target)
+        except FileNotFoundError:
+            existing = None
+        mode = existing.st_mode & MODE_BITS if existing and S_ISREG(existing.st_mode) else None
+        temp = target.with_name(f".{WORKSPACE_WRITE_PREFIX}{uuid4().hex}")
+        try:
+            await asyncio.to_thread(temp.write_bytes, content)
+            if mode is not None:
+                await asyncio.to_thread(temp.chmod, mode)
+            await asyncio.to_thread(temp.replace, target)
+        except BaseException:
+            await asyncio.to_thread(temp.unlink, missing_ok=True)
+            raise
 
     async def read(self, handle: SandboxHandle, path: str) -> AsyncIterator[bytes]:
         """The workspace is a host directory, so the copy-out is a chunked host read under it — off
@@ -174,6 +204,17 @@ def _root(handle: SandboxHandle) -> Path:
     if handle.workspace_host_path is None:
         raise RuntimeError("the local carrier serves /workspace from a host directory; none is set")
     return Path(handle.workspace_host_path)
+
+
+def _write_target(handle: SandboxHandle, path: str) -> Path:
+    """The host file a copy-in lands on. A path resolving to the workspace root, or above it, has no
+    sibling inside the workspace to stage beside — the root's sibling is another conversation's
+    workspace — so it is refused here rather than written and cleaned up."""
+    root = _root(handle)
+    target = Path(os.path.normpath(_host_path(handle, path)))
+    if target == root or root not in target.parents:
+        raise IsADirectoryError(path)
+    return target
 
 
 def _host_path(handle: SandboxHandle, path: str) -> Path:

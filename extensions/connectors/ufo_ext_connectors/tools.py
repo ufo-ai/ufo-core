@@ -435,12 +435,12 @@ class _ConnectorCall:
         broker's dedup md5 and not a prefix of either: a provider chooses this content, and any
         digest it can collide lets one payload overwrite another and be read under its name.
 
-        Addressing by content means two turns decoding the same payload write one path, and no
-        carrier's write is atomic — the local one truncates through `write_bytes`, docker through
-        `cat >`. So the bytes land beside the target and are renamed onto it, which is atomic within
-        a directory: a reader either sees the previous complete file or the new one, never a
-        truncated window. A produced file needs none of this because its `uuid4` path is unique to
-        one fetch and no second writer can reach it."""
+        Addressing by content means two turns decoding the same payload write one path, and
+        `Carrier.write` promises no atomicity — docker truncates through `cat >`. So the bytes land
+        beside the target and are renamed onto it, which is atomic within a directory: a reader
+        either sees the previous complete file or the new one, never a truncated window. A produced
+        file needs none of this because its `uuid4` path is unique to one fetch and no second writer
+        can reach it."""
         basename = PurePosixPath(name.replace("\\", "/")).name
         safe = basename if basename not in ("", ".", "..") else FALLBACK_FILENAME
         target = f"{WORKSPACE_DIR}/{CONNECTOR_FILES_DIR}/{hashlib.sha256(data).hexdigest()}/{safe}"

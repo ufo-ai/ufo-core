@@ -9,6 +9,7 @@ interpreter present, no container."""
 
 import asyncio
 import json
+import os
 from dataclasses import replace
 from pathlib import Path
 from uuid import uuid4
@@ -276,3 +277,189 @@ async def test_background_descendant_keeps_its_authority_across_later_execs(
     assert (workspace / "second.txt").read_text() == (
         f"http://member-b:@127.0.0.1:{PROXY_PORT}|sent-b"
     )
+
+
+async def test_a_second_write_never_shows_a_reader_a_half_written_file(tmp_path: Path) -> None:
+    """Two writers race one path whenever a surface delivers the same file twice — Slack sends a
+    channel mention as two events, and both build their turn before the duplicate is dropped. The
+    write lands beside the target and is renamed onto it, so every read returns one whole write."""
+    workspace = tmp_path / "workspace"
+    carrier = LocalCarrier()
+    handle = await carrier.create(_spec(workspace))
+    path = "/workspace/inbox/data.csv"
+    first = b"a" * (READ_CHUNK_BYTES * 4)
+    second = b"b" * (READ_CHUNK_BYTES * 4)
+    await carrier.write(handle, path, first)
+
+    async def rewrite() -> None:
+        for _ in range(20):
+            await carrier.write(handle, path, second)
+            await carrier.write(handle, path, first)
+
+    async def reads() -> list[bytes]:
+        seen = []
+        for _ in range(20):
+            seen.append(b"".join([chunk async for chunk in carrier.read(handle, path)]))
+            await asyncio.sleep(0)
+        return seen
+
+    rewriting = asyncio.ensure_future(rewrite())
+    seen = await reads()
+    await rewriting
+    assert set(seen) <= {first, second}
+    assert [entry.name for entry in (workspace / "inbox").iterdir()] == ["data.csv"]
+
+
+async def test_the_longest_filename_a_directory_takes_still_writes(tmp_path: Path) -> None:
+    """The sidecar is named for itself, not the target, so the longest name a directory accepts is
+    still writable. A name built from the target plus a suffix fails here with ENAMETOOLONG —
+    reached from the agent's own write tool and from an inbound attachment the member named."""
+    workspace = tmp_path / "workspace"
+    carrier = LocalCarrier()
+    handle = await carrier.create(_spec(workspace))
+    longest = "n" * os.pathconf(tmp_path, "PC_NAME_MAX")
+
+    await carrier.write(handle, f"/workspace/{longest}", b"fits")
+
+    assert (workspace / longest).read_bytes() == b"fits"
+
+
+async def test_a_write_that_fails_leaves_nothing_behind(tmp_path: Path) -> None:
+    """The workspace listing is the member's own file list, so a half-written sidecar would show up
+    in it as a file they never made — in the portal, in the agent's glob, and in the prune count."""
+    workspace = tmp_path / "workspace"
+    carrier = LocalCarrier()
+    handle = await carrier.create(_spec(workspace))
+    await carrier.write(handle, "/workspace/inbox/keep.txt", b"kept")
+
+    with pytest.raises(IsADirectoryError):
+        await carrier.write(handle, "/workspace/inbox", b"onto the directory itself")
+
+    assert [entry.name for entry in workspace.iterdir()] == ["inbox"]
+    assert [entry.name for entry in (workspace / "inbox").iterdir()] == ["keep.txt"]
+
+
+@pytest.mark.parametrize("path", ("/workspace", "/workspace/.", "/workspace/sub/.."))
+async def test_a_write_at_the_workspace_root_is_refused_before_any_byte_lands(
+    tmp_path: Path, path: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sidecar is the target's sibling, and the workspace root's sibling is another
+    conversation's workspace — so a path resolving to the root is refused before it is staged, not
+    staged and cleaned up. The payload is asserted never written, since the cleanup would hide it
+    from the directory listing and leave it behind only when the process dies mid-write."""
+    workspace = tmp_path / "conversations" / "one" / "workspace"
+    carrier = LocalCarrier()
+    handle = await carrier.create(_spec(workspace))
+    written: list[Path] = []
+    unpatched = Path.write_bytes
+
+    def spy(self: Path, data: bytes) -> int:
+        written.append(Path(self))
+        return unpatched(self, data)
+
+    monkeypatch.setattr(Path, "write_bytes", spy)
+
+    with pytest.raises(IsADirectoryError):
+        await carrier.write(handle, path, b"payload that must not land beside the workspace")
+
+    assert written == []
+    assert [entry.name for entry in workspace.parent.iterdir()] == ["workspace"]
+    assert list(workspace.iterdir()) == []
+
+
+async def test_an_overwrite_keeps_the_mode_the_file_already_had(tmp_path: Path) -> None:
+    """A rename installs a new inode under the umask, so a script a turn made executable would come
+    back 0o644 and the next turn's `./run.sh` would exit 126. The mode crosses with the bytes."""
+    workspace = tmp_path / "workspace"
+    carrier = LocalCarrier()
+    handle = await carrier.create(_spec(workspace))
+    script = workspace / "run.sh"
+    await carrier.write(handle, "/workspace/run.sh", b"#!/bin/sh\necho first\n")
+    script.chmod(0o755)
+
+    await carrier.write(handle, "/workspace/run.sh", b"#!/bin/sh\necho second\n")
+
+    assert script.stat().st_mode & 0o7777 == 0o755
+    result = await carrier.exec(handle, ("bash", "-lc", "./run.sh"), 30)
+    assert result.exit_code == 0
+    assert result.stdout.strip() == "second"
+
+
+async def test_an_overwrite_carries_permission_bits_and_not_the_others(tmp_path: Path) -> None:
+    """Docker's `cat >` and an in-place `edit` both strip setuid, setgid and sticky, so a copy-in
+    that carried them would make one `Carrier.write` mean two things by carrier."""
+    workspace = tmp_path / "workspace"
+    carrier = LocalCarrier()
+    handle = await carrier.create(_spec(workspace))
+    target = workspace / "tool"
+    await carrier.write(handle, "/workspace/tool", b"first")
+    target.chmod(0o6755)
+
+    await carrier.write(handle, "/workspace/tool", b"second")
+
+    assert target.stat().st_mode & 0o7777 == 0o755
+
+
+async def test_a_symlinked_target_never_pulls_an_outside_files_mode(tmp_path: Path) -> None:
+    """The probe does not follow links, so the mode of whatever a symlink points at stays out of
+    the workspace — and the copy-in replaces the link rather than writing through it."""
+    workspace = tmp_path / "workspace"
+    outside = tmp_path / "outside.sh"
+    outside.write_bytes(b"outside")
+    outside.chmod(0o777)
+    carrier = LocalCarrier()
+    handle = await carrier.create(_spec(workspace))
+    link = workspace / "linked.sh"
+    link.symlink_to(outside)
+
+    await carrier.write(handle, "/workspace/linked.sh", b"replaced")
+    await carrier.write(handle, "/workspace/control.sh", b"control")
+
+    assert not link.is_symlink()
+    assert link.read_bytes() == b"replaced"
+    control = workspace / "control.sh"
+    assert link.stat().st_mode & 0o7777 == control.stat().st_mode & 0o7777
+    assert outside.read_bytes() == b"outside"
+
+
+async def test_the_mode_is_read_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """One probe, so there is no window between two of them for a delete to land in — a second probe
+    turns a write into FileNotFoundError on a path the prune sweep, a bash `rm`, or a concurrent
+    delivery removed, where the copy-in would have recreated it."""
+    workspace = tmp_path / "workspace"
+    carrier = LocalCarrier()
+    handle = await carrier.create(_spec(workspace))
+    await carrier.write(handle, "/workspace/probed.txt", b"first")
+    target = workspace / "probed.txt"
+    probes: list[str] = []
+
+    for name in ("lstat", "stat"):
+        unpatched = getattr(os, name)
+
+        def counted(path, *args, _name=name, _unpatched=unpatched, **kwargs):
+            if Path(path) == target:
+                probes.append(_name)
+            return _unpatched(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, name, counted)
+
+    await carrier.write(handle, "/workspace/probed.txt", b"second")
+
+    assert probes == ["lstat"]
+    assert target.read_bytes() == b"second"
+
+
+async def test_a_target_deleted_before_the_write_is_still_created(tmp_path: Path) -> None:
+    """The mode is read once, so a delete that lands between the read and the rename ends in a
+    created file — where a second probe would have raised FileNotFoundError on a path the prune
+    sweep, a bash `rm`, or a concurrent delivery had just removed."""
+    workspace = tmp_path / "workspace"
+    carrier = LocalCarrier()
+    handle = await carrier.create(_spec(workspace))
+    target = workspace / "gone.txt"
+    await carrier.write(handle, "/workspace/gone.txt", b"first")
+    target.unlink()
+
+    await carrier.write(handle, "/workspace/gone.txt", b"second")
+
+    assert target.read_bytes() == b"second"
