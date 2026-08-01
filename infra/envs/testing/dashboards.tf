@@ -192,3 +192,192 @@ resource "datadog_dashboard" "model_latency" {
     }
   }
 }
+
+# Where a turn spends its wall clock, and what it spent it on. The four `_ms` distributions arrive as
+# sketches and answer percentiles because `metrics.tf` enables them.
+#
+# The board is ordered as the question is asked: the turn first, then the model rounds inside it, then
+# the tool calls between them.
+
+resource "datadog_dashboard" "turns" {
+  title       = "ufo turns"
+  layout_type = "ordered"
+
+  # Every query scopes to `$env` rather than a literal, so the board reads either fleet.
+  template_variable {
+    name     = "env"
+    prefix   = "env"
+    defaults = ["testing"]
+  }
+
+  widget {
+    note_definition {
+      content          = <<-EOT
+        Everything from `turn_ms` and `turn_rounds_total` is per execution, not per turn: a turn that
+        parks and resumes, or that a crash re-dispatches, reaches an exit more than once and is
+        counted at each one. `turn_terminal_total` is the once-per-turn number, so read "turns by
+        terminal status" against the execution graphs rather than adding them together.
+
+        Comparing backends is the model latency board's question, and `provider` is charted there.
+      EOT
+      background_color = "yellow"
+      font_size        = "14"
+      text_align       = "left"
+      show_tick        = false
+    }
+  }
+
+  # The only once-per-turn producer on the board: committed terminals, counted behind the transition
+  # guard, so a park or a re-dispatch never adds a second one.
+  widget {
+    timeseries_definition {
+      title = "turns by terminal status"
+      request {
+        q            = "sum:ufo.turn_terminal_total{$env} by {status}.as_count()"
+        display_type = "bars"
+      }
+    }
+  }
+
+  widget {
+    timeseries_definition {
+      title = "execution wall clock"
+      request {
+        q            = "p50:ufo.turn_ms{$env}"
+        display_type = "line"
+      }
+      request {
+        q            = "p95:ufo.turn_ms{$env}"
+        display_type = "line"
+      }
+      request {
+        q            = "p99:ufo.turn_ms{$env}"
+        display_type = "line"
+      }
+    }
+  }
+
+  widget {
+    timeseries_definition {
+      title = "executions by exit"
+      request {
+        q            = "count:ufo.turn_ms{$env} by {status}"
+        display_type = "bars"
+      }
+    }
+  }
+
+  widget {
+    timeseries_definition {
+      title = "execution wall clock by exit"
+      request {
+        q            = "p95:ufo.turn_ms{$env} by {status}"
+        display_type = "line"
+      }
+    }
+  }
+
+  widget {
+    timeseries_definition {
+      title = "rounds by execution exit"
+      request {
+        q            = "sum:ufo.turn_rounds_total{$env} by {status}.as_count()"
+        display_type = "bars"
+      }
+    }
+  }
+
+  widget {
+    timeseries_definition {
+      title = "model round wall clock"
+      request {
+        q            = "p50:ufo.model_round_ms{$env}"
+        display_type = "line"
+      }
+      request {
+        q            = "p95:ufo.model_round_ms{$env}"
+        display_type = "line"
+      }
+      request {
+        q            = "p99:ufo.model_round_ms{$env}"
+        display_type = "line"
+      }
+    }
+  }
+
+  widget {
+    timeseries_definition {
+      title = "round wall clock against time to first event"
+      request {
+        q            = "p95:ufo.model_round_ms{$env}"
+        display_type = "line"
+      }
+      request {
+        q            = "p95:ufo.model_first_event_ms{$env}"
+        display_type = "line"
+      }
+    }
+  }
+
+  # A round that returned carries no `error_class` at all, so the filter is what keeps the healthy
+  # population out of a graph about failures rather than under an `N/A` bar that dwarfs them.
+  widget {
+    timeseries_definition {
+      title = "model round failures by error class"
+      request {
+        q            = "count:ufo.model_round_ms{$env,error_class:*} by {error_class}"
+        display_type = "bars"
+      }
+    }
+  }
+
+  widget {
+    timeseries_definition {
+      title = "tokens by kind"
+      request {
+        q            = "sum:ufo.model_round_tokens_total{$env} by {kind}.as_count()"
+        display_type = "bars"
+      }
+    }
+  }
+
+  widget {
+    timeseries_definition {
+      title = "tool call wall clock by tool"
+      request {
+        q            = "p95:ufo.tool_call_ms{$env} by {tool}"
+        display_type = "line"
+      }
+    }
+  }
+
+  widget {
+    timeseries_definition {
+      title = "tool calls by tool"
+      request {
+        q            = "sum:ufo.tool_call_total{$env} by {tool}.as_count()"
+        display_type = "bars"
+      }
+    }
+  }
+
+  widget {
+    timeseries_definition {
+      title = "tool calls by outcome"
+      request {
+        q            = "sum:ufo.tool_call_total{$env} by {outcome}.as_count()"
+        display_type = "bars"
+      }
+    }
+  }
+
+  widget {
+    timeseries_definition {
+      title = "tool call error classes"
+      request {
+        q            = "sum:ufo.tool_call_total{$env,error_class:*} by {error_class}.as_count()"
+        display_type = "bars"
+      }
+    }
+  }
+}
