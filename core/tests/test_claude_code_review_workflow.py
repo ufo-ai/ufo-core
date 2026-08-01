@@ -17,8 +17,15 @@ _SPEC.loader.exec_module(prior)
 def test_claude_code_review_uses_its_own_skill_with_permissive_bash() -> None:
     workflow = WORKFLOW.read_text()
     allowed_tools = re.search(r'--allowedTools "([^"]+)"', workflow)
+    allowed_bots = re.search(r"allowed_bots: ([^\n]+)", workflow)
 
     assert allowed_tools is not None
+    assert allowed_bots is not None
+    assert set(allowed_bots.group(1).split(",")) == {
+        "github-actions",
+        "claude",
+        "flyingobject-ai-ufo",
+    }
     assert {"Skill", "Bash"} <= set(allowed_tools.group(1).split(","))
     assert "--model claude-opus-5" in workflow
     assert "Use the review-pull-request skill" in workflow
