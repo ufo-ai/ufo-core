@@ -88,6 +88,98 @@ while [ "$#" -gt 0 ]; do
 done
 """
 
+AWS_STUB = """#!/bin/sh
+printf '%s\n' "$*" >> "$AWS_CALLS"
+[ "$AWS_FAIL" != "$1 $2" ] || exit 42
+if [ "$AWS_FAIL_ONCE" = "$1 $2" ] && [ ! -e "$AWS_FAILED_ONCE" ]; then
+  touch "$AWS_FAILED_ONCE"
+  exit 42
+fi
+case "$1 $2" in
+  "sts get-caller-identity") printf '%s\n' "$AWS_ACCOUNT" ;;
+  "sesv2 get-account") printf '%s %s\n' "$SES_ACCESS" "$SES_SENDING" ;;
+  "service-quotas get-service-quota") printf '%s\n' "$AWS_QUOTA" ;;
+  "ec2 describe-availability-zones") printf '%s\n' 'us-east-1a us-east-1b us-east-1c' ;;
+  "ec2 describe-nat-gateways")
+    case "$*" in
+      *"tag:flyingobject.ai/environment,Values=prod"*) printf '%s\n' "$AWS_PROD_NAT_SUBNETS" ;;
+      *) printf '%s\n' "$AWS_NAT_SUBNETS" ;;
+    esac
+    ;;
+  "ec2 describe-subnets")
+    case "$*" in
+      *subnet-a*) printf '%s\n' 'us-east-1a' ;;
+      *subnet-b*) printf '%s\n' 'us-east-1b' ;;
+      *subnet-c*) printf '%s\n' 'us-east-1c' ;;
+    esac
+    ;;
+  *)
+    case "$*" in
+      *"tag:flyingobject.ai/environment,Values=prod"*|*prod-cluster*|*prod-postgres*|*prod-redis-*)
+        case "$*" in
+          *"--output json"*) printf '%s\n' "$AWS_OWNED" ;;
+          *) printf '%s\n' "$AWS_TEXT_OWNED" ;;
+        esac
+        ;;
+      *)
+        case "$*" in
+          *"--output json"*) printf '%s\n' "$AWS_USED" ;;
+          *) printf '%s\n' "$AWS_TEXT_USED" ;;
+        esac
+        ;;
+    esac
+    ;;
+esac
+"""
+
+
+def _run_production_prerequisites(
+    tmp_path: Path,
+    *,
+    account: str = "899147036157",
+    region: str = "us-east-1",
+    ses_access: str = "True",
+    ses_sending: str = "True",
+    quota: str = "5",
+    used: str = "0",
+    text_used: str | None = None,
+    failed_command: str = "",
+    failed_once_command: str = "",
+    nat_subnets: str = "subnet-a",
+    owned: str = "0",
+    text_owned: str | None = None,
+    prod_nat_subnets: str = "",
+) -> tuple[subprocess.CompletedProcess[bytes], str]:
+    script = _step("production_access", "Check production prerequisites")["run"]
+    assert isinstance(script, str)
+    aws = tmp_path / "aws"
+    aws.write_text(AWS_STUB)
+    aws.chmod(0o755)
+    calls = tmp_path / "aws-calls"
+    run = subprocess.run(
+        ["bash", "-e", "-c", script],
+        env={
+            "PATH": f"{tmp_path}:{os.environ['PATH']}",
+            "AWS_ACCOUNT": account,
+            "AWS_CALLS": str(calls),
+            "AWS_FAIL": failed_command,
+            "AWS_FAILED_ONCE": str(tmp_path / "aws-failed-once"),
+            "AWS_FAIL_ONCE": failed_once_command,
+            "AWS_NAT_SUBNETS": nat_subnets,
+            "AWS_OWNED": owned,
+            "AWS_PROD_NAT_SUBNETS": prod_nat_subnets,
+            "AWS_QUOTA": quota,
+            "AWS_REGION": region,
+            "AWS_TEXT_OWNED": owned if text_owned is None else text_owned,
+            "AWS_TEXT_USED": used if text_used is None else text_used,
+            "AWS_USED": used,
+            "SES_ACCESS": ses_access,
+            "SES_SENDING": ses_sending,
+        },
+        capture_output=True,
+    )
+    return run, calls.read_text() if calls.exists() else ""
+
 
 def _report(
     tmp_path: Path, testing_result: str, prod_result: str, edge_result: str = "success"
@@ -405,6 +497,171 @@ def test_pull_requests_plan_production_foundation_without_applying() -> None:
         "  -target=module.platform.aws_secretsmanager_secret.gateway_slack_connect \\\n"
         '  -var "e2b_template=$E2B_TEMPLATE"\n'
     )
+
+
+@pytest.mark.parametrize(
+    ("account", "region", "ses_access", "ses_sending", "quota", "used", "accepted"),
+    [
+        ("899147036157", "us-east-1", "True", "True", "5", "0", True),
+        ("111111111111", "us-east-1", "True", "True", "5", "0", False),
+        ("899147036157", "us-west-2", "True", "True", "5", "0", False),
+        ("899147036157", "us-east-1", "False", "True", "5", "0", False),
+        ("899147036157", "us-east-1", "True", "False", "5", "0", False),
+        ("899147036157", "us-east-1", "True", "True", "2", "0", False),
+        ("899147036157", "us-east-1", "True", "True", "5", "5", False),
+    ],
+)
+def test_production_prerequisites_fail_before_terraform(
+    tmp_path: Path,
+    account: str,
+    region: str,
+    ses_access: str,
+    ses_sending: str,
+    quota: str,
+    used: str,
+    accepted: bool,
+) -> None:
+    job = _workflow(WORKFLOWS / "deploy.yml")["jobs"]["production_access"]
+    assert isinstance(job, dict)
+    steps = job["steps"]
+    assert isinstance(steps, list)
+    preflight = _step("production_access", "Check production prerequisites")
+    init = _step("production_access", "Terraform init")
+    assert steps.index(preflight) < steps.index(init)
+    run, invoked = _run_production_prerequisites(
+        tmp_path,
+        account=account,
+        region=region,
+        ses_access=ses_access,
+        ses_sending=ses_sending,
+        quota=quota,
+        used=used,
+    )
+    assert (run.returncode == 0) is accepted
+    if accepted:
+        for code in (
+            "L-F678F1CE",
+            "L-0263D0A3",
+            "L-1194D53C",
+            "L-7B6409FD",
+            "L-DFE45DF3",
+            "L-FE5A380F",
+        ):
+            assert code in invoked
+        assert invoked.count("describe-nat-gateways") == 2
+        assert invoked.count("describe-subnets") == 1
+
+
+@pytest.mark.parametrize(
+    "failed_command",
+    [
+        "ec2 describe-vpcs",
+        "ec2 describe-addresses",
+        "eks list-clusters",
+        "rds describe-db-instances",
+        "elasticache describe-cache-clusters",
+        "ec2 describe-availability-zones",
+    ],
+)
+def test_production_prerequisite_queries_fail_loud(tmp_path: Path, failed_command: str) -> None:
+    run, _ = _run_production_prerequisites(tmp_path, failed_command=failed_command)
+    assert run.returncode == 42
+
+
+def test_production_prerequisite_nat_lookup_fails_loud(tmp_path: Path) -> None:
+    run, invoked = _run_production_prerequisites(
+        tmp_path,
+        failed_once_command="ec2 describe-subnets",
+        nat_subnets="subnet-a subnet-b",
+    )
+    assert run.returncode == 42
+    assert invoked.count("describe-subnets") == 1
+
+
+def test_production_prerequisites_accept_no_nat_gateways(tmp_path: Path) -> None:
+    run, invoked = _run_production_prerequisites(tmp_path, nat_subnets="")
+    assert run.returncode == 0
+    assert invoked.count("describe-nat-gateways") == 2
+    assert invoked.count("Name=state,Values=pending,available,deleting") == 1
+    assert (
+        invoked.count(
+            "Name=state,Values=pending,available Name=tag:flyingobject.ai/environment,Values=prod"
+        )
+        == 1
+    )
+    assert "describe-subnets" not in invoked
+    assert invoked.count("L-FE5A380F") == 3
+    assert "describe-availability-zones --filters Name=state,Values=available" in invoked
+
+
+def test_production_prerequisites_report_computed_headroom(tmp_path: Path) -> None:
+    run, invoked = _run_production_prerequisites(
+        tmp_path,
+        quota="10",
+        used="2",
+        owned="1",
+        nat_subnets=" ".join(["subnet-a"] * 2 + ["subnet-b"] * 2 + ["subnet-c"] * 2),
+        prod_nat_subnets="",
+    )
+    assert run.returncode == 0
+    assert invoked.count("Name=tag:flyingobject.ai/environment,Values=prod") == 3
+    assert run.stdout.decode().splitlines() == [
+        "vpc L-F678F1CE 0 2",
+        "ec2 L-0263D0A3 2 2",
+        "eks L-1194D53C 0 2",
+        "rds L-7B6409FD 0 2",
+        "elasticache L-DFE45DF3 1 2",
+        "vpc L-FE5A380F 1 2",
+        "vpc L-FE5A380F 1 2",
+        "vpc L-FE5A380F 1 2",
+    ]
+
+
+def test_production_prerequisites_combine_paginated_inventory(tmp_path: Path) -> None:
+    run, invoked = _run_production_prerequisites(
+        tmp_path,
+        quota="10",
+        used="5",
+        text_used="2\n3",
+        owned="1",
+        text_owned="0\n1",
+        nat_subnets="",
+    )
+    assert run.returncode == 0
+    assert invoked.count("--output json") == 10
+    assert run.stdout.decode().splitlines() == [
+        "vpc L-F678F1CE 0 5",
+        "ec2 L-0263D0A3 2 5",
+        "eks L-1194D53C 0 5",
+        "rds L-7B6409FD 0 5",
+        "elasticache L-DFE45DF3 1 5",
+        "vpc L-FE5A380F 1 0",
+        "vpc L-FE5A380F 1 0",
+        "vpc L-FE5A380F 1 0",
+    ]
+
+
+def test_production_prerequisites_reserve_only_missing_capacity(tmp_path: Path) -> None:
+    run, invoked = _run_production_prerequisites(
+        tmp_path,
+        quota="5",
+        used="4",
+        owned="3",
+        nat_subnets=" ".join(["subnet-a"] * 4 + ["subnet-b"] * 4 + ["subnet-c"] * 4),
+        prod_nat_subnets="subnet-a subnet-b subnet-c",
+    )
+    assert run.returncode == 0
+    assert invoked.count("describe-subnets") == 15
+    assert run.stdout.decode().splitlines() == [
+        "vpc L-F678F1CE 0 4",
+        "ec2 L-0263D0A3 0 4",
+        "eks L-1194D53C 0 4",
+        "rds L-7B6409FD 0 4",
+        "elasticache L-DFE45DF3 0 4",
+        "vpc L-FE5A380F 0 4",
+        "vpc L-FE5A380F 0 4",
+        "vpc L-FE5A380F 0 4",
+    ]
 
 
 def test_hosted_runtime_receives_the_selected_sandbox_template() -> None:
