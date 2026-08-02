@@ -1,8 +1,8 @@
 """The open connector namespace: how Composio brokers every toolkit without registering each.
 
 Composio brokers hundreds of toolkits, so the deploy names none of them — a member connects any by
-its slug and the dynamic connector tools discover and execute its tools. `claims` confirms the slug
-against Composio's live catalog through `connectable`, which decides what this deploy can broker;
+its slug and the dynamic connector tools discover and execute its tools. `claims` rejects judged
+bans locally, then confirms any other slug against Composio's live catalog;
 `descriptor` builds the pure OAuth descriptor a validated slug connects through (no provider host —
 the account's token stays with Composio and tools execute server-side); `entry` routes the slug to
 the one shared `ComposioBroker`; `catalog` searches Composio's toolkit catalog, offering only
@@ -33,6 +33,8 @@ class ComposioResolver:
         return COMPOSIO_TRANSFER_HOSTS
 
     async def claims(self, provider: str) -> bool:
+        if provider.lower() in composio.BANNED:
+            return False
         return await composio.composio_client().connectable_toolkit(provider) is not None
 
     def descriptor(self, provider: str) -> OAuthProvider:

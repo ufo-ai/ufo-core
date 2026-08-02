@@ -521,22 +521,24 @@ class SourceObjects(MemberOwnedObjects[SourceSpec, ObjectOwner]):
     async def _resolved_account(self, ctx: ToolContext, spec: SourceSpec) -> _ResolvedAccount:
         """The account a source authenticates as. An explicitly registered connector always uses its
         broker; an open provider the broker namespace serves uses the broker once an account is
-        connected, else its direct BYOK credential when one is declared — so a member picks the path
+        connected, else its direct BYOK credential when one is set — so a member picks the path
         by connecting an account or setting a key, never a flag. The handle returned here IS that
         choice: it lands in `ConnectorSourceConfig.account`, and every run replays it through
         the connection-bound source credential resolver, which sends `DIRECT_ACCOUNT` to the
-        deploy's fallback backend and a connected account to its broker."""
+        deploy's fallback backend and a connected account to its broker.
+
+        A provider the broker serves with neither is asked to connect an account, never to add a
+        workspace key; a provider the direct path is the only path for refuses a named `account_id`
+        as the contradiction it is, key set or not."""
         ext = _require_ext(ctx)
         registry = _require_connectors(ctx)
         explicit = spec.provider in registry.entries
-        brokerable = explicit or registry.resolver is not None
         accounts: tuple[str, ...] = ()
-        if brokerable:
+        if explicit or registry.resolver is not None:
             try:
                 accounts = tuple(await ctx.connector_accounts(spec.provider))
             except ConnectUnavailable:
                 accounts = ()
-        direct_capable = spec.provider in ext.credentials.declared and registry.fallback is not None
         if explicit or accounts:
             if not accounts:
                 raise ValueError(
@@ -563,25 +565,33 @@ class SourceObjects(MemberOwnedObjects[SourceSpec, ObjectOwner]):
                 account=connection.account_id,
                 connection_id=connection.id,
             )
+        direct_capable = spec.provider in ext.credentials.declared and registry.fallback is not None
+        keyed = False
+        if direct_capable:
+            try:
+                await ext.credentials.get(spec.provider)
+            except CredentialSlotUnset:
+                pass
+            else:
+                keyed = True
+        if keyed and not spec.account_id:
+            return _ResolvedAccount(account=DIRECT_ACCOUNT, connection_id=None)
+        brokerable = registry.resolver is not None and await registry.resolver.claims(spec.provider)
+        if brokerable:
+            raise ValueError(
+                f"connect a {spec.provider!r} account before registering its sources "
+                f"(connect_account with provider={spec.provider!r})"
+            )
         if not direct_capable:
-            if brokerable:
-                raise ValueError(
-                    f"connect a {spec.provider!r} account before registering its sources "
-                    f"(connect_account with provider={spec.provider!r})"
-                )
             raise ValueError(f"no direct authentication backend can sync {spec.provider!r}")
         if spec.account_id:
             raise ValueError(
                 f"{spec.provider!r} uses its workspace credential, not a connected account"
             )
-        try:
-            await ext.credentials.get(spec.provider)
-        except CredentialSlotUnset:
-            raise ValueError(
-                f"add the {spec.provider!r} credential before registering its sources "
-                f"(request_credentials for slot {spec.provider!r})"
-            ) from None
-        return _ResolvedAccount(account=DIRECT_ACCOUNT, connection_id=None)
+        raise ValueError(
+            f"add the {spec.provider!r} credential before registering its sources "
+            f"(request_credentials for slot {spec.provider!r})"
+        )
 
     async def _find(self, ctx: ToolContext, name: str) -> _Binding | None:
         return next(

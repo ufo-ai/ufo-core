@@ -311,14 +311,18 @@ async def test_connectable_toolkit_refuses_a_toolkit_composio_cannot_broker() ->
     assert await client.connectable_toolkit(BANNED_SLUG) is None
 
 
-async def test_connect_flow_refuses_a_banned_toolkit(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A member naming a banned slug is turned away at the connect request — the consumer end of
-    `BANNED`, which a resolver that stopped consulting `connectable` would silently break."""
-    monkeypatch.setattr(composio, "composio_client", _mock_client)
+async def test_connect_flow_classifies_banned_without_a_broker_key_and_fails_others(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(composio.COMPOSIO_API_KEY_ENV, raising=False)
     flow = _connect_flow(_credentials(), _config(), (composio_manifest.manifest(),))
     assert flow is not None
     with pytest.raises(UnknownProvider):
-        await flow.validate_provider(BANNED_SLUG)
+        await flow.validate_provider("greenhouse")
+    with pytest.raises(UnknownProvider):
+        await flow.validate_provider("Greenhouse")
+    with pytest.raises(RuntimeError, match="COMPOSIO_API_KEY"):
+        await flow.validate_provider("googledrive")
 
 
 async def test_composio_client_refuses_an_account_owned_by_a_foreign_user() -> None:

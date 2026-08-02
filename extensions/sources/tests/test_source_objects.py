@@ -61,8 +61,10 @@ TOOL_NARRATION = "setting up the connection"
 ASANA = "asana"
 ASANA_HOST = "app.asana.com"
 GREENHOUSE = "greenhouse"
+GOOGLEDRIVE = "googledrive"
 FRESHDESK = "freshdesk"
 DECLARED_PROVIDERS = frozenset(CONNECTORS)
+NAMESPACE_BROKERED = frozenset({ASANA, GOOGLEDRIVE})
 
 
 class _UnusedBroker:
@@ -70,12 +72,20 @@ class _UnusedBroker:
         raise AssertionError("source objects must not resolve provider credentials")
 
 
+async def _broker_down(self: object, provider: str) -> bool:
+    raise RuntimeError("COMPOSIO_API_KEY is required to broker a connector's OAuth")
+
+
 class _OpenNamespace:
-    """Stands in for a broker's open namespace: it claims any slug, so a provider it brokers is
-    resolvable without an explicit entry. Account resolution never reaches its broker (it refuses
-    before, asking the member to connect), so no method is called."""
+    """Stands in for a broker's open namespace: it claims the slugs its broker's live catalog serves
+    and refuses the rest, so a provider it does not claim is resolvable only through its workspace
+    credential. Account resolution never reaches its broker (it refuses before, asking the member to
+    connect), so no method beyond `claims` is called."""
 
     transfer_hosts: tuple[str, ...] = ()
+
+    async def claims(self, provider: str) -> bool:
+        return provider in NAMESPACE_BROKERED
 
     def entry(self, provider: str) -> None:
         raise AssertionError("account resolution must not reach the namespace broker")
@@ -1014,6 +1024,122 @@ async def test_open_namespace_provider_without_an_account_asks_to_connect(db: No
             await tool.handler(ctx, args)
 
 
+@pytest.mark.parametrize(
+    ("keyed", "account_id"),
+    [(False, None), (False, "acct-one"), (True, "acct-one")],
+)
+async def test_a_brokered_provider_without_an_account_asks_to_connect(
+    db: None,
+    monkeypatch: pytest.MonkeyPatch,
+    keyed: bool,
+    account_id: str | None,
+) -> None:
+    if keyed:
+        monkeypatch.setenv(GOOGLEDRIVE.upper(), "secret")
+    else:
+        monkeypatch.delenv(GOOGLEDRIVE.upper(), raising=False)
+    state = await _workspace()
+    ctx = _context(state, GrantStore(), brokered=(), open_namespace=True)
+    tool = _TOOLS["object_apply"]
+    args = tool.input_model.model_validate(
+        {
+            "user_description": TOOL_NARRATION,
+            "manifest": _manifest_text(
+                GOOGLEDRIVE, ("files",), "drive-open", account_id=account_id
+            ),
+        }
+    )
+    with ws(state.workspace_id), agent(state.agent_id):
+        with pytest.raises(ValueError) as refusal:
+            await tool.handler(ctx, args)
+    assert str(refusal.value) == (
+        "connect a 'googledrive' account before registering its sources "
+        "(connect_account with provider='googledrive')"
+    )
+
+
+async def test_a_provider_the_namespace_does_not_claim_asks_for_its_credential(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The open namespace is installed but does not claim this provider, so no account can ever be
+    connected for it: with its slot unset the member is asked for the key, never sent through a
+    connect flow that has nothing to connect."""
+    monkeypatch.delenv(GREENHOUSE.upper(), raising=False)
+    state = await _workspace()
+    ctx = _context(state, GrantStore(), brokered=(), open_namespace=True)
+    tool = _TOOLS["object_apply"]
+    args = tool.input_model.model_validate(
+        {
+            "user_description": TOOL_NARRATION,
+            "manifest": _manifest_text(GREENHOUSE, ("jobs",), "greenhouse-unkeyed"),
+        }
+    )
+    with ws(state.workspace_id), agent(state.agent_id):
+        with pytest.raises(ValueError) as refusal:
+            await tool.handler(ctx, args)
+    assert str(refusal.value) == (
+        "add the 'greenhouse' credential before registering its sources "
+        "(request_credentials for slot 'greenhouse')"
+    )
+
+
+@pytest.mark.parametrize("keyed", [True, False])
+async def test_a_direct_only_provider_refuses_an_account_id_keyed_or_not(
+    db: None, monkeypatch: pytest.MonkeyPatch, keyed: bool
+) -> None:
+    """A provider the workspace credential is the only path for syncs through that credential, so
+    naming an account_id is refused as the contradiction it is whether or not the key is set — the
+    member is never sent to add a key that leaves the same apply failing, nor through an OAuth
+    connect the namespace has nothing to connect."""
+    if keyed:
+        monkeypatch.setenv(GREENHOUSE.upper(), "secret")
+    else:
+        monkeypatch.delenv(GREENHOUSE.upper(), raising=False)
+    state = await _workspace()
+    ctx = _context(state, GrantStore(), brokered=(), open_namespace=True)
+    tool = _TOOLS["object_apply"]
+    args = tool.input_model.model_validate(
+        {
+            "user_description": TOOL_NARRATION,
+            "manifest": _manifest_text(
+                GREENHOUSE, ("jobs",), "greenhouse-keyed", account_id="acct-one"
+            ),
+        }
+    )
+    with ws(state.workspace_id), agent(state.agent_id):
+        with pytest.raises(ValueError) as refusal:
+            await tool.handler(ctx, args)
+    assert str(refusal.value) == (
+        "'greenhouse' uses its workspace credential, not a connected account"
+    )
+
+
+@pytest.mark.parametrize("direct_fallback", [True, False])
+async def test_a_broker_failure_for_a_claimed_provider_raises(
+    db: None, monkeypatch: pytest.MonkeyPatch, direct_fallback: bool
+) -> None:
+    monkeypatch.delenv(GOOGLEDRIVE.upper(), raising=False)
+    monkeypatch.setattr(_OpenNamespace, "claims", _broker_down)
+    state = await _workspace()
+    ctx = _context(
+        state,
+        GrantStore(),
+        brokered=(),
+        direct_fallback=direct_fallback,
+        open_namespace=True,
+    )
+    tool = _TOOLS["object_apply"]
+    args = tool.input_model.model_validate(
+        {
+            "user_description": TOOL_NARRATION,
+            "manifest": _manifest_text(GOOGLEDRIVE, ("files",), "drive-broker-down"),
+        }
+    )
+    with ws(state.workspace_id), agent(state.agent_id):
+        with pytest.raises(RuntimeError, match="COMPOSIO_API_KEY"):
+            await tool.handler(ctx, args)
+
+
 async def test_provider_with_no_broker_and_no_direct_backend_refuses(db: None) -> None:
     """A provider no connector brokers, no open namespace claims, and no direct backend can
     authenticate is refused loud — the deploy simply cannot sync it."""
@@ -1034,17 +1160,18 @@ async def test_provider_with_no_broker_and_no_direct_backend_refuses(db: None) -
 async def test_open_namespace_provider_with_a_byok_key_syncs_directly(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A provider the open namespace could broker but that has no connected account and a set BYOK
-    credential syncs through its direct key — the member picked the path by setting a key, so it is
-    never forced through connect."""
-    monkeypatch.setenv("GREENHOUSE", "secret")
+    """A provider the open namespace does broker, with no connected account and a set BYOK
+    credential, syncs through its direct key — the key is read before the namespace is asked, so the
+    member who picked the path by setting a key is never forced through connect."""
+    assert GOOGLEDRIVE in NAMESPACE_BROKERED
+    monkeypatch.setenv(GOOGLEDRIVE.upper(), "secret")
     state = await _workspace()
     ctx = _context(state, GrantStore(), brokered=(), open_namespace=True)
-    name = binding_name(GREENHOUSE, DIRECT_ACCOUNT, None)
+    name = binding_name(GOOGLEDRIVE, DIRECT_ACCOUNT, None)
     with ws(state.workspace_id), agent(state.agent_id):
-        registered = await _apply(ctx, _manifest_text(GREENHOUSE, ("jobs",), name))
+        registered = await _apply(ctx, _manifest_text(GOOGLEDRIVE, ("files",), name))
     assert registered["result"] == "created"
-    [row] = await _rows(state, GREENHOUSE)
+    [row] = await _rows(state, GOOGLEDRIVE)
     assert row["config"]["account"] == DIRECT_ACCOUNT
 
 

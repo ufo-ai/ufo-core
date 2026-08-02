@@ -70,8 +70,8 @@ DIRECT_ACCOUNT = "default"
 """The account handle a feed-sync source carries when it authenticates with the workspace's own
 provider key instead of a broker connection. A source registers with it when the member set the
 provider's credential rather than connecting an account, so the run replays the decision
-registration made. It has to be the handle that carries it: a broker's open namespace claims every
-slug, so the provider name alone cannot tell a keyed source from a connected one."""
+registration made. It has to be the handle that carries it: the provider name alone cannot tell a
+keyed source from a connected one."""
 
 
 class AuthProxy(Protocol):
@@ -255,16 +255,19 @@ class CatalogEntry:
 
 class ConnectorResolver(Protocol):
     """The registry half of an open connector namespace: how a broker extension serves any provider
-    slug it brokers without registering each as an explicit `ConnectorProvider`. `entry` builds the
-    routing entry for a claimed slug (pure — the broker is shared and the label is cosmetic, since
-    the real label rides `catalog`); `catalog` searches the broker's live service catalog so the
-    discovery tool surfaces connectable services the closed registry never enumerated;
-    `transfer_hosts` are the broker's file-store hosts every grant in the namespace additionally
-    admits at the egress proxy. A namespace is the catch-all — it claims any slug, so its broker's
-    own calls fail loud on a slug the broker cannot serve."""
+    slug it brokers without registering each as an explicit `ConnectorProvider`. `claims` answers
+    whether the broker's live catalog serves a slug (I/O), so a caller choosing between the
+    namespace and a workspace credential asks instead of assuming the namespace is a catch-all;
+    `entry` builds the routing entry for a claimed slug (pure — the broker is shared and the label
+    is cosmetic, since the real label rides `catalog`); `catalog` searches the broker's live service
+    catalog so the discovery tool surfaces connectable services the closed registry never
+    enumerated; `transfer_hosts` are the broker's file-store hosts every grant in the namespace
+    additionally admits at the egress proxy."""
 
     @property
     def transfer_hosts(self) -> tuple[str, ...]: ...
+
+    async def claims(self, provider: str) -> bool: ...
 
     def entry(self, provider: str) -> ConnectorEntry: ...
 
