@@ -607,13 +607,6 @@ def _readable_audience_values(member_id: UUID) -> tuple[str, ...]:
     return (str(SHARED_AUDIENCE), str(conversation_audience(member_id)))
 
 
-def _email_domain(email: str) -> str:
-    """The address's domain, lowercased — empty for anything that is not `local@domain`, so a
-    malformed value can never satisfy a domain match."""
-    local, _, domain = email.strip().lower().rpartition("@")
-    return domain if local and domain else ""
-
-
 async def _main_agent(workspace_id: UUID) -> UUID:
     """The workspace's main agent, used when no surface binding names an agent."""
     async with workspace_tx() as connection:
