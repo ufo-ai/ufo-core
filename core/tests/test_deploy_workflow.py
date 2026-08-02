@@ -17,6 +17,7 @@ from ufo.sources.sync import SOURCE_SYNC_FAILED_METRIC
 
 ROOT = Path(__file__).parents[2]
 WORKFLOWS = ROOT / ".github" / "workflows"
+PRODUCTION_PREREQUISITES = ROOT / ".github" / "scripts" / "production_prerequisites.sh"
 DEPLOY_ENVIRONMENTS = ("testing", "prod")
 MONITORS = {
     environment: ROOT / "infra" / "envs" / environment / "monitors.tf"
@@ -215,14 +216,12 @@ def _run_production_prerequisites(
     nlb_owned: str = "0",
     nlb_quota: str = "50",
 ) -> tuple[subprocess.CompletedProcess[bytes], str]:
-    script = _step("production_access", "Check production prerequisites")["run"]
-    assert isinstance(script, str)
     aws = tmp_path / "aws"
     aws.write_text(AWS_STUB)
     aws.chmod(0o755)
     calls = tmp_path / "aws-calls"
     run = subprocess.run(
-        ["bash", "-e", "-c", script],
+        ["bash", str(PRODUCTION_PREREQUISITES)],
         env={
             "PATH": f"{tmp_path}:{os.environ['PATH']}",
             "AWS_ACCOUNT": account,
@@ -350,7 +349,8 @@ def test_pull_request_plans_active_deployment_inputs() -> None:
     environment = selector["env"]
     assert isinstance(environment, dict)
     assert environment["DEPLOY_PATHS_PATTERN"] == (
-        r"^(\.github/(workflows/deploy\.yml|scripts/terraform_plan_guard\.py)$|"
+        r"^(\.github/(workflows/deploy\.yml|"
+        r"scripts/(production_prerequisites\.sh|terraform_plan_guard\.py))$|"
         r"infra/production_secrets\.py$|"
         r"infra/(production-access|envs/(testing|prod|edge)|modules/(platform|edge)|templates)/)"
     )
@@ -377,6 +377,7 @@ def test_runtime_authorization_changes_are_split_across_deploys() -> None:
 
     for runtime_path in (
         ".github/scripts/deploy_change_gate.py",
+        ".github/scripts/production_prerequisites.sh",
         "core/src/ufo/serve.py",
         "extensions/e2b/ufo_ext_e2b.py",
         "infra/envs/prod/ufo.tf",
@@ -779,6 +780,7 @@ def test_production_prerequisites_fail_before_terraform(
     assert isinstance(steps, list)
     preflight = _step("production_access", "Check production prerequisites")
     init = _step("production_access", "Terraform init")
+    assert preflight["run"] == "bash .github/scripts/production_prerequisites.sh"
     assert steps.index(preflight) < steps.index(init)
     run, invoked = _run_production_prerequisites(
         tmp_path,
@@ -883,8 +885,7 @@ def test_production_vcpu_quota_uses_standard_on_demand_instance_defaults(
         "ec2 describe-instance-types --instance-types m6i.large "
         "--query InstanceTypes[0].VCpuInfo.DefaultVCpus --output text"
     ) in invoked
-    script = _step("production_access", "Check production prerequisites")["run"]
-    assert isinstance(script, str)
+    script = PRODUCTION_PREREQUISITES.read_text()
     assert 'select(test("^(?:[acdhmrtz][0-9]|i(?:[0-9]|m[0-9]|s[0-9]))"))' in script
 
 
@@ -900,8 +901,7 @@ def test_production_vcpu_reservation_matches_the_node_group() -> None:
     assert max_size and az_count
     assert "use_latest_ami_release_version = true" in eks
 
-    script = _step("production_access", "Check production prerequisites")["run"]
-    assert isinstance(script, str)
+    script = PRODUCTION_PREREQUISITES.read_text()
     reservation = re.search(
         r'REQUIRED=\$\(missing (\d+) "\$OWNED"\)\ncheck_headroom ec2 L-1216C47A',
         script,
@@ -917,8 +917,7 @@ def test_production_nlb_reservation_matches_the_services() -> None:
     load_balancers = production.count(
         '"service.beta.kubernetes.io/aws-load-balancer-nlb-target-type"'
     )
-    script = _step("production_access", "Check production prerequisites")["run"]
-    assert isinstance(script, str)
+    script = PRODUCTION_PREREQUISITES.read_text()
     reservation = re.search(
         r'REQUIRED=\$\(missing (\d+) "\$OWNED"\)\n'
         r"check_headroom elasticloadbalancing L-69A177A2",
