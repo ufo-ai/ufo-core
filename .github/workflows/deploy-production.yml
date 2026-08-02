@@ -6,6 +6,10 @@ on:
       target_sha:
         description: Full SHA from a successful testing deployment.
         required: true
+      replace_attempt_sha:
+        description: Current attempt SHA when replacing it before the first successful deployment.
+        required: false
+        default: ""
 
 concurrency:
   group: deploy-production
@@ -62,6 +66,7 @@ jobs:
     needs: validate
     runs-on: ubuntu-latest
     outputs:
+      attempt_id: ${{ steps.attempt.outputs.attempt_id }}
       e2b_template: ${{ steps.artifacts.outputs.e2b_template }}
       image_tag: ${{ steps.artifacts.outputs.image_tag }}
       target_sha: ${{ steps.select.outputs.target_sha }}
@@ -135,24 +140,50 @@ jobs:
       - name: Reject an unsplit authorization change
         env:
           GH_TOKEN: ${{ github.token }}
+          REPLACE_ATTEMPT_SHA: ${{ inputs.replace_attempt_sha }}
           TARGET_SHA: ${{ steps.select.outputs.target_sha }}
         run: |
           BASE_SHA=$(gh api "repos/$GITHUB_REPOSITORY/deployments?environment=production&task=deploy%3Aproduction&per_page=1" \
             --jq '.[0].sha // empty')
           if [ -z "$BASE_SHA" ]; then
-            if CLUSTER_RESULT=$(aws eks describe-cluster --name prod-cluster 2>&1); then
-              echo '::error::No recorded production deployment.'
-              exit 1
+            ATTEMPT_SHA=$(gh api "repos/$GITHUB_REPOSITORY/deployments?environment=production&task=deploy%3Aproduction-attempt&per_page=1" \
+              --jq '.[0].sha // empty')
+            if [ -n "$ATTEMPT_SHA" ]; then
+              if [ "$ATTEMPT_SHA" != "$TARGET_SHA" ] && [ "$REPLACE_ATTEMPT_SHA" != "$ATTEMPT_SHA" ]; then
+                echo "::error::Production bootstrap requires replace_attempt_sha=$ATTEMPT_SHA."
+                exit 1
+              fi
+              BASE_SHA=$ATTEMPT_SHA
+            else
+              if CLUSTER_RESULT=$(aws eks describe-cluster --name prod-cluster 2>&1); then
+                echo '::error::No recorded production deployment.'
+                exit 1
+              fi
+              if [[ "$CLUSTER_RESULT" != *ResourceNotFoundException* ]]; then
+                printf '%s\n' "$CLUSTER_RESULT" >&2
+                exit 1
+              fi
+              exit 0
             fi
-            if [[ "$CLUSTER_RESULT" != *ResourceNotFoundException* ]]; then
-              printf '%s\n' "$CLUSTER_RESULT" >&2
-              exit 1
-            fi
-            exit 0
           fi
           git merge-base --is-ancestor "$BASE_SHA" "$TARGET_SHA"
           git diff --name-only --no-renames "$BASE_SHA...$TARGET_SHA" > "$RUNNER_TEMP/production-paths"
           python .github/scripts/deploy_change_gate.py "$RUNNER_TEMP/production-paths"
+
+      - name: Record the production attempt
+        id: attempt
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TARGET_SHA: ${{ steps.select.outputs.target_sha }}
+        run: |
+          ATTEMPT_ID=$(jq -n --arg ref "$TARGET_SHA" \
+            '{ref: $ref, environment: "production", task: "deploy:production-attempt", auto_merge: false, required_contexts: []}' \
+            | gh api --method POST "repos/$GITHUB_REPOSITORY/deployments" --input - --jq '.id')
+          echo "attempt_id=$ATTEMPT_ID" >> "$GITHUB_OUTPUT"
+          jq -n --arg environment_url "$RUN_URL" \
+            '{state: "in_progress", environment: "production", environment_url: $environment_url}' \
+            | gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$ATTEMPT_ID/statuses" --input - >/dev/null
 
       - uses: actions/checkout@v4
         with:
@@ -392,8 +423,21 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - name: Record the production deployment
-        if: needs.deploy.result == 'success'
+      - name: Report the production attempt
+        if: always() && needs.prepare.outputs.attempt_id != ''
+        env:
+          ATTEMPT_ID: ${{ needs.prepare.outputs.attempt_id }}
+          DEPLOY_RESULT: ${{ needs.deploy.result }}
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          test "$DEPLOY_RESULT" = success && STATE=success || STATE=failure
+          jq -n --arg environment_url "$RUN_URL" --arg state "$STATE" \
+            '{state: $state, environment: "production", environment_url: $environment_url, auto_inactive: true}' \
+            | gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$ATTEMPT_ID/statuses" --input - >/dev/null
+
+      - name: Record the successful production deployment
+        if: always() && needs.deploy.result == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

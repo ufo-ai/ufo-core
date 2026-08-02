@@ -383,6 +383,8 @@ def test_every_main_push_triggers_deployment() -> None:
     assert set(production_triggers) == {"workflow_dispatch"}
     inputs = production_triggers["workflow_dispatch"]["inputs"]
     assert inputs["target_sha"]["required"] == "true"
+    assert inputs["replace_attempt_sha"]["required"] == "false"
+    assert inputs["replace_attempt_sha"]["default"] == ""
     assert production["concurrency"] == {
         "group": "deploy-production",
         "cancel-in-progress": "false",
@@ -1742,6 +1744,7 @@ def test_testing_run_records_the_artifacts_production_consumes(tmp_path: Path) -
     prepare = production_jobs["prepare"]
     assert isinstance(prepare, dict)
     assert prepare["outputs"] == {
+        "attempt_id": "${{ steps.attempt.outputs.attempt_id }}",
         "e2b_template": "${{ steps.artifacts.outputs.e2b_template }}",
         "image_tag": "${{ steps.artifacts.outputs.image_tag }}",
         "target_sha": "${{ steps.select.outputs.target_sha }}",
@@ -1955,6 +1958,7 @@ def test_production_prepare_applies_access_before_deploy() -> None:
     guard = _step("prepare", "Reject destructive changes", "deploy-production.yml")
     apply = _step("prepare", "Terraform apply", "deploy-production.yml")
     boundary = _step("prepare", "Reject an unsplit authorization change", "deploy-production.yml")
+    attempt = _step("prepare", "Record the production attempt", "deploy-production.yml")
     prerequisites = _step("prepare", "Check production prerequisites", "deploy-production.yml")
     images = _step("prepare", "Require tested images", "deploy-production.yml")
     assert "task=deploy%3Aproduction&per_page=1" in boundary["run"]
@@ -1970,7 +1974,7 @@ def test_production_prepare_applies_access_before_deploy() -> None:
         steps.index(checkouts[-2]) < steps.index(step) < steps.index(checkouts[-1])
         for step in (prerequisites, boundary)
     )
-    assert steps.index(boundary) < steps.index(apply)
+    assert steps.index(boundary) < steps.index(attempt) < steps.index(apply)
     assert steps.index(images) < steps.index(apply)
     assert all(
         steps.index(before) < steps.index(after)
@@ -2019,6 +2023,7 @@ def test_production_authorization_boundary_fails_closed(tmp_path: Path) -> None:
     step = _step("prepare", "Reject an unsplit authorization change", "deploy-production.yml")
     assert step["env"] == {
         "GH_TOKEN": "${{ github.token }}",
+        "REPLACE_ATTEMPT_SHA": "${{ inputs.replace_attempt_sha }}",
         "TARGET_SHA": "${{ steps.select.outputs.target_sha }}",
     }
     script = step["run"]
@@ -2083,8 +2088,30 @@ def test_production_authorization_boundary_fails_closed(tmp_path: Path) -> None:
     target_sha = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True
     ).stdout.strip()
-    subprocess.run(["git", "switch", "-c", "clean", base_sha], cwd=repo, check=True)
+    subprocess.run(["git", "switch", "-c", "span", target_sha], cwd=repo, check=True)
     runtime = repo / "core" / "src" / "ufo" / "serve.py"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text("changed\n")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-m",
+            "span",
+        ],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    span_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    subprocess.run(["git", "switch", "-c", "clean", base_sha], cwd=repo, check=True)
     runtime.parent.mkdir(parents=True)
     runtime.write_text("changed\n")
     subprocess.run(["git", "add", "."], cwd=repo, check=True)
@@ -2108,7 +2135,13 @@ def test_production_authorization_boundary_fails_closed(tmp_path: Path) -> None:
     ).stdout.strip()
     gh = tmp_path / "gh"
     gh.write_text(
-        '#!/bin/sh\nprintf \'%s\\n\' "$*" >> "$GH_CALLS"\nprintf \'%s\\n\' "$GH_RESPONSE"\n'
+        "#!/bin/sh\n"
+        'printf \'%s\\n\' "$*" >> "$GH_CALLS"\n'
+        'case "$*" in\n'
+        "  *task=deploy%3Aproduction-attempt*) printf '%s\\n' \"$GH_ATTEMPT\" ;;\n"
+        "  *task=deploy%3Aproduction*) printf '%s\\n' \"$GH_SUCCESS\" ;;\n"
+        "  *) exit 42 ;;\n"
+        "esac\n"
     )
     gh.chmod(0o755)
     aws = tmp_path / "aws"
@@ -2126,8 +2159,14 @@ def test_production_authorization_boundary_fails_closed(tmp_path: Path) -> None:
     gh_calls = tmp_path / "gh-calls"
 
     def boundary(
-        base: str, cluster: str, target: str = target_sha
+        success: str,
+        attempt: str,
+        target: str = target_sha,
+        cluster: str = "missing",
+        replace: str = "",
     ) -> subprocess.CompletedProcess[bytes]:
+        aws_calls.write_text("")
+        gh_calls.write_text("")
         return subprocess.run(
             ["bash", "-e", "-o", "pipefail", "-c", script],
             cwd=repo,
@@ -2135,38 +2174,54 @@ def test_production_authorization_boundary_fails_closed(tmp_path: Path) -> None:
             env={
                 "AWS_CALLS": str(aws_calls),
                 "AWS_CLUSTER_STATE": cluster,
+                "GH_ATTEMPT": attempt,
                 "GH_CALLS": str(gh_calls),
-                "GH_RESPONSE": base,
+                "GH_SUCCESS": success,
                 "GITHUB_REPOSITORY": "metalcraftai/ufo",
                 "PATH": f"{tmp_path}:{os.environ['PATH']}",
+                "REPLACE_ATTEMPT_SHA": replace,
                 "RUNNER_TEMP": str(tmp_path),
                 "TARGET_SHA": target,
             },
         )
 
-    split = boundary(base_sha, "missing")
+    success_query = (
+        "api repos/metalcraftai/ufo/deployments?environment=production&"
+        "task=deploy%3Aproduction&per_page=1 --jq .[0].sha // empty"
+    )
+    attempt_query = (
+        "api repos/metalcraftai/ufo/deployments?environment=production&"
+        "task=deploy%3Aproduction-attempt&per_page=1 --jq .[0].sha // empty"
+    )
+    split = boundary(base_sha, target_sha, span_sha)
     assert split.returncode != 0
     assert b"expand IAM, roll and drain" in split.stderr
-    assert boundary(base_sha, "missing", clean_sha).returncode == 0
-    assert boundary(target_sha, "missing", clean_sha).returncode != 0
-    existing = boundary("", "found")
+    assert gh_calls.read_text().splitlines() == [success_query]
+    assert boundary(base_sha, target_sha, clean_sha).returncode == 0
+    assert boundary(base_sha, target_sha, span_sha, replace=target_sha).returncode != 0
+    assert boundary(target_sha, "", clean_sha).returncode != 0
+    assert boundary("", target_sha, target_sha).returncode == 0
+    assert gh_calls.read_text().splitlines() == [success_query, attempt_query]
+    assert aws_calls.read_text() == ""
+    changed = boundary("", target_sha, span_sha)
+    assert changed.returncode != 0
+    assert changed.stdout.decode() == (
+        f"::error::Production bootstrap requires replace_attempt_sha={target_sha}.\n"
+    )
+    assert boundary("", target_sha, span_sha, replace=target_sha).returncode == 0
+    assert boundary("", target_sha, span_sha, replace=base_sha).returncode != 0
+    replacement_span = boundary("", base_sha, span_sha, replace=base_sha)
+    assert replacement_span.returncode != 0
+    assert b"expand IAM, roll and drain" in replacement_span.stderr
+    existing = boundary("", "", cluster="found")
     assert existing.returncode != 0
     assert existing.stdout == b"::error::No recorded production deployment.\n"
-    assert boundary("", "missing").returncode == 0
-    denied = boundary("", "denied")
+    assert boundary("", "").returncode == 0
+    assert gh_calls.read_text().splitlines() == [success_query, attempt_query]
+    denied = boundary("", "", cluster="denied")
     assert denied.returncode != 0
     assert denied.stderr == b"AccessDeniedException\n"
-    assert (
-        gh_calls.read_text().splitlines()
-        == [
-            (
-                "api repos/metalcraftai/ufo/deployments?environment=production&"
-                "task=deploy%3Aproduction&per_page=1 --jq .[0].sha // empty"
-            )
-        ]
-        * 6
-    )
-    assert aws_calls.read_text().splitlines() == ["eks describe-cluster --name prod-cluster"] * 3
+    assert aws_calls.read_text().splitlines() == ["eks describe-cluster --name prod-cluster"]
 
 
 def test_production_deploy_rejects_missing_inputs_before_role_assumption() -> None:
@@ -2822,21 +2877,34 @@ def test_deployment_gate_accepts_only_expected_results(
     assert (run.returncode == 0) is accepted
 
 
-def test_successful_manual_deploy_records_the_promoted_commit(tmp_path: Path) -> None:
+def test_manual_deploy_records_before_mutation_and_reports_conclusion(tmp_path: Path) -> None:
     jobs = _workflow(WORKFLOWS / "deploy-production.yml")["jobs"]
     assert isinstance(jobs, dict)
+    prepare = jobs["prepare"]
     report = jobs["report"]
+    assert isinstance(prepare, dict)
     assert isinstance(report, dict)
+    assert prepare["outputs"]["attempt_id"] == "${{ steps.attempt.outputs.attempt_id }}"
     assert report["needs"] == ["ref", "validate", "prepare", "deploy"]
     assert report["if"] == "always()"
-    record = _step("report", "Record the production deployment", "deploy-production.yml")
-    assert record["if"] == "needs.deploy.result == 'success'"
+    record = _step("prepare", "Record the production attempt", "deploy-production.yml")
+    conclusion = _step("report", "Report the production attempt", "deploy-production.yml")
+    assert record["id"] == "attempt"
     assert record["env"] == {
         "GH_TOKEN": "${{ github.token }}",
         "RUN_URL": (
             "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
         ),
-        "TARGET_SHA": "${{ needs.prepare.outputs.target_sha }}",
+        "TARGET_SHA": "${{ steps.select.outputs.target_sha }}",
+    }
+    assert conclusion["if"] == "always() && needs.prepare.outputs.attempt_id != ''"
+    assert conclusion["env"] == {
+        "ATTEMPT_ID": "${{ needs.prepare.outputs.attempt_id }}",
+        "DEPLOY_RESULT": "${{ needs.deploy.result }}",
+        "GH_TOKEN": "${{ github.token }}",
+        "RUN_URL": (
+            "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        ),
     }
     gh = tmp_path / "gh"
     gh.write_text(
@@ -2858,11 +2926,13 @@ def test_successful_manual_deploy_records_the_promoted_commit(tmp_path: Path) ->
     gh.chmod(0o755)
     calls = tmp_path / "gh-calls"
     deployment = tmp_path / "deployment.json"
+    github_output = tmp_path / "github-output"
     status = tmp_path / "status.json"
     environment = {
         "DEPLOYMENT_PAYLOAD": str(deployment),
         "GH_CALLS": str(calls),
         "GH_FAIL": "",
+        "GITHUB_OUTPUT": str(github_output),
         "GITHUB_REPOSITORY": "metalcraftai/ufo",
         "PATH": f"{tmp_path}:{os.environ['PATH']}",
         "RUN_URL": RUN_URL,
@@ -2881,6 +2951,97 @@ def test_successful_manual_deploy_records_the_promoted_commit(tmp_path: Path) ->
     assert json.loads(deployment.read_text()) == {
         "ref": "0123456789abcdef0123456789abcdef01234567",
         "environment": "production",
+        "task": "deploy:production-attempt",
+        "auto_merge": False,
+        "required_contexts": [],
+    }
+    assert github_output.read_text() == "attempt_id=123\n"
+    assert json.loads(status.read_text()) == {
+        "state": "in_progress",
+        "environment": "production",
+        "environment_url": RUN_URL,
+    }
+    for failure in ("deployment", "status"):
+        failed = subprocess.run(
+            ["bash", "-e", "-o", "pipefail", "-c", record["run"]],
+            capture_output=True,
+            env=environment | {"GH_FAIL": failure},
+        )
+        assert failed.returncode != 0
+    for result, state in (
+        ("success", "success"),
+        ("failure", "failure"),
+        ("skipped", "failure"),
+        ("cancelled", "failure"),
+    ):
+        calls.write_text("")
+        subprocess.run(
+            ["bash", "-e", "-o", "pipefail", "-c", conclusion["run"]],
+            check=True,
+            env=environment | {"ATTEMPT_ID": "123", "DEPLOY_RESULT": result},
+        )
+        assert calls.read_text().splitlines() == [
+            "api --method POST repos/metalcraftai/ufo/deployments/123/statuses --input -"
+        ]
+        assert json.loads(status.read_text()) == {
+            "state": state,
+            "environment": "production",
+            "environment_url": RUN_URL,
+            "auto_inactive": True,
+        }
+    failed = subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", conclusion["run"]],
+        env=environment | {"ATTEMPT_ID": "123", "DEPLOY_RESULT": "failure", "GH_FAIL": "status"},
+    )
+    assert failed.returncode != 0
+
+
+def test_successful_manual_deploy_records_the_promoted_commit(tmp_path: Path) -> None:
+    record = _step("report", "Record the successful production deployment", "deploy-production.yml")
+    assert record["if"] == "always() && needs.deploy.result == 'success'"
+    assert record["env"] == {
+        "GH_TOKEN": "${{ github.token }}",
+        "RUN_URL": (
+            "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        ),
+        "TARGET_SHA": "${{ needs.prepare.outputs.target_sha }}",
+    }
+    gh = tmp_path / "gh"
+    gh.write_text(
+        "#!/bin/sh\n"
+        'case "$*" in\n'
+        "  *'/deployments --input - --jq .id')\n"
+        '    cat > "$DEPLOYMENT_PAYLOAD"\n'
+        '    [ "$GH_FAIL" != deployment ] || exit 42\n'
+        "    printf '456\\n'\n"
+        "    ;;\n"
+        "  *'/deployments/456/statuses --input -')\n"
+        '    cat > "$STATUS_PAYLOAD"\n'
+        '    [ "$GH_FAIL" != status ] || exit 42\n'
+        "    ;;\n"
+        "  *) exit 42 ;;\n"
+        "esac\n"
+    )
+    gh.chmod(0o755)
+    deployment = tmp_path / "deployment.json"
+    status = tmp_path / "status.json"
+    environment = {
+        "DEPLOYMENT_PAYLOAD": str(deployment),
+        "GH_FAIL": "",
+        "GITHUB_REPOSITORY": "metalcraftai/ufo",
+        "PATH": f"{tmp_path}:{os.environ['PATH']}",
+        "RUN_URL": RUN_URL,
+        "STATUS_PAYLOAD": str(status),
+        "TARGET_SHA": "0123456789abcdef0123456789abcdef01234567",
+    }
+    subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", record["run"]],
+        check=True,
+        env=environment,
+    )
+    assert json.loads(deployment.read_text()) == {
+        "ref": "0123456789abcdef0123456789abcdef01234567",
+        "environment": "production",
         "task": "deploy:production",
         "auto_merge": False,
         "required_contexts": [],
@@ -2894,7 +3055,6 @@ def test_successful_manual_deploy_records_the_promoted_commit(tmp_path: Path) ->
     for failure in ("deployment", "status"):
         failed = subprocess.run(
             ["bash", "-e", "-o", "pipefail", "-c", record["run"]],
-            capture_output=True,
             env=environment | {"GH_FAIL": failure},
         )
         assert failed.returncode != 0
