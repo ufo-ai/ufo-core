@@ -2,9 +2,9 @@
 
 Owns the boilerplate a provider would otherwise duplicate: the httpx client (built from whichever
 `Credential` the auth-proxy resolved — a broker's proxying transport, a bearer token, or auth
-headers), exponential-backoff retry on transient/5xx responses, and one page loop per declared
-`PaginationStrategy`. Async — a connector runs from the core sync driver where a blocking network
-call would stall every other surface.
+headers), retry on transient/5xx responses, and one page loop per declared `PaginationStrategy`.
+Async — a connector runs from the core sync driver where a blocking network call would stall every
+other surface.
 
 A subclass sets `name`, `base_url`, `streams_list`, and either declares `Pagination` on each stream
 (routing through `paginate_from_strategy`) or overrides `paginate` for provider-specific shapes
@@ -13,6 +13,7 @@ uniform. `flatten` is a passthrough; override for payloads that nest under an en
 path (CRUD, field discovery) is deliberately absent — the source seam only reads."""
 
 import asyncio
+import math
 import re
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from typing import Any, ClassVar
@@ -30,6 +31,7 @@ from ufo.sources.connector import (
 MAX_ATTEMPTS = 5
 RETRY_INITIAL_DELAY_SECONDS = 1.0
 RETRY_MAX_DELAY_SECONDS = 30.0
+RETRY_AFTER_MAX_SECONDS = 60.0
 RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
 TIMEOUT_CONNECT_SECONDS = 30.0
 TIMEOUT_READ_SECONDS = 60.0
@@ -100,6 +102,26 @@ def _is_retryable(error: BaseException) -> bool:
     if isinstance(error, httpx.HTTPStatusError):
         return error.response.status_code in RETRYABLE_STATUS
     return False
+
+
+def _retry_wait(error: BaseException, delay: float) -> float:
+    """A 429's `Retry-After` when it reads as a finite non-negative number of seconds, capped at
+    `RETRY_AFTER_MAX_SECONDS`, else the caller's `delay` — a provider telling us exactly how long to
+    back off beats our own guess, but the cap bounds each wait so a header naming a distant
+    rate-limit reset cannot park one page fetch on it, and a `nan` would poison the shared loop's
+    timer heap."""
+    if not isinstance(error, httpx.HTTPStatusError) or error.response.status_code != 429:
+        return delay
+    header = error.response.headers.get("retry-after")
+    if header is None:
+        return delay
+    try:
+        wait = float(header)
+    except ValueError:
+        return delay
+    if not math.isfinite(wait) or wait < 0.0:
+        return delay
+    return min(wait, RETRY_AFTER_MAX_SECONDS)
 
 
 def _raise_for_status(response: httpx.Response) -> None:
@@ -202,8 +224,10 @@ class RestConnector(Connector):
         return await self._send(lambda: client.post(path, json=json))
 
     async def _send(self, request: Callable[[], Awaitable[httpx.Response]]) -> httpx.Response:
-        """The shared retry envelope behind `_get_raw`/`_post`: run one request coroutine with
-        exponential backoff on transient/5xx responses."""
+        """The shared retry envelope behind `_get_raw`/`_post`: run one request coroutine, retrying
+        a transient/5xx response until `MAX_ATTEMPTS` attempts are spent — waiting a 429's
+        `Retry-After` when it carries a usable one, bounded by `RETRY_AFTER_MAX_SECONDS`, otherwise
+        a doubling delay."""
         delay = RETRY_INITIAL_DELAY_SECONDS
         for attempt in range(1, MAX_ATTEMPTS + 1):
             try:
@@ -213,7 +237,7 @@ class RestConnector(Connector):
             except (httpx.TransportError, httpx.HTTPStatusError) as error:
                 if attempt >= MAX_ATTEMPTS or not _is_retryable(error):
                     raise
-                await asyncio.sleep(min(delay, RETRY_MAX_DELAY_SECONDS))
+                await asyncio.sleep(_retry_wait(error, min(delay, RETRY_MAX_DELAY_SECONDS)))
                 delay *= 2
         raise AssertionError("unreachable")
 

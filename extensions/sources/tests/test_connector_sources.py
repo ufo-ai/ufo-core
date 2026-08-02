@@ -233,6 +233,86 @@ async def test_next_link_strategy_fails_on_a_repeated_link() -> None:
         await _pages(_ProbeConnector(stream, handle))
 
 
+def _connect_error() -> httpx.Response:
+    raise httpx.ConnectError("connection refused")
+
+
+@pytest.mark.parametrize(
+    ("failing_calls", "expected_waits"),
+    [
+        ([lambda: httpx.Response(429, json={}, headers={"retry-after": "42"})], [42.0]),
+        ([lambda: httpx.Response(429, json={}, headers={"retry-after": "600"})], [60.0]),
+        ([lambda: httpx.Response(429, json={}, headers={"retry-after": "inf"})], [1.0]),
+        ([lambda: httpx.Response(429, json={}, headers={"retry-after": "nan"})], [1.0]),
+        ([lambda: httpx.Response(429, json={}, headers={"retry-after": "-5"})], [1.0]),
+        ([lambda: httpx.Response(429, json={})], [1.0]),
+        (
+            [
+                lambda: httpx.Response(
+                    429, json={}, headers={"retry-after": "Wed, 21 Oct 2026 07:28:00 GMT"}
+                )
+            ],
+            [1.0],
+        ),
+        ([lambda: httpx.Response(503, json={}, headers={"retry-after": "42"})], [1.0]),
+        ([_connect_error], [1.0]),
+        (
+            [lambda: httpx.Response(503, json={}), lambda: httpx.Response(503, json={})],
+            [1.0, 2.0],
+        ),
+    ],
+    ids=[
+        "429-seconds",
+        "429-seconds-over-the-cap",
+        "429-inf",
+        "429-nan",
+        "429-negative",
+        "429-no-header",
+        "429-http-date",
+        "503-header-not-read",
+        "transport-error",
+        "503-twice-doubles",
+    ],
+)
+async def test_retry_waits_a_bounded_429_retry_after_else_the_doubling_delay(
+    failing_calls: list[Callable[[], httpx.Response]],
+    expected_waits: list[float],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 429 carrying `Retry-After` must wait that long, not the connector's own guessed doubling
+    delay — the provider is telling us exactly when it will accept the next request — capped at
+    `RETRY_AFTER_MAX_SECONDS` so a header naming a distant rate-limit reset cannot park one page
+    fetch on it. Every other shape takes the doubling delay: a non-finite or negative seconds count
+    (a `nan` reaching `asyncio.sleep` corrupts the shared loop's timer heap), no header at all, an
+    RFC 9110 HTTP-date that the seconds parse rejects, a retryable status other than 429 whose
+    `Retry-After` this envelope does not read, and a transport error — which the envelope hands to
+    the same wait calculation carrying no response at all to read a header off. The last case fails
+    twice, so the doubling is observed across consecutive retries rather than assumed from one."""
+    waits: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        waits.append(seconds)
+
+    monkeypatch.setattr("ufo.sources.rest.asyncio.sleep", fake_sleep)
+
+    calls = 0
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls <= len(failing_calls):
+            return failing_calls[calls - 1]()
+        return httpx.Response(200, json=[{"id": 1}])
+
+    stream = StreamSpec(
+        name="items",
+        source_object="items",
+        pagination=Pagination(strategy=PaginationStrategy.next_link, path="/items"),
+    )
+    assert _ids(await _pages(_ProbeConnector(stream, handle))) == {1}
+    assert waits == expected_waits
+
+
 # --- the adapter: connector pages → SyncResult ---------------------------------------------------
 
 
