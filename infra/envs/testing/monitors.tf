@@ -57,6 +57,8 @@ resource "datadog_monitor" "db_tx_unavailable" {
     critical = 1
   }
 
+  require_full_window = false
+
   tags = ["env:testing", "managed-by:terraform"]
 }
 
@@ -74,6 +76,8 @@ resource "datadog_monitor" "db_pool_exhausted" {
   monitor_thresholds {
     critical = 1
   }
+
+  require_full_window = false
 
   tags = ["env:testing", "managed-by:terraform"]
 }

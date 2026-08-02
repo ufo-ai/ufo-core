@@ -3166,6 +3166,14 @@ def test_source_sync_failure_monitor_consumes_the_reported_metric(environment: s
     assert _monitor_attribute("source_sync_failed", "require_full_window", environment) == "false"
 
 
+@pytest.mark.parametrize("environment", DEPLOY_ENVIRONMENTS)
+@pytest.mark.parametrize(
+    "monitor", ["db_tx_unavailable", "db_pool_exhausted", "source_sync_failed"]
+)
+def test_a_sparse_counters_alert_can_clear_itself(monitor: str, environment: str) -> None:
+    assert _monitor_attribute(monitor, "require_full_window", environment) == "false"
+
+
 def test_production_owns_database_and_model_dashboards() -> None:
     production = (ROOT / "infra" / "envs" / "prod" / "dashboards.tf").read_text()
     assert re.findall(r'resource "datadog_dashboard" "(\w+)"', production) == [
