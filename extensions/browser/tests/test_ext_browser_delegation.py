@@ -76,7 +76,7 @@ class ScriptedSubagents:
         self.cancelled.append(turn_id)
         return SubagentStatus(turn_id=turn_id, status="cancelled", text="")
 
-    async def message(self, turn_id: UUID, text: str) -> SubagentStatus:
+    async def message(self, turn_id: UUID, text: str, dedup_key: str) -> SubagentStatus:
         raise NotImplementedError
 
 

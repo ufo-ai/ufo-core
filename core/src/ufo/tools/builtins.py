@@ -733,7 +733,11 @@ async def message_subagent_handler(ctx: ToolContext, args: MessageSubagentInput)
     follow-up for a later wait. Refuses a turn id this turn did not spawn."""
     if ctx.subagents is None:
         raise RuntimeError("subagent control is not available in this context")
-    status = await ctx.subagents.message(UUID(args.subagent_id), args.message)
+    if ctx.idempotency_key is None:
+        raise RuntimeError("message_subagent dispatched without its idempotency key")
+    status = await ctx.subagents.message(
+        UUID(args.subagent_id), args.message, dedup_key=ctx.idempotency_key
+    )
     return ToolResult(
         content=(
             TextContent(
@@ -919,5 +923,6 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         ),
         input_model=MessageSubagentInput,
         handler=message_subagent_handler,
+        side_effecting=True,
     ),
 )

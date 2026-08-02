@@ -1481,7 +1481,9 @@ async def test_subagent_plain_text_followup_runs_without_a_spawn_payload(
         parent=parent,
         audience=conversation_audience(None),
     )
-    queued = await subagents.message(child_id, FOLLOWUP_INBOUND)
+    queued = await subagents.message(
+        child_id, FOLLOWUP_INBOUND, dedup_key="turn-1/message_subagent/call-1"
+    )
     (followup,) = await subagents.wait((queued.turn_id,))
     assert followup.status == "done"
     assert RoundTripOutput.model_validate_json(followup.text).echoed == FOLLOWUP_ECHO

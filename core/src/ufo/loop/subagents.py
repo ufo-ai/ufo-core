@@ -231,13 +231,16 @@ class Subagents:
         text = "" if row.terminal is None else TerminalFrame.model_validate(row.terminal).text
         return SubagentStatus(turn_id=turn_id, status=row.status, text=text)
 
-    async def message(self, turn_id: UUID, text: str) -> SubagentStatus:
+    async def message(self, turn_id: UUID, text: str, dedup_key: str) -> SubagentStatus:
         """Queue a follow-up for a background child by admitting the next turn on the child's own
         conversation with `text` as its inbound. The child's partition serializes it after the turn
         in flight (create-or-attach hands it the same sandbox), and the engine loads the child's
         accumulated transcript as prior context — so the follow-up continues the subagent under its
-        own profile rather than starting fresh. Returns the queued follow-up's status; refuses a
-        turn id that is not a child of this parent, mirroring cancel."""
+        own profile rather than starting fresh. Admission is idempotent through
+        `turn.idempotency_key`: a re-run of the messaging tool step (crash recovery) finds the turn
+        it already admitted under `dedup_key` instead of admitting a second one at the next seq.
+        Returns the follow-up's status; refuses a turn id that is not a child of this parent,
+        mirroring cancel."""
         await self._require_child(turn_id)
         async with workspace_tx() as connection:
             child = (
@@ -254,34 +257,60 @@ class Subagents:
                 .where(tables.conversation.c.id == child.conversation_id)
                 .with_for_update()
             )
-            next_seq = (
+            followup = (
                 await connection.execute(
-                    sa.select(sa.func.max(tables.turn.c.seq)).where(
-                        tables.turn.c.conversation_id == child.conversation_id
+                    sa.select(
+                        tables.turn.c.id,
+                        tables.turn.c.conversation_id,
+                        tables.turn.c.seq,
+                        tables.turn.c.status,
+                    ).where(
+                        tables.turn.c.workspace_id == self.parent.workspace_id,
+                        tables.turn.c.idempotency_key == dedup_key,
                     )
                 )
-            ).scalar_one() + 1
-            followup_id = turn_id_for(self.parent.workspace_id, child.conversation_id, next_seq)
-            await connection.execute(
-                sa.insert(tables.turn).values(
-                    id=followup_id,
-                    workspace_id=self.parent.workspace_id,
-                    conversation_id=child.conversation_id,
-                    agent_id=child.agent_id,
-                    seq=next_seq,
-                    status="queued",
-                    inbound=text,
-                    admission_source=INTERNAL_ADMISSION,
-                    speaker_member_id=None,
-                    on_behalf_of_member_id=self.acting_member_id,
-                    terminal=None,
-                    parent_turn_id=self.parent.id,
-                    subagent_profile=child.subagent_profile,
-                    traceparent=current_traceparent(),
-                    created_at=sa.func.now(),
-                    updated_at=sa.func.now(),
+            ).one_or_none()
+            if followup is not None and followup.conversation_id != child.conversation_id:
+                raise ValueError("dedup key belongs to another follow-up")
+            if followup is None:
+                followup_seq = (
+                    await connection.execute(
+                        sa.select(sa.func.max(tables.turn.c.seq)).where(
+                            tables.turn.c.conversation_id == child.conversation_id
+                        )
+                    )
+                ).scalar_one() + 1
+                followup_id = turn_id_for(
+                    self.parent.workspace_id, child.conversation_id, followup_seq
                 )
-            )
+                followup_status = "queued"
+                await connection.execute(
+                    sa.insert(tables.turn).values(
+                        id=followup_id,
+                        workspace_id=self.parent.workspace_id,
+                        conversation_id=child.conversation_id,
+                        agent_id=child.agent_id,
+                        seq=followup_seq,
+                        status=followup_status,
+                        inbound=text,
+                        admission_source=INTERNAL_ADMISSION,
+                        idempotency_key=dedup_key,
+                        speaker_member_id=None,
+                        on_behalf_of_member_id=self.acting_member_id,
+                        terminal=None,
+                        parent_turn_id=self.parent.id,
+                        subagent_profile=child.subagent_profile,
+                        traceparent=current_traceparent(),
+                        created_at=sa.func.now(),
+                        updated_at=sa.func.now(),
+                    )
+                )
+            else:
+                followup_id, followup_seq, followup_status = (
+                    followup.id,
+                    followup.seq,
+                    followup.status,
+                )
             earlier_queued = (
                 await connection.execute(
                     sa.select(
@@ -289,21 +318,22 @@ class Subagents:
                             sa.select(tables.turn.c.id).where(
                                 tables.turn.c.conversation_id == child.conversation_id,
                                 tables.turn.c.status == "queued",
-                                tables.turn.c.seq < next_seq,
+                                tables.turn.c.seq < followup_seq,
                             )
                         )
                     )
                 )
             ).scalar_one()
-            if not earlier_queued:
+            dispatch = followup_status == "queued" and not earlier_queued
+            if dispatch:
                 await connection.execute(
                     sa.update(tables.turn)
                     .values(dispatch_enqueued_at=sa.func.now(), updated_at=sa.func.now())
                     .where(tables.turn.c.id == followup_id)
                 )
-        if not earlier_queued:
+        if dispatch:
             await self._enqueue(followup_id, child.conversation_id)
-        return SubagentStatus(turn_id=followup_id, status="queued", text="")
+        return SubagentStatus(turn_id=followup_id, status=followup_status, text="")
 
     def _untrusted_output(self, profile: str) -> bool:
         """Trust fails closed: a child whose profile is no longer registered walls as
