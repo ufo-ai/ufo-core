@@ -8,10 +8,14 @@ over the same window delivers only the newly-changed page), and builds the jobs-
 the model wired. `core_jobs` registers one `page_change:<ext>:<hook>` job per consumer, so a
 consumer that raises fails only its own workflow — proven by driving one consumer that raises and
 confirming its
-cursor did not advance while a second consumer still makes progress. No mock call-log — a real
-consumer records through its capability APIs."""
+cursor did not advance while a second consumer still makes progress. A consumer that advances its
+own cursor from inside its handler stands in for the writer that overlaps a slow tick: the runner
+compare-and-sets through `ScopedStore.put_if`, so the newer value survives and the drive stops
+instead of rewinding the cursor and replaying the batch. No mock call-log — a real consumer records
+through its capability APIs."""
 
 import hashlib
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
@@ -23,9 +27,10 @@ from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.ext.context import ScopedStore
 from ufo.ext.loader import load_manifests
-from ufo.ext.manifest import HookContext, HookOutcome, HookSpec, Manifest
+from ufo.ext.manifest import HookContext, HookOutcome, HookSpec, Manifest, PageChangeBatch
 from ufo.jobs import (
     CORE_EXTENSION,
+    PAGE_CHANGE_BATCH,
     PAGE_CHANGE_CURSOR_KEY,
     PAGE_CHANGE_JOB,
     PageChangeRunner,
@@ -36,9 +41,21 @@ from ufo.jobs import (
 from ufo.models.catalog import CORE_PRICING
 from ufo.models.registry import ModelRegistry
 from ufo.schema import tables
-from ufo.sources.sync import CorePageFeed, FolderSource, SyncDriver
+from ufo.sources.sync import (
+    CorePageFeed,
+    FolderSource,
+    PageBatch,
+    PageChange,
+    SyncDriver,
+    page_cursor,
+)
 from ufo.subjects import SHARED_SUBJECT
 from ufo.workspace import ws
+
+RACER_EXTENSION = "racer_ext"
+RACER_CURSOR_KEY = f"{PAGE_CHANGE_CURSOR_KEY}:_advance_the_cursor_then_record"
+CONCURRENT_CURSOR = f"9000|{UUID(int=9000)}"
+DELIVERED_SIZES_KEY = "hook:delivered_batch_sizes"
 
 
 def _sample_manifest() -> object:
@@ -208,3 +225,94 @@ async def test_a_failing_consumer_neither_advances_its_cursor_nor_blocks_another
         )
     assert record == {"page_ids": [str(page)], "model_wired": False}
     assert isinstance(sample_cursor, str) and sample_cursor != boom_cursor
+
+
+@dataclass(frozen=True)
+class _SyntheticPages:
+    revisions: int
+
+    async def pages_changed_since(self, cursor: str | None, limit: int) -> PageBatch:
+        after = 0 if cursor is None else page_cursor(cursor)[0]
+        window = tuple(
+            self._page(revision)
+            for revision in range(after + 1, min(after + limit, self.revisions) + 1)
+        )
+        if not window:
+            return PageBatch(changes=(), next_cursor=None)
+        return PageBatch(changes=window, next_cursor=f"{window[-1].revision}|{window[-1].page_id}")
+
+    def _page(self, revision: int) -> PageChange:
+        when = datetime(2026, 8, 1, tzinfo=UTC)
+        return PageChange(
+            page_id=UUID(int=revision),
+            source_id=UUID(int=0),
+            subject=SHARED_SUBJECT,
+            stream="pages",
+            title=f"page {revision}",
+            body=f"the body of page {revision}",
+            digest=f"sha256:{revision:064x}",
+            revision=revision,
+            tombstone=False,
+            created_at=when,
+            as_of=when,
+            changed_at=when,
+        )
+
+
+async def _advance_the_cursor_then_record(ctx: HookContext) -> HookOutcome:
+    match ctx.payload:
+        case PageChangeBatch(changes=changes):
+            delivered = await ctx.ext.store.get(DELIVERED_SIZES_KEY)
+            sizes = [] if delivered is None else list(delivered)
+            await ctx.ext.store.put(DELIVERED_SIZES_KEY, [*sizes, len(changes)])
+            await ctx.ext.store.put(RACER_CURSOR_KEY, CONCURRENT_CURSOR)
+    return None
+
+
+async def test_a_cursor_another_writer_advanced_is_not_rewound_by_the_drive(db: None) -> None:
+    """A consumer whose handler runs long enough for another writer — an overlapping tick of the
+    same per-minute job, or the eval settling the deriver — to move the cursor on. The drive holds
+    the older value it read, so writing it back would rewind the cursor and replay the batch the
+    other writer already accounted for. It compare-and-sets instead: the newer value stands and the
+    drive stops, delivering one batch and no replay."""
+    workspace_id = await _workspace()
+    racer = Manifest(
+        name=RACER_EXTENSION,
+        version="0",
+        hooks=(HookSpec(event="page_change", handler=_advance_the_cursor_then_record),),
+    )
+    runner = PageChangeRunner(
+        manifests=(racer,), pages=_SyntheticPages(revisions=PAGE_CHANGE_BATCH + 1)
+    )
+    (consumer,) = runner.consumers()
+
+    with ws(workspace_id):
+        await runner.drive(consumer)
+        scoped = ScopedStore(extension=RACER_EXTENSION)
+        cursor = await scoped.get(f"{PAGE_CHANGE_CURSOR_KEY}:{consumer.discriminator}")
+        delivered = await scoped.get(DELIVERED_SIZES_KEY)
+    assert cursor == CONCURRENT_CURSOR
+    assert delivered == [PAGE_CHANGE_BATCH]
+
+
+async def test_put_if_writes_only_while_the_stored_value_still_matches(db: None) -> None:
+    workspace_id = await _workspace()
+    with ws(workspace_id):
+        scoped = ScopedStore(extension=RACER_EXTENSION)
+        await scoped.put("cursor", "10|a")
+        assert await scoped.put_if("cursor", "11|b", expected="9|z") is False
+        assert await scoped.get("cursor") == "10|a"
+        assert await scoped.put_if("cursor", "11|b", expected="10|a") is True
+        assert await scoped.get("cursor") == "11|b"
+
+
+async def test_put_if_inserts_a_missing_key_but_never_clobbers_one_a_racer_created(
+    db: None,
+) -> None:
+    workspace_id = await _workspace()
+    with ws(workspace_id):
+        scoped = ScopedStore(extension=RACER_EXTENSION)
+        assert await scoped.put_if("cursor", "10|a", expected=None) is True
+        assert await scoped.get("cursor") == "10|a"
+        assert await scoped.put_if("cursor", "11|b", expected=None) is False
+        assert await scoped.get("cursor") == "10|a"

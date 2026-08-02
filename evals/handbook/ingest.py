@@ -16,10 +16,11 @@ policy into memory, and these tasks turn on exact thresholds and exact wording �
 rounds "2%" or reworks a required message is worse than no memory at all. Verbatim page snippets are
 what the agent needs.
 
-That cannot be won as a race. `PageChangeRunner.drive` reads its cursor, runs the handler, then
-writes the cursor with no compare-and-set, so a tick of serve's page-change job already inside the
-deriver commits its paraphrase after any delete and can land its cursor on top of a settled one. So
-the cursor is settled, what the gap produced is deleted, and then the invariant is *checked* —
+Settling the cursor decides the race but not the tick already inside it. `PageChangeRunner.drive`
+advances the cursor by compare-and-set, so a tick of serve's page-change job that is in the deriver
+when the settle lands cannot write its older cursor over the settled one and nothing is replayed —
+but that tick still commits the paraphrase it was already deriving, after any delete. So the cursor
+is settled, what the gap produced is deleted, and then the invariant is *checked* —
 `derived_facts` is read again before the turn is graded, and a case whose policy was paraphrased
 fails loudly rather than scoring against memory it was never supposed to have."""
 

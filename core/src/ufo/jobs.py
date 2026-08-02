@@ -432,7 +432,10 @@ class PageChangeRunner:
     async def drive(self, consumer: PageChangeConsumer) -> None:
         """Replay the workspace's pages changed since this consumer's cursor to its handler and
         advance the cursor — the dispatcher binds the workspace, so this runs scoped to it and never
-        enumerates the fleet itself."""
+        enumerates the fleet itself. The cursor advances by compare-and-set against the value this
+        tick read, so an overlapping tick or an external writer that already moved it on is never
+        rewound to an older place: losing that write means another writer owns the cursor, and this
+        tick stops having only redone work a handler is idempotent under."""
         context = self._context_for(consumer.extension, consumer.declared)
         cursor_key = f"{PAGE_CHANGE_CURSOR_KEY}:{consumer.discriminator}"
         stored = await context.store.get(cursor_key)
@@ -446,8 +449,9 @@ class PageChangeRunner:
             await consumer.spec.handler(
                 HookContext(ext=context, payload=PageChangeBatch(changes=batch.changes))
             )
+            if not await context.store.put_if(cursor_key, batch.next_cursor, expected=cursor):
+                return
             cursor = batch.next_cursor
-            await context.store.put(cursor_key, cursor)
             if len(batch.changes) < PAGE_CHANGE_BATCH:
                 return
 

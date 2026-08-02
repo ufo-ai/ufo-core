@@ -117,6 +117,58 @@ class ScopedStore:
                     )
                 )
 
+    async def put_if(self, key: str, value: JsonValue, expected: JsonValue | None) -> bool:
+        """Write only while the stored value is still `expected`; returns whether it was written. A
+        caller holding a value it read earlier writes through this so a concurrent writer's newer
+        value is never overwritten by its own stale one. The row is locked, compared in Python and
+        updated in one transaction; `expected is None` means the key was absent, so it inserts and
+        reports whether the insert landed."""
+        async with workspace_tx() as connection:
+            if expected is None:
+                insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
+                landed = await connection.execute(
+                    insert(tables.ext_store)
+                    .values(
+                        workspace_id=self.workspace_id,
+                        extension=self.extension,
+                        key=key,
+                        value=value,
+                        created_at=sa.func.now(),
+                        updated_at=sa.func.now(),
+                    )
+                    .on_conflict_do_nothing(
+                        index_elements=[
+                            tables.ext_store.c.workspace_id,
+                            tables.ext_store.c.extension,
+                            tables.ext_store.c.key,
+                        ]
+                    )
+                )
+                return landed.rowcount == 1
+            locked = (
+                await connection.execute(
+                    sa.select(tables.ext_store.c.value)
+                    .where(
+                        tables.ext_store.c.workspace_id == self.workspace_id,
+                        tables.ext_store.c.extension == self.extension,
+                        tables.ext_store.c.key == key,
+                    )
+                    .with_for_update()
+                )
+            ).one_or_none()
+            if locked is None or locked.value != expected:
+                return False
+            await connection.execute(
+                sa.update(tables.ext_store)
+                .values(value=value, updated_at=sa.func.now())
+                .where(
+                    tables.ext_store.c.workspace_id == self.workspace_id,
+                    tables.ext_store.c.extension == self.extension,
+                    tables.ext_store.c.key == key,
+                )
+            )
+            return True
+
     async def delete(self, key: str) -> None:
         async with workspace_tx() as connection:
             await connection.execute(
