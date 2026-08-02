@@ -47,7 +47,7 @@ from ufo.loop.subagents import SubagentRegistry, Subagents, subagent_system_prom
 from ufo.loop.transcript import Transcript
 from ufo.memory import MemorySearch
 from ufo.models.registry import ModelRegistry
-from ufo.o11y import emit_metric, log, turn_profile, warn
+from ufo.o11y import emit_metric, formatted_stack, log, log_error, turn_profile, warn
 from ufo.sandbox.conversation import ConversationSandbox
 from ufo.sandbox.session import (
     RunToken,
@@ -392,7 +392,11 @@ async def _commit_failed_terminal(hub: Hub, turn_id: UUID, error: BaseException)
     their terminal first and leave nothing for this update to match.
 
     The `profile` rides back off that same write, so the count carries the turn's real profile
-    without a second read to fail in a path that has already run out of ways to report."""
+    without a second read to fail in a path that has already run out of ways to report. The stack
+    is logged on that same transition: a setup fault leaves no step behind to read the failure off,
+    so a class name names no call. An engine failure reaches here too, having already committed its
+    own terminal and logged its own stack — it matches no row, so it is neither counted nor logged
+    twice."""
     frame = TerminalFrame(
         status="failed",
         error_class=type(error).__name__,
@@ -423,6 +427,12 @@ async def _commit_failed_terminal(hub: Hub, turn_id: UUID, error: BaseException)
                     status="failed",
                     error_class=type(error).__name__,
                     profile=turn_profile(transitioned.subagent_profile),
+                )
+                log_error(
+                    "turn.setup_failed",
+                    turn_id=str(turn_id),
+                    error_class=type(error).__name__,
+                    stack=formatted_stack(error),
                 )
             await hub.publish(turn_id, Terminal(frame=frame))
             return

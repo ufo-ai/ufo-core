@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
@@ -890,6 +891,36 @@ async def _running_turn(subagent_profile: str | None = None) -> tuple[UUID, UUID
             )
         )
     return workspace_id, turn_id
+
+
+async def test_backstop_logs_the_stack_that_failed_the_setup(
+    db: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A setup fault records no step, so the terminal row is the only trace it leaves — and a class
+    name names no call. The 2026-08-01 recovery failures surfaced as a bare `TimeoutException` with
+    nothing saying which provider call hung, so the stack rides the log the write emits.
+
+    An engine failure reaches the same backstop having already committed its terminal and logged
+    its own stack, so it matches no row: the second call here stands for that turn and must log
+    nothing rather than name a model or tool failure a setup fault."""
+    _, turn_id = await _running_turn()
+
+    def open_sandbox() -> None:
+        raise TimeoutError("the provider stopped answering")
+
+    try:
+        open_sandbox()
+    except TimeoutError as error:
+        with caplog.at_level(logging.ERROR, logger="ufo"):
+            await loop_queue._commit_failed_terminal(InProcessHub(), turn_id, error)
+            await loop_queue._commit_failed_terminal(InProcessHub(), turn_id, error)
+
+    (event,) = [
+        record.ufo for record in caplog.records if record.getMessage() == "turn.setup_failed"
+    ]
+    assert event["turn_id"] == str(turn_id)
+    assert event["error_class"] == "TimeoutError"
+    assert "open_sandbox" in str(event["stack"])
 
 
 async def test_backstop_terminal_carries_class_and_message(

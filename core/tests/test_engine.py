@@ -297,6 +297,32 @@ class CancelRacingModel:
 
 
 @dataclass(frozen=True)
+class CancelThenFailModel:
+    """The row goes terminal underneath the turn, and then the round fails: the engine commits a
+    failure that matches no row and gets the committed frame read back instead."""
+
+    turn_id: UUID
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        frame = TerminalFrame(status="cancelled")
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.turn)
+                .values(
+                    status="cancelled",
+                    terminal=frame.model_dump(mode="json"),
+                    updated_at=sa.func.now(),
+                )
+                .where(
+                    tables.turn.c.id == self.turn_id,
+                    tables.turn.c.status.in_(("queued", "running")),
+                )
+            )
+        raise RuntimeError("round failed after the row went terminal")
+        yield Usage(input_tokens=1, output_tokens=1)
+
+
+@dataclass(frozen=True)
 class ToolCallingModel:
     """Emits one bash tool call, then answers with text once the tool result comes back — so the
     engine's multi-round dispatch loop runs end to end without a real model."""
@@ -2430,11 +2456,42 @@ async def test_an_interrupted_intent_turn_names_what_interrupted_it(
         assert "ufo.turn_terminal_total" not in points
 
 
+async def test_a_read_back_frame_never_carries_another_errors_stack(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """`error_class` is not proof the frame came from this error. A refused intent commits its
+    terminal, and the transcript write after it then fails: the second commit matches no row and
+    reads that frame back, so gating on its class would print the transcript failure's stack beside
+    the refusal's name. Only the commit that actually wrote the frame may carry a stack."""
+    turn = await _seed_turn("queued", None, admission_source=INTENT_ADMISSION)
+    owner = await _seeded_member(turn.workspace_id)
+    intent = ToolIntent(tool=REQUEST_CREDENTIALS_TOOL, input=REQUEST_INPUT)
+    turn = turn.model_copy(update={"inbound": intent.model_dump_json()})
+    requests = CredentialRequests(
+        fernet=Fernet(Fernet.generate_key()), declared=frozenset(), fillable=frozenset()
+    )
+
+    async def failing_persist(*_: object, **__: object) -> None:
+        raise OSError("blob store unreachable")
+
+    monkeypatch.setattr(TurnEngine, "_persist_transcript", failing_persist)
+    engine = _engine(turn, object(), tmp_path, member_id=owner, requestable_credentials=requests)
+
+    with caplog.at_level(logging.INFO, logger="ufo"), pytest.raises(OSError):
+        await engine.run_intent()
+
+    records = [r.ufo for r in caplog.records if r.getMessage() == "turn.terminal"]
+    assert [r["error_class"] for r in records] == ["IntentRefused", "IntentRefused"]
+    assert all("stack" not in r for r in records)
+
+
 async def test_a_refused_intent_meters_the_refusal_as_the_turn_it_failed(
-    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """A refused intent commits a failed terminal without a model round, so the failing intent path
-    carries the same wall clock and outcome as any other failure — under the refusal's class."""
+    carries the same wall clock and outcome as any other failure — under the refusal's class. Its
+    refusal is constructed rather than raised, so it passed through no frame and the record carries
+    no stack: a class line alone names no call, which is the whole reason the field exists."""
     reader = _metric_capture(monkeypatch)
     turn = await _seed_turn("queued", None, admission_source=INTENT_ADMISSION)
     owner = await _seeded_member(turn.workspace_id)
@@ -2443,10 +2500,14 @@ async def test_a_refused_intent_meters_the_refusal_as_the_turn_it_failed(
     requests = CredentialRequests(
         fernet=Fernet(Fernet.generate_key()), declared=frozenset(), fillable=frozenset()
     )
-    frame = await _engine(
-        turn, object(), tmp_path, member_id=owner, requestable_credentials=requests
-    ).run_intent()
+    with caplog.at_level(logging.INFO, logger="ufo"):
+        frame = await _engine(
+            turn, object(), tmp_path, member_id=owner, requestable_credentials=requests
+        ).run_intent()
     assert frame is not None and frame.status == "failed"
+    (refused,) = [r.ufo for r in caplog.records if r.getMessage() == "turn.terminal"]
+    assert refused["error_class"] == "IntentRefused"
+    assert "stack" not in refused
     points = _exported_metrics(reader)
     (wall,) = points["ufo.turn_ms"]
     assert (wall.count, wall.attributes["status"]) == (1, "failed")
@@ -3950,7 +4011,9 @@ async def test_the_terminal_log_carries_the_error_class_and_never_the_message(
     message stays behind: `str(error)` is raw text — a sandbox write failure carries the command's
     own stderr, which can echo the egress proxy URL that embeds the turn's run token — and `log`
     redacts by field name, never by value, so the class is the only part safe to export. The bounded
-    message lives on the persisted frame for anyone diagnosing from the record."""
+    message lives on the persisted frame for anyone diagnosing from the record. The stack rides
+    the same record and is held to the same rule: it names the frames the failure passed through
+    and the class that raised, never the message."""
     turn = await _seed_turn("queued", None)
     engine = _engine(turn, StreamErrorModel(), tmp_path)
 
@@ -3964,6 +4027,30 @@ async def test_the_terminal_log_carries_the_error_class_and_never_the_message(
     assert terminal[0]["profile"] == "main"
     assert terminal[0]["parent_turn_id"] == ""
     assert "error_message" not in terminal[0]
+    stack = terminal[0]["stack"]
+    assert isinstance(stack, str)
+    assert "ModelStreamError" in stack
+    assert "_stream_recovering_overflow" in stack
+    assert "stream boom" not in stack
+
+
+async def test_the_terminal_log_carries_no_stack_when_the_frame_records_no_failure(
+    db: None, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """`status` and `error_class` come off the committed frame, so the stack must too. A failure
+    that matches no row gets the committed frame read back — logging its stack beside that frame
+    would publish a record that contradicts itself: cancelled, no error class, and a failure
+    stack."""
+    turn = await _seed_turn("queued", None)
+    engine = _engine(turn, CancelThenFailModel(turn_id=turn.id), tmp_path)
+
+    with caplog.at_level(logging.INFO, logger="ufo"), pytest.raises(ModelStreamError):
+        await engine.run()
+
+    (terminal,) = [r.ufo for r in caplog.records if r.getMessage() == "turn.terminal"]
+    assert terminal["status"] == "cancelled"
+    assert terminal["error_class"] == ""
+    assert "stack" not in terminal
 
 
 async def test_cancel_winning_mid_round_keeps_cancelled_terminal_bills_and_preserves_inbound(

@@ -75,6 +75,96 @@ def test_log_carries_redacted_fields(caplog):
     assert record.ufo == {"turn_id": "abc"}
 
 
+def test_formatted_stack_names_the_raising_call():
+    def wedged():
+        raise TimeoutError
+
+    try:
+        wedged()
+    except TimeoutError as error:
+        stack = o11y.formatted_stack(error)
+    assert "wedged" in stack
+    assert "TimeoutError" in stack
+
+
+def test_formatted_stack_never_carries_the_exception_message():
+    """A message is text this process never wrote — a sandbox command's stderr arrives as a
+    RuntimeError, and the sandbox environment echoes the turn's run token in HTTP_PROXY. Logs
+    withhold messages, and a stack that formatted them would be the same export under a field
+    name redaction does not match. Frames carry their own source text, which is this repo's; it is
+    the runtime values that must not travel."""
+
+    run_token = uuid4().hex
+
+    def failing_command(stderr: str) -> None:
+        raise RuntimeError(stderr)
+
+    try:
+        failing_command(f"HTTP_PROXY=https://{run_token}:@proxy.test")
+    except RuntimeError as error:
+        stack = o11y.formatted_stack(error)
+    assert run_token not in stack
+    assert "failing_command" in stack
+    assert "builtins.RuntimeError" in stack
+
+
+def test_formatted_stack_honours_a_severed_context():
+    """`raise ... from None` severs the context deliberately — the engine does it at the model
+    seam. Walking it anyway would export the class and frames of an exception the author took
+    care to detach."""
+
+    def broker_call() -> None:
+        raise ConnectionResetError("upstream reset")
+
+    try:
+        broker_call()
+    except ConnectionResetError:
+        try:
+            raise RuntimeError("severed") from None
+        except RuntimeError as raised:
+            severed = o11y.formatted_stack(raised)
+
+    try:
+        broker_call()
+    except ConnectionResetError:
+        try:
+            raise RuntimeError("kept")
+        except RuntimeError as raised:
+            kept = o11y.formatted_stack(raised)
+
+    assert "ConnectionResetError" not in severed
+    assert "broker_call" not in severed
+    assert "ConnectionResetError" in kept
+    assert "broker_call" in kept
+
+
+def test_formatted_stack_keeps_both_ends_of_a_long_cause_chain():
+    """A one-ended truncation always drops one of the two frames worth having. `format_tb` lists
+    frames caller-first, so the head holds the entry point and the tail holds the raise that
+    actually went wrong — and it is the root cause, deepest in the chain, that a tail cut loses."""
+
+    def root_cause() -> None:
+        raise TimeoutError("the provider stopped answering")
+
+    try:
+        root_cause()
+    except TimeoutError as raised:
+        error: BaseException = raised
+    for layer in range(100):
+        try:
+            raise RuntimeError(f"layer {layer}") from error
+        except RuntimeError as raised:
+            error = raised
+
+    stack = o11y.formatted_stack(error)
+
+    assert len(stack) <= o11y.STACK_MAX_CHARS
+    assert o11y.STACK_ELISION in stack
+    head, tail = stack.split(o11y.STACK_ELISION)
+    assert head.startswith("builtins.RuntimeError\n")
+    assert "root_cause" in tail
+
+
 def test_emit_metric_rejects_unregistered_names():
     with pytest.raises(ValueError, match="unknown metric"):
         o11y.emit_metric("model_call_total")

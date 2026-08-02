@@ -1,6 +1,7 @@
 """Tracing, metrics, and redacting structured logs; OTel SDK with OTLP export at init."""
 
 import logging
+import traceback
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from typing import cast
@@ -39,6 +40,8 @@ METRIC_EXPORT_INTERVAL_MILLIS = 30_000
 OTLP_TRACES_PATH = "v1/traces"
 OTLP_METRICS_PATH = "v1/metrics"
 OTLP_LOGS_PATH = "v1/logs"
+STACK_MAX_CHARS = 8_000
+STACK_ELISION = "\n... middle frames elided ...\n"
 METRICS = (
     "turn_started_total",
     "turn_terminal_total",
@@ -343,6 +346,38 @@ def log_error(event: str, **fields: object) -> None:
 def warn(event: str, **fields: object) -> None:
     """`log` at warning severity, for expected-but-notable conditions worth an operator's eye."""
     _emit_log(event, SeverityNumber.WARN, "WARN", logging.WARNING, fields)
+
+
+def formatted_stack(error: BaseException) -> str:
+    """Where an exception was raised — its frames and the class of every exception in its cause
+    chain, for a log field.
+
+    Carries no exception message. A message is operator-controlled text this process never wrote:
+    a sandbox command's stderr reaches here as `RuntimeError`, and the sandbox's own environment
+    echoes the turn's run token in `HTTP_PROXY`. A stack that formatted them would be that export
+    through a field name redaction does not match.
+
+    A `raise ... from None` severs its context deliberately, and that severing is honoured: the
+    exception it was raised inside names neither its class nor its frames here.
+
+    An over-long chain keeps both ends: `format_tb` lists frames caller-first, so the head holds
+    the entry point the turn came in through and the tail holds the raise that actually went wrong.
+    The elision falls in the middle, where the frames are the ones a reader can reconstruct."""
+    parts: list[str] = []
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        parts.append(f"{type(current).__module__}.{type(current).__qualname__}\n")
+        parts.extend(traceback.format_tb(current.__traceback__))
+        current = current.__cause__ or (
+            None if current.__suppress_context__ else current.__context__
+        )
+    frames = "".join(parts)
+    if len(frames) <= STACK_MAX_CHARS:
+        return frames
+    half = (STACK_MAX_CHARS - len(STACK_ELISION)) // 2
+    return f"{frames[:half]}{STACK_ELISION}{frames[-half:]}"
 
 
 def _emit_log(

@@ -80,7 +80,7 @@ from ufo.models.interface import (
     ToolUseBlock,
 )
 from ufo.models.pricing import Pricing
-from ufo.o11y import emit_histogram, emit_metric, log, turn_profile, turn_span
+from ufo.o11y import emit_histogram, emit_metric, formatted_stack, log, turn_profile, turn_span
 from ufo.sandbox.session import TOOL_OUTPUT_DIR, SandboxSession
 from ufo.schema import tables
 from ufo.schema.records import (
@@ -2201,6 +2201,11 @@ class TurnEngine:
             error_class=frame.error_class or "",
             profile=self.profile,
             parent_turn_id=str(self.turn.parent_turn_id or ""),
+            **(
+                {"stack": formatted_stack(error)}
+                if committed and error is not None and error.__traceback__ is not None
+                else {}
+            ),
         )
         return frame
 
