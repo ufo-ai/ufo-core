@@ -47,6 +47,12 @@ UFO_DIR = "/etc/ufo"
 IMAGE_SOURCE_DIR = ROOT / "core" / "src" / "ufo" / "sandbox" / "image"
 
 E2B_BASE_TEMPLATE = "code-interpreter-v1"
+# RAM every E2B sandbox built from this template gets. E2B fixes memory at build time — the SDK's
+# `Sandbox.create` takes no sizing argument at all — so an E2B deploy sizes its boxes here or
+# nowhere. It applies to every turn on that carrier: a subagent runs in the sandbox of the turn
+# that spawned it, so coding work takes this size too. The SDK's default is 1024, which a
+# repository checkout plus a toolchain build inside one box outgrows.
+TEMPLATE_MEMORY_MB = 2048
 DOCKER_BASE_IMAGE = "e2bdev/code-interpreter:latest"
 DOCKER_IMAGE_TAG = "ufo-sandbox:latest"
 START_COMMAND = "tail -f /dev/null"
@@ -153,11 +159,13 @@ test -n "$browser"
 
 def build_definition_digest() -> str:
     """Content digest of everything apply_layers bakes — base, users, the start/ready commands, the
-    apt/pip/npm package sets, the env, and each script (version + content hash). Baked into the
-    image at BUILD_DIGEST_PATH and re-derived by --check, so any change to the build definition is
-    detectable as drift from the live template."""
+    apt/pip/npm package sets, the env, and each script (version + content hash) — plus the memory
+    the build allocates, which no layer carries but which only a republish can change. Baked into
+    the image at BUILD_DIGEST_PATH and re-derived by --check, so any change to the build definition
+    is detectable as drift from the live template."""
     payload = {
         "base": E2B_BASE_TEMPLATE,
+        "memory_mb": TEMPLATE_MEMORY_MB,
         "users": [BUILD_USER, RUNTIME_USER],
         "start": START_COMMAND,
         "ready": SANDBOX_TEMPLATE_READY_COMMAND,
@@ -303,7 +311,7 @@ def main() -> None:
         check_published_template(E2B_TEMPLATE_NAME)
         print(f"{E2B_TEMPLATE_NAME} up to date")
         return
-    info = Template.build(e2b_template(), name=E2B_TEMPLATE_NAME)
+    info = Template.build(e2b_template(), name=E2B_TEMPLATE_NAME, memory_mb=TEMPLATE_MEMORY_MB)
     reference = f"{info.name}:{info.build_id}"
     verify_published_template(reference)
     print(reference)

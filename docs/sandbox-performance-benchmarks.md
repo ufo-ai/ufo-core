@@ -13,7 +13,6 @@ filesystem they are running on.
 |---|---|
 | Kernel | Linux 6.1.158+ x86_64 |
 | CPUs | 2 vCPUs |
-| Memory | 976 MiB total, ~658 MiB available at test time |
 | `/workspace` filesystem | ext4 on `/dev/vda`, mount options `rw,relatime,discard` |
 | FUSE | none over `/workspace` — only the kernel's own `fusectl` on `/sys/fs/fuse/connections` |
 | Disk | 25 GB total, 18 GB free (27% used) |

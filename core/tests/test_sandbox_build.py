@@ -21,6 +21,7 @@ from sandbox.build_template import (
     SANDBOX_ENV,
     SANDBOX_SCRIPTS,
     SANDBOX_TEMPLATE_READY_COMMAND,
+    TEMPLATE_MEMORY_MB,
     build_definition_digest,
     pod_dockerfile,
 )
@@ -81,6 +82,10 @@ def test_pip_packages_match_the_expected_toolchain() -> None:
 
 def test_npm_packages_match_the_expected_toolchain() -> None:
     assert NPM_PACKAGES == EXPECTED_NPM
+
+
+def test_sandbox_memory_is_two_gigabytes() -> None:
+    assert TEMPLATE_MEMORY_MB == 2048
 
 
 def test_no_kubernetes_toolchain_baked() -> None:
@@ -167,8 +172,17 @@ def test_gh_install_is_covered_by_the_drift_digest(monkeypatch) -> None:
     assert build_definition_digest() != before
 
 
+def test_memory_is_covered_by_the_drift_digest(monkeypatch) -> None:
+    """Memory is fixed at build time and carried by no layer, so without it in the digest a live
+    template built at the old size would pass --check and keep serving turns undersized."""
+    before = build_definition_digest()
+    monkeypatch.setattr(build_template, "TEMPLATE_MEMORY_MB", TEMPLATE_MEMORY_MB * 2)
+    assert build_definition_digest() != before
+
+
 def test_publish_returns_the_exact_build_reference(monkeypatch, capsys) -> None:
     created = []
+    built = []
     sandbox = SimpleNamespace(
         commands=SimpleNamespace(run=lambda *args, **kwargs: SimpleNamespace(exit_code=0)),
         kill=lambda: None,
@@ -178,11 +192,14 @@ def test_publish_returns_the_exact_build_reference(monkeypatch, capsys) -> None:
     monkeypatch.setattr(
         build_template.Template,
         "build",
-        lambda template, name: BuildInfo(
-            template_id="template-1",
-            build_id="build-1",
-            name=name,
-            alias=name,
+        lambda template, name, **kwargs: (
+            built.append(kwargs)
+            or BuildInfo(
+                template_id="template-1",
+                build_id="build-1",
+                name=name,
+                alias=name,
+            )
         ),
     )
     monkeypatch.setattr(
@@ -199,4 +216,5 @@ def test_publish_returns_the_exact_build_reference(monkeypatch, capsys) -> None:
             "timeout": build_template.READY_VERIFY_TIMEOUT_SECONDS,
         }
     ]
+    assert built == [{"memory_mb": TEMPLATE_MEMORY_MB}]
     assert capsys.readouterr().out == "ufo-sbx:build-1\n"
