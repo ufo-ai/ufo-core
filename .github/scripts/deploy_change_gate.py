@@ -15,6 +15,7 @@ RUNTIME_PATHS = frozenset(
     {
         ".github/scripts/deploy_change_gate.py",
         ".github/scripts/production_prerequisites.sh",
+        ".github/workflows/deploy-production.yml",
         ".github/workflows/deploy.yml",
         "hosted.toml",
         "infra/envs/prod/ufo.tf",

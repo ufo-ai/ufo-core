@@ -1,0 +1,423 @@
+name: Deploy (production)
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_sha:
+        description: Full SHA from a successful testing deployment.
+        required: true
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  actions: read
+  contents: read
+  deployments: write
+  id-token: write
+
+env:
+  AWS_REGION: us-east-1
+  TF_DIR: infra/envs/prod
+
+jobs:
+  ref:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require main branch
+        env:
+          WORKFLOW_REF: ${{ github.ref }}
+        run: test "$WORKFLOW_REF" = refs/heads/main
+
+  validate:
+    needs: ref
+    environment: production
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require production secrets
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          BROWSERBASE_API_KEY: ${{ secrets.BROWSERBASE_API_KEY }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          DD_API_KEY: ${{ secrets.DD_API_KEY }}
+          DD_APP_KEY: ${{ secrets.DD_APP_KEY }}
+          E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
+          EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          TURBOPUFFER_API_KEY: ${{ secrets.TURBOPUFFER_API_KEY }}
+        run: |
+          missing=false
+          for name in ANTHROPIC_API_KEY BROWSERBASE_API_KEY CLOUDFLARE_API_TOKEN DD_API_KEY DD_APP_KEY E2B_API_KEY EXA_API_KEY OPENAI_API_KEY TURBOPUFFER_API_KEY; do
+            if [ -z "${!name}" ]; then
+              echo "::error::$name is required"
+              missing=true
+            fi
+          done
+          if [ "$missing" = true ]; then
+            exit 1
+          fi
+
+  prepare:
+    needs: validate
+    runs-on: ubuntu-latest
+    outputs:
+      e2b_template: ${{ steps.artifacts.outputs.e2b_template }}
+      image_tag: ${{ steps.artifacts.outputs.image_tag }}
+      target_sha: ${{ steps.select.outputs.target_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Select tested deployment
+        id: select
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_SHA: ${{ inputs.target_sha }}
+        run: |
+          test "${#TARGET_SHA}" = 40
+          case "$TARGET_SHA" in *[!0-9a-f]*) exit 1 ;; esac
+          git cat-file -e "$TARGET_SHA^{commit}"
+          git merge-base --is-ancestor "$TARGET_SHA" origin/main
+          TESTED=$(gh api \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/deploy.yml/runs?branch=main&event=push&head_sha=$TARGET_SHA&per_page=1" \
+            --jq '(.workflow_runs[0] // empty) | [.id, .status, .conclusion] | @tsv')
+          test -n "$TESTED"
+          read -r TESTING_RUN_ID TESTED_STATUS TESTED_CONCLUSION <<< "$TESTED"
+          test "$TESTED_STATUS" = completed
+          test "$TESTED_CONCLUSION" = success
+          echo "target_sha=$TARGET_SHA" >> "$GITHUB_OUTPUT"
+          echo "testing_run_id=$TESTING_RUN_ID" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: tested-artifacts
+          path: ${{ runner.temp }}/tested-artifacts
+          run-id: ${{ steps.select.outputs.testing_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Verify tested artifacts
+        id: artifacts
+        env:
+          TARGET_SHA: ${{ steps.select.outputs.target_sha }}
+        run: |
+          ARTIFACT="$RUNNER_TEMP/tested-artifacts/tested-artifacts.json"
+          IMAGE_TAG="${TARGET_SHA::8}"
+          jq -e --arg commit "$TARGET_SHA" --arg image_tag "$IMAGE_TAG" \
+            '.commit == $commit and .image_tag == $image_tag and (.sandbox_template | type == "string" and length > 0)' \
+            "$ARTIFACT"
+          E2B_TEMPLATE=$(jq -er '.sandbox_template' "$ARTIFACT")
+          echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+          echo "e2b_template=$E2B_TEMPLATE" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.select.outputs.target_sha }}
+          fetch-depth: 0
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::899147036157:role/github-deploy
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Check production prerequisites
+        run: bash .github/scripts/production_prerequisites.sh
+
+      - name: Reject an unsplit authorization change
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_SHA: ${{ steps.select.outputs.target_sha }}
+        run: |
+          BASE_SHA=$(gh api "repos/$GITHUB_REPOSITORY/deployments?environment=production&task=deploy%3Aproduction&per_page=1" \
+            --jq '.[0].sha // empty')
+          if [ -z "$BASE_SHA" ]; then
+            if CLUSTER_RESULT=$(aws eks describe-cluster --name prod-cluster 2>&1); then
+              echo '::error::No recorded production deployment.'
+              exit 1
+            fi
+            if [[ "$CLUSTER_RESULT" != *ResourceNotFoundException* ]]; then
+              printf '%s\n' "$CLUSTER_RESULT" >&2
+              exit 1
+            fi
+            exit 0
+          fi
+          git merge-base --is-ancestor "$BASE_SHA" "$TARGET_SHA"
+          git diff --name-only --no-renames "$BASE_SHA...$TARGET_SHA" > "$RUNNER_TEMP/production-paths"
+          python .github/scripts/deploy_change_gate.py "$RUNNER_TEMP/production-paths"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.14.9"
+          terraform_wrapper: false
+
+      - name: Terraform init
+        working-directory: infra/production-access
+        run: terraform init -input=false
+
+      - name: Terraform plan
+        working-directory: infra/production-access
+        run: terraform plan -input=false -no-color -out="$RUNNER_TEMP/production-access.tfplan"
+
+      - name: Reject destructive changes
+        working-directory: infra/production-access
+        run: terraform show -json "$RUNNER_TEMP/production-access.tfplan" | python "$GITHUB_WORKSPACE/.github/scripts/terraform_plan_guard.py"
+
+      - name: Terraform apply
+        working-directory: infra/production-access
+        run: terraform apply -input=false "$RUNNER_TEMP/production-access.tfplan"
+
+  deploy:
+    needs: prepare
+    environment: production
+    runs-on: ubuntu-latest
+    concurrency:
+      group: deploy-edge
+      cancel-in-progress: false
+    env:
+      DD_API_KEY: ${{ secrets.DD_API_KEY }}
+      DD_APP_KEY: ${{ secrets.DD_APP_KEY }}
+      DEPLOY_ROLE_ARN: arn:aws:iam::899147036157:role/github-production-deploy
+      E2B_TEMPLATE: ${{ needs.prepare.outputs.e2b_template }}
+      IMAGE_TAG: ${{ needs.prepare.outputs.image_tag }}
+      TARGET_SHA: ${{ needs.prepare.outputs.target_sha }}
+    steps:
+      - name: Require production inputs
+        run: |
+          missing=false
+          for name in E2B_TEMPLATE IMAGE_TAG TARGET_SHA; do
+            if [ -z "${!name}" ]; then
+              echo "::error::$name is required"
+              missing=true
+            fi
+          done
+          if [ "$missing" = true ]; then
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TARGET_SHA }}
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.14.9"
+          terraform_wrapper: false
+
+      - name: Terraform init
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform init -input=false
+
+      - name: Terraform foundation plan
+        working-directory: ${{ env.TF_DIR }}
+        env:
+          TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          terraform plan -input=false -no-color \
+            -out="$RUNNER_TEMP/production-foundation.tfplan" \
+            -target=module.platform.module.vpc \
+            -target=module.platform.module.eks \
+            -target=module.platform.aws_secretsmanager_secret.postgres \
+            -target=module.platform.aws_secretsmanager_secret.platform \
+            -target=module.platform.aws_secretsmanager_secret.api_keys \
+            -target=module.platform.aws_secretsmanager_secret.gateway_slack_connect \
+            -var "image_tag=$IMAGE_TAG" -var "e2b_template=$E2B_TEMPLATE" \
+            -var "deployment_id=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+
+      - name: Reject destructive foundation changes
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform show -json "$RUNNER_TEMP/production-foundation.tfplan" | python "$GITHUB_WORKSPACE/.github/scripts/terraform_plan_guard.py"
+
+      - name: Terraform foundation apply
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform apply -input=false "$RUNNER_TEMP/production-foundation.tfplan"
+
+      - name: Terraform plan
+        working-directory: ${{ env.TF_DIR }}
+        env:
+          TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: terraform plan -input=false -no-color -out="$RUNNER_TEMP/production.tfplan" -var "image_tag=$IMAGE_TAG" -var "e2b_template=$E2B_TEMPLATE" -var "deployment_id=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+
+      - name: Reject destructive changes
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform show -json "$RUNNER_TEMP/production.tfplan" | python "$GITHUB_WORKSPACE/.github/scripts/terraform_plan_guard.py"
+
+      - name: Write production runtime secrets
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          BROWSERBASE_API_KEY: ${{ secrets.BROWSERBASE_API_KEY }}
+          E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
+          EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          TURBOPUFFER_API_KEY: ${{ secrets.TURBOPUFFER_API_KEY }}
+          PRODUCTION_DEPLOYMENT_ID: ${{ github.run_id }}
+        run: |
+          PRODUCTION_API_KEYS_SECRET_ID="$(terraform -chdir="$TF_DIR" output -raw api_keys_secret_id)" \
+          PRODUCTION_GATEWAY_SECRET_ID="$(terraform -chdir="$TF_DIR" output -raw gateway_secret_id)" \
+            python infra/production_secrets.py
+
+      - name: Refresh production runtime secrets
+        run: |
+          aws eks update-kubeconfig \
+            --region "$AWS_REGION" \
+            --name "$(terraform -chdir="$TF_DIR" output -raw cluster_name)"
+          NAMESPACE="$(terraform -chdir="$TF_DIR" output -raw system_namespace)"
+          python infra/production_secret_sync.py \
+            "$NAMESPACE" "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+
+      - name: Terraform apply
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform apply -input=false "$RUNNER_TEMP/production.tfplan"
+
+      - name: Wait for runtime rollout
+        run: |
+          aws eks update-kubeconfig \
+            --region "$AWS_REGION" \
+            --name "$(terraform -chdir="$TF_DIR" output -raw cluster_name)"
+          kubectl --namespace ingress-nginx rollout status deployment/ingress-nginx-controller --timeout=15m
+          NAMESPACE="$(terraform -chdir="$TF_DIR" output -raw system_namespace)"
+          kubectl --namespace "$NAMESPACE" wait --for=condition=Ready --timeout=15m \
+            externalsecret/ufo-control-secrets \
+            externalsecret/ufo-platform-secrets \
+            externalsecret/ufo-gateway-slack-connect \
+            externalsecret/ufo-egress-ca \
+            externalsecret/datadog-api-key
+          kubectl --namespace "$NAMESPACE" wait --for=condition=Ready --timeout=15m \
+            certificate/ufo-gateway-tls \
+            certificate/ufo-ingress-tls \
+            certificate/ufo-serve-tls
+          kubectl --namespace "$NAMESPACE" rollout status deployment/ufo-gateway --timeout=15m
+          kubectl --namespace "$NAMESPACE" rollout status deployment/ufo-sandbox-proxy --timeout=15m
+          kubectl --namespace "$NAMESPACE" rollout status deployment/ufo-ingress --timeout=15m
+          kubectl --namespace "$NAMESPACE" rollout status deployment/ufo-serve --timeout=15m
+          kubectl --namespace "$NAMESPACE" rollout status deployment/otel-collector --timeout=15m
+          kubectl --namespace "$NAMESPACE" rollout status daemonset/otel-logs-agent --timeout=15m
+
+      - name: Gate gateway origin
+        shell: bash
+        run: |
+          HOST=$(terraform -chdir="$TF_DIR" output -raw hostname)
+          curl -fsS "https://origin.$HOST/ufo" | grep -F 'UFO_URL="${UFO_URL:-https://'"$HOST"'}"'
+          curl -fsS "https://origin.$HOST/fleet" | jq -e '.craft | type == "number" and . >= 0' >/dev/null
+
+      - name: Terraform production edge init
+        working-directory: infra/envs/edge
+        run: terraform init -input=false
+
+      - name: Terraform production edge plan
+        working-directory: infra/envs/edge
+        env:
+          TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          terraform plan -input=false -no-color -lock-timeout=10m \
+            -target=module.prod \
+            -out="$RUNNER_TEMP/production-edge.tfplan"
+
+      - name: Reject destructive production edge changes
+        working-directory: infra/envs/edge
+        run: terraform show -json "$RUNNER_TEMP/production-edge.tfplan" | python "$GITHUB_WORKSPACE/.github/scripts/terraform_plan_guard.py"
+
+      - name: Terraform production edge apply
+        working-directory: infra/envs/edge
+        run: terraform apply -input=false "$RUNNER_TEMP/production-edge.tfplan"
+
+      - name: Gate sandbox egress proxy TLS
+        env:
+          E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
+        run: |
+          UFO_EGRESS_CA_CERT="$(terraform -chdir="$TF_DIR" output -raw sandbox_proxy_ca_cert)" \
+            uv run python sandbox/proxy_gate.py \
+            --proxy-url "$(terraform -chdir="$TF_DIR" output -raw sandbox_proxy_url)"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: current-main
+
+      - name: Terraform shared edge init
+        working-directory: current-main/infra/envs/edge
+        run: terraform init -input=false
+
+      - name: Terraform shared edge plan
+        working-directory: current-main/infra/envs/edge
+        env:
+          TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          terraform plan -input=false -no-color -lock-timeout=10m \
+            -target=cloudflare_ruleset.https_redirect \
+            -target=cloudflare_zone_setting.always_use_https \
+            -out="$RUNNER_TEMP/shared-edge.tfplan"
+
+      - name: Reject destructive shared edge changes
+        working-directory: current-main/infra/envs/edge
+        run: terraform show -json "$RUNNER_TEMP/shared-edge.tfplan" | python "$GITHUB_WORKSPACE/current-main/.github/scripts/terraform_plan_guard.py"
+
+      - name: Terraform shared edge apply
+        working-directory: current-main/infra/envs/edge
+        run: terraform apply -input=false "$RUNNER_TEMP/shared-edge.tfplan"
+
+      - name: Gate production door
+        shell: bash
+        run: |
+          HOST=flyingobject.ai
+          curl -fsS "https://$HOST/" | grep -F "curl https://$HOST/waitlist"
+          test "$(curl -fsS -o /dev/null -w '%{http_code} %{redirect_url}' "https://$HOST/login")" = "302 https://app.$HOST/login"
+          curl -fsS "https://$HOST/ufo" | grep -F 'UFO_URL="${UFO_URL:-https://'"$HOST"'}"'
+          curl -fsS "https://$HOST/fleet" | jq -e '.craft | type == "number" and . >= 0' >/dev/null
+
+  report:
+    needs: [ref, validate, prepare, deploy]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Record the production deployment
+        if: needs.deploy.result == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TARGET_SHA: ${{ needs.prepare.outputs.target_sha }}
+        run: |
+          DEPLOYMENT_ID=$(jq -n --arg ref "$TARGET_SHA" \
+            '{ref: $ref, environment: "production", task: "deploy:production", auto_merge: false, required_contexts: []}' \
+            | gh api --method POST "repos/$GITHUB_REPOSITORY/deployments" --input - --jq '.id')
+          jq -n --arg environment_url "$RUN_URL" \
+            '{state: "success", environment: "production", environment_url: $environment_url, auto_inactive: true}' \
+            | gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" --input - >/dev/null
+
+      - name: Report the production deploy conclusion to Datadog
+        if: always()
+        env:
+          DD_API_KEY: ${{ secrets.DD_API_KEY }}
+          DD_CHECK_URL: https://api.us5.datadoghq.com/api/v1/check_run
+          DEPLOY_CHECK: ufo.deploy.main
+          DD_STATUS_OK: "0"
+          DD_STATUS_CRITICAL: "2"
+          REF_RESULT: ${{ needs.ref.result }}
+          VALIDATE_RESULT: ${{ needs.validate.result }}
+          PREPARE_RESULT: ${{ needs.prepare.result }}
+          DEPLOY_RESULT: ${{ needs.deploy.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          test -n "$DD_API_KEY" || { echo 'DD_API_KEY secret is unset' >&2; exit 1; }
+          test "$REF_RESULT $VALIDATE_RESULT $PREPARE_RESULT $DEPLOY_RESULT" = \
+            "success success success success" \
+            && STATUS="$DD_STATUS_OK" || STATUS="$DD_STATUS_CRITICAL"
+          curl -sS --fail-with-body -X POST "$DD_CHECK_URL" \
+            -H "DD-API-KEY: $DD_API_KEY" -H 'Content-Type: application/json' \
+            -d "$(jq -n --arg check "$DEPLOY_CHECK" --argjson status "$STATUS" --arg url "$RUN_URL" \
+              '[{check: $check, host_name: "github-actions", status: $status, message: $url,
+                 tags: ["env:prod"]}]')"

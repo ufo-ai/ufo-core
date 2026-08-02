@@ -4,9 +4,8 @@ variable "region" {
 }
 
 variable "image_tag" {
-  type        = string
-  default     = "latest"
-  description = "Tag for the ufo-control gateway image. deploy.yml passes the git short SHA."
+  type    = string
+  default = "latest"
 }
 
 variable "deployment_id" {

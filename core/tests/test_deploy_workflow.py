@@ -63,8 +63,8 @@ def _workflow(path: Path) -> dict[str, object]:
     return loaded
 
 
-def _step(job: str, name: str) -> dict[str, object]:
-    jobs = _workflow(WORKFLOWS / "deploy.yml")["jobs"]
+def _step(job: str, name: str, workflow: str = "deploy.yml") -> dict[str, object]:
+    jobs = _workflow(WORKFLOWS / workflow)["jobs"]
     assert isinstance(jobs, dict)
     target = jobs[job]
     assert isinstance(target, dict)
@@ -253,15 +253,15 @@ def _run_production_prerequisites(
 
 
 def _report(
-    tmp_path: Path, testing_result: str, prod_result: str, edge_result: str = "success"
-) -> tuple[str, dict[str, dict[str, object]]]:
+    tmp_path: Path, testing_result: str, edge_result: str = "success"
+) -> tuple[str, dict[str, object]]:
     step = _step("deploy", "Report the deploy conclusion to Datadog")
     environment = step["env"]
     assert isinstance(environment, dict)
     script = step["run"]
     assert isinstance(script, str)
 
-    stubs = tmp_path / f"{testing_result}-{prod_result}-{edge_result}"
+    stubs = tmp_path / f"testing-{testing_result}-{edge_result}"
     stubs.mkdir()
     curl = stubs / "curl"
     curl.write_text(CURL_STUB)
@@ -279,23 +279,81 @@ def _report(
             "DD_API_KEY": "deploy-reporter-key",
             **literals,
             "TESTING_RESULT": testing_result,
-            "PROD_RESULT": prod_result,
             "EDGE_RESULT": edge_result,
             "RUN_URL": RUN_URL,
         },
     )
     submitted = json.loads(payload.read_text())
     assert isinstance(submitted, list)
-    assert len(submitted) == len(DEPLOY_ENVIRONMENTS)
-    reports = {}
-    for reported in submitted:
-        assert isinstance(reported, dict)
-        tags = reported["tags"]
-        assert isinstance(tags, list)
-        environment = next(str(tag).split(":", 1)[1] for tag in tags if str(tag).startswith("env:"))
-        reports[environment] = reported
-    assert set(reports) == set(DEPLOY_ENVIRONMENTS)
-    return url.read_text(), reports
+    assert len(submitted) == 1
+    reported = submitted[0]
+    assert isinstance(reported, dict)
+    assert "env:testing" in reported["tags"]
+    return url.read_text(), reported
+
+
+def _report_production(
+    tmp_path: Path,
+    deploy_result: str,
+    *,
+    ref_result: str = "success",
+    validate_result: str = "success",
+    prepare_result: str = "success",
+) -> tuple[str, dict[str, object]]:
+    step = _step(
+        "report", "Report the production deploy conclusion to Datadog", "deploy-production.yml"
+    )
+    assert step["if"] == "always()"
+    environment = step["env"]
+    assert environment == {
+        "DD_API_KEY": "${{ secrets.DD_API_KEY }}",
+        "DD_CHECK_URL": "https://api.us5.datadoghq.com/api/v1/check_run",
+        "DEPLOY_CHECK": "ufo.deploy.main",
+        "DD_STATUS_OK": "0",
+        "DD_STATUS_CRITICAL": "2",
+        "REF_RESULT": "${{ needs.ref.result }}",
+        "VALIDATE_RESULT": "${{ needs.validate.result }}",
+        "PREPARE_RESULT": "${{ needs.prepare.result }}",
+        "DEPLOY_RESULT": "${{ needs.deploy.result }}",
+        "RUN_URL": (
+            "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        ),
+    }
+    script = step["run"]
+    assert isinstance(script, str)
+    stubs = tmp_path / (
+        f"production-{ref_result}-{validate_result}-{prepare_result}-{deploy_result}"
+    )
+    stubs.mkdir()
+    curl = stubs / "curl"
+    curl.write_text(CURL_STUB)
+    curl.chmod(0o755)
+    payload = stubs / "payload.json"
+    url = stubs / "url.txt"
+    literals = {name: str(value) for name, value in environment.items() if "${{" not in str(value)}
+    subprocess.run(
+        ["bash", "-e", "-c", script],
+        check=True,
+        env={
+            "PATH": f"{stubs}:{os.environ['PATH']}",
+            "CURL_PAYLOAD": str(payload),
+            "CURL_URL": str(url),
+            "DD_API_KEY": "deploy-reporter-key",
+            **literals,
+            "REF_RESULT": ref_result,
+            "VALIDATE_RESULT": validate_result,
+            "PREPARE_RESULT": prepare_result,
+            "DEPLOY_RESULT": deploy_result,
+            "RUN_URL": RUN_URL,
+        },
+    )
+    submitted = json.loads(payload.read_text())
+    assert isinstance(submitted, list)
+    assert len(submitted) == 1
+    reported = submitted[0]
+    assert isinstance(reported, dict)
+    assert "env:prod" in reported["tags"]
+    return url.read_text(), reported
 
 
 def _facets(reported: dict[str, object]) -> set[str]:
@@ -319,6 +377,22 @@ def test_every_main_push_triggers_deployment() -> None:
     assert isinstance(triggers, dict)
     assert triggers["push"] == {"branches": ["main"]}
 
+    production = _workflow(WORKFLOWS / "deploy-production.yml")
+    production_triggers = production["on"]
+    assert isinstance(production_triggers, dict)
+    assert set(production_triggers) == {"workflow_dispatch"}
+    inputs = production_triggers["workflow_dispatch"]["inputs"]
+    assert inputs["target_sha"]["required"] == "true"
+    assert production["concurrency"] == {
+        "group": "deploy-production",
+        "cancel-in-progress": "false",
+    }
+    assert production["env"] == {
+        "AWS_REGION": "us-east-1",
+        "TF_DIR": "infra/envs/prod",
+    }
+    assert "deploy-testing" in str(workflow["concurrency"]["group"])
+
 
 def test_every_pull_request_has_one_deployment_gate() -> None:
     workflow = _workflow(WORKFLOWS / "deploy.yml")
@@ -337,6 +411,115 @@ def test_every_pull_request_has_one_deployment_gate() -> None:
     assert producers == ["deploy.yml"]
 
 
+def test_manual_production_target_must_have_a_successful_testing_run(tmp_path: Path) -> None:
+    script = _step("prepare", "Select tested deployment", "deploy-production.yml")["run"]
+    assert isinstance(script, str)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "seed",
+        ],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    target_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "newer",
+        ],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    main_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    subprocess.run(
+        ["git", "update-ref", "refs/remotes/origin/main", main_sha],
+        cwd=repo,
+        check=True,
+    )
+    gh = tmp_path / "gh"
+    gh.write_text(
+        "#!/bin/sh\n"
+        'printf \'%s\\n\' "$*" > "$GH_ARGS"\n'
+        'test -n "$TESTING_RUN_ID" && printf \'%s %s %s\\n\' "$TESTING_RUN_ID" '
+        '"$TESTED_STATUS" "$TESTED_CONCLUSION"\n'
+    )
+    gh.chmod(0o755)
+
+    def select(
+        candidate: str,
+        testing_run_id: str = "42",
+        tested_status: str = "completed",
+        tested_conclusion: str = "success",
+    ) -> subprocess.CompletedProcess[bytes]:
+        output = tmp_path / "github-output"
+        output.write_text("")
+        return subprocess.run(
+            ["bash", "-e", "-o", "pipefail", "-c", script],
+            cwd=repo,
+            capture_output=True,
+            env={
+                "PATH": f"{tmp_path}:{os.environ['PATH']}",
+                "GITHUB_OUTPUT": str(output),
+                "GITHUB_REPOSITORY": "metalcraftai/ufo",
+                "GH_ARGS": str(tmp_path / "gh-args"),
+                "TARGET_SHA": candidate,
+                "TESTED_STATUS": tested_status,
+                "TESTED_CONCLUSION": tested_conclusion,
+                "TESTING_RUN_ID": testing_run_id,
+            },
+        )
+
+    accepted = select(target_sha)
+    assert accepted.returncode == 0, accepted.stderr.decode()
+    assert (tmp_path / "github-output").read_text().splitlines() == [
+        f"target_sha={target_sha}",
+        "testing_run_id=42",
+    ]
+    assert select(target_sha[:8]).returncode != 0
+    assert select(target_sha.upper()).returncode != 0
+    assert select("0" * 40).returncode != 0
+    assert select(target_sha, testing_run_id="").returncode != 0
+    assert select(target_sha, tested_status="in_progress", tested_conclusion="").returncode != 0
+    assert select(target_sha, tested_conclusion="failure").returncode != 0
+    query = (tmp_path / "gh-args").read_text()
+    assert "event=push" in query
+    assert f"head_sha={target_sha}" in query
+    assert "per_page=1" in query
+    assert "status=" not in query
+
+
 def test_pull_request_plans_active_deployment_inputs() -> None:
     jobs = _workflow(WORKFLOWS / "deploy.yml")["jobs"]
     assert isinstance(jobs, dict)
@@ -349,8 +532,9 @@ def test_pull_request_plans_active_deployment_inputs() -> None:
     environment = selector["env"]
     assert isinstance(environment, dict)
     assert environment["DEPLOY_PATHS_PATTERN"] == (
-        r"^(\.github/(workflows/deploy\.yml|"
-        r"scripts/(production_prerequisites\.sh|terraform_plan_guard\.py))$|"
+        r"^(\.github/(workflows/deploy(-production)?\.yml|"
+        r"scripts/(deploy_change_gate\.py|terraform_plan_guard\.py|"
+        r"production_prerequisites\.sh))$|"
         r"infra/production_secrets\.py$|"
         r"infra/(production-access|envs/(testing|prod|edge)|modules/(platform|edge)|templates)/)"
     )
@@ -520,18 +704,36 @@ def test_plans_run_only_for_selected_deployment_inputs() -> None:
     production_access = jobs["production_access"]
     assert isinstance(production_access, dict)
     assert production_access["needs"] == "changes"
-    assert production_access["if"] == "needs.changes.outputs.deploy == 'true'"
-    production_deploy = jobs["production_deploy"]
-    assert isinstance(production_deploy, dict)
-    assert production_deploy["needs"] == ["changes", "production_access", "rollout"]
-    assert production_deploy["if"] == (
-        "github.event_name != 'pull_request' && needs.changes.outputs.deploy == 'true'"
+    assert production_access["if"] == (
+        "github.event_name == 'pull_request' && needs.changes.outputs.deploy == 'true'"
     )
-    assert production_deploy["environment"] == "production"
+    assert "production_review" not in jobs
+    assert "production_deploy" not in jobs
+    assert not any(
+        isinstance(job, dict) and job.get("environment") == "production" for job in jobs.values()
+    )
+    source = (WORKFLOWS / "deploy.yml").read_text()
+    for secret in (
+        "ANTHROPIC_API_KEY",
+        "BROWSERBASE_API_KEY",
+        "EXA_API_KEY",
+        "TURBOPUFFER_API_KEY",
+    ):
+        assert secret not in source
+    assert "github-production-deploy" not in source
+    for job in jobs.values():
+        assert isinstance(job, dict)
+        job_environment = job.get("env", {})
+        assert isinstance(job_environment, dict)
+        for step in job.get("steps", []):
+            if isinstance(step, dict) and step.get("name") == "Terraform apply":
+                assert job_environment.get("TF_DIR") != "infra/envs/prod"
+                assert step.get("working-directory") != "infra/production-access"
 
 
 @pytest.mark.parametrize(
     (
+        "workflow",
         "job_name",
         "targets",
         "plan_name",
@@ -539,12 +741,13 @@ def test_plans_run_only_for_selected_deployment_inputs() -> None:
         "apply_name",
         "gate_name",
         "host",
-        "init_name",
+        "init_step_name",
         "plan_step_name",
         "condition",
     ),
     [
         (
+            "deploy.yml",
             "edge",
             ("module.testing",),
             "edge",
@@ -557,25 +760,23 @@ def test_plans_run_only_for_selected_deployment_inputs() -> None:
             "github.event_name != 'pull_request'",
         ),
         (
-            "production_deploy",
-            (
-                "cloudflare_ruleset.https_redirect",
-                "cloudflare_zone_setting.always_use_https",
-                "module.prod",
-            ),
+            "deploy-production.yml",
+            "deploy",
+            ("module.prod",),
             "production-edge",
-            "Reject destructive edge changes",
-            "Terraform edge apply",
+            "Reject destructive production edge changes",
+            "Terraform production edge apply",
             "Gate production door",
             "flyingobject.ai",
-            "Terraform edge init",
-            "Terraform edge plan",
+            "Terraform production edge init",
+            "Terraform production edge plan",
             None,
         ),
     ],
 )
 def test_edge_deploys_are_isolated(
     tmp_path: Path,
+    workflow: str,
     job_name: str,
     targets: tuple[str, ...],
     plan_name: str,
@@ -583,24 +784,26 @@ def test_edge_deploys_are_isolated(
     apply_name: str,
     gate_name: str,
     host: str,
-    init_name: str,
+    init_step_name: str,
     plan_step_name: str,
     condition: str | None,
 ) -> None:
-    jobs = _workflow(WORKFLOWS / "deploy.yml")["jobs"]
+    jobs = _workflow(WORKFLOWS / workflow)["jobs"]
     assert isinstance(jobs, dict)
     job = jobs[job_name]
     assert isinstance(job, dict)
     steps = job["steps"]
     assert isinstance(steps, list)
-    init = _step(job_name, init_name)
-    plan = _step(job_name, plan_step_name)
-    guard = _step(job_name, guard_name)
-    apply = _step(job_name, apply_name)
-    gate = _step(job_name, gate_name)
+    init = _step(job_name, init_step_name, workflow)
+    plan = _step(job_name, plan_step_name, workflow)
+    guard = _step(job_name, guard_name, workflow)
+    apply = _step(job_name, apply_name, workflow)
+    gate = _step(job_name, gate_name, workflow)
     plan_path = f"$RUNNER_TEMP/{plan_name}.tfplan"
-    for step in (init, plan, guard, apply):
-        assert step["working-directory"] == "infra/envs/edge"
+    assert init["working-directory"] == "infra/envs/edge"
+    assert plan["working-directory"] == "infra/envs/edge"
+    assert guard["working-directory"] == "infra/envs/edge"
+    assert apply["working-directory"] == "infra/envs/edge"
     assert plan["env"] == {"TF_VAR_cloudflare_api_token": "${{ secrets.CLOUDFLARE_API_TOKEN }}"}
     assert "-lock-timeout=10m" in plan["run"]
     assert tuple(re.findall(r"-target=(\S+)", plan["run"])) == targets
@@ -638,34 +841,143 @@ def test_edge_deploys_are_isolated(
         f"https://{host}/ufo",
         f"https://{host}/fleet",
     ]
-    for name in (
-        "BAD_ROOT_HOST",
-        "BAD_LOGIN_HOST",
-        "BAD_HOST",
-        "NEGATIVE_FLEET_HOST",
-        "BAD_FLEET_HOST",
-    ):
-        failed = subprocess.run(
-            ["bash", "-e", "-o", "pipefail", "-c", script],
-            capture_output=True,
-            env=environment | {name: host},
+    environment["BAD_ROOT_HOST"] = host
+    failed = subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", script],
+        capture_output=True,
+        env=environment,
+    )
+    assert failed.returncode != 0
+    environment["BAD_ROOT_HOST"] = ""
+    environment["BAD_LOGIN_HOST"] = host
+    failed = subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", script],
+        capture_output=True,
+        env=environment,
+    )
+    assert failed.returncode != 0
+    environment["BAD_LOGIN_HOST"] = ""
+    environment["BAD_HOST"] = host
+    failed = subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", script],
+        capture_output=True,
+        env=environment,
+    )
+    assert failed.returncode != 0
+    environment["BAD_HOST"] = ""
+    environment["NEGATIVE_FLEET_HOST"] = host
+    failed = subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", script],
+        capture_output=True,
+        env=environment,
+    )
+    assert failed.returncode != 0
+    environment["NEGATIVE_FLEET_HOST"] = ""
+    environment["BAD_FLEET_HOST"] = host
+    failed = subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", script],
+        capture_output=True,
+        env=environment,
+    )
+    assert failed.returncode != 0
+
+
+def test_production_edge_preserves_the_promoted_workspace() -> None:
+    jobs = _workflow(WORKFLOWS / "deploy-production.yml")["jobs"]
+    assert isinstance(jobs, dict)
+    deploy = jobs["deploy"]
+    assert isinstance(deploy, dict)
+    steps = deploy["steps"]
+    assert isinstance(steps, list)
+    checkouts = [step for step in steps if step.get("uses") == "actions/checkout@v4"]
+    assert checkouts == [
+        {"uses": "actions/checkout@v4", "with": {"ref": "${{ env.TARGET_SHA }}"}},
+        {
+            "uses": "actions/checkout@v4",
+            "with": {"ref": "${{ github.sha }}", "path": "current-main"},
+        },
+    ]
+    runtime_apply = _step("deploy", "Terraform apply", "deploy-production.yml")
+    origin_gate = _step("deploy", "Gate gateway origin", "deploy-production.yml")
+    production_init = _step("deploy", "Terraform production edge init", "deploy-production.yml")
+    production_apply = _step("deploy", "Terraform production edge apply", "deploy-production.yml")
+    proxy_gate = _step("deploy", "Gate sandbox egress proxy TLS", "deploy-production.yml")
+    shared_init = _step("deploy", "Terraform shared edge init", "deploy-production.yml")
+    shared_apply = _step("deploy", "Terraform shared edge apply", "deploy-production.yml")
+    door = _step("deploy", "Gate production door", "deploy-production.yml")
+    assert all(
+        steps.index(before) < steps.index(after)
+        for before, after in pairwise(
+            (
+                checkouts[0],
+                runtime_apply,
+                origin_gate,
+                production_init,
+                production_apply,
+                proxy_gate,
+                checkouts[1],
+                shared_init,
+                shared_apply,
+                door,
+            )
         )
-        assert failed.returncode != 0
+    )
+
+
+def test_production_shared_edge_uses_current_main() -> None:
+    jobs = _workflow(WORKFLOWS / "deploy-production.yml")["jobs"]
+    assert isinstance(jobs, dict)
+    deploy = jobs["deploy"]
+    assert isinstance(deploy, dict)
+    steps = deploy["steps"]
+    assert isinstance(steps, list)
+    checkout = next(
+        step
+        for step in steps
+        if step.get("uses") == "actions/checkout@v4"
+        and step.get("with", {}).get("path") == "current-main"
+    )
+    init = _step("deploy", "Terraform shared edge init", "deploy-production.yml")
+    plan = _step("deploy", "Terraform shared edge plan", "deploy-production.yml")
+    guard = _step("deploy", "Reject destructive shared edge changes", "deploy-production.yml")
+    apply = _step("deploy", "Terraform shared edge apply", "deploy-production.yml")
+    door = _step("deploy", "Gate production door", "deploy-production.yml")
+    assert checkout["with"] == {"ref": "${{ github.sha }}", "path": "current-main"}
+    assert all(
+        step["working-directory"] == "current-main/infra/envs/edge"
+        for step in (init, plan, guard, apply)
+    )
+    assert plan["env"] == {"TF_VAR_cloudflare_api_token": "${{ secrets.CLOUDFLARE_API_TOKEN }}"}
+    assert tuple(re.findall(r"-target=(\S+)", plan["run"])) == (
+        "cloudflare_ruleset.https_redirect",
+        "cloudflare_zone_setting.always_use_https",
+    )
+    assert '-out="$RUNNER_TEMP/shared-edge.tfplan"' in plan["run"]
+    assert guard["run"] == (
+        'terraform show -json "$RUNNER_TEMP/shared-edge.tfplan" | '
+        'python "$GITHUB_WORKSPACE/current-main/.github/scripts/terraform_plan_guard.py"'
+    )
+    assert apply["run"] == 'terraform apply -input=false "$RUNNER_TEMP/shared-edge.tfplan"'
+    assert all(
+        steps.index(before) < steps.index(after)
+        for before, after in pairwise((checkout, init, plan, guard, apply, door))
+    )
 
 
 @pytest.mark.parametrize(
-    ("job_name", "group"),
+    ("workflow", "job_name", "group"),
     [
         (
+            "deploy.yml",
             "edge",
             "${{ github.event_name == 'pull_request' && "
             "format('deploy-edge-pr-{0}', github.event.pull_request.number) || 'deploy-edge' }}",
         ),
-        ("production_deploy", "deploy-edge"),
+        ("deploy-production.yml", "deploy", "deploy-edge"),
     ],
 )
-def test_edge_writers_share_deploy_concurrency(job_name: str, group: str) -> None:
-    job = _workflow(WORKFLOWS / "deploy.yml")["jobs"][job_name]
+def test_edge_writers_share_deploy_concurrency(workflow: str, job_name: str, group: str) -> None:
+    job = _workflow(WORKFLOWS / workflow)["jobs"][job_name]
     assert isinstance(job, dict)
     assert job["concurrency"] == {"group": group, "cancel-in-progress": "false"}
 
@@ -679,21 +991,28 @@ def test_pull_requests_guard_the_production_edge_plan() -> None:
     assert isinstance(steps, list)
     plan = _step("edge", "Terraform production edge plan")
     guard = _step("edge", "Reject destructive production edge changes")
-    assert plan["if"] == "github.event_name == 'pull_request'"
-    assert plan["working-directory"] == "infra/envs/edge"
-    assert plan["run"] == (
-        "terraform plan -input=false -no-color -lock=false \\\n"
-        "  -target=cloudflare_ruleset.https_redirect \\\n"
-        "  -target=cloudflare_zone_setting.always_use_https \\\n"
-        "  -target=module.prod \\\n"
-        '  -out="$RUNNER_TEMP/production-edge-review.tfplan"\n'
-    )
-    assert guard["if"] == "github.event_name == 'pull_request'"
-    assert guard["working-directory"] == "infra/envs/edge"
-    assert guard["run"] == (
-        'terraform show -json "$RUNNER_TEMP/production-edge-review.tfplan" | '
-        'python "$GITHUB_WORKSPACE/.github/scripts/terraform_plan_guard.py"'
-    )
+    assert plan == {
+        "name": "Terraform production edge plan",
+        "if": "github.event_name == 'pull_request'",
+        "working-directory": "infra/envs/edge",
+        "env": {"TF_VAR_cloudflare_api_token": "${{ secrets.CLOUDFLARE_API_TOKEN }}"},
+        "run": (
+            "terraform plan -input=false -no-color -lock=false \\\n"
+            "  -target=cloudflare_ruleset.https_redirect \\\n"
+            "  -target=cloudflare_zone_setting.always_use_https \\\n"
+            "  -target=module.prod \\\n"
+            '  -out="$RUNNER_TEMP/production-edge-review.tfplan"\n'
+        ),
+    }
+    assert guard == {
+        "name": "Reject destructive production edge changes",
+        "if": "github.event_name == 'pull_request'",
+        "working-directory": "infra/envs/edge",
+        "run": (
+            'terraform show -json "$RUNNER_TEMP/production-edge-review.tfplan" | '
+            'python "$GITHUB_WORKSPACE/.github/scripts/terraform_plan_guard.py"'
+        ),
+    }
     assert steps.index(plan) < steps.index(guard)
     assert not any(
         "terraform apply" in str(step.get("run", ""))
@@ -708,22 +1027,19 @@ def test_pull_requests_plan_production_foundation_without_applying() -> None:
     assert isinstance(jobs, dict)
     rollout = jobs["rollout"]
     assert isinstance(rollout, dict)
-    assert rollout["outputs"] == {
-        "image_tag": "${{ steps.image_tag.outputs.image_tag }}",
-        "sandbox_template": "${{ steps.sandbox_template.outputs.sandbox_template }}",
-    }
+    assert "outputs" not in rollout
     rollout_steps = rollout["steps"]
     assert isinstance(rollout_steps, list)
     image_tag = next(step for step in rollout_steps if step.get("name") == "Image tag")
-    assert image_tag["id"] == "image_tag"
+    assert "id" not in image_tag
     assert 'echo "IMAGE_TAG=$TAG" >> "$GITHUB_ENV"' in image_tag["run"]
-    assert 'echo "image_tag=$TAG" >> "$GITHUB_OUTPUT"' in image_tag["run"]
+    assert "GITHUB_OUTPUT" not in image_tag["run"]
     sandbox_template = next(
         step for step in rollout_steps if step.get("name") == "Select sandbox template"
     )
-    assert sandbox_template["id"] == "sandbox_template"
+    assert "id" not in sandbox_template
     assert "E2B_TEMPLATE=$(uv run python sandbox/build_template.py)" in sandbox_template["run"]
-    assert 'echo "sandbox_template=$E2B_TEMPLATE" >> "$GITHUB_OUTPUT"' in sandbox_template["run"]
+    assert "GITHUB_OUTPUT" not in sandbox_template["run"]
 
     production = jobs["production"]
     assert isinstance(production, dict)
@@ -745,6 +1061,8 @@ def test_pull_requests_plan_production_foundation_without_applying() -> None:
         '  -out="$RUNNER_TEMP/production.tfplan" \\\n'
         "  -target=module.platform.module.vpc \\\n"
         "  -target=module.platform.module.eks \\\n"
+        "  -target=module.platform.aws_secretsmanager_secret.postgres \\\n"
+        "  -target=module.platform.aws_secretsmanager_secret.platform \\\n"
         "  -target=module.platform.aws_secretsmanager_secret.api_keys \\\n"
         "  -target=module.platform.aws_secretsmanager_secret.gateway_slack_connect \\\n"
         '  -var "e2b_template=$E2B_TEMPLATE" \\\n'
@@ -774,14 +1092,14 @@ def test_production_prerequisites_fail_before_terraform(
     used: str,
     accepted: bool,
 ) -> None:
-    job = _workflow(WORKFLOWS / "deploy.yml")["jobs"]["production_access"]
+    job = _workflow(WORKFLOWS / "deploy-production.yml")["jobs"]["prepare"]
     assert isinstance(job, dict)
     steps = job["steps"]
     assert isinstance(steps, list)
-    preflight = _step("production_access", "Check production prerequisites")
-    init = _step("production_access", "Terraform init")
-    assert preflight["run"] == "bash .github/scripts/production_prerequisites.sh"
+    preflight = _step("prepare", "Check production prerequisites", "deploy-production.yml")
+    init = _step("prepare", "Terraform init", "deploy-production.yml")
     assert steps.index(preflight) < steps.index(init)
+    assert preflight["run"] == _step("production_access", "Check production prerequisites")["run"]
     run, invoked = _run_production_prerequisites(
         tmp_path,
         account=account,
@@ -793,17 +1111,25 @@ def test_production_prerequisites_fail_before_terraform(
     )
     assert (run.returncode == 0) is accepted
     if accepted:
-        for code in (
-            "L-F678F1CE",
-            "L-0263D0A3",
-            "L-1194D53C",
-            "L-7B6409FD",
-            "L-DFE45DF3",
-            "L-1216C47A",
-            "L-69A177A2",
-            "L-FE5A380F",
+        calls = invoked.splitlines()
+        for service, code in (
+            ("vpc", "L-F678F1CE"),
+            ("ec2", "L-0263D0A3"),
+            ("eks", "L-1194D53C"),
+            ("rds", "L-7B6409FD"),
+            ("elasticache", "L-DFE45DF3"),
+            ("ec2", "L-1216C47A"),
+            ("elasticloadbalancing", "L-69A177A2"),
+            ("vpc", "L-FE5A380F"),
         ):
-            assert code in invoked
+            assert (
+                f"service-quotas get-service-quota --service-code {service} "
+                f"--quota-code {code} --query Quota.Value --output text"
+            ) in calls
+        assert (
+            "ec2 describe-subnets --subnet-ids subnet-a "
+            "--query Subnets[0].AvailabilityZone --output text"
+        ) in calls
         assert invoked.count("describe-nat-gateways") == 2
         assert invoked.count("describe-subnets") == 1
         assert "Name=tag:aws:eks:cluster-name,Values=prod-cluster" in invoked
@@ -1060,27 +1386,48 @@ def test_hosted_runtime_receives_the_selected_sandbox_template() -> None:
 
 
 @pytest.mark.parametrize(
-    ("job_name", "plan_name", "step_name", "working_directory"),
+    ("workflow", "job_name", "plan_name", "step_name", "working_directory"),
     [
-        ("rollout", "testing", "Terraform plan", "${{ env.TF_DIR }}"),
-        ("edge", "edge", "Terraform plan", "infra/envs/edge"),
-        ("production", "production", "Terraform foundation plan", "${{ env.TF_DIR }}"),
+        ("deploy.yml", "rollout", "testing", "Terraform plan", "${{ env.TF_DIR }}"),
+        ("deploy.yml", "edge", "edge", "Terraform plan", "infra/envs/edge"),
         (
+            "deploy.yml",
+            "production",
+            "production",
+            "Terraform foundation plan",
+            "${{ env.TF_DIR }}",
+        ),
+        (
+            "deploy.yml",
             "production_access",
             "production-access",
             "Terraform plan",
             "infra/production-access",
         ),
-        ("production_deploy", "production", "Terraform plan", "${{ env.TF_DIR }}"),
+        (
+            "deploy-production.yml",
+            "prepare",
+            "production-access",
+            "Terraform plan",
+            "infra/production-access",
+        ),
+        (
+            "deploy-production.yml",
+            "deploy",
+            "production",
+            "Terraform plan",
+            "${{ env.TF_DIR }}",
+        ),
     ],
 )
 def test_saved_plans_reject_destructive_changes(
+    workflow: str,
     job_name: str,
     plan_name: str,
     step_name: str,
     working_directory: str,
 ) -> None:
-    jobs = _workflow(WORKFLOWS / "deploy.yml")["jobs"]
+    jobs = _workflow(WORKFLOWS / workflow)["jobs"]
     assert isinstance(jobs, dict)
     job = jobs[job_name]
     assert isinstance(job, dict)
@@ -1088,8 +1435,8 @@ def test_saved_plans_reject_destructive_changes(
     assert isinstance(steps, list)
     setup = next(step for step in steps if step.get("uses") == "hashicorp/setup-terraform@v3")
     assert setup["with"]["terraform_wrapper"] == "false"
-    plan = _step(job_name, step_name)
-    guard = _step(job_name, "Reject destructive changes")
+    plan = _step(job_name, step_name, workflow)
+    guard = _step(job_name, "Reject destructive changes", workflow)
     plan_path = f"$RUNNER_TEMP/{plan_name}.tfplan"
     assert f'-out="{plan_path}"' in plan["run"]
     assert plan["working-directory"] == working_directory
@@ -1102,7 +1449,7 @@ def test_saved_plans_reject_destructive_changes(
     assert steps.index(plan) < steps.index(guard)
 
 
-@pytest.mark.parametrize("job_name", ["rollout", "edge", "production_access"])
+@pytest.mark.parametrize("job_name", ["rollout", "edge"])
 def test_mutating_plans_lock_state_and_preserve_inputs(job_name: str) -> None:
     script = _step(job_name, "Terraform plan")["run"]
     assert isinstance(script, str)
@@ -1118,31 +1465,45 @@ def test_rollout_plan_pins_the_selected_artifacts() -> None:
 
 
 @pytest.mark.parametrize(
-    ("job_name", "plan_name", "step_name", "apply_condition"),
+    ("workflow", "job_name", "plan_name", "step_name", "apply_condition"),
     [
-        ("rollout", "testing", "Terraform plan", "github.event_name != 'pull_request'"),
-        ("edge", "edge", "Terraform plan", "github.event_name != 'pull_request'"),
         (
-            "production_access",
-            "production-access",
+            "deploy.yml",
+            "rollout",
+            "testing",
             "Terraform plan",
             "github.event_name != 'pull_request'",
+        ),
+        (
+            "deploy.yml",
+            "edge",
+            "edge",
+            "Terraform plan",
+            "github.event_name != 'pull_request'",
+        ),
+        (
+            "deploy-production.yml",
+            "prepare",
+            "production-access",
+            "Terraform plan",
+            None,
         ),
     ],
 )
 def test_apply_uses_the_guarded_plan(
+    workflow: str,
     job_name: str,
     plan_name: str,
     step_name: str,
-    apply_condition: str,
+    apply_condition: str | None,
 ) -> None:
-    plan = _step(job_name, step_name)
-    guard = _step(job_name, "Reject destructive changes")
-    apply = _step(job_name, "Terraform apply")
+    plan = _step(job_name, step_name, workflow)
+    guard = _step(job_name, "Reject destructive changes", workflow)
+    apply = _step(job_name, "Terraform apply", workflow)
     assert plan.get("if") is None
     assert apply.get("if") == apply_condition
     assert apply["run"] == f'terraform apply -input=false "$RUNNER_TEMP/{plan_name}.tfplan"'
-    steps = _workflow(WORKFLOWS / "deploy.yml")["jobs"][job_name]["steps"]
+    steps = _workflow(WORKFLOWS / workflow)["jobs"][job_name]["steps"]
     assert steps.index(guard) < steps.index(apply)
 
 
@@ -1246,13 +1607,13 @@ def test_only_testing_owns_account_global_resources() -> None:
 def test_production_deploy_role_trusts_only_the_main_production_workflow() -> None:
     source = _code((ROOT / "infra" / "production-access" / "main.tf").read_text())
     trust = _terraform_block(source, "data", "github_trust")
-    workflow_name = _workflow(WORKFLOWS / "deploy.yml")["name"]
+    workflow_name = _workflow(WORKFLOWS / "deploy-production.yml")["name"]
     assert isinstance(workflow_name, str)
     assert [
         path
         for path in (*WORKFLOWS.glob("*.yml"), *WORKFLOWS.glob("*.yaml"))
         if _workflow(path).get("name") == workflow_name
-    ] == [WORKFLOWS / "deploy.yml"]
+    ] == [WORKFLOWS / "deploy-production.yml"]
     assert len(re.findall(r"^  statement \{", trust, re.MULTILINE)) == 1
     assert re.search(
         r'principals \{\n\s+type\s+=\s+"Federated"\n'
@@ -1307,16 +1668,21 @@ def test_production_deploy_role_trusts_only_the_main_production_workflow() -> No
 
 
 def test_production_deploy_consumes_the_protected_role_and_artifacts() -> None:
-    jobs = _workflow(WORKFLOWS / "deploy.yml")["jobs"]
+    jobs = _workflow(WORKFLOWS / "deploy-production.yml")["jobs"]
     assert isinstance(jobs, dict)
-    job = jobs["production_deploy"]
+    prepare = jobs["prepare"]
+    assert isinstance(prepare, dict)
+    job = jobs["deploy"]
     assert isinstance(job, dict)
+    assert job["needs"] == "prepare"
     assert job["environment"] == "production"
     assert job["env"] == {
+        "DD_API_KEY": "${{ secrets.DD_API_KEY }}",
+        "DD_APP_KEY": "${{ secrets.DD_APP_KEY }}",
         "DEPLOY_ROLE_ARN": "arn:aws:iam::899147036157:role/github-production-deploy",
-        "E2B_TEMPLATE": "${{ needs.rollout.outputs.sandbox_template }}",
-        "IMAGE_TAG": "${{ needs.rollout.outputs.image_tag }}",
-        "TF_DIR": "infra/envs/prod",
+        "E2B_TEMPLATE": "${{ needs.prepare.outputs.e2b_template }}",
+        "IMAGE_TAG": "${{ needs.prepare.outputs.image_tag }}",
+        "TARGET_SHA": "${{ needs.prepare.outputs.target_sha }}",
     }
     steps = job["steps"]
     assert isinstance(steps, list)
@@ -1324,30 +1690,461 @@ def test_production_deploy_consumes_the_protected_role_and_artifacts() -> None:
         step for step in steps if step.get("uses") == "aws-actions/configure-aws-credentials@v4"
     )
     assert credentials["with"]["role-to-assume"] == "${{ env.DEPLOY_ROLE_ARN }}"
+    source = (WORKFLOWS / "deploy-production.yml").read_text()
+    assert "docker build" not in source
+    assert "docker push" not in source
+
+
+def test_testing_run_records_the_artifacts_production_consumes(tmp_path: Path) -> None:
+    testing_jobs = _workflow(WORKFLOWS / "deploy.yml")["jobs"]
+    assert isinstance(testing_jobs, dict)
+    rollout = testing_jobs["rollout"]
+    assert isinstance(rollout, dict)
+    rollout_steps = rollout["steps"]
+    assert isinstance(rollout_steps, list)
+    record = _step("rollout", "Record tested artifacts")
+    upload = next(
+        step for step in rollout_steps if step.get("uses") == "actions/upload-artifact@v4"
+    )
+    assert record["if"] == "github.event_name == 'push'"
+    assert upload["if"] == "github.event_name == 'push'"
+    assert upload["with"] == {
+        "name": "tested-artifacts",
+        "path": "${{ runner.temp }}/tested-artifacts.json",
+        "if-no-files-found": "error",
+        "overwrite": "true",
+        "retention-days": "90",
+    }
+    subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", record["run"]],
+        check=True,
+        env={
+            "E2B_TEMPLATE": "ufo-sbx:build-id",
+            "GITHUB_SHA": "0123456789abcdef0123456789abcdef01234567",
+            "IMAGE_TAG": "01234567",
+            "PATH": os.environ["PATH"],
+            "RUNNER_TEMP": str(tmp_path),
+        },
+    )
+    artifact = tmp_path / "tested-artifacts.json"
+    assert [path.name for path in tmp_path.iterdir()] == [artifact.name]
+    assert json.loads(artifact.read_text()) == {
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "image_tag": "01234567",
+        "sandbox_template": "ufo-sbx:build-id",
+    }
+    assert rollout_steps.index(record) < rollout_steps.index(upload)
+
+    production_jobs = _workflow(WORKFLOWS / "deploy-production.yml")["jobs"]
+    production_workflow = _workflow(WORKFLOWS / "deploy-production.yml")
+    assert production_workflow["permissions"]["actions"] == "read"
+    assert isinstance(production_jobs, dict)
+    prepare = production_jobs["prepare"]
+    assert isinstance(prepare, dict)
+    assert prepare["outputs"] == {
+        "e2b_template": "${{ steps.artifacts.outputs.e2b_template }}",
+        "image_tag": "${{ steps.artifacts.outputs.image_tag }}",
+        "target_sha": "${{ steps.select.outputs.target_sha }}",
+    }
+    prepare_steps = prepare["steps"]
+    assert isinstance(prepare_steps, list)
+    select = _step("prepare", "Select tested deployment", "deploy-production.yml")
+    download = next(
+        step for step in prepare_steps if step.get("uses") == "actions/download-artifact@v4"
+    )
+    verify = _step("prepare", "Verify tested artifacts", "deploy-production.yml")
+    assert download["with"] == {
+        "name": upload["with"]["name"],
+        "path": "${{ runner.temp }}/tested-artifacts",
+        "run-id": "${{ steps.select.outputs.testing_run_id }}",
+        "github-token": "${{ github.token }}",
+    }
+    assert "${{ inputs.target_sha }}" in str(select)
+    assert "actions/workflows/deploy.yml/runs" in select["run"]
+    assert "push" in select["run"]
+    assert 'test "$TESTED_STATUS" = completed' in select["run"]
+    assert 'test "$TESTED_CONCLUSION" = success' in select["run"]
+    assert 'ARTIFACT="$RUNNER_TEMP/tested-artifacts/tested-artifacts.json"' in verify["run"]
+    assert "TARGET_SHA" in verify["run"]
+    assert "image_tag" in verify["run"]
+    assert "e2b_template" in verify["run"]
+    assert prepare_steps.index(select) < prepare_steps.index(download) < prepare_steps.index(verify)
+
+
+def test_production_target_selection_fails_closed(tmp_path: Path) -> None:
+    script = _step("prepare", "Select tested deployment", "deploy-production.yml")["run"]
+    assert isinstance(script, str)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+    git = ["git", "-c", "user.email=t@t", "-c", "user.name=t"]
+    subprocess.run([*git, "commit", "--allow-empty", "-m", "tested"], cwd=repo, check=True)
+    tested_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    subprocess.run([*git, "commit", "--allow-empty", "-m", "main"], cwd=repo, check=True)
+    subprocess.run(["git", "update-ref", "refs/remotes/origin/main", "HEAD"], cwd=repo, check=True)
+    subprocess.run(["git", "switch", "--orphan", "diverged"], cwd=repo, check=True)
+    subprocess.run([*git, "commit", "--allow-empty", "-m", "diverged"], cwd=repo, check=True)
+    diverged_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    subprocess.run(["git", "switch", "main"], cwd=repo, check=True)
+    response = tmp_path / "response.json"
+    output = tmp_path / "github-output"
+    gh = tmp_path / "gh"
+    gh.write_text(
+        "#!/bin/sh\n"
+        'while [ "$#" -gt 0 ]; do\n'
+        '  if [ "$1" = --jq ]; then jq -r "$2" "$GH_RESPONSE"; exit; fi\n'
+        "  shift\n"
+        "done\n"
+        "exit 1\n"
+    )
+    gh.chmod(0o755)
+
+    def select(
+        target_sha: str, workflow_runs: list[dict[str, object]]
+    ) -> subprocess.CompletedProcess[bytes]:
+        response.write_text(json.dumps({"workflow_runs": workflow_runs}))
+        output.write_text("")
+        return subprocess.run(
+            ["bash", "-e", "-o", "pipefail", "-c", script],
+            cwd=repo,
+            capture_output=True,
+            env={
+                "GH_RESPONSE": str(response),
+                "GITHUB_OUTPUT": str(output),
+                "GITHUB_REPOSITORY": "metalcraftai/ufo",
+                "PATH": f"{tmp_path}:{os.environ['PATH']}",
+                "TARGET_SHA": target_sha,
+            },
+        )
+
+    successful_run = [{"id": 123, "status": "completed", "conclusion": "success"}]
+    accepted = select(tested_sha, successful_run)
+    assert accepted.returncode == 0, accepted.stderr.decode()
+    assert output.read_text().splitlines() == [
+        f"target_sha={tested_sha}",
+        "testing_run_id=123",
+    ]
+    assert select(diverged_sha, successful_run).returncode != 0
+    assert select(tested_sha, []).returncode != 0
+
+
+def test_production_prepare_rejects_untested_artifact_values(tmp_path: Path) -> None:
+    script = _step("prepare", "Verify tested artifacts", "deploy-production.yml")["run"]
+    assert isinstance(script, str)
+    target_sha = "0123456789abcdef0123456789abcdef01234567"
+    artifact_dir = tmp_path / "tested-artifacts"
+    artifact_dir.mkdir()
+    artifact = artifact_dir / "tested-artifacts.json"
+    output = tmp_path / "github-output"
+
+    def verify(values: dict[str, object]) -> subprocess.CompletedProcess[bytes]:
+        artifact.write_text(json.dumps(values))
+        output.write_text("")
+        return subprocess.run(
+            ["bash", "-e", "-o", "pipefail", "-c", script],
+            capture_output=True,
+            env={
+                "GITHUB_OUTPUT": str(output),
+                "RUNNER_TEMP": str(tmp_path),
+                "TARGET_SHA": target_sha,
+                "PATH": os.environ["PATH"],
+            },
+        )
+
+    values = {
+        "commit": target_sha,
+        "image_tag": target_sha[:8],
+        "sandbox_template": "ufo-sbx:build-id",
+    }
+    accepted = verify(values)
+    assert accepted.returncode == 0, accepted.stderr.decode()
+    assert output.read_text().splitlines() == [
+        f"image_tag={target_sha[:8]}",
+        "e2b_template=ufo-sbx:build-id",
+    ]
+    assert verify(values | {"commit": "f" * 40}).returncode != 0
+    assert verify(values | {"image_tag": "ffffffff"}).returncode != 0
+    assert verify(values | {"sandbox_template": ""}).returncode != 0
+    assert verify(values | {"sandbox_template": None}).returncode != 0
+    assert verify({"commit": target_sha, "image_tag": target_sha[:8]}).returncode != 0
+
+
+def test_production_secrets_fail_before_aws_changes() -> None:
+    jobs = _workflow(WORKFLOWS / "deploy-production.yml")["jobs"]
+    assert isinstance(jobs, dict)
+    validate = jobs["validate"]
+    prepare = jobs["prepare"]
+    assert isinstance(validate, dict)
+    assert isinstance(prepare, dict)
+    ref = jobs["ref"]
+    assert isinstance(ref, dict)
+    assert "if" not in ref
+    assert ref["steps"] == [
+        {
+            "name": "Require main branch",
+            "env": {"WORKFLOW_REF": "${{ github.ref }}"},
+            "run": 'test "$WORKFLOW_REF" = refs/heads/main',
+        }
+    ]
+    ref_gate = _step("ref", "Require main branch", "deploy-production.yml")
+    assert (
+        subprocess.run(
+            ["bash", "-e", "-c", ref_gate["run"]],
+            env={"WORKFLOW_REF": "refs/heads/main"},
+        ).returncode
+        == 0
+    )
+    assert (
+        subprocess.run(
+            ["bash", "-e", "-c", ref_gate["run"]],
+            env={"WORKFLOW_REF": "refs/heads/feature"},
+        ).returncode
+        != 0
+    )
+    assert validate["needs"] == "ref"
+    assert validate["environment"] == "production"
+    assert prepare["needs"] == "validate"
+    assert len(validate["steps"]) == 1
+    step = _step("validate", "Require production secrets", "deploy-production.yml")
+    required = (
+        "ANTHROPIC_API_KEY",
+        "BROWSERBASE_API_KEY",
+        "CLOUDFLARE_API_TOKEN",
+        "DD_API_KEY",
+        "DD_APP_KEY",
+        "E2B_API_KEY",
+        "EXA_API_KEY",
+        "OPENAI_API_KEY",
+        "TURBOPUFFER_API_KEY",
+    )
+    assert step["env"] == {name: f"${{{{ secrets.{name} }}}}" for name in required}
+    environment = dict.fromkeys(required, "present")
+    subprocess.run(["bash", "-e", "-o", "pipefail", "-c", step["run"]], check=True, env=environment)
+    missing = required[::2]
+    failed = subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", step["run"]],
+        capture_output=True,
+        env=environment | dict.fromkeys(missing, ""),
+    )
+    assert failed.returncode != 0
+    assert failed.stdout.decode().splitlines() == [
+        f"::error::{name} is required" for name in missing
+    ]
+    assert b"present" not in failed.stdout + failed.stderr
+
+
+def test_production_prepare_applies_access_before_deploy() -> None:
+    jobs = _workflow(WORKFLOWS / "deploy-production.yml")["jobs"]
+    assert isinstance(jobs, dict)
+    prepare = jobs["prepare"]
+    assert isinstance(prepare, dict)
+    assert "environment" not in prepare
+    assert prepare["needs"] == "validate"
+    steps = prepare["steps"]
+    assert isinstance(steps, list)
+    credentials = next(
+        step for step in steps if step.get("uses") == "aws-actions/configure-aws-credentials@v4"
+    )
+    assert credentials["with"]["role-to-assume"] == ("arn:aws:iam::899147036157:role/github-deploy")
+    init = _step("prepare", "Terraform init", "deploy-production.yml")
+    plan = _step("prepare", "Terraform plan", "deploy-production.yml")
+    guard = _step("prepare", "Reject destructive changes", "deploy-production.yml")
+    apply = _step("prepare", "Terraform apply", "deploy-production.yml")
+    boundary = _step("prepare", "Reject an unsplit authorization change", "deploy-production.yml")
+    prerequisites = _step("prepare", "Check production prerequisites", "deploy-production.yml")
+    assert "task=deploy%3Aproduction&per_page=1" in boundary["run"]
+    checkouts = [step for step in steps if step.get("uses") == "actions/checkout@v4"]
+    assert checkouts[-2]["with"]["ref"] == "${{ steps.select.outputs.target_sha }}"
+    assert checkouts[-1]["with"]["ref"] == "${{ github.sha }}"
+    assert init["working-directory"] == "infra/production-access"
+    assert plan["working-directory"] == "infra/production-access"
+    assert guard["working-directory"] == "infra/production-access"
+    assert apply["working-directory"] == "infra/production-access"
+    assert apply["run"] == 'terraform apply -input=false "$RUNNER_TEMP/production-access.tfplan"'
+    assert all(
+        steps.index(checkouts[-2]) < steps.index(step) < steps.index(checkouts[-1])
+        for step in (prerequisites, boundary)
+    )
+    assert steps.index(boundary) < steps.index(apply)
+    assert all(
+        steps.index(before) < steps.index(after)
+        for before, after in pairwise((checkouts[-1], plan, guard, apply))
+    )
+
+
+def test_production_authorization_boundary_fails_closed(tmp_path: Path) -> None:
+    step = _step("prepare", "Reject an unsplit authorization change", "deploy-production.yml")
+    assert step["env"] == {
+        "GH_TOKEN": "${{ github.token }}",
+        "TARGET_SHA": "${{ steps.select.outputs.target_sha }}",
+    }
+    script = step["run"]
+    repo = tmp_path / "repo"
+    gate = repo / ".github" / "scripts" / "deploy_change_gate.py"
+    gate.parent.mkdir(parents=True)
+    shutil.copy(ROOT / ".github" / "scripts" / "deploy_change_gate.py", gate)
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "add",
+            ".",
+        ],
+        cwd=repo,
+        check=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-m",
+            "base",
+        ],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    base_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    authorization = repo / "infra" / "modules" / "platform" / "iam.tf"
+    authorization.parent.mkdir(parents=True)
+    authorization.write_text("changed\n")
+    workflow = repo / ".github" / "workflows" / "deploy-production.yml"
+    workflow.parent.mkdir(parents=True)
+    workflow.write_text("changed\n")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-m",
+            "target",
+        ],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    target_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    subprocess.run(["git", "switch", "-c", "clean", base_sha], cwd=repo, check=True)
+    runtime = repo / "core" / "src" / "ufo" / "serve.py"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text("changed\n")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-m",
+            "clean",
+        ],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    clean_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    gh = tmp_path / "gh"
+    gh.write_text(
+        '#!/bin/sh\nprintf \'%s\\n\' "$*" >> "$GH_CALLS"\nprintf \'%s\\n\' "$GH_RESPONSE"\n'
+    )
+    gh.chmod(0o755)
+    aws = tmp_path / "aws"
+    aws.write_text(
+        "#!/bin/sh\n"
+        'printf \'%s\\n\' "$*" >> "$AWS_CALLS"\n'
+        'case "$AWS_CLUSTER_STATE" in\n'
+        "  found) exit 0 ;;\n"
+        "  missing) printf '%s\\n' ResourceNotFoundException >&2; exit 254 ;;\n"
+        "  *) printf '%s\\n' AccessDeniedException >&2; exit 254 ;;\n"
+        "esac\n"
+    )
+    aws.chmod(0o755)
+    aws_calls = tmp_path / "aws-calls"
+    gh_calls = tmp_path / "gh-calls"
+
+    def boundary(
+        base: str, cluster: str, target: str = target_sha
+    ) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.run(
+            ["bash", "-e", "-o", "pipefail", "-c", script],
+            cwd=repo,
+            capture_output=True,
+            env={
+                "AWS_CALLS": str(aws_calls),
+                "AWS_CLUSTER_STATE": cluster,
+                "GH_CALLS": str(gh_calls),
+                "GH_RESPONSE": base,
+                "GITHUB_REPOSITORY": "metalcraftai/ufo",
+                "PATH": f"{tmp_path}:{os.environ['PATH']}",
+                "RUNNER_TEMP": str(tmp_path),
+                "TARGET_SHA": target,
+            },
+        )
+
+    split = boundary(base_sha, "missing")
+    assert split.returncode != 0
+    assert b"expand IAM, roll and drain" in split.stderr
+    assert boundary(base_sha, "missing", clean_sha).returncode == 0
+    assert boundary(target_sha, "missing", clean_sha).returncode != 0
+    existing = boundary("", "found")
+    assert existing.returncode != 0
+    assert existing.stdout == b"::error::No recorded production deployment.\n"
+    assert boundary("", "missing").returncode == 0
+    denied = boundary("", "denied")
+    assert denied.returncode != 0
+    assert denied.stderr == b"AccessDeniedException\n"
+    assert (
+        gh_calls.read_text().splitlines()
+        == [
+            (
+                "api repos/metalcraftai/ufo/deployments?environment=production&"
+                "task=deploy%3Aproduction&per_page=1 --jq .[0].sha // empty"
+            )
+        ]
+        * 6
+    )
+    assert aws_calls.read_text().splitlines() == ["eks describe-cluster --name prod-cluster"] * 3
 
 
 def test_production_deploy_rejects_missing_inputs_before_role_assumption() -> None:
-    jobs = _workflow(WORKFLOWS / "deploy.yml")["jobs"]
+    jobs = _workflow(WORKFLOWS / "deploy-production.yml")["jobs"]
     assert isinstance(jobs, dict)
-    job = jobs["production_deploy"]
+    job = jobs["deploy"]
     assert isinstance(job, dict)
     steps = job["steps"]
     assert isinstance(steps, list)
-    step = _step("production_deploy", "Require production inputs")
+    step = _step("deploy", "Require production inputs", "deploy-production.yml")
     assert steps[0] == step
-    assert steps[1] == {"uses": "actions/checkout@v4"}
-    assert step["env"] == {
-        "ANTHROPIC_API_KEY": "${{ secrets.ANTHROPIC_API_KEY }}",
-        "BROWSERBASE_API_KEY": "${{ secrets.BROWSERBASE_API_KEY }}",
-        "CLOUDFLARE_API_TOKEN": "${{ secrets.CLOUDFLARE_API_TOKEN }}",
-        "DD_API_KEY": "${{ secrets.DD_API_KEY }}",
-        "DD_APP_KEY": "${{ secrets.DD_APP_KEY }}",
-        "E2B_API_KEY": "${{ secrets.E2B_API_KEY }}",
-        "EXA_API_KEY": "${{ secrets.EXA_API_KEY }}",
-        "OPENAI_API_KEY": "${{ secrets.OPENAI_API_KEY }}",
-        "TURBOPUFFER_API_KEY": "${{ secrets.TURBOPUFFER_API_KEY }}",
+    assert steps[1] == {
+        "uses": "actions/checkout@v4",
+        "with": {"ref": "${{ env.TARGET_SHA }}"},
     }
-    required = (*step["env"], "E2B_TEMPLATE", "IMAGE_TAG")
+    assert "env" not in step
+    required = ("E2B_TEMPLATE", "IMAGE_TAG", "TARGET_SHA")
     environment = dict.fromkeys(required, "present")
     subprocess.run(["bash", "-e", "-o", "pipefail", "-c", step["run"]], check=True, env=environment)
     for missing in required:
@@ -1359,25 +2156,88 @@ def test_production_deploy_rejects_missing_inputs_before_role_assumption() -> No
         assert failed.returncode != 0
         assert failed.stdout.decode() == f"::error::{missing} is required\n"
         assert b"present" not in failed.stdout + failed.stderr
+    missing = required[::2]
+    failed = subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", step["run"]],
+        capture_output=True,
+        env=environment | dict.fromkeys(missing, ""),
+    )
+    assert failed.returncode != 0
+    assert failed.stdout.decode().splitlines() == [
+        f"::error::{name} is required" for name in missing
+    ]
+
+
+def test_production_gateway_origin_gate_executes(tmp_path: Path) -> None:
+    gate = _step("deploy", "Gate gateway origin", "deploy-production.yml")
+    assert gate["shell"] == "bash"
+    script = gate["run"]
+    terraform = tmp_path / "terraform"
+    terraform.write_text(
+        '#!/bin/sh\nprintf \'%s\\n\' "$*" > "$TERRAFORM_CALL"\nprintf \'%s\\n\' "$ORIGIN_HOST"\n'
+    )
+    terraform.chmod(0o755)
+    curl = tmp_path / "curl"
+    curl.write_text(
+        "#!/bin/sh\n"
+        'printf \'%s\\n\' "$*" >> "$CURL_CALLS"\n'
+        'case "$*" in\n'
+        "  */ufo)\n"
+        "    [ \"$BAD_RESPONSE\" != ufo ] || { printf 'wrong\\n'; exit; }\n"
+        '    printf \'UFO_URL="${UFO_URL:-https://%s}"\\n\' "$ORIGIN_HOST"\n'
+        "    ;;\n"
+        "  */fleet)\n"
+        '    [ "$BAD_RESPONSE" != fleet ] || { printf \'{"craft":"wrong"}\\n\'; exit; }\n'
+        "    printf '{\"craft\":1}\\n'\n"
+        "    ;;\n"
+        "esac\n"
+    )
+    curl.chmod(0o755)
+    calls = tmp_path / "curl-calls"
+    environment = {
+        "BAD_RESPONSE": "",
+        "CURL_CALLS": str(calls),
+        "ORIGIN_HOST": "flyingobject.ai",
+        "PATH": f"{tmp_path}:{os.environ['PATH']}",
+        "TERRAFORM_CALL": str(tmp_path / "terraform-call"),
+        "TF_DIR": "infra/envs/prod",
+    }
+    subprocess.run(["bash", "-e", "-o", "pipefail", "-c", script], check=True, env=environment)
+    assert (tmp_path / "terraform-call").read_text().strip() == (
+        "-chdir=infra/envs/prod output -raw hostname"
+    )
+    assert calls.read_text().splitlines() == [
+        "-fsS https://origin.flyingobject.ai/ufo",
+        "-fsS https://origin.flyingobject.ai/fleet",
+    ]
+    for bad_response in ("ufo", "fleet"):
+        failed = subprocess.run(
+            ["bash", "-e", "-o", "pipefail", "-c", script],
+            capture_output=True,
+            env=environment | {"BAD_RESPONSE": bad_response},
+        )
+        assert failed.returncode != 0
 
 
 def test_production_deploy_applies_guarded_foundation_then_runtime() -> None:
-    jobs = _workflow(WORKFLOWS / "deploy.yml")["jobs"]
+    jobs = _workflow(WORKFLOWS / "deploy-production.yml")["jobs"]
     assert isinstance(jobs, dict)
-    job = jobs["production_deploy"]
+    job = jobs["deploy"]
     assert isinstance(job, dict)
     steps = job["steps"]
     assert isinstance(steps, list)
 
-    foundation_plan = _step("production_deploy", "Terraform foundation plan")
-    foundation_guard = _step("production_deploy", "Reject destructive foundation changes")
-    foundation_apply = _step("production_deploy", "Terraform foundation apply")
-    secrets = _step("production_deploy", "Write production runtime secrets")
-    runtime_plan = _step("production_deploy", "Terraform plan")
-    runtime_guard = _step("production_deploy", "Reject destructive changes")
-    refresh = _step("production_deploy", "Refresh production runtime secrets")
-    runtime_apply = _step("production_deploy", "Terraform apply")
-    rollout = _step("production_deploy", "Wait for runtime rollout")
+    foundation_plan = _step("deploy", "Terraform foundation plan", "deploy-production.yml")
+    foundation_guard = _step(
+        "deploy", "Reject destructive foundation changes", "deploy-production.yml"
+    )
+    foundation_apply = _step("deploy", "Terraform foundation apply", "deploy-production.yml")
+    secrets = _step("deploy", "Write production runtime secrets", "deploy-production.yml")
+    runtime_plan = _step("deploy", "Terraform plan", "deploy-production.yml")
+    runtime_guard = _step("deploy", "Reject destructive changes", "deploy-production.yml")
+    refresh = _step("deploy", "Refresh production runtime secrets", "deploy-production.yml")
+    runtime_apply = _step("deploy", "Terraform apply", "deploy-production.yml")
+    rollout = _step("deploy", "Wait for runtime rollout", "deploy-production.yml")
     for step in (foundation_plan, foundation_guard, foundation_apply):
         assert step["working-directory"] == "${{ env.TF_DIR }}"
     assert foundation_plan["run"] == (
@@ -1404,7 +2264,6 @@ def test_production_deploy_applies_guarded_foundation_then_runtime() -> None:
         "env": {
             "ANTHROPIC_API_KEY": "${{ secrets.ANTHROPIC_API_KEY }}",
             "BROWSERBASE_API_KEY": "${{ secrets.BROWSERBASE_API_KEY }}",
-            "DD_API_KEY": "${{ secrets.DD_API_KEY }}",
             "E2B_API_KEY": "${{ secrets.E2B_API_KEY }}",
             "EXA_API_KEY": "${{ secrets.EXA_API_KEY }}",
             "OPENAI_API_KEY": "${{ secrets.OPENAI_API_KEY }}",
@@ -1429,6 +2288,15 @@ def test_production_deploy_applies_guarded_foundation_then_runtime() -> None:
         'python "$GITHUB_WORKSPACE/.github/scripts/terraform_plan_guard.py"'
     )
     assert runtime_apply["run"] == 'terraform apply -input=false "$RUNNER_TEMP/production.tfplan"'
+    for step in (
+        foundation_plan,
+        foundation_guard,
+        foundation_apply,
+        runtime_plan,
+        runtime_guard,
+        runtime_apply,
+    ):
+        assert step["working-directory"] == "${{ env.TF_DIR }}"
     assert refresh["run"] == (
         "aws eks update-kubeconfig \\\n"
         '  --region "$AWS_REGION" \\\n'
@@ -1465,9 +2333,12 @@ def test_production_deploy_applies_guarded_foundation_then_runtime() -> None:
     assert all(steps.index(before) < steps.index(after) for before, after in pairwise(order))
 
 
-@pytest.mark.parametrize("job_name", ["rollout", "production_deploy"])
-def test_proxy_gate_dials_the_rolled_proxy_with_the_shared_ca(job_name: str) -> None:
-    jobs = _workflow(WORKFLOWS / "deploy.yml")["jobs"]
+@pytest.mark.parametrize(
+    ("workflow", "job_name"),
+    [("deploy.yml", "rollout"), ("deploy-production.yml", "deploy")],
+)
+def test_proxy_gate_dials_the_rolled_proxy_with_the_shared_ca(workflow: str, job_name: str) -> None:
+    jobs = _workflow(WORKFLOWS / workflow)["jobs"]
     assert isinstance(jobs, dict)
     job = jobs[job_name]
     assert isinstance(job, dict)
@@ -1479,7 +2350,7 @@ def test_proxy_gate_dials_the_rolled_proxy_with_the_shared_ca(job_name: str) -> 
         assert 'echo "E2B_TEMPLATE=$E2B_TEMPLATE" >> "$GITHUB_ENV"' in selector["run"]
         assert steps.index(selector) < steps.index(gate)
     else:
-        assert job["env"]["E2B_TEMPLATE"] == "${{ needs.rollout.outputs.sandbox_template }}"
+        assert job["env"]["E2B_TEMPLATE"] == "${{ needs.prepare.outputs.e2b_template }}"
     script = gate["run"]
     assert isinstance(script, str)
     assert "output -raw sandbox_proxy_ca_cert" in script
@@ -1531,9 +2402,12 @@ def test_sandbox_proxy_nlb_routes_across_all_enabled_zones() -> None:
         assert cross_zone, environment
 
 
-@pytest.mark.parametrize("job_name", ["rollout", "production_deploy"])
-def test_runtime_rollout_drains_before_the_proxy_gate(job_name: str) -> None:
-    job = _workflow(WORKFLOWS / "deploy.yml")["jobs"][job_name]
+@pytest.mark.parametrize(
+    ("workflow", "job_name"),
+    [("deploy.yml", "rollout"), ("deploy-production.yml", "deploy")],
+)
+def test_runtime_rollout_drains_before_the_proxy_gate(workflow: str, job_name: str) -> None:
+    job = _workflow(WORKFLOWS / workflow)["jobs"][job_name]
     assert isinstance(job, dict)
     steps = job["steps"]
     assert isinstance(steps, list)
@@ -1550,7 +2424,7 @@ def test_runtime_rollout_drains_before_the_proxy_gate(job_name: str) -> None:
         "kubectl --namespace ingress-nginx rollout status "
         "deployment/ingress-nginx-controller --timeout=15m"
     )
-    assert (ingress in script) is (job_name == "production_deploy")
+    assert (ingress in script) is (workflow == "deploy-production.yml")
     templates = ROOT / "infra" / "templates"
     manifests = [
         document
@@ -1622,7 +2496,7 @@ def test_runtime_rollout_drains_before_the_proxy_gate(job_name: str) -> None:
     )
     gated_readiness = {resource for command in wait_commands for resource in command[6:]}
     gated_rollouts = {command[5] for command in rollout_commands}
-    expected_production = job_name == "production_deploy"
+    expected_production = workflow == "deploy-production.yml"
     assert gated_readiness == (readiness_resources if expected_production else set())
     testing_rollouts = {
         "deployment/ufo-sandbox-proxy",
@@ -1726,7 +2600,6 @@ def test_deployment_gate_joins_every_selected_result() -> None:
         "edge",
         "production",
         "production_access",
-        "production_deploy",
     ]
     assert deploy["if"] == "always()"
     steps = deploy["steps"]
@@ -1742,7 +2615,6 @@ def test_deployment_gate_joins_every_selected_result() -> None:
         "EDGE_RESULT": "${{ needs.edge.result }}",
         "PRODUCTION_RESULT": "${{ needs.production.result }}",
         "PRODUCTION_ACCESS_RESULT": "${{ needs.production_access.result }}",
-        "PRODUCTION_DEPLOY_RESULT": "${{ needs.production_deploy.result }}",
     }
     script = gate["run"]
     assert isinstance(script, str)
@@ -1758,24 +2630,53 @@ def test_deployment_gate_joins_every_selected_result() -> None:
         "edge",
         "production",
         "access",
-        "production_deploy",
         "accepted",
     ),
     [
-        ("true", "pull_request", "success", "success", "success", "success", "skipped", True),
-        ("true", "push", "success", "success", "skipped", "success", "success", True),
-        ("false", "push", "skipped", "skipped", "skipped", "skipped", "skipped", True),
-        ("true", "pull_request", "success", "success", "skipped", "success", "skipped", False),
-        ("true", "pull_request", "success", "success", "success", "failure", "skipped", False),
-        ("true", "pull_request", "success", "success", "success", "success", "success", False),
-        ("true", "push", "success", "success", "success", "success", "success", False),
-        ("true", "push", "failure", "success", "skipped", "success", "success", False),
-        ("true", "push", "success", "success", "skipped", "failure", "success", False),
-        ("true", "push", "success", "success", "skipped", "success", "failure", False),
-        ("false", "push", "skipped", "skipped", "success", "skipped", "skipped", False),
-        ("false", "push", "skipped", "skipped", "skipped", "success", "skipped", False),
-        ("false", "push", "skipped", "skipped", "skipped", "skipped", "success", False),
-        ("invalid", "push", "success", "success", "skipped", "success", "success", False),
+        (
+            "true",
+            "pull_request",
+            "success",
+            "success",
+            "success",
+            "success",
+            True,
+        ),
+        ("true", "push", "success", "success", "skipped", "skipped", True),
+        ("false", "push", "skipped", "skipped", "skipped", "skipped", True),
+        (
+            "true",
+            "pull_request",
+            "success",
+            "success",
+            "skipped",
+            "success",
+            False,
+        ),
+        (
+            "true",
+            "pull_request",
+            "success",
+            "success",
+            "success",
+            "failure",
+            False,
+        ),
+        ("true", "push", "success", "success", "success", "skipped", False),
+        ("true", "push", "failure", "skipped", "skipped", "skipped", False),
+        ("true", "push", "success", "failure", "skipped", "skipped", False),
+        ("true", "push", "success", "success", "skipped", "success", False),
+        ("false", "push", "skipped", "skipped", "success", "skipped", False),
+        ("false", "push", "skipped", "skipped", "skipped", "success", False),
+        (
+            "invalid",
+            "push",
+            "success",
+            "success",
+            "skipped",
+            "skipped",
+            False,
+        ),
     ],
 )
 def test_deployment_gate_accepts_only_expected_results(
@@ -1785,7 +2686,6 @@ def test_deployment_gate_accepts_only_expected_results(
     edge: str,
     production: str,
     access: str,
-    production_deploy: str,
     accepted: bool,
 ) -> None:
     gate = _step("deploy", "Require the selected deployment work")
@@ -1798,11 +2698,88 @@ def test_deployment_gate_accepts_only_expected_results(
         "EVENT_NAME": event,
         "PRODUCTION_RESULT": production,
         "PRODUCTION_ACCESS_RESULT": access,
-        "PRODUCTION_DEPLOY_RESULT": production_deploy,
         "ROLLOUT_RESULT": rollout,
     }
     run = subprocess.run(["bash", "-e", "-c", script], env=os.environ | environment)
     assert (run.returncode == 0) is accepted
+
+
+def test_successful_manual_deploy_records_the_promoted_commit(tmp_path: Path) -> None:
+    jobs = _workflow(WORKFLOWS / "deploy-production.yml")["jobs"]
+    assert isinstance(jobs, dict)
+    report = jobs["report"]
+    assert isinstance(report, dict)
+    assert report["needs"] == ["ref", "validate", "prepare", "deploy"]
+    assert report["if"] == "always()"
+    record = _step("report", "Record the production deployment", "deploy-production.yml")
+    assert record["if"] == "needs.deploy.result == 'success'"
+    assert record["env"] == {
+        "GH_TOKEN": "${{ github.token }}",
+        "RUN_URL": (
+            "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        ),
+        "TARGET_SHA": "${{ needs.prepare.outputs.target_sha }}",
+    }
+    gh = tmp_path / "gh"
+    gh.write_text(
+        "#!/bin/sh\n"
+        'printf \'%s\\n\' "$*" >> "$GH_CALLS"\n'
+        'case "$*" in\n'
+        "  *'/deployments --input - --jq .id')\n"
+        '    cat > "$DEPLOYMENT_PAYLOAD"\n'
+        '    [ "$GH_FAIL" != deployment ] || exit 42\n'
+        "    printf '123\\n'\n"
+        "    ;;\n"
+        "  *'/deployments/123/statuses --input -')\n"
+        '    cat > "$STATUS_PAYLOAD"\n'
+        '    [ "$GH_FAIL" != status ] || exit 42\n'
+        "    ;;\n"
+        "  *) exit 43 ;;\n"
+        "esac\n"
+    )
+    gh.chmod(0o755)
+    calls = tmp_path / "gh-calls"
+    deployment = tmp_path / "deployment.json"
+    status = tmp_path / "status.json"
+    environment = {
+        "DEPLOYMENT_PAYLOAD": str(deployment),
+        "GH_CALLS": str(calls),
+        "GH_FAIL": "",
+        "GITHUB_REPOSITORY": "metalcraftai/ufo",
+        "PATH": f"{tmp_path}:{os.environ['PATH']}",
+        "RUN_URL": RUN_URL,
+        "STATUS_PAYLOAD": str(status),
+        "TARGET_SHA": "0123456789abcdef0123456789abcdef01234567",
+    }
+    subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", record["run"]],
+        check=True,
+        env=environment,
+    )
+    assert calls.read_text().splitlines() == [
+        "api --method POST repos/metalcraftai/ufo/deployments --input - --jq .id",
+        "api --method POST repos/metalcraftai/ufo/deployments/123/statuses --input -",
+    ]
+    assert json.loads(deployment.read_text()) == {
+        "ref": "0123456789abcdef0123456789abcdef01234567",
+        "environment": "production",
+        "task": "deploy:production",
+        "auto_merge": False,
+        "required_contexts": [],
+    }
+    assert json.loads(status.read_text()) == {
+        "state": "success",
+        "environment": "production",
+        "environment_url": RUN_URL,
+        "auto_inactive": True,
+    }
+    for failure in ("deployment", "status"):
+        failed = subprocess.run(
+            ["bash", "-e", "-o", "pipefail", "-c", record["run"]],
+            capture_output=True,
+            env=environment | {"GH_FAIL": failure},
+        )
+        assert failed.returncode != 0
 
 
 def test_every_main_deploy_conclusion_reaches_datadog(tmp_path: Path) -> None:
@@ -1814,7 +2791,6 @@ def test_every_main_deploy_conclusion_reaches_datadog(tmp_path: Path) -> None:
         "DD_STATUS_OK": "0",
         "DD_STATUS_CRITICAL": "2",
         "TESTING_RESULT": "${{ needs.rollout.result }}",
-        "PROD_RESULT": "${{ needs.production_deploy.result }}",
         "EDGE_RESULT": "${{ needs.edge.result }}",
         "RUN_URL": (
             "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
@@ -1827,26 +2803,39 @@ def test_every_main_deploy_conclusion_reaches_datadog(tmp_path: Path) -> None:
     }
     assert len(api_urls) == 1
 
-    posted_to, testing_failed = _report(tmp_path, "failure", "skipped", "skipped")
+    posted_to, testing_failed = _report(tmp_path, "failure", "skipped")
     assert urlparse(posted_to).hostname == urlparse(api_urls.pop()).hostname
-    assert {report["message"] for report in testing_failed.values()} == {RUN_URL}
-    assert {report["status"] for report in testing_failed.values()} == {DATADOG_STATUS_CRITICAL}
+    assert testing_failed["message"] == RUN_URL
+    assert testing_failed["status"] == DATADOG_STATUS_CRITICAL
 
-    _, succeeded = _report(tmp_path, "success", "success")
-    assert {report["message"] for report in succeeded.values()} == {RUN_URL}
+    _, succeeded = _report(tmp_path, "success")
+    assert succeeded["message"] == RUN_URL
+    assert succeeded["status"] == DATADOG_STATUS_OK
 
-    _, edge_failed = _report(tmp_path, "success", "success", "failure")
-    assert edge_failed["testing"]["status"] == DATADOG_STATUS_CRITICAL
-    assert edge_failed["prod"]["status"] == DATADOG_STATUS_OK
+    _, edge_failed = _report(tmp_path, "success", "failure")
+    assert edge_failed["status"] == DATADOG_STATUS_CRITICAL
 
-    _, edge_skipped = _report(tmp_path, "success", "success", "skipped")
-    assert edge_skipped["testing"]["status"] == DATADOG_STATUS_CRITICAL
-    assert edge_skipped["prod"]["status"] == DATADOG_STATUS_OK
+    _, edge_skipped = _report(tmp_path, "success", "skipped")
+    assert edge_skipped["status"] == DATADOG_STATUS_CRITICAL
 
-    for prod_result in ("failure", "skipped"):
-        _, prod_failed = _report(tmp_path, "success", prod_result)
-        assert prod_failed["testing"]["status"] == DATADOG_STATUS_OK
-        assert prod_failed["prod"]["status"] == DATADOG_STATUS_CRITICAL
+    _, prod_succeeded = _report_production(tmp_path, "success")
+    assert prod_succeeded["message"] == RUN_URL
+    assert prod_succeeded["status"] == DATADOG_STATUS_OK
+    _, prod_failed = _report_production(tmp_path, "failure")
+    assert prod_failed["status"] == DATADOG_STATUS_CRITICAL
+    _, validate_failed = _report_production(
+        tmp_path,
+        "skipped",
+        validate_result="failure",
+        prepare_result="skipped",
+    )
+    assert validate_failed["status"] == DATADOG_STATUS_CRITICAL
+    _, prepare_failed = _report_production(
+        tmp_path,
+        "skipped",
+        prepare_result="failure",
+    )
+    assert prepare_failed["status"] == DATADOG_STATUS_CRITICAL
 
 
 @pytest.mark.parametrize("environment", DEPLOY_ENVIRONMENTS)
@@ -1862,15 +2851,12 @@ def test_the_deploy_monitor_watches_the_check_the_reporter_submits(
     submissions = int(parsed.group(4))
     assert 1 <= int(_monitor_attribute("deploy_failed", "critical", environment)) <= submissions
 
-    failed_results = (
-        ("failure", "skipped", "skipped")
-        if environment == "testing"
-        else ("success", "skipped", "skipped")
-    )
-    _, failed_run = _report(tmp_path, *failed_results)
-    _, succeeded = _report(tmp_path, "success", "success")
-    failed = failed_run[environment]
-    succeeded_report = succeeded[environment]
+    if environment == "testing":
+        _, failed = _report(tmp_path, "failure", "skipped")
+        _, succeeded_report = _report(tmp_path, "success")
+    else:
+        _, failed = _report_production(tmp_path, "failure")
+        _, succeeded_report = _report_production(tmp_path, "success")
     assert failed["check"] == check
     assert succeeded_report["check"] == check
     assert scope in failed["tags"]
