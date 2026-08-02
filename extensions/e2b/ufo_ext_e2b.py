@@ -40,6 +40,7 @@ every lease decision below turns on it:
   client's stream dies, and the error class belongs to the SDK's HTTP stack rather than its API, so
   it is version-dependent and cannot be named."""
 
+import asyncio
 import os
 import shlex
 import time
@@ -92,6 +93,7 @@ SYSTEM_CA_BUNDLE = "/etc/ssl/certs/ca-certificates.crt"
 CA_INSTALL_TIMEOUT_SECONDS = 30
 SANDBOX_USER = "user"
 WORKSPACE_ENSURE_TIMEOUT_SECONDS = 30
+RESUME_PREPARE_TIMEOUT_SECONDS = 5
 ENSURE_WORKSPACE_COMMAND = (
     f"mkdir -p {WORKSPACE_DIR} && chown {SANDBOX_USER}:{SANDBOX_USER} {WORKSPACE_DIR}"
 )
@@ -228,6 +230,9 @@ class E2BCarrier:
     is the model's thinking between two tool calls, not the calls, that a lease has to outlast."""
     sdk: E2BSdk = E2B_SDK
     clock: Callable[[], float] = time.monotonic
+    resume_prepare_seconds: float = RESUME_PREPARE_TIMEOUT_SECONDS
+    """How long a resumed box's `envd` is given to re-assert preparation before the turn goes on
+    without it."""
     _live: dict[UUID, _Lease] = field(default_factory=dict)
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
@@ -240,7 +245,26 @@ class E2BCarrier:
         provider no longer has means that sandbox and its workspace are gone — an explicit kill, or
         a provider fault — so a fresh one opens in its place and the loss is named in the log;
         refusing instead would wedge every later turn of the conversation on a sandbox nothing can
-        bring back."""
+        bring back.
+
+        Preparing the box — the CA into system trust, `/workspace` into place — runs on every open,
+        because the CA in hand is the only one the proxy will present and a resumed box may hold an
+        older one. On a box this call just opened it must succeed: nothing is installed yet, so an
+        unprepared box reaches no host and holds no workspace. On a resumed box it is already true
+        and this is a re-assertion, so it is bounded here and its silence tolerated: preparation
+        runs through `envd`, which stops answering while a loaded container thrashes. The bound is
+        this repo's own because the SDK has none to offer — `request_timeout` covers a stream's
+        setup and send, never its read, so a silent `envd` holds a command open with nothing to
+        expire. A deferred preparation costs nothing: the trust store still holds the CA installed
+        when the box was made, the install command replaces it the first turn `envd` answers, and a
+        command meeting a container still too busy to talk gets the exit code `exec` maps for it.
+
+        What makes deferring safe is which box it is allowed for: the one `spec.resume_id` names,
+        and only that one. That id comes off the conversation's durable handle, which is written
+        only once this call has returned — so an id being there at all is proof some `create`
+        prepared that container. A box reached any other way carries no such proof: this process's
+        own cache can name one whose preparation just failed, and a fresh container has nothing on
+        it yet. Both prepare strictly."""
         egress_env = _egress_env(spec.proxy, spec.run_token)
         live = self._leased(spec.conversation_id)
         resume_id = (
@@ -251,10 +275,20 @@ class E2BCarrier:
             else None
         )
         opened = self.clock()
-        sandbox = await self._resume_or_open(spec, resume_id)
+        sandbox, _ = await self._resume_or_open(spec, resume_id)
         self._live[spec.conversation_id] = _Lease(sandbox, opened + SANDBOX_LEASE_SECONDS)
-        await self._install_ca(sandbox, spec.proxy.ca_cert)
-        await self._ensure_workspace(sandbox)
+        if sandbox.sandbox_id == spec.resume_id:
+            try:
+                async with asyncio.timeout(self.resume_prepare_seconds):
+                    await self._prepare(sandbox, spec.proxy.ca_cert)
+            except TimeoutError:
+                log(
+                    "sandbox.e2b.prepare_deferred",
+                    conversation_id=str(spec.conversation_id),
+                    sandbox_id=sandbox.sandbox_id,
+                )
+        else:
+            await self._prepare(sandbox, spec.proxy.ca_cert)
         return SandboxHandle(
             conversation_id=spec.conversation_id,
             container_id=sandbox.sandbox_id,
@@ -287,17 +321,26 @@ class E2BCarrier:
             run_token=spec.run_token,
         )
 
-    async def _resume_or_open(self, spec: SandboxSpec, resume_id: str | None) -> E2BSandbox:
+    async def _resume_or_open(
+        self, spec: SandboxSpec, resume_id: str | None
+    ) -> tuple[E2BSandbox, bool]:
         """Resume the conversation's sandbox, or open one on the deploy's template. `connect` both
         resumes a paused sandbox and sets its lease, so a resume is one call whatever state the
         container was left in. e2b holds a paused sandbox until something kills it, so an id that
         comes back not-found names one the provider no longer has: the container is cache over the
         durable workspace, so the turn opens a fresh one rather than failing every turn this
-        conversation will ever admit against an id nothing can resurrect."""
+        conversation will ever admit against an id nothing can resurrect.
+
+        Reports whether the sandbox came back resumed, which is what tells `create` the box was
+        already prepared once and its preparation is a re-assertion rather than the thing that
+        makes the box usable."""
         if resume_id is not None:
             try:
-                return await self.sdk.connect(
-                    resume_id, timeout=SANDBOX_LEASE_SECONDS, api_key=self.api_key
+                return (
+                    await self.sdk.connect(
+                        resume_id, timeout=SANDBOX_LEASE_SECONDS, api_key=self.api_key
+                    ),
+                    True,
                 )
             except SandboxNotFoundException:
                 log(
@@ -319,7 +362,16 @@ class E2BCarrier:
                 "traffic disabled — its ports would be unreachable through the ingress; "
                 "check the template"
             )
-        return sandbox
+        return sandbox, False
+
+    async def _prepare(self, sandbox: E2BSandbox, ca_cert: str) -> None:
+        """Make the box usable: the proxy's CA in system trust, `/workspace` in place and owned by
+        the sandbox user. Both steps reach `envd`, and neither can be bounded from the SDK — the
+        command runs over a stream the SDK gives no read timeout at all, so a silent `envd` holds
+        it open with nothing to expire. The upload is bounded, but raises a class the SDK leaves
+        unmapped. A caller that needs this to end bounds the whole of it, in one place."""
+        await self._install_ca(sandbox, ca_cert)
+        await self._ensure_workspace(sandbox)
 
     def _leased(self, conversation_id: UUID) -> _Lease | None:
         """The conversation's lease, having dropped every lease whose deadline has passed. `destroy`
@@ -349,10 +401,8 @@ class E2BCarrier:
             raise RuntimeError(f"sandbox CA install failed: {detail}") from error
 
     async def _ensure_workspace(self, sandbox: E2BSandbox) -> None:
-        """Guarantee `/workspace` exists and is the sandbox user's, on every create-or-attach path
-        — fresh, resumed, and reconnected alike, because the first process to touch a sandbox is not
-        always the one that created it. Root, since `/` is root-owned and the sandbox user could
-        neither create the directory nor own it."""
+        """`/workspace`, existing and owned by the sandbox user. Root, since `/` is root-owned and
+        the sandbox user could neither create the directory nor own it."""
         try:
             await sandbox.commands.run(
                 ENSURE_WORKSPACE_COMMAND, user="root", timeout=WORKSPACE_ENSURE_TIMEOUT_SECONDS

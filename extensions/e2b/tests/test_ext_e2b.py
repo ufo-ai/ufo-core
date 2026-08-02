@@ -12,6 +12,7 @@ reads — a container pauses when its span runs out and answers the renewal the 
 was measured to answer it, so a lapsed lease is a state a test reaches rather than one it asserts
 about."""
 
+import asyncio
 import logging
 import shlex
 import subprocess
@@ -111,6 +112,7 @@ class _Provider:
 @dataclass
 class _Commands:
     runs: list[tuple[str, str | None, float | None]] = field(default_factory=list)
+    hangs: bool = False
     users: list[str | None] = field(default_factory=list)
     envs: list[dict[str, str] | None] = field(default_factory=list)
     result: _Result = field(default_factory=lambda: _Result("out", "", 0))
@@ -130,6 +132,8 @@ class _Commands:
         timeout: float | None = None,  # noqa: ASYNC109
     ) -> _Result:
         self.runs.append((cmd, cwd, timeout))
+        if self.hangs:
+            await asyncio.Event().wait()
         self.users.append(user)
         self.envs.append(envs)
         if any(token in cmd for token in self.fail_on):
@@ -182,6 +186,7 @@ class _Files:
     closed: int = 0
     missing: bool = False
     raises: Exception | None = None
+    hangs: bool = False
 
     async def read(self, path: str, format: str) -> _Stream:
         if self.missing:
@@ -190,6 +195,8 @@ class _Files:
         return _Stream(chunks=self.chunks, files=self)
 
     async def write(self, path: str, data: str | bytes, *, user: str | None = None) -> object:
+        if self.hangs:
+            await asyncio.Event().wait()
         if self.raises is not None:
             raise self.raises
         self.written.append((path, data))
@@ -204,9 +211,14 @@ class _Sandbox:
     commands: _Commands
     files: _Files
     traffic_access_token: str | None = "traffic-tok"
+    killed: int = 0
 
     def get_host(self, port: int) -> str:
         return f"{port}-{self.sandbox_id}.e2b.test"
+
+    async def kill(self) -> bool:
+        self.killed += 1
+        return True
 
 
 @dataclass
@@ -221,6 +233,7 @@ class _Sdk:
     command_fail_counts: dict[str, int] = field(default_factory=dict)
     command_timeout_on: tuple[str, ...] = ()
     command_timeout_counts: dict[str, int] = field(default_factory=dict)
+    command_hangs: bool = False
     on_call: Callable[[], None] | None = None
     traffic_access_token: str | None = "traffic-tok"
 
@@ -244,6 +257,7 @@ class _Sdk:
             provider=provider,
             traffic_access_token=self.traffic_access_token,
             commands=_Commands(
+                hangs=self.command_hangs,
                 fail_on=self.command_fail_on,
                 fail_counts=dict(self.command_fail_counts),
                 timeout_on=self.command_timeout_on,
@@ -347,21 +361,23 @@ async def test_create_installs_the_proxy_ca_into_system_trust_as_root() -> None:
     assert sandbox.commands.users[0] == "root"
 
 
-async def test_create_retries_system_trust_after_an_update_failure() -> None:
+async def test_a_box_whose_trust_update_failed_is_prepared_again_not_deferred() -> None:
+    """No durable handle names this box — it is reached off this process's own cache — so nothing
+    vouches for its preparation and the next open re-asserts it strictly rather than deferring."""
     sdk = _Sdk(command_fail_counts={"update-ca-certificates": 1})
-    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk)
+    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk, resume_prepare_seconds=0.01)
     spec = _spec(uuid4())
 
     with pytest.raises(RuntimeError, match="sandbox CA install failed"):
         await carrier.create(spec)
+    sdk.command_fail_counts = {}
+    sdk.sandboxes["sbx-1"].commands.hangs = True
 
-    await carrier.create(spec)
+    with pytest.raises(TimeoutError):
+        async with asyncio.timeout(0.2):
+            await carrier.create(spec)
 
-    commands = [command for command, _, _ in sdk.sandboxes["sbx-1"].commands.runs]
-    assert [command for command in commands if command == INSTALL_CA_COMMAND] == [
-        INSTALL_CA_COMMAND,
-        INSTALL_CA_COMMAND,
-    ]
+    assert sdk.connected == ["sbx-1"]
 
 
 def test_ca_install_command_removes_a_target_after_a_failed_bundle_update(
@@ -568,6 +584,66 @@ async def test_create_resumes_a_prior_process_sandbox_and_exec_works() -> None:
     ]
     result = await restarted.exec(resumed, ("bash", "-lc", "echo hi"), 60)
     assert result.exit_code == 0
+
+
+async def test_a_resumed_box_whose_command_stream_hangs_still_opens(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The case the bound exists for, and the only one no SDK deadline reaches: `commands.run` goes
+    out over a stream the SDK gives no read timeout, so a silent `envd` holds it open forever. The
+    upload answers here, so the hang this tolerates is the command's alone."""
+    sdk = _Sdk()
+    first = E2BCarrier(api_key="k", template="t", sdk=sdk)
+    conversation = uuid4()
+    opened = await first.create(_spec(conversation))
+    sandbox = sdk.sandboxes[opened.container_id]
+    sandbox.files.written.clear()
+    sandbox.commands.hangs = True
+
+    restarted = E2BCarrier(api_key="k", template="t", sdk=sdk, resume_prepare_seconds=0.01)
+    with caplog.at_level(logging.INFO, logger="ufo"):
+        resumed = await restarted.create(
+            replace(_spec(conversation), resume_id=opened.container_id)
+        )
+
+    assert resumed.container_id == opened.container_id
+    assert sandbox.files.written == [(CA_STAGING_PATH, "ca-pem")], (
+        "the upload answered during this resume; only the command hung"
+    )
+    assert _events(caplog, "sandbox.e2b.prepare_deferred") == [
+        {"conversation_id": str(conversation), "sandbox_id": opened.container_id}
+    ]
+
+
+async def test_a_resumed_box_whose_upload_hangs_still_opens() -> None:
+    """The upload is bounded by the SDK but raises a class it never maps, so a bound that named
+    exception classes would miss it. It hangs before any command runs."""
+    sdk = _Sdk()
+    first = E2BCarrier(api_key="k", template="t", sdk=sdk)
+    conversation = uuid4()
+    opened = await first.create(_spec(conversation))
+    sandbox = sdk.sandboxes[opened.container_id]
+    sandbox.commands.runs.clear()
+    sandbox.files.hangs = True
+
+    restarted = E2BCarrier(api_key="k", template="t", sdk=sdk, resume_prepare_seconds=0.01)
+    resumed = await restarted.create(replace(_spec(conversation), resume_id=opened.container_id))
+
+    assert resumed.container_id == opened.container_id
+    assert sandbox.commands.runs == []
+
+
+async def test_a_fresh_box_is_never_served_on_a_deferral() -> None:
+    """Only a box the durable handle vouches for may defer. A fresh one holds no CA and no
+    `/workspace`, so its preparation has no deadline to expire into — routing it through the
+    deferring branch would hand the turn a container that reaches no host."""
+    sdk = _Sdk()
+    sdk.command_hangs = True
+    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk, resume_prepare_seconds=0.01)
+
+    with pytest.raises(TimeoutError):
+        async with asyncio.timeout(0.2):
+            await carrier.create(_spec(uuid4()))
 
 
 async def test_exec_runs_the_joined_command_in_the_workspace_and_maps_the_result() -> None:
