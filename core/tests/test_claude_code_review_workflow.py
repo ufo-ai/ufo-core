@@ -6,12 +6,19 @@ from pathlib import Path
 _ROOT = Path(__file__).parents[2]
 WORKFLOW = _ROOT / ".github" / "workflows" / "claude-code-review.yml"
 SKILL = _ROOT / ".claude" / "skills" / "review-pull-request" / "SKILL.md"
+AUTHOR_SKILL = _ROOT / ".claude" / "skills" / "babysit-prs" / "SKILL.md"
 SCRIPT = _ROOT / ".github" / "scripts" / "prior_findings.py"
+LEDGER_SCRIPT = _ROOT / ".github" / "scripts" / "review_ledger.py"
 
 _SPEC = importlib.util.spec_from_file_location("prior_findings", SCRIPT)
 prior = importlib.util.module_from_spec(_SPEC)
 sys.modules["prior_findings"] = prior
 _SPEC.loader.exec_module(prior)
+
+_LEDGER_SPEC = importlib.util.spec_from_file_location("review_ledger", LEDGER_SCRIPT)
+ledger = importlib.util.module_from_spec(_LEDGER_SPEC)
+sys.modules["review_ledger"] = ledger
+_LEDGER_SPEC.loader.exec_module(ledger)
 
 
 def test_claude_code_review_uses_its_own_skill_with_permissive_bash() -> None:
@@ -79,9 +86,11 @@ def test_claude_code_review_skill_keeps_published_text_terse() -> None:
     assert "one paragraph of at most 60 words" in prose
     assert "State only the failure, its consequence, and the required change" in prose
     assert "Do not narrate the investigation, restate the diff, or include test commands" in prose
-    assert "The verdict body is one sentence" in prose
+    assert "The verdict body is one sentence: the round, then the finding ids by bucket" in prose
     assert "Never repeat inline evidence in the verdict" in prose
-    assert "Round 2. Two blocking findings: sandbox expiry; synchronous file encoding." in prose
+    assert "never restate continuity in prose" in prose
+    assert '"unresolved from rounds 1, 2 and 3" is not a verdict\'s work' in prose
+    assert "Round 5. Blocking: F3, F7. New: F12. Advisory: F9." in prose
 
 
 def test_claude_code_review_skill_verifies_prior_rounds_instead_of_re_deriving() -> None:
@@ -98,6 +107,7 @@ def test_claude_code_review_skill_verifies_prior_rounds_instead_of_re_deriving()
     assert "Closure across all three" in prose
     assert "On a follow-up round — `rounds` is anything but `0`" in prose
     assert "verify each earlier finding is actually fixed at this head" in prose
+    assert "`anchor_sha`, the head the newest earlier finding anchored to" in prose
     assert "`git diff <anchor_sha>..<head sha>`" in prose
     assert "A null `anchor_sha` leaves no range" in prose
     assert "A follow-up round carries a null `anchor_sha`" in prose
@@ -142,10 +152,10 @@ def test_claude_code_review_skill_drops_findings_that_buy_a_round() -> None:
     assert "raising it now buys a round for code this pull request is done with" in prose
     assert "The range bounds new work only" in prose
     assert (
-        "an earlier finding this head does not resolve is verified and re-published wherever its "
-        "file sits" in prose
+        "an earlier finding this head does not resolve is verified wherever its file sits, and its "
+        "row keeps holding the gate without a second comment" in prose
     )
-    assert "An earlier finding on that file is verified and re-published as usual" in prose
+    assert "its row holds the gate with no second comment" in prose
     assert "Drop a finding that restores what an earlier round's finding removed" in prose
     assert "reverses a disposition an earlier round settled" in prose
     assert "stating which earlier finding was wrong and why" in prose
@@ -158,7 +168,15 @@ def test_claude_code_review_skill_drops_findings_that_buy_a_round() -> None:
 
 def test_every_round_count_the_script_emits_has_an_instruction_in_the_skill() -> None:
     prose = " ".join(SKILL.read_text().split())
-    claude = prior.comment({"id": 1, "user": {"login": "claude[bot]"}, "path": "a.py", "body": ""})
+    claude = prior.comment(
+        {
+            "id": 1,
+            "user": {"login": "claude[bot]"},
+            "path": "a.py",
+            "body": "",
+            "created_at": "2026-01-01T00:00:00Z",
+        }
+    )
     unanchored = prior.prior_round((claude,), (), ())
 
     assert prior.prior_round((), (), ()).rounds == 0
@@ -175,6 +193,10 @@ def test_every_round_count_the_script_emits_has_an_instruction_in_the_skill() ->
     assert "A null `anchor_sha` leaves no range" in prose
     assert "A follow-up round carries a null `anchor_sha`" in prose
 
+    assert "a marker-only verdict carries no body and so no count" in " ".join(
+        AUTHOR_SKILL.read_text().split()
+    )
+
 
 def test_every_verdict_the_script_emits_is_read_by_the_skill() -> None:
     prose = " ".join(SKILL.read_text().split())
@@ -183,7 +205,12 @@ def test_every_verdict_the_script_emits_is_read_by_the_skill() -> None:
         (),
         (
             prior.review(
-                {"user": {"login": "claude[bot]"}, "state": "CHANGES_REQUESTED", "body": body}
+                {
+                    "user": {"login": "claude[bot]"},
+                    "state": "CHANGES_REQUESTED",
+                    "body": body,
+                    "submitted_at": "2026-01-01T00:00:00Z",
+                }
             ),
         ),
         (),
@@ -191,14 +218,24 @@ def test_every_verdict_the_script_emits_is_read_by_the_skill() -> None:
 
     assert emitted == (body,)
     assert "every earlier round's verdict summary under `verdicts`" in prose
-    assert "they say what each earlier round closed, re-published, and settled" in prose
+    assert "they say what each earlier round closed, carried forward, and settled" in prose
 
 
 def test_a_marker_round_is_counted_and_carries_no_summary() -> None:
     prose = " ".join(SKILL.read_text().split())
     marker = f"<!-- claude-review-verdict head={'a' * 40} verdict=APPROVED -->"
     result = prior.prior_round(
-        (), (), (prior.issue_comment({"user": {"login": "claude[bot]"}, "body": marker}),)
+        (),
+        (),
+        (
+            prior.issue_comment(
+                {
+                    "user": {"login": "claude[bot]"},
+                    "body": marker,
+                    "created_at": "2026-01-01T00:00:00Z",
+                }
+            ),
+        ),
     )
 
     assert (result.rounds, result.verdicts) == (1, ())
@@ -253,3 +290,113 @@ def test_claude_code_review_skill_names_the_split_when_the_round_count_stops_fal
     assert prose.index("Open the verdict body with `Round <rounds + 1>.`") < prose.index(
         "For each validated issue, blocking or advisory"
     )
+
+
+def test_claude_code_review_skill_keeps_one_ledger_it_edits_in_place() -> None:
+    prose = " ".join(SKILL.read_text().split())
+
+    assert "python3 .github/scripts/review_ledger.py" in prose
+    assert "the `F<n>` id it keeps for life" in prose
+    assert "`next_id` for the first finding you publish this round" in prose
+    assert "`comment_id` for the one ledger comment to edit" in prose
+    assert "A null `rows` means the fetch failed" in prose
+    assert "A null `next_id` publishes the finding without an id prefix or marker" in prose
+    assert "The next readable run derives its id from thread creation order" in prose
+    assert "a projection of the evidence step 6 reads, never a second source" in prose
+    assert "a deleted ledger comment loses a rendering and no state" in prose
+    assert "opening with `<id> \u2014 ` and ending with `<!-- claude-finding id=<id> -->`" in prose
+    assert "taking ids from `next_id` upward in publication order" in prose
+    assert (
+        "The visible prefix is what a human cites and the marker is what the script reads" in prose
+    )
+    assert (
+        "`gh api --method PATCH repos/<owner>/<repo>/issues/comments/<comment_id> -F body=@<file>`"
+        in prose
+    )
+    assert "`gh pr comment <number> --body-file <file>`" in prose
+    assert "The pull request carries exactly one ledger, at one URL" in prose
+    assert "so never post a second" in prose
+    assert "Publish the script's `body` unedited" in prose
+    assert "the ledger carries a row for every finding this round published" in prose
+    assert prose.index("review_ledger.py") < prose.index("## Review")
+    assert prose.index("opening with `<id> \u2014 `") < prose.index("## Publish the verdict")
+
+
+def test_claude_code_review_skill_renders_the_ledger_after_the_round_it_reports() -> None:
+    prose = " ".join(SKILL.read_text().split())
+
+    assert "The ledger is published last, once the evidence it renders exists" in prose
+    assert (
+        "With every inline finding created and every `verified fixed` reply written, run step 7's "
+        "script again and save its `body` under `$RUNNER_TEMP`" in prose
+    )
+    assert "which the `body` from step 7 could not know" in prose
+    assert "With the second run's `comment_id` set, edit that comment in place" in prose
+    assert "About to render the ledger before this round's comments and replies exist" in prose
+    assert prose.index("For each validated issue, blocking or advisory") < prose.index(
+        "The ledger is published last"
+    )
+    assert prose.index("`F<n> — verified fixed: <head sha>`, and on nothing else") < prose.index(
+        "The ledger is published last"
+    )
+
+
+def test_claude_code_review_skill_publishes_one_finding_once() -> None:
+    prose = " ".join(SKILL.read_text().split())
+    author = " ".join(AUTHOR_SKILL.read_text().split())
+
+    assert "A finding is published once, on one thread, for the life of the pull request" in prose
+    assert (
+        "A `todo` row the head does not resolve is carried forward by that row and by its id in "
+        "this round's verdict, never by a second inline comment" in prose
+    )
+    assert "One id is one row" in prose
+    assert "a re-publication renders the same finding twice" not in prose
+    assert "Publish an inline comment only for a finding no round has published" in prose
+    assert "A `todo` row is verified at this head and stays `todo`" in prose
+    assert (
+        "About to publish an inline comment for a `todo` row this head still does not resolve"
+        in prose
+    )
+    assert "Re-publish a finding the head does not resolve" not in prose
+    assert "A prior finding's thread is open but the newest summary does not name its id" in author
+
+
+def test_claude_code_review_skill_moves_a_ledger_row_only_on_evidence() -> None:
+    prose = " ".join(SKILL.read_text().split())
+
+    assert "Step 7's `state` says which findings are still yours to verify" in prose
+    assert "A `todo` row is verified at this head" in prose
+    assert "A `done` row was verified once and is not verified again" in prose
+    assert "A defect that returns after a `done` is a new id" in prose
+    assert "No row moves backwards" in prose
+    assert "one reply on its own thread reading `F<n> — verified fixed: <head sha>`" in prose
+    assert "arrives as `todo` and is bought again" in prose
+
+    for gotcha in (
+        "Step 7 reports null `rows`",
+        "A finding an earlier round published carries no `<!-- claude-finding id=<id> -->`",
+        "A row you verified is still `todo` next round",
+    ):
+        assert gotcha in prose
+
+    assert "Publish under that id" not in prose
+    assert "Use that derived id in the verdict and any `verified fixed` reply" in prose
+
+
+def test_every_ledger_state_the_script_emits_has_an_instruction_in_both_skills() -> None:
+    reviewer = " ".join(SKILL.read_text().split())
+    author = " ".join(AUTHOR_SKILL.read_text().split())
+    states = {ledger.TODO, ledger.DONE}
+
+    assert states == {"todo", "done"}
+    for state in states:
+        assert f"`{state}`" in reviewer
+        assert f"`{state}`" in author
+
+    assert ledger.UNDETERMINED.rows is None
+    assert "A null `rows` means the fetch failed" in reviewer
+    assert "Step 7 reports null `rows`" in reviewer
+
+    assert ledger.LEDGER_MARKER == "<!-- claude-review-ledger -->"
+    assert ledger.LEDGER_MARKER in author

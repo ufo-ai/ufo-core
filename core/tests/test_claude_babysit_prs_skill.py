@@ -203,6 +203,41 @@ def test_babysit_prs_skill_reads_the_round_count_and_backs_its_replies() -> None
     )
 
 
+def test_babysit_prs_skill_reads_the_finding_ledger() -> None:
+    skill = SKILL.read_text()
+    prose = " ".join(skill.split())
+
+    assert "Every finding carries an `F<n>` id and one row in the ledger" in prose
+    assert (
+        "the single PR comment holding `<!-- claude-review-ledger -->`, edited in place every round"
+        in prose
+    )
+    assert "Read it before the inline list" in prose
+    assert "a `todo` row is open and a `done` row is settled and asks nothing of you" in prose
+    assert "Cite the id in every reply and in anything you surface" in prose
+    assert "Triage from the ledger and the review **summary**, not the inline list" in prose
+    assert "A finding is published once and carried by its row" in prose
+    assert "the inline list holds threads from every earlier head" in prose
+    assert "A row moves on evidence the reviewer reads, never on your say-so" in prose
+    assert "your fix moves it when the reviewer verifies it at the pushed head" in prose
+    assert "reply on its thread beginning `F<n> — `" in prose
+    assert prose.index("## Respond to review") < prose.index("Every finding carries an `F<n>` id")
+
+    rows = {
+        row.split("|")[1].strip(): row.split("|")[2].strip()
+        for row in skill.splitlines()
+        if row.startswith("| ")
+    }
+    assert rows["A reply names a line instead of the finding's `F<n>`"] == (
+        "Cite the id. The ledger row is what the human reads, and a reply that does not name it "
+        "leaves the row unreadable."
+    )
+    assert rows["A prior finding's thread is open but the newest summary does not name its id"] == (
+        "The row says where it stands. A finding is published once, so an old thread is not this "
+        "round's finding, and a `todo` row is open whether or not this round restated it."
+    )
+
+
 def test_babysit_prs_skill_never_merges() -> None:
     skill = SKILL.read_text()
 

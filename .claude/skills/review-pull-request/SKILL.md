@@ -26,7 +26,17 @@ The argument is the pull request URL. Do not modify its branch.
    this pull request has already had. `0` is a first review; `N` makes this round `N + 1`; `null`
    means the fetch failed, so treat it as a follow-up over every changed file, never as a first
    review. Read the `verdicts` bodies before deriving anything: they say what each earlier round
-   closed, re-published, and settled, and a round that skips them argues with itself.
+   closed, carried forward, and settled, and a round that skips them argues with itself.
+7. Save `python3 .github/scripts/review_ledger.py <owner/repo> <number>` under `$RUNNER_TEMP` and
+   read it. It returns `rows` — every finding this pull request has published, each with the `F<n>`
+   id it keeps for life, its subject, its `file:line`, its `state`, and the evidence that put it
+   there — plus `next_id` for the first finding you publish this round, `comment_id` for the one
+   ledger comment to edit, and `body`, the ledger rendered from those rows. A null
+   `rows` means the fetch failed, so verify every earlier finding at this head and publish no ledger
+   this round. A null `next_id` publishes the finding without an id prefix or marker; never invent
+   one. The next readable run derives its id from thread creation order. The rows are a projection
+   of the evidence step 6 reads, never a second source: an id re-derives from the threads, so a
+   deleted ledger comment loses a rendering and no state.
 
 Use Bash directly and deliberately. Combine related reads when that reduces calls, but never repeat
 an equivalent command that failed without changing the mechanism.
@@ -77,23 +87,35 @@ no commit since `anchor_sha` has touched.
 
 The reply decides how much work verifying costs, never whether the finding holds. A reply naming a
 commit is a claim to check against this head, and a finding whose reply disputes it or is missing is
-checked the same way; only the code at this head settles it. Re-publish a finding the head does not
-resolve, and never re-publish one it does.
+checked the same way; only the code at this head settles it.
+
+A finding is published once, on one thread, for the life of the pull request. A `todo` row the head
+does not resolve is carried forward by that row and by its id in this round's verdict, never by a
+second inline comment. One id is one row. Publish an inline comment only for a finding no round has
+published. What a round owes an unresolved finding is its id in the blocking list — and, where this
+head resolved it, the reply on its own thread that moves it.
+
+Step 7's `state` says which findings are still yours to verify. A `todo` row is verified at this head
+and stays `todo` where the head does not resolve it. A `done` row was verified once and is not
+verified again. A defect that returns after a `done` is a new id. No row moves backwards, and no
+round restates in prose the continuity the ledger already carries.
 
 Validate every returned finding against the exact diff and surrounding code. Keep the findings that
 are grounded there; drop the rest. Run a focused test only when it is necessary to prove or disprove
 a finding. Whether a kept finding blocks the merge is decided below, after validation, never here.
 
-Publish each inline finding as one paragraph of at most 60 words. State only the failure, its
-consequence, and the required change. Do not narrate the investigation, restate the diff, or include
-test commands. The inline anchor supplies the file and line; quote only the words needed to identify
-the defect.
+With a non-null `next_id`, publish each inline finding as one paragraph of at most 60 words, opening
+with `<id> — ` and ending with `<!-- claude-finding id=<id> -->`, taking ids from `next_id` upward in
+publication order. The visible prefix is what a human cites and the marker is what the script reads.
+State only the failure, its consequence, and the required change. Do not narrate the investigation,
+restate the diff, or include test commands. The inline anchor supplies the file and line; quote only
+the words needed to identify the defect.
 
 Two further drops on a follow-up round. With `anchor_sha` set, drop a new finding on a file no
 commit in `<anchor_sha>..<head sha>` touched: the earlier round saw that content and published
 nothing, and raising it now buys a round for code this pull request is done with. The range bounds
-new work only — an earlier finding this head does not resolve is verified and re-published
-wherever its file sits. Drop a finding that restores what an earlier round's finding removed, or
+new work only — an earlier finding this head does not resolve is verified wherever its file sits,
+and its row keeps holding the gate without a second comment. Drop a finding that restores what an earlier round's finding removed, or
 that reverses a disposition an earlier round settled — that is the review contradicting itself,
 and it costs the author two rounds to arrive back where the diff already was. Publish it only by
 stating which earlier finding was wrong and why.
@@ -148,9 +170,10 @@ worth — drop it and leave it to the author.
 Re-read `headRefOid` immediately before writing. If it changed, do not comment on or review the new
 head from stale evidence.
 
-The verdict body is one sentence: the round, finding counts, and terse subjects separated by
-semicolons. Never repeat inline evidence in the verdict. Example: `Round 2. Two blocking findings:
-sandbox expiry; synchronous file encoding.`
+The verdict body is one sentence: the round, then the finding ids by bucket. Never repeat inline
+evidence in the verdict, and never restate continuity in prose — the ledger carries what an earlier
+round closed, so "unresolved from rounds 1, 2 and 3" is not a verdict's work. Example: `Round 5.
+Blocking: F3, F7. New: F12. Advisory: F9.`
 
 Open the verdict body with `Round <rounds + 1>.`, or `Round unknown.` where `rounds` came back
 `null` — the count is what makes a cycling review visible to the author and to the human who has to
@@ -169,7 +192,27 @@ only `<!-- claude-review-verdict head=<full head SHA> verdict=APPROVED -->` for 
 approval or `<!-- claude-review-verdict head=<full head SHA> verdict=CHANGES_REQUESTED -->` for an
 attempted changes request.
 
-Finish only after GitHub records the verdict as a decisive review or the exact self-review marker.
+A row you verified fixed at this head moves on one reply on its own thread reading
+`F<n> — verified fixed: <head sha>`, and on nothing else: that reply is the evidence the next round
+reads, so a verification you keep to yourself arrives as `todo` and is bought again.
+
+The ledger is published last, once the evidence it renders exists. With every inline finding created
+and every `verified fixed` reply written, run step 7's script again and save its `body` under
+`$RUNNER_TEMP`: that run reads this round's own comments, so each new finding renders as its own row
+and each verification renders as `done` against the sha, which the `body` from step 7 could not know.
+With the second run's `comment_id` set, edit that comment in place:
+
+`gh api --method PATCH repos/<owner>/<repo>/issues/comments/<comment_id> -F body=@<file>`
+
+With `comment_id` null, post it once instead:
+
+`gh pr comment <number> --body-file <file>`
+
+The pull request carries exactly one ledger, at one URL, for the author and for the human reading it,
+so never post a second. Publish the script's `body` unedited.
+
+Finish only after GitHub records the verdict as a decisive review or the exact self-review marker,
+and the ledger carries a row for every finding this round published.
 
 ## Gotchas
 
@@ -193,4 +236,9 @@ Finish only after GitHub records the verdict as a decisive review or the exact s
 | The code names several cases and the diff answers one | Name every uncovered case in the one comment. A finding that covers the instance and not the class returns as its own round. |
 | A finding asks for a deletion, a replacement, or a move | Say what the replacement must still cover. A rewrite that satisfies the wording and drops the cover is a round you bought. |
 | A follow-up commit introduced a mechanism that did not exist before | Nothing has reviewed it. Close every lens on it this round rather than one aspect per round. |
-| A new finding lands on a file no commit in the `anchor_sha` range touched | Drop it. It was visible to the earlier round, which published nothing on it. An earlier finding on that file is verified and re-published as usual. |
+| A new finding lands on a file no commit in the `anchor_sha` range touched | Drop it. It was visible to the earlier round, which published nothing on it. An earlier finding on that file is verified as usual, and its row holds the gate with no second comment. |
+| Step 7 reports null `rows` | The fetch failed; that is not evidence that a finding closed. Verify every earlier finding at this head and publish no ledger this round. |
+| A finding an earlier round published carries no `<!-- claude-finding id=<id> -->` | Step 7 derives its id from thread creation order. Use that derived id in the verdict and any `verified fixed` reply; never renumber a finding and never reuse a retired one. |
+| A row you verified is still `todo` next round | The reply is the evidence. `F<n> — verified fixed: <head sha>` on that thread, or the next round buys the verification again. |
+| About to publish an inline comment for a `todo` row this head still does not resolve | Don't. Its id in the verdict's blocking list is how it carries forward; a second comment is a second render of one finding. |
+| About to render the ledger before this round's comments and replies exist | Run the script again after them and publish that `body`. A ledger rendered first shows every finding you just verified as `todo`. |
