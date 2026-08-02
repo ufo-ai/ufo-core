@@ -607,10 +607,6 @@ def _readable_audience_values(member_id: UUID) -> tuple[str, ...]:
     return (str(SHARED_AUDIENCE), str(conversation_audience(member_id)))
 
 
-def _readable_audiences(member_id: UUID) -> sa.ColumnElement[bool]:
-    return tables.conversation.c.audience.in_(_readable_audience_values(member_id))
-
-
 def _email_domain(email: str) -> str:
     """The address's domain, lowercased — empty for anything that is not `local@domain`, so a
     malformed value can never satisfy a domain match."""
