@@ -3,11 +3,13 @@
 
 `spawn_subagent("coding", {"objective": ...})` runs a child that explores a repo, edits code, runs
 tests, and reports a result. The profile names only tool names — bash/read/write/
-edit/glob/grep to work the code, load_skill to pull a workflow, share_file to hand back
-an artifact, and js_repl to exercise Node code — so the pack is self-contained and carries no
-cross-extension import. Core wraps the prompt with the shared citation/formatting discipline and
-fills its skill index. The `coding` skill teaches the main agent to route repo work to that child;
-`code-review` teaches reviewing a PR through the GitHub connector and reporting findings.
+edit/glob/grep to work the code, load_skill to pull a workflow, and js_repl to exercise Node
+code — so the pack is self-contained and carries no cross-extension import. Nothing in it delivers
+a file to the member: the child leaves work in the workspace it shares with the parent, and the
+parent decides what reaches the member. Core wraps the prompt with the shared citation/formatting
+discipline and fills its skill index. The `coding` skill teaches the main agent to route repo work
+to that child; `code-review` teaches reviewing a PR through the GitHub connector and reporting
+findings.
 
 The pack also declares the git credential slot, because a checkout is the work it routes: a
 workspace that fills it gets authenticated `git clone` and `git push` for private repositories,
@@ -50,7 +52,6 @@ CODING_TOOL_NAMES = (
     "glob",
     "grep",
     "load_skill",
-    "share_file",
     "js_repl",
     "search_web",
     "fetch_url",

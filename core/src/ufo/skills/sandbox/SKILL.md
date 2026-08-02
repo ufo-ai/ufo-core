@@ -11,9 +11,10 @@ metadata:
 ---
 # Working in the sandbox
 
-Every command and file operation runs in a disposable per-conversation container. The one writable
-tree is `/workspace`; it is the durable truth — it survives across turns while the container itself
-is cache that may be rebuilt between turns. Anything outside `/workspace` is off limits.
+Every command and file operation runs in a disposable container that belongs to a conversation — a
+subagent turn runs in the container of the turn that spawned it. The one writable tree is
+`/workspace`; it is the durable truth — it survives across turns while the container itself is cache
+that may be rebuilt between turns. Anything outside `/workspace` is off limits.
 
 ## Building up work
 
@@ -26,6 +27,7 @@ is cache that may be rebuilt between turns. Anything outside `/workspace` is off
 
 ## Handing a result back
 
-A file only reaches the user through `share_file`, which returns a time-limited download link —
-put that link in your reply. Writing a file into `/workspace` does not deliver it; nothing leaves
-the sandbox until you share it. Save the finished artifact, then share the exact path.
+A file reaches the user through `share_file`, which returns a time-limited download link — put that
+link in your reply. Writing a file into `/workspace` does not deliver it; nothing leaves the sandbox
+until it is shared. Save the finished artifact, then share the exact path. Without `share_file` in
+your tool set, the workspace is the handoff: name the path in your result, and the parent shares it.

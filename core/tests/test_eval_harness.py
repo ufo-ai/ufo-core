@@ -30,7 +30,7 @@ from dbos import error as dbos_error
 from httpx import AsyncClient
 
 import evals.harness.target as harness_target
-from evals import cos_workflows, github_connections
+from evals import coding_subagent, cos_workflows, github_connections
 from evals.__main__ import EVAL_SHARE_BUCKET_ENV, _task_reports
 from evals.__main__ import _run as run_evals
 from evals.__main__ import main as eval_main
@@ -2192,6 +2192,170 @@ async def test_required_tools_scorer_rejects_error_and_missing_result() -> None:
 
     assert not (await grader(errored)).passed
     assert not (await grader(unfinished)).passed
+
+
+async def test_parallel_checkout_scorer_covers_every_checkout_guard() -> None:
+    unrelated = ToolInvocation(
+        "spawn_subagent",
+        {"profile": "general_purpose", "payload": {"task": "Find the repository URL."}},
+        "done",
+        True,
+    )
+    setup_objective = (
+        "Repository setup: clone https://github.com/octocat/Hello-World into "
+        "/workspace/hello-canonical with git, verify the checkout, report the checked-out branch "
+        "as the base, then finish without task work."
+    )
+    setup = ToolInvocation(
+        "spawn_subagent",
+        {"profile": "coding", "payload": {"objective": setup_objective}},
+        "done",
+        True,
+    )
+    worker = "Repository setup: copy the committed tree at /workspace/hello-canonical to "
+    first = ToolInvocation(
+        "spawn_subagent",
+        {
+            "profile": "coding",
+            "payload": {
+                "objective": worker
+                + "/workspace/hello-files with git, base the work on main, keep the source as "
+                "workspace."
+            },
+        },
+        "done",
+        True,
+    )
+    second = ToolInvocation(
+        "spawn_subagent",
+        {
+            "profile": "coding",
+            "payload": {
+                "objective": worker
+                + "/workspace/hello-commit with git, base the work on main, keep the source as "
+                "workspace."
+            },
+        },
+        "done",
+        True,
+    )
+    background_setup = ToolInvocation(
+        "spawn_subagent",
+        {**setup.input, "background": True},
+        "done",
+        True,
+    )
+    coerced_background_setup = ToolInvocation(
+        "spawn_subagent",
+        {**setup.input, "background": "true"},
+        "done",
+        True,
+    )
+    wait = ToolInvocation("wait_for_subagents", {"subagent_ids": ["setup"]}, "done", True)
+    errored_wait = ToolInvocation(
+        "wait_for_subagents", {"subagent_ids": ["setup"]}, "failed", True, True
+    )
+    grader = coding_subagent.parallel_checkout_scorer()
+
+    assert (await grader(CapabilityOutput("done", (unrelated, setup, first, second)))).passed
+    assert (await grader(CapabilityOutput("done", (background_setup, wait, first, second)))).passed
+    assert (
+        await grader(CapabilityOutput("done", (coerced_background_setup, wait, first, second)))
+    ).passed
+    assert not (await grader(CapabilityOutput("done", (background_setup, first, second)))).passed
+    assert not (
+        await grader(CapabilityOutput("done", (coerced_background_setup, first, second)))
+    ).passed
+    assert not (
+        await grader(CapabilityOutput("done", (wait, background_setup, first, second)))
+    ).passed
+    assert not (
+        await grader(CapabilityOutput("done", (background_setup, first, wait, second)))
+    ).passed
+    assert not (
+        await grader(CapabilityOutput("done", (background_setup, errored_wait, first, second)))
+    ).passed
+    for truthy in (1, "yes", "on", "1"):
+        truthy_setup = ToolInvocation(
+            "spawn_subagent",
+            {**setup.input, "background": truthy},
+            "done",
+            True,
+        )
+        assert not (await grader(CapabilityOutput("done", (truthy_setup, first, second)))).passed
+        assert (await grader(CapabilityOutput("done", (truthy_setup, wait, first, second)))).passed
+    for falsey in (0, "false", "no", "off", "0"):
+        falsey_setup = ToolInvocation(
+            "spawn_subagent",
+            {**setup.input, "background": falsey},
+            "done",
+            True,
+        )
+        assert (await grader(CapabilityOutput("done", (falsey_setup, first, second)))).passed
+    missing_objective = ToolInvocation(
+        "spawn_subagent", {"profile": "coding", "payload": {}}, "done", True
+    )
+    assert not (await grader(CapabilityOutput("done", (missing_objective,)))).passed
+    assert not (await grader(CapabilityOutput("done", (first, second)))).passed
+    setup_with_work = ToolInvocation(
+        "spawn_subagent",
+        {
+            "profile": "coding",
+            "payload": {"objective": setup_objective.replace(", verify the checkout", "")},
+        },
+        "done",
+        True,
+    )
+    assert not (await grader(CapabilityOutput("done", (setup_with_work, first, second)))).passed
+    unterminated_setup = ToolInvocation(
+        "spawn_subagent",
+        {
+            "profile": "coding",
+            "payload": {"objective": setup_objective.replace(" with git", "")},
+        },
+        "done",
+        True,
+    )
+    assert not (await grader(CapabilityOutput("done", (unterminated_setup, first, second)))).passed
+    assert not (await grader(CapabilityOutput("done", (setup, first)))).passed
+    unterminated_worker = ToolInvocation(
+        "spawn_subagent",
+        {
+            "profile": "coding",
+            "payload": {
+                "objective": worker + "/workspace/hello-commit, keep the source as workspace."
+            },
+        },
+        "done",
+        True,
+    )
+    assert not (await grader(CapabilityOutput("done", (setup, first, unterminated_worker)))).passed
+    assert not (await grader(CapabilityOutput("done", (setup, first, first)))).passed
+    missing_base = ToolInvocation(
+        "spawn_subagent",
+        {
+            "profile": "coding",
+            "payload": {
+                "objective": worker
+                + "/workspace/hello-other with git, keep the source as workspace."
+            },
+        },
+        "done",
+        True,
+    )
+    assert not (await grader(CapabilityOutput("done", (setup, first, missing_base)))).passed
+    missing_remote = ToolInvocation(
+        "spawn_subagent",
+        {
+            "profile": "coding",
+            "payload": {
+                "objective": worker + "/workspace/hello-other with git, base the work on main."
+            },
+        },
+        "done",
+        True,
+    )
+    assert not (await grader(CapabilityOutput("done", (setup, first, missing_remote)))).passed
 
 
 async def test_github_connection_graders_accept_the_shipped_routes() -> None:

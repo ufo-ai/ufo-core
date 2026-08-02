@@ -15,18 +15,25 @@ You decide the repository setup before delegating and state it explicitly to the
 - Use any tool to inspect code contents — not even a single file
 - Browse the repo via `gh api` or URL fetching to read file trees, directory structures, or file contents
 
-The coding subagent works in its own sandbox with `bash`, `git`, `read`, `write`, and `edit`, and can navigate codebases far more effectively than you can. Pass any non-code context (tickets, requirements, user instructions) in the objective — let the subagent explore the code.
+The coding subagent works in your `/workspace` with `bash`, `git`, `read`, `write`, and `edit`, and can navigate codebases far more effectively than you can. Its checkout, edits, and notes land where you and every later child read them. Pass any non-code context (tickets, requirements, user instructions) in the objective — let the subagent explore the code.
 
 ## Repository Setup Contract
 
 The main agent owns the clone/no-clone decision. Do not make the coding subagent infer whether cloning is needed from vague phrases like "in the repo" or "in this codebase."
 
+One remote clone per turn. Children work in your `/workspace`, so the first remote clone is the only fetch: pick the path yourself and give it to the first spawn. You do not run the clone — the first child does, which keeps you out of the repository.
+
+Sequence every spawn that uses one checkout. The cloning child finishes before another child touches that path; after it finishes, a later child may reuse the path. Never point two live children at one checkout: they collide over `.git/index.lock`, branch state, and working files. Give every overlapping child its own local checkout.
+
+For fan-out, the cloning child only creates and verifies the canonical checkout. End its setup with `verify the checkout, report the checked-out branch as the base, then finish without task work.` After it finishes, start every worker in local checkout mode at a distinct path. Use the branch the setup child reports as `<base>`. For one task, the cloning child may work in the checkout itself.
+
 Before calling `spawn_subagent(profile="coding", ...)`, choose exactly one setup mode and state it at the start of the objective:
 
-- **Clone a repo:** Use when the task targets a GitHub repository. Start the objective with: `Repository setup: clone https://github.com/org/repo into the workspace with git, then work inside it.` Public repositories always clone; private ones need the workspace connected to GitHub (below).
+- **Clone a repo:** Use for the first spawn of the turn that needs the repository. Start the objective with: `Repository setup: clone https://github.com/org/repo into /workspace/org-repo with git, then work inside it.` For fan-out, use: `Repository setup: clone https://github.com/org/repo into /workspace/org-repo with git, verify the checkout, report the checked-out branch as the base, then finish without task work.` Name that path and reuse it below. A public repository clones with no connection; a private one needs the workspace connected to GitHub (below).
 
   **A clone that fails to authenticate means the workspace is not connected. Call `connect_github` — that is the next action, not a fallback route.** Reaching the files another way is the trap here, and every route is forbidden, not just the obvious one: no `gh api` file reads, and no `GITHUB_DOWNLOAD_A_REPOSITORY_ARCHIVE_ZIP`/`_TAR`, zipball, tarball, or `GITHUB_GET_RAW_REPOSITORY_CONTENT` through `call_external_tool`. A snapshot fetched that way has no `.git`, cannot push, and hides from the member that nothing is connected.
-- **Existing workspace:** Use when the repository is already present in the sandbox workspace. Start the objective with: `Repository setup: use the existing workspace at <path>. Do not clone.`
+- **Existing checkout:** Use for any later spawn after the child using that path has finished. Start the objective with: `Repository setup: use the existing checkout at /workspace/org-repo, from https://github.com/org/repo. Do not clone.` The URL is what the child falls back to if the path is not there.
+- **Local checkout:** Use for every spawn that overlaps another child. Start the objective with: `Repository setup: copy the committed tree at /workspace/org-repo to /workspace/org-repo-<slug> with git, base the work on <base>, keep the source as workspace, use https://github.com/org/repo as origin, then work inside it.` This copies from disk without a fetch, separates the source's branches from GitHub's, and keeps pushes pointed at GitHub.
 - **No repository:** Use only for coding-adjacent tasks that do not need repository files. Start the objective with: `Repository setup: no repository clone is needed.`
 
 A coding subagent should not spend startup time deciding whether to clone.
@@ -74,7 +81,7 @@ After a coding subagent completes:
    - **What was done**: What was implemented, fixed, or analyzed — mention specific changes, files modified, and approach taken
    - **Testing**: What tests were added or run, and their results
    - **Key decisions**: Any notable design decisions or trade-offs made
-4. Share any generated files via `share_file`. A workspace with a git credential can `git push` a branch; opening a PR additionally needs the GitHub connector, which is what `gh` authenticates through. Without those, work comes back as files and patches in the workspace.
+4. `share_file` what the member should keep — a report, a patch, a generated asset. The subagent has no `share_file` of its own: the workspace is the handoff, and you decide what reaches the member. A workspace with a git credential can `git push` a branch; opening a PR additionally needs the GitHub connector, which is what `gh` authenticates through. Without those, work comes back as files and patches in the workspace.
 
 The summary should give the user a clear picture of the work without them needing to read the full diff. Be specific — mention function names, file paths, and concrete changes rather than vague descriptions.
 
@@ -99,9 +106,11 @@ The summary should give the user a clear picture of the work without them needin
 spawn_subagent(
   profile="coding",
   payload={
-    "objective": "Repository setup: clone https://github.com/acme/cobbledb into the workspace with git, then work inside it.\n\nRust codebase. Ticket LIN-1234: Add cursor-based pagination to the /query endpoint. Requirements: support `cursor` and `limit` query params, default limit 50, max 200. Write tests."
+    "objective": "Repository setup: clone https://github.com/acme/cobbledb into /workspace/acme-cobbledb with git, then work inside it.\n\nRust codebase. Ticket LIN-1234: Add cursor-based pagination to the /query endpoint. Requirements: support `cursor` and `limit` query params, default limit 50, max 200. Write tests."
   }
 )
 ```
+
+A second spawn after the first finishes opens with `Repository setup: use the existing checkout at /workspace/acme-cobbledb, from https://github.com/acme/cobbledb. Do not clone.`
 
 For an unusually deep task, add `"extended_context": true` to the payload to run the child under the main agent's round ceiling instead of its default budget.

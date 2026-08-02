@@ -24,7 +24,7 @@ from ufo.loop.subagents import (
 from ufo.o11y import current_traceparent
 from ufo.schema import tables
 from ufo.schema.records import TerminalFrame, Turn, turn_id_for
-from ufo.skills.runtime import LoadedSkill, RuntimeSkill
+from ufo.skills.runtime import CORE_SKILL_REGISTRY, LoadedSkill, RuntimeSkill
 from ufo.tools.builtins import BUILTIN_TOOLS
 from ufo.tools.context import UnknownSubagentProfile, UntrustedContentError
 
@@ -143,6 +143,25 @@ def test_subagent_prompt_wraps_the_profile_with_the_shared_citation_discipline()
     prompt = subagent_system_prompt(_profile("research"))
     assert "research instructions" in prompt
     assert "<citation_instructions>" in prompt
+
+
+def test_the_sandbox_skill_names_the_container_a_subagent_turn_inherits() -> None:
+    body = " ".join(CORE_SKILL_REGISTRY.named("sandbox").instructions.split())
+    assert "a subagent turn runs in the container of the turn that spawned it" in body
+
+
+def test_the_shared_shell_leaves_a_child_without_share_file_a_way_to_hand_a_file_over() -> None:
+    prompt = subagent_system_prompt(_profile("research"))
+    assert "Surface a produced file with share_file when your tool set has it" in prompt
+    assert "leave the file in /workspace and name its path in your result" in prompt
+    assert "surface a produced file with share_file." not in prompt
+
+
+def test_the_sandbox_skill_answers_a_subagent_that_holds_no_share_file() -> None:
+    body = " ".join(CORE_SKILL_REGISTRY.named("sandbox").instructions.split())
+    assert "Without `share_file` in your tool set, the workspace is the handoff" in body
+    assert "name the path in your result, and the parent shares it" in body
+    assert "A file only reaches the user through `share_file`" not in body
 
 
 def test_subagent_prompt_fills_the_skill_index_slot() -> None:

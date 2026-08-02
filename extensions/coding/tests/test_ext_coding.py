@@ -99,6 +99,97 @@ def test_coding_tools_are_core_builtins_plus_the_repl_and_exclude_the_forbidden_
     )
 
 
+def test_coding_profile_leaves_member_delivery_to_the_parent() -> None:
+    profile = coding.CODING_PROFILE
+    assert "share_file" not in profile.tool_names
+    assert (
+        "The subagent has no `share_file` of its own"
+        in skill_registry((coding.manifest(),)).named("coding").instructions
+    )
+    assert "The parent reads it there and decides what reaches the member" in coding.CODING_PROMPT
+
+
+def test_the_child_prompt_names_the_shared_workspace_and_checks_before_cloning() -> None:
+    assert "sandbox workspace shared with the parent agent" in coding.CODING_PROMPT
+    assert "you share the workspace with the parent and sibling subagents" in coding.CODING_PROMPT
+    assert "Look at the path first" in coding.CODING_PROMPT
+    assert "if not, clone once" in coding.CODING_PROMPT
+    assert "use the existing checkout at <path>, from <url>. Do not clone." in coding.CODING_PROMPT
+
+
+def test_the_setup_contract_fetches_the_repository_once_per_turn() -> None:
+    instructions = skill_registry((coding.manifest(),)).named("coding").instructions
+    assert "One remote clone per turn" in instructions
+    assert "the first remote clone is the only fetch" in instructions
+    assert "You do not run the clone — the first child does" in instructions
+    assert "The cloning child finishes before another child touches that path" in instructions
+    assert "**Existing checkout:** Use for any later spawn after the child using that path" in (
+        instructions
+    )
+    assert (
+        "use the existing checkout at /workspace/org-repo, from https://github.com/org/repo. "
+        "Do not clone."
+    ) in instructions
+
+
+def test_the_setup_contract_isolates_parallel_writers() -> None:
+    instructions = skill_registry((coding.manifest(),)).named("coding").instructions
+    assert "Never point two live children at one checkout" in instructions
+    assert "the cloning child only creates and verifies the canonical checkout" in instructions
+    setup = (
+        "verify the checkout, report the checked-out branch as the base, then finish without task "
+        "work"
+    )
+    assert setup in instructions
+    assert "start every worker in local checkout mode at a distinct path" in instructions
+    assert "**Local checkout:** Use for every spawn that overlaps another child" in instructions
+    assert (
+        "copy the committed tree at /workspace/org-repo to /workspace/org-repo-<slug> with git, "
+        "base the work on <base>, keep the source as workspace, use "
+        "https://github.com/org/repo as origin" in instructions
+    )
+    assert "Use the branch the setup child reports as `<base>`" in instructions
+    assert "base the work on <base>" in coding.CODING_PROMPT
+
+
+def test_both_ends_of_the_setup_only_clone_stop_after_the_checkout() -> None:
+    instructions = skill_registry((coding.manifest(),)).named("coding").instructions
+    setup = (
+        "verify the checkout, report the checked-out branch as the base, then finish without task "
+        "work"
+    )
+    assert setup in instructions
+    assert setup in coding.CODING_PROMPT
+    assert "report `git branch --show-current` as the base" in coding.CODING_PROMPT
+    assert "finish without doing the task" in coding.CODING_PROMPT
+
+
+def test_both_ends_of_the_local_checkout_mode_restore_the_github_origin() -> None:
+    instructions = skill_registry((coding.manifest(),)).named("coding").instructions
+    assert "use https://github.com/org/repo as origin" in instructions
+    assert "keep the source as workspace, use <url> as origin" in coding.CODING_PROMPT
+    assert "base the work on <base>" in coding.CODING_PROMPT
+    assert "git clone --origin workspace <source> <path>" in coding.CODING_PROMPT
+    assert "git remote add origin <url>" in coding.CODING_PROMPT
+    assert "git config remote.pushDefault origin" in coding.CODING_PROMPT
+    assert "git checkout -B <your branch> workspace/<base>" in coding.CODING_PROMPT
+    assert "git symbolic-ref --short refs/remotes/origin/HEAD" not in coding.CODING_PROMPT
+    assert "Never relabel the source's branches as `origin/*`" in coding.CODING_PROMPT
+    assert "git fetch --prune workspace" not in coding.CODING_PROMPT
+    assert "git fetch origin" not in coding.CODING_PROMPT
+    assert "--branch <default-branch>" not in coding.CODING_PROMPT
+
+
+def test_the_local_checkout_mode_handles_missing_and_dirty_sources() -> None:
+    assert "If the source is missing, run `git clone --branch <base> <url> <path>`" in (
+        coding.CODING_PROMPT
+    )
+    assert "git status --porcelain=v1 --untracked-files=all` is not empty" in coding.CODING_PROMPT
+    assert "Uncommitted and untracked changes are not copied" in coding.CODING_PROMPT
+    assert "`workspace/*` names the source's committed local branches" in coding.CODING_PROMPT
+    assert "`origin/*` does not exist until GitHub supplies it" in coding.CODING_PROMPT
+
+
 def test_coding_profile_excludes_the_connector_tools_pr_review_uses() -> None:
     """`code-review` reaches GitHub through the connector trio (`call_external_tool` +
     `describe_external_tools`); by design the main agent runs that skill directly, never the coding
