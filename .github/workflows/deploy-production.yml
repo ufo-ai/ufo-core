@@ -121,6 +121,14 @@ jobs:
           role-to-assume: arn:aws:iam::899147036157:role/github-deploy
           aws-region: ${{ env.AWS_REGION }}
 
+      - name: Require tested images
+        env:
+          IMAGE_TAG: ${{ steps.artifacts.outputs.image_tag }}
+        run: |
+          for repository in ufo ufo-control; do
+            aws ecr describe-images --repository-name "$repository" --image-ids imageTag="$IMAGE_TAG" >/dev/null
+          done
+
       - name: Check production prerequisites
         run: bash .github/scripts/production_prerequisites.sh
 

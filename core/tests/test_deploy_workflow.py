@@ -1956,6 +1956,7 @@ def test_production_prepare_applies_access_before_deploy() -> None:
     apply = _step("prepare", "Terraform apply", "deploy-production.yml")
     boundary = _step("prepare", "Reject an unsplit authorization change", "deploy-production.yml")
     prerequisites = _step("prepare", "Check production prerequisites", "deploy-production.yml")
+    images = _step("prepare", "Require tested images", "deploy-production.yml")
     assert "task=deploy%3Aproduction&per_page=1" in boundary["run"]
     checkouts = [step for step in steps if step.get("uses") == "actions/checkout@v4"]
     assert checkouts[-2]["with"]["ref"] == "${{ steps.select.outputs.target_sha }}"
@@ -1970,10 +1971,48 @@ def test_production_prepare_applies_access_before_deploy() -> None:
         for step in (prerequisites, boundary)
     )
     assert steps.index(boundary) < steps.index(apply)
+    assert steps.index(images) < steps.index(apply)
     assert all(
         steps.index(before) < steps.index(after)
         for before, after in pairwise((checkouts[-1], plan, guard, apply))
     )
+
+
+def test_production_prepare_requires_both_tested_images(tmp_path: Path) -> None:
+    step = _step("prepare", "Require tested images", "deploy-production.yml")
+    assert step["env"] == {"IMAGE_TAG": "${{ steps.artifacts.outputs.image_tag }}"}
+    script = step["run"]
+    aws = tmp_path / "aws"
+    aws.write_text(
+        '#!/bin/sh\nprintf \'%s\\n\' "$*" >> "$AWS_CALLS"\n[ "$FAIL_REPOSITORY" != "$4" ]\n'
+    )
+    aws.chmod(0o755)
+    calls = tmp_path / "aws-calls"
+    environment = {
+        "AWS_CALLS": str(calls),
+        "FAIL_REPOSITORY": "",
+        "IMAGE_TAG": "01234567",
+        "PATH": f"{tmp_path}:{os.environ['PATH']}",
+    }
+    subprocess.run(["bash", "-e", "-o", "pipefail", "-c", script], check=True, env=environment)
+    assert calls.read_text().splitlines() == [
+        "ecr describe-images --repository-name ufo --image-ids imageTag=01234567",
+        "ecr describe-images --repository-name ufo-control --image-ids imageTag=01234567",
+    ]
+    calls.write_text("")
+    failed_first = subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", script],
+        env=environment | {"FAIL_REPOSITORY": "ufo"},
+    )
+    assert failed_first.returncode != 0
+    assert calls.read_text().splitlines() == [
+        "ecr describe-images --repository-name ufo --image-ids imageTag=01234567"
+    ]
+    failed = subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", script],
+        env=environment | {"FAIL_REPOSITORY": "ufo-control"},
+    )
+    assert failed.returncode != 0
 
 
 def test_production_authorization_boundary_fails_closed(tmp_path: Path) -> None:
