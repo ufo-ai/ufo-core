@@ -4500,6 +4500,70 @@ async def test_a_parked_turn_leaves_no_progress_task_behind(
     assert not _requests_to(recorder, slack.SLACK_CHAT_POST_MESSAGE_URL)
 
 
+async def test_a_finished_reporter_releases_the_turn_before_its_next_run(monkeypatch) -> None:
+    started = 0
+    release = asyncio.Event()
+
+    async def run(progress: slack.ThreadProgress) -> None:
+        nonlocal started
+        started += 1
+        if started == 1:
+            asyncio.get_running_loop().call_soon(
+                slack._track_progress, progress.ctx, progress.turn_id, progress.queue_key
+            )
+            return
+        await release.wait()
+
+    monkeypatch.setattr(slack.ThreadProgress, "run", run)
+    ctx = slack.SurfaceContext.__new__(slack.SurfaceContext)
+    turn_id = uuid4()
+    slack._track_progress(ctx, turn_id, "C1:100.5")
+    first = slack._PROGRESS_TASKS[turn_id]
+
+    await first
+
+    second = slack._PROGRESS_TASKS[turn_id]
+    assert second is not first
+    release.set()
+    await second
+    assert turn_id not in slack._PROGRESS_TASKS
+
+
+async def test_a_finished_status_follower_releases_the_turn_before_its_next_run(
+    monkeypatch,
+) -> None:
+    started = 0
+    release = asyncio.Event()
+
+    async def run(status: slack.ThreadStatus) -> None:
+        nonlocal started
+        started += 1
+        if started == 1:
+            asyncio.get_running_loop().call_soon(
+                slack._track_status, status.ctx, status.turn_id, "C1:100.5", "100.5"
+            )
+            return
+        await release.wait()
+
+    monkeypatch.setattr(slack.ThreadStatus, "run", run)
+    ctx = slack.SurfaceContext.__new__(slack.SurfaceContext)
+    object.__setattr__(ctx, "workspace_id", uuid4())
+    turn_id = uuid4()
+    writer = (ctx.workspace_id, "C1", "100.5")
+    slack._track_status(ctx, turn_id, "C1:100.5", "100.5")
+    first = slack._STATUS_TASKS[turn_id]
+
+    await first
+
+    second = slack._STATUS_TASKS[turn_id]
+    assert second is not first
+    assert slack._THREAD_WRITERS[writer] == turn_id
+    release.set()
+    await second
+    assert turn_id not in slack._STATUS_TASKS
+    assert writer not in slack._THREAD_WRITERS
+
+
 async def test_one_message_starts_one_reporter_across_its_deliveries(
     db: None, tmp_path, monkeypatch
 ) -> None:

@@ -1786,13 +1786,6 @@ def _track_status(ctx: SurfaceContext, turn_id: UUID, queue_key: str, message_ts
     task = asyncio.create_task(_run_status(status))
     _STATUS_TASKS[turn_id] = task
 
-    def _untrack(_done: asyncio.Task[None]) -> None:
-        _STATUS_TASKS.pop(turn_id, None)
-        if _THREAD_WRITERS.get(writer) == turn_id:
-            del _THREAD_WRITERS[writer]
-
-    task.add_done_callback(_untrack)
-
 
 async def _run_status(status: ThreadStatus) -> None:
     """A write Slack refuses is the write's own event; reaching here means the follower itself is
@@ -1807,6 +1800,11 @@ async def _run_status(status: ThreadStatus) -> None:
             thread_ts=status.thread_ts,
             error=repr(error),
         )
+    finally:
+        _STATUS_TASKS.pop(status.turn_id, None)
+        writer = (status.ctx.workspace_id, status.channel, status.thread_ts)
+        if _THREAD_WRITERS.get(writer) == status.turn_id:
+            del _THREAD_WRITERS[writer]
 
 
 @dataclass(frozen=True)
@@ -2061,7 +2059,6 @@ def _track_progress(ctx: SurfaceContext, turn_id: UUID, queue_key: str) -> None:
     )
     task = asyncio.create_task(_run_progress(progress))
     _PROGRESS_TASKS[turn_id] = task
-    task.add_done_callback(lambda _done: _PROGRESS_TASKS.pop(turn_id, None))
 
 
 async def _run_progress(progress: ThreadProgress) -> None:
@@ -2078,6 +2075,8 @@ async def _run_progress(progress: ThreadProgress) -> None:
             queue_key=progress.queue_key,
             error=repr(error),
         )
+    finally:
+        _PROGRESS_TASKS.pop(progress.turn_id, None)
 
 
 @dataclass(frozen=True)
