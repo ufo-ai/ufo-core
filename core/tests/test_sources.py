@@ -2173,9 +2173,16 @@ def _meter(monkeypatch: pytest.MonkeyPatch) -> InMemoryMetricReader:
 
 
 def _metric_points(reader: InMemoryMetricReader, name: str) -> list[dict[str, str]]:
+    """A reader that collected nothing returns no data at all rather than an empty envelope, and
+    whether this one collected anything depends on which instruments were already bound to an
+    earlier provider when the test started — `db_tx_acquire_ms` fires on every transaction. So the
+    absence of a metric has to read the same as the absence of every metric."""
+    collected = reader.get_metrics_data()
+    if collected is None:
+        return []
     return [
         dict(point.attributes or {})
-        for resource in reader.get_metrics_data().resource_metrics
+        for resource in collected.resource_metrics
         for scope in resource.scope_metrics
         for metric in scope.metrics
         if metric.name == name
@@ -2321,7 +2328,7 @@ async def test_a_synced_stream_reports_what_it_wrote(
     assert await _tombstone(gone_id) is True
     assert (synced[1].ufo["pages_written"], synced[1].ufo["pages_tombstoned"]) == (1, 0)
     assert not _events(caplog, "source_sync.failed")
-    assert reader.get_metrics_data() is None
+    assert not _metric_points(reader, SYNC_METRIC)
 
 
 async def test_a_provider_fault_reports_its_status_and_url_and_never_its_body_or_a_key(
