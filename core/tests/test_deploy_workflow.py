@@ -2927,6 +2927,83 @@ def test_source_sync_failure_monitor_consumes_the_reported_metric(environment: s
     assert _monitor_attribute("source_sync_failed", "require_full_window", environment) == "false"
 
 
+def test_production_owns_database_and_model_dashboards() -> None:
+    production = (ROOT / "infra" / "envs" / "prod" / "dashboards.tf").read_text()
+    assert re.findall(r'resource "datadog_dashboard" "(\w+)"', production) == [
+        "database",
+        "model_latency",
+    ]
+    assert "env:testing" not in production
+    assert "env:prod" in production
+    assert "cpucredit_balance" not in production
+    assert "first three graphs" in production
+    assert re.findall(r'title\s+=\s+"([^"]+)"', production)[:4] == [
+        "ufo prod database",
+        "transactions that never opened (client side)",
+        "how long a transaction waited for a connection",
+        "pools exhausted at their ceiling (client side)",
+    ]
+    assert (
+        "sum:ufo.db_tx_unavailable_total{env:prod} by {path,error_class}.as_count()" in production
+    )
+    assert "p95:ufo.db_tx_acquire_ms{env:prod} by {path}" in production
+    assert "p99:ufo.db_tx_acquire_ms{env:prod} by {path}" in production
+    assert "sum:ufo.db_pool_exhausted_total{env:prod} by {path}.as_count()" in production
+    assert (
+        'resource "datadog_dashboard" "turns"'
+        in (ROOT / "infra" / "envs" / "testing" / "dashboards.tf").read_text()
+    )
+
+
+@pytest.mark.parametrize(
+    ("environment", "monitor", "query", "critical", "warning"),
+    [
+        (
+            "testing",
+            "db_memory_low",
+            "min(last_15m):avg:aws.rds.freeable_memory"
+            "{dbinstanceidentifier:${module.platform.db_instance_identifier}} < 209715200",
+            "209715200",
+            "419430400",
+        ),
+        (
+            "testing",
+            "db_connections_high",
+            "avg(last_15m):avg:aws.rds.database_connections"
+            "{dbinstanceidentifier:${module.platform.db_instance_identifier}} > 350",
+            "350",
+            "300",
+        ),
+        (
+            "prod",
+            "db_memory_low",
+            "min(last_15m):avg:aws.rds.freeable_memory"
+            "{dbinstanceidentifier:${module.platform.db_instance_identifier}} < 419430400",
+            "419430400",
+            "838860800",
+        ),
+        (
+            "prod",
+            "db_connections_high",
+            "avg(last_15m):avg:aws.rds.database_connections"
+            "{dbinstanceidentifier:${module.platform.db_instance_identifier}} > 300",
+            "300",
+            "268",
+        ),
+    ],
+)
+def test_database_capacity_monitors(
+    environment: str, monitor: str, query: str, critical: str, warning: str
+) -> None:
+    assert _monitor_attribute(monitor, "query", environment) == query
+    assert _monitor_attribute(monitor, "critical", environment) == critical
+    assert _monitor_attribute(monitor, "warning", environment) == warning
+    assert _monitor_attribute(monitor, "evaluation_delay", environment) == "900"
+    assert _monitor_attribute(monitor, "tags", environment) == (
+        f'["env:{environment}", "managed-by:terraform"]'
+    )
+
+
 def test_edge_doors_use_separate_environment_origins() -> None:
     source = (ROOT / "infra" / "envs" / "edge" / "main.tf").read_text()
     doors = dict(

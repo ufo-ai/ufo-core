@@ -102,3 +102,35 @@ resource "datadog_monitor" "db_storage_low" {
 
   tags = ["env:prod", "managed-by:terraform"]
 }
+
+resource "datadog_monitor" "db_memory_low" {
+  name    = "ufo prod database is low on memory"
+  type    = "query alert"
+  query   = "min(last_15m):avg:aws.rds.freeable_memory{dbinstanceidentifier:${module.platform.db_instance_identifier}} < 419430400"
+  message = "Freeable memory on the database is under 400 MB. Postgres starts refusing connections before it starts refusing queries. @ops@flyingobject.ai @slack-alerts"
+
+  monitor_thresholds {
+    critical = 419430400
+    warning  = 838860800
+  }
+
+  evaluation_delay = 900
+
+  tags = ["env:prod", "managed-by:terraform"]
+}
+
+resource "datadog_monitor" "db_connections_high" {
+  name    = "ufo prod database is holding too many connections"
+  type    = "query alert"
+  query   = "avg(last_15m):avg:aws.rds.database_connections{dbinstanceidentifier:${module.platform.db_instance_identifier}} > 300"
+  message = "The database is holding more connections than the fleet's 268 pooled slots. Something is opening connections outside that budget, or engines outlived the loop that built them. @ops@flyingobject.ai @slack-alerts"
+
+  monitor_thresholds {
+    critical = 300
+    warning  = 268
+  }
+
+  evaluation_delay = 900
+
+  tags = ["env:prod", "managed-by:terraform"]
+}
