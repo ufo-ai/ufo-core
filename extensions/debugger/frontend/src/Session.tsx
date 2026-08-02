@@ -215,6 +215,14 @@ function TurnBody(props: {
         </dd>
         <dt>last update</dt>
         <dd>{when(turn.updated_at)}</dd>
+        {turn.context?.source && (
+          <>
+            <dt>source</dt>
+            <dd>
+              <Source source={turn.context.source} />
+            </dd>
+          </>
+        )}
         {turn.traceparent && (
           <>
             <dt>traceparent</dt>
@@ -288,6 +296,19 @@ function TurnBody(props: {
         </details>
       )}
       {LIVE_STATUSES.has(turn.status) && <Tail turnId={turn.id} />}
+    </>
+  );
+}
+
+function Source(props: { source: string }) {
+  const [head, ...rest] = props.source.split(" ");
+  if (!/^https?:\/\//.test(head)) return <>{props.source}</>;
+  return (
+    <>
+      <a href={head} target="_blank" rel="noopener">
+        {head}
+      </a>
+      {rest.length > 0 && ` ${rest.join(" ")}`}
     </>
   );
 }

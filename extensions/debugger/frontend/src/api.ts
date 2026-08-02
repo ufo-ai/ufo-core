@@ -32,7 +32,7 @@ export type Turn = {
   updated_at: string | null;
   admission_source: string;
   speaker_member_id: string | null;
-  context: { sender?: string | null; timezone?: string | null } | null;
+  context: { sender?: string | null; timezone?: string | null; source?: string | null } | null;
   terminal: TerminalFrame | null;
   parent_turn_id: string | null;
   subagent_profile: string | null;
