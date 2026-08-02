@@ -211,14 +211,9 @@ class _Sandbox:
     commands: _Commands
     files: _Files
     traffic_access_token: str | None = "traffic-tok"
-    killed: int = 0
 
     def get_host(self, port: int) -> str:
         return f"{port}-{self.sandbox_id}.e2b.test"
-
-    async def kill(self) -> bool:
-        self.killed += 1
-        return True
 
 
 @dataclass
@@ -644,6 +639,22 @@ async def test_a_fresh_box_is_never_served_on_a_deferral() -> None:
     with pytest.raises(TimeoutError):
         async with asyncio.timeout(0.2):
             await carrier.create(_spec(uuid4()))
+
+
+async def test_a_replacement_for_a_lost_resume_id_is_never_deferred() -> None:
+    """The one path where "the durable id is set" and "this is the box that id named" come apart:
+    the provider no longer has that sandbox, so a fresh one opens in its place. The id vouches for
+    a container that is gone, not for this one, which holds no CA and no `/workspace` — so its
+    preparation is strict and has no deadline to expire into."""
+    sdk = _Sdk(command_hangs=True)
+    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk, resume_prepare_seconds=0.01)
+
+    with pytest.raises(TimeoutError):
+        async with asyncio.timeout(0.2):
+            await carrier.create(replace(_spec(uuid4()), resume_id="gone-1"))
+
+    assert sdk.connected == ["gone-1"]
+    assert len(sdk.created) == 1
 
 
 async def test_exec_runs_the_joined_command_in_the_workspace_and_maps_the_result() -> None:

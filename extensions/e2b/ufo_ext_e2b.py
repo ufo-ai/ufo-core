@@ -275,7 +275,7 @@ class E2BCarrier:
             else None
         )
         opened = self.clock()
-        sandbox, _ = await self._resume_or_open(spec, resume_id)
+        sandbox = await self._resume_or_open(spec, resume_id)
         self._live[spec.conversation_id] = _Lease(sandbox, opened + SANDBOX_LEASE_SECONDS)
         if sandbox.sandbox_id == spec.resume_id:
             try:
@@ -321,26 +321,17 @@ class E2BCarrier:
             run_token=spec.run_token,
         )
 
-    async def _resume_or_open(
-        self, spec: SandboxSpec, resume_id: str | None
-    ) -> tuple[E2BSandbox, bool]:
+    async def _resume_or_open(self, spec: SandboxSpec, resume_id: str | None) -> E2BSandbox:
         """Resume the conversation's sandbox, or open one on the deploy's template. `connect` both
         resumes a paused sandbox and sets its lease, so a resume is one call whatever state the
         container was left in. e2b holds a paused sandbox until something kills it, so an id that
         comes back not-found names one the provider no longer has: the container is cache over the
         durable workspace, so the turn opens a fresh one rather than failing every turn this
-        conversation will ever admit against an id nothing can resurrect.
-
-        Reports whether the sandbox came back resumed, which is what tells `create` the box was
-        already prepared once and its preparation is a re-assertion rather than the thing that
-        makes the box usable."""
+        conversation will ever admit against an id nothing can resurrect."""
         if resume_id is not None:
             try:
-                return (
-                    await self.sdk.connect(
-                        resume_id, timeout=SANDBOX_LEASE_SECONDS, api_key=self.api_key
-                    ),
-                    True,
+                return await self.sdk.connect(
+                    resume_id, timeout=SANDBOX_LEASE_SECONDS, api_key=self.api_key
                 )
             except SandboxNotFoundException:
                 log(
@@ -362,7 +353,7 @@ class E2BCarrier:
                 "traffic disabled — its ports would be unreachable through the ingress; "
                 "check the template"
             )
-        return sandbox, False
+        return sandbox
 
     async def _prepare(self, sandbox: E2BSandbox, ca_cert: str) -> None:
         """Make the box usable: the proxy's CA in system trust, `/workspace` in place and owned by
