@@ -63,13 +63,15 @@ class ScriptedSubagents:
     """Answers `wait` with a scripted terminal after `finish_after_s` and records cancels."""
 
     text: str = ""
+    status: str = "done"
     finish_after_s: float = 0.0
     cancelled: list[UUID] = field(default_factory=list)
 
     async def wait(self, turn_ids: tuple[UUID, ...]) -> tuple[SubagentStatus, ...]:
         await asyncio.sleep(self.finish_after_s)
         return tuple(
-            SubagentStatus(turn_id=turn_id, status="done", text=self.text) for turn_id in turn_ids
+            SubagentStatus(turn_id=turn_id, status=self.status, text=self.text)
+            for turn_id in turn_ids
         )
 
     async def cancel(self, turn_id: UUID) -> SubagentStatus:
@@ -137,6 +139,7 @@ async def test_browser_task_spawns_the_browser_profile_and_awaits_its_terminal(
     spawn = RecordingSpawn()
     control = ScriptedSubagents(text='{"result": "did jobs"}')
     tool = _tool("browser_task")
+    assert tool.side_effecting is True
     args = tool.input_model.model_validate(
         {
             "url": "https://jobs.example.com",
@@ -146,13 +149,20 @@ async def test_browser_task_spawns_the_browser_profile_and_awaits_its_terminal(
         }
     )
     assert args.timeout_minutes == BROWSER_TASK_TIMEOUT_FLOOR_MINUTES
-    result = await tool.handler(_context(FilesSandbox(), spawn, tmp_path, subagents=control), args)
+    ctx = _context(
+        FilesSandbox(),
+        spawn,
+        tmp_path,
+        idempotency_key="turn-1/browser_task/call-7",
+        subagents=control,
+    )
+    result = await tool.handler(ctx, args)
     assert spawn.spawned == [
         (
             "browser",
             {"task": "list open roles", "url": "https://jobs.example.com", "task_name": "jobs"},
             True,
-            None,
+            "turn-1/browser_task/call-7",
         )
     ]
     assert control.cancelled == []
@@ -180,6 +190,34 @@ async def test_browser_task_cancels_a_child_that_outlives_its_timeout(tmp_path: 
     assert result.is_error is True
     assert "timeout" in result.content[0].text
     assert len(control.cancelled) == 1
+
+
+async def test_browser_task_reattached_to_its_timeout_cancelled_child_reports_the_timeout(
+    tmp_path: Path,
+) -> None:
+    spawn = RecordingSpawn()
+    control = ScriptedSubagents(status="cancelled")
+    tool = _tool("browser_task")
+    result = await tool.handler(
+        _context(
+            FilesSandbox(),
+            spawn,
+            tmp_path,
+            idempotency_key="turn-1/browser_task/call-7",
+            subagents=control,
+        ),
+        tool.input_model.model_validate(
+            {
+                "url": "https://jobs.example.com",
+                "task": "list open roles",
+                "task_name": "jobs",
+                "user_description": "browse jobs",
+            }
+        ),
+    )
+    assert result.is_error is True
+    assert "timeout" in result.content[0].text
+    assert control.cancelled == []
 
 
 async def test_browser_task_rejects_a_timeout_below_the_floor() -> None:
@@ -227,8 +265,8 @@ async def test_wide_browse_fans_over_deduped_entities_and_writes_the_json(tmp_pa
 async def test_wide_browse_keys_each_child_on_the_call_and_entity(tmp_path: Path) -> None:
     """The producer half of the recovery-dedup seam: wide_browse is side_effecting and spawns each
     child under a dedup_key derived from the call's idempotency_key and the entity, deterministic
-    across a crash-recovery re-run so the parent reconnects rather than respawns. browser_task,
-    which wants a fresh session each call, passes no key (proven above)."""
+    across a crash-recovery re-run so the parent reconnects rather than respawns. browser_task
+    keys its one child on the bare idempotency_key (proven above)."""
     wide_browse = _tool("wide_browse")
     assert wide_browse.side_effecting is True
     sandbox = FilesSandbox(files={"entities.txt": "acme.com\nbeta.io\n", "schema.json": ""})

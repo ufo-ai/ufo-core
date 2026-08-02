@@ -9,7 +9,8 @@ member's own conversation. It reaches the child through `ctx.spawn` — the same
 handle. Its typed input carries the two per-build knobs the generic `spawn_subagent` payload can't
 describe to the spawning agent: `preload_skills`, which seeds the child's context with a skill's
 instructions before its first round, and `extended_context`, which lifts its round ceiling for a
-large build. Each call wants a fresh session, so it passes no `dedup_key`."""
+large build. The tool is `side_effecting` and keys its child on the call's `idempotency_key`, so
+a dispatch step re-executed on crash recovery reconnects to the build it already spawned."""
 
 from pydantic import BaseModel, Field
 
@@ -54,7 +55,9 @@ class BuildWebsiteInput(BaseModel):
 
 async def _build_website(ctx: ToolContext, args: BuildWebsiteInput) -> ToolResult:
     result = await ctx.spawn(
-        WEBSITE_BUILDING_NAME, args.model_dump(exclude_none=True, exclude={"user_description"})
+        WEBSITE_BUILDING_NAME,
+        args.model_dump(exclude_none=True, exclude={"user_description"}),
+        dedup_key=ctx.idempotency_key,
     )
     text = "" if result.output is None else result.output.model_dump_json()
     return ToolResult(content=(TextContent(text=text),))
@@ -66,5 +69,6 @@ DELEGATION_TOOLS: tuple[ToolDef, ...] = (
         description=BUILD_WEBSITE_DESCRIPTION,
         input_model=BuildWebsiteInput,
         handler=_build_website,
+        side_effecting=True,
     ),
 )

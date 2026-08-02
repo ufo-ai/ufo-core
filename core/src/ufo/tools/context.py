@@ -19,10 +19,10 @@ on `cleanup`, the per-turn registry the loop drains at turn end so a CDP connect
 its turn. `search_provider` is the deploy's selected web-search backend (None when no research
 extension is active) — the research tools call it host-side, so the provider reads its key in the
 serve process and the sandbox never sees it. `idempotency_key` is `{turn}/{name}/{call_id}`, folded
-on only for a `side_effecting` tool: it passes it to its external write as a dedup header so a
-cross-attempt resume applies the effect at most once; a read tool gets `None`. An extension tool
-also gets `ext`, its owning extension's workspace-scoped ExtensionContext; a builtin tool gets
-`ext=None`."""
+on only for a `side_effecting` tool: its dedup key against a cross-attempt resume — an external
+write's header, a spawned child's identity — so the effect applies at most once; a read tool gets
+`None`. An extension tool also gets `ext`, its owning extension's workspace-scoped
+ExtensionContext; a builtin tool gets `ext=None`."""
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -117,11 +117,13 @@ class Spawn(Protocol):
     input schema, run a child turn, and (foreground) return its schema-validated output.
 
     `dedup_key` makes the child's identity deterministic from the parent turn and the key rather
-    than random, so a caller that re-runs on crash recovery (a fanned-out `wide_*` tool step
-    re-executing) reconnects to the child it already spawned instead of respawning it — the same
-    key yields the same child turn, its admit is idempotent, and a child that already finished is
-    awaited, not recomputed. A caller that wants a fresh child each call (`browser_task`,
-    `spawn_subagent`) omits it."""
+    than random, so a caller that re-runs on crash recovery (a dispatch step dying mid-await, a
+    fanned-out `wide_*` step re-executing) reconnects to the child it already spawned instead of
+    respawning it — the same key yields the same child turn, its admit is idempotent, and a child
+    that already finished is awaited, not recomputed. Every tool-step caller derives its key from
+    `ctx.idempotency_key`: the recorded round freezes call ids, so distinct model calls still get
+    distinct children while a re-executed step reconnects. A keyless spawn mints a fresh child per
+    execution — on recovery that is a duplicate doing the same work."""
 
     async def __call__(
         self,

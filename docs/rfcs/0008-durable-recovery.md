@@ -208,9 +208,9 @@ with the same `workflow_id` is deduplicated by DBOS (the workflow already exists
 recovery) returns **immediately**. So on a Level-1 replay of the `wide_*` tool step, the fan-out
 re-runs but **reconnects to completed children instead of respawning them; only the remainder is
 new work.** The children's own durable terminals *are* the per-`(turn, entity)` checkpoint — no
-separate results table or file is required. `spawn` grows a `dedup_key: str | None` parameter so
-`browser_task`/`spawn_subagent` (which *want* a fresh child each call) keep `uuid4()`, while `wide_*`
-passes the deterministic key.
+separate results table or file is required. `spawn` grows a `dedup_key: str | None` parameter;
+every tool spawn passes a key derived from the call's `idempotency_key` (`wide_*` appends the
+entity), so a re-executed step reconnects while distinct calls get distinct children.
 
 | Failure | Recovery |
 |---|---|
@@ -290,8 +290,8 @@ plus the durable token record; both ends land together.
   per-entity log, the extension's scoped store is the browser log.
 - **Both ends or neither.** Each seam ships producer + consumer together: `side_effecting` +
   `idempotency_key` (core folds it, sdk exposes it, a side-effecting tool consumes it); `spawn`'s
-  `dedup_key` (producer `wide_*`, consumer `Subagents.spawn`); the browser token/checkpoint (written on
-  lease, read on reattach, reaped by the sweep).
+  `dedup_key` (producer: every spawning tool, consumer `Subagents.spawn`); the browser
+  token/checkpoint (written on lease, read on reattach, reaped by the sweep).
 - **Stays out of core.** `wide_*` and the browser session/token/sweep are entirely extension-side over
   existing seams (`ctx.spawn`, `ctx.store`, `CdpProvider`, `JobSpec`). Core changes are confined to the
   turn engine (Level 1) and the two-field `ToolDef`/`ToolContext` idempotency seam — both genuinely

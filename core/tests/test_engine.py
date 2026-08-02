@@ -897,7 +897,10 @@ async def _seed_turn(
 
 
 async def _unavailable_spawn(
-    profile: str, payload: dict[str, object], background: bool = False
+    profile: str,
+    payload: dict[str, object],
+    background: bool = False,
+    dedup_key: str | None = None,
 ) -> SpawnResult:
     raise RuntimeError("spawn is not wired in this engine test")
 

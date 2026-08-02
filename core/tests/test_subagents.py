@@ -942,7 +942,6 @@ async def test_spawn_enqueue_failure_leaves_the_child_in_the_outbox(
 async def test_spawn_without_a_dedup_key_mints_a_fresh_child_each_call(
     db: None, dbos_launched: Config
 ) -> None:
-    """No key keeps the fresh-child-per-call contract `browser_task`/`spawn_subagent` rely on."""
     workspace_id, agent_id = await _workspace_agent()
     parent = await _parent(workspace_id, agent_id)
     subagents = Subagents(

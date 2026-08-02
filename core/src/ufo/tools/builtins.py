@@ -599,7 +599,9 @@ async def share_file_handler(ctx: ToolContext, args: ShareFileInput) -> ToolResu
 
 async def spawn_subagent_handler(ctx: ToolContext, args: SpawnSubagentInput) -> ToolResult:
     try:
-        result = await ctx.spawn(args.profile, args.payload, args.background)
+        result = await ctx.spawn(
+            args.profile, args.payload, args.background, dedup_key=ctx.idempotency_key
+        )
     except UnknownSubagentProfile as error:
         return ToolResult(content=(TextContent(text=str(error)),), is_error=True)
     if result.output is None:
@@ -841,6 +843,7 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         ),
         input_model=SpawnSubagentInput,
         handler=spawn_subagent_handler,
+        side_effecting=True,
     ),
     ToolDef(
         name="ask_user",

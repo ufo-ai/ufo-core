@@ -13,10 +13,10 @@ A budget is bounded at both ends: below so a wedged site gets a fair run, above 
 a run holds is one leased session, and a transport that reaps its own sessions would drop the live
 connection mid-task rather than ending it through the graceful cancel path below.
 
-`browser_task` wants a fresh session each call, so it passes no `dedup_key`. `wide_browse` is
-`side_effecting` and spawns each child under `dedup_key = f"{idempotency_key}/{entity}"`,
-deterministic across a crash-recovery re-run of the fan-out — a recovered parent reconnects to the
-children already spawned rather than respawning them."""
+Both tools are `side_effecting`: `browser_task` keys its one child on the call's
+`idempotency_key`, `wide_browse` spawns each child under `dedup_key =
+f"{idempotency_key}/{entity}"` — deterministic across a crash-recovery re-run, so a recovered
+parent reconnects to the children already spawned rather than respawning them."""
 
 import asyncio
 import json
@@ -97,21 +97,25 @@ async def _browser_task(ctx: ToolContext, args: BrowserTaskInput) -> ToolResult:
         BROWSER_PROFILE_NAME,
         {"task": args.task, "url": args.url, "task_name": args.task_name},
         background=True,
+        dedup_key=ctx.idempotency_key,
+    )
+    timed_out = ToolResult(
+        content=(
+            TextContent(
+                text=f"browser task {args.task_name!r} exceeded its "
+                f"{args.timeout_minutes}-minute timeout and was cancelled"
+            ),
+        ),
+        is_error=True,
     )
     try:
         async with asyncio.timeout(args.timeout_minutes * 60):
             (status,) = await ctx.subagents.wait((spawned.turn_id,))
     except TimeoutError:
         await ctx.subagents.cancel(spawned.turn_id)
-        return ToolResult(
-            content=(
-                TextContent(
-                    text=f"browser task {args.task_name!r} exceeded its "
-                    f"{args.timeout_minutes}-minute timeout and was cancelled"
-                ),
-            ),
-            is_error=True,
-        )
+        return timed_out
+    if status.status == "cancelled":
+        return timed_out
     if status.status != "done":
         raise RuntimeError(f"subagent {BROWSER_PROFILE_NAME!r} turn ended {status.status}")
     text = BrowserResult.model_validate_json(status.text).model_dump_json()
@@ -171,6 +175,7 @@ DELEGATION_TOOLS: tuple[ToolDef, ...] = (
         input_model=BrowserTaskInput,
         handler=_browser_task,
         untrusted=True,
+        side_effecting=True,
     ),
     ToolDef(
         name="wide_browse",

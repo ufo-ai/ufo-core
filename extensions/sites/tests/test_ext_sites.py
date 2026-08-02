@@ -101,6 +101,7 @@ def test_manifest_declares_the_tools_the_profile_and_the_section() -> None:
     (surface,) = manifest.surfaces
     assert surface.name == "sites"
     build = next(tool for tool in manifest.tools if tool.name == "build_website")
+    assert build.side_effecting is True
     assert {"objective", "preload_skills", "extended_context"} <= set(
         build.input_model.model_json_schema()["properties"]
     )
@@ -125,12 +126,22 @@ def test_website_profile_receives_the_complete_per_turn_skill_index() -> None:
 async def test_build_website_forwards_the_optional_knobs_into_the_spawn(tmp_path: Path) -> None:
     captured: dict[str, object] = {}
 
-    async def _capture(profile: str, payload: dict, background: bool = False) -> SpawnResult:
+    async def _capture(
+        profile: str,
+        payload: dict,
+        background: bool = False,
+        dedup_key: str | None = None,
+    ) -> SpawnResult:
         captured["profile"] = profile
         captured["payload"] = payload
+        captured["dedup_key"] = dedup_key
         return SpawnResult(turn_id=uuid4(), output=WebsiteBuildingResult(result="built"))
 
-    ctx = replace(_context(FakeSandbox(), tmp_path), spawn=_capture)
+    ctx = replace(
+        _context(FakeSandbox(), tmp_path),
+        spawn=_capture,
+        idempotency_key="turn-1/build_website/call-2",
+    )
     result = await _build_website(
         ctx,
         BuildWebsiteInput(
@@ -146,13 +157,19 @@ async def test_build_website_forwards_the_optional_knobs_into_the_spawn(tmp_path
         "preload_skills": ("website-building",),
         "extended_context": True,
     }
+    assert captured["dedup_key"] == "turn-1/build_website/call-2"
     assert json.loads(result.content[0].text)["result"] == "built"
 
 
 async def test_build_website_omits_the_unset_knobs(tmp_path: Path) -> None:
     captured: dict[str, object] = {}
 
-    async def _capture(profile: str, payload: dict, background: bool = False) -> SpawnResult:
+    async def _capture(
+        profile: str,
+        payload: dict,
+        background: bool = False,
+        dedup_key: str | None = None,
+    ) -> SpawnResult:
         captured["payload"] = payload
         return SpawnResult(turn_id=uuid4(), output=WebsiteBuildingResult(result="built"))
 

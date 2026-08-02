@@ -53,7 +53,10 @@ class FakeSandbox:
 
 
 async def _unavailable_spawn(
-    profile: str, payload: dict[str, object], background: bool = False
+    profile: str,
+    payload: dict[str, object],
+    background: bool = False,
+    dedup_key: str | None = None,
 ) -> SpawnResult:
     raise RuntimeError("spawn is not wired in this context")
 
@@ -507,6 +510,35 @@ async def test_spawn_subagent_unknown_profile_is_an_error_naming_the_valid_profi
     text = result.content[0].text
     assert "assistant" in text
     assert "research" in text
+
+
+async def test_spawn_subagent_keys_the_child_on_the_calls_idempotency_key(tmp_path: Path) -> None:
+    recorded: list[str | None] = []
+
+    async def _record(
+        profile: str,
+        payload: dict[str, object],
+        background: bool = False,
+        dedup_key: str | None = None,
+    ) -> SpawnResult:
+        recorded.append(dedup_key)
+        return SpawnResult(turn_id=uuid4(), output=None)
+
+    assert REGISTRY.get("spawn_subagent").side_effecting is True
+    ctx = replace(
+        make_context(FakeSandbox(), tmp_path, spawn=_record),
+        idempotency_key="turn-1/spawn_subagent/call-1",
+    )
+    result = await run(
+        "spawn_subagent",
+        ctx,
+        profile="research",
+        payload={"task": "x"},
+        background=True,
+        user_description="handing off the research",
+    )
+    assert recorded == ["turn-1/spawn_subagent/call-1"]
+    assert not result.is_error
 
 
 SEAL_MEMBER = UUID("11111111-1111-1111-1111-111111111111")

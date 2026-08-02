@@ -25,7 +25,7 @@ from pathlib import Path
 import httpx
 from pydantic import BaseModel, Field
 
-from ufo.sdk.context import CredentialAccess
+from ufo.sdk.context import CredentialAccess, ScopedStore
 from ufo.sdk.manifest import CredentialSlot, Manifest, PromptSection
 from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 
@@ -91,10 +91,13 @@ class RunFile:
 
 class StartedRun(BaseModel):
     """The handle a created run is reached by. It outlives the process in `ext_store`, so a keyed
-    fan-out can reattach after a crash — persisted state, validated on the way back in."""
+    fan-out can reattach after a crash — persisted state, validated on the way back in.
+    `timed_out` records that this key's own attempt cancelled the run at its deadline, so a
+    reattach reports the timeout rather than reading the vendor's stop as its own conclusion."""
 
     id: str
     workspace_id: str
+    timed_out: bool = False
 
 
 @dataclass(frozen=True)
@@ -102,9 +105,10 @@ class RunOutcome:
     """What one finished run leaves behind. `output` is the run's result when it completed and its
     error text otherwise, so a caller always has something to say about it.
 
-    `status` is the vendor's terminal status, except for `timed_out`, which is ours alone: a run the
-    vendor itself cancelled reports `cancelled` and still carries whatever it collected, so the two
-    must not share a name."""
+    `status` is the vendor's terminal status, except for `timed_out`, which is ours alone: a run
+    the vendor itself cancelled reports `cancelled` and still carries whatever it collected, so the
+    two must not share a name. A reattached run whose stored handle records this key's own
+    deadline cancel reports `timed_out` like the attempt that cancelled it did."""
 
     status: str
     output: str
@@ -136,6 +140,9 @@ class HostedRun:
             raise ValueError(
                 f"browser task is {len(task)} characters, over the {MAX_TASK_CHARS} sent to a run"
             )
+        if ctx.ext is None:
+            raise RuntimeError("browser_use tools need their extension context")
+        store = ctx.ext.store
         key = await self.credentials.get(API_KEY_SLOT)
         async with httpx.AsyncClient(
             base_url=API_BASE,
@@ -143,31 +150,35 @@ class HostedRun:
             transport=self.transport,
             headers={API_KEY_HEADER: key},
         ) as http:
-            run = await self._start(http, ctx, task, dedup_key)
+            run = await self._start(http, store, task, dedup_key)
             try:
                 async with asyncio.timeout(timeout_seconds):
                     status = await self._watch(http, run.id)
             except TimeoutError:
                 status = await self._status(http, run.id)
                 if status not in TERMINAL_STATUSES:
+                    if dedup_key is not None:
+                        await store.put(
+                            dedup_key, run.model_copy(update={"timed_out": True}).model_dump()
+                        )
                     await self._json(await http.post(f"/runs/{run.id}/cancel"))
                     return RunOutcome(RUN_TIMED_OUT, "", (), (), False)
+            if run.timed_out and status in ("stopped", "cancelled"):
+                return RunOutcome(RUN_TIMED_OUT, "", (), (), False)
             summary = await self._json(await http.get(f"/runs/{run.id}"))
             saved, skipped, more_files = await self._collect(http, ctx, run.workspace_id)
             output = summary.get("result") if status == RUN_COMPLETED else summary.get("error")
             return RunOutcome(status, str(output or ""), saved, skipped, more_files)
 
     async def _start(
-        self, http: httpx.AsyncClient, ctx: ToolContext, task: str, dedup_key: str | None
+        self, http: httpx.AsyncClient, store: ScopedStore, task: str, dedup_key: str | None
     ) -> StartedRun:
         """The run this call owns: the one a previous attempt already paid for when a dedup key
         names it, otherwise a fresh one recorded under that key. A crash between creating the run
         and recording it re-runs, which is the narrowest window the API allows — there is no way to
         name a run before it exists."""
-        if ctx.ext is None:
-            raise RuntimeError("browser_use tools need their extension context")
         if dedup_key is not None:
-            found = await ctx.ext.store.get(dedup_key)
+            found = await store.get(dedup_key)
             if found is not None:
                 return StartedRun.model_validate(found)
         created = await self._json(
@@ -185,7 +196,7 @@ class HostedRun:
             id=self._text(created, "id"), workspace_id=self._text(created, "workspaceId")
         )
         if dedup_key is not None:
-            await ctx.ext.store.put(dedup_key, run.model_dump())
+            await store.put(dedup_key, run.model_dump())
         return run
 
     async def _watch(self, http: httpx.AsyncClient, run_id: str) -> str:
@@ -341,6 +352,7 @@ async def _browser_task(ctx: ToolContext, args: BrowserTaskInput) -> ToolResult:
         ctx,
         f"Start at {args.url}\n\n{args.task}",
         timeout_seconds=args.timeout_minutes * 60,
+        dedup_key=None if ctx.idempotency_key is None else f"run/{ctx.idempotency_key}",
     )
     if outcome.status == RUN_TIMED_OUT:
         return ToolResult(
@@ -441,6 +453,7 @@ BROWSER_USE_TOOLS: tuple[ToolDef, ...] = (
         input_model=BrowserTaskInput,
         handler=_browser_task,
         untrusted=True,
+        side_effecting=True,
     ),
     ToolDef(
         name="wide_browse",

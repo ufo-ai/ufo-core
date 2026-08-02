@@ -56,6 +56,7 @@ class _Api:
     create_body: dict[str, object] | None = None
     create_text: str | None = None
     download_status: int = 200
+    cancel_status: int = 200
     fail_status_for: set[str] = field(default_factory=set)
     requests: list[httpx.Request] = field(default_factory=list)
 
@@ -88,6 +89,8 @@ class _Api:
                 },
             )
         if path.endswith("/cancel"):
+            if self.cancel_status >= 400:
+                return httpx.Response(self.cancel_status, json={"detail": "nope"})
             return httpx.Response(200, json={"id": RUN_ID, "status": "cancelled"})
         if path.endswith("/status"):
             status = self.statuses[0] if len(self.statuses) == 1 else self.statuses.pop(0)
@@ -654,6 +657,132 @@ async def test_wide_browse_reattaches_a_recorded_run_instead_of_paying_twice(
     assert api.sent("GET", f"/api/v4/runs/{RUN_ID}")
 
 
+async def test_a_keyed_browser_task_reattaches_the_run_its_first_attempt_bought(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fast_poll: None
+) -> None:
+    api = _Api(statuses=["completed"])
+    _wire(monkeypatch, api)
+    workspace_id = await _keyed_workspace()
+    ctx = _context(_Sandbox(), tmp_path, idempotency_key="idem")
+    assert _tool("browser_task").side_effecting is True
+    with ws(workspace_id):
+        await ctx.ext.store.put("run/idem", {"id": RUN_ID, "workspace_id": WORKSPACE_ID})
+        result = await _tool("browser_task").handler(
+            ctx,
+            BrowserTaskInput(
+                url="https://shop.test",
+                task="read the price",
+                task_name="Price check",
+                user_description="checking a price",
+            ),
+        )
+    assert not api.sent("POST", "/api/v4/runs")
+    assert api.sent("GET", f"/api/v4/runs/{RUN_ID}")
+    assert json.loads(result.content[0].text)["result"] == "found it"
+
+
+@pytest.mark.parametrize("vendor_status", ["stopped", "cancelled"])
+async def test_a_reattached_run_its_earlier_attempt_cancelled_reports_the_timeout(
+    db: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fast_poll: None,
+    vendor_status: str,
+) -> None:
+    api = _Api(statuses=[vendor_status])
+    _wire(monkeypatch, api)
+    workspace_id = await _keyed_workspace()
+    ctx = _context(_Sandbox(), tmp_path, idempotency_key="idem")
+    with ws(workspace_id):
+        await ctx.ext.store.put(
+            "run/idem", {"id": RUN_ID, "workspace_id": WORKSPACE_ID, "timed_out": True}
+        )
+        result = await _tool("browser_task").handler(
+            ctx,
+            BrowserTaskInput(
+                url="https://shop.test",
+                task="read the price",
+                task_name="Price check",
+                user_description="checking a price",
+            ),
+        )
+    assert not api.sent("POST", "/api/v4/runs")
+    assert result.is_error
+    assert "timeout" in result.content[0].text
+
+
+async def test_a_reattached_run_the_vendor_ended_keeps_its_output(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fast_poll: None
+) -> None:
+    api = _Api(statuses=["cancelled"], result="", error="cancelled from the dashboard")
+    _wire(monkeypatch, api)
+    workspace_id = await _keyed_workspace()
+    ctx = _context(_Sandbox(), tmp_path, idempotency_key="idem")
+    with ws(workspace_id):
+        await ctx.ext.store.put("run/idem", {"id": RUN_ID, "workspace_id": WORKSPACE_ID})
+        result = await _tool("browser_task").handler(
+            ctx,
+            BrowserTaskInput(
+                url="https://shop.test",
+                task="read the price",
+                task_name="Price check",
+                user_description="checking a price",
+            ),
+        )
+    assert not api.sent("POST", "/api/v4/runs")
+    assert result.is_error
+    assert "timeout" not in result.content[0].text
+    assert json.loads(result.content[0].text)["result"] == "cancelled from the dashboard"
+
+
+async def test_a_keyed_timeout_cancel_marks_the_recorded_run(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fast_poll: None
+) -> None:
+    api = _Api(statuses=["running"])
+    _wire(monkeypatch, api)
+    workspace_id = await _keyed_workspace()
+    ctx = _context(_Sandbox(), tmp_path, idempotency_key="idem")
+    with ws(workspace_id):
+        result = await _tool("browser_task").handler(
+            ctx,
+            BrowserTaskInput.model_construct(
+                url="https://slow.test",
+                task="t",
+                task_name="Wedged",
+                timeout_minutes=0,
+                user_description="d",
+            ),
+        )
+        recorded = await ctx.ext.store.get("run/idem")
+    assert api.sent("POST", f"/api/v4/runs/{RUN_ID}/cancel")
+    assert result.is_error
+    assert browser_use.StartedRun.model_validate(recorded).timed_out is True
+
+
+async def test_the_mark_is_durable_before_the_cancel_is_attempted(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fast_poll: None
+) -> None:
+    api = _Api(statuses=["running"], cancel_status=500)
+    _wire(monkeypatch, api)
+    workspace_id = await _keyed_workspace()
+    ctx = _context(_Sandbox(), tmp_path, idempotency_key="idem")
+    with ws(workspace_id):
+        with pytest.raises(browser_use.BrowserUseError, match="500"):
+            await _tool("browser_task").handler(
+                ctx,
+                BrowserTaskInput.model_construct(
+                    url="https://slow.test",
+                    task="t",
+                    task_name="Wedged",
+                    timeout_minutes=0,
+                    user_description="d",
+                ),
+            )
+        recorded = await ctx.ext.store.get("run/idem")
+    assert api.sent("POST", f"/api/v4/runs/{RUN_ID}/cancel")
+    assert browser_use.StartedRun.model_validate(recorded).timed_out is True
+
+
 async def test_a_keyed_run_records_its_handle_so_a_later_attempt_can_find_it(
     db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fast_poll: None
 ) -> None:
@@ -675,7 +804,7 @@ async def test_a_keyed_run_records_its_handle_so_a_later_attempt_can_find_it(
         )
         recorded = await ctx.ext.store.get("run/idem/a.test")
     assert len(api.sent("POST", "/api/v4/runs")) == 1
-    assert recorded == {"id": RUN_ID, "workspace_id": WORKSPACE_ID}
+    assert recorded == {"id": RUN_ID, "workspace_id": WORKSPACE_ID, "timed_out": False}
     assert browser_use.StartedRun.model_validate(recorded).id == RUN_ID
 
 
