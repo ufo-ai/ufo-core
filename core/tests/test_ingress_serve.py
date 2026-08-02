@@ -7,6 +7,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from uuid import UUID, uuid4
 
 import httpx
@@ -20,7 +21,8 @@ from websockets.typing import Origin, Subprotocol
 
 from ufo import ingress_serve
 from ufo.bearer import UFO_TOKEN_SECRET_ENV
-from ufo.db import workspace_tx
+from ufo.config import BlobConfig, Config, DatabaseConfig, SandboxConfig
+from ufo.db import dispose_db, workspace_tx
 from ufo.ingress_serve import (
     CACHE_DIRECTIVE_HEADERS,
     FOREIGN_ORIGIN,
@@ -1460,3 +1462,39 @@ async def test_a_viewer_that_vanishes_mid_push_leaves_the_ingress_serving(
         await after.send("still here")
         assert await after.recv() == "echo:still here"
     assert len(socket_origin.handshakes) == ABORT_ROUNDS + 1
+
+
+def test_the_ingress_refuses_to_bind_when_its_database_is_unreachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`ufo-ingress` has no `/healthz` either; a TCP probe confirms the bind (`hosted.yaml.tpl`), so
+    an ingress bound in front of an unreachable database reads as ready and then fails every request
+    behind it. `run` is synchronous, so the check gets its own throwaway loop.
+
+    `uvicorn.run` is a sentinel: without the check, boot reaches the bind and the test says so. The
+    refusal arrives as `OperationalError` because `owner_dsn` rewrites the secret's libpq url onto
+    the psycopg driver this deployment ships. Every other precondition boot enforces is satisfied
+    here, so the sentinel is what the check is holding back."""
+    monkeypatch.setenv("UFO_OWNER_DSN", "postgresql://ufo:ufo@127.0.0.1:1/ufo")
+    monkeypatch.setenv(UFO_TOKEN_SECRET_ENV, "ingress-boot-test-secret")
+    monkeypatch.setattr(
+        ingress_serve,
+        "load_config",
+        lambda: Config(
+            database=DatabaseConfig(url="sqlite+aiosqlite:///ufo.db"),
+            blob=BlobConfig(backend="filesystem", root=Path("/tmp/blobs")),
+            sandbox=SandboxConfig(
+                backend="local", ingress_port=0, ingress_public_url="https://ingress.test"
+            ),
+        ),
+    )
+
+    def never(*_: object, **__: object) -> None:
+        raise AssertionError("bound the ingress with an unreachable database")
+
+    monkeypatch.setattr(ingress_serve.uvicorn, "run", never)
+    try:
+        with pytest.raises(sa.exc.OperationalError):
+            ingress_serve.run()
+    finally:
+        asyncio.run(dispose_db())

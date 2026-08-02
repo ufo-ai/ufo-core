@@ -24,7 +24,7 @@ from websockets.exceptions import WebSocketException
 from websockets.typing import Subprotocol
 
 from ufo.config import load_config
-from ufo.db import init_db, workspace_tx
+from ufo.db import init_db, verify_db_reachable, workspace_tx
 from ufo.ext.loader import load_manifests
 from ufo.o11y import init_o11y, log, log_error, warn
 from ufo.proxy_serve import OTLP_ENDPOINT_ENV, owner_dsn
@@ -655,6 +655,7 @@ def run() -> None:
     init_o11y(os.environ.get(OTLP_ENDPOINT_ENV) or config.o11y.otlp_endpoint)
     manifests = load_manifests(config.pack.name)
     init_db(owner_dsn(config))
+    asyncio.run(verify_db_reachable())
     ingress_secret()
     server = IngressServe(
         backend=config.sandbox.backend,

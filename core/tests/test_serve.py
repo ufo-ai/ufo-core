@@ -120,6 +120,38 @@ def test_one_shot_closes_the_throwaway_loops_connections(database_url: str, tmp_
         asyncio.run(dispose_db())
 
 
+def test_serve_verifies_the_owner_database_before_it_seats_the_instance(
+    database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`hosted.yaml.tpl` TCP-probes serve too.
+
+    The check runs for real here rather than through a stub, and only the owner dsn is unreachable:
+    that is what pins the call *after* `init_owner_db`, since a check that ran before it would find
+    only the app url, dial it happily, and boot on. `record_fleet_seat` is the sentinel for both the
+    ordering and the call itself — a process that seats itself against a database it cannot read has
+    already told the fleet it is alive."""
+    reachable = database_url
+    if reachable.startswith("sqlite"):
+        private = tmp_path / "serve_boot.db"
+        shutil.copy(make_url(reachable).database or "", private)
+        reachable = f"sqlite+aiosqlite:///{private}"
+
+    def seated(_: object) -> None:
+        raise AssertionError("seated the instance against an unreachable owner database")
+
+    monkeypatch.setenv(OWNER_DSN_ENV, "postgresql://ufo:ufo@127.0.0.1:1/ufo")
+    monkeypatch.setenv("UFO_CREDENTIAL_KEY", Fernet.generate_key().decode())
+    monkeypatch.setattr(serve, "load_config", lambda: _hosted_config())
+    monkeypatch.setattr(serve, "init_o11y", lambda endpoint: None)
+    monkeypatch.setattr(serve, "init_db", lambda opened: init_db(reachable))
+    monkeypatch.setattr(serve, "record_fleet_seat", seated)
+    try:
+        with pytest.raises(ConnectionRefusedError):
+            serve.run()
+    finally:
+        asyncio.run(dispose_db())
+
+
 def test_launch_jobs_reuses_the_boot_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     manifests = (Manifest(name="jobs", version="1"),)
     registry = object()

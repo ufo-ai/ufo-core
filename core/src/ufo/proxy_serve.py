@@ -17,7 +17,7 @@ from cryptography.fernet import Fernet
 from ufo.blob import blob_store_for
 from ufo.config import Config, load_config
 from ufo.credentials import CredentialStore
-from ufo.db import init_db
+from ufo.db import init_db, verify_db_reachable
 from ufo.ext.loader import connector_clis, injecting_slots, load_manifests
 from ufo.ext.manifest import CredentialSlot, Manifest
 from ufo.grants import GrantStore
@@ -153,6 +153,7 @@ class ProxyServe:
         for shutdown_signal in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(shutdown_signal, self.shutdown.set)
         init_db(self.owner_dsn)
+        await verify_db_reachable()
         artifacts = await derive_artifact_store_rules(blob_store_for(self.config.blob))
         resolver = PerAgentRules(
             base=(*model_rule_base(self.config), *artifacts),

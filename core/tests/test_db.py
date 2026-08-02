@@ -36,6 +36,7 @@ from ufo.db import (
     init_db,
     init_owner_db,
     owner_tx,
+    verify_db_reachable,
     workspace_tx,
 )
 from ufo.ext.loader import migration_locations
@@ -914,6 +915,44 @@ async def test_conversation_and_memory_audiences_are_constrained(db: None) -> No
                         updated_at=sa.func.now(),
                     )
                 )
+
+
+REFUSED_DSN = "postgresql+asyncpg://ufo:ufo@127.0.0.1:1/ufo_test"
+
+
+async def test_verify_db_reachable_fails_loud_on_a_database_it_cannot_reach() -> None:
+    """The boot check the TCP-probed deployments rest on. A privileged port is used because nothing
+    in this suite can bind it, so the refusal is deterministic — an ephemeral port is free for a
+    parallel worker to take between the release and the connect."""
+    init_db(REFUSED_DSN)
+    try:
+        with pytest.raises(ConnectionRefusedError):
+            await verify_db_reachable()
+    finally:
+        await dispose_db()
+
+
+async def test_verify_db_reachable_checks_the_owner_url_too(db: None) -> None:
+    """`ufoctl proxy` and `ufoctl ingress` open one url, but `serve` opens two and reaches the
+    database through the owner one — a check that only dialled the app url would pass a boot whose
+    owner database is unreachable."""
+    init_owner_db(REFUSED_DSN)
+    with pytest.raises(ConnectionRefusedError):
+        await verify_db_reachable()
+
+
+async def test_verify_db_reachable_requires_init() -> None:
+    with pytest.raises(RuntimeError, match="db not initialized"):
+        await verify_db_reachable()
+
+
+async def test_verify_db_reachable_publishes_no_engine(db: None) -> None:
+    """It dials with its own engine and disposes it, so the check never leaves a pooled connection
+    behind — a boot verb that seeded the registry would hand the first request an engine built on
+    whatever loop happened to run the check."""
+    before = (set(ufo.db._APP.engines), set(ufo.db._OWNER.engines))
+    await verify_db_reachable()
+    assert (set(ufo.db._APP.engines), set(ufo.db._OWNER.engines)) == before
 
 
 async def test_workspace_tx_requires_init() -> None:

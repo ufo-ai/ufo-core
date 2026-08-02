@@ -5,12 +5,14 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import sqlalchemy as sa
 from cryptography.fernet import Fernet
 
 from ufo import proxy_serve as proxy_serve_module
 from ufo.bearer import UFO_TOKEN_SECRET_ENV
 from ufo.config import BlobConfig, Config, DatabaseConfig, load_config
 from ufo.credentials import CredentialStore
+from ufo.db import dispose_db
 from ufo.ext.loader import injecting_slots, load_manifests
 from ufo.ext.manifest import CredentialSlot, InjectionTarget, Manifest
 from ufo.models.catalog import CORE_PRICING
@@ -38,6 +40,10 @@ def _config(owner_url: str | None = "postgresql://owner@db/ufo") -> Config:
         database=DatabaseConfig(url="sqlite+aiosqlite:///ufo.db", owner_url=owner_url),
         blob=BlobConfig(backend="filesystem", root=Path("/tmp/blobs")),
     )
+
+
+async def _opens_nothing() -> None:
+    pass
 
 
 def _proxy_serve(
@@ -214,6 +220,7 @@ async def test_proxy_serve_wires_run_tokens_from_the_env_secret(
     monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setattr(proxy_serve_module, "init_db", lambda dsn: None)
+    monkeypatch.setattr(proxy_serve_module, "verify_db_reachable", _opens_nothing)
     monkeypatch.setattr(proxy_serve_module, "EgressProxy", Proxy)
 
     with pytest.raises(StopServe):
@@ -249,6 +256,7 @@ async def test_proxy_serve_resolves_keyed_slots_per_workspace(
     monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setattr(proxy_serve_module, "init_db", lambda dsn: None)
+    monkeypatch.setattr(proxy_serve_module, "verify_db_reachable", _opens_nothing)
     monkeypatch.setattr(proxy_serve_module, "EgressProxy", Proxy)
     monkeypatch.setattr(proxy_serve_module, "PerAgentRules", rules)
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
@@ -295,6 +303,7 @@ async def test_proxy_serve_drains_connections_on_shutdown(
     monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setattr(proxy_serve_module, "init_db", lambda dsn: None)
+    monkeypatch.setattr(proxy_serve_module, "verify_db_reachable", _opens_nothing)
     monkeypatch.setattr(proxy_serve_module, "EgressProxy", Proxy)
 
     await _proxy_serve(config, (), shutdown).serve()
@@ -325,6 +334,7 @@ async def test_proxy_serve_sigterm_wakes_the_idle_loop(
     monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setattr(proxy_serve_module, "init_db", lambda dsn: None)
+    monkeypatch.setattr(proxy_serve_module, "verify_db_reachable", _opens_nothing)
     monkeypatch.setattr(proxy_serve_module, "EgressProxy", Proxy)
 
     serving = asyncio.create_task(_proxy_serve(config, ()).serve())
@@ -363,6 +373,7 @@ async def test_proxy_serve_base_admits_the_s3_artifact_store_host(
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "proxy-serve-test")
     monkeypatch.delenv("AWS_PROFILE", raising=False)
     monkeypatch.setattr(proxy_serve_module, "init_db", lambda dsn: None)
+    monkeypatch.setattr(proxy_serve_module, "verify_db_reachable", _opens_nothing)
     monkeypatch.setattr(proxy_serve_module, "EgressProxy", Proxy)
     monkeypatch.setattr(proxy_serve_module, "PerAgentRules", rules)
     config = _config().model_copy(
@@ -385,3 +396,42 @@ async def test_proxy_serve_base_admits_the_s3_artifact_store_host(
     base = captured["base"]
     assert isinstance(base, tuple)
     assert ScopeRule(allowed_hosts=frozenset({"ufo-blobs.s3.amazonaws.com"})) in base
+
+
+REFUSED_OWNER_DSN = "postgresql+psycopg://ufo:ufo@127.0.0.1:1/ufo"
+
+
+async def test_the_proxy_refuses_to_bind_when_its_database_is_unreachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`ufo-sandbox-proxy` has no `/healthz`; a TCP probe confirms the bind (`hosted.yaml.tpl`), so
+    a proxy that binds in front of an unreachable database reads as ready and then fails every
+    request behind it. Boot has to end before the bind instead.
+
+    `start` is replaced with a sentinel rather than left to bind a real port: without the check the
+    boot reaches it and the test says so, instead of hanging on a socket. Every other precondition
+    boot enforces is satisfied here, so the sentinel is what the check is holding back. The dsn
+    carries the psycopg scheme `owner_dsn` rewrites to, which is the driver this deployment opens
+    and the reason the refusal arrives as `OperationalError` rather than the bare `OSError` asyncpg
+    would raise."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
+
+    async def never(*_: object, **__: object) -> None:
+        raise AssertionError("bound the proxy with an unreachable database")
+
+    monkeypatch.setattr(proxy_serve_module.EgressProxy, "start", never)
+    proxy = ProxyServe(
+        config=_config(),
+        manifests=(),
+        owner_dsn=REFUSED_OWNER_DSN,
+        ca_cert="CA",
+        ca_key="KEY",
+        credentials=None,
+        pricing=CORE_PRICING,
+        shutdown=asyncio.Event(),
+    )
+    try:
+        with pytest.raises(sa.exc.OperationalError):
+            await proxy.serve()
+    finally:
+        await dispose_db()

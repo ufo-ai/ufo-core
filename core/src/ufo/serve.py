@@ -32,7 +32,13 @@ from ufo.credentials import (
     CredentialStore,
     install_credential_requests,
 )
-from ufo.db import current_workspace, dispose_loop_engines, init_db, init_owner_db
+from ufo.db import (
+    current_workspace,
+    dispose_loop_engines,
+    init_db,
+    init_owner_db,
+    verify_db_reachable,
+)
 from ufo.ext.context import CredentialAccess, context_for
 from ufo.ext.loader import (
     CORE_OBJECT_KINDS,
@@ -160,6 +166,7 @@ def run() -> None:
         )
     credentials = CredentialStore(fernet=Fernet(key.encode()))
     init_owner_db(_shared_owner_dsn(config))
+    _one_shot(verify_db_reachable())
     instance_id = uuid4()
     _one_shot(record_fleet_seat(instance_id))
     heartbeat = Heartbeat(instance_id=instance_id)

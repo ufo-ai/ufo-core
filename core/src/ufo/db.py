@@ -189,6 +189,29 @@ def init_owner_db(url: str) -> None:
     _owner_url = url
 
 
+async def verify_db_reachable() -> None:
+    """Fail loud at boot on a database this process cannot reach. Engines build per loop on first
+    touch, so nothing dials until the first request — and `ufo-sandbox-proxy` and `ufo-ingress` are
+    TCP-probed rather than `/healthz`-probed (`hosted.yaml.tpl`), so a bound socket in front of an
+    unreachable database passes readiness and then fails every request behind it.
+
+    Awaited on the caller's loop rather than driven on a private one. `init_db`'s callers include
+    `async def` composition roots, and a blocking dial there stalls every surface that loop carries:
+    the proxy registers its SIGTERM handler before it opens the database, so a stalled loop is also
+    a loop that cannot be shut down. The engine this dials with is disposed here and never published
+    to a registry, so no pooled connection outlives the check."""
+    opened = [(url, pool) for url, pool in ((_app_url, _APP), (_owner_url, _OWNER)) if url]
+    if not opened:
+        raise RuntimeError("db not initialized (init_db runs in the composition root)")
+    for url, pool in opened:
+        engine = _build_engine(url, pool)
+        try:
+            async with engine.connect():
+                pass
+        finally:
+            await engine.dispose()
+
+
 async def dispose_db() -> None:
     """Teardown — a CLI verb's `finally`, a test's fixture. The urls clear first, before anything
     can fail, so a teardown that cannot finish never leaves the next `init_db` refusing, and no
