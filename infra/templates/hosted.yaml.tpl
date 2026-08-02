@@ -159,8 +159,10 @@ metadata:
 spec:
   ingressClassName: ${ingress_class}
   tls:
-    - hosts: [${apex_host}, ${gateway_origin_host}]
+    - hosts: [${apex_host}]
       secretName: ufo-gateway-tls
+    - hosts: [${gateway_origin_host}]
+      secretName: ufo-ingress-tls
   rules:
     - host: ${apex_host}
       http:
@@ -195,7 +197,7 @@ metadata:
 spec:
   secretName: ufo-gateway-tls
   issuerRef: {name: ${cluster_issuer}, kind: ClusterIssuer}
-  dnsNames: [${apex_host}, ${gateway_origin_host}]
+  dnsNames: [${apex_host}]
 ---
 # The shared egress proxy meters every workspace sandbox through one service. It runs
 # from the ufo bundle image (`ufoctl proxy`), opens the RLS-bypassing owner DSN and scopes every

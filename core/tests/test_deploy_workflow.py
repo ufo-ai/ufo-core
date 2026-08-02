@@ -2463,7 +2463,7 @@ def test_runtime_rollout_drains_before_the_proxy_gate(workflow: str, job_name: s
         "kubectl --namespace ingress-nginx rollout status "
         "deployment/ingress-nginx-controller --timeout=15m"
     )
-    assert (ingress in script) is (workflow == "deploy-production.yml")
+    assert ingress in script
     templates = ROOT / "infra" / "templates"
     manifests = [
         document
@@ -2535,14 +2535,96 @@ def test_runtime_rollout_drains_before_the_proxy_gate(workflow: str, job_name: s
     )
     gated_readiness = {resource for command in wait_commands for resource in command[6:]}
     gated_rollouts = {command[5] for command in rollout_commands}
-    expected_production = workflow == "deploy-production.yml"
-    assert gated_readiness == (readiness_resources if expected_production else set())
-    testing_rollouts = {
-        "deployment/ufo-sandbox-proxy",
-        "deployment/ufo-ingress",
-        "deployment/ufo-serve",
+    assert gated_readiness == readiness_resources
+    assert gated_rollouts == rollout_resources
+
+
+@pytest.mark.parametrize(
+    ("workflow", "job_name", "hostname", "tf_dir"),
+    [
+        ("deploy.yml", "rollout", "testing.flyingobject.ai", "infra/envs/testing"),
+        ("deploy-production.yml", "deploy", "flyingobject.ai", "infra/envs/prod"),
+    ],
+)
+def test_runtime_rollout_gates_the_direct_gateway_origin(
+    tmp_path: Path, workflow: str, job_name: str, hostname: str, tf_dir: str
+) -> None:
+    job = _workflow(WORKFLOWS / workflow)["jobs"][job_name]
+    assert isinstance(job, dict)
+    steps = job["steps"]
+    assert isinstance(steps, list)
+    names = [step.get("name") for step in steps if isinstance(step, dict)]
+    gate = _step(job_name, "Gate gateway origin", workflow)
+    assert names.index("Wait for runtime rollout") < names.index("Gate gateway origin")
+    assert names.index("Gate gateway origin") < names.index("Gate sandbox egress proxy TLS")
+    assert gate.get("if") == (
+        "github.event_name != 'pull_request'" if workflow == "deploy.yml" else None
+    )
+    assert gate["shell"] == "bash"
+    assert "output -raw hostname" in gate["run"]
+
+    curl = tmp_path / "curl"
+    curl.write_text(
+        "#!/bin/sh\n"
+        'printf \'%s\\n\' "$*" >> "$ORIGIN_CALLS"\n'
+        'case "$*" in\n'
+        '  */ufo) [ "$FAIL_PATH" != ufo ] || exit 1; '
+        'printf \'UFO_URL="${UFO_URL:-https://%s}"\\n\' "$ORIGIN_RESPONSE_HOST" ;;\n'
+        '  */fleet) [ "$FAIL_PATH" != fleet ] || exit 1; printf \'%s\\n\' "$FLEET_BODY" ;;\n'
+        "esac\n"
+    )
+    curl.chmod(0o755)
+    terraform = tmp_path / "terraform"
+    terraform.write_text(
+        "#!/bin/sh\n"
+        '[ "$*" = "-chdir=$TF_DIR output -raw hostname" ] || exit 1\n'
+        "printf '%s\\n' \"$ORIGIN_APEX_HOST\"\n"
+    )
+    terraform.chmod(0o755)
+    calls = tmp_path / "origin-calls"
+    environment = os.environ | {
+        "FAIL_PATH": "",
+        "FLEET_BODY": '{"craft":1}',
+        "ORIGIN_APEX_HOST": hostname,
+        "ORIGIN_RESPONSE_HOST": hostname,
+        "ORIGIN_CALLS": str(calls),
+        "PATH": f"{tmp_path}:{os.environ['PATH']}",
+        "TF_DIR": tf_dir,
     }
-    assert gated_rollouts == (rollout_resources if expected_production else testing_rollouts)
+    subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", gate["run"]],
+        check=True,
+        env=environment,
+    )
+    invoked = calls.read_text().splitlines()
+    assert len(invoked) == 2
+    assert any(call.endswith(f"https://origin.{hostname}/ufo") for call in invoked)
+    assert any(call.endswith(f"https://origin.{hostname}/fleet") for call in invoked)
+    subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", gate["run"]],
+        check=True,
+        env=environment | {"FLEET_BODY": '{"craft":0}'},
+    )
+
+    for failed_path in ("ufo", "fleet"):
+        failed = subprocess.run(
+            ["bash", "-e", "-o", "pipefail", "-c", gate["run"]],
+            capture_output=True,
+            env=environment | {"FAIL_PATH": failed_path},
+        )
+        assert failed.returncode != 0
+
+    for overrides in (
+        {"ORIGIN_RESPONSE_HOST": "wrong.flyingobject.ai"},
+        {"FLEET_BODY": '{"craft":"1"}'},
+        {"FLEET_BODY": '{"craft":-1}'},
+    ):
+        failed = subprocess.run(
+            ["bash", "-e", "-o", "pipefail", "-c", gate["run"]],
+            capture_output=True,
+            env=environment | overrides,
+        )
+        assert failed.returncode != 0, overrides
 
 
 def test_runtime_certificates_match_ingress_tls() -> None:
@@ -2555,31 +2637,28 @@ def test_runtime_certificates_match_ingress_tls() -> None:
     ingresses = sorted(
         (
             tls["secretName"],
-            tls["secretName"],
             tuple(tls["hosts"]),
         )
         for document in documents
         if document["kind"] == "Ingress"
         for tls in document["spec"]["tls"]
     )
-    certificates = sorted(
-        (
-            document["metadata"]["name"],
-            document["spec"]["secretName"],
-            tuple(document["spec"]["dnsNames"]),
-        )
+    certificates = {
+        document["spec"]["secretName"]: tuple(document["spec"]["dnsNames"])
         for document in documents
         if document["kind"] == "Certificate"
-    )
-    assert (
-        certificates
-        == ingresses
-        == [
-            ("ufo-gateway-tls", "ufo-gateway-tls", ("apex_host", "gateway_origin_host")),
-            ("ufo-ingress-tls", "ufo-ingress-tls", ("*.apex_host",)),
-            ("ufo-serve-tls", "ufo-serve-tls", ("shared_host",)),
-        ]
-    )
+    }
+    assert certificates == {
+        "ufo-gateway-tls": ("apex_host",),
+        "ufo-ingress-tls": ("*.apex_host",),
+        "ufo-serve-tls": ("shared_host",),
+    }
+    assert ingresses == [
+        ("ufo-gateway-tls", ("apex_host",)),
+        ("ufo-ingress-tls", ("*.apex_host",)),
+        ("ufo-ingress-tls", ("gateway_origin_host",)),
+        ("ufo-serve-tls", ("shared_host",)),
+    ]
 
 
 def test_runtime_secret_consumers_roll_once_per_production_deploy() -> None:
@@ -3020,7 +3099,8 @@ def test_edge_doors_use_separate_environment_origins() -> None:
     }
     hosted = (ROOT / "infra" / "templates" / "hosted.yaml.tpl").read_text()
     assert "${apex_host},${gateway_origin_host}" in hosted
-    assert "hosts: [${apex_host}, ${gateway_origin_host}]" in hosted
+    assert "hosts: [${apex_host}]\n      secretName: ufo-gateway-tls" in hosted
+    assert "hosts: [${gateway_origin_host}]\n      secretName: ufo-ingress-tls" in hosted
     origin = re.search(
         r"    - host: \$\{gateway_origin_host\}\n.*?(?=\n---)",
         hosted,
