@@ -15,6 +15,7 @@ import logging
 import re
 import time
 from collections.abc import Set as AbstractSet
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -136,12 +137,12 @@ def _deploy_secrets():
 
 @pytest.fixture(autouse=True)
 async def _settle_status_tasks(db: None):
-    """A status task and a progress task each live as long as their turn, and no turn ever
-    terminates under the stubbed queue — settle them so no task outlives its test. Layered UNDER the
-    test's own patches: a fallback Slack transport (a task ending after the test's mock is undone
-    must never dial the real API) and a fast durable poll; teardown marks the tracked turns
-    cancelled and waits for each task to end on that durable state — ended, not cancelled, so no
-    query is abandoned mid-flight."""
+    async with _status_task_lifecycle():
+        yield
+
+
+@asynccontextmanager
+async def _status_task_lifecycle():
     patch = pytest.MonkeyPatch()
     fallback = httpx.MockTransport(
         lambda request: httpx.Response(200, json={"ok": True, "channel": "C0", "ts": "0.0"})
@@ -155,25 +156,57 @@ async def _settle_status_tasks(db: None):
     patch.setattr(hub_tail, "TERMINAL_POLL_SECONDS", 0.05)
     try:
         yield
-        await asyncio.gather(*slack._IDENTITY_TASKS.values(), return_exceptions=True)
-        await asyncio.gather(*slack._REWRITE_TASKS, return_exceptions=True)
-        turn_ids = set(slack._STATUS_TASKS) | set(slack._PROGRESS_TASKS)
-        tasks = [*slack._STATUS_TASKS.values(), *slack._PROGRESS_TASKS.values()]
-        if turn_ids:
-            frame = TerminalFrame(status="cancelled").model_dump(mode="json")
-            async with workspace_tx() as connection:
-                await connection.execute(
-                    sa.update(tables.turn)
-                    .where(tables.turn.c.id.in_(list(turn_ids)))
-                    .values(status="cancelled", terminal=frame, updated_at=sa.func.now())
-                )
-            await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=10)
-        slack._STATUS_TASKS.clear()
-        slack._PROGRESS_TASKS.clear()
-        slack._THREAD_WRITERS.clear()
-        slack._IDENTITY_TASKS.clear()
     finally:
-        patch.undo()
+        try:
+            await asyncio.gather(*slack._IDENTITY_TASKS.values(), return_exceptions=True)
+            await asyncio.gather(*slack._REWRITE_TASKS, return_exceptions=True)
+            turn_ids = set(slack._STATUS_TASKS) | set(slack._PROGRESS_TASKS)
+            tasks = [*slack._STATUS_TASKS.values(), *slack._PROGRESS_TASKS.values()]
+            if turn_ids:
+                frame = TerminalFrame(status="cancelled").model_dump(mode="json")
+                async with workspace_tx() as connection:
+                    await connection.execute(
+                        sa.update(tables.turn)
+                        .where(tables.turn.c.id.in_(list(turn_ids)))
+                        .values(status="cancelled", terminal=frame, updated_at=sa.func.now())
+                    )
+                await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=10)
+            slack._STATUS_TASKS.clear()
+            slack._PROGRESS_TASKS.clear()
+            slack._THREAD_WRITERS.clear()
+            slack._IDENTITY_TASKS.clear()
+        finally:
+            patch.undo()
+
+
+async def test_reporter_cleanup_terminalizes_a_reporter_after_failure(db: None) -> None:
+    workspace_id, _ = await _seed()
+    turn_id = await _seed_done_turn(workspace_id, "C1:100.0", "", None, artifact=False)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .where(tables.turn.c.id == turn_id)
+            .values(status="running", terminal=None, updated_at=sa.func.now())
+        )
+
+    async def follow() -> None:
+        async for _ in hub_tail.tail_frames(InProcessHub(), turn_id):
+            pass
+
+    with pytest.raises(RuntimeError, match="test failure"):
+        async with _status_task_lifecycle():
+            task = asyncio.create_task(follow())
+            slack._STATUS_TASKS[turn_id] = task
+            raise RuntimeError("test failure")
+    assert task.done()
+    assert not task.cancelled()
+    assert task.exception() is None
+    async with workspace_tx() as connection:
+        status = await connection.scalar(
+            sa.select(tables.turn.c.status).where(tables.turn.c.id == turn_id)
+        )
+
+    assert status == "cancelled"
 
 
 @dataclass
@@ -3433,7 +3466,8 @@ async def test_the_status_holds_whatever_prose_the_model_gave_it(
                 sa.select(tables.turn.c.id).where(tables.turn.c.workspace_id == workspace_id)
             )
         ).scalar_one()
-    task = slack._STATUS_TASKS[turn_id]
+    status_task = slack._STATUS_TASKS[turn_id]
+    progress_task = slack._PROGRESS_TASKS[turn_id]
 
     async def _until(status: str, frame: ToolCall) -> None:
         deadline = time.monotonic() + 5
@@ -3456,8 +3490,8 @@ async def test_the_status_holds_whatever_prose_the_model_gave_it(
     overlong = "Reconciling every invoice line against the ledger " * 8
     cut = f"{overlong.strip()[: slack.STATUS_DESCRIPTION_LIMIT]}…"
     await _until(cut, ToolCall(tool="bash", preview="{}", description=overlong))
-    await hub.publish(turn_id, Terminal(frame=TerminalFrame(status="done", text="hi")))
-    await task
+    await _finish_turn(turn_id, "hi")
+    await asyncio.gather(status_task, progress_task)
 
     assert len(overlong) > slack.STATUS_TEXT_LIMIT
     assert len(cut) == slack.STATUS_TEXT_LIMIT
