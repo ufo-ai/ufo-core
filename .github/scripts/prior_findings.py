@@ -3,7 +3,7 @@
 Run by the review-pull-request skill's Establish phase. Prints one JSON object on stdout:
 
     {"rounds": <count of reviews this pull request has already had> | null,
-     "anchor_sha": "<head the newest prior finding anchored to>" | null,
+     "anchor_sha": "<head the newest prior round reviewed>" | null,
      "verdicts": ["<each earlier round's summary body>"],
      "findings": [{"path", "line", "commit_id", "body", "replies": [{"author", "body"}]}]}
 
@@ -17,7 +17,8 @@ A round ends in a decisive review, or — where GitHub refuses one because Claud
 request — in an issue comment holding only the verdict marker. Both are counted, from three
 endpoints, because a count that saw only reviews reads a Claude-authored pull request as unreviewed
 however many rounds it has had. A marker carries no summary, so `verdicts` is shorter than `rounds`
-on that path.
+on that path. The newest decisive review, marker, or finding advances `anchor_sha`; a candidate
+without a timestamp leaves it null so the caller audits the cumulative diff.
 """
 
 from __future__ import annotations
@@ -66,6 +67,10 @@ def json_optional_int(value: object, name: str) -> int | None:
     return None if value is None else json_int(value, name)
 
 
+def json_optional_str(value: object, name: str) -> str | None:
+    return None if value is None else json_str(value, name)
+
+
 @dataclass(frozen=True)
 class Comment:
     """One inline review comment as the pulls comments endpoint returns it."""
@@ -77,6 +82,7 @@ class Comment:
     commit_id: str | None
     body: str
     in_reply_to_id: int | None
+    at: str | None
 
 
 def author_of(node: JsonObject, name: str) -> str:
@@ -89,13 +95,11 @@ def author_of(node: JsonObject, name: str) -> str:
 
 
 def comment(node: JsonObject) -> Comment:
-    """Parse one comment, raising `Unusable` on any shape this module cannot read.
-
-    A comment whose anchor commit is gone carries the head it was written against under
-    `original_commit_id`.
-    """
+    """Parse one comment, raising `Unusable` on any shape this module cannot read."""
     line = node.get("line")
-    anchor = node.get("commit_id") or node.get("original_commit_id")
+    anchor = (
+        node.get("original_commit_id") if "original_commit_id" in node else node.get("commit_id")
+    )
     return Comment(
         id=json_int(node.get("id"), "comment.id"),
         author=author_of(node, "comment"),
@@ -104,6 +108,7 @@ def comment(node: JsonObject) -> Comment:
         commit_id=None if anchor is None else json_str(anchor, "comment.commit_id"),
         body=json_str(node.get("body") or "", "comment.body"),
         in_reply_to_id=json_optional_int(node.get("in_reply_to_id"), "comment.in_reply_to_id"),
+        at=json_optional_str(node.get("created_at"), "comment.created_at"),
     )
 
 
@@ -114,6 +119,8 @@ class Review:
     author: str
     state: str
     body: str
+    commit_id: str | None
+    at: str | None
 
 
 def review(node: JsonObject) -> Review:
@@ -121,6 +128,8 @@ def review(node: JsonObject) -> Review:
         author=author_of(node, "review"),
         state=json_str(node.get("state"), "review.state").upper(),
         body=json_str(node.get("body") or "", "review.body"),
+        commit_id=json_optional_str(node.get("commit_id"), "review.commit_id"),
+        at=json_optional_str(node.get("submitted_at"), "review.submitted_at"),
     )
 
 
@@ -130,12 +139,14 @@ class IssueComment:
 
     author: str
     body: str
+    at: str | None
 
 
 def issue_comment(node: JsonObject) -> IssueComment:
     return IssueComment(
         author=author_of(node, "issue_comment"),
         body=json_str(node.get("body") or "", "issue_comment.body"),
+        at=json_optional_str(node.get("created_at"), "issue_comment.created_at"),
     )
 
 
@@ -244,18 +255,34 @@ def prior_round(
         for one in comments
         if one.author in CLAUDE_AUTHORS and one.in_reply_to_id is None
     )
-    verdicts = tuple(
-        one.body for one in reviews if one.author in CLAUDE_AUTHORS and one.state in DECISIVE_STATES
+    decisive = tuple(
+        one for one in reviews if one.author in CLAUDE_AUTHORS and one.state in DECISIVE_STATES
     )
-    markers = sum(
-        1
+    verdicts = tuple(one.body for one in decisive)
+    markers = tuple(
+        (one, match)
         for one in issue_comments
-        if one.author in CLAUDE_AUTHORS and VERDICT_MARKER.fullmatch(one.body.strip())
+        if one.author in CLAUDE_AUTHORS
+        if (match := VERDICT_MARKER.fullmatch(one.body.strip())) is not None
     )
-    anchors = [finding.commit_id for finding in findings if finding.commit_id]
+    candidates = [
+        (one.at, 0, one.commit_id)
+        for one in comments
+        if one.author in CLAUDE_AUTHORS and one.in_reply_to_id is None and one.commit_id and one.at
+    ]
+    candidates += [(one.at, 1, one.commit_id) for one in decisive if one.commit_id and one.at]
+    candidates += [(one.at, 2, match.group(1)) for one, match in markers if one.at]
+    missing_time = any(
+        one.author in CLAUDE_AUTHORS
+        and one.in_reply_to_id is None
+        and one.commit_id
+        and one.at is None
+        for one in comments
+    ) or any(one.commit_id and one.at is None for one in decisive)
+    missing_time = missing_time or any(one.at is None for one, _ in markers)
     return PriorRound(
-        rounds=len(verdicts) + markers or (1 if findings else 0),
-        anchor_sha=anchors[-1] if anchors else None,
+        rounds=len(verdicts) + len(markers) or (1 if findings else 0),
+        anchor_sha=None if missing_time or not candidates else max(candidates)[2],
         verdicts=verdicts,
         findings=findings,
     )

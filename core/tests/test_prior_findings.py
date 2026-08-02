@@ -24,7 +24,14 @@ OLDER = "1a409e751a409e751a409e751a409e751a409e75"
 MARKER = f"<!-- claude-review-verdict head={HEAD} verdict=CHANGES_REQUESTED -->"
 
 
-def payload(id, login="claude[bot]", commit_id=HEAD, in_reply_to_id=None, body="finding"):
+def payload(
+    id,
+    login="claude[bot]",
+    commit_id=HEAD,
+    in_reply_to_id=None,
+    body="finding",
+    at=None,
+):
     return {
         "id": id,
         "user": None if login is None else {"login": login},
@@ -33,15 +40,32 @@ def payload(id, login="claude[bot]", commit_id=HEAD, in_reply_to_id=None, body="
         "commit_id": commit_id,
         "in_reply_to_id": in_reply_to_id,
         "body": body,
+        "created_at": at or f"2026-01-01T00:00:00.{id:06d}Z",
     }
 
 
-def verdict_payload(state="CHANGES_REQUESTED", login="claude[bot]", body="Four blocking findings."):
-    return {"user": None if login is None else {"login": login}, "state": state, "body": body}
+def verdict_payload(
+    state="CHANGES_REQUESTED",
+    login="claude[bot]",
+    body="Four blocking findings.",
+    commit_id=HEAD,
+    at="2026-01-01T00:00:00.000005Z",
+):
+    return {
+        "user": None if login is None else {"login": login},
+        "state": state,
+        "body": body,
+        "commit_id": commit_id,
+        "submitted_at": at,
+    }
 
 
-def note_payload(body=MARKER, login="claude[bot]"):
-    return {"user": None if login is None else {"login": login}, "body": body}
+def note_payload(body=MARKER, login="claude[bot]", at="2026-01-01T00:00:00.000005Z"):
+    return {
+        "user": None if login is None else {"login": login},
+        "body": body,
+        "created_at": at,
+    }
 
 
 def comments(*payloads):
@@ -171,6 +195,19 @@ def test_each_decisive_claude_review_is_one_round():
     assert list(result.verdicts) == ["Five blocking findings.", "Four blocking findings."]
 
 
+def test_the_newest_decisive_review_advances_the_range_anchor_without_a_new_finding():
+    result = prior.prior_round(
+        comments(payload(1, commit_id=OLDER)),
+        reviews(
+            verdict_payload(commit_id=OLDER),
+            verdict_payload(commit_id=HEAD, at="2026-01-01T00:00:00.000010Z"),
+        ),
+        (),
+    )
+
+    assert result.anchor_sha == HEAD
+
+
 def test_a_bodiless_verdict_still_counts_its_round():
     result = prior.prior_round((), reviews(verdict_payload(state="APPROVED", body=None)), ())
 
@@ -234,7 +271,18 @@ def test_a_marker_comment_is_the_round_github_refused_as_a_review():
     result = prior.prior_round((), (), notes(note_payload()))
 
     assert result.rounds == 1
+    assert result.anchor_sha == HEAD
     assert result.verdicts == ()
+
+
+def test_the_newest_marker_or_finding_advances_the_range_anchor():
+    newer = "b" * 40
+    marker = note_payload(body=MARKER.replace(HEAD, newer), at="2026-01-01T00:00:00.000010Z")
+    finding = payload(2, commit_id=newer, at="2026-01-01T00:00:00.000010Z")
+    decisive = verdict_payload(commit_id=OLDER, at="2026-01-01T00:00:00.000005Z")
+
+    assert prior.prior_round((), reviews(decisive), notes(marker)).anchor_sha == newer
+    assert prior.prior_round(comments(finding), reviews(decisive), ()).anchor_sha == newer
 
 
 def test_marker_rounds_add_to_the_decisive_ones():
@@ -314,6 +362,20 @@ def test_an_empty_verdict_body_is_readable():
 
 
 @pytest.mark.parametrize(
+    ("reader", "node"),
+    [
+        (prior.comment, payload(1) | {"created_at": 7}),
+        (prior.review, verdict_payload() | {"commit_id": 7}),
+        (prior.review, verdict_payload() | {"submitted_at": 7}),
+        (prior.issue_comment, note_payload() | {"created_at": 7}),
+    ],
+)
+def test_each_optional_string_field_rejects_a_wrong_type(reader, node):
+    with pytest.raises(prior.Unusable):
+        reader(node)
+
+
+@pytest.mark.parametrize(
     "node",
     [
         {"user": {"login": "claude[bot]"}},
@@ -336,16 +398,67 @@ def test_a_line_falls_back_to_the_original_line():
     assert prior.comment(node).line == 7
 
 
-def test_an_anchor_falls_back_to_the_original_commit_id():
+def test_an_explicit_original_commit_id_is_the_anchor_when_the_live_anchor_is_null():
     node = payload(1) | {"commit_id": None, "original_commit_id": OLDER}
 
     assert prior.comment(node).commit_id == OLDER
 
 
-def test_a_live_commit_id_wins_over_the_original():
+def test_the_original_commit_id_wins_over_githubs_advanced_live_anchor():
     node = payload(1, commit_id=HEAD) | {"original_commit_id": OLDER}
 
-    assert prior.comment(node).commit_id == HEAD
+    assert prior.comment(node).commit_id == OLDER
+
+
+@pytest.mark.parametrize(
+    ("history", "expected_rounds"),
+    [
+        ((payload(1) | {"created_at": None},), 1),
+        ((verdict_payload(at=None),), 1),
+        ((note_payload(at=None),), 1),
+    ],
+)
+def test_an_anchor_with_no_timestamp_keeps_the_range_unset(history, expected_rounds):
+    inline = comments(*history) if "id" in history[0] else ()
+    verdicts = reviews(*history) if "state" in history[0] else ()
+    pr_comments = notes(*history) if "created_at" in history[0] and "id" not in history[0] else ()
+    result = prior.prior_round(inline, verdicts, pr_comments)
+
+    assert result.rounds == expected_rounds
+    assert result.anchor_sha is None
+
+
+@pytest.mark.parametrize("source", ["finding", "review", "marker"])
+def test_one_untimestamped_anchor_keeps_a_mixed_history_range_unset(source):
+    inline = comments(payload(1, commit_id=OLDER))
+    verdicts = reviews(verdict_payload(commit_id=OLDER))
+    pr_comments = notes(note_payload(body=MARKER))
+
+    if source == "finding":
+        inline = comments(payload(1, commit_id=OLDER) | {"created_at": None})
+    elif source == "review":
+        verdicts = reviews(verdict_payload(commit_id=OLDER, at=None))
+    else:
+        pr_comments = notes(note_payload(body=MARKER, at=None))
+
+    assert prior.prior_round(inline, verdicts, pr_comments).anchor_sha is None
+
+
+def test_a_decisive_review_wins_a_timestamp_tie_with_a_finding():
+    at = "2026-01-01T00:00:00Z"
+    finding = payload(1, commit_id=HEAD, at=at)
+    decisive = verdict_payload(commit_id=OLDER, at=at)
+
+    assert prior.prior_round(comments(finding), reviews(decisive), ()).anchor_sha == OLDER
+
+
+def test_a_marker_wins_a_timestamp_tie_with_a_decisive_review():
+    at = "2026-01-01T00:00:00Z"
+    marker_head = "0" * 40
+    marker = note_payload(body=MARKER.replace(HEAD, marker_head), at=at)
+    decisive = verdict_payload(commit_id=HEAD, at=at)
+
+    assert prior.prior_round((), reviews(decisive), notes(marker)).anchor_sha == marker_head
 
 
 def test_a_finding_with_no_anchor_at_all_leaves_the_range_unset():

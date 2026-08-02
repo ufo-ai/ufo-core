@@ -107,10 +107,16 @@ def test_claude_code_review_skill_verifies_prior_rounds_instead_of_re_deriving()
     assert "Closure across all three" in prose
     assert "On a follow-up round — `rounds` is anything but `0`" in prose
     assert "verify each earlier finding is actually fixed at this head" in prose
-    assert "`anchor_sha`, the head the newest earlier finding anchored to" in prose
+    assert "`anchor_sha`, the head the newest earlier round reviewed" in prose
+    assert "`git cat-file -e <anchor_sha>^{commit}`" in prose
+    assert "`git fetch origin <anchor_sha>`" in prose
     assert "`git diff <anchor_sha>..<head sha>`" in prose
+    assert prose.index("`git fetch origin <anchor_sha>`") < prose.index(
+        "`git diff <anchor_sha>..<head sha>`"
+    )
     assert "A null `anchor_sha` leaves no range" in prose
     assert "A follow-up round carries a null `anchor_sha`" in prose
+    assert "No prior finding named a head" not in prose
     assert "never on code no commit since `anchor_sha` has touched" in prose
     assert (
         "The reply decides how much work verifying costs, never whether the finding holds" in prose

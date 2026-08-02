@@ -78,10 +78,11 @@ bills for.
 On a follow-up round — `rounds` is anything but `0` — give each agent the findings and replies from
 step 6 and bound its work to two things: verify each earlier finding is actually fixed at this head,
 and audit what the new commits changed. Step 6 returns `anchor_sha`, the head the newest earlier
-finding anchored to: when it is set, capture `git diff <anchor_sha>..<head sha>` under
-`$RUNNER_TEMP` and give agents that path alongside the cumulative diff, naming which is which. A
-null `anchor_sha` leaves no range, so audit the cumulative diff instead and still verify each
-earlier finding. Re-derive a finding on
+round reviewed. When it is set, check it with `git cat-file -e <anchor_sha>^{commit}` and, when it
+is missing, fetch that exact object with `git fetch origin <anchor_sha>`. Then capture
+`git diff <anchor_sha>..<head sha>` under `$RUNNER_TEMP` and give agents that path alongside the
+cumulative diff, naming which is which. A null `anchor_sha` leaves no range, so audit the cumulative
+diff instead and still verify each earlier finding. Re-derive a finding on
 unchanged code only when an earlier finding's fix exposed it, and with a range in hand never on code
 no commit since `anchor_sha` has touched.
 
@@ -228,7 +229,7 @@ and the ledger carries a row for every finding this round published.
 | Step 6 reports a null `rounds` | The fetch failed; that is not evidence of a first review. Review every changed file rather than assume there is nothing to verify. |
 | About to publish a prose finding on a sentence an earlier round already raised | Ask for the deletion, once. If an earlier round already asked for it, drop it — the sentence has outlasted its worth. Never negotiate a wording. |
 | `rounds` is 3 or more and each recent range brought a new mechanism | The fixes are outgrowing the findings. Name the split, quote the written rule, and spend the round on that. |
-| A follow-up round carries a null `anchor_sha` | No prior finding named a head, so there is no range. Audit the cumulative diff and verify the earlier findings anyway; never skip the round for want of a range. |
+| A follow-up round carries a null `anchor_sha` | Audit the cumulative diff and verify the earlier findings anyway; never skip the round for want of a range. |
 | Tempted to read prior findings with `gh pr view` or a filtered `gh api` | `gh pr view` returns no inline comments, and `gh api --paginate -q` applies the filter per page, keeping only page one. Run the script. |
 | Only wording, comment, or docstring issues remain | Approve and list them as advisory. Requesting changes for prose costs the author a full review round. |
 | A structural or design finding fits neither blocking bucket | It is blocking only with a written rule quoted from `CLAUDE.md`, `AGENTS.md`, `spec.md`, or an existing local contract. Without one it is a preference: drop it. |
