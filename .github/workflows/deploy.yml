@@ -198,11 +198,12 @@ jobs:
             --proxy-url "$(terraform -chdir="$TF_DIR" output -raw sandbox_proxy_url)"
 
   edge:
-    needs: [changes, production_deploy]
-    if: >-
-      !cancelled() && needs.changes.outputs.deploy == 'true' &&
-      (github.event_name == 'pull_request' || needs.production_deploy.result == 'success')
+    needs: [changes, rollout]
+    if: needs.changes.outputs.deploy == 'true'
     runs-on: ubuntu-latest
+    concurrency:
+      group: ${{ github.event_name == 'pull_request' && format('deploy-edge-pr-{0}', github.event.pull_request.number) || 'deploy-edge' }}
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
 
@@ -229,27 +230,44 @@ jobs:
           if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
             LOCK=false
           fi
-          terraform plan -input=false -no-color -lock="$LOCK" -out="$RUNNER_TEMP/edge.tfplan"
+          terraform plan -input=false -no-color -lock="$LOCK" -lock-timeout=10m \
+            -target=module.testing -out="$RUNNER_TEMP/edge.tfplan"
 
       - name: Reject destructive changes
         working-directory: infra/envs/edge
         run: terraform show -json "$RUNNER_TEMP/edge.tfplan" | python "$GITHUB_WORKSPACE/.github/scripts/terraform_plan_guard.py"
+
+      - name: Terraform production edge plan
+        if: github.event_name == 'pull_request'
+        working-directory: infra/envs/edge
+        env:
+          TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          terraform plan -input=false -no-color -lock=false \
+            -target=cloudflare_ruleset.https_redirect \
+            -target=cloudflare_zone_setting.always_use_https \
+            -target=module.prod \
+            -out="$RUNNER_TEMP/production-edge-review.tfplan"
+
+      - name: Reject destructive production edge changes
+        if: github.event_name == 'pull_request'
+        working-directory: infra/envs/edge
+        run: terraform show -json "$RUNNER_TEMP/production-edge-review.tfplan" | python "$GITHUB_WORKSPACE/.github/scripts/terraform_plan_guard.py"
 
       - name: Terraform apply
         if: github.event_name != 'pull_request'
         working-directory: infra/envs/edge
         run: terraform apply -input=false "$RUNNER_TEMP/edge.tfplan"
 
-      - name: Gate public doors
+      - name: Gate testing door
         if: github.event_name != 'pull_request'
         shell: bash
         run: |
-          for HOST in flyingobject.ai testing.flyingobject.ai; do
-            curl -fsS "https://$HOST/" | grep -F "curl https://$HOST/waitlist"
-            test "$(curl -fsS -o /dev/null -w '%{http_code} %{redirect_url}' "https://$HOST/login")" = "302 https://app.$HOST/login"
-            curl -fsS "https://$HOST/ufo" | grep -F 'UFO_URL="${UFO_URL:-https://'"$HOST"'}"'
-            curl -fsS "https://$HOST/fleet" | jq -e '.craft | type == "number" and . >= 0' >/dev/null
-          done
+          HOST=testing.flyingobject.ai
+          curl -fsS "https://$HOST/" | grep -F "curl https://$HOST/waitlist"
+          test "$(curl -fsS -o /dev/null -w '%{http_code} %{redirect_url}' "https://$HOST/login")" = "302 https://app.$HOST/login"
+          curl -fsS "https://$HOST/ufo" | grep -F 'UFO_URL="${UFO_URL:-https://'"$HOST"'}"'
+          curl -fsS "https://$HOST/fleet" | jq -e '.craft | type == "number" and . >= 0' >/dev/null
 
   production:
     needs: changes
@@ -282,6 +300,7 @@ jobs:
         run: |
           terraform plan -input=false -no-color -lock=false \
             -out="$RUNNER_TEMP/production.tfplan" \
+            -target=module.platform.module.vpc \
             -target=module.platform.module.eks \
             -target=module.platform.aws_secretsmanager_secret.api_keys \
             -target=module.platform.aws_secretsmanager_secret.gateway_slack_connect \
@@ -414,6 +433,9 @@ jobs:
     if: github.event_name != 'pull_request' && needs.changes.outputs.deploy == 'true'
     environment: production
     runs-on: ubuntu-latest
+    concurrency:
+      group: deploy-edge
+      cancel-in-progress: false
     env:
       DEPLOY_ROLE_ARN: arn:aws:iam::899147036157:role/github-production-deploy
       IMAGE_TAG: ${{ needs.rollout.outputs.image_tag }}
@@ -466,6 +488,7 @@ jobs:
         run: |
           terraform plan -input=false -no-color \
             -out="$RUNNER_TEMP/production-foundation.tfplan" \
+            -target=module.platform.module.vpc \
             -target=module.platform.module.eks \
             -target=module.platform.aws_secretsmanager_secret.postgres \
             -target=module.platform.aws_secretsmanager_secret.platform \
@@ -544,6 +567,38 @@ jobs:
           kubectl --namespace "$NAMESPACE" rollout status deployment/otel-collector --timeout=15m
           kubectl --namespace "$NAMESPACE" rollout status daemonset/otel-logs-agent --timeout=15m
 
+      - name: Terraform edge init
+        working-directory: infra/envs/edge
+        run: terraform init -input=false
+
+      - name: Terraform edge plan
+        working-directory: infra/envs/edge
+        env:
+          TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          terraform plan -input=false -no-color -lock-timeout=10m \
+            -target=cloudflare_ruleset.https_redirect \
+            -target=cloudflare_zone_setting.always_use_https \
+            -target=module.prod \
+            -out="$RUNNER_TEMP/production-edge.tfplan"
+
+      - name: Reject destructive edge changes
+        working-directory: infra/envs/edge
+        run: terraform show -json "$RUNNER_TEMP/production-edge.tfplan" | python "$GITHUB_WORKSPACE/.github/scripts/terraform_plan_guard.py"
+
+      - name: Terraform edge apply
+        working-directory: infra/envs/edge
+        run: terraform apply -input=false "$RUNNER_TEMP/production-edge.tfplan"
+
+      - name: Gate production door
+        shell: bash
+        run: |
+          HOST=flyingobject.ai
+          curl -fsS "https://$HOST/" | grep -F "curl https://$HOST/waitlist"
+          test "$(curl -fsS -o /dev/null -w '%{http_code} %{redirect_url}' "https://$HOST/login")" = "302 https://app.$HOST/login"
+          curl -fsS "https://$HOST/ufo" | grep -F 'UFO_URL="${UFO_URL:-https://'"$HOST"'}"'
+          curl -fsS "https://$HOST/fleet" | jq -e '.craft | type == "number" and . >= 0' >/dev/null
+
       - name: Gate sandbox egress proxy TLS
         env:
           E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
@@ -615,10 +670,9 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           test -n "$DD_API_KEY" || { echo 'DD_API_KEY secret is unset' >&2; exit 1; }
-          test "$TESTING_RESULT" = success && \
-            { test "$EDGE_RESULT" = success || { test "$PROD_RESULT" != success && test "$EDGE_RESULT" = skipped; }; } && \
+          test "$TESTING_RESULT" = success && test "$EDGE_RESULT" = success && \
             TESTING_STATUS="$DD_STATUS_OK" || TESTING_STATUS="$DD_STATUS_CRITICAL"
-          test "$PROD_RESULT" = success && test "$EDGE_RESULT" = success && PROD_STATUS="$DD_STATUS_OK" || PROD_STATUS="$DD_STATUS_CRITICAL"
+          test "$PROD_RESULT" = success && PROD_STATUS="$DD_STATUS_OK" || PROD_STATUS="$DD_STATUS_CRITICAL"
           curl -sS --fail-with-body -X POST "$DD_CHECK_URL" \
             -H "DD-API-KEY: $DD_API_KEY" -H 'Content-Type: application/json' \
             -d "$(jq -n --arg check "$DEPLOY_CHECK" --argjson testing "$TESTING_STATUS" \

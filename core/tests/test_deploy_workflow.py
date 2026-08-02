@@ -507,11 +507,8 @@ def test_plans_run_only_for_selected_deployment_inputs() -> None:
 
     edge = jobs["edge"]
     assert isinstance(edge, dict)
-    assert edge["needs"] == ["changes", "production_deploy"]
-    assert edge["if"] == (
-        "!cancelled() && needs.changes.outputs.deploy == 'true' && "
-        "(github.event_name == 'pull_request' || needs.production_deploy.result == 'success')"
-    )
+    assert edge["needs"] == ["changes", "rollout"]
+    assert edge["if"] == "needs.changes.outputs.deploy == 'true'"
 
     production = jobs["production"]
     assert isinstance(production, dict)
@@ -532,19 +529,91 @@ def test_plans_run_only_for_selected_deployment_inputs() -> None:
     assert production_deploy["environment"] == "production"
 
 
-def test_edge_gates_both_live_public_doors(tmp_path: Path) -> None:
-    step = _step("edge", "Gate public doors")
+@pytest.mark.parametrize(
+    (
+        "job_name",
+        "targets",
+        "plan_name",
+        "guard_name",
+        "apply_name",
+        "gate_name",
+        "host",
+        "init_name",
+        "plan_step_name",
+        "condition",
+    ),
+    [
+        (
+            "edge",
+            ("module.testing",),
+            "edge",
+            "Reject destructive changes",
+            "Terraform apply",
+            "Gate testing door",
+            "testing.flyingobject.ai",
+            "Terraform init",
+            "Terraform plan",
+            "github.event_name != 'pull_request'",
+        ),
+        (
+            "production_deploy",
+            (
+                "cloudflare_ruleset.https_redirect",
+                "cloudflare_zone_setting.always_use_https",
+                "module.prod",
+            ),
+            "production-edge",
+            "Reject destructive edge changes",
+            "Terraform edge apply",
+            "Gate production door",
+            "flyingobject.ai",
+            "Terraform edge init",
+            "Terraform edge plan",
+            None,
+        ),
+    ],
+)
+def test_edge_deploys_are_isolated(
+    tmp_path: Path,
+    job_name: str,
+    targets: tuple[str, ...],
+    plan_name: str,
+    guard_name: str,
+    apply_name: str,
+    gate_name: str,
+    host: str,
+    init_name: str,
+    plan_step_name: str,
+    condition: str | None,
+) -> None:
     jobs = _workflow(WORKFLOWS / "deploy.yml")["jobs"]
     assert isinstance(jobs, dict)
-    edge = jobs["edge"]
-    assert isinstance(edge, dict)
-    steps = edge["steps"]
+    job = jobs[job_name]
+    assert isinstance(job, dict)
+    steps = job["steps"]
     assert isinstance(steps, list)
-    names = [item.get("name") for item in steps if isinstance(item, dict)]
-    assert names.index("Terraform apply") < names.index("Gate public doors")
-    assert step["if"] == "github.event_name != 'pull_request'"
-    assert step["shell"] == "bash"
-    script = step["run"]
+    init = _step(job_name, init_name)
+    plan = _step(job_name, plan_step_name)
+    guard = _step(job_name, guard_name)
+    apply = _step(job_name, apply_name)
+    gate = _step(job_name, gate_name)
+    plan_path = f"$RUNNER_TEMP/{plan_name}.tfplan"
+    for step in (init, plan, guard, apply):
+        assert step["working-directory"] == "infra/envs/edge"
+    assert plan["env"] == {"TF_VAR_cloudflare_api_token": "${{ secrets.CLOUDFLARE_API_TOKEN }}"}
+    assert "-lock-timeout=10m" in plan["run"]
+    assert tuple(re.findall(r"-target=(\S+)", plan["run"])) == targets
+    assert f'-out="{plan_path}"' in plan["run"]
+    assert guard["run"] == (
+        f'terraform show -json "{plan_path}" | '
+        'python "$GITHUB_WORKSPACE/.github/scripts/terraform_plan_guard.py"'
+    )
+    assert apply["run"] == f'terraform apply -input=false "{plan_path}"'
+    assert steps.index(plan) < steps.index(guard) < steps.index(apply) < steps.index(gate)
+    assert apply.get("if") == condition
+    assert gate.get("if") == condition
+    assert gate["shell"] == "bash"
+    script = gate["run"]
     assert isinstance(script, str)
     curl = tmp_path / "curl"
     curl.write_text(DOOR_CURL_STUB)
@@ -561,51 +630,76 @@ def test_edge_gates_both_live_public_doors(tmp_path: Path) -> None:
     }
     subprocess.run(["bash", "-e", "-o", "pipefail", "-c", script], check=True, env=environment)
     invoked = calls.read_text().splitlines()
-    assert len(invoked) == 8
-    for host in ("flyingobject.ai", "testing.flyingobject.ai"):
-        assert any(call.endswith(f"https://{host}/") for call in invoked)
-        assert any(call.endswith(f"https://{host}/login") for call in invoked)
-        assert any(call.endswith(f"https://{host}/ufo") for call in invoked)
-        assert any(call.endswith(f"https://{host}/fleet") for call in invoked)
-    environment["BAD_ROOT_HOST"] = "testing.flyingobject.ai"
-    failed = subprocess.run(
-        ["bash", "-e", "-o", "pipefail", "-c", script],
-        capture_output=True,
-        env=environment,
+    assert len(invoked) == 4
+    assert [call.rsplit(" ", 1)[-1] for call in invoked] == [
+        f"https://{host}/",
+        f"https://{host}/login",
+        f"https://{host}/ufo",
+        f"https://{host}/fleet",
+    ]
+    for name in (
+        "BAD_ROOT_HOST",
+        "BAD_LOGIN_HOST",
+        "BAD_HOST",
+        "NEGATIVE_FLEET_HOST",
+        "BAD_FLEET_HOST",
+    ):
+        failed = subprocess.run(
+            ["bash", "-e", "-o", "pipefail", "-c", script],
+            capture_output=True,
+            env=environment | {name: host},
+        )
+        assert failed.returncode != 0
+
+
+@pytest.mark.parametrize(
+    ("job_name", "group"),
+    [
+        (
+            "edge",
+            "${{ github.event_name == 'pull_request' && "
+            "format('deploy-edge-pr-{0}', github.event.pull_request.number) || 'deploy-edge' }}",
+        ),
+        ("production_deploy", "deploy-edge"),
+    ],
+)
+def test_edge_writers_share_deploy_concurrency(job_name: str, group: str) -> None:
+    job = _workflow(WORKFLOWS / "deploy.yml")["jobs"][job_name]
+    assert isinstance(job, dict)
+    assert job["concurrency"] == {"group": group, "cancel-in-progress": "false"}
+
+
+def test_pull_requests_guard_the_production_edge_plan() -> None:
+    jobs = _workflow(WORKFLOWS / "deploy.yml")["jobs"]
+    assert isinstance(jobs, dict)
+    edge = jobs["edge"]
+    assert isinstance(edge, dict)
+    steps = edge["steps"]
+    assert isinstance(steps, list)
+    plan = _step("edge", "Terraform production edge plan")
+    guard = _step("edge", "Reject destructive production edge changes")
+    assert plan["if"] == "github.event_name == 'pull_request'"
+    assert plan["working-directory"] == "infra/envs/edge"
+    assert plan["run"] == (
+        "terraform plan -input=false -no-color -lock=false \\\n"
+        "  -target=cloudflare_ruleset.https_redirect \\\n"
+        "  -target=cloudflare_zone_setting.always_use_https \\\n"
+        "  -target=module.prod \\\n"
+        '  -out="$RUNNER_TEMP/production-edge-review.tfplan"\n'
     )
-    assert failed.returncode != 0
-    environment["BAD_ROOT_HOST"] = ""
-    environment["BAD_LOGIN_HOST"] = "testing.flyingobject.ai"
-    failed = subprocess.run(
-        ["bash", "-e", "-o", "pipefail", "-c", script],
-        capture_output=True,
-        env=environment,
+    assert guard["if"] == "github.event_name == 'pull_request'"
+    assert guard["working-directory"] == "infra/envs/edge"
+    assert guard["run"] == (
+        'terraform show -json "$RUNNER_TEMP/production-edge-review.tfplan" | '
+        'python "$GITHUB_WORKSPACE/.github/scripts/terraform_plan_guard.py"'
     )
-    assert failed.returncode != 0
-    environment["BAD_LOGIN_HOST"] = ""
-    environment["BAD_HOST"] = "testing.flyingobject.ai"
-    failed = subprocess.run(
-        ["bash", "-e", "-o", "pipefail", "-c", script],
-        capture_output=True,
-        env=environment,
+    assert steps.index(plan) < steps.index(guard)
+    assert not any(
+        "terraform apply" in str(step.get("run", ""))
+        and "production-edge-review.tfplan" in str(step.get("run", ""))
+        for step in steps
+        if isinstance(step, dict)
     )
-    assert failed.returncode != 0
-    environment["BAD_HOST"] = ""
-    environment["NEGATIVE_FLEET_HOST"] = "testing.flyingobject.ai"
-    failed = subprocess.run(
-        ["bash", "-e", "-o", "pipefail", "-c", script],
-        capture_output=True,
-        env=environment,
-    )
-    assert failed.returncode != 0
-    environment["NEGATIVE_FLEET_HOST"] = ""
-    environment["BAD_FLEET_HOST"] = "testing.flyingobject.ai"
-    failed = subprocess.run(
-        ["bash", "-e", "-o", "pipefail", "-c", script],
-        capture_output=True,
-        env=environment,
-    )
-    assert failed.returncode != 0
 
 
 def test_pull_requests_plan_production_foundation_without_applying() -> None:
@@ -648,6 +742,7 @@ def test_pull_requests_plan_production_foundation_without_applying() -> None:
     assert (
         plan["run"] == "terraform plan -input=false -no-color -lock=false \\\n"
         '  -out="$RUNNER_TEMP/production.tfplan" \\\n'
+        "  -target=module.platform.module.vpc \\\n"
         "  -target=module.platform.module.eks \\\n"
         "  -target=module.platform.aws_secretsmanager_secret.api_keys \\\n"
         "  -target=module.platform.aws_secretsmanager_secret.gateway_slack_connect \\\n"
@@ -1284,9 +1379,12 @@ def test_production_deploy_applies_guarded_foundation_then_runtime() -> None:
     refresh = _step("production_deploy", "Refresh production runtime secrets")
     runtime_apply = _step("production_deploy", "Terraform apply")
     rollout = _step("production_deploy", "Wait for runtime rollout")
+    for step in (foundation_plan, foundation_guard, foundation_apply):
+        assert step["working-directory"] == "${{ env.TF_DIR }}"
     assert foundation_plan["run"] == (
         "terraform plan -input=false -no-color \\\n"
         '  -out="$RUNNER_TEMP/production-foundation.tfplan" \\\n'
+        "  -target=module.platform.module.vpc \\\n"
         "  -target=module.platform.module.eks \\\n"
         "  -target=module.platform.aws_secretsmanager_secret.postgres \\\n"
         "  -target=module.platform.aws_secretsmanager_secret.platform \\\n"
@@ -1739,13 +1837,15 @@ def test_every_main_deploy_conclusion_reaches_datadog(tmp_path: Path) -> None:
     assert {report["message"] for report in succeeded.values()} == {RUN_URL}
 
     _, edge_failed = _report(tmp_path, "success", "success", "failure")
-    assert {report["status"] for report in edge_failed.values()} == {DATADOG_STATUS_CRITICAL}
+    assert edge_failed["testing"]["status"] == DATADOG_STATUS_CRITICAL
+    assert edge_failed["prod"]["status"] == DATADOG_STATUS_OK
 
     _, edge_skipped = _report(tmp_path, "success", "success", "skipped")
-    assert {report["status"] for report in edge_skipped.values()} == {DATADOG_STATUS_CRITICAL}
+    assert edge_skipped["testing"]["status"] == DATADOG_STATUS_CRITICAL
+    assert edge_skipped["prod"]["status"] == DATADOG_STATUS_OK
 
     for prod_result in ("failure", "skipped"):
-        _, prod_failed = _report(tmp_path, "success", prod_result, "skipped")
+        _, prod_failed = _report(tmp_path, "success", prod_result)
         assert prod_failed["testing"]["status"] == DATADOG_STATUS_OK
         assert prod_failed["prod"]["status"] == DATADOG_STATUS_CRITICAL
 
