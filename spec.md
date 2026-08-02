@@ -188,8 +188,12 @@ terminal frame. A client's wait always ends — the terminal state commits on th
 
 ## Sandboxing
 
-Every turn executes tools in a per-conversation sandbox: Docker container from a pinned image
-(baked toolchain), default-deny network egress with exactly one route out — the sandbox proxy.
+Every turn executes tools in a sandbox: Docker container from a pinned image (baked toolchain),
+default-deny network egress with exactly one route out — the sandbox proxy. A sandbox belongs to a
+conversation, and a subagent turn executes in the sandbox of the turn that spawned it — one
+filesystem for a whole spawn tree, so a file a child leaves in `/workspace` is the handoff back to
+its parent, and co-residency is the cost: session state at fixed paths, one serving port, one
+`/proc` carrying the run token.
 An off-cluster carrier reaches the proxy only over TLS; the proxy token is never sent on plaintext
 transport. Each tool command gets a deployment-signed token naming its turn and acting member;
 unbound commands name no member. Descendants retain the launching command's environment while later
@@ -256,7 +260,7 @@ Manifest registers (each optional):
 | `indexes` | Index backends for memory/source retrieval (turbopuffer); the dialect-native default (SQLite FTS5 + local cosine, Postgres tsvector + pgvector) ships as the base-pinned `index_default` extension registering name `"default"`, which core resolves when `memory.index_backend` is unset. |
 | `embeds` | Embedding backends behind `EmbedClient`, selected by `memory.embed_backend`; OpenAI text-embedding-3-large ships as the base-pinned `embed_openai` extension registering name `"default"`. |
 | `hubs` | Stream hubs for multi-instance deploys (Redis). |
-| `cdp_providers` | CDP transport backends the one BUA browser engine (an extension, not core) connects, selected by `[browser] cdp_provider` (default `sandbox_chrome`). Core ships none: `sandbox_chrome` drives Chrome inside the turn's own sandbox; `browserbase` mints a hosted session per browser run (the hosted default) against a Browserbase Context it keeps for that run and deletes with the session. A provider mints a per-turn `CdpLease` the loop releases at turn end, and the lease answers both file questions only the transport can: `place_file` where its Chrome can open a workspace file (the same path when Chrome shares the sandbox, an upload when it is remote) and `download_dir`/`fetch_download` where that Chrome may write a download and how its bytes come back (a sandbox path read back out of the sandbox, or a hosted provider's storage read back over its API) — so a file input works whichever transport is selected, and a hosted browser is never handed a path it refuses. The BUA engine is the browser extension, so only the transport is a core seam, never the engine. |
+| `cdp_providers` | CDP transport backends the one BUA browser engine (an extension, not core) connects, selected by `[browser] cdp_provider` (default `sandbox_chrome`). Core ships none: `sandbox_chrome` drives Chrome inside the sandbox the turn runs in; `browserbase` mints a hosted session per browser run (the hosted default) against a Browserbase Context it keeps for that run and deletes with the session. A provider mints a per-turn `CdpLease` the loop releases at turn end, and the lease answers both file questions only the transport can: `place_file` where its Chrome can open a workspace file (the same path when Chrome shares the sandbox, an upload when it is remote) and `download_dir`/`fetch_download` where that Chrome may write a download and how its bytes come back (a sandbox path read back out of the sandbox, or a hosted provider's storage read back over its API) — so a file input works whichever transport is selected, and a hosted browser is never handed a path it refuses. The BUA engine is the browser extension, so only the transport is a core seam, never the engine. |
 | `auth_proxies` | The credential backend a feed-sync source resolves through when it registered against `DIRECT_ACCOUNT` because the member set a workspace credential instead of connecting an account. The sole installed backend is automatic; `[connectors] auth_backend` selects one when several are installed and must name a registered choice. `direct` BYOK reads that key host-side, never reaching the sandbox. A source holding an account id resolves only while its registering member owns the active connection, independent of agent grants; another member reconnecting the same account does not reactivate it. **The account handle is the routing signal, not the provider name.** |
 | `search_providers` | Web-search backends the research extension's tools call, selected by `[research] search_provider`. A backend runs host-side — it reads its BYOK key in-process and reaches its API over async HTTP, so the key never enters the sandbox — and answers a search query; `supports_fetch` marks whether it also fetches a URL's content (Exa's search + contents does; an answer-with-citations backend need not, and the `fetch_url` tool gates on it). Core ships no default: every backend is an extension, and the research extension `requires` this seam. |
 | `memory_search` | A named workspace-scoped memory search provider (`default` is selected). Core passes the exact readable subject set; consumers declare `requires=("memory_search",)`, and boot fails unless exactly one default provider is active. |
@@ -419,8 +423,9 @@ caps — the ledger spans every member's turns, so spend answers an admin or a m
 explicit grant holds the agent, never the main-agent default alone. The conversations view lists
 the member's own plus the workspace-shared ones and opens each as its turns, the turns those
 spawned nested beneath them (a subagent runs in its own conversation carrying the parent's
-audience), and the live workspace files; an admin lists every conversation of the agent and reads
-another member's private one only by acknowledging first that it may hold private information.
+audience, in the spawning turn's sandbox), and the live workspace files; an admin lists every
+conversation of the agent and reads another member's private one only by acknowledging first that
+it may hold private information.
 The acknowledgement is a granting act, so it rides the prepared-intent lane like every other panel
 mutation — `read_private_transcript`, admin-only — and the turn is its audit record; the row it
 writes names the reader, the subject, and the moment before any content is served, and is what the
@@ -630,8 +635,9 @@ Two invariants make this safe, and they hold even single-instance:
 
 - **At most one running turn per conversation** — the DBOS queue serializes on the conversation
   key; the transcript's monotonic seq depends on it.
-- **The workspace lives in the sandbox** — the conversation row's `sandbox_handle` names the one
-  container holding it, so any instance resumes exactly that sandbox and none may destroy one.
+- **The workspace lives in the sandbox** — a turn's `sandbox_conversation_id` names the conversation
+  whose row's `sandbox_handle` holds the container, its own unless it inherited the sandbox of the
+  turn that spawned it, so any instance resumes exactly that sandbox and none may destroy one.
 
 Misconfiguration fails loud at boot: the shared owner DSN must be set and no surface may claim a
 reserved onboarding route. Instances heartbeat a `runtime_instance` row so the fleet tracks its live
