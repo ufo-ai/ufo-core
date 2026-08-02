@@ -30,10 +30,13 @@ from e2b.exceptions import (
     TimeoutException,
 )
 from e2b.sandbox.commands.command_handle import CommandExitException
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from ufo_ext_e2b import (
     CA_INSTALL_TIMEOUT_SECONDS,
     CA_SANDBOX_PATH,
     CA_STAGING_PATH,
+    CARRIER_NAME,
     CONVERSATION_METADATA_KEY,
     DEFAULT_IDLE_SECONDS,
     E2B_API_KEY_ENV,
@@ -54,6 +57,7 @@ from ufo_ext_e2b import (
     build_e2b_carrier,
 )
 
+from ufo import o11y
 from ufo.config import BlobConfig, Config, DatabaseConfig, SandboxConfig
 from ufo.sandbox.select import select_carrier
 from ufo.sandbox.session import (
@@ -655,6 +659,57 @@ async def test_a_replacement_for_a_lost_resume_id_is_never_deferred() -> None:
 
     assert sdk.connected == ["gone-1"]
     assert len(sdk.created) == 1
+
+
+def _counters(monkeypatch: pytest.MonkeyPatch) -> InMemoryMetricReader:
+    reader = InMemoryMetricReader()
+    monkeypatch.setattr(o11y.metrics, "get_meter", MeterProvider(metric_readers=[reader]).get_meter)
+    monkeypatch.setattr(o11y, "_counters", {})
+    return reader
+
+
+def _counted(reader: InMemoryMetricReader, name: str) -> list[tuple[int, dict[str, object]]]:
+    return [
+        (point.value, dict(point.attributes or {}))
+        for resource in reader.get_metrics_data().resource_metrics
+        for scope in resource.scope_metrics
+        for metric in scope.metrics
+        if metric.name == name
+        for point in metric.data.data_points
+    ]
+
+
+async def test_a_deferred_preparation_is_counted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The deferral is how a wedged box stops costing a turn, so its rate is the thing to watch —
+    a log line alone answers "did it happen once", never "is it getting worse"."""
+    reader = _counters(monkeypatch)
+    sdk = _Sdk()
+    first = E2BCarrier(api_key="k", template="t", sdk=sdk)
+    conversation = uuid4()
+    opened = await first.create(_spec(conversation))
+    sdk.sandboxes[opened.container_id].commands.hangs = True
+
+    restarted = E2BCarrier(api_key="k", template="t", sdk=sdk, resume_prepare_seconds=0.01)
+    await restarted.create(replace(_spec(conversation), resume_id=opened.container_id))
+
+    assert _counted(reader, "ufo.sandbox_prepare_deferred_total") == [
+        (1, {"carrier": CARRIER_NAME})
+    ]
+
+
+async def test_a_command_that_timed_out_is_counted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`exec` maps a wedged `envd` to an exit code the model reads and moves past, so nothing else
+    records that it happened."""
+    reader = _counters(monkeypatch)
+    sdk = _Sdk()
+    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk)
+    handle = await carrier.create(_spec(uuid4()))
+    sdk.sandboxes[handle.container_id].commands.raises = TimeoutException("probe hung")
+
+    result = await carrier.exec(handle, ("bash", "-lc", "pytest -q"), 60)
+
+    assert result.exit_code == EXEC_TIMEOUT_CODE
+    assert _counted(reader, "ufo.sandbox_exec_timeout_total") == [(1, {"carrier": CARRIER_NAME})]
 
 
 async def test_exec_runs_the_joined_command_in_the_workspace_and_maps_the_result() -> None:

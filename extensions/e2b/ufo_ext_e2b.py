@@ -56,7 +56,7 @@ from e2b.sandbox.commands.command_handle import CommandExitException
 from e2b.sandbox.sandbox_api import SandboxLifecycle, SandboxNetworkOpts
 
 from ufo.sdk.manifest import Manifest
-from ufo.sdk.o11y import log
+from ufo.sdk.o11y import emit_metric, log
 from ufo.sdk.sandbox import (
     NO_PROXY_HOSTS,
     SENTINEL_MODEL_KEY,
@@ -287,6 +287,7 @@ class E2BCarrier:
                     conversation_id=str(spec.conversation_id),
                     sandbox_id=sandbox.sandbox_id,
                 )
+                emit_metric("sandbox_prepare_deferred_total", carrier=CARRIER_NAME)
         else:
             await self._prepare(sandbox, spec.proxy.ca_cert)
         return SandboxHandle(
@@ -433,6 +434,7 @@ class E2BCarrier:
         except CommandExitException as error:
             return ExecResult(stdout=error.stdout, stderr=error.stderr, exit_code=error.exit_code)
         except TimeoutException as error:
+            emit_metric("sandbox_exec_timeout_total", carrier=CARRIER_NAME)
             return ExecResult(stdout="", stderr=str(error), exit_code=EXEC_TIMEOUT_CODE)
         except Exception:
             self._drop(handle.conversation_id, "exec")
