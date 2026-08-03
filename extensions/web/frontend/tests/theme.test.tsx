@@ -9,7 +9,7 @@ import { App } from "@/App";
 import { Table, Td } from "@/components/ui/table";
 import { Notice } from "@/kernel/panel";
 
-import { AGENT, MEMBER, StreamFake, TURN_ID, json, useStreamFake, wire } from "./harness";
+import { CHAT_ROW, CONVO_ID, AGENT, MEMBER, StreamFake, TURN_ID, json, useStreamFake, wire } from "./harness";
 
 const STATIC = join(import.meta.dirname, "..", "..", "ufo_ext_web", "static");
 
@@ -125,11 +125,12 @@ test("the reading plane's tokens survive into the built sheet", () => {
 
 test("replies read as a document and member bubbles stay bubbles", async () => {
   wire({
+    "/api/chats": () => json({ chats: [CHAT_ROW] }),
     "/transcript": () =>
       json({ messages: [{ role: "user", text: "mine" }, { role: "assistant", text: "reply" }] }),
-    "/chat": () => json({ turn_id: TURN_ID }),
+    "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "mine" }),
   });
-  location.hash = "#/agents/" + AGENT.id + "/chat";
+  location.hash = "#/c/" + CONVO_ID;
   render(<App agents={[AGENT]} member={MEMBER} />);
 
   const agentSide = (await screen.findByText("reply")).closest("[data-role=agent]")!;

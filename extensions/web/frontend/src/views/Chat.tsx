@@ -4,9 +4,16 @@ import { CredentialPromptForm } from "@/views/CredentialPrompt";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
 import { Markdown, StreamingBody } from "@/lib/markdown";
-import { updateChat, useChat, type ToolEvent } from "@/lib/chatStore";
+import { chatState, clearChat, updateChat, useChat, type ToolEvent } from "@/lib/chatStore";
 import { clearDraft, installDraftFlush, readDraft, writeDraft } from "@/lib/drafts";
-import { answerQuestion, eventLabel, refreshTranscript, resyncChat, sendMessage } from "@/lib/turnStream";
+import {
+  answerQuestion,
+  eventLabel,
+  refreshTranscript,
+  resyncChat,
+  sendMessage,
+  type ChatTarget,
+} from "@/lib/turnStream";
 import type { Agent, ChatFile, ChatQuestion, Member, QuestionEntry } from "@/lib/types";
 
 const MAX_ANSWER_BUTTONS = 10;
@@ -19,19 +26,47 @@ export function formatSize(bytes: number): string {
 
 const PIN_THRESHOLD_PX = 40;
 
-export function Chat({ agent, member }: { agent: Agent; member: Member }) {
-  const state = useChat(agent.id);
+export type ChatProps = {
+  agent: Agent;
+  member: Member;
+  conversationId: string | null;
+  onCreated?: (conversationId: string, title: string) => void;
+  onActivity?: (conversationId: string) => void;
+};
+
+export function Chat({ agent, member, conversationId, onCreated, onActivity }: ChatProps) {
+  const chatKey = conversationId ?? "new:" + agent.id;
+  const state = useChat(chatKey);
   const log = useRef<HTMLDivElement>(null);
   const pinned = useRef(true);
   const composer = useRef<HTMLInputElement>(null);
+  const target: ChatTarget = {
+    key: chatKey,
+    agentId: agent.id,
+    conversationId,
+    onCreated,
+    onAccepted: onActivity,
+  };
+  const live = useRef(target);
+  live.current = target;
 
   useEffect(() => {
-    void refreshTranscript(agent.id, true);
-  }, [agent.id]);
+    if (conversationId !== null) {
+      void refreshTranscript(live.current, true);
+      return;
+    }
+    const held = chatState(chatKey);
+    if (held.messages !== null && !held.busy && held.messages.at(-1)?.role === "error") {
+      clearChat(chatKey);
+    }
+    updateChat(chatKey, (current) =>
+      current.messages !== null ? current : { ...current, messages: [] },
+    );
+  }, [chatKey, conversationId]);
 
   useEffect(() => {
     const sync = () => {
-      if (document.visibilityState === "visible") resyncChat(agent.id);
+      if (document.visibilityState === "visible") resyncChat(live.current);
     };
     window.addEventListener("focus", sync);
     document.addEventListener("visibilitychange", sync);
@@ -39,7 +74,7 @@ export function Chat({ agent, member }: { agent: Agent; member: Member }) {
       window.removeEventListener("focus", sync);
       document.removeEventListener("visibilitychange", sync);
     };
-  }, [agent.id]);
+  }, [chatKey]);
 
   useEffect(() => {
     const pane = log.current;
@@ -105,7 +140,7 @@ export function Chat({ agent, member }: { agent: Agent; member: Member }) {
                 sealed={credentials.sealed}
                 prompt={prompt}
                 onStored={(slot) =>
-                  updateChat(agent.id, (current) => {
+                  updateChat(chatKey, (current) => {
                     const request = current.handoffs.credentials;
                     if (!request) return current;
                     return {
@@ -128,7 +163,7 @@ export function Chat({ agent, member }: { agent: Agent; member: Member }) {
         ) : null}
         {state.handoffs.question ? (
           <Question
-            agent={agent}
+            target={target}
             question={state.handoffs.question}
             held={state.busy || state.messages === null}
             onAct={() => {
@@ -139,11 +174,18 @@ export function Chat({ agent, member }: { agent: Agent; member: Member }) {
         ) : null}
         {showEmpty ? (
           <div className="m-auto max-w-empty text-center opacity-(--muted-soft)">
-            No conversation with {agent.name} yet.
+            {conversationId === null
+              ? "Message " + agent.name + " to start."
+              : "No messages in this conversation yet."}
           </div>
         ) : null}
       </div>
-      <Composer agent={agent} draftKey={member.id + "/" + agent.id} input={composer} onSend={repin} />
+      <Composer
+        target={target}
+        draftKey={member.id + "/" + chatKey}
+        input={composer}
+        onSend={repin}
+      />
     </>
   );
 }
@@ -243,12 +285,12 @@ function buttonable(entry: QuestionEntry): boolean {
 }
 
 function Question({
-  agent,
+  target,
   question,
   held,
   onAct,
 }: {
-  agent: Agent;
+  target: ChatTarget;
   question: ChatQuestion;
   held: boolean;
   onAct: () => void;
@@ -273,7 +315,7 @@ function Question({
                       if (held) return;
                       onAct();
                       void answerQuestion(
-                        agent.id,
+                        target,
                         question.turn_id,
                         index,
                         asked.length === 1
@@ -308,17 +350,17 @@ function Question({
 }
 
 function Composer({
-  agent,
+  target,
   draftKey,
   input,
   onSend,
 }: {
-  agent: Agent;
+  target: ChatTarget;
   draftKey: string;
   input: RefObject<HTMLInputElement | null>;
   onSend: () => void;
 }) {
-  const state = useChat(agent.id);
+  const state = useChat(target.key);
   const [text, setText] = useState(() => readDraft(draftKey));
   const files = useRef<HTMLInputElement>(null);
   const disabled = state.busy || state.messages === null;
@@ -347,7 +389,7 @@ function Composer({
     if (files.current) files.current.value = "";
     onSend();
     input.current?.focus();
-    sendMessage(agent.id, body, shown);
+    void sendMessage(target, body, shown);
   }
 
   return (

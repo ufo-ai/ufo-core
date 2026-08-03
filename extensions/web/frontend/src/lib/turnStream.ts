@@ -1,9 +1,39 @@
 import { BASE, getJson } from "@/lib/api";
 import { money } from "@/lib/money";
-import { chatState, liveTurn, updateChat, type LiveTurn, type ToolEvent } from "@/lib/chatStore";
+import {
+  chatState,
+  liveTurn,
+  migrateChat,
+  updateChat,
+  type LiveTurn,
+  type ToolEvent,
+} from "@/lib/chatStore";
 import type { ChatFile, ChatQuestion, Transcript } from "@/lib/types";
 
 const REATTACH_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000];
+const MALFORMED_REPLY = "Malformed reply — try again.";
+
+export const NEW_CONVERSATION = "new";
+
+/** One conversation as the client addresses it: the store key it holds, the agent and
+ *  conversation the routes name, and what a create hands back to the shell. */
+export type ChatTarget = {
+  key: string;
+  agentId: string;
+  conversationId: string | null;
+  onCreated?: (conversationId: string, title: string) => void;
+  onAccepted?: (conversationId: string) => void;
+};
+
+function chatUrl(target: ChatTarget): string {
+  const base = BASE + "/agents/" + target.agentId + "/chat";
+  return base + "?conversation=" + (target.conversationId ?? NEW_CONVERSATION);
+}
+
+function transcriptPath(target: ChatTarget): string | null {
+  if (!target.conversationId) return null;
+  return "/agents/" + target.agentId + "/transcript?conversation=" + target.conversationId;
+}
 
 export function tokens(count: number): string {
   return count.toLocaleString("en-US");
@@ -11,8 +41,8 @@ export function tokens(count: number): string {
 
 const RESYNC_EPOCH = new Map<string, number>();
 
-function bumpEpoch(agentId: string): void {
-  RESYNC_EPOCH.set(agentId, (RESYNC_EPOCH.get(agentId) ?? 0) + 1);
+function bumpEpoch(chatKey: string): void {
+  RESYNC_EPOCH.set(chatKey, (RESYNC_EPOCH.get(chatKey) ?? 0) + 1);
 }
 
 const SOURCES = new Map<string, EventSource>();
@@ -44,24 +74,24 @@ export function eventLabel(event: ToolEvent, phase: "active" | "done"): string {
   return event.preview ? event.name + " " + event.preview : event.name;
 }
 
-export function streamTurn(agentId: string, turnId: string, answering: boolean): void {
-  REATTACHES.delete(agentId);
-  updateChat(agentId, (state) => ({ ...state, turn: { id: turnId, answering } }));
-  attach(agentId, turnId, answering, false);
+export function streamTurn(chatKey: string, turnId: string, answering: boolean): void {
+  REATTACHES.delete(chatKey);
+  updateChat(chatKey, (state) => ({ ...state, turn: { id: turnId, answering } }));
+  attach(chatKey, turnId, answering, false);
 }
 
-function attach(agentId: string, turnId: string, answering: boolean, reattach: boolean): void {
-  TIMERS.delete(agentId);
+function attach(chatKey: string, turnId: string, answering: boolean, reattach: boolean): void {
+  TIMERS.delete(chatKey);
   let redrawOnOpen = reattach;
   const source = new EventSource(BASE + "/turns/" + turnId + "/stream");
-  SOURCES.set(agentId, source);
+  SOURCES.set(chatKey, source);
   let sawFiles = false;
 
   const onLive = (change: (live: LiveTurn) => LiveTurn) =>
-    updateChat(agentId, (state) => ({ ...state, live: change(state.live ?? liveTurn()) }));
+    updateChat(chatKey, (state) => ({ ...state, live: change(state.live ?? liveTurn()) }));
 
   const record = () =>
-    updateChat(agentId, (state) => {
+    updateChat(chatKey, (state) => {
       const live = state.live;
       if (!live || !live.text) return state;
       return {
@@ -79,15 +109,15 @@ function attach(agentId: string, turnId: string, answering: boolean, reattach: b
 
   const close = () => {
     source.close();
-    SOURCES.delete(agentId);
-    updateChat(agentId, (state) => ({ ...state, busy: false, live: null, turn: null }));
+    SOURCES.delete(chatKey);
+    updateChat(chatKey, (state) => ({ ...state, busy: false, live: null, turn: null }));
   };
 
   source.addEventListener("open", () => {
-    REATTACHES.delete(agentId);
+    REATTACHES.delete(chatKey);
     if (redrawOnOpen) {
       redrawOnOpen = false;
-      updateChat(agentId, (state) => ({ ...state, live: liveTurn() }));
+      updateChat(chatKey, (state) => ({ ...state, live: liveTurn() }));
     } else {
       onLive((live) => ({ ...live, reconnecting: false }));
     }
@@ -101,7 +131,7 @@ function attach(agentId: string, turnId: string, answering: boolean, reattach: b
   source.addEventListener("files", (event) => {
     const files = JSON.parse((event as MessageEvent).data).files as ChatFile[];
     sawFiles = true;
-    updateChat(agentId, (state) => ({
+    updateChat(chatKey, (state) => ({
       ...state,
       handoffs: { ...state.handoffs, files },
       live: { ...(state.live ?? liveTurn()), files },
@@ -110,7 +140,7 @@ function attach(agentId: string, turnId: string, answering: boolean, reattach: b
 
   source.addEventListener("credentials", (event) => {
     const credentials = JSON.parse((event as MessageEvent).data);
-    updateChat(agentId, (state) => ({
+    updateChat(chatKey, (state) => ({
       ...state,
       handoffs: { ...state.handoffs, credentials },
     }));
@@ -161,7 +191,7 @@ function attach(agentId: string, turnId: string, answering: boolean, reattach: b
 
   source.addEventListener("terminal", (event) => {
     const frame = JSON.parse((event as MessageEvent).data);
-    updateChat(agentId, (state) => {
+    updateChat(chatKey, (state) => {
       const live = state.live ?? liveTurn();
       const handoffs = { ...state.handoffs };
       let text = live.text;
@@ -201,11 +231,11 @@ function attach(agentId: string, turnId: string, answering: boolean, reattach: b
       return;
     }
     source.close();
-    SOURCES.delete(agentId);
-    const attempts = (REATTACHES.get(agentId) ?? 0) + 1;
+    SOURCES.delete(chatKey);
+    const attempts = (REATTACHES.get(chatKey) ?? 0) + 1;
     if (attempts > REATTACH_DELAYS_MS.length) {
       record();
-      updateChat(agentId, (state) => ({
+      updateChat(chatKey, (state) => ({
         ...state,
         messages: (state.messages ?? []).concat({
           role: "error",
@@ -215,38 +245,50 @@ function attach(agentId: string, turnId: string, answering: boolean, reattach: b
       close();
       return;
     }
-    REATTACHES.set(agentId, attempts);
+    REATTACHES.set(chatKey, attempts);
     onLive((live) => ({ ...live, reconnecting: true }));
     TIMERS.set(
-      agentId,
-      reattachTimer(() => attach(agentId, turnId, answering, true), REATTACH_DELAYS_MS[attempts - 1]),
+      chatKey,
+      reattachTimer(() => attach(chatKey, turnId, answering, true), REATTACH_DELAYS_MS[attempts - 1]),
     );
   };
 }
 
-export function resyncChat(agentId: string): void {
-  const state = chatState(agentId);
+export function resyncChat(target: ChatTarget): void {
+  const chatKey = target.key;
+  const state = chatState(chatKey);
   if (state.turn) {
-    const source = SOURCES.get(agentId);
+    const source = SOURCES.get(chatKey);
     if (source && source.readyState !== EventSource.CLOSED) return;
-    const timer = TIMERS.get(agentId);
+    const timer = TIMERS.get(chatKey);
     if (timer !== undefined) clearTimeout(timer);
-    attach(agentId, state.turn.id, state.turn.answering, true);
+    attach(chatKey, state.turn.id, state.turn.answering, true);
     return;
   }
   if (state.busy || state.messages === null) return;
-  void refreshTranscript(agentId);
+  void refreshTranscript(target);
 }
 
-export async function refreshTranscript(agentId: string, onlyIfEmpty = false): Promise<void> {
-  if (onlyIfEmpty && chatState(agentId).messages !== null) return;
-  const epoch = RESYNC_EPOCH.get(agentId) ?? 0;
-  const result = await getJson<Transcript>("/agents/" + agentId + "/transcript");
+export async function refreshTranscript(
+  target: ChatTarget,
+  onlyIfEmpty = false,
+): Promise<void> {
+  const chatKey = target.key;
+  if (onlyIfEmpty && chatState(chatKey).messages !== null) return;
+  const path = transcriptPath(target);
+  if (path === null) {
+    updateChat(chatKey, (current) =>
+      current.messages !== null ? current : { ...current, messages: [] },
+    );
+    return;
+  }
+  const epoch = RESYNC_EPOCH.get(chatKey) ?? 0;
+  const result = await getJson<Transcript>(path);
   if (!result.ok && !onlyIfEmpty) return;
   const payload: Transcript = result.ok ? result.payload : { messages: [] };
-  updateChat(agentId, (current) => {
+  updateChat(chatKey, (current) => {
     if (onlyIfEmpty && current.messages !== null) return current;
-    if ((RESYNC_EPOCH.get(agentId) ?? 0) !== epoch) return current;
+    if ((RESYNC_EPOCH.get(chatKey) ?? 0) !== epoch) return current;
     if (!onlyIfEmpty && (current.busy || current.turn)) return current;
     const incoming = ("question" in payload && payload.question) || null;
     const held = current.handoffs.question ?? null;
@@ -269,12 +311,13 @@ export async function refreshTranscript(agentId: string, onlyIfEmpty = false): P
 }
 
 export async function sendMessage(
-  agentId: string,
+  target: ChatTarget,
   body: string | FormData,
   shown: string,
 ): Promise<void> {
-  bumpEpoch(agentId);
-  updateChat(agentId, (state) => ({
+  const chatKey = target.key;
+  bumpEpoch(chatKey);
+  updateChat(chatKey, (state) => ({
     ...state,
     busy: true,
     live: liveTurn(),
@@ -282,42 +325,59 @@ export async function sendMessage(
   }));
   let res: Response;
   try {
-    res = await fetch(BASE + "/agents/" + agentId + "/chat", {
+    res = await fetch(chatUrl(target), {
       method: "POST",
       body,
       credentials: "same-origin",
     });
   } catch {
-    failTurn(agentId, "Network error — try again.");
+    failTurn(chatKey, "Network error — try again.");
     return;
   }
   if (!res.ok) {
-    failTurn(agentId, "Error " + res.status + " — try again.");
+    failTurn(chatKey, "Error " + res.status + " — try again.");
     return;
   }
-  let accepted: { turn_id: string };
+  let accepted: { turn_id?: unknown; conversation_id?: unknown; title?: unknown };
   try {
     accepted = await res.json();
   } catch {
-    failTurn(agentId, "Network error — try again.");
+    failTurn(chatKey, "Network error — try again.");
     return;
   }
-  streamTurn(agentId, accepted.turn_id, false);
+  if (typeof accepted.turn_id !== "string") {
+    failTurn(chatKey, MALFORMED_REPLY);
+    return;
+  }
+  let streamKey = chatKey;
+  if (target.conversationId) {
+    target.onAccepted?.(target.conversationId);
+  } else {
+    if (typeof accepted.conversation_id !== "string" || typeof accepted.title !== "string") {
+      failTurn(chatKey, MALFORMED_REPLY);
+      return;
+    }
+    streamKey = accepted.conversation_id;
+    migrateChat(chatKey, streamKey);
+    target.onCreated?.(accepted.conversation_id, accepted.title);
+  }
+  streamTurn(streamKey, accepted.turn_id, false);
 }
 
 export async function answerQuestion(
-  agentId: string,
+  target: ChatTarget,
   turnId: string,
   questionIndex: number,
   body: string,
 ): Promise<void> {
-  const state = chatState(agentId);
+  const chatKey = target.key;
+  const state = chatState(chatKey);
   if (state.busy || state.messages === null) return;
-  bumpEpoch(agentId);
-  updateChat(agentId, (current) => ({ ...current, busy: true, live: liveTurn() }));
+  bumpEpoch(chatKey);
+  updateChat(chatKey, (current) => ({ ...current, busy: true, live: liveTurn() }));
   let res: Response;
   try {
-    res = await fetch(BASE + "/agents/" + agentId + "/chat", {
+    res = await fetch(chatUrl(target), {
       method: "POST",
       body,
       credentials: "same-origin",
@@ -327,22 +387,27 @@ export async function answerQuestion(
       },
     });
   } catch {
-    failTurn(agentId, "Network error — try again.");
+    failTurn(chatKey, "Network error — try again.");
     return;
   }
   if (!res.ok) {
-    failTurn(agentId, "Error " + res.status + " — try again.");
+    failTurn(chatKey, "Error " + res.status + " — try again.");
     return;
   }
-  let payload: { body?: string; turn_id: string };
+  let payload: { body?: unknown; turn_id?: unknown };
   try {
     payload = await res.json();
   } catch {
-    failTurn(agentId, "Network error — try again.");
+    failTurn(chatKey, "Network error — try again.");
     return;
   }
-  const landed = payload.body || body;
-  updateChat(agentId, (current) => ({
+  if (typeof payload.turn_id !== "string") {
+    failTurn(chatKey, MALFORMED_REPLY);
+    return;
+  }
+  const turn = payload.turn_id;
+  const landed = typeof payload.body === "string" && payload.body ? payload.body : body;
+  updateChat(chatKey, (current) => ({
     ...current,
     messages: (current.messages ?? []).concat({ role: "user", text: landed }),
     handoffs: {
@@ -350,11 +415,11 @@ export async function answerQuestion(
       question: markAnswered(current.handoffs.question, questionIndex, turnId),
     },
   }));
-  streamTurn(agentId, payload.turn_id, true);
+  streamTurn(chatKey, turn, true);
 }
 
-function failTurn(agentId: string, message: string): void {
-  updateChat(agentId, (state) => ({
+function failTurn(chatKey: string, message: string): void {
+  updateChat(chatKey, (state) => ({
     ...state,
     busy: false,
     live: null,

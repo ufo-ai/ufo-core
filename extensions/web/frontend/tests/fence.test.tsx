@@ -23,13 +23,14 @@ test("switching tabs discards the read left behind rather than painting it", asy
         });
       }
       if (url.includes("/tasks")) return json({ tasks: [], spec_schema: null });
+      if (url.includes("/api/chats")) return json({ chats: [] });
       return json({ messages: [] });
     }),
   );
 
+  location.hash = "#/agents/" + AGENT.id + "/skills";
   render(<App agents={[AGENT]} member={MEMBER} />);
 
-  await userEvent.click(screen.getByRole("tab", { name: "skills" }));
   await waitFor(() => expect(releaseSkills).not.toBeNull());
 
   await userEvent.click(screen.getByRole("tab", { name: "tasks" }));
@@ -52,18 +53,18 @@ test("switching agents discards the read left behind rather than painting it", a
           pending.set(url, resolve);
         });
       }
+      if (url.includes("/api/chats")) return json({ chats: [] });
       return json({ messages: [] });
     }),
   );
 
+  location.hash = "#/agents/" + AGENT.id + "/skills";
   render(<App agents={[AGENT, SECOND]} member={MEMBER} />);
 
-  await userEvent.click(screen.getByRole("tab", { name: "skills" }));
   await waitFor(() => expect(pending.size).toBe(1));
   const [firstUrl] = [...pending.keys()];
 
-  await userEvent.click(screen.getByRole("button", { name: /second/ }));
-  await userEvent.click(screen.getByRole("tab", { name: "skills" }));
+  location.hash = "#/agents/" + SECOND.id + "/skills";
   await waitFor(() => expect(pending.size).toBe(2));
   const secondUrl = [...pending.keys()].find((url) => url !== firstUrl)!;
 

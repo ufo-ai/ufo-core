@@ -1,4 +1,3 @@
-import { Chat } from "@/views/Chat";
 import { Connections } from "@/views/Connections";
 import { Conversations } from "@/views/Conversations";
 import { Overview } from "@/views/Overview";
@@ -7,17 +6,16 @@ import { Tasks } from "@/views/Tasks";
 import { AgentUsage } from "@/views/Usage";
 import { cn } from "@/lib/cn";
 import type { AgentTab } from "@/lib/route";
-import type { Agent, Member } from "@/lib/types";
+import type { Agent } from "@/lib/types";
 
 export type AgentPaneProps = {
   agent: Agent;
-  member: Member;
   tab: AgentTab;
   tabs: readonly AgentTab[];
   onTab: (tab: AgentTab) => void;
 };
 
-export function AgentPane({ agent, member, tab, tabs, onTab }: AgentPaneProps) {
+export function AgentPane({ agent, tab, tabs, onTab }: AgentPaneProps) {
   return (
     <main className="flex min-h-0 min-w-0 flex-col">
       <div className="flex items-baseline gap-md px-2xl pt-lg">
@@ -42,18 +40,14 @@ export function AgentPane({ agent, member, tab, tabs, onTab }: AgentPaneProps) {
           </button>
         ))}
       </div>
-      {tab === "chat" ? (
-        <Chat key={agent.id} agent={agent} member={member} />
-      ) : (
-        <div className="flex-1 overflow-y-auto p-2xl" data-testid="panel">
-          {tab === "overview" ? <Overview agent={agent} /> : null}
-          {tab === "tasks" ? <Tasks agent={agent} /> : null}
-          {tab === "conversations" ? <Conversations agent={agent} /> : null}
-          {tab === "connections" ? <Connections agent={agent} /> : null}
-          {tab === "skills" ? <Skills agent={agent} /> : null}
-          {tab === "usage" ? <AgentUsage agent={agent} /> : null}
-        </div>
-      )}
+      <div className="flex-1 overflow-y-auto p-2xl" data-testid="panel">
+        {tab === "overview" ? <Overview agent={agent} /> : null}
+        {tab === "tasks" ? <Tasks agent={agent} /> : null}
+        {tab === "conversations" ? <Conversations agent={agent} /> : null}
+        {tab === "connections" ? <Connections agent={agent} /> : null}
+        {tab === "skills" ? <Skills agent={agent} /> : null}
+        {tab === "usage" ? <AgentUsage agent={agent} /> : null}
+      </div>
     </main>
   );
 }

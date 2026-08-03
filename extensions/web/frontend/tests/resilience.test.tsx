@@ -5,10 +5,25 @@ import { beforeEach, expect, test } from "vitest";
 import { App } from "@/App";
 import { setReattachTimer } from "@/lib/turnStream";
 
-import { AGENT, MEMBER, SECOND, StreamFake, TURN_ID, json, useStreamFake, wire } from "./harness";
+import {
+  AGENT,
+  CHAT_ROW,
+  CONVO_ID,
+  MEMBER,
+  SECOND,
+  StreamFake,
+  TURN_ID,
+  json,
+  useStreamFake,
+  wire,
+} from "./harness";
+
+const OTHER_ID = "66666666-6666-4666-8666-666666666666";
+const OTHER_ROW = { ...CHAT_ROW, conversation_id: OTHER_ID, title: "The other thread" };
+const RAIL = { chats: [CHAT_ROW, OTHER_ROW] };
 
 beforeEach(() => {
-  location.hash = "#/agents/" + AGENT.id + "/chat";
+  location.hash = "#/c/" + CONVO_ID;
   useStreamFake();
 });
 
@@ -19,12 +34,13 @@ function fatal(stream: StreamFake) {
 
 async function streaming(routes: Record<string, () => Response> = {}) {
   wire({
+    "/api/chats": () => json(RAIL),
     "/transcript": () => json({ messages: [] }),
-    "/chat": () => json({ turn_id: TURN_ID }),
+    "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "go" }),
     ...routes,
   });
   render(<App agents={[AGENT, SECOND]} member={MEMBER} />);
-  await screen.findByText("No conversation with assistant yet.");
+  await screen.findByText("No messages in this conversation yet.");
   await userEvent.type(screen.getByLabelText("Message the agent"), "go");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
@@ -113,6 +129,7 @@ test("returning to a tab with a dead stream reattaches without waiting out the b
 test("returning to an idle tab refetches the transcript", async () => {
   let serves = 0;
   wire({
+    "/api/chats": () => json(RAIL),
     "/transcript": () => {
       serves += 1;
       return json({
@@ -121,7 +138,7 @@ test("returning to an idle tab refetches the transcript", async () => {
     },
   });
   render(<App agents={[AGENT, SECOND]} member={MEMBER} />);
-  await screen.findByText("No conversation with assistant yet.");
+  await screen.findByText("No messages in this conversation yet.");
 
   window.dispatchEvent(new Event("focus"));
   expect(await screen.findByText("fresh from the server")).toBeTruthy();
@@ -130,25 +147,26 @@ test("returning to an idle tab refetches the transcript", async () => {
 
 test("a draft survives leaving the chat and is cleared by sending", async () => {
   wire({
+    "/api/chats": () => json(RAIL),
     "/transcript": () => json({ messages: [] }),
-    "/chat": () => json({ turn_id: TURN_ID }),
+    "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "go" }),
   });
   render(<App agents={[AGENT, SECOND]} member={MEMBER} />);
-  await screen.findByText("No conversation with assistant yet.");
+  await screen.findByText("No messages in this conversation yet.");
 
   await userEvent.type(screen.getByLabelText("Message the agent"), "half a thought");
   window.dispatchEvent(new Event("pagehide"));
-  await userEvent.click(screen.getByRole("button", { name: /second/ }));
-  await screen.findByText("No conversation with second yet.");
-  await userEvent.click(screen.getByRole("button", { name: /assistant/ }));
+  await userEvent.click(screen.getByRole("button", { name: /The other thread/ }));
+  await screen.findByText("No messages in this conversation yet.");
+  await userEvent.click(screen.getByRole("button", { name: /Pick one thread/ }));
 
   const input = screen.getByLabelText("Message the agent") as HTMLInputElement;
   expect(input.value).toBe("half a thought");
 
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   window.dispatchEvent(new Event("pagehide"));
-  await userEvent.click(screen.getByRole("button", { name: /second/ }));
-  await userEvent.click(screen.getByRole("button", { name: /assistant/ }));
+  await userEvent.click(screen.getByRole("button", { name: /The other thread/ }));
+  await userEvent.click(screen.getByRole("button", { name: /Pick one thread/ }));
   expect((screen.getByLabelText("Message the agent") as HTMLInputElement).value).toBe("");
 });
 
@@ -203,6 +221,7 @@ test("a transcript fetched before a send never erases the exchange", async () =>
   let release: (value: Response) => void = () => {};
   let serves = 0;
   wire({
+    "/api/chats": () => json(RAIL),
     "/transcript": () => {
       serves += 1;
       if (serves === 1) return json({ messages: [] });
@@ -211,7 +230,7 @@ test("a transcript fetched before a send never erases the exchange", async () =>
     "/chat": () => json({ turn_id: TURN_ID }),
   });
   render(<App agents={[AGENT, SECOND]} member={MEMBER} />);
-  await screen.findByText("No conversation with assistant yet.");
+  await screen.findByText("No messages in this conversation yet.");
 
   window.dispatchEvent(new Event("focus"));
   await waitFor(() => expect(serves).toBe(2));
@@ -257,6 +276,7 @@ test("reattach delays climb the declared ladder", async () => {
 test("a failed idle refetch keeps what the member already sees", async () => {
   let serves = 0;
   wire({
+    "/api/chats": () => json(RAIL),
     "/transcript": () => {
       serves += 1;
       if (serves === 1) return json({ messages: [{ role: "assistant", text: "kept history" }] });
@@ -274,6 +294,7 @@ test("a failed idle refetch keeps what the member already sees", async () => {
 test("returning visibility alone refetches an idle transcript", async () => {
   let serves = 0;
   wire({
+    "/api/chats": () => json(RAIL),
     "/transcript": () => {
       serves += 1;
       return json({
@@ -282,16 +303,16 @@ test("returning visibility alone refetches an idle transcript", async () => {
     },
   });
   render(<App agents={[AGENT, SECOND]} member={MEMBER} />);
-  await screen.findByText("No conversation with assistant yet.");
+  await screen.findByText("No messages in this conversation yet.");
 
   document.dispatchEvent(new Event("visibilitychange"));
   expect(await screen.findByText("visible again")).toBeTruthy();
 });
 
 test("a draft never crosses members on a shared browser", async () => {
-  wire({ "/transcript": () => json({ messages: [] }) });
+  wire({ "/api/chats": () => json(RAIL), "/transcript": () => json({ messages: [] }) });
   const first = render(<App agents={[AGENT, SECOND]} member={MEMBER} />);
-  await screen.findByText("No conversation with assistant yet.");
+  await screen.findByText("No messages in this conversation yet.");
   await userEvent.type(screen.getByLabelText("Message the agent"), "private thought");
   window.dispatchEvent(new Event("pagehide"));
   first.unmount();
@@ -299,12 +320,12 @@ test("a draft never crosses members on a shared browser", async () => {
   const other = render(
     <App agents={[AGENT, SECOND]} member={{ ...MEMBER, id: "m2", email: "other@example.com" }} />,
   );
-  await screen.findByText("No conversation with assistant yet.");
+  await screen.findByText("No messages in this conversation yet.");
   expect((screen.getByLabelText("Message the agent") as HTMLInputElement).value).toBe("");
   other.unmount();
 
   render(<App agents={[AGENT, SECOND]} member={MEMBER} />);
-  await screen.findByText("No conversation with assistant yet.");
+  await screen.findByText("No messages in this conversation yet.");
   expect((screen.getByLabelText("Message the agent") as HTMLInputElement).value).toBe(
     "private thought",
   );

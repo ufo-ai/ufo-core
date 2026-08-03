@@ -338,15 +338,15 @@ async def _own_chat(
     return record
 
 
-def _chat_source(public_base_url: str | None, agent_id: UUID, email: str) -> str:
+def _chat_source(public_base_url: str | None, conversation_id: UUID, email: str) -> str:
     """Where a portal message was said, as the agent carries it into anything it creates: the
-    portal URL that opens this agent's chat, plus who asked. The portal routes on the fragment
-    (`#/agents/<id>`), so the link lands on the conversation rather than the shell. A deploy
-    whose public base is unset or empty has no address to give, and names the client and the
-    member instead."""
+    portal URL that opens this conversation, plus who asked. The portal routes on the fragment
+    (`#/c/<id>`), so the link lands on the conversation rather than the shell. A deploy whose
+    public base is unset or empty has no address to give, and names the client and the member
+    instead."""
     if not public_base_url:
         return f"{SOURCE} ({email})"
-    return f"{public_base_url.rstrip('/')}{PORTAL_PATH}#/agents/{agent_id} ({email})"
+    return f"{public_base_url.rstrip('/')}{PORTAL_PATH}#/c/{conversation_id} ({email})"
 
 
 async def _audience_for(
@@ -517,12 +517,10 @@ def _answer_headers(request: Request) -> tuple[UUID, int] | None | Response:
 
 
 async def chat(ctx: SurfaceContext, request: Request) -> Response:
-    """Admit one member message. A `conversation` query parameter continues that conversation —
+    """Admit one member message. The `conversation` query parameter continues that conversation —
     gated to the member's own chat with this agent — and the `new` sentinel opens a fresh one: the
     chat POST is the chat transport, so opening a conversation rides the first message rather than
-    a separate mutation, and the response names the conversation it landed in. Absent, the
-    member's default conversation with this agent takes the message, opened on first contact —
-    the contract the shipped page calls on."""
+    a separate mutation, and the response names the conversation it landed in."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
@@ -545,7 +543,15 @@ async def chat(ctx: SurfaceContext, request: Request) -> Response:
         return answer
     store = web_extension().store
     requested = request.query_params.get("conversation", "").strip()
-    if requested and requested != NEW_CONVERSATION:
+    if not requested:
+        return Response("conversation is required", status_code=400)
+    if requested == NEW_CONVERSATION:
+        if answer is not None:
+            return Response("an answer names the conversation it was asked in", status_code=400)
+        conversation_id, title = await _open_conversation(
+            ctx, store, agent_id, member_id, email, f"{agent_id}/{email}/{uuid4().hex}", text, paths
+        )
+    else:
         try:
             conversation_id = UUID(requested)
         except ValueError:
@@ -554,31 +560,13 @@ async def chat(ctx: SurfaceContext, request: Request) -> Response:
         if record is None:
             return Response("no such conversation", status_code=404)
         title = record.title
-    elif requested == NEW_CONVERSATION:
-        if answer is not None:
-            return Response("an answer names the conversation it was asked in", status_code=400)
-        conversation_id, title = await _open_conversation(
-            ctx, store, agent_id, member_id, email, f"{agent_id}/{email}/{uuid4().hex}", text, paths
-        )
-    else:
-        found = await ctx.find_conversation(f"{agent_id}/{email}")
-        if found is not None:
-            record = await _own_chat(store, agent_id, email, found)
-            if record is None:
-                raise RuntimeError(f"conversation {found} has no chat row")
-            conversation_id = found
-            title = record.title
-        else:
-            conversation_id, title = await _open_conversation(
-                ctx, store, agent_id, member_id, email, f"{agent_id}/{email}", text, paths
-            )
     key = None if answer is None else f"{conversation_id}:{answer[0]}:answer:{answer[1]}"
     await _deliver_uploads(ctx, conversation_id, uploads, paths)
     admitted = await ctx.admit(
         conversation_id,
         inbound,
         context=TurnContext(
-            sender=email, source=_chat_source(ctx.public_base_url, agent_id, email)
+            sender=email, source=_chat_source(ctx.public_base_url, conversation_id, email)
         ),
         idempotency_key=key,
         speaker_member_id=member_id,
@@ -619,18 +607,14 @@ async def transcript(ctx: SurfaceContext, request: Request) -> Response:
     if agent_id is None or not audience.allows(agent_id):
         return Response("no such agent", status_code=404)
     requested = request.query_params.get("conversation", "").strip()
-    if requested:
-        try:
-            conversation_id = UUID(requested)
-        except ValueError:
-            return Response("no such conversation", status_code=404)
-        if await _own_chat(web_extension().store, agent_id, email, conversation_id) is None:
-            return Response("no such conversation", status_code=404)
-    else:
-        found = await ctx.find_conversation(f"{agent_id}/{email}")
-        if found is None:
-            return JSONResponse({"messages": []})
-        conversation_id = found
+    if not requested:
+        return Response("conversation is required", status_code=400)
+    try:
+        conversation_id = UUID(requested)
+    except ValueError:
+        return Response("no such conversation", status_code=404)
+    if await _own_chat(web_extension().store, agent_id, email, conversation_id) is None:
+        return Response("no such conversation", status_code=404)
     recorded = await ctx.read_transcript(conversation_id)
     rendered = (
         []
@@ -683,8 +667,11 @@ async def chats_index(ctx: SurfaceContext, request: Request) -> Response:
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
-    member_id, _email, audience = resolved
+    member_id, email, audience = resolved
     store = web_extension().store
+    requested = request.query_params.get("conversation", "").strip()
+    if requested:
+        return await _resolve_chat(ctx, store, audience, email, requested)
     rows: list[dict[str, object]] = []
     for agent in audience.agents:
         listed = await ctx.list_agent_conversations(
@@ -707,6 +694,47 @@ async def chats_index(ctx: SurfaceContext, request: Request) -> Response:
             )
     rows.sort(key=lambda row: (str(row["last_at"]), str(row["conversation_id"])), reverse=True)
     return JSONResponse({"chats": rows})
+
+
+async def _resolve_chat(
+    ctx: SurfaceContext,
+    store: ScopedStore,
+    audience: WebAudience,
+    email: str,
+    requested: str,
+) -> Response:
+    """One rail row by conversation id — how a `#/c/<id>` link resolves when the conversation's
+    activity has fallen past the rail's bound. The same ownership gate as the chat POST answers;
+    anything else, a malformed id included, is an empty list, and a turnless conversation stays
+    as absent as the rail's own read keeps it."""
+    try:
+        named = UUID(requested)
+    except ValueError:
+        return JSONResponse({"chats": []})
+    for agent in audience.agents:
+        record = await _own_chat(store, agent.id, email, named)
+        if record is None:
+            continue
+        latest = await ctx.latest_turn(named)
+        if latest is None:
+            break
+        detail = await ctx.turn_detail(latest)
+        if detail is None:
+            break
+        return JSONResponse(
+            {
+                "chats": [
+                    {
+                        "conversation_id": str(named),
+                        "agent_id": str(agent.id),
+                        "agent_name": agent.name,
+                        "title": record.title,
+                        "last_at": _iso(detail.turn.created_at),
+                    }
+                ]
+            }
+        )
+    return JSONResponse({"chats": []})
 
 
 async def _panel_gate(

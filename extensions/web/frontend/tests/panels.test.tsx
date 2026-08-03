@@ -44,9 +44,8 @@ test("the overview states the agent's facts, renders its schema, and submits a s
     },
     "/transcript": () => json({ messages: [] }),
   });
+  location.hash = "#/agents/" + AGENT_ID;
   render(<App agents={[AGENT]} member={MEMBER} />);
-
-  await userEvent.click(screen.getByRole("tab", { name: "overview" }));
   expect(await screen.findByText("main agent · installations: web · updated 2026-07-30 12:00")).toBeTruthy();
   expect(screen.getByText("digest abc123 — prompt changes go through the governed proposal path in chat")).toBeTruthy();
   expect(screen.getByText("be useful")).toBeTruthy();
@@ -70,9 +69,8 @@ test("an overview that fails to read states the error and offers no form", async
     "/overview": () => new Response("nope", { status: 503 }),
     "/transcript": () => json({ messages: [] }),
   });
+  location.hash = "#/agents/" + AGENT_ID;
   render(<App agents={[AGENT]} member={MEMBER} />);
-
-  await userEvent.click(screen.getByRole("tab", { name: "overview" }));
   expect(await screen.findByText("Error 503 — reload to retry.")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
 });
@@ -103,9 +101,8 @@ test("tasks list their state and pause through the intent lane", async () => {
     },
     "/transcript": () => json({ messages: [] }),
   });
+  location.hash = "#/agents/" + AGENT_ID + "/tasks";
   render(<App agents={[AGENT]} member={MEMBER} />);
-
-  await userEvent.click(screen.getByRole("tab", { name: "tasks" }));
   expect(await screen.findByText("scheduled")).toBeTruthy();
   expect(screen.getByText("2026-08-01 09:00")).toBeTruthy();
 
@@ -146,9 +143,8 @@ test("a task with a hidden prompt offers only its cadence fields", async () => {
       }),
     "/transcript": () => json({ messages: [] }),
   });
+  location.hash = "#/agents/" + AGENT_ID + "/tasks";
   render(<App agents={[AGENT]} member={MEMBER} />);
-
-  await userEvent.click(screen.getByRole("tab", { name: "tasks" }));
   expect(await screen.findByText("private member task")).toBeTruthy();
   await userEvent.click(screen.getByRole("button", { name: "Edit" }));
 
@@ -173,9 +169,8 @@ test("skills separate member-authored from deploy, and save posts one skill file
     },
     "/transcript": () => json({ messages: [] }),
   });
+  location.hash = "#/agents/" + AGENT_ID + "/skills";
   render(<App agents={[AGENT]} member={MEMBER} />);
-
-  await userEvent.click(screen.getByRole("tab", { name: "skills" }));
   expect(await screen.findByText("member skill")).toBeTruthy();
   expect(screen.getByText("deploy skill")).toBeTruthy();
 
@@ -215,9 +210,8 @@ test("connections flip and revoke a grant, and a 404 usage read says it is not s
     "/usage": () => new Response("no", { status: 404 }),
     "/transcript": () => json({ messages: [] }),
   });
+  location.hash = "#/agents/" + AGENT_ID + "/connections";
   render(<App agents={[AGENT]} member={MEMBER} />);
-
-  await userEvent.click(screen.getByRole("tab", { name: "connections" }));
   expect(await screen.findByText("private")).toBeTruthy();
   await userEvent.click(screen.getByRole("button", { name: "Share with agent" }));
   await waitFor(() => expect(posted.length).toBe(1));
@@ -276,9 +270,8 @@ test("conversations open a turn tree that nests a subagent under the turn that s
       }),
     "/transcript": () => json({ messages: [] }),
   });
+  location.hash = "#/agents/" + AGENT_ID + "/conversations";
   render(<App agents={[AGENT]} member={MEMBER} />);
-
-  await userEvent.click(screen.getByRole("tab", { name: "conversations" }));
   await userEvent.click(await screen.findByRole("button", { name: "Open" }));
 
   expect(await screen.findByText("parent ask")).toBeTruthy();
@@ -308,9 +301,8 @@ test("a conversation nobody shared offers no opener", async () => {
       }),
     "/transcript": () => json({ messages: [] }),
   });
+  location.hash = "#/agents/" + AGENT_ID + "/conversations";
   render(<App agents={[AGENT]} member={MEMBER} />);
-
-  await userEvent.click(screen.getByRole("tab", { name: "conversations" }));
   expect(await screen.findByText("not shared with you")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Open" })).toBeNull();
 });
@@ -436,9 +428,8 @@ test("the model field offers the deploy's models, which its schema alone cannot 
     "/overview": () => json(OVERVIEW),
     "/transcript": () => json({ messages: [] }),
   });
+  location.hash = "#/agents/" + AGENT_ID;
   render(<App agents={[AGENT]} member={MEMBER} />);
-
-  await userEvent.click(screen.getByRole("tab", { name: "overview" }));
   const model = (await screen.findByLabelText("model")) as HTMLSelectElement;
   expect(model.tagName).toBe("SELECT");
   expect([...model.options].map((option) => option.value)).toEqual(["opus", "sonnet"]);
@@ -462,9 +453,8 @@ test("a conversation the member may not read says so instead of reporting a stat
       }),
     "/transcript": () => json({ messages: [] }),
   });
+  location.hash = "#/agents/" + AGENT_ID + "/conversations";
   render(<App agents={[AGENT]} member={MEMBER} />);
-
-  await userEvent.click(screen.getByRole("tab", { name: "conversations" }));
   await userEvent.click(await screen.findByRole("button", { name: "Open" }));
   expect(await screen.findByText("This conversation is not shared with you.")).toBeTruthy();
   expect(screen.queryByText(/Error 404/)).toBeNull();
@@ -494,9 +484,8 @@ test("a refusal after a consent link supersedes the link with the toned message"
     },
     "/transcript": () => json({ messages: [] }),
   });
+  location.hash = "#/agents/" + AGENT_ID + "/connections";
   render(<App agents={[AGENT]} member={MEMBER} />);
-
-  await userEvent.click(screen.getByRole("tab", { name: "connections" }));
   await userEvent.type(
     await screen.findByPlaceholderText("Provider (github, notion, …)"),
     "github",
@@ -571,9 +560,8 @@ test("an applied grant change keeps a live consent link on screen", async () => 
     },
     "/transcript": () => json({ messages: [] }),
   });
+  location.hash = "#/agents/" + AGENT_ID + "/connections";
   render(<App agents={[AGENT]} member={MEMBER} />);
-
-  await userEvent.click(screen.getByRole("tab", { name: "connections" }));
   await userEvent.type(
     await screen.findByPlaceholderText("Provider (github, notion, …)"),
     "github",

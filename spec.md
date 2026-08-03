@@ -396,7 +396,7 @@ allocation, delivery registration, and enqueue recovery remain one implementatio
 | Surface | Home | Delivery | Identity | Conversation key |
 |---|---|---|---|---|
 | CLI | core | live (hub tail) | member token | session (private) |
-| Web | `extensions/web` | live (hub tail) | web session → member (adopted from CLI) | agent/email (private; the member's default conversation with that agent, opened on first message — the shipped page's one lane) + agent/email/hex (private; a further conversation opened behind `conversation=new`) + intent/agent/email (the member's prepared-intent lane to that agent) |
+| Web | `extensions/web` | live (hub tail) | web session → member (adopted from CLI) | agent/email/hex (private; a member opens any number of conversations per agent, each behind `conversation=new`; conversations that predate the rail keep bare agent/email keys, reachable by id) + intent/agent/email (the member's prepared-intent lane to that agent) |
 | Slackbot | `extensions/slack` | durable (writeback) | Slack user → member (linked; a Slack-confirmed same-domain email joins as new) | channel:thread_ts; public = shared, private channel/MPIM = room, DM = member, Slack Connect = foreign |
 | Debug | `extensions/debugger` | live (hub tail) | gateway bearer whose email domain is `OPERATOR_EMAIL_DOMAIN`; `?ws=` re-scopes to any workspace | — (read-only; admits nothing) |
 | Memory explorer | `extensions/memory` | live (page + JSON read) | gateway bearer whose email domain is `OPERATOR_EMAIL_DOMAIN`; `?ws=` re-scopes to any workspace | — (read-only; admits nothing) |

@@ -59,9 +59,13 @@ export type Route = (url: string, init?: RequestInit) => Response | Promise<Resp
 
 export function wire(routes: Record<string, Route>) {
   const calls: string[] = [];
+  const table: Record<string, Route> = {
+    "/api/chats": () => json({ chats: [] }),
+    ...routes,
+  };
   const handler = vi.fn(async (url: string, init?: RequestInit) => {
     calls.push(url);
-    for (const [pattern, route] of Object.entries(routes)) {
+    for (const [pattern, route] of Object.entries(table)) {
       if (url.includes(pattern)) return route(url, init);
     }
     throw new Error("no route for " + url);
@@ -73,6 +77,7 @@ export function wire(routes: Record<string, Route>) {
 export const AGENT_ID = "11111111-1111-4111-8111-111111111111";
 export const SECOND_ID = "22222222-2222-4222-8222-222222222222";
 export const TURN_ID = "33333333-3333-4333-8333-333333333333";
+export const CONVO_ID = "55555555-5555-4555-8555-555555555555";
 
 export const AGENT = {
   id: AGENT_ID,
@@ -92,6 +97,14 @@ export const SECOND = {
 };
 
 export const MEMBER = { id: "m1", email: "member@example.com", admin: false };
+
+export const CHAT_ROW = {
+  conversation_id: CONVO_ID,
+  agent_id: AGENT_ID,
+  agent_name: "assistant",
+  title: "Pick one thread",
+  last_at: "2026-08-01T09:00:00.000Z",
+};
 
 export const json = (payload: unknown) => Response.json(payload);
 

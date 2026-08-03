@@ -4,13 +4,27 @@ import { beforeEach, expect, test } from "vitest";
 
 import { App } from "@/App";
 
-import { AGENT, MEMBER, SECOND, StreamFake, TURN_ID, json, useStreamFake, wire } from "./harness";
+import {
+  AGENT,
+  CHAT_ROW,
+  CONVO_ID,
+  MEMBER,
+  SECOND,
+  SECOND_ID,
+  StreamFake,
+  TURN_ID,
+  json,
+  useStreamFake,
+  wire,
+} from "./harness";
 
 beforeEach(() => {
+  location.hash = "#/c/" + CONVO_ID;
   useStreamFake();
 });
 
 const transcript = (payload: unknown = { messages: [] }) => ({
+  "/api/chats": () => json({ chats: [CHAT_ROW] }),
   "/transcript": () => json(payload),
 });
 
@@ -21,11 +35,11 @@ function open() {
 test("an empty conversation states it, and the composer sends a message and streams the reply", async () => {
   wire({
     ...transcript(),
-    "/chat": () => json({ turn_id: TURN_ID }),
+    "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }),
   });
   open();
 
-  expect(await screen.findByText("No conversation with assistant yet.")).toBeTruthy();
+  expect(await screen.findByText("No messages in this conversation yet.")).toBeTruthy();
 
   await userEvent.type(screen.getByLabelText("Message the agent"), "hello");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
@@ -49,9 +63,9 @@ test("an empty conversation states it, and the composer sends a message and stre
 });
 
 test("the composer is disabled while a turn streams and re-enabled when it lands", async () => {
-  wire({ ...transcript(), "/chat": () => json({ turn_id: TURN_ID }) });
+  wire({ ...transcript(), "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }) });
   open();
-  await screen.findByText("No conversation with assistant yet.");
+  await screen.findByText("No messages in this conversation yet.");
 
   const send = screen.getByRole("button", { name: "Send" });
   await userEvent.type(screen.getByLabelText("Message the agent"), "hi");
@@ -73,7 +87,7 @@ test("a failed post states the error instead of opening a stream", async () => {
     "/chat": () => new Response("nope", { status: 500 }),
   });
   open();
-  await screen.findByText("No conversation with assistant yet.");
+  await screen.findByText("No messages in this conversation yet.");
   await userEvent.type(screen.getByLabelText("Message the agent"), "hi");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
 
@@ -110,9 +124,9 @@ test("a question handoff answers by its option button and posts the answer heade
 });
 
 test("a files frame lists each shared file with its size", async () => {
-  wire({ ...transcript(), "/chat": () => json({ turn_id: TURN_ID }) });
+  wire({ ...transcript(), "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }) });
   open();
-  await screen.findByText("No conversation with assistant yet.");
+  await screen.findByText("No messages in this conversation yet.");
   await userEvent.type(screen.getByLabelText("Message the agent"), "hi");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
@@ -149,14 +163,14 @@ test("a credential handoff stores a value and drops the prompt it answered", asy
 });
 
 test("a streamed chunk never steals focus from where the member put it", async () => {
-  wire({ ...transcript(), "/chat": () => json({ turn_id: TURN_ID }) });
+  wire({ ...transcript(), "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }) });
   open();
-  await screen.findByText("No conversation with assistant yet.");
+  await screen.findByText("No messages in this conversation yet.");
   await userEvent.type(screen.getByLabelText("Message the agent"), "hi");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
 
-  const elsewhere = screen.getByRole("button", { name: /assistant/ });
+  const elsewhere = screen.getByRole("button", { name: /assistant ·/ });
   elsewhere.focus();
   StreamFake.last().emit("message", { text: "chunk" });
   await screen.findByText("chunk");
@@ -165,9 +179,9 @@ test("a streamed chunk never steals focus from where the member put it", async (
 
 test("streaming keeps the log pinned at the bottom but never yanks a reader back down", async () => {
   const { fireEvent } = await import("@testing-library/react");
-  wire({ ...transcript(), "/chat": () => json({ turn_id: TURN_ID }) });
+  wire({ ...transcript(), "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }) });
   open();
-  await screen.findByText("No conversation with assistant yet.");
+  await screen.findByText("No messages in this conversation yet.");
   await userEvent.type(screen.getByLabelText("Message the agent"), "hi");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
@@ -191,9 +205,9 @@ test("streaming keeps the log pinned at the bottom but never yanks a reader back
 
 test("sending while scrolled up re-pins the log to the bottom", async () => {
   const { fireEvent } = await import("@testing-library/react");
-  wire({ ...transcript(), "/chat": () => json({ turn_id: TURN_ID }) });
+  wire({ ...transcript(), "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }) });
   open();
-  await screen.findByText("No conversation with assistant yet.");
+  await screen.findByText("No messages in this conversation yet.");
 
   const log = screen.getByTestId("log");
   Object.defineProperty(log, "scrollHeight", { configurable: true, value: 1000 });
@@ -234,11 +248,22 @@ test("answering a question while scrolled up re-pins the log to the bottom", asy
   expect(log.scrollTop).toBe(1000);
 });
 
-test("switching agents remounts the log so scroll state never leaks across", async () => {
+test("switching conversations remounts the log so scroll state never leaks across", async () => {
   const { fireEvent } = await import("@testing-library/react");
-  wire({ ...transcript(), "/chat": () => json({ turn_id: TURN_ID }) });
+  const other = {
+    ...CHAT_ROW,
+    conversation_id: "66666666-6666-4666-8666-666666666666",
+    agent_id: SECOND_ID,
+    agent_name: "second",
+    title: "The second thread",
+  };
+  wire({
+    "/api/chats": () => json({ chats: [CHAT_ROW, other] }),
+    "/transcript": () => json({ messages: [] }),
+    "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }),
+  });
   render(<App agents={[AGENT, SECOND]} member={MEMBER} />);
-  await screen.findByText("No conversation with assistant yet.");
+  await screen.findByText("No messages in this conversation yet.");
 
   const first = screen.getByTestId("log");
   Object.defineProperty(first, "scrollHeight", { configurable: true, value: 1000 });
@@ -246,8 +271,8 @@ test("switching agents remounts the log so scroll state never leaks across", asy
   first.scrollTop = 100;
   fireEvent.scroll(first);
 
-  await userEvent.click(screen.getByRole("button", { name: /second/ }));
-  await screen.findByText("No conversation with second yet.");
+  await userEvent.click(screen.getByRole("button", { name: /The second thread/ }));
+  await screen.findByText("No messages in this conversation yet.");
   expect(document.activeElement).toBe(screen.getByLabelText("Message the agent"));
   const fresh = screen.getByTestId("log");
   expect(fresh).not.toBe(first);
@@ -263,12 +288,13 @@ test("switching agents remounts the log so scroll state never leaks across", asy
 test("the log opens pinned: loading a transcript lands at the bottom untouched", async () => {
   let release: (value: Response) => void = () => {};
   wire({
+    "/api/chats": () => json({ chats: [CHAT_ROW] }),
     "/transcript": () => new Promise<Response>((resolve) => (release = resolve)),
-    "/chat": () => json({ turn_id: TURN_ID }),
+    "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }),
   });
   open();
 
-  const log = screen.getByTestId("log");
+  const log = await screen.findByTestId("log");
   Object.defineProperty(log, "scrollHeight", { configurable: true, value: 1000 });
   Object.defineProperty(log, "clientHeight", { configurable: true, value: 300 });
 
@@ -279,9 +305,9 @@ test("the log opens pinned: loading a transcript lands at the bottom untouched",
 
 test("a reader inside the tolerance band still counts as at the bottom", async () => {
   const { fireEvent } = await import("@testing-library/react");
-  wire({ ...transcript(), "/chat": () => json({ turn_id: TURN_ID }) });
+  wire({ ...transcript(), "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }) });
   open();
-  await screen.findByText("No conversation with assistant yet.");
+  await screen.findByText("No messages in this conversation yet.");
   await userEvent.type(screen.getByLabelText("Message the agent"), "hi");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
@@ -298,9 +324,9 @@ test("a reader inside the tolerance band still counts as at the bottom", async (
 });
 
 test("sending returns focus to the composer instead of stranding it on the page", async () => {
-  wire({ ...transcript(), "/chat": () => json({ turn_id: TURN_ID }) });
+  wire({ ...transcript(), "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }) });
   open();
-  await screen.findByText("No conversation with assistant yet.");
+  await screen.findByText("No messages in this conversation yet.");
   const input = screen.getByLabelText("Message the agent");
   await userEvent.type(input, "hi");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
@@ -364,9 +390,9 @@ test("a second answer clicked mid-stream neither posts nor yanks the reader", as
 });
 
 test("agent markdown renders as elements while the member's text stays literal", async () => {
-  wire({ ...transcript(), "/chat": () => json({ turn_id: TURN_ID }) });
+  wire({ ...transcript(), "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }) });
   open();
-  await screen.findByText("No conversation with assistant yet.");
+  await screen.findByText("No messages in this conversation yet.");
   await userEvent.type(screen.getByLabelText("Message the agent"), "**hi**");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));

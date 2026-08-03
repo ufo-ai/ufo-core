@@ -265,16 +265,16 @@ def dbos_runtime(
     loop_queue.reset_runtime()
 
 
-def test_chat_source_links_the_portal_at_the_agent_and_names_who_asked() -> None:
-    agent_id = uuid4()
-    assert web_surface._chat_source("https://ufo.example", agent_id, "bee@example.com") == (
-        f"https://ufo.example/surface/web#/agents/{agent_id} (bee@example.com)"
+def test_chat_source_links_the_portal_at_the_conversation_and_names_who_asked() -> None:
+    conversation_id = uuid4()
+    assert web_surface._chat_source("https://ufo.example", conversation_id, "bee@example.com") == (
+        f"https://ufo.example/surface/web#/c/{conversation_id} (bee@example.com)"
     )
-    assert web_surface._chat_source("https://ufo.example/", agent_id, "bee@example.com") == (
-        f"https://ufo.example/surface/web#/agents/{agent_id} (bee@example.com)"
+    assert web_surface._chat_source("https://ufo.example/", conversation_id, "bee@example.com") == (
+        f"https://ufo.example/surface/web#/c/{conversation_id} (bee@example.com)"
     )
     for unset in (None, ""):
-        assert web_surface._chat_source(unset, agent_id, "bee@example.com") == (
+        assert web_surface._chat_source(unset, conversation_id, "bee@example.com") == (
             "ufo web (bee@example.com)"
         )
 
@@ -384,7 +384,7 @@ async def test_web_turn_round_trip_admits_streams_and_links_identity(
     member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
     STREAM_GATE.arm()
     admitted = await client.post(
-        f"/surface/web/agents/{agent_id}/chat",
+        f"/surface/web/agents/{agent_id}/chat?conversation=new",
         content=b"hello",
         headers={"cookie": f"{SESSION_COOKIE}={token}"},
     )
@@ -432,12 +432,12 @@ async def test_web_turn_round_trip_admits_streams_and_links_identity(
     assert conversation.surface == "web"
     assert conversation.member_id == member_id
     assert conversation.agent_id == agent_id
-    assert conversation.queue_key == f"{agent_id}/owner@example.com"
+    assert conversation.queue_key.startswith(f"{agent_id}/owner@example.com/")
     assert writeback is None
     assert context == {
         "sender": "owner@example.com",
         "timezone": None,
-        "source": (f"https://web/surface/web#/agents/{agent_id} (owner@example.com)"),
+        "source": (f"https://web/surface/web#/c/{opened} (owner@example.com)"),
     }
     transcript = await client.get(
         f"/surface/web/agents/{agent_id}/transcript?conversation={opened}",
@@ -498,7 +498,7 @@ async def test_ungranted_member_reaches_the_main_agent_and_nothing_else(
     assert empty_rail.json() == {"chats": []}
     STREAM_GATE.arm()
     admitted = await client.post(
-        f"/surface/web/agents/{agent_id}/chat", content=b"hi", headers=cookie
+        f"/surface/web/agents/{agent_id}/chat?conversation=new", content=b"hi", headers=cookie
     )
     assert admitted.status_code == 200
     await _consume(client, token, admitted.json()["turn_id"])
@@ -574,8 +574,8 @@ async def test_agents_index_filters_by_grant_and_widens_for_admins(
         f"/surface/web/agents/{agent_id}/transcript",
         headers={"cookie": f"{SESSION_COOKIE}={member_token}"},
     )
-    assert reachable.status_code == 200
-    assert reachable.json() == {"messages": []}
+    assert reachable.status_code == 400
+    assert reachable.text == "conversation is required"
 
 
 async def _seed_connection(
@@ -1318,11 +1318,13 @@ async def test_one_member_holds_a_conversation_per_agent(
     _member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
     cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
     STREAM_GATE.arm()
-    first = await client.post(f"/surface/web/agents/{agent_id}/chat", content=b"hi", headers=cookie)
+    first = await client.post(
+        f"/surface/web/agents/{agent_id}/chat?conversation=new", content=b"hi", headers=cookie
+    )
     await _consume(client, token, first.json()["turn_id"])
     STREAM_GATE.arm()
     second = await client.post(
-        f"/surface/web/agents/{second_agent}/chat", content=b"hi", headers=cookie
+        f"/surface/web/agents/{second_agent}/chat?conversation=new", content=b"hi", headers=cookie
     )
     await _consume(client, token, second.json()["turn_id"])
     async with workspace_tx() as connection:
@@ -1454,7 +1456,7 @@ async def test_the_rail_lists_own_conversations_newest_first_and_only_own(
     await _consume(client, token, opened.json()["turn_id"])
     STREAM_GATE.arm()
     theirs = await client.post(
-        f"/surface/web/agents/{agent_id}/chat",
+        f"/surface/web/agents/{agent_id}/chat?conversation=new",
         content=b"peer message",
         headers={"cookie": f"{SESSION_COOKIE}={other_token}"},
     )
@@ -1557,89 +1559,79 @@ async def test_an_answer_into_a_fresh_conversation_is_refused(
     assert turns == 0
 
 
-async def test_the_shipped_pages_calls_keep_working_unchanged(
+async def test_a_parameterless_call_is_refused_before_anything_opens(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
-    """The contract the deployed portal calls on, replayed exactly: chat POSTs with no
-    `conversation` land in one default conversation per agent, its transcript answers the bare
-    GET, and an answer click with no parameter joins that same conversation under a stable
-    idempotency key. The new fields ride the responses additively."""
+    """Every chat call names its conversation — `new` or an id. A bare POST or transcript GET is
+    refused before any conversation, chat row, or turn exists."""
     client, workspace_id, agent_id = web
     _member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
     cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
-    STREAM_GATE.arm()
-    first = await client.post(
+    refused = await client.post(
         f"/surface/web/agents/{agent_id}/chat", content=b"hello", headers=cookie
     )
-    await _consume(client, token, first.json()["turn_id"])
-    STREAM_GATE.arm()
-    second = await client.post(
-        f"/surface/web/agents/{agent_id}/chat", content=b"more", headers=cookie
-    )
-    await _consume(client, token, second.json()["turn_id"])
-    assert second.json()["conversation_id"] == first.json()["conversation_id"]
-    assert second.json()["title"] == "hello"
-    async with workspace_tx() as connection:
-        keys = (
-            (
-                await connection.execute(
-                    sa.select(tables.conversation.c.queue_key).where(
-                        tables.conversation.c.surface == "web"
-                    )
-                )
-            )
-            .scalars()
-            .all()
-        )
-    assert keys == [f"{agent_id}/owner@example.com"]
+    assert refused.status_code == 400
+    assert refused.text == "conversation is required"
     bare = await client.get(f"/surface/web/agents/{agent_id}/transcript", headers=cookie)
-    assert [m["text"] for m in bare.json()["messages"] if m["role"] == "user"] == [
-        "hello",
-        "more",
-    ]
-    rail = await client.get("/surface/web/api/chats", headers=cookie)
-    assert [row["title"] for row in rail.json()["chats"]] == ["hello"]
-    default_id = UUID(first.json()["conversation_id"])
-    asking_turn = uuid4()
+    assert bare.status_code == 400
+    assert bare.text == "conversation is required"
+    async with workspace_tx() as connection:
+        conversations = (
+            await connection.execute(sa.select(sa.func.count()).select_from(tables.conversation))
+        ).scalar_one()
+    assert conversations == 0
+
+
+async def test_a_conversation_past_the_rails_bound_still_resolves_by_id(
+    web: tuple[AsyncClient, UUID, UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An emitted `#/c/<id>` link outlives the rail's bound: with the bound at one, the displaced
+    older conversation still answers `api/chats?conversation=` with its one row, another member's
+    id answers empty, and a malformed id answers empty."""
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    _peer_id, peer_token = await _seed_member(workspace_id, "peer@example.com")
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    older_id, older_turn = await _seed_web_turn(
+        workspace_id,
+        agent_id,
+        member_id,
+        "owner@example.com",
+        TerminalFrame(status="done", text="hi"),
+        title="Displaced but linked",
+    )
     async with workspace_tx() as connection:
         await connection.execute(
-            sa.insert(tables.turn).values(
-                id=asking_turn,
-                workspace_id=workspace_id,
-                conversation_id=default_id,
-                agent_id=agent_id,
-                seq=3,
-                status="done",
-                inbound="ask",
-                terminal=TerminalFrame(
-                    status="done", text="one question", question=QUESTION
-                ).model_dump(mode="json"),
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
+            sa.update(tables.turn)
+            .where(tables.turn.c.id == older_turn)
+            .values(updated_at=datetime.now(UTC) - timedelta(hours=1))
         )
-    answer_headers = {
-        **cookie,
-        "x-ufo-answer-turn": str(asking_turn),
-        "x-ufo-answer-question": "0",
-    }
     STREAM_GATE.arm()
-    answered = await client.post(
-        f"/surface/web/agents/{agent_id}/chat",
-        content="Now · When should the deploy run?".encode(),
-        headers=answer_headers,
+    newer = await client.post(
+        f"/surface/web/agents/{agent_id}/chat?conversation=new",
+        content=b"newer words",
+        headers=cookie,
     )
-    assert answered.status_code == 200
-    assert answered.json()["conversation_id"] == str(default_id)
-    assert answered.json()["body"] == "Now · When should the deploy run?"
-    await _consume(client, token, answered.json()["turn_id"])
-    again = await client.post(
-        f"/surface/web/agents/{agent_id}/chat",
-        content="Tonight · When should the deploy run?".encode(),
-        headers=answer_headers,
+    await _consume(client, token, newer.json()["turn_id"])
+    monkeypatch.setattr(web_surface, "CONVERSATION_LIST_LIMIT", 1)
+    rail = await client.get("/surface/web/api/chats", headers=cookie)
+    assert [row["conversation_id"] for row in rail.json()["chats"]] == [
+        newer.json()["conversation_id"]
+    ]
+    resolved = await client.get(f"/surface/web/api/chats?conversation={older_id}", headers=cookie)
+    rows = resolved.json()["chats"]
+    assert [row["conversation_id"] for row in rows] == [str(older_id)]
+    assert rows[0]["title"] == "Displaced but linked"
+    assert rows[0]["agent_name"] == "assistant"
+    assert rows[0]["last_at"] is not None
+    crossed = await client.get(
+        f"/surface/web/api/chats?conversation={older_id}",
+        headers={"cookie": f"{SESSION_COOKIE}={peer_token}"},
     )
-    assert again.json()["turn_id"] == answered.json()["turn_id"]
-    assert again.json()["body"] == "Now · When should the deploy run?"
+    assert crossed.json() == {"chats": []}
+    malformed = await client.get("/surface/web/api/chats?conversation=not-a-uuid", headers=cookie)
+    assert malformed.json() == {"chats": []}
 
 
 async def test_an_orphaned_chat_row_is_inert(
@@ -1727,7 +1719,7 @@ async def test_a_conversation_is_walled_to_its_member_and_its_agent(
     peer_cookie = {"cookie": f"{SESSION_COOKIE}={peer_token}"}
     STREAM_GATE.arm()
     opened = await client.post(
-        f"/surface/web/agents/{agent_id}/chat", content=b"mine", headers=cookie
+        f"/surface/web/agents/{agent_id}/chat?conversation=new", content=b"mine", headers=cookie
     )
     await _consume(client, token, opened.json()["turn_id"])
     conversation = opened.json()["conversation_id"]
@@ -1862,14 +1854,14 @@ async def test_two_web_members_get_isolated_subjects_and_cannot_cross(
     member_b, token_b = await _seed_member(workspace_id, "b@example.com")
     turn_a = (
         await client.post(
-            f"/surface/web/agents/{agent_id}/chat",
+            f"/surface/web/agents/{agent_id}/chat?conversation=new",
             content=b"hi",
             headers={"cookie": f"{SESSION_COOKIE}={token_a}"},
         )
     ).json()["turn_id"]
     turn_b = (
         await client.post(
-            f"/surface/web/agents/{agent_id}/chat",
+            f"/surface/web/agents/{agent_id}/chat?conversation=new",
             content=b"hi",
             headers={"cookie": f"{SESSION_COOKIE}={token_b}"},
         )
@@ -2506,7 +2498,7 @@ async def test_composer_files_land_in_the_workspace_before_the_turn(
     _member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
     STREAM_GATE.arm()
     admitted = await client.post(
-        f"/surface/web/agents/{agent_id}/chat",
+        f"/surface/web/agents/{agent_id}/chat?conversation=new",
         data={"message": "read these"},
         files=[
             ("file", ("notes.txt", b"hello", "text/plain")),
@@ -2666,7 +2658,7 @@ async def test_a_multipart_message_part_lands_as_the_parsers_decode(
     )
     STREAM_GATE.arm()
     admitted = await client.post(
-        f"/surface/web/agents/{agent_id}/chat",
+        f"/surface/web/agents/{agent_id}/chat?conversation=new",
         content=body,
         headers={
             "cookie": f"{SESSION_COOKIE}={token}",
@@ -2762,7 +2754,7 @@ async def test_a_multibyte_message_at_the_char_bound_admits(
     text = "\U0001d11e" * web_surface.MAX_INBOUND_CHARS
     STREAM_GATE.arm()
     admitted = await client.post(
-        f"/surface/web/agents/{agent_id}/chat",
+        f"/surface/web/agents/{agent_id}/chat?conversation=new",
         content=text.encode(),
         headers={"cookie": f"{SESSION_COOKIE}={token}"},
     )
@@ -2790,7 +2782,7 @@ async def test_a_client_chosen_filename_is_never_a_path(
     _member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
     STREAM_GATE.arm()
     admitted = await client.post(
-        f"/surface/web/agents/{agent_id}/chat",
+        f"/surface/web/agents/{agent_id}/chat?conversation=new",
         data={"message": "renamed"},
         files=[
             ("file", ("../../we ird&name!!.txt", b"safe", "text/plain")),
@@ -2828,7 +2820,7 @@ async def test_a_files_note_cannot_blow_the_inbound_bound(
     cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
     STREAM_GATE.arm()
     opened = await client.post(
-        f"/surface/web/agents/{agent_id}/chat", content=b"hi", headers=cookie
+        f"/surface/web/agents/{agent_id}/chat?conversation=new", content=b"hi", headers=cookie
     )
     await _consume(client, token, opened.json()["turn_id"])
     monkeypatch.setattr(web_surface, "MAX_INBOUND_CHARS", 64)

@@ -48,12 +48,12 @@ const EMPTY: ChatState = { messages: null, busy: false, live: null, turn: null, 
 const states = new Map<string, ChatState>();
 const listeners = new Set<() => void>();
 
-export function chatState(agentId: string): ChatState {
-  return states.get(agentId) ?? EMPTY;
+export function chatState(chatKey: string): ChatState {
+  return states.get(chatKey) ?? EMPTY;
 }
 
-export function updateChat(agentId: string, change: (state: ChatState) => ChatState): void {
-  states.set(agentId, change(chatState(agentId)));
+export function updateChat(chatKey: string, change: (state: ChatState) => ChatState): void {
+  states.set(chatKey, change(chatState(chatKey)));
   for (const listener of listeners) listener();
 }
 
@@ -70,13 +70,26 @@ export function liveTurn(): LiveTurn {
   };
 }
 
-export function useChat(agentId: string): ChatState {
+export function migrateChat(fromKey: string, toKey: string): void {
+  const state = states.get(fromKey);
+  if (!state) return;
+  states.delete(fromKey);
+  states.set(toKey, state);
+  for (const listener of listeners) listener();
+}
+
+export function clearChat(chatKey: string): void {
+  if (!states.delete(chatKey)) return;
+  for (const listener of listeners) listener();
+}
+
+export function useChat(chatKey: string): ChatState {
   return useSyncExternalStore(
     (listener) => {
       listeners.add(listener);
       return () => listeners.delete(listener);
     },
-    () => chatState(agentId),
+    () => chatState(chatKey),
   );
 }
 

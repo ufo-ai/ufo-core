@@ -5,12 +5,12 @@ import { beforeEach, expect, test } from "vitest";
 import { App } from "@/App";
 import { tokens } from "@/lib/turnStream";
 
-import { AGENT, MEMBER, StreamFake, TURN_ID, json, useStreamFake, wire } from "./harness";
+import { AGENT, CONVO_ID, MEMBER, StreamFake, TURN_ID, json, useStreamFake, wire } from "./harness";
 
 async function streaming() {
   wire({
     "/transcript": () => json({ messages: [] }),
-    "/chat": () => json({ turn_id: TURN_ID }),
+    "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "go" }),
   });
   render(<App agents={[AGENT]} member={MEMBER} />);
   await userEvent.type(screen.getByLabelText("Message the agent"), "go");
@@ -20,7 +20,6 @@ async function streaming() {
 }
 
 beforeEach(() => {
-  location.hash = "#/agents/" + AGENT.id + "/chat";
   useStreamFake();
 });
 
