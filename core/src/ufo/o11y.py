@@ -15,6 +15,7 @@ from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExport
 from opentelemetry.metrics import Counter, Histogram
 from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
 from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
+from opentelemetry.sdk.metrics import Counter as CounterInstrument
 from opentelemetry.sdk.metrics import Histogram as HistogramInstrument
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import (
@@ -74,8 +75,9 @@ HISTOGRAMS = {
 HISTOGRAM_AGGREGATION: dict[type, Aggregation] = {
     HistogramInstrument: ExponentialBucketHistogramAggregation()
 }
-HISTOGRAM_TEMPORALITY: dict[type, AggregationTemporality] = {
-    HistogramInstrument: AggregationTemporality.DELTA
+EXPORT_TEMPORALITY: dict[type, AggregationTemporality] = {
+    CounterInstrument: AggregationTemporality.DELTA,
+    HistogramInstrument: AggregationTemporality.DELTA,
 }
 NO_ERROR_CLASS = ""
 OTHER_ERROR_CLASS = "other"
@@ -210,7 +212,7 @@ def init_o11y(otlp_endpoint: str | None) -> None:
         OTLPMetricExporter(
             endpoint=metrics_url,
             preferred_aggregation=HISTOGRAM_AGGREGATION,
-            preferred_temporality=HISTOGRAM_TEMPORALITY,
+            preferred_temporality=EXPORT_TEMPORALITY,
         ),
         export_interval_millis=METRIC_EXPORT_INTERVAL_MILLIS,
     )
@@ -417,7 +419,8 @@ def _bounded_error_class(dimensions: dict[str, str]) -> dict[str, str]:
 
 def emit_metric(name: str, amount: int = 1, /, **dimensions: str) -> None:
     """Increment a registered counter; unregistered names fail loud. What is measured is positional
-    so that every keyword is a dimension."""
+    so that every keyword is a dimension. `EXPORT_TEMPORALITY` ships the increment as a delta, so
+    one event is one count."""
     if name not in METRICS:
         raise ValueError(f"unknown metric: {name}")
     counter = _counters.get(name)
@@ -435,7 +438,7 @@ def emit_histogram(name: str, value: int, /, **dimensions: str) -> None:
     the deployed allowlist is held against, and no call site can reach Datadog with a tag the
     allowlist omits. `HISTOGRAM_AGGREGATION` resolves a cached file read and a turn that ran for
     hours on one instrument, at bounded relative error, so no name declares a range;
-    `HISTOGRAM_TEMPORALITY` is what carries it, since the Datadog exporter maps an exponential
+    `EXPORT_TEMPORALITY` is what carries it, since the Datadog exporter maps an exponential
     histogram to a sketch only in delta and drops a cumulative one."""
     declared = HISTOGRAMS.get(name)
     if declared is None:

@@ -441,7 +441,7 @@ def test_histograms_resolve_a_millisecond_and_a_day_as_delta_exponential(monkeyp
     would mean silence in production and fails here instead."""
     reader = InMemoryMetricReader(
         preferred_aggregation=o11y.HISTOGRAM_AGGREGATION,
-        preferred_temporality=o11y.HISTOGRAM_TEMPORALITY,
+        preferred_temporality=o11y.EXPORT_TEMPORALITY,
     )
     provider = MeterProvider(metric_readers=[reader])
     monkeypatch.setattr(o11y.metrics, "get_meter", provider.get_meter)
@@ -469,11 +469,57 @@ def test_init_o11y_ships_histograms_as_delta_exponential(monkeypatch):
     every other assertion in this file passing, while production goes silent because the Datadog
     exporter drops the cumulative histograms it would then receive. So this reads the bytes the real
     exporter puts on the wire, built by `init_o11y` itself."""
-    received: list[bytes] = []
+    provider, exported, server = _init_o11y_against_an_intake(monkeypatch)
+    o11y.emit_histogram("turn_ms", CACHED_FILE_READ_MS, status="done")
+    o11y.emit_histogram("turn_ms", LONG_TURN_MS, status="done")
+    assert provider.force_flush(timeout_millis=15_000)
+    server.shutdown()
+    metric = exported[0].resource_metrics[0].scope_metrics[0].metrics[0]
+    point = metric.exponential_histogram.data_points[0]
+    assert metric.name == "ufo.turn_ms"
+    assert metric.WhichOneof("data") == "exponential_histogram"
+    assert metric.exponential_histogram.aggregation_temporality == AGGREGATION_TEMPORALITY_DELTA
+    assert (point.min, point.max, point.count) == (CACHED_FILE_READ_MS, LONG_TURN_MS, 2)
+
+
+def test_init_o11y_ships_one_increment_as_one_counted_delta(monkeypatch):
+    """One event is one count. The delta carries the increment itself, so the count stands without
+    anything downstream holding per-series state to recover it, and an interval where nothing is
+    counted exports no point at all, which is what the second flush pins."""
+    provider, exported, server = _init_o11y_against_an_intake(monkeypatch)
+    o11y.emit_metric("source_sync_failed_total", provider="googlesheets", stream="sheet_values")
+    assert provider.force_flush(timeout_millis=15_000)
+    assert provider.force_flush(timeout_millis=15_000)
+    server.shutdown()
+    counters = [
+        metric
+        for export in exported
+        for resource in export.resource_metrics
+        for scope in resource.scope_metrics
+        for metric in scope.metrics
+        if metric.WhichOneof("data") == "sum"
+    ]
+    assert len(counters) == 1
+    metric = counters[0]
+    assert metric.name == "ufo.source_sync_failed_total"
+    assert metric.sum.aggregation_temporality == AGGREGATION_TEMPORALITY_DELTA
+    assert metric.sum.is_monotonic
+    assert [point.as_int for point in metric.sum.data_points] == [1]
+
+
+def _init_o11y_against_an_intake(
+    monkeypatch,
+) -> tuple[MeterProvider, list[ExportMetricsServiceRequest], HTTPServer]:
+    """`init_o11y` pointed at a real OTLP/HTTP intake: the provider it installed, the export
+    requests that reach the intake, and the server to shut down. Both instrument caches are emptied
+    alongside the provider they bind to."""
+    exported: list[ExportMetricsServiceRequest] = []
 
     class Intake(BaseHTTPRequestHandler):
         def do_POST(self) -> None:
-            received.append(self.rfile.read(int(self.headers["content-length"])))
+            export = ExportMetricsServiceRequest()
+            export.ParseFromString(self.rfile.read(int(self.headers["content-length"])))
+            exported.append(export)
             self.send_response(200)
             self.send_header("content-length", "0")
             self.end_headers()
@@ -488,22 +534,12 @@ def test_init_o11y_ships_histograms_as_delta_exponential(monkeypatch):
     monkeypatch.setattr(o11y.trace, "set_tracer_provider", lambda provider: None)
     monkeypatch.setattr(o11y._logs, "set_logger_provider", lambda provider: None)
     monkeypatch.setattr(o11y, "_bridge_warning_logs", lambda provider: None)
+    monkeypatch.setattr(o11y, "_counters", {})
     monkeypatch.setattr(o11y, "_histograms", {})
     o11y.init_o11y(f"http://127.0.0.1:{server.server_port}")
     provider = installed[0]
     monkeypatch.setattr(o11y.metrics, "get_meter", provider.get_meter)
-    o11y.emit_histogram("turn_ms", CACHED_FILE_READ_MS, status="done")
-    o11y.emit_histogram("turn_ms", LONG_TURN_MS, status="done")
-    assert provider.force_flush(timeout_millis=15_000)
-    server.shutdown()
-    export = ExportMetricsServiceRequest()
-    export.ParseFromString(received[0])
-    metric = export.resource_metrics[0].scope_metrics[0].metrics[0]
-    point = metric.exponential_histogram.data_points[0]
-    assert metric.name == "ufo.turn_ms"
-    assert metric.WhichOneof("data") == "exponential_histogram"
-    assert metric.exponential_histogram.aggregation_temporality == AGGREGATION_TEMPORALITY_DELTA
-    assert (point.min, point.max, point.count) == (CACHED_FILE_READ_MS, LONG_TURN_MS, 2)
+    return provider, exported, server
 
 
 def test_turn_span_yields_and_closes():
