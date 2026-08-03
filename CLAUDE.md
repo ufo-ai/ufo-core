@@ -22,6 +22,9 @@ and unavoidable third-party plumbing (e.g. an OAuth callback). The speaker gates
 act; subsequent use is the wire's job. (`ufoctl` CLI verbs are the operator surface — a
 different audience, not member actions.)
 
+- Study how established products solve the problem before designing a solution. Adopt their proven
+  patterns and conventions rather than inventing an approach from scratch.
+
 ## One shape
 
 **The code is exactly what it does, nothing else.** Anything that creates a second answer to "what
