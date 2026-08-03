@@ -70,7 +70,7 @@ export function Caps({ caps, empty }: { caps: Cap[]; empty: string }) {
         {caps.map((cap, index) => (
           <tr key={index}>
             <Td>{hours(cap.window_seconds)}</Td>
-            <Td>{"$" + (cap.limit_micro_usd / 1e6).toFixed(2)}</Td>
+            <Td>{money(cap.limit_micro_usd)}</Td>
             <Td>{cap.on_breach}</Td>
           </tr>
         ))}

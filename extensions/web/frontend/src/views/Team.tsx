@@ -4,7 +4,7 @@ import type { Placement } from "@/kernel/pager";
 import { Button } from "@/components/ui/button";
 import { Checkbox, Input } from "@/components/ui/field";
 import { Table, Td, Th } from "@/components/ui/table";
-import { Notice, Panel, usePanelRead } from "@/kernel/panel";
+import { type NoticeState, OutcomeNotice, Panel, outcomeNotice, usePanelRead } from "@/kernel/panel";
 import { postIntent } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { useMainAgent } from "@/lib/mainAgent";
@@ -41,7 +41,7 @@ export function Team({
   onPlace: (place: Placement) => void;
 }) {
   const mainAgent = useMainAgent();
-  const [notice, setNotice] = useState(place.notice ?? "");
+  const [notice, setNotice] = useState<NoticeState>({ text: place.notice ?? "", refused: false });
   const [email, setEmail] = useState("");
   const [admin, setAdmin] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -62,7 +62,7 @@ export function Team({
       onPlace({ notice: outcome.message });
       return;
     }
-    setNotice(outcome.message);
+    setNotice(outcomeNotice(outcome));
   }
 
   return (
@@ -117,7 +117,7 @@ export function Team({
               </Button>
             </form>
           ) : null}
-          <Notice>{notice}</Notice>
+          <OutcomeNotice state={notice} />
         </>
       )}
     </Panel>

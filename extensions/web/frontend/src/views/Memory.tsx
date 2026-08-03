@@ -4,7 +4,7 @@ import { Pager, type Placement } from "@/kernel/pager";
 import { day } from "@/views/Tasks";
 import { Button } from "@/components/ui/button";
 import { Table, Td, Th } from "@/components/ui/table";
-import { Notice, Panel, PanelEmpty, usePanelRead } from "@/kernel/panel";
+import { type NoticeState, OutcomeNotice, Panel, PanelEmpty, QUIET, usePanelRead } from "@/kernel/panel";
 import { postIntent } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { useMainAgent } from "@/lib/mainAgent";
@@ -34,7 +34,7 @@ export function Memory({
   const [query, setQuery] = useState("");
   const [submitted, setSubmitted] = useState("");
   const [reloads, setReloads] = useState(0);
-  const [notice, setNotice] = useState("");
+  const [notice, setNotice] = useState<NoticeState>(QUIET);
   const [correcting, setCorrecting] = useState<Match | null>(null);
 
   const params = new URLSearchParams();
@@ -152,11 +152,11 @@ export function Memory({
           onDone={(message) => {
             setCorrecting(null);
             if (message === null) setReloads((count) => count + 1);
-            else setNotice(message);
+            else setNotice({ text: message, refused: true });
           }}
         />
       ) : null}
-      <Notice>{notice}</Notice>
+      <OutcomeNotice state={notice} />
     </>
   );
 }

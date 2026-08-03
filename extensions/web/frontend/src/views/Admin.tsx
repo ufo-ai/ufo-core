@@ -3,19 +3,24 @@ import { useEffect, useState, type FormEvent } from "react";
 import { Button } from "@/components/ui/button";
 import { Checkbox, Input, Select, Textarea } from "@/components/ui/field";
 import { Table, Td, Th } from "@/components/ui/table";
-import { Notice, Panel, PanelEmpty, usePanelRead } from "@/kernel/panel";
+import { type NoticeState, OutcomeNotice, Panel, PanelEmpty, QUIET, outcomeNotice, usePanelRead } from "@/kernel/panel";
 import { getJson, postIntent } from "@/lib/api";
+import { money } from "@/lib/money";
 import type { Agent, AdminPayload, Member } from "@/lib/types";
 
 export function Admin() {
   const [reloads, setReloads] = useState(0);
-  const [notice, setNotice] = useState("");
+  const [notice, setNotice] = useState<NoticeState>(QUIET);
   const [copying, setCopying] = useState<Agent | null>(null);
   const state = usePanelRead<AdminPayload>("/api/admin", reloads);
 
   async function intent(agentId: string, envelope: unknown, prefix?: string) {
     const outcome = await postIntent(agentId, envelope);
-    setNotice(prefix && outcome.applied ? prefix + " " + outcome.message : outcome.message);
+    setNotice(
+      prefix && outcome.applied
+        ? { text: prefix + " " + outcome.message, refused: false }
+        : outcomeNotice(outcome),
+    );
     if (outcome.applied) setReloads((count) => count + 1);
   }
 
@@ -40,9 +45,9 @@ export function Admin() {
 
         return (
           <main className="flex flex-col gap-3xl overflow-y-auto p-2xl" data-testid="admin">
-            <Notice>{notice}</Notice>
+            <OutcomeNotice state={notice} />
 
-            <h2 className="m-0 text-section">Agents</h2>
+            <h2 className="m-0 text-ui">Agents</h2>
             <Table>
               <thead>
                 <tr>
@@ -60,7 +65,7 @@ export function Admin() {
                     agent={agent}
                     onCopy={() => {
                       setCopying(agent);
-                      setNotice("Copying " + agent.name + " — configuration only.");
+                      setNotice({ text: "Copying " + agent.name + " — configuration only.", refused: false });
                     }}
                     onAudience={(verb, email) => intent(agent.id, { verb, email })}
                   />
@@ -82,7 +87,7 @@ export function Admin() {
               />
             ) : null}
 
-            <h2 className="m-0 text-section">
+            <h2 className="m-0 text-ui">
               {"Members" +
                 (gated ? "" : " · seats ungated") +
                 (seats.limit !== null ? " · " + seats.limit + " seat limit" : "") +
@@ -119,7 +124,7 @@ export function Admin() {
               </tbody>
             </Table>
 
-            <h2 className="m-0 text-section">Billing</h2>
+            <h2 className="m-0 text-ui">Billing</h2>
             {payload.caps.length ? (
               <Table>
                 <thead>
@@ -135,7 +140,7 @@ export function Admin() {
                       <Td>{cap.scope}</Td>
                       <Td>{cap.subject || "—"}</Td>
                       <Td>{cap.window_seconds / 3600 + "h"}</Td>
-                      <Td>{"$" + (cap.limit_micro_usd / 1e6).toFixed(2)}</Td>
+                      <Td>{money(cap.limit_micro_usd)}</Td>
                       <Td>{cap.on_breach}</Td>
                     </tr>
                   ))}
@@ -146,7 +151,7 @@ export function Admin() {
             )}
             <div>The plan, invoices, and payment methods are managed with the agent in chat.</div>
 
-            <h2 className="m-0 text-section">Deploy</h2>
+            <h2 className="m-0 text-ui">Deploy</h2>
             <div>
               Sandbox public internet: {payload.deploy.sandbox_internet ? "allowed" : "blocked"}
             </div>
@@ -304,7 +309,7 @@ function CreateAgent({
 
   return (
     <div>
-      <h2 className="m-0 text-section">Create agent</h2>
+      <h2 className="m-0 text-ui">Create agent</h2>
       <form onSubmit={submit} className="flex max-w-form flex-col gap-sm">
         <Input
           placeholder="agent name"

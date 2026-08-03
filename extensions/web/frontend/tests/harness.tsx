@@ -1,4 +1,5 @@
-import { vi } from "vitest";
+import { expect, vi } from "vitest";
+import { screen } from "@testing-library/react";
 
 export class StreamFake {
   static opened: StreamFake[] = [];
@@ -93,3 +94,9 @@ export const SECOND = {
 export const MEMBER = { id: "m1", email: "member@example.com", admin: false };
 
 export const json = (payload: unknown) => Response.json(payload);
+
+export async function refusedNotice(text: string): Promise<void> {
+  const notice = await screen.findByText(text);
+  expect(notice.className).toContain("bg-attention");
+  expect(notice.className).toContain("[color:var(--color-attention-ink)]");
+}

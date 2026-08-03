@@ -20,7 +20,7 @@ export function AgentPane({ agent, tab, tabs, onTab }: AgentPaneProps) {
   return (
     <main className="flex min-h-0 min-w-0 flex-col">
       <div className="flex items-baseline gap-md px-2xl pt-lg">
-        <h1 className="m-0 text-body font-strong">{agent.name}</h1>
+        <h1 className="m-0 text-title font-strong">{agent.name}</h1>
         <span className="font-mono text-mono opacity-(--muted-strong)">{agent.model}</span>
       </div>
       <div role="tablist" className="flex gap-2xs border-b border-edge px-lg pt-xs">

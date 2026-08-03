@@ -1,13 +1,15 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test } from "vitest";
 
 import { App } from "@/App";
 import { Table, Td } from "@/components/ui/table";
+import { Notice } from "@/kernel/panel";
 
-import { AGENT, MEMBER, useStreamFake, wire } from "./harness";
+import { AGENT, MEMBER, StreamFake, TURN_ID, json, useStreamFake, wire } from "./harness";
 
 const STATIC = join(import.meta.dirname, "..", "..", "ufo_ext_web", "static");
 
@@ -94,6 +96,58 @@ test("a table scrolls its own overflow instead of squeezing the page", () => {
 test("the working pulse yields to reduced motion in the built sheet", () => {
   const css = builtStyles().replace(/\s+/g, "");
   expect(/@media\(prefers-reduced-motion:reduce\)\{[^}]*\.motion-reduce\\:animate-none\{animation:none/.test(css)).toBe(true);
+});
+
+test("the reading plane's tokens survive into the built sheet", () => {
+  const css = builtStyles().replace(/\s+/g, "");
+  expect(css).toContain("--leading-reading:1.65");
+  expect(css).toContain("--shadow-raised:");
+  expect(css).toContain("box-shadow:var(--shadow-raised)");
+  expect(css).toContain("--color-link:LinkText");
+  expect(css).toContain("--color-attention:Mark");
+});
+
+test("replies read as a document and member bubbles stay bubbles", async () => {
+  wire({
+    "/transcript": () =>
+      json({ messages: [{ role: "user", text: "mine" }, { role: "assistant", text: "reply" }] }),
+    "/chat": () => json({ turn_id: TURN_ID }),
+  });
+  location.hash = "#/agents/" + AGENT.id + "/chat";
+  render(<App agents={[AGENT]} member={MEMBER} />);
+
+  const agentSide = (await screen.findByText("reply")).closest("[data-role=agent]")!;
+  expect(agentSide.className).toContain("leading-reading");
+  expect(agentSide.className).toContain("w-full");
+  expect(agentSide.className).not.toContain("bg-fill");
+  expect(agentSide.className).not.toContain("animate-appear");
+  const mineSide = screen.getByText("mine").closest("[data-role=me]")!;
+  expect(mineSide.className).toContain("self-end");
+  expect(mineSide.className).toContain("bg-fill");
+
+  await userEvent.type(screen.getByLabelText("Message the agent"), "go");
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+  StreamFake.last().emit("message", { text: "streaming now" });
+  const live = (await screen.findByText("streaming now")).closest("[data-role=agent]")!;
+  expect(live.className).toContain("animate-appear");
+  StreamFake.last().emit("terminal", { status: "done", model: "opus", tokens: 1, cost_micro_usd: 0 });
+  await waitFor(() => {
+    const settled = screen.getByText("streaming now").closest("[data-role=agent]")!;
+    expect(settled.className).not.toContain("animate-appear");
+  });
+});
+
+test("both notice tones keep the meta type size", () => {
+  const { container } = render(
+    <div>
+      <Notice tone="attention">refused</Notice>
+      <Notice>done</Notice>
+    </div>,
+  );
+  for (const notice of Array.from(container.querySelectorAll("div > div > div"))) {
+    expect(notice.className).toContain("text-mono");
+  }
 });
 
 test("the wordmark reads as one word in the sidebar", async () => {

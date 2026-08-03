@@ -18,7 +18,7 @@ export function Sheet({ open, onClose, title, children, footer }: SheetProps) {
         <DialogPrimitive.Content
           className={cn(
             "fixed inset-y-0 right-0 left-auto z-10 w-drawer overflow-y-auto",
-            "bg-surface border-l border-edge-strong p-2xl",
+            "bg-surface border-l border-edge-strong p-2xl [box-shadow:var(--shadow-raised)]",
             "flex flex-col gap-md",
           )}
         >

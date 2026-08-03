@@ -4,7 +4,7 @@ import { beforeEach, expect, test } from "vitest";
 
 import { App } from "@/App";
 
-import { AGENT, MEMBER, json, useStreamFake, wire } from "./harness";
+import { refusedNotice, AGENT, MEMBER, json, useStreamFake, wire } from "./harness";
 
 const ADMIN = { ...MEMBER, admin: true };
 
@@ -143,7 +143,7 @@ test("a refused acknowledgement states the refusal and opens nothing", async () 
   await userEvent.click(await screen.findByRole("button", { name: "Open as admin" }));
   await userEvent.click(screen.getByRole("button", { name: "Open transcript" }));
 
-  expect(await screen.findByText("Only an admin may read it.")).toBeTruthy();
+  await refusedNotice("Only an admin may read it.");
   expect(calls.some((url) => url.includes("/turns"))).toBe(false);
 });
 

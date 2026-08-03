@@ -5,7 +5,7 @@ import { Table, Td, Th } from "@/components/ui/table";
 import { Heading } from "@/views/Usage";
 import { day } from "@/views/Tasks";
 import { formatSize } from "@/views/Chat";
-import { Notice, Panel, PanelEmpty, usePanelRead } from "@/kernel/panel";
+import { type NoticeState, OutcomeNotice, Panel, PanelEmpty, QUIET, outcomeNotice, usePanelRead } from "@/kernel/panel";
 import { BASE, postIntent } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import type { Agent } from "@/lib/types";
@@ -68,7 +68,7 @@ function Disclose({
   onBack: () => void;
   onOpened: () => void;
 }) {
-  const [outcome, setOutcome] = useState("");
+  const [outcome, setOutcome] = useState<NoticeState>(QUIET);
   const [busy, setBusy] = useState(false);
   const live = useRef(true);
   const owner = conversation.member_email || "another member";
@@ -90,7 +90,7 @@ function Disclose({
     if (!live.current) return;
     setBusy(false);
     if (!submitted.applied) {
-      setOutcome(submitted.message);
+      setOutcome(outcomeNotice(submitted));
       return;
     }
     onOpened();
@@ -113,7 +113,7 @@ function Disclose({
           Open transcript
         </Button>
       </div>
-      <Notice>{outcome}</Notice>
+      <OutcomeNotice state={outcome} />
     </div>
   );
 }

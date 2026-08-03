@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/field";
 import { Td } from "@/components/ui/table";
 import { FormFromSchema, initialSpecValue, type SpecValue } from "@/kernel/form";
-import { Notice, Panel, Section, usePanelRead } from "@/kernel/panel";
+import { type NoticeState, OutcomeNotice, Panel, QUIET, Section, outcomeNotice, usePanelRead } from "@/kernel/panel";
 import { DataTable } from "@/kernel/table";
 import { postIntent } from "@/lib/api";
 import type { Agent, SchemaProperty } from "@/lib/types";
@@ -32,13 +32,13 @@ export function day(iso: string | null): string | null {
 
 export function Tasks({ agent }: { agent: Agent }) {
   const [reloads, setReloads] = useState(0);
-  const [notice, setNotice] = useState("");
+  const [notice, setNotice] = useState<NoticeState>(QUIET);
   const [editing, setEditing] = useState<Task | null>(null);
   const state = usePanelRead<TasksPayload>("/agents/" + agent.id + "/tasks", reloads);
 
   async function act(envelope: unknown) {
     const outcome = await postIntent(agent.id, envelope);
-    setNotice(outcome.message);
+    setNotice(outcomeNotice(outcome));
     setEditing(null);
     setReloads((count) => count + 1);
   }
@@ -47,7 +47,7 @@ export function Tasks({ agent }: { agent: Agent }) {
     <Panel state={state}>
       {(payload) => (
         <>
-          {notice ? <Notice>{notice}</Notice> : null}
+          {notice.text ? <OutcomeNotice state={notice} /> : null}
           <DataTable
             columns={[
               "name",

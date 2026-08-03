@@ -16,6 +16,22 @@
   --color-fill-hover: color-mix(in srgb, CanvasText 8%, transparent);
   --color-fill: color-mix(in srgb, CanvasText 12%, transparent);
 
+  --color-attention: Mark;
+  --color-attention-ink: MarkText;
+  --color-link: LinkText;
+
+  --shadow-raised:
+    0 8px 18px color-mix(in srgb, CanvasText 10%, transparent),
+    0 22px 55px color-mix(in srgb, CanvasText 16%, transparent);
+
+  --animate-appear: appear 0.3s ease-out;
+
+  @keyframes appear {
+    from {
+      opacity: 0;
+    }
+  }
+
   --muted: 0.6;
   --muted-strong: 0.55;
   --muted-soft: 0.7;
@@ -46,9 +62,12 @@
   --text-mono: 11px;
   --text-small: 12px;
   --text-label: 13px;
-  --text-section: 14px;
+  --text-ui: 14px;
   --text-body: 15px;
   --text-title: 18px;
+
+  --leading-chrome: 1.5;
+  --leading-reading: 1.65;
 
   --font-weight-strong: 600;
 
@@ -89,7 +108,15 @@
     margin: 0;
     background: var(--color-surface);
     color: var(--color-ink);
-    font: var(--text-body) / 1.5 var(--font-sans);
+    font: var(--text-ui) / var(--leading-chrome) var(--font-sans);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+    }
   }
 
   button {

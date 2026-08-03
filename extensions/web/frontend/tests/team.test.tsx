@@ -4,7 +4,7 @@ import { beforeEach, expect, test } from "vitest";
 
 import { App } from "@/App";
 
-import { AGENT, MEMBER, json, useStreamFake, wire } from "./harness";
+import { refusedNotice, AGENT, MEMBER, json, useStreamFake, wire } from "./harness";
 
 const ADMIN = { ...MEMBER, admin: true };
 
@@ -93,7 +93,7 @@ test("a refused add states the refusal and leaves the form to correct", async ()
   await userEvent.type(await screen.findByPlaceholderText("email@example.com"), "x@example.com");
   await userEvent.click(screen.getByRole("button", { name: "Add member" }));
 
-  expect(await screen.findByText("Only an admin adds a member.")).toBeTruthy();
+  await refusedNotice("Only an admin adds a member.");
   expect(screen.getByRole("button", { name: "Add member" })).toBeTruthy();
 });
 

@@ -12,7 +12,7 @@ import { SOURCES } from "@/views/Sources";
 import { Workspace } from "@/views/Workspace";
 import { App } from "@/App";
 
-import { AGENT, MEMBER, json, wire } from "./harness";
+import { refusedNotice, AGENT, MEMBER, json, wire } from "./harness";
 
 type Row = { name: string; count: number; note: string | null };
 
@@ -196,7 +196,7 @@ test("a declared action posts one intent on the main agent's lane and states a r
   await waitFor(() => expect(headers()).toEqual(["who", "how many", "note", ""]));
   await userEvent.click(screen.getByRole("button", { name: "Poke beta" }));
   await waitFor(() => expect(posted).toEqual([{ verb: "poke", name: "beta" }]));
-  expect(await screen.findByText("Refused.")).toBeTruthy();
+  await refusedNotice("Refused.");
   expect(placed).toEqual([]);
 });
 

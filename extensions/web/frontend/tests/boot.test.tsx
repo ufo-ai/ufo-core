@@ -8,7 +8,7 @@ import { beforeEach, expect, test, vi } from "vitest";
 import { App } from "@/App";
 import { Portal } from "@/Portal";
 
-import { AGENT, MEMBER, json, useStreamFake, wire } from "./harness";
+import { refusedNotice, AGENT, MEMBER, json, useStreamFake, wire } from "./harness";
 
 const STATIC = join(import.meta.dirname, "..", "..", "ufo_ext_web", "static");
 const builtPage = () => readFileSync(join(STATIC, "index.html"), "utf8");
@@ -178,4 +178,37 @@ test("the admin loading arm keeps the padded frame its other arms own", async ()
 
   const loading = await screen.findByText("Loading…");
   expect(loading.closest("main")).not.toBeNull();
+});
+
+test("a refused audience change tones the administration notice", async () => {
+  const second = { ...AGENT, id: "22222222-2222-4222-8222-222222222222", name: "second", main: false };
+  wire({
+    "/api/admin": () =>
+      json({
+        agents: [second],
+        members: [],
+        seats: { limit: null, included: null },
+        caps: [
+          {
+            scope: "workspace",
+            subject: null,
+            window_seconds: 3600,
+            limit_micro_usd: 4_000,
+            on_breach: "warn",
+          },
+        ],
+        models: ["opus"],
+        reasoning_levels: ["high"],
+        deploy: { sandbox_internet: false, extensions: [] },
+      }),
+    "/intents": () => json({ applied: false, message: "Only an admin grants access." }),
+    "/transcript": () => json({ messages: [] }),
+  });
+  render(<App agents={[second]} member={{ ...MEMBER, admin: true }} />);
+
+  await userEvent.click(screen.getByRole("button", { name: "Administration" }));
+  await userEvent.type(await screen.findByPlaceholderText("email@work.com"), "new@work.com");
+  await userEvent.click(screen.getByRole("button", { name: "Grant" }));
+  await refusedNotice("Only an admin grants access.");
+  expect(screen.getByText("<$0.01")).toBeTruthy();
 });

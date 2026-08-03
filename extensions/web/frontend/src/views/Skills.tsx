@@ -3,7 +3,7 @@ import { useState, type FormEvent } from "react";
 import { Button } from "@/components/ui/button";
 import { Input, Textarea } from "@/components/ui/field";
 import { Td } from "@/components/ui/table";
-import { Notice, Panel, usePanelRead } from "@/kernel/panel";
+import { type NoticeState, OutcomeNotice, Panel, QUIET, outcomeNotice, usePanelRead } from "@/kernel/panel";
 import { DataTable } from "@/kernel/table";
 import { postIntent } from "@/lib/api";
 import type { Agent } from "@/lib/types";
@@ -12,7 +12,7 @@ type Skill = { name: string; description: string; origin: string };
 
 export function Skills({ agent }: { agent: Agent }) {
   const [reloads, setReloads] = useState(0);
-  const [notice, setNotice] = useState("");
+  const [notice, setNotice] = useState<NoticeState>(QUIET);
   const [name, setName] = useState("");
   const [content, setContent] = useState("");
   const [busy, setBusy] = useState(false);
@@ -22,7 +22,7 @@ export function Skills({ agent }: { agent: Agent }) {
     setBusy(true);
     const outcome = await postIntent(agent.id, intent);
     setBusy(false);
-    setNotice(outcome.message);
+    setNotice(outcomeNotice(outcome));
     if (outcome.applied) setReloads((count) => count + 1);
   }
 
@@ -98,7 +98,7 @@ export function Skills({ agent }: { agent: Agent }) {
               Save
             </Button>
           </form>
-          <Notice>{notice}</Notice>
+          <OutcomeNotice state={notice} />
         </>
       )}
     </Panel>

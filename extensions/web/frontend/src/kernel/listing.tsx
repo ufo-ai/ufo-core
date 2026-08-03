@@ -3,7 +3,7 @@ import { useRef, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/field";
 import { Table, Td, Th } from "@/components/ui/table";
-import { Notice, Panel, PanelEmpty, usePanelRead } from "@/kernel/panel";
+import { OutcomeNotice, Panel, PanelEmpty, outcomeNotice, usePanelRead, type NoticeState } from "@/kernel/panel";
 import { Pager, type Placement } from "@/kernel/pager";
 import { postIntent } from "@/lib/api";
 import { cn } from "@/lib/cn";
@@ -63,7 +63,7 @@ export function Listing<Payload, Row>({
 }) {
   const mainAgent = useMainAgent();
   const held = LISTING_CONTROLS.get(spec.read) ?? { query: "", picked: null };
-  const [notice, setNotice] = useState(place.notice ?? "");
+  const [notice, setNotice] = useState<NoticeState>({ text: place.notice ?? "", refused: false });
   const [busy, setBusy] = useState(false);
   const [opened, setOpened] = useState<Row | null>(null);
   const [reloads, setReloads] = useState(0);
@@ -89,7 +89,7 @@ export function Listing<Payload, Row>({
       onPlace({ notice: outcome.message });
       return;
     }
-    setNotice(outcome.message);
+    setNotice(outcomeNotice(outcome));
   }
 
   const context: RowContext<Row> = { open: setOpened, act, busy };
@@ -148,7 +148,7 @@ export function Listing<Payload, Row>({
             return (
               <>
                 <PanelEmpty>{spec.empty}</PanelEmpty>
-                <Notice>{notice}</Notice>
+                <OutcomeNotice state={notice} />
               </>
             );
           const chip = spec.chips?.find((entry) => entry.label === picked);
@@ -157,7 +157,7 @@ export function Listing<Payload, Row>({
             return (
               <>
                 <PanelEmpty>Nothing matches.</PanelEmpty>
-                <Notice>{notice}</Notice>
+                <OutcomeNotice state={notice} />
               </>
             );
           return (
@@ -193,7 +193,7 @@ export function Listing<Payload, Row>({
                   onPlace={onPlace}
                 />
               ) : null}
-              <Notice>{notice}</Notice>
+              <OutcomeNotice state={notice} />
               {opened && spec.detail ? spec.detail(opened, () => setOpened(null)) : null}
             </>
           );

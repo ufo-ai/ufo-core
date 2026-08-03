@@ -4,7 +4,7 @@ import type { Placement } from "@/kernel/pager";
 import { CredentialPromptForm } from "@/views/CredentialPrompt";
 import { Button } from "@/components/ui/button";
 import { Table, Td, Th } from "@/components/ui/table";
-import { Notice, Panel, usePanelRead } from "@/kernel/panel";
+import { type NoticeState, OutcomeNotice, Panel, outcomeNotice, usePanelRead } from "@/kernel/panel";
 import { postIntent } from "@/lib/api";
 import { useMainAgent } from "@/lib/mainAgent";
 import type { CredentialRequest } from "@/lib/types";
@@ -25,7 +25,7 @@ export function WorkspaceCredentials({
   onPlace: (place: Placement) => void;
 }) {
   const mainAgent = useMainAgent();
-  const [notice, setNotice] = useState(place.notice ?? "");
+  const [notice, setNotice] = useState<NoticeState>({ text: place.notice ?? "", refused: false });
   const [request, setRequest] = useState<CredentialRequest | null>(null);
   const [busy, setBusy] = useState(false);
   const state = usePanelRead<{ slots: Slot[] }>("/workspace/credentials");
@@ -47,7 +47,7 @@ export function WorkspaceCredentials({
       onPlace({ notice: outcome.message });
       return;
     }
-    setNotice(outcome.message);
+    setNotice(outcomeNotice(outcome));
   }
 
   return (
@@ -104,7 +104,7 @@ export function WorkspaceCredentials({
                 ))}
               </div>
             ) : null}
-            <Notice>{notice}</Notice>
+            <OutcomeNotice state={notice} />
           </>
         );
       }}

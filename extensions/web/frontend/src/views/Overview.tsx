@@ -3,7 +3,7 @@ import { useEffect, useState, type FormEvent } from "react";
 import { Button } from "@/components/ui/button";
 import { Hint } from "@/components/ui/field";
 import { FormFromSchema, initialSpecValue, type SpecValue } from "@/kernel/form";
-import { Notice, Panel, Section, usePanelRead } from "@/kernel/panel";
+import { type NoticeState, OutcomeNotice, Panel, QUIET, Section, outcomeNotice, usePanelRead } from "@/kernel/panel";
 import { postIntent } from "@/lib/api";
 import type { Agent, SchemaProperty } from "@/lib/types";
 
@@ -27,7 +27,7 @@ export function Overview({ agent }: { agent: Agent }) {
   const [reloads, setReloads] = useState(0);
   const state = usePanelRead<OverviewPayload>("/agents/" + agent.id + "/overview", reloads);
   const [values, setValues] = useState<Record<string, SpecValue>>({});
-  const [notice, setNotice] = useState("");
+  const [notice, setNotice] = useState<NoticeState>(QUIET);
   const [busy, setBusy] = useState(false);
 
   const payload = state.phase === "ready" ? state.payload : null;
@@ -62,7 +62,7 @@ export function Overview({ agent }: { agent: Agent }) {
             spec: values,
           });
           setBusy(false);
-          setNotice(outcome.message);
+          setNotice(outcomeNotice(outcome));
           if (outcome.applied) setReloads((count) => count + 1);
         }
 
@@ -101,7 +101,7 @@ export function Overview({ agent }: { agent: Agent }) {
                 <Button type="submit" variant="send" disabled={busy}>
                   Save
                 </Button>
-                <Notice>{notice}</Notice>
+                <OutcomeNotice state={notice} />
               </form>
             </Section>
 

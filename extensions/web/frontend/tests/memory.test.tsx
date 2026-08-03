@@ -5,7 +5,7 @@ import { beforeEach, expect, test } from "vitest";
 import { MainAgentProvider } from "@/lib/mainAgent";
 import { Workspace } from "@/views/Workspace";
 
-import { AGENT, json, useStreamFake, wire } from "./harness";
+import { refusedNotice, AGENT, json, useStreamFake, wire } from "./harness";
 
 const MATCH = {
   text: "the deploy runs on EKS",
@@ -178,4 +178,17 @@ test("narrowing by kind keeps what the member has typed in the search box", asyn
   expect((screen.getByPlaceholderText("Search memory…") as HTMLInputElement).value).toBe(
     "half-written",
   );
+});
+
+test("a refused correction tones its notice in place", async () => {
+  wire({
+    "/workspace/memory": () =>
+      json({ available: true, kinds: ["fact"], matches: [MATCH], older: null, newer: null }),
+    "/intents": () => json({ applied: false, message: "Only the owner corrects it." }),
+  });
+  open();
+
+  await userEvent.click(await screen.findByRole("button", { name: "Correct" }));
+  await userEvent.click(screen.getByRole("button", { name: "Record correction" }));
+  await refusedNotice("Only the owner corrects it.");
 });

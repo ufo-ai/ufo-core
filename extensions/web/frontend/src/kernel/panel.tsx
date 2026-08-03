@@ -65,8 +65,37 @@ export function PanelEmpty({ children }: { children: ReactNode }) {
   return <Empty className="my-6xl mx-auto block">{children}</Empty>;
 }
 
-export function Notice({ children }: { children: ReactNode }) {
-  return <div className="mt-md font-mono text-mono min-h-[1em]">{children}</div>;
+export type NoticeState = { text: string; refused: boolean };
+
+export const QUIET: NoticeState = { text: "", refused: false };
+
+export function outcomeNotice(outcome: { applied: boolean; message: string }): NoticeState {
+  return { text: outcome.message, refused: !outcome.applied };
+}
+
+export function OutcomeNotice({ state }: { state: NoticeState }) {
+  return <Notice tone={state.refused ? "attention" : "quiet"}>{state.text}</Notice>;
+}
+
+export function Notice({
+  tone = "quiet",
+  children,
+}: {
+  tone?: "quiet" | "attention";
+  children: ReactNode;
+}) {
+  return (
+    <div
+      className={cn(
+        "mt-md min-h-[1em] font-mono text-mono",
+        tone === "attention" && children
+          ? "w-fit rounded-sm bg-attention px-sm py-hair [color:var(--color-attention-ink)]"
+          : null,
+      )}
+    >
+      {children}
+    </div>
+  );
 }
 
 export function Section({ title, children }: { title: string; children: ReactNode }) {

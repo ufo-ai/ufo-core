@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Td } from "@/components/ui/table";
-import { Notice, Panel, usePanelRead } from "@/kernel/panel";
+import { Notice, type NoticeState, Panel, QUIET, outcomeNotice, usePanelRead } from "@/kernel/panel";
 import { DataTable } from "@/kernel/table";
 import { BASE, postIntent } from "@/lib/api";
 import type { Agent } from "@/lib/types";
@@ -20,7 +20,7 @@ type ConnectionsPayload = { connections: Connection[] };
 
 export function Connections({ agent }: { agent: Agent }) {
   const [reloads, setReloads] = useState(0);
-  const [handoff, setHandoff] = useState("");
+  const [handoff, setHandoff] = useState<NoticeState>(QUIET);
   const [consentUrl, setConsentUrl] = useState<string | null>(null);
   const [provider, setProvider] = useState("");
   const [shared, setShared] = useState(false);
@@ -39,11 +39,11 @@ export function Connections({ agent }: { agent: Agent }) {
     };
     stream.addEventListener("connect", (event) => {
       setConsentUrl(JSON.parse((event as MessageEvent).data).url);
-      setHandoff("");
+      setHandoff(QUIET);
       done();
     });
     stream.addEventListener("connect_error", (event) => {
-      setHandoff(JSON.parse((event as MessageEvent).data).message);
+      setHandoff({ text: JSON.parse((event as MessageEvent).data).message, refused: true });
       done();
     });
     stream.addEventListener("terminal", done);
@@ -68,16 +68,17 @@ export function Connections({ agent }: { agent: Agent }) {
     });
     setBusy(false);
     if (!outcome.applied) {
-      setHandoff(outcome.message);
+      setHandoff(outcomeNotice(outcome));
       return;
     }
-    setHandoff("Consent opens privately for you.");
+    setHandoff({ text: "Consent opens privately for you.", refused: false });
     setWatching(outcome.turn_id ?? null);
   }
 
   async function act(envelope: unknown) {
     const outcome = await postIntent(agent.id, envelope);
-    setHandoff(outcome.message);
+    if (!outcome.applied) setConsentUrl(null);
+    setHandoff(outcomeNotice(outcome));
     setReloads((count) => count + 1);
   }
 
@@ -103,13 +104,13 @@ export function Connections({ agent }: { agent: Agent }) {
           Connect
         </Button>
       </form>
-      <Notice>
+      <Notice tone={handoff.refused ? "attention" : "quiet"}>
         {consentUrl ? (
           <a href={consentUrl} target="_blank" rel="noopener">
             Open the provider consent page
           </a>
         ) : (
-          handoff
+          handoff.text
         )}
       </Notice>
       <Panel state={state}>

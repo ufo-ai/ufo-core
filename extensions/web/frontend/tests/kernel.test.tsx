@@ -6,7 +6,7 @@ import { expect, test, vi } from "vitest";
 import { FormFromSchema, initialSpecValue, type SpecValue } from "@/kernel/form";
 import { Pager } from "@/kernel/pager";
 import { getJson } from "@/lib/api";
-import { Panel, usePanelRead } from "@/kernel/panel";
+import { Notice, Panel, usePanelRead } from "@/kernel/panel";
 import { DataTable } from "@/kernel/table";
 import { Td } from "@/components/ui/table";
 
@@ -252,4 +252,18 @@ test("a loading panel says so instead of rendering nothing", () => {
   );
   expect(screen.getByText("Loading…")).toBeTruthy();
   expect(screen.queryByText("never")).toBeNull();
+});
+
+test("an attention notice is highlighted and a quiet one is not", () => {
+  const { container } = render(
+    <div>
+      <Notice tone="attention">refused</Notice>
+      <Notice>done</Notice>
+    </div>,
+  );
+  const [attention, quiet] = Array.from(container.querySelectorAll("div > div > div"));
+  expect(attention.className).toContain("bg-attention");
+  expect(attention.className).toContain("[color:var(--color-attention-ink)]");
+  expect(attention.className).toContain("text-mono");
+  expect(quiet.className).not.toContain("bg-attention");
 });

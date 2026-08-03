@@ -6,7 +6,7 @@ import { App } from "@/App";
 import { MainAgentProvider } from "@/lib/mainAgent";
 import { Workspace } from "@/views/Workspace";
 
-import { AGENT, AGENT_ID, MEMBER, SECOND, json, useStreamFake, wire } from "./harness";
+import { refusedNotice, AGENT, AGENT_ID, MEMBER, SECOND, StreamFake, TURN_ID, json, useStreamFake, wire } from "./harness";
 
 beforeEach(() => {
   useStreamFake();
@@ -378,7 +378,7 @@ test("a workspace usage read shows the member's own spend and the admin rollup w
         window_seconds: 86400,
         total_micro_usd: 1_500_000,
         by_dimension: [{ dimension: "model", amount: 1200, priced_micro_usd: 1_500_000 }],
-        caps: [],
+        caps: [{ window_seconds: 86_400, limit_micro_usd: 4_000, on_breach: "pause" }],
         workspace: {
           total_micro_usd: 9_000_000,
           by_dimension: [],
@@ -393,10 +393,11 @@ test("a workspace usage read shows the member's own spend and the admin rollup w
     </MainAgentProvider>,
   );
 
-  expect(await screen.findByText("Your spend · last 24h · $1.500000")).toBeTruthy();
+  expect(await screen.findByText("Your spend · last 24h · $1.50")).toBeTruthy();
   expect(screen.getByText("1,200")).toBeTruthy();
-  expect(screen.getByText("No caps are set on you.")).toBeTruthy();
-  expect(screen.getByText("Workspace · $9.000000")).toBeTruthy();
+  expect(screen.getByText("<$0.01")).toBeTruthy();
+  expect(screen.getByText("pause")).toBeTruthy();
+  expect(screen.getByText("Workspace · $9.00")).toBeTruthy();
   expect(screen.getByText("member@example.com")).toBeTruthy();
 });
 
@@ -467,4 +468,122 @@ test("a conversation the member may not read says so instead of reporting a stat
   await userEvent.click(await screen.findByRole("button", { name: "Open" }));
   expect(await screen.findByText("This conversation is not shared with you.")).toBeTruthy();
   expect(screen.queryByText(/Error 404/)).toBeNull();
+});
+
+test("a refusal after a consent link supersedes the link with the toned message", async () => {
+  let calls = 0;
+  wire({
+    "/connections": () =>
+      json({
+        connections: [
+          {
+            provider: "github",
+            account_id: "acct",
+            owner_email: "member@example.com",
+            shared: false,
+            connected_at: "2026-07-01T00:00:00",
+            grant: "g1",
+          },
+        ],
+      }),
+    "/intents": () => {
+      calls += 1;
+      return calls === 1
+        ? json({ applied: true, message: "Queued.", turn_id: TURN_ID })
+        : json({ applied: false, message: "The provider refuses it." });
+    },
+    "/transcript": () => json({ messages: [] }),
+  });
+  render(<App agents={[AGENT]} member={MEMBER} />);
+
+  await userEvent.click(screen.getByRole("tab", { name: "connections" }));
+  await userEvent.type(
+    await screen.findByPlaceholderText("Provider (github, notion, …)"),
+    "github",
+  );
+  await userEvent.click(screen.getByRole("button", { name: "Connect" }));
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+  StreamFake.last().emit("connect", { url: "https://consent.example/go" });
+  expect(
+    await screen.findByRole("link", { name: "Open the provider consent page" }),
+  ).toBeTruthy();
+
+  await userEvent.click(screen.getByRole("button", { name: "Share with agent" }));
+  await refusedNotice("The provider refuses it.");
+  expect(screen.queryByRole("link", { name: "Open the provider consent page" })).toBeNull();
+});
+
+test("empty caps say so on both the workspace and the agent views", async () => {
+  wire({
+    "/workspace/usage": () =>
+      json({
+        window_seconds: 86400,
+        total_micro_usd: 0,
+        by_dimension: [],
+        caps: [],
+        workspace: null,
+      }),
+  });
+  const workspace = render(
+    <MainAgentProvider agents={[AGENT]}>
+      <Workspace view="usage" />
+    </MainAgentProvider>,
+  );
+  expect(await screen.findByText("No caps are set on you.")).toBeTruthy();
+  workspace.unmount();
+
+  location.hash = "#/agents/" + AGENT.id + "/usage";
+  wire({
+    "/transcript": () => json({ messages: [] }),
+    "/usage": () =>
+      json({
+        window_seconds: 86400,
+        total_micro_usd: 0,
+        by_dimension: [],
+        caps: [],
+      }),
+  });
+  render(<App agents={[AGENT]} member={MEMBER} />);
+  expect(await screen.findByText("No agent-scoped caps.")).toBeTruthy();
+});
+
+test("an applied grant change keeps a live consent link on screen", async () => {
+  let calls = 0;
+  wire({
+    "/connections": () =>
+      json({
+        connections: [
+          {
+            provider: "github",
+            account_id: "acct",
+            owner_email: "member@example.com",
+            shared: false,
+            connected_at: "2026-07-01T00:00:00",
+            grant: "g1",
+          },
+        ],
+      }),
+    "/intents": () => {
+      calls += 1;
+      return calls === 1
+        ? json({ applied: true, message: "Queued.", turn_id: TURN_ID })
+        : json({ applied: true, message: "Shared." });
+    },
+    "/transcript": () => json({ messages: [] }),
+  });
+  render(<App agents={[AGENT]} member={MEMBER} />);
+
+  await userEvent.click(screen.getByRole("tab", { name: "connections" }));
+  await userEvent.type(
+    await screen.findByPlaceholderText("Provider (github, notion, …)"),
+    "github",
+  );
+  await userEvent.click(screen.getByRole("button", { name: "Connect" }));
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+  StreamFake.last().emit("connect", { url: "https://consent.example/go" });
+  await screen.findByRole("link", { name: "Open the provider consent page" });
+
+  await userEvent.click(screen.getByRole("button", { name: "Share with agent" }));
+  await waitFor(() => expect(calls).toBe(2));
+  expect(screen.getByRole("link", { name: "Open the provider consent page" })).toBeTruthy();
 });

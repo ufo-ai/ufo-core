@@ -90,7 +90,7 @@ export function Chat({ agent }: { agent: Agent }) {
           ),
         )}
         {state.live ? (
-          <Speech mine={false}>
+          <Speech mine={false} entering>
             {state.live.text}
             {state.live.files ? <Files files={state.live.files} /> : null}
             {state.live.connectUrl ? <ConnectLink url={state.live.connectUrl} /> : null}
@@ -152,12 +152,23 @@ export function Chat({ agent }: { agent: Agent }) {
   );
 }
 
-function Speech({ mine, children }: { mine: boolean; children: ReactNode }) {
+function Speech({
+  mine,
+  entering = false,
+  children,
+}: {
+  mine: boolean;
+  entering?: boolean;
+  children: ReactNode;
+}) {
   return (
     <div
       className={cn(
-        "max-w-bubble whitespace-pre-wrap break-words rounded-bubble px-lg py-sm [&_a]:text-inherit",
-        mine ? "self-end bg-fill" : "self-start bg-fill-subtle",
+        "break-words [&_a]:text-link",
+        mine
+          ? "max-w-bubble self-end whitespace-pre-wrap rounded-bubble bg-fill px-lg py-sm"
+          : "w-full max-w-bubble self-start whitespace-pre-wrap text-body leading-reading",
+        entering && "animate-appear",
       )}
       data-role={mine ? "me" : "agent"}
     >
@@ -167,7 +178,9 @@ function Speech({ mine, children }: { mine: boolean; children: ReactNode }) {
 }
 
 function Meta({ children }: { children: ReactNode }) {
-  return <div className="mt-2xs font-mono text-small opacity-(--muted)">{children}</div>;
+  return (
+    <div className="mt-2xs font-mono text-small tabular-nums opacity-(--muted)">{children}</div>
+  );
 }
 
 function Working({ children }: { children: ReactNode }) {

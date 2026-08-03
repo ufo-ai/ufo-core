@@ -4,7 +4,7 @@ import { beforeEach, expect, test } from "vitest";
 
 import { App } from "@/App";
 
-import { AGENT, MEMBER, StreamFake, TURN_ID, json, useStreamFake, wire } from "./harness";
+import { refusedNotice, AGENT, MEMBER, StreamFake, TURN_ID, json, useStreamFake, wire } from "./harness";
 
 const ADMIN = { ...MEMBER, admin: true };
 
@@ -178,7 +178,7 @@ test("an empty slot offers Set, and a refused act states the refusal in place", 
 
   await userEvent.click(await screen.findByRole("button", { name: "Set" }));
 
-  expect(await screen.findByText("Only an admin may set it.")).toBeTruthy();
+  await refusedNotice("Only an admin may set it.");
   expect(screen.queryByRole("button", { name: "Clear" })).toBe(null);
 });
 
@@ -227,4 +227,64 @@ test("a refused store states the reason the server gave and keeps the field", as
 
   expect(await screen.findByText("the key — that seal has expired.")).toBeTruthy();
   expect(screen.getByPlaceholderText("OPENAI_API_KEY")).toBeTruthy();
+});
+
+test("the tasks, overview, and skills refusals tone their notices", async () => {
+  const OVERVIEW = {
+    agent: {
+      name: "assistant",
+      main: true,
+      surfaces: ["web"],
+      updated_at: "2026-07-30T12:00:00",
+      prompt: "be useful",
+      prompt_digest: "abc123",
+    },
+    spec: { model: "opus", reasoning: "high" },
+    spec_schema: {
+      properties: { model: { type: "string" }, reasoning: { type: "string", enum: ["low", "high"] } },
+    },
+    models: ["opus"],
+    deploy: { sandbox_internet: true },
+    audience: [],
+  };
+  const TASKS = {
+    tasks: [
+      {
+        name: "digest",
+        schedule: "0 9 * * *",
+        prompt: "summarize",
+        description: null,
+        created_by: "member@example.com",
+        paused: false,
+        next_run_at: null,
+        last_run_at: null,
+        expires_at: null,
+      },
+    ],
+    spec_schema: { properties: { schedule: { type: "string" } } },
+  };
+  const refuse = () => json({ applied: false, message: "The workspace refuses it." });
+
+  location.hash = "#/agents/" + AGENT.id + "/tasks";
+  wire({ "/tasks": () => json(TASKS), "/transcript": () => json({ messages: [] }), "/intents": refuse });
+  const first = render(<App agents={[AGENT]} member={MEMBER} />);
+  await userEvent.click(await screen.findByRole("button", { name: "Pause" }));
+  await refusedNotice("The workspace refuses it.");
+  first.unmount();
+
+  location.hash = "#/agents/" + AGENT.id + "/overview";
+  wire({ "/overview": () => json(OVERVIEW), "/transcript": () => json({ messages: [] }), "/intents": refuse });
+  const second = render(<App agents={[AGENT]} member={MEMBER} />);
+  await userEvent.click(await screen.findByRole("button", { name: "Save" }));
+  await refusedNotice("The workspace refuses it.");
+  second.unmount();
+
+  location.hash = "#/agents/" + AGENT.id + "/skills";
+  wire({ "/skills": () => json({ skills: [] }), "/transcript": () => json({ messages: [] }), "/intents": refuse });
+  const third = render(<App agents={[AGENT]} member={MEMBER} />);
+  await userEvent.type(await screen.findByPlaceholderText("skill-name"), "triage");
+  await userEvent.type(screen.getByPlaceholderText(/name: skill-name/), "steps");
+  await userEvent.click(screen.getByRole("button", { name: "Save" }));
+  await refusedNotice("The workspace refuses it.");
+  third.unmount();
 });
