@@ -4,7 +4,7 @@ import { cn } from "@/lib/cn";
 
 export function Table({ className, ...props }: ComponentProps<"table">) {
   return (
-    <div className="mb-4xl overflow-x-auto">
+    <div className="mb-4xl shrink-0 overflow-x-auto">
       <table className={cn("w-full border-collapse", className)} {...props} />
     </div>
   );

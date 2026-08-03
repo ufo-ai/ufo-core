@@ -109,6 +109,23 @@ test("a table scrolls its own overflow instead of squeezing the page", () => {
   expect(table.className).not.toContain("overflow");
 });
 
+test("a table keeps its height inside a scrolling panel instead of collapsing", () => {
+  render(
+    <Table>
+      <tbody>
+        <tr>
+          <Td>a cell</Td>
+        </tr>
+      </tbody>
+    </Table>,
+  );
+
+  // The frame scrolls on both axes, so its automatic minimum size is zero and a
+  // fixed-height flex panel would otherwise shrink it away instead of scrolling.
+  expect(screen.getByRole("table").parentElement?.className).toContain("shrink-0");
+  expect(builtStyles().replace(/\s+/g, "")).toContain(".shrink-0{flex-shrink:0}");
+});
+
 test("the working pulse yields to reduced motion in the built sheet", () => {
   const css = builtStyles().replace(/\s+/g, "");
   expect(/@media\(prefers-reduced-motion:reduce\)\{[^}]*\.motion-reduce\\:animate-none\{animation:none/.test(css)).toBe(true);
