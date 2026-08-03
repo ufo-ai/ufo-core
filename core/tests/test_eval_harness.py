@@ -67,6 +67,7 @@ from evals.harness.capability import (
     run_capability_case,
     source_digest,
 )
+from evals.harness.handoff import SubagentHandoff
 from evals.harness.harness import EvalCaseResult, EvalMetric, EvalReport, is_transient_fault
 from evals.harness.judge import (
     JUDGE_REVISION,
@@ -96,7 +97,13 @@ from evals.harness.scorers import (
     shared_artifact_scorer,
     skill_scorer,
 )
-from evals.harness.target import InProcessTarget, TargetResult, capability_output
+from evals.harness.target import (
+    InProcessTarget,
+    TargetResult,
+    _terminal_result,
+    capability_output,
+)
+from evals.harness.timing import CaseTiming, StepTiming, TurnTiming
 from evals.harness.viewer import (
     AWS_S3_CONFIG,
     MAX_SHARE_EXPIRY_SECONDS,
@@ -841,6 +848,7 @@ class StubWorker:
     child_transcript_corrupt: bool = False
     child_followup_turns: int = 0
     child_artifact: tuple[str, bytes] | None = None
+    child_conversation_id: UUID = field(default_factory=uuid4)
     child_turn_id: UUID = field(default_factory=uuid4)
     expected_reference: tuple[str, bytes] | None = None
     workspace_root: Path | None = None
@@ -893,7 +901,7 @@ class StubWorker:
                 Conversation(seq=self.seq, messages=self.transcript)
             )
         if self.child_transcript is not None:
-            child_conversation_id = uuid4()
+            child_conversation_id = self.child_conversation_id
             async with workspace_tx() as connection:
                 await connection.execute(
                     sa.insert(tables.conversation).values(
@@ -3190,7 +3198,37 @@ async def test_semantic_case_preserves_deterministic_grader_evidence() -> None:
     ]
 
 
+FIRST_TURN_TIMING = CaseTiming(
+    wall_ms=4_000,
+    turns=(
+        TurnTiming(
+            turn_id=uuid4(),
+            role="evaluated",
+            span_ms=3_500,
+            model_round_ms=2_000,
+            tool_call_ms=1_000,
+            unaccounted_ms=500,
+            rounds=2,
+            tool_calls=1,
+            tokens=2,
+            cost_micro_usd=3,
+            steps=(StepTiming(kind="tool_call", name="create_object", duration_ms=1_000),),
+        ),
+    ),
+    slowest=(StepTiming(kind="tool_call", name="create_object", duration_ms=1_000),),
+)
+FIRST_TURN_HANDOFF = SubagentHandoff(
+    conversation_id=uuid4(), closing_chars=12, result_chars=8, duplication=0.5
+)
+FOLLOWUP_HANDOFF = SubagentHandoff(
+    conversation_id=uuid4(), closing_chars=3, result_chars=4, duplication=0.0
+)
+
+
 async def test_capability_followup_uses_the_first_conversation_and_grades_the_second() -> None:
+    """A followup grades the second turn, so the first turn's own record has to survive it: the
+    latency the harness measured around the evaluated turn, and every child either turn delegated
+    to. `step` never measures a case's wall-clock, so a dropped `timing` is unrecoverable."""
     conversation_id = uuid4()
     stepped: list[tuple[UUID, str, str]] = []
 
@@ -3204,7 +3242,14 @@ async def test_capability_followup_uses_the_first_conversation_and_grades_the_se
 
         async def run(self, case: CapabilityCase) -> TargetResult:
             return TargetResult(
-                CapabilityOutput("created", (), tokens=2, cost_micro_usd=3),
+                CapabilityOutput(
+                    "created",
+                    (),
+                    tokens=2,
+                    cost_micro_usd=3,
+                    timing=FIRST_TURN_TIMING,
+                    handoffs=(FIRST_TURN_HANDOFF,),
+                ),
                 clean=True,
                 trajectory=EvalTrajectory(
                     conversation_id=conversation_id,
@@ -3219,7 +3264,9 @@ async def test_capability_followup_uses_the_first_conversation_and_grades_the_se
         ) -> TargetResult:
             stepped.append((continued_conversation_id, message, idempotency_key))
             return TargetResult(
-                CapabilityOutput("asked", (), tokens=5, cost_micro_usd=7),
+                CapabilityOutput(
+                    "asked", (), tokens=5, cost_micro_usd=7, handoffs=(FOLLOWUP_HANDOFF,)
+                ),
                 clean=True,
                 trajectory=EvalTrajectory(
                     conversation_id=continued_conversation_id,
@@ -3244,6 +3291,11 @@ async def test_capability_followup_uses_the_first_conversation_and_grades_the_se
     attempt = cast(list[dict[str, object]], result.evidence["attempts"])[0]
     assert attempt["tokens"] == 7
     assert attempt["costMicroUsd"] == 10
+    assert attempt["timing"] == FIRST_TURN_TIMING.model_dump(mode="json")
+    assert attempt["handoffs"] == [
+        FIRST_TURN_HANDOFF.model_dump(mode="json"),
+        FOLLOWUP_HANDOFF.model_dump(mode="json"),
+    ]
     assert "followup" in case.payload()
 
 
@@ -5106,6 +5158,58 @@ async def test_capability_merge_reads_a_followed_up_child_conversation_once(
     assert [call.name for call in result.output.calls].count("navigate") == 1
 
 
+async def test_capability_merge_records_one_handoff_for_a_followed_up_conversation(
+    db: None, tmp_path
+) -> None:
+    """The handoff is the conversation's, so a follow-up that adds turns is counted once and whole
+    rather than attributed to the last turn — and the record reaches the scored output."""
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    worker = _delegated_worker(blob, workspace_id, child_followup_turns=2)
+    target = _delegating_target(blob, worker, agent_id, workspace_id)
+    case = CapabilityCase("delegated-handoff", "browse", required_tools_scorer(("navigate",)))
+    with ws(workspace_id):
+        result = await target.run(case)
+    (handoff,) = result.output.handoffs
+    assert handoff.conversation_id == worker.child_conversation_id
+    assert handoff.closing_chars == len("done")
+    assert handoff.result_chars == len("Done.")
+    assert handoff.document_chars == 0
+
+
+def test_a_childs_terminal_yields_its_payload_or_its_text() -> None:
+    assert _terminal_result({"status": "done", "text": '{"result": "summary"}'}) == "summary"
+    assert _terminal_result({"status": "done", "text": "not json"}) == "not json"
+    assert _terminal_result({"status": "done", "text": '{"other": 1}'}) == '{"other": 1}'
+    assert _terminal_result(None) == ""
+
+
+def test_a_reconstructed_call_carries_the_id_its_result_was_keyed_by() -> None:
+    """The durable step record names the engine's dispatch function, not the tool; the tool-use id
+    is what joins a step's timing to the call it ran."""
+    output = capability_output(
+        (
+            Message(
+                role="assistant",
+                content=(ToolUseBlock(id="toolu_7", name="bash", input={"command": "ls"}),),
+            ),
+            Message(role="user", content=(ToolResultBlock(tool_use_id="toolu_7", content="ok"),)),
+        )
+    )
+    assert [call.call_id for call in output.calls] == ["toolu_7"]
+
+
+async def test_an_attempt_records_its_handoffs_and_timing_keys() -> None:
+    """Every attempt carries both keys whatever its verdict, so a failed case is still readable for
+    where its time went and what its children handed back."""
+    case = CapabilityCase("static", "ask", exact_scorer("evidence"))
+    result = await run_capability_case(case, StaticTarget())
+    attempt = result.evidence["attempts"][0]
+    assert "handoffs" in attempt
+    assert "timing" in attempt
+
+
 async def test_capability_merge_collects_a_childs_shared_artifacts(db: None, tmp_path) -> None:
     """A delegated child's share_file records against the child turn; its file must be as visible
     to a scorer as the call that shared it."""
@@ -5215,3 +5319,21 @@ async def test_capability_scoring_merges_child_turn_trajectories(db: None, tmp_p
     attempt = cast(list[dict[str, object]], result.evidence["attempts"])[0]
     assert attempt["tokens"] == 150
     assert attempt["costMicroUsd"] == 10
+
+
+async def test_a_case_run_without_a_step_reader_records_that_instead_of_timings(
+    db: None, tmp_path
+) -> None:
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    worker = _delegated_worker(blob, workspace_id)
+    target = _delegating_target(blob, worker, agent_id, workspace_id)
+    case = CapabilityCase("untimed", "browse", required_tools_scorer(("navigate",)))
+    with ws(workspace_id):
+        result = await target.run(case)
+    timing = result.output.timing
+    assert timing is not None
+    assert timing.error == "no step reader is wired"
+    assert timing.turns == ()
+    assert timing.slowest == ()

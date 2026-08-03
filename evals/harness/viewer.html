@@ -241,6 +241,10 @@ pre {
 .artifact-thumb { max-width: 220px; max-height: 300px; border: 1px solid var(--line); border-radius: 4px; background: #fff; display: block; }
 .artifact-link { font-family: var(--mono); font-size: 11px; word-break: break-all; }
 .call-grid { display: grid; gap: 9px; }
+.timing { width: 100%; border-collapse: collapse; font: 11px var(--mono); margin: 6px 0 12px; }
+.timing th, .timing td { border-bottom: 1px solid var(--line); padding: 3px 8px; text-align: left; }
+.timing th { color: var(--muted); font-weight: 500; }
+.timing .num { text-align: right; }
 .trajectory-link { color: var(--blue); font: 11px var(--mono); text-decoration: none; }
 .trajectory-link:hover { text-decoration: underline; }
 .trajectory-head { padding: 18px 20px; border-bottom: 1px solid var(--line); }
@@ -512,7 +516,7 @@ function callMarkup(attState) {
 }
 const ATTEMPT_KEYS = new Set(['passed', 'reason', 'response', 'calls', 'toolErrors', 'artifacts',
   'artifactContents', 'artifactReferences', 'artifactError', 'tokens', 'costMicroUsd', 'compactions',
-  'compactionRecords', 'log', 'grader', 'judge', 'turns', 'stopped', 'trajectory']);
+  'compactionRecords', 'log', 'grader', 'judge', 'turns', 'stopped', 'trajectory', 'timing']);
 const CASE_EVIDENCE_KEYS = new Set(['message', 'grading', 'rubric', 'visualRubric', 'memberKey', 'webDependent',
   'reconstructed', 'selectedAttempt', 'attempts', 'user', 'maxTurns', 'claims', 'claimVerdicts',
   'claimCoverage', 'enabledTools', 'exposedTools', 'omittedEnabledTools', 'referenceTools',
@@ -652,6 +656,7 @@ function attemptMarkup(attempt, index, selected, kind) {
       <div class="reason">${h(attempt.reason)}</div>
       ${trajectory}
       <div class="section"><div class="section-title">Resources</div><pre>${attempt.tokens == null && attempt.costMicroUsd == null ? 'not recorded' : `${h(attempt.tokens || 0)} tokens\n${h(attempt.costMicroUsd || 0)} micro-USD${attempt.compactions ? `\n${h(attempt.compactions)} compactions` : ''}`}</pre></div>
+      ${timingMarkup(attempt.timing)}
       ${scenarioMarkup(attempt)}
       <div class="section"><div class="section-title">Agent response</div><pre>${h(responseMarkup(attempt))}</pre></div>
       ${judgeMarkup(attempt.judge)}
@@ -727,6 +732,43 @@ function messageMarkup(message, index) {
 function messagesMarkup(messages) {
   return messages.length ? messages.map(messageMarkup).join('') : '<div class="empty">No messages.</div>';
 }
+function duration(ms) {
+  if (ms == null) return '—';
+  if (ms < 1000) return `${ms}ms`;
+  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
+  const minutes = Math.floor(ms / 60000);
+  return `${minutes}m ${Math.round((ms % 60000) / 1000)}s`;
+}
+
+function timingMarkup(timing) {
+  if (!timing) return '';
+  const turns = timing.turns || [];
+  const slowest = timing.slowest || [];
+  if (!turns.length) {
+    return `<div class="section"><div class="section-title">Latency</div><pre>${h(duration(timing.wall_ms))} wall${timing.error ? ` · ${h(timing.error)}` : ''}</pre></div>`;
+  }
+  const rows = turns.map(turn => `<tr>
+      <td>${h(turn.role)} ${h((turn.turn_id || '').slice(0, 8))}</td>
+      <td class="num">${h(duration(turn.span_ms))}</td>
+      <td class="num">${h(duration(turn.model_round_ms))}</td>
+      <td class="num">${h(duration(turn.tool_call_ms))}</td>
+      <td class="num">${h(duration(turn.unaccounted_ms))}</td>
+      <td class="num">${h(turn.rounds)}</td>
+      <td class="num">${h(turn.tool_calls)}</td>
+      <td class="num">${h(turn.tokens)}</td>
+      <td class="num">${h(((turn.cost_micro_usd || 0) / 1e6).toFixed(2))}</td>
+    </tr>`).join('');
+  const steps = slowest.map(step => `<tr>
+      <td>${h(step.name)}</td>
+      <td>${h(step.kind)}</td>
+      <td class="num">${h(duration(step.duration_ms))}</td>
+    </tr>`).join('');
+  return `<div class="section"><div class="section-title">Latency · ${h(duration(timing.wall_ms))} wall</div>
+    <table class="timing"><thead><tr><th>turn</th><th class="num">span</th><th class="num">model</th><th class="num">tools</th><th class="num">other</th><th class="num">rounds</th><th class="num">calls</th><th class="num">tokens</th><th class="num">USD</th></tr></thead><tbody>${rows}</tbody></table>
+    ${slowest.length ? `<div class="section-title">Slowest steps</div><table class="timing"><thead><tr><th>step</th><th>kind</th><th class="num">duration</th></tr></thead><tbody>${steps}</tbody></table>` : ''}
+    ${timing.error ? `<pre>${h(timing.error)}</pre>` : ''}</div>`;
+}
+
 function trajectoryMarkup(kind, run, report, item, attempt, index) {
   const trajectory = attempt.trajectory;
   const agentPrompt = run.agent_prompt

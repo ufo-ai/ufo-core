@@ -22,6 +22,7 @@ from evals.driver import WorkspaceDriver
 from evals.harness.capability import CapabilityCase
 from evals.harness.scorers import exact_scorer
 from evals.harness.target import InProcessTarget
+from evals.harness.timing import UNNAMED_TOOL
 from ufo import o11y
 from ufo.audience import conversation_audience
 from ufo.blob import FilesystemBlobStore
@@ -1078,6 +1079,86 @@ async def test_eval_settle_deadline_cancels_the_turn_before_the_runner_advances(
     handle = await runtime.dbos.retrieve_workflow_async(str(overdue.trajectory.turn_id))
     assert (await handle.get_status()).status == "CANCELLED"
     assert followup.clean
+
+
+async def test_eval_timing_reads_the_engines_own_step_record_for_every_turn(
+    db: None, dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore]
+) -> None:
+    """The latency record is the driver reading DBOS's durable step log: the evaluated turn's rounds
+    and its `spawn_subagent` dispatch, the delegated child's own rounds, and each turn's spend from
+    its terminal row. The step names and the tool-use id on a dispatch step's memoized output are
+    the engine's, so this is what pins `_stream_once`, `_dispatch_step` and the call-id join."""
+    _, _, blob = dbos_runtime
+    STREAM_GATE.reset()
+    await _bootstrap()
+    async with workspace_tx() as connection:
+        workspace_id = (await connection.execute(sa.select(tables.workspace.c.id))).scalar_one()
+        agent_id = (await connection.execute(sa.select(tables.agent.c.id))).scalar_one()
+    runtime = loop_queue._runtime
+    assert runtime is not None
+    driver = WorkspaceDriver(
+        workspace_id,
+        agent_id,
+        "be brief",
+        blob,
+        runtime.dbos,
+        runtime.sandboxes.workspace_root,
+        poll_interval_seconds=0.05,
+        workflow_wait_seconds=EVAL_FOLLOWUP_WAIT_SECONDS,
+    )
+    target = InProcessTarget(
+        ctx=context_for(
+            "evals",
+            frozenset(),
+            invoker=AdmissionInvoker(
+                admission=Admission(dbos=runtime.dbos, durable_surfaces=frozenset()),
+                workspace_id=workspace_id,
+            ),
+        ),
+        agent_id=agent_id,
+        conversations=driver,
+        outcome=driver,
+        blob=blob,
+        turn_steps=driver,
+    )
+
+    with ws(workspace_id):
+        result = await target.run(
+            CapabilityCase("delegating", "spawn-subagent", exact_scorer("unused"))
+        )
+
+    assert result.clean
+    timing = result.output.timing
+    assert timing is not None
+    assert not timing.error
+    assert timing.wall_ms > 0
+    evaluated, child = timing.turns
+    assert (evaluated.role, child.role) == ("evaluated", "child")
+    assert result.trajectory is not None
+    assert evaluated.turn_id == result.trajectory.turn_id
+    async with workspace_tx() as connection:
+        rows = (
+            await connection.execute(
+                sa.select(tables.turn.c.id, tables.turn.c.terminal).where(
+                    tables.turn.c.id.in_([evaluated.turn_id, child.turn_id])
+                )
+            )
+        ).all()
+    spend = {row.id: TerminalFrame.model_validate(row.terminal) for row in rows}
+    assert spend.keys() == {evaluated.turn_id, child.turn_id}
+    assert spend[child.turn_id].tokens > 0
+    for turn in timing.turns:
+        assert "model round" in [step.name for step in turn.steps]
+        assert turn.model_round_ms + turn.tool_call_ms + turn.unaccounted_ms == turn.span_ms
+        assert turn.tokens == spend[turn.turn_id].tokens
+        assert turn.cost_micro_usd == spend[turn.turn_id].cost_micro_usd
+    assert (evaluated.rounds, child.rounds) == (2, 1)
+    assert evaluated.tool_calls == 1
+    assert evaluated.tool_call_ms > 0
+    assert evaluated.span_ms >= evaluated.tool_call_ms
+    assert "spawn_subagent" in [step.name for step in evaluated.steps]
+    assert "spawn_subagent" in [step.name for step in timing.slowest]
+    assert UNNAMED_TOOL not in [step.name for step in timing.slowest]
 
 
 def _runtime_parts() -> tuple[Config, Hub, FilesystemBlobStore]:

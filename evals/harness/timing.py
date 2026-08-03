@@ -1,0 +1,188 @@
+"""Where a case's wall-clock went.
+
+The engine already records durable per-step timing: every model round runs as one DBOS step and
+every tool call as another, each stamped with the epoch millisecond it started and completed. This
+reads that record for the evaluated turn and each delegated child and turns it into the shape a
+reader can act on — how long the turn took, how much of it was the model thinking versus tools
+working, and which individual steps were the expensive ones.
+
+A delegated case's cost is mostly its child's, so every turn is reported separately rather than
+summed: a case that took twelve minutes because one coding child ran eleven of them reads
+differently from one that spent them in the parent.
+
+A tool's name lives only in the transcript, while the timing lives only in the step record — but a
+dispatch step's durable output carries the tool-use id the transcript keyed that call by, so the
+two join exactly, with no assumption that steps and transcript calls fall in the same order. A step
+whose id resolves to no call is named generically rather than mislabeled."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import Literal, Protocol
+from uuid import UUID
+
+from pydantic import BaseModel, ConfigDict, Field
+
+MODEL_ROUND_STEP = "_stream_once"
+TOOL_CALL_STEP = "_dispatch_step"
+SLOWEST_STEPS = 12
+UNNAMED_TOOL = "tool"
+
+type StepKind = Literal["model_round", "tool_call", "other"]
+type TurnRole = Literal["evaluated", "child"]
+
+
+class TurnStep(BaseModel):
+    """One durable engine step: a model round, a tool call, or the engine's own bookkeeping."""
+
+    model_config = ConfigDict(frozen=True)
+
+    function_name: str
+    started_at_epoch_ms: int | None = None
+    completed_at_epoch_ms: int | None = None
+    call_id: str = ""
+
+
+class StepTiming(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    kind: StepKind
+    name: str
+    duration_ms: int = Field(ge=0)
+
+
+class TurnTiming(BaseModel):
+    """One turn's own timing: its span, how that span divided between model rounds and tool calls,
+    and what it spent. A round dispatches its tool calls concurrently, so each bucket is the wall
+    those steps occupied — overlapping intervals merged, never summed — and `unaccounted_ms` is the
+    span the buckets do not cover: engine overhead, queue wait, and the gaps between steps."""
+
+    model_config = ConfigDict(frozen=True)
+
+    turn_id: UUID
+    role: TurnRole
+    span_ms: int = Field(ge=0)
+    model_round_ms: int = Field(ge=0)
+    tool_call_ms: int = Field(ge=0)
+    unaccounted_ms: int = Field(ge=0)
+    rounds: int = Field(ge=0)
+    tool_calls: int = Field(ge=0)
+    tokens: int = Field(ge=0)
+    cost_micro_usd: int = Field(ge=0)
+    steps: tuple[StepTiming, ...] = ()
+
+
+class CaseTiming(BaseModel):
+    """A case's latency record: the wall-clock the harness measured around the turn, each turn's own
+    timing, and the slowest individual steps across all of them — the first place to look for a
+    trajectory that took longer than the work it did."""
+
+    model_config = ConfigDict(frozen=True)
+
+    wall_ms: int = Field(ge=0)
+    turns: tuple[TurnTiming, ...] = ()
+    slowest: tuple[StepTiming, ...] = ()
+    error: str = ""
+
+
+class TurnSteps(Protocol):
+    async def steps(self, turn_id: UUID) -> tuple[TurnStep, ...]: ...
+
+
+def turn_timing(
+    turn_id: UUID,
+    role: TurnRole,
+    steps: tuple[TurnStep, ...],
+    tool_names: Mapping[str, str],
+    tokens: int = 0,
+    cost_micro_usd: int = 0,
+) -> TurnTiming:
+    """One turn's timing from its durable steps, with each tool call named by the transcript entry
+    its recorded call id belongs to."""
+    timed = tuple(step for step in steps if step.started_at_epoch_ms is not None)
+    dispatches = tuple(step for step in steps if step.function_name.endswith(TOOL_CALL_STEP))
+    entries: list[StepTiming] = []
+    for step in steps:
+        if step.started_at_epoch_ms is None or step.completed_at_epoch_ms is None:
+            continue
+        duration = max(step.completed_at_epoch_ms - step.started_at_epoch_ms, 0)
+        if step.function_name.endswith(TOOL_CALL_STEP):
+            entries.append(
+                StepTiming(
+                    kind="tool_call",
+                    name=tool_names.get(step.call_id, UNNAMED_TOOL),
+                    duration_ms=duration,
+                )
+            )
+        elif step.function_name.endswith(MODEL_ROUND_STEP):
+            entries.append(StepTiming(kind="model_round", name="model round", duration_ms=duration))
+        else:
+            entries.append(
+                StepTiming(
+                    kind="other", name=step.function_name.rsplit(".", 1)[-1], duration_ms=duration
+                )
+            )
+    starts = tuple(
+        step.started_at_epoch_ms for step in timed if step.started_at_epoch_ms is not None
+    )
+    ends = tuple(
+        step.completed_at_epoch_ms for step in timed if step.completed_at_epoch_ms is not None
+    )
+    span = max(ends) - min(starts) if starts and ends else 0
+    model_ms = _occupied(timed, MODEL_ROUND_STEP)
+    tool_ms = _occupied(timed, TOOL_CALL_STEP)
+    return TurnTiming(
+        turn_id=turn_id,
+        role=role,
+        span_ms=max(span, 0),
+        model_round_ms=model_ms,
+        tool_call_ms=tool_ms,
+        unaccounted_ms=max(span - model_ms - tool_ms, 0),
+        rounds=sum(1 for entry in entries if entry.kind == "model_round"),
+        tool_calls=len(dispatches),
+        tokens=tokens,
+        cost_micro_usd=cost_micro_usd,
+        steps=tuple(entries),
+    )
+
+
+def _occupied(steps: tuple[TurnStep, ...], step_name: str) -> int:
+    """The wall these steps occupied, merging overlaps. A round dispatches its tool calls
+    concurrently, so three sixty-second reads inside one minute cost that minute, not three."""
+    spans = sorted(
+        (step.started_at_epoch_ms, step.completed_at_epoch_ms)
+        for step in steps
+        if step.function_name.endswith(step_name)
+        and step.started_at_epoch_ms is not None
+        and step.completed_at_epoch_ms is not None
+    )
+    occupied = 0
+    open_start: int | None = None
+    open_end = 0
+    for start, end in spans:
+        if open_start is None:
+            open_start, open_end = start, end
+            continue
+        if start <= open_end:
+            open_end = max(open_end, end)
+            continue
+        occupied += open_end - open_start
+        open_start, open_end = start, end
+    if open_start is not None:
+        occupied += open_end - open_start
+    return max(occupied, 0)
+
+
+def case_timing(wall_ms: int, turns: tuple[TurnTiming, ...], error: str = "") -> CaseTiming:
+    """The case's record, with the slowest steps across every turn lifted to the top."""
+    slowest = sorted(
+        (step for turn in turns for step in turn.steps),
+        key=lambda step: step.duration_ms,
+        reverse=True,
+    )
+    return CaseTiming(
+        wall_ms=max(wall_ms, 0),
+        turns=turns,
+        slowest=tuple(slowest[:SLOWEST_STEPS]),
+        error=error,
+    )

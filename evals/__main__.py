@@ -625,6 +625,7 @@ async def _run(
                     outcome=driver,
                     blob=blob,
                     logs=collector,
+                    turn_steps=driver,
                     mcp_atlas=await _mcp_atlas_target(
                         stack,
                         config,

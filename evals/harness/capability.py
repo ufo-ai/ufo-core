@@ -18,6 +18,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from evals.harness.handoff import SubagentHandoff
 from evals.harness.harness import (
     EvalCaseResult,
     Json,
@@ -32,6 +33,7 @@ from evals.harness.judge import (
     rubric_pass,
     visual_rubric_pass,
 )
+from evals.harness.timing import CaseTiming
 from ufo.schema.records import TurnStatus
 from ufo.sdk.models import ImageBlock, ImageSource, Message
 from ufo.transcript import CompactionSummary
@@ -77,6 +79,7 @@ class ToolInvocation:
     result: str = ""
     has_result: bool = False
     is_error: bool = False
+    call_id: str = ""
 
     @property
     def succeeded(self) -> bool:
@@ -173,6 +176,8 @@ class CapabilityOutput:
     tokens: int = 0
     cost_micro_usd: int = 0
     workspace_dir: Path | None = None
+    timing: CaseTiming | None = None
+    handoffs: tuple[SubagentHandoff, ...] = ()
 
     @property
     def tools(self) -> tuple[str, ...]:
@@ -404,6 +409,13 @@ async def run_capability_case(case: CapabilityCase, target: CapabilityTarget) ->
                 "artifactError": sample_output.artifact_error or None,
                 "tokens": sample_output.tokens,
                 "costMicroUsd": sample_output.cost_micro_usd,
+                "handoffs": [handoff.model_dump(mode="json") for handoff in sample_output.handoffs]
+                or None,
+                "timing": (
+                    None
+                    if sample_output.timing is None
+                    else sample_output.timing.model_dump(mode="json")
+                ),
                 "log": (
                     None if sample_output.log is None else sample_output.log.model_dump(mode="json")
                 ),
@@ -514,6 +526,8 @@ async def sample_capability(case: CapabilityCase, target: CapabilityTarget) -> C
                     log=first_output.log,
                     compactions=first_output.compactions,
                     compaction_records=first_output.compaction_records,
+                    timing=first_output.timing,
+                    handoffs=first_output.handoffs + result.output.handoffs,
                 ),
             )
             if not result.clean:

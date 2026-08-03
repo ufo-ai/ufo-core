@@ -21,11 +21,13 @@ from dbos import DBOSClient, WorkflowHandleAsync
 from dbos import error as dbos_error
 
 from evals.harness.capability import UndeliveredRound, WorkspaceFile
+from evals.harness.timing import TurnStep
 from ufo.blob import BlobNotFound, BlobStore
 from ufo.cancellation import cancel_one_turn
 from ufo.db import workspace_tx
 from ufo.ext.context import Trajectory
 from ufo.governance import prompt_digest
+from ufo.loop.engine import DispatchResult
 from ufo.schema import tables
 from ufo.schema.records import PENDING, ReasoningEffort
 from ufo.sdk.models import Message, TextBlock, ToolResultBlock, ToolUseBlock
@@ -241,6 +243,27 @@ class WorkspaceDriver:
             await asyncio.to_thread(target.parent.mkdir, parents=True, exist_ok=True)
             await asyncio.to_thread(target.write_bytes, item.content)
         return conversation_id
+
+    async def steps(self, turn_id: UUID) -> tuple[TurnStep, ...]:
+        """The turn's durable engine steps, in the order the workflow recorded them. A tool call's
+        step carries the tool-use id its result was memoized under, which is what names it."""
+        recorded = await self.dbos.list_workflow_steps_async(str(turn_id))
+        steps: list[TurnStep] = []
+        for step in recorded:
+            match step.get("output"):
+                case DispatchResult() as dispatched:
+                    call_id = dispatched.tool_use_id
+                case _:
+                    call_id = ""
+            steps.append(
+                TurnStep(
+                    function_name=step["function_name"],
+                    started_at_epoch_ms=step.get("started_at_epoch_ms"),
+                    completed_at_epoch_ms=step.get("completed_at_epoch_ms"),
+                    call_id=call_id,
+                )
+            )
+        return tuple(steps)
 
     async def stage(self, conversation_id: UUID, path: str, source: Path) -> None:
         target = self.workspace_path(conversation_id, path)

@@ -9,10 +9,12 @@ conversation per case, and `outcome` awaits the admitted turn's terminal transcr
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from hashlib import sha256
 from pathlib import Path
+from time import perf_counter
 from typing import TYPE_CHECKING, Protocol
 from uuid import UUID
 
@@ -30,8 +32,10 @@ from evals.harness.capability import (
     UndeliveredRound,
     WorkspaceFile,
 )
+from evals.harness.handoff import handoff_record
 from evals.harness.harness import Json
 from evals.harness.judge import JudgeLeg
+from evals.harness.timing import CaseTiming, TurnSteps, TurnTiming, case_timing, turn_timing
 from ufo.blob import BlobNotFound, BlobStore
 from ufo.db import workspace_tx
 from ufo.schema import tables
@@ -173,6 +177,7 @@ class InProcessTarget:
     simulator: JudgeLeg | None = None
     blob: BlobStore | None = None
     logs: TurnLogReader | None = None
+    turn_steps: TurnSteps | None = None
     mcp_atlas: McpAtlasTarget | None = None
     compaction: CompactionTarget | None = None
     loadable_skills: frozenset[str] | None = None
@@ -210,6 +215,7 @@ class InProcessTarget:
             await case.prepare(
                 ws_current().workspace_id, self.conversations.workspace_path(conversation_id, "")
             )
+        started = perf_counter()
         try:
             turn_id = await self.ctx.invoke(
                 conversation_id,
@@ -220,7 +226,11 @@ class InProcessTarget:
         except Exception as error:
             return _invoke_failure(conversation_id, error)
         settled = await self._settled(conversation_id, turn_id)
+        wall_ms = round((perf_counter() - started) * 1_000)
         result = settled.result
+        turn_ids = (turn_id, *settled.descendant_ids)
+        timing = await self._case_timing(wall_ms, turn_ids, result.output)
+        result = replace(result, output=replace(result.output, timing=timing))
         if not result.clean:
             if self.logs is not None:
                 await self.logs.discard(turn_id)
@@ -246,6 +256,31 @@ class InProcessTarget:
                 compaction_records=compaction_snapshots(records),
             )
         return replace(result, output=output)
+
+    async def _case_timing(
+        self, wall_ms: int, turn_ids: tuple[UUID, ...], output: CapabilityOutput
+    ) -> CaseTiming:
+        """Where the case's wall-clock went, per turn. Tool names come from the merged trajectory,
+        which already carries the evaluated turn's calls and every delegated child's, each keyed by
+        the call id its durable step records."""
+        if self.turn_steps is None:
+            return case_timing(wall_ms, (), "no step reader is wired")
+        names = {call.call_id: call.name for call in output.calls if call.call_id}
+        turns: list[TurnTiming] = []
+        for index, turn_id in enumerate(turn_ids):
+            steps = await self.turn_steps.steps(turn_id)
+            tokens, cost_micro_usd = await self._turn_resources((turn_id,))
+            turns.append(
+                turn_timing(
+                    turn_id,
+                    "evaluated" if index == 0 else "child",
+                    steps,
+                    names,
+                    tokens,
+                    cost_micro_usd,
+                )
+            )
+        return case_timing(wall_ms, tuple(turns))
 
     async def step(self, conversation_id: UUID, message: str, idempotency_key: str) -> TargetResult:
         """Drive one member turn on an existing conversation and reconstruct its result — the
@@ -339,6 +374,7 @@ class InProcessTarget:
                         tables.turn.c.id,
                         tables.turn.c.conversation_id,
                         tables.turn.c.status,
+                        tables.turn.c.terminal,
                     )
                     .where(tables.turn.c.parent_turn_id == turn_id)
                     .order_by(tables.turn.c.created_at)
@@ -349,6 +385,7 @@ class InProcessTarget:
             conversations.setdefault(row.conversation_id, []).append(row)
         calls = list(output.calls)
         errors = list(output.tool_errors)
+        handoffs = list(output.handoffs)
         descendant_ids: list[UUID] = []
         for conversation_id, turns in conversations.items():
             descendant_ids.extend(turn.id for turn in turns)
@@ -367,6 +404,12 @@ class InProcessTarget:
                     f"child conversation {conversation_id} has a corrupt transcript",
                 )
             child = capability_output(decoded.messages)
+            settled = tuple(turn for turn in turns if turn.status in TERMINAL_CHILD_STATUSES)
+            handoffs.append(
+                handoff_record(
+                    conversation_id, decoded.messages, _terminal_result(settled[-1].terminal)
+                )
+            )
             for turn in turns:
                 child, sub_ids, failure = await self._merge_descendants(turn.id, child)
                 descendant_ids.extend(sub_ids)
@@ -374,7 +417,10 @@ class InProcessTarget:
                     return output, tuple(descendant_ids), failure
             calls.extend(child.calls)
             errors.extend(child.tool_errors)
-        merged = replace(output, calls=tuple(calls), tool_errors=tuple(errors))
+            handoffs.extend(child.handoffs)
+        merged = replace(
+            output, calls=tuple(calls), tool_errors=tuple(errors), handoffs=tuple(handoffs)
+        )
         return merged, tuple(descendant_ids), ""
 
     async def _await_child_transcript(self, conversation_id: UUID) -> bytes | None:
@@ -571,6 +617,23 @@ def compaction_snapshots(records: tuple[CompactionRecord, ...]) -> tuple[StoredC
     )
 
 
+def _terminal_result(terminal: Json) -> str:
+    """The payload a finished child handed its parent: the `result` its terminal text carried, or
+    that text whole when it is not the typed shape a profile's output model produces."""
+    if terminal is None:
+        return ""
+    text = TerminalFrame.model_validate(terminal).text
+    try:
+        decoded = json.loads(text)
+    except json.JSONDecodeError:
+        return text
+    match decoded:
+        case {"result": str() as result}:
+            return result
+        case _:
+            return text
+
+
 def capability_output(messages: tuple[Message, ...]) -> CapabilityOutput:
     """Rebuild the grader-visible output from the transcript: the final answer (the last assistant
     text), the ordered tool calls (each tool_use joined to its tool_result by id), and the error
@@ -602,6 +665,7 @@ def capability_output(messages: tuple[Message, ...]) -> CapabilityOutput:
                         _redact_object(block.input, private_values),
                         result_text,
                         has_result=result is not None,
+                        call_id=block.id,
                         is_error=result.is_error if result is not None else False,
                     )
                 )
