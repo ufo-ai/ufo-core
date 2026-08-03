@@ -25,7 +25,9 @@ import {
   parseHash,
   workspaceHash,
   type AgentTab,
+  type PlaceStep,
   type Route,
+  type WorkspacePlace,
   type WorkspaceTab,
 } from "@/lib/route";
 import type { Agent, Member } from "@/lib/types";
@@ -88,8 +90,22 @@ export function App({ agents, member }: AppProps) {
     [go],
   );
 
-  const openWorkspace = useCallback(
-    (view: WorkspaceTab) => go(workspaceHash(view), { kind: "workspace", view }),
+  const placeWorkspace = useCallback(
+    (view: WorkspaceTab, place: WorkspacePlace, step: PlaceStep) => {
+      const seen = routeRef.current;
+      if (step !== "push" && (seen.kind !== "workspace" || seen.view !== view)) return;
+      if (step === "back") {
+        history.back();
+        return;
+      }
+      const next: Route = { kind: "workspace", view, place };
+      if (step === "replace") {
+        history.replaceState(null, "", workspaceHash(view, place));
+        setRoute(next);
+        return;
+      }
+      go(workspaceHash(view, place), next);
+    },
     [go],
   );
 
@@ -168,7 +184,7 @@ export function App({ agents, member }: AppProps) {
             <li>
               <SidebarButton
                 current={route.kind === "workspace"}
-                onClick={() => openWorkspace("team")}
+                onClick={() => placeWorkspace("team", {}, "push")}
               >
                 Workspace
               </SidebarButton>
@@ -200,7 +216,7 @@ export function App({ agents, member }: AppProps) {
           onActivity={activity}
           onOpenAgent={openAgent}
           onNewChat={openNewChat}
-          onWorkspace={openWorkspace}
+          onPlaceWorkspace={placeWorkspace}
           sought={sought}
         />
       </div>
@@ -218,7 +234,7 @@ function Pane({
   onActivity,
   onOpenAgent,
   onNewChat,
-  onWorkspace,
+  onPlaceWorkspace,
   sought,
 }: {
   route: Route;
@@ -230,11 +246,13 @@ function Pane({
   onActivity: (conversationId: string) => void;
   onOpenAgent: (agentId: string, tab?: AgentTab) => void;
   onNewChat: (agentId: string) => void;
-  onWorkspace: (view: WorkspaceTab) => void;
+  onPlaceWorkspace: (view: WorkspaceTab, place: WorkspacePlace, step: PlaceStep) => void;
   sought: readonly string[];
 }) {
   if (route.kind === "admin") return <Admin />;
-  if (route.kind === "workspace") return <Workspace view={route.view} onView={onWorkspace} />;
+  if (route.kind === "workspace") {
+    return <Workspace view={route.view} place={route.place} onPlace={onPlaceWorkspace} />;
+  }
   if (route.kind === "agents") {
     return <Agents agents={agents} onOpen={onOpenAgent} onNewChat={onNewChat} />;
   }

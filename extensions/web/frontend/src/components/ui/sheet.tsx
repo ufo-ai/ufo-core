@@ -16,6 +16,7 @@ export function Sheet({ open, onClose, title, children, footer }: SheetProps) {
     <DialogPrimitive.Root modal={false} open={open} onOpenChange={(next) => !next && onClose()}>
       <DialogPrimitive.Portal>
         <DialogPrimitive.Content
+          onInteractOutside={(event) => event.preventDefault()}
           className={cn(
             "fixed inset-y-0 right-0 left-auto z-10 w-drawer overflow-y-auto",
             "bg-surface border-l border-edge-strong p-2xl [box-shadow:var(--shadow-raised)]",

@@ -4,9 +4,8 @@ import { beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
 import { MainAgentProvider } from "@/lib/mainAgent";
-import { Workspace } from "@/views/Workspace";
 
-import { AGENT, MEMBER, SECOND, json, useStreamFake } from "./harness";
+import { PlacedWorkspace, AGENT, MEMBER, SECOND, json, useStreamFake } from "./harness";
 
 beforeEach(() => {
   useStreamFake();
@@ -96,7 +95,7 @@ test("a slow read for a filter the member left never paints over the filter they
 
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <Workspace view="memory" onView={() => {}} />
+      <PlacedWorkspace view="memory" />
     </MainAgentProvider>,
   );
 

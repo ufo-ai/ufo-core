@@ -1,12 +1,12 @@
-export type Placement = { kind?: string; after?: string; notice?: string };
+import type { WorkspacePlace } from "@/lib/route";
+
+export type Placement = WorkspacePlace & { notice?: string };
 
 export function Pager({
   payload,
-  place,
   onPlace,
 }: {
   payload: { newer?: string | null; older?: string | null };
-  place: Placement;
   onPlace: (place: Placement) => void;
 }) {
   const steps: [string, string | null | undefined][] = [
@@ -20,7 +20,9 @@ export function Pager({
           <button
             key={label}
             type="button"
-            onClick={() => onPlace({ kind: place.kind, after: cursor })}
+            onClick={() =>
+              onPlace({ after: cursor })
+            }
             className="border border-edge-control rounded-control bg-transparent px-sm py-hair text-inherit"
           >
             {label}

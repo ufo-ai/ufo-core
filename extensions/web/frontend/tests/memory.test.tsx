@@ -3,10 +3,8 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test } from "vitest";
 
 import { MainAgentProvider } from "@/lib/mainAgent";
-import { Workspace } from "@/views/Workspace";
 
-import { refusedNotice, AGENT, json, useStreamFake, wire } from "./harness";
-
+import { AGENT, PlacedWorkspace, json, refusedNotice, useStreamFake, wire } from "./harness";
 const MATCH = {
   text: "the deploy runs on EKS",
   kind: "fact",
@@ -17,7 +15,7 @@ const MATCH = {
 function open(view: "memory" = "memory") {
   return render(
     <MainAgentProvider agents={[AGENT]}>
-      <Workspace view={view} onView={() => {}} />
+      <PlacedWorkspace view={view} />
     </MainAgentProvider>,
   );
 }

@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 
 import { Pager, type Placement } from "@/kernel/pager";
 import { day } from "@/views/Tasks";
@@ -31,8 +31,8 @@ export function Memory({
   place: Placement;
   onPlace: (place: Placement) => void;
 }) {
-  const [query, setQuery] = useState("");
-  const [submitted, setSubmitted] = useState("");
+  const [query, setQuery] = useState(place.q ?? "");
+  const submitted = place.q ?? "";
   const [reloads, setReloads] = useState(0);
   const [notice, setNotice] = useState<NoticeState>(QUIET);
   const [correcting, setCorrecting] = useState<Match | null>(null);
@@ -49,9 +49,11 @@ export function Memory({
     reloads,
   );
 
+  useEffect(() => setQuery(place.q ?? ""), [place.q]);
+
   function submit(event: FormEvent) {
     event.preventDefault();
-    setSubmitted(query.trim());
+    onPlace({ q: query.trim() || undefined, after: undefined });
     setCorrecting(null);
   }
 
@@ -74,6 +76,9 @@ export function Memory({
       >
         {(payload) => (
           <>
+            {!submitted && place.kind && !payload.kinds.includes(place.kind) ? (
+              <PanelEmpty>That memory class is not available.</PanelEmpty>
+            ) : null}
             {submitted ? null : (
               <div className="mb-lg flex gap-xs">
                 {["all", ...payload.kinds].map((kind) => {
@@ -83,7 +88,9 @@ export function Memory({
                       key={kind}
                       type="button"
                       aria-current={chosen}
-                      onClick={() => onPlace({ kind: kind === "all" ? undefined : kind })}
+                      onClick={() =>
+                        onPlace({ kind: kind === "all" ? undefined : kind, after: undefined })
+                      }
                       className={cn(
                         "border border-edge-control rounded-control bg-transparent px-sm py-hair text-inherit",
                         chosen && "font-strong underline",
@@ -105,7 +112,7 @@ export function Memory({
                       : "No memories yet."}
                 </PanelEmpty>
                 {submitted ? null : (
-                  <Pager payload={payload} place={place} onPlace={onPlace} />
+                  <Pager payload={payload} onPlace={onPlace} />
                 )}
               </>
             ) : (
@@ -139,7 +146,7 @@ export function Memory({
                   </tbody>
                 </Table>
                 {submitted ? null : (
-                  <Pager payload={payload} place={place} onPlace={onPlace} />
+                  <Pager payload={payload} onPlace={onPlace} />
                 )}
               </>
             )}

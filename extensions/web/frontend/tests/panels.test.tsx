@@ -4,10 +4,8 @@ import { beforeEach, expect, test } from "vitest";
 
 import { App } from "@/App";
 import { MainAgentProvider } from "@/lib/mainAgent";
-import { Workspace } from "@/views/Workspace";
 
-import { refusedNotice, AGENT, AGENT_ID, MEMBER, SECOND, StreamFake, TURN_ID, json, useStreamFake, wire } from "./harness";
-
+import { AGENT, AGENT_ID, MEMBER, PlacedWorkspace, SECOND, StreamFake, TURN_ID, json, refusedNotice, useStreamFake, wire } from "./harness";
 beforeEach(() => {
   useStreamFake();
 });
@@ -390,7 +388,7 @@ test("the sources listing groups a binding's streams and acts on the main agent'
   });
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <Workspace view="sources" onView={() => {}} />
+      <PlacedWorkspace view="sources" />
     </MainAgentProvider>,
   );
 
@@ -427,7 +425,7 @@ test("a workspace usage read shows the member's own spend and the admin rollup w
   });
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <Workspace view="usage" onView={() => {}} />
+      <PlacedWorkspace view="usage" />
     </MainAgentProvider>,
   );
 
@@ -570,7 +568,7 @@ test("empty caps say so on both the workspace and the agent views", async () => 
   });
   const workspace = render(
     <MainAgentProvider agents={[AGENT]}>
-      <Workspace view="usage" onView={() => {}} />
+      <PlacedWorkspace view="usage" />
     </MainAgentProvider>,
   );
   expect(await screen.findByText("No caps are set on you.")).toBeTruthy();

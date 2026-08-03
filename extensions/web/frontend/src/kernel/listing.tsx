@@ -49,9 +49,6 @@ export type ListingSpec<Payload, Row> = {
   detail?: (row: Row, close: () => void) => ReactNode;
 } & Presentation<Row>;
 
-/** Controls survive the mutation remount here; Workspace releases them when the member leaves. */
-export const LISTING_CONTROLS = new Map<string, { query: string; picked: string | null }>();
-
 export function Listing<Payload, Row>({
   spec,
   place,
@@ -62,23 +59,17 @@ export function Listing<Payload, Row>({
   onPlace: (place: Placement) => void;
 }) {
   const mainAgent = useMainAgent();
-  const held = LISTING_CONTROLS.get(spec.read) ?? { query: "", picked: null };
   const [notice, setNotice] = useState<NoticeState>({ text: place.notice ?? "", refused: false });
   const [busy, setBusy] = useState(false);
-  const [opened, setOpened] = useState<Row | null>(null);
   const [reloads, setReloads] = useState(0);
-  const [query, holdQuery] = useState(held.query);
-  const [picked, holdPicked] = useState(held.picked);
   const state = usePanelRead<Payload>(spec.read + cursor(spec, place), reloads);
+  const query = place.q ?? "";
+  const picked = place.chip ?? null;
 
-  const setQuery = (value: string) => {
-    holdQuery(value);
-    LISTING_CONTROLS.set(spec.read, { query: value, picked });
-  };
-  const setPicked = (value: string | null) => {
-    holdPicked(value);
-    LISTING_CONTROLS.set(spec.read, { query, picked: value });
-  };
+  const setQuery = (value: string) => onPlace({ q: value || undefined });
+  const setPicked = (value: string | null) => onPlace({ chip: value ?? undefined });
+  const open = (row: Row) => onPlace({ open: spec.rowKey(row) });
+  const close = () => onPlace({ open: undefined });
 
   async function act(envelope: unknown) {
     if (!mainAgent) return;
@@ -92,7 +83,7 @@ export function Listing<Payload, Row>({
     setNotice(outcomeNotice(outcome));
   }
 
-  const context: RowContext<Row> = { open: setOpened, act, busy };
+  const context: RowContext<Row> = { open, act, busy };
   const term = query.trim().toLowerCase();
   const bySearch = (row: Row) =>
     !spec.search || !term || spec.search(row).toLowerCase().includes(term);
@@ -132,6 +123,11 @@ export function Listing<Payload, Row>({
                 </Button>
               ))
             : null}
+          {state.phase === "failed" && place.after ? (
+            <Button variant="row" className="m-0" onClick={() => onPlace({ after: undefined })}>
+              First page
+            </Button>
+          ) : null}
           <Button
             variant="row"
             className="m-0 ml-auto"
@@ -152,6 +148,13 @@ export function Listing<Payload, Row>({
               </>
             );
           const chip = spec.chips?.find((entry) => entry.label === picked);
+          if (picked !== null && chip === undefined)
+            return (
+              <>
+                <PanelEmpty>That filter is not available.</PanelEmpty>
+                <OutcomeNotice state={notice} />
+              </>
+            );
           const matched = rows.filter((row) => (!chip || chip.has(row)) && bySearch(row));
           if (!matched.length)
             return (
@@ -189,12 +192,20 @@ export function Listing<Payload, Row>({
               {spec.paged ? (
                 <Pager
                   payload={payload as { newer?: string | null; older?: string | null }}
-                  place={place}
                   onPlace={onPlace}
                 />
               ) : null}
               <OutcomeNotice state={notice} />
-              {opened && spec.detail ? spec.detail(opened, () => setOpened(null)) : null}
+              {spec.detail && place.open
+                ? (() => {
+                    const shown = rows.find((row) => spec.rowKey(row) === place.open);
+                    return shown ? (
+                      spec.detail(shown, close)
+                    ) : (
+                      <PanelEmpty>That item is not on this page.</PanelEmpty>
+                    );
+                  })()
+                : null}
             </>
           );
         }}

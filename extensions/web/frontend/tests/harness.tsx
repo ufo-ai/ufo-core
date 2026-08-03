@@ -1,5 +1,24 @@
-import { expect, vi } from "vitest";
 import { screen } from "@testing-library/react";
+import { useState } from "react";
+import { expect, vi } from "vitest";
+
+import { Workspace } from "@/views/Workspace";
+import type { WorkspacePlace, WorkspaceTab } from "@/lib/route";
+
+export function PlacedWorkspace({ view }: { view: WorkspaceTab }) {
+  const [placed, setPlaced] = useState<{ view: WorkspaceTab; place: WorkspacePlace }>({
+    view,
+    place: {},
+  });
+  if (placed.view !== view) setPlaced({ view, place: {} });
+  return (
+    <Workspace
+      view={view}
+      place={placed.place}
+      onPlace={(next, place) => setPlaced({ view: next, place })}
+    />
+  );
+}
 
 export class StreamFake {
   static opened: StreamFake[] = [];

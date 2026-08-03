@@ -1,38 +1,66 @@
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 
-import { LISTING_CONTROLS } from "@/kernel/listing";
 import type { Placement } from "@/kernel/pager";
-import { WORKSPACE_TABS, type WorkspaceTab } from "@/lib/route";
+import type { PlaceStep } from "@/lib/route";
+import { WORKSPACE_TABS, type WorkspacePlace, type WorkspaceTab } from "@/lib/route";
 import { cn } from "@/lib/cn";
 import { WORKSPACE_VIEWS } from "@/views/registry";
 
-type Placed = { view: WorkspaceTab; place: Placement; acts: number };
+type Outcome = { view: WorkspaceTab; notice: string | undefined; acts: number };
 
 export function Workspace({
   view,
-  onView,
+  place,
+  onPlace,
 }: {
   view: WorkspaceTab;
-  onView: (view: WorkspaceTab) => void;
+  place: WorkspacePlace;
+  onPlace: (view: WorkspaceTab, place: WorkspacePlace, step: PlaceStep) => void;
 }) {
-  const [placed, setPlaced] = useState<Placed>({ view, place: {}, acts: 0 });
+  const [outcome, setOutcome] = useState<Outcome>({ view, notice: undefined, acts: 0 });
   const shown = useRef(view);
   shown.current = view;
-  useEffect(() => () => LISTING_CONTROLS.clear(), []);
-  if (placed.view !== view) {
-    LISTING_CONTROLS.clear();
-    setPlaced({ view, place: {}, acts: 0 });
-  }
+  if (outcome.view !== view) setOutcome({ view, notice: undefined, acts: 0 });
 
   const registered = WORKSPACE_VIEWS[view];
   const key = registered.remountOnPlace
-    ? [view, placed.place.kind ?? "", placed.place.after ?? "", String(placed.acts)].join("|")
+    ? [view, place.kind ?? "", place.after ?? "", String(outcome.acts)].join("|")
     : view;
 
-  const place = placed.place;
-  const record = (next: Placement) => {
+  const merged: Placement = { ...place, notice: outcome.notice };
+  const live = useRef(place);
+  live.current = place;
+  const pushedOpen = useRef(false);
+
+  /** A view names only the keys it moves; the rest ride the live place, so a placement that
+   *  resolves after the member typed does not overwrite what they typed. Opening a row, paging,
+   *  and narrowing a kind are places to come back from; closing unwinds the entry opening
+   *  pushed, and a filter never becomes an entry at all. */
+  const record = (patch: Placement) => {
     if (shown.current !== view) return;
-    setPlaced((prev) => ({ view, place: next, acts: prev.acts + 1 }));
+    if (patch.notice !== undefined) {
+      setOutcome((prev) => ({ view, notice: patch.notice, acts: prev.acts + 1 }));
+    } else if (outcome.notice !== undefined) {
+      setOutcome((prev) => ({ ...prev, notice: undefined }));
+    }
+    const held = live.current;
+    const next: WorkspacePlace = {
+      kind: "kind" in patch ? patch.kind : held.kind,
+      after: "after" in patch ? patch.after : held.after,
+      q: "q" in patch ? patch.q : held.q,
+      chip: "chip" in patch ? patch.chip : held.chip,
+      open: "open" in patch ? patch.open : held.open,
+    };
+    const opening = next.open !== undefined && next.open !== held.open;
+    const closing = next.open === undefined && held.open !== undefined;
+    const stepped =
+      opening ||
+      (next.after !== undefined && next.after !== held.after) ||
+      (next.kind !== undefined && next.kind !== held.kind);
+    const step: PlaceStep =
+      closing && pushedOpen.current ? "back" : stepped ? "push" : "replace";
+    pushedOpen.current = opening;
+    onPlace(view, next, step);
   };
 
   return (
@@ -47,7 +75,7 @@ export function Workspace({
             type="button"
             role="tab"
             aria-selected={name === view}
-            onClick={() => onView(name)}
+            onClick={() => onPlace(name, {}, "push")}
             className={cn(
               "border-0 border-b-(length:--marker-width) border-b-transparent bg-transparent",
               "px-md py-xs text-inherit opacity-(--muted-soft)",
@@ -62,7 +90,7 @@ export function Workspace({
         className="flex flex-1 flex-col gap-3xl overflow-y-auto p-2xl"
         data-testid="workspace"
       >
-        <Registered key={key} view={view} place={place} onPlace={record} />
+        <Registered key={key} view={view} place={merged} onPlace={record} />
       </div>
     </main>
   );

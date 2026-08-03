@@ -142,14 +142,14 @@ test("the table falls to its own empty words when it holds no rows", async () =>
 test("the pager offers only the directions the payload carries", async () => {
   const placed: unknown[] = [];
   const { unmount } = render(
-    <Pager payload={{ older: "cursor-older" }} place={{}} onPlace={(next) => placed.push(next)} />,
+    <Pager payload={{ older: "cursor-older" }} onPlace={(next) => placed.push(next)} />,
   );
   expect(screen.queryByRole("button", { name: "Newer" })).toBeNull();
   await userEvent.click(screen.getByRole("button", { name: "Older" }));
-  expect(placed).toEqual([{ kind: undefined, after: "cursor-older" }]);
+  expect(placed).toEqual([{ after: "cursor-older" }]);
   unmount();
 
-  render(<Pager payload={{ newer: "n", older: "o" }} place={{ kind: "fact" }} onPlace={() => {}} />);
+  render(<Pager payload={{ newer: "n", older: "o" }} onPlace={() => {}} />);
   expect(screen.getByRole("button", { name: "Newer" })).toBeTruthy();
   expect(screen.getByRole("button", { name: "Older" })).toBeTruthy();
 });

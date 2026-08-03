@@ -3,21 +3,18 @@ import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { beforeEach, expect, test } from "vitest";
 
-import { LISTING_CONTROLS, Listing, type ListingSpec } from "@/kernel/listing";
+import { Listing, type ListingSpec } from "@/kernel/listing";
 import type { Placement } from "@/kernel/pager";
 import { MainAgentProvider } from "@/lib/mainAgent";
 import { ARTIFACTS } from "@/views/Artifacts";
 import { SITES } from "@/views/Sites";
 import { SOURCES } from "@/views/Sources";
-import { Workspace } from "@/views/Workspace";
 import { App } from "@/App";
 
-import { refusedNotice, AGENT, MEMBER, json, wire } from "./harness";
-
+import { AGENT, MEMBER, PlacedWorkspace, json, refusedNotice, wire } from "./harness";
 type Row = { name: string; count: number; note: string | null };
 
 beforeEach(() => {
-  LISTING_CONTROLS.clear();
 });
 
 type Payload = { rows: Row[]; available?: boolean; newer?: string | null; older?: string | null };
@@ -53,9 +50,9 @@ function mount(declaration: ListingSpec<Payload, Row>, place: Placement = {}) {
         <Listing
           spec={declaration}
           place={current}
-          onPlace={(next) => {
-            placed.push(next);
-            setCurrent(next);
+          onPlace={(patch) => {
+            placed.push(patch);
+            setCurrent((held) => ({ ...held, ...patch }));
           }}
         />
       </MainAgentProvider>
@@ -302,7 +299,7 @@ test("the sites declaration binds to the payload the workspace route answers", a
   });
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <Workspace view="sites" onView={() => {}} />
+      <PlacedWorkspace view="sites" />
     </MainAgentProvider>,
   );
 
@@ -357,7 +354,7 @@ test("the sources declaration projects a binding and a bare stream into one unif
   });
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <Workspace view="sources" onView={() => {}} />
+      <PlacedWorkspace view="sources" />
     </MainAgentProvider>,
   );
 
@@ -405,7 +402,7 @@ test("a shared binding is offered no Share control", async () => {
   });
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <Workspace view="sources" onView={() => {}} />
+      <PlacedWorkspace view="sources" />
     </MainAgentProvider>,
   );
 
@@ -450,7 +447,7 @@ test("resync posts the binding whole, account and base url included", async () =
   });
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <Workspace view="sources" onView={() => {}} />
+      <PlacedWorkspace view="sources" />
     </MainAgentProvider>,
   );
 
@@ -494,7 +491,7 @@ test("an applied outcome states itself under the listing that produced it", asyn
   });
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <Workspace view="sources" onView={() => {}} />
+      <PlacedWorkspace view="sources" />
     </MainAgentProvider>,
   );
 
@@ -529,7 +526,7 @@ test("share flips the value it carries, and remove posts no spec at all", async 
   });
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <Workspace view="sources" onView={() => {}} />
+      <PlacedWorkspace view="sources" />
     </MainAgentProvider>,
   );
 
@@ -575,7 +572,7 @@ test("the artifacts declaration binds its parts to the artifact payload", async 
   });
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <Workspace view="artifacts" onView={() => {}} />
+      <PlacedWorkspace view="artifacts" />
     </MainAgentProvider>,
   );
 
@@ -820,7 +817,7 @@ test("an applied intent keeps the pressed chip and the typed search term", async
   });
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <Workspace view="sources" onView={() => {}} />
+      <PlacedWorkspace view="sources" />
     </MainAgentProvider>,
   );
 
@@ -925,7 +922,7 @@ test("the sources declaration searches and filters by access with live counts", 
   });
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <Workspace view="sources" onView={() => {}} />
+      <PlacedWorkspace view="sources" />
     </MainAgentProvider>,
   );
 
@@ -989,7 +986,7 @@ test("a chip alone survives an applied intent, with no search term typed", async
   });
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <Workspace view="sources" onView={() => {}} />
+      <PlacedWorkspace view="sources" />
     </MainAgentProvider>,
   );
 
@@ -999,67 +996,6 @@ test("a chip alone survives an applied intent, with no search term typed", async
   expect(await screen.findByText("Resync queued.")).toBeTruthy();
   expect(screen.getByRole("button", { name: "Private 1" }).getAttribute("aria-pressed")).toBe(
     "true",
-  );
-});
-
-test("leaving the view releases its controls, so a return starts unfiltered", async () => {
-  wire({
-    "/workspace/sources": () =>
-      json({
-        sources: [
-          {
-            name: "notion-main",
-            backend: "notion",
-            stream: "pages",
-            account_id: "acct",
-            base_url: null,
-            owner_email: "member@example.com",
-            shared: false,
-            consecutive_errors: 0,
-            next_sync_at: "2026-08-01T06:00:00",
-          },
-          {
-            name: null,
-            backend: "rss",
-            stream: "feed",
-            account_id: null,
-            base_url: "https://example.com/feed",
-            owner_email: null,
-            shared: true,
-            consecutive_errors: 0,
-            next_sync_at: "2026-08-02T09:30:00",
-          },
-        ],
-      }),
-    "/workspace/team": () => json({ members: [], can_add: false, domain: null }),
-  });
-  const view = render(
-    <MainAgentProvider agents={[AGENT]}>
-      <Workspace view="sources" onView={() => {}} />
-    </MainAgentProvider>,
-  );
-
-  await userEvent.click(await screen.findByRole("button", { name: "Shared 1" }));
-  await userEvent.type(screen.getByRole("searchbox"), "rss");
-
-  view.rerender(
-    <MainAgentProvider agents={[AGENT]}>
-      <Workspace view="team" onView={() => {}} />
-    </MainAgentProvider>,
-  );
-  await waitFor(() => expect(screen.queryByRole("searchbox")).toBeNull());
-
-  view.rerender(
-    <MainAgentProvider agents={[AGENT]}>
-      <Workspace view="sources" onView={() => {}} />
-    </MainAgentProvider>,
-  );
-
-  expect(await screen.findByText("notion")).toBeTruthy();
-  expect(screen.getByText("rss")).toBeTruthy();
-  expect(((await screen.findByRole("searchbox")) as HTMLInputElement).value).toBe("");
-  expect(screen.getByRole("button", { name: "Shared 1" }).getAttribute("aria-pressed")).toBe(
-    "false",
   );
 });
 
