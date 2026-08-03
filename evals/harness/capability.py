@@ -18,7 +18,13 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from evals.harness.harness import EvalCaseResult, Json, JsonObject, infra_error
+from evals.harness.harness import (
+    EvalCaseResult,
+    Json,
+    JsonObject,
+    infra_error,
+    is_transient_fault,
+)
 from evals.harness.judge import (
     JUDGE_REVISION,
     CriterionVerdict,
@@ -47,14 +53,14 @@ MAX_LINKED_ARTIFACT_BYTES = 4 * 1024 * 1024
 MAX_LINKED_TOTAL_BYTES = 12 * 1024 * 1024
 
 if TYPE_CHECKING:
-    from evals.harness.target import CapabilityTarget
+    from evals.harness.target import CapabilityTarget, TargetResult
 
 
 @dataclass(frozen=True)
 class CapabilityVerdict:
-    """`excluded` marks a case the harness could not put a capability question to — its environment
-    was not the one the case describes. Neither pass nor fail: counting it as a failure charges the
-    model for the harness."""
+    """`excluded` marks a sample the harness could not put a capability question to — its
+    environment was not the one the case describes. Neither pass nor fail: counting it as a failure
+    charges the model for the harness, so it leaves the case's denominator instead."""
 
     passed: bool
     reason: str
@@ -347,9 +353,20 @@ class CapabilityCase:
 
 
 async def run_capability_case(case: CapabilityCase, target: CapabilityTarget) -> EvalCaseResult:
+    """Run the case's samples and fold them into one result. An excluded sample leaves the
+    denominator, so a `samples=3` case whose third turn died on the provider's transport is scored
+    on the two that ran — the case itself is excluded only when no sample survived, which is the
+    call `run_scenario_case` makes on trials."""
     samples = [await sample_capability(case, target) for _ in range(max(case.samples, 1))]
-    winning_indexes = [index for index, sample in enumerate(samples) if sample.verdict.passed]
-    selected_index = winning_indexes[0] if winning_indexes else len(samples) - 1
+    scored_indexes = [index for index, sample in enumerate(samples) if not sample.verdict.excluded]
+    excluded_samples = len(samples) - len(scored_indexes)
+    winning_indexes = [index for index in scored_indexes if samples[index].verdict.passed]
+    if winning_indexes:
+        selected_index = winning_indexes[0]
+    elif scored_indexes:
+        selected_index = scored_indexes[-1]
+    else:
+        selected_index = len(samples) - 1
     verdict = samples[selected_index].verdict
     attempts: list[Json] = []
     for sample in samples:
@@ -417,6 +434,7 @@ async def run_capability_case(case: CapabilityCase, target: CapabilityTarget) ->
         "memberKey": case.member_key,
         "webDependent": case.web_dependent,
         "selectedAttempt": selected_index,
+        "excludedSamples": excluded_samples,
         "attempts": attempts,
     }
     if not winning_indexes and case.web_dependent:
@@ -431,8 +449,7 @@ async def run_capability_case(case: CapabilityCase, target: CapabilityTarget) ->
                 evidence=evidence,
                 excluded=True,
             )
-    passed = bool(winning_indexes)
-    if not passed and all(sample.verdict.excluded for sample in samples):
+    if not scored_indexes:
         return EvalCaseResult(
             name=case.name,
             passed=False,
@@ -440,20 +457,35 @@ async def run_capability_case(case: CapabilityCase, target: CapabilityTarget) ->
             evidence=evidence,
             excluded=True,
         )
+    passed = bool(winning_indexes)
+    note = f" ({excluded_samples} infra-excluded)" if excluded_samples else ""
     reason = (
         verdict.reason
         if passed
-        else f"{len(winning_indexes)}/{len(samples)} samples passed: {verdict.reason}"
+        else f"{len(winning_indexes)}/{len(scored_indexes)} samples passed{note}: {verdict.reason}"
     )
     return EvalCaseResult(name=case.name, passed=passed, reason=reason, evidence=evidence)
+
+
+def _unclean_verdict(result: TargetResult) -> CapabilityVerdict:
+    """The verdict for a turn that never reached a grader. A terminal `error_class` naming a model
+    or transport fault the provider owns put no capability question to the model at all, so the
+    sample is excluded rather than scored — the same call the scenario harness makes on the same
+    field. Every other unclean end (a wedge of ours, a turn row that vanished, a class the
+    transient set does not name) stays a failure: exclusion reaches only turns that never
+    terminated cleanly, so a graded answer, a refusal, and a failed rubric are all out of its
+    reach by construction."""
+    if not is_transient_fault(result.error_class):
+        return CapabilityVerdict(False, result.failure_reason)
+    return CapabilityVerdict(
+        False, f"{result.failure_reason}; the provider owns this fault", excluded=True
+    )
 
 
 async def sample_capability(case: CapabilityCase, target: CapabilityTarget) -> CapabilitySample:
     result = await target.run(case)
     if not result.clean:
-        return CapabilitySample(
-            result.output, CapabilityVerdict(False, result.failure_reason), result.trajectory
-        )
+        return CapabilitySample(result.output, _unclean_verdict(result), result.trajectory)
     if case.followup is not None:
         message = await case.followup(result.output)
         if message is not None:
@@ -485,11 +517,7 @@ async def sample_capability(case: CapabilityCase, target: CapabilityTarget) -> C
                 ),
             )
             if not result.clean:
-                return CapabilitySample(
-                    result.output,
-                    CapabilityVerdict(False, result.failure_reason),
-                    result.trajectory,
-                )
+                return CapabilitySample(result.output, _unclean_verdict(result), result.trajectory)
     deterministic = await case.grader(result.output)
     if not deterministic.passed or not (case.rubric or case.visual_rubric):
         return CapabilitySample(result.output, deterministic, result.trajectory)

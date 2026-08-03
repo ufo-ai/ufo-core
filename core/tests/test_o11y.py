@@ -32,7 +32,7 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from pydantic import ValidationError
 
-from evals.harness.scenario import TRANSIENT_ERROR_CLASSES
+from evals.harness.harness import TRANSIENT_ERROR_CLASSES
 from ufo import o11y
 from ufo.credentials import CredentialValueInvalid
 from ufo.loop.engine import IntentRefused

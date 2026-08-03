@@ -213,3 +213,38 @@ def infra_error(errors: Sequence[str]) -> str:
         if any(marker in lowered for marker in INFRA_ERROR_MARKERS):
             return message
     return ""
+
+
+TRANSIENT_ERROR_CLASSES = frozenset(
+    {
+        "RateLimitError",
+        "InternalServerError",
+        "ServiceUnavailableError",
+        "OverloadedError",
+        "DeadlineExceededError",
+        "APIConnectionError",
+        "APITimeoutError",
+        "ReadTimeout",
+        "ConnectTimeout",
+        "PoolTimeout",
+        "WriteTimeout",
+        "ReadError",
+        "ConnectError",
+        "WriteError",
+        "RemoteProtocolError",
+        "ProxyError",
+    }
+)
+
+
+def is_transient_fault(error_class: str | None) -> bool:
+    """Whether a turn crashed on a model or transport fault the provider owns — a read/connect
+    timeout, an overload, a 5xx — carried on the terminal's `error_class` (or the class of a
+    simulator-leg model call that raised). These are external uncertainty, not a capability signal,
+    so the run is excluded from scoring rather than counted as a failure (mirroring the capability
+    harness's `web_dependent` infra exclusion). Matched by exact class name against the anthropic
+    SDK / httpx transient set, never a substring: the terminal `error_class` also carries the class
+    of an internal fault (a DB or DBOS wedge the backstop commits as `type(error).__name__`), and a
+    builtin `TimeoutError` or `ConnectionError` there is an internal wedge that must surface as a
+    failure, never be masked as external."""
+    return error_class in TRANSIENT_ERROR_CLASSES

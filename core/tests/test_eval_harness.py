@@ -67,7 +67,7 @@ from evals.harness.capability import (
     run_capability_case,
     source_digest,
 )
-from evals.harness.harness import EvalCaseResult, EvalMetric, EvalReport
+from evals.harness.harness import EvalCaseResult, EvalMetric, EvalReport, is_transient_fault
 from evals.harness.judge import (
     JUDGE_REVISION,
     MAX_ANSWER_CHARS,
@@ -1473,6 +1473,141 @@ async def test_a_grader_that_excludes_its_sample_excludes_the_case(db: None, tmp
     assert result.excluded is True
     assert result.passed is False
     assert result.reason == "environment contaminated"
+
+
+@dataclass(frozen=True)
+class CrashedTarget:
+    """A turn that never terminated cleanly, carrying the class its terminal frame recorded."""
+
+    error_class: str
+    judge: None = None
+
+    async def run(self, case: CapabilityCase) -> TargetResult:
+        return TargetResult(
+            CapabilityOutput("", ()),
+            clean=False,
+            failure_reason=f"turn ended with status failed ({self.error_class})",
+            error_class=self.error_class,
+        )
+
+
+async def test_a_turn_that_died_on_a_transport_fault_is_excluded_not_scored() -> None:
+    """A turn killed by the model provider's transport put no capability question to the model, so
+    charging it as a failure moves the reported rate on our own connectivity. Measured on the
+    handbook suite, where one case recorded `turn ended with status failed (APIConnectionError)`
+    with zero tool calls and counted against the pass rate."""
+    case = CapabilityCase("crashed", "do the task", exact_scorer("done"))
+
+    result = await run_capability_case(case, CrashedTarget("APIConnectionError"))  # type: ignore[arg-type]
+
+    assert result.excluded is True
+    assert result.passed is False
+    assert "APIConnectionError" in result.reason
+    assert "the provider owns this fault" in result.reason
+    assert "case is excluded" not in result.reason
+
+
+async def test_a_turn_that_died_on_an_internal_fault_stays_a_failure() -> None:
+    """The exclusion reads the terminal's exact class against the provider-fault set, so a wedge of
+    ours — a DB fault, a bare builtin timeout the backstop commits as `type(error).__name__` — is
+    still a failure. Masking those as external would hide the faults this repo must root-cause."""
+    for error_class in ("OperationalError", "TimeoutError", "ConnectionError", "ValueError"):
+        case = CapabilityCase("crashed", "do the task", exact_scorer("done"))
+
+        result = await run_capability_case(case, CrashedTarget(error_class))  # type: ignore[arg-type]
+
+        assert result.excluded is False, error_class
+        assert result.passed is False, error_class
+
+
+async def test_a_graded_turn_is_never_excluded_by_the_transport_guard() -> None:
+    """The guard reaches only turns that never terminated cleanly, so a turn that answered and was
+    graded wrong stays a capability failure whatever the case name suggests."""
+    case = CapabilityCase("graded", "do the task", exact_scorer("done"))
+
+    result = await run_capability_case(case, StaticTarget())  # type: ignore[arg-type]
+
+    assert result.excluded is False
+    assert result.passed is False
+
+
+@dataclass
+class ScriptedTarget:
+    """One outcome per sample, consumed in order: a class name crashes that sample's turn on that
+    terminal class, `None` lets the turn answer `response`."""
+
+    outcomes: tuple[str | None, ...]
+    response: str = "ANSWER: wrong"
+    judge: None = None
+    index: int = 0
+
+    async def run(self, case: CapabilityCase) -> TargetResult:
+        error_class = self.outcomes[self.index]
+        self.index += 1
+        if error_class is None:
+            return TargetResult(CapabilityOutput(self.response, ()), clean=True)
+        return TargetResult(
+            CapabilityOutput("", ()),
+            clean=False,
+            failure_reason=f"turn ended with status failed ({error_class})",
+            error_class=error_class,
+        )
+
+
+async def test_a_transport_dead_sample_leaves_the_denominator_of_a_multi_sample_case() -> None:
+    """`samples=3` cases (`onboarding_help`, `response_register`) are the ones the exclusion has to
+    reach: charging the case for a transport-dead attempt scores it as though three real attempts
+    were made. The dead sample leaves the denominator and the case is scored on the two that ran,
+    the call `run_scenario_case` makes on trials."""
+    target = ScriptedTarget((None, None, "APIConnectionError"))
+    case = CapabilityCase("mixed", "do the task", exact_scorer("done"), samples=3)
+
+    result = await run_capability_case(case, target)  # type: ignore[arg-type]
+
+    assert result.excluded is False
+    assert result.passed is False
+    assert result.reason.startswith("0/2 samples passed (1 infra-excluded)")
+    assert "APIConnectionError" not in result.reason
+    assert result.evidence["excludedSamples"] == 1
+    assert result.evidence["selectedAttempt"] == 1
+
+
+async def test_a_surviving_sample_that_passes_carries_a_multi_sample_case() -> None:
+    """Samples are pass-any, so a transport fault on one attempt cannot bury a pass on another."""
+    target = ScriptedTarget(("APIConnectionError", None, None), response="ANSWER: done")
+    case = CapabilityCase("mixed", "do the task", exact_scorer("done"), samples=3)
+
+    result = await run_capability_case(case, target)  # type: ignore[arg-type]
+
+    assert result.passed is True
+    assert result.excluded is False
+    assert result.evidence["excludedSamples"] == 1
+    assert result.evidence["selectedAttempt"] == 1
+
+
+async def test_a_multi_sample_case_whose_every_sample_died_on_transport_is_excluded() -> None:
+    """No sample survived to score, so the case leaves the run excluded rather than as a 0/3."""
+    target = ScriptedTarget(("APIConnectionError", "ReadTimeout", "OverloadedError"))
+    case = CapabilityCase("all-dead", "do the task", exact_scorer("done"), samples=3)
+
+    result = await run_capability_case(case, target)  # type: ignore[arg-type]
+
+    assert result.excluded is True
+    assert result.passed is False
+    assert "OverloadedError" in result.reason
+    assert result.evidence["excludedSamples"] == 3
+
+
+def test_is_transient_fault_flags_provider_faults_not_real_failures() -> None:
+    assert is_transient_fault("ReadTimeout")
+    assert is_transient_fault("ReadError")
+    assert is_transient_fault("OverloadedError")
+    assert is_transient_fault("RateLimitError")
+    assert not is_transient_fault("ValueError")
+    assert not is_transient_fault("TimeoutError")
+    assert not is_transient_fault("ConnectionError")
+    assert not is_transient_fault("OperationalError")
+    assert not is_transient_fault(None)
 
 
 async def test_a_case_carrying_undelivered_rounds_seeds_them_before_the_turn_runs(

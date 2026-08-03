@@ -521,20 +521,6 @@ def test_nonpositive_tier_fails_loud() -> None:
         ScenarioCase("typo", _SUM_USER, _sum_grader, tier=0)
 
 
-def test_is_transient_flags_provider_faults_not_real_failures() -> None:
-    from evals.harness.scenario import _is_transient
-
-    assert _is_transient("ReadTimeout")
-    assert _is_transient("ReadError")
-    assert _is_transient("OverloadedError")
-    assert _is_transient("RateLimitError")
-    assert not _is_transient("ValueError")
-    assert not _is_transient("TimeoutError")
-    assert not _is_transient("ConnectionError")
-    assert not _is_transient("OperationalError")
-    assert not _is_transient(None)
-
-
 async def _always_fail(outcome: ScenarioOutcome) -> CapabilityVerdict:
     return CapabilityVerdict(False, "nope")
 

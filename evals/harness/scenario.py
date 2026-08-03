@@ -16,7 +16,7 @@ from evals.harness.capability import (
     grading_statement,
     source_digest,
 )
-from evals.harness.harness import EvalCaseResult, Json, JsonObject
+from evals.harness.harness import EvalCaseResult, Json, JsonObject, is_transient_fault
 from evals.harness.judge import JUDGE_REVISION, CriterionVerdict, JudgeLeg, rubric_pass
 from evals.harness.target import CapabilityTarget, TargetResult
 from ufo.sdk.models import Message
@@ -166,41 +166,6 @@ def _bounded(reply: str) -> str:
     return reply[:MAX_SIMULATOR_REPLY_CHARS] + "\n[reply truncated for the simulator]"
 
 
-TRANSIENT_ERROR_CLASSES = frozenset(
-    {
-        "RateLimitError",
-        "InternalServerError",
-        "ServiceUnavailableError",
-        "OverloadedError",
-        "DeadlineExceededError",
-        "APIConnectionError",
-        "APITimeoutError",
-        "ReadTimeout",
-        "ConnectTimeout",
-        "PoolTimeout",
-        "WriteTimeout",
-        "ReadError",
-        "ConnectError",
-        "WriteError",
-        "RemoteProtocolError",
-        "ProxyError",
-    }
-)
-
-
-def _is_transient(error_class: str | None) -> bool:
-    """A trial whose turn crashed on a model or transport fault the provider owns — a read/connect
-    timeout, an overload, a 5xx — carried on the terminal's `error_class` (or the class of a
-    simulator-leg model call that raised). These are external uncertainty, not a capability signal,
-    so the trial is excluded from pass^k rather than counted as a failure (mirroring the capability
-    harness's `web_dependent` infra exclusion). Matched by exact class name against the anthropic
-    SDK / httpx transient set, never a substring: the terminal `error_class` also carries the class
-    of an internal fault (a DB or DBOS wedge the backstop commits as `type(error).__name__`), and a
-    builtin `TimeoutError` or `ConnectionError` there is an internal wedge that must surface as a
-    failure, never be masked as external."""
-    return error_class in TRANSIENT_ERROR_CLASSES
-
-
 @dataclass(frozen=True)
 class _Trial:
     """One independent run of the case's conversation and its verdict. `infra` marks a trial whose
@@ -296,7 +261,7 @@ class _ScenarioRun:
                 message = await self.simulator.next_message(tuple(turns))
             except Exception as error:
                 reason = f"simulator model call failed: {type(error).__name__}: {error}"
-                if not _is_transient(type(error).__name__):
+                if not is_transient_fault(type(error).__name__):
                     raise
                 return _Trial(
                     tuple(turns), stopped, last, False, reason, tokens, cost_micro_usd, infra=True
@@ -330,7 +295,7 @@ class _ScenarioRun:
                     result.failure_reason,
                     tokens,
                     cost_micro_usd,
-                    infra=_is_transient(result.error_class),
+                    infra=is_transient_fault(result.error_class),
                 )
         if last is None:
             return _Trial(
