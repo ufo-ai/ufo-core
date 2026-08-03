@@ -81,6 +81,16 @@
     white-space:pre-wrap; color:var(--green); text-shadow:0 0 10px #9dffb055;
   }
   .panel .ack.bad{color:var(--rust); text-shadow:none}
+
+  /* iOS Safari zooms the page in whenever a focused control's text computes under 16px, which
+     blows the block up and clips it the moment the entry is tapped. Keyed on the pointer rather
+     than the width because a phone in landscape is a wide viewport that still zooms, and because
+     the desktop panel keeps its 14px terminal size. Suppressing the zoom in the viewport tag
+     instead would cost every visitor pinch zoom. */
+  @media (pointer: coarse){
+    .panel{font-size:16px}
+    .panel input,.panel .go{min-height:44px}   /* a fingertip's worth of target */
+  }
 </style>
 </head>
 <body>

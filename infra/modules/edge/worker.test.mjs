@@ -166,6 +166,16 @@ test("the sky is decoration the pointer passes straight through", () => {
   assert.doesNotMatch(LANDING_PAGE, /addEventListener\('click'/);
 });
 
+test("the served page fits the device without taking pinch zoom away", () => {
+  assert.match(
+    LANDING_PAGE,
+    /<meta name="viewport" content="width=device-width, initial-scale=1" \/>/,
+  );
+  // Pinning the scale is the usual way to stop Safari's focus zoom. It strips zoom from every
+  // visitor and modern Safari ignores it anyway, so the controls carry 16px instead.
+  assert.doesNotMatch(LANDING_PAGE, /(?:maximum|minimum)-scale|user-scalable/);
+});
+
 test("the join is a block in the page, submittable with nothing to open", () => {
   assert.doesNotMatch(LANDING_PAGE, /dialog|showModal|aria-modal|::backdrop/i);
   assert.match(

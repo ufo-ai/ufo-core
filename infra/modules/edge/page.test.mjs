@@ -56,12 +56,66 @@ after(async () => {
   await new Promise((resolve) => server.close(resolve));
 });
 
-async function open(craft = 1) {
-  const page = await browser.newPage({ viewport: { width: 1200, height: 800 } });
+const DESKTOP = { viewport: { width: 1200, height: 800 } };
+// An iPhone 15-class device: the viewport, pixel density and pointer Safari reports there, so the
+// page's coarse-pointer rules resolve the way they do on the phone.
+const PHONE = {
+  viewport: { width: 390, height: 844 },
+  deviceScaleFactor: 3,
+  isMobile: true,
+  hasTouch: true,
+};
+// The same phone turned on its side: a coarse pointer on a viewport wider than a phone-width query
+// would ever cover, which is why the page keys the rules off the pointer and not the width.
+const PHONE_LANDSCAPE = {
+  ...PHONE,
+  viewport: { width: PHONE.viewport.height, height: PHONE.viewport.width },
+};
+
+async function open(craft = 1, device = DESKTOP) {
+  const page = await browser.newPage(device);
   page.on("pageerror", (error) => assert.fail(`page error: ${error}`));
   await page.goto(`${origin}/?n=${craft}`);
   await page.waitForFunction(() => document.querySelector(".craft")?.style.opacity === "1");
   return page;
+}
+
+// Everything a finger or a Tab can land on inside the block.
+const FOCUSABLE = "input, button, select, textarea, a[href], [tabindex]";
+
+function controls(page) {
+  return page.locator("#join").evaluate(
+    (block, selector) =>
+      [...block.querySelectorAll(selector)].map((el) => {
+        const box = el.getBoundingClientRect();
+        return {
+          id: el.id,
+          fontSize: Number.parseFloat(getComputedStyle(el).fontSize),
+          height: box.height,
+          left: box.left,
+          right: box.right,
+        };
+      }),
+    FOCUSABLE,
+  );
+}
+
+// Safari zooms the page in when the control taking focus computes under 16px, and 44px is a
+// fingertip's worth of target.
+const PHONE_MIN_FONT = 16;
+const PHONE_MIN_TARGET = 44;
+
+function assertSizedForAFinger(measured) {
+  for (const control of measured) {
+    assert.ok(
+      control.fontSize >= PHONE_MIN_FONT,
+      `#${control.id} computes to ${control.fontSize}px`,
+    );
+    assert.ok(
+      control.height >= PHONE_MIN_TARGET,
+      `#${control.id} is ${control.height}px to a fingertip`,
+    );
+  }
 }
 
 // A press and a release, far enough apart to straddle a redraw, like a hand.
@@ -92,6 +146,84 @@ test("the join stands in the middle of the page, above the fleet", async () => {
   assert.equal(placed.drawn, true);
   assert.ok(placed.offCentre < 1, `the block sits ${placed.offCentre}px off centre`);
   assert.equal(placed.reachable, true);
+  await page.close();
+});
+
+// iOS Safari zooms the page in when the control taking focus computes under 16px, which is the
+// blown-up, clipped block a phone showed after tapping the entry. Chromium cannot reproduce that
+// zoom, so the computed size is the assertion.
+test("every focusable control in the block is at least 16px on a phone", async () => {
+  const page = await open(6, PHONE);
+  const resting = await controls(page);
+  assert.deepEqual(
+    resting.map((control) => control.id),
+    ["email", "go"],
+  );
+  await page.locator("#email").focus();
+  assert.equal(await page.evaluate(() => document.activeElement.id), "email");
+  const focused = await controls(page);
+  assertSizedForAFinger([...resting, ...focused]);
+  assert.deepEqual(focused, resting);
+  await page.close();
+});
+
+// A phone in landscape is the case no width query serves: 844px across, still a coarse pointer,
+// still zooming Safari in on a 14px control. Retarget the page's rule to a phone-sized max-width
+// and this fails while the portrait test above stays green.
+test("every focusable control in the block is at least 16px on a phone in landscape", async () => {
+  const page = await open(6, PHONE_LANDSCAPE);
+  assert.deepEqual(
+    await page.evaluate(() => [innerWidth, innerHeight]),
+    [PHONE_LANDSCAPE.viewport.width, PHONE_LANDSCAPE.viewport.height],
+  );
+  const measured = await controls(page);
+  assert.deepEqual(
+    measured.map((control) => control.id),
+    ["email", "go"],
+  );
+  assertSizedForAFinger(measured);
+  await page.close();
+});
+
+test("the desktop panel keeps its 14px terminal size", async () => {
+  const page = await open();
+  assert.equal(await page.locator("#join").evaluate((el) => getComputedStyle(el).fontSize), "14px");
+  for (const control of await controls(page)) {
+    assert.equal(control.fontSize, 14, `#${control.id} computes to ${control.fontSize}px`);
+  }
+  await page.close();
+});
+
+test("the block fits a phone with nothing clipped", async () => {
+  const page = await open(6, PHONE);
+  // The longest copy the block ever carries is the ack, so measure with it on screen.
+  await page.fill("#email", "phone@yourco.com");
+  await page.click("#go");
+  await page.waitForFunction(() =>
+    document.getElementById("ack").textContent.includes("waitlist"),
+  );
+  const laid = await page.locator("#join").evaluate((block) => {
+    const box = block.getBoundingClientRect();
+    return {
+      pageOverflow: document.documentElement.scrollWidth - innerWidth,
+      viewport: { width: innerWidth, height: innerHeight },
+      left: box.left,
+      right: box.right,
+      top: box.top,
+      bottom: box.bottom,
+      clipped: block.scrollWidth > block.clientWidth + 1,
+    };
+  });
+  assert.equal(laid.pageOverflow, 0);
+  assert.equal(laid.clipped, false);
+  assert.ok(
+    laid.left >= 0 && laid.right <= laid.viewport.width,
+    `the block spans ${laid.left}–${laid.right}px of ${laid.viewport.width}px`,
+  );
+  assert.ok(
+    laid.top >= 0 && laid.bottom <= laid.viewport.height,
+    `the block spans ${laid.top}–${laid.bottom}px of ${laid.viewport.height}px`,
+  );
   await page.close();
 });
 
