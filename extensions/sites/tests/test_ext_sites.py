@@ -111,6 +111,9 @@ def test_manifest_declares_the_tools_the_profile_and_the_section() -> None:
     )
     (profile,) = manifest.subagents
     assert profile.name == "website_building"
+    assert profile.input_model.model_validate({"objective": "x" * 10_000}).objective == "x" * 10_000
+    assert "maxLength" not in profile.input_model.model_json_schema()["properties"]["objective"]
+    assert "maxLength" not in profile.output_model.model_json_schema()["properties"]["result"]
     assert "deploy_website" in profile.tool_names
     assert "publish_website" not in profile.tool_names
     assert "this conversation's sandbox" in build.description
@@ -254,9 +257,11 @@ def test_the_website_building_profile_names_only_meaningful_tools() -> None:
     assert WEBSITE_BUILDING_PROFILE.max_rounds == 100
 
 
-def test_the_website_building_profile_finishes_without_a_prose_final() -> None:
-    assert "call `finish` directly" in WEBSITE_BUILDING_PROFILE.prompt
-    assert "give a final message" not in WEBSITE_BUILDING_PROFILE.prompt
+def test_the_website_building_profile_uses_the_shared_finish_contract() -> None:
+    prompt = subagent_system_prompt(WEBSITE_BUILDING_PROFILE)
+    assert "A delivery crosses an agent boundary" in prompt
+    assert "call `finish` directly" not in WEBSITE_BUILDING_PROFILE.prompt
+    assert "End the turn by calling the `finish` tool" in prompt
 
 
 async def test_website_builds_and_lists_the_output(tmp_path: Path) -> None:

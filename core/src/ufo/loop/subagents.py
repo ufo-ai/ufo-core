@@ -26,6 +26,8 @@ from ufo.ext.manifest import SubagentProfile
 from ufo.loop.prompts.render import (
     CITATION_BLOCK,
     CITATION_SLOT,
+    DELIVERY_REGISTER_BLOCK,
+    DELIVERY_REGISTER_SLOT,
     PROMPT_VAR_RE,
     SKILL_INDEX_SLOT,
     render_skill_index,
@@ -64,6 +66,7 @@ SUBAGENT_OUTPUT_DISCIPLINE = (
     .read_text()
     .strip()
     .replace(CITATION_SLOT, CITATION_BLOCK)
+    .replace(DELIVERY_REGISTER_SLOT, DELIVERY_REGISTER_BLOCK)
 )
 CORE_SKILL_INDEX = tuple((skill.name, skill.description) for skill in CORE_SKILLS)
 
@@ -100,14 +103,13 @@ def subagent_system_prompt(
 ) -> str:
     """The child's system prompt: the profile's own instructions with its `{{skill_index}}` slot
     filled from the loadable-skill index, then any preloaded skills' instructions, then the shared
-    output discipline (citation and formatting rules, wrapped around every profile so a subagent
-    inherits the same citation contract the main agent renders), then the output contract — the
-    child ends its turn by calling the engine's finish tool, whose input schema is the profile's
-    output model, and a preloaded skill's own answer-formatting instructions can never displace
-    that contract from the prompt's last word. A slot the profile leaves unfilled fails loud
-    rather than reaching the model as a literal brace; preloaded bodies over the char bound fail
-    loud rather than blowing the model call. Skill bodies are injected after slot validation — a
-    literal brace inside a skill is content, never an unfilled slot."""
+    output discipline (the shared delivery register, citation, and formatting rules), then the
+    output contract — the child ends its turn by calling the engine's finish tool, whose input
+    schema is the profile's output model, and a preloaded skill's own answer-formatting instructions
+    can never displace that contract from the prompt's last word. A slot the profile leaves unfilled
+    fails loud rather than reaching the model as a literal brace; preloaded bodies over the char
+    bound fail loud rather than blowing the model call. Skill bodies are injected after slot
+    validation — a literal brace inside a skill is content, never an unfilled slot."""
     if "load_skill" in profile.tool_names and SKILL_INDEX_SLOT not in profile.prompt:
         raise ValueError(
             f"subagent profile {profile.name!r} grants load_skill but has no "

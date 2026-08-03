@@ -2,13 +2,13 @@
 a more specific one.
 
 `general_purpose` is the catch-all: a focused child given a self-contained task, working in the same
-workspace, that reports back a single summary. Its tool subset is the working set minus the tools a
+workspace. Its tool subset is the working set minus the tools a
 subagent must not hold — it never asks the user (`ask_user`), never delegates further
 (`spawn_subagent`), never waits on, messages, or cancels a sibling (`wait_for_subagents`,
 `message_subagent`, `cancel_subagent`), and never gates a member grant (`connect_account`). Every
 other profile is extension-provided through the manifest; this is the floor."""
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ufo.loop.prompts.render import SKILL_INDEX_SLOT
 from ufo.loop.subagents import SubagentProfile
@@ -39,11 +39,15 @@ GENERAL_PURPOSE_TOOLS = (
 
 
 class GeneralPurposeInput(BaseModel):
-    task: str
+    task: str = Field(
+        description="Freeform task governed by the shared delivery register.",
+    )
 
 
 class GeneralPurposeOutput(BaseModel):
-    result: str
+    result: str = Field(
+        description="Freeform result governed by the shared delivery register.",
+    )
 
 
 _PARAGRAPHS = (
@@ -70,13 +74,7 @@ _PARAGRAPHS = (
     (
         "You share the /workspace directory with the parent agent and any sibling subagents. Save "
         "findings, data, and artifacts to files there with clear, unique names so they can be read "
-        "back; never delete another agent's files. Passing work through workspace files is the "
-        "standard way to hand off between agents."
-    ),
-    "Be brief and focus on results; avoid filler, and never use emojis unless asked.",
-    (
-        "When you are done, report a result: a short summary of what you did and where you saved "
-        "anything, so the parent agent can pick it up."
+        "back."
     ),
 )
 

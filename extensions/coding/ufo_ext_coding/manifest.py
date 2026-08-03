@@ -61,7 +61,9 @@ CODING_ROUND_LIMIT = 100
 
 
 class CodingInput(BaseModel):
-    objective: str
+    objective: str = Field(
+        description="Freeform task governed by the shared delivery register.",
+    )
     extended_context: bool | None = Field(
         default=None,
         description="Run the child under the main agent's round ceiling instead of its default "
@@ -71,8 +73,7 @@ class CodingInput(BaseModel):
 
 class CodingOutput(BaseModel):
     result: str = Field(
-        description="Complete findings when no durable report exists; otherwise headlines and "
-        "pointers without repeating the report.",
+        description="Freeform result governed by the shared delivery register.",
     )
 
 

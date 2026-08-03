@@ -12,6 +12,7 @@ import pytest
 from ufo.ext.loader import load_manifests
 from ufo.loop.prompts.render import (
     COMPACTION_SYSTEM_PROMPT,
+    DELIVERY_REGISTER_BLOCK,
     SHELL,
     render_skill_index,
     render_system_prompt,
@@ -46,6 +47,28 @@ def test_shell_asks_for_the_source_without_naming_a_surface() -> None:
     assert "Requested in: <source>" in SHELL
     for surface in ("Slack", "slack", "ufo cli", "ufo web", "permalink"):
         assert surface not in SHELL
+
+
+def test_shell_splits_long_delivery_between_chat_and_one_markdown_report() -> None:
+    assert SHELL.count(DELIVERY_REGISTER_BLOCK) == 1
+    prose = " ".join(SHELL.split())
+    assert "A delivery crosses an agent boundary" in prose
+    assert "task, when assigning work to another agent" in prose
+    assert "complete evidence, uncertainty, and reasoning" in prose
+    assert "even when they fit inline" in prose
+    assert "For a member, inline includes only the answer" in prose
+    assert "one deciding product fact" in prose
+    assert "Do not invent an action or result" in prose
+    assert "what remains unknown" in prose
+    assert "distinguish the rule from the instance" in prose
+    assert "put the full report in one Markdown artifact" in prose
+    assert "never duplicate its body inline" in prose
+    assert "Send it a task-register objective" in prose
+    assert "Keep a spawn foreground when your next step needs its result" in prose
+    assert "A subagent's return is a short text summary" not in SHELL
+    assert "put every piece of it in\nthis one message, in full" not in SHELL
+    assert "report, when you deliver" in SHELL
+    assert "full structure, because the content is genuinely report-shaped" not in SHELL
 
 
 def test_digest_is_stable_for_equal_content_and_shifts_with_it() -> None:

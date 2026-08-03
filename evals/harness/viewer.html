@@ -517,7 +517,7 @@ function callMarkup(attState) {
 const ATTEMPT_KEYS = new Set(['passed', 'reason', 'response', 'calls', 'toolErrors', 'artifacts',
   'artifactContents', 'artifactReferences', 'artifactError', 'tokens', 'costMicroUsd', 'compactions',
   'compactionRecords', 'log', 'grader', 'judge', 'turns', 'stopped', 'trajectory', 'timing']);
-const CASE_EVIDENCE_KEYS = new Set(['message', 'grading', 'rubric', 'visualRubric', 'memberKey', 'webDependent',
+const CASE_EVIDENCE_KEYS = new Set(['message', 'grading', 'rubric', 'artifactRubric', 'visualRubric', 'memberKey', 'webDependent',
   'reconstructed', 'selectedAttempt', 'attempts', 'user', 'maxTurns', 'claims', 'claimVerdicts',
   'claimCoverage', 'enabledTools', 'exposedTools', 'omittedEnabledTools', 'referenceTools',
   'referenceServers', 'enabledCatalogServers']);
@@ -823,11 +823,13 @@ function detailMarkup(base, current, before, after) {
   const item = caseByName(after, state.caseName);
   const evidence = (item || prior || {}).evidence || {};
   const rubric = evidence.rubric || [];
+  const artifactRubric = evidence.artifactRubric || [];
   const visualRubric = evidence.visualRubric || [];
   const grading = typeof evidence.grading === 'string' ? evidence.grading : '';
   const criteria = [
     grading ? `[grader] ${grading}` : '',
     ...rubric.map(value => `[judge rubric] ${value}`),
+    ...artifactRubric.map(value => `[artifact rubric] ${value}`),
     ...visualRubric.map(value => `[visual rubric] ${value}`)
   ].filter(Boolean);
   const setup = setupMeta(evidence);

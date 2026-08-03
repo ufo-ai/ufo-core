@@ -245,7 +245,9 @@ class NoteInput(BaseModel):
 
 
 class ProbeTask(BaseModel):
-    task: str
+    task: str = Field(
+        description="Freeform task governed by the shared delivery register.",
+    )
 
 
 class ProbeFinding(BaseModel):

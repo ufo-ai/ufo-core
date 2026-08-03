@@ -9,7 +9,7 @@ reaches for — and their prompts are the ported instructions verbatim.
 
 from pathlib import Path
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ufo.sdk.manifest import SubagentProfile
 from ufo_ext_research.tools import FETCH_URL_TOOL, SEARCH_VERTICAL_TOOL, SEARCH_WEB_TOOL
@@ -42,11 +42,15 @@ DEEP_RESEARCH_PROMPT = (Path(__file__).parent / "prompts" / "subagent_deep_resea
 
 
 class ResearchInput(BaseModel):
-    objective: str
+    objective: str = Field(
+        description="Freeform task governed by the shared delivery register.",
+    )
 
 
 class ResearchOutput(BaseModel):
-    result: str
+    result: str = Field(
+        description="Freeform result governed by the shared delivery register.",
+    )
 
 
 RESEARCH_PROFILE = SubagentProfile(

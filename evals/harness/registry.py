@@ -64,7 +64,7 @@ def capability_task(
     judge_reasoning: ReasoningEffort = "low",
     serial: bool = False,
 ) -> EvalTask:
-    needs_judge = any(case.rubric or case.visual_rubric for case in cases)
+    needs_judge = any(case.rubric or case.artifact_rubric or case.visual_rubric for case in cases)
     if needs_judge and judge_model is None:
         raise ValueError(f"capability task {name!r} has semantic rubrics but no judge model")
     if judge_model is not None and not needs_judge:

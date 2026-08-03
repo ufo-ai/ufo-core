@@ -267,15 +267,15 @@ class CapabilityCase:
     stabilizes the suite digest. `member_key`, when set, is the exact email of the workspace member
     whose private memory the eval conversation may recall. `followup`, when set, derives one second
     inbound from the first turn's output and durable state; returning None grades the first turn.
-    `rubric` judges the answer text; `visual_rubric` judges the rendered page images the turn shared
-    — both reach the model judge only after the deterministic grader passes, and both require a
-    judge model on the task. `seed`, when set, receives (workspace_id, agent_id) before the case's
-    conversation opens and establishes the state the case runs against, resetting whatever it
-    owns. `prepare`, when set, runs once the conversation's workspace directory exists and its files
-    are staged, and before the turn opens, receiving (workspace_id, that directory) — for a case
-    whose external environment must read the very files the agent will write, which `seed` runs too
-    early to know. `undelivered` seeds rounds the agent ran before the case message arrived, so they
-    answer the last of the `prior_messages`."""
+    `rubric` judges the answer text; `artifact_rubric` judges the Markdown files the turn shared;
+    `visual_rubric` judges its rendered page images. Each reaches the model judge only after the
+    deterministic grader passes and requires a judge model on the task. `seed`, when set, receives
+    (workspace_id, agent_id) before the case's conversation opens and establishes the state the case
+    runs against, resetting whatever it owns. `prepare`, when set, runs once the conversation's
+    workspace directory exists and its files are staged, and before the turn opens, receiving
+    (workspace_id, that directory) — for a case whose external environment must read the very files
+    the agent will write, which `seed` runs too early to know. `undelivered` seeds rounds the agent
+    ran before the case message arrived, so they answer the last of the `prior_messages`."""
 
     name: str
     message: str
@@ -284,6 +284,7 @@ class CapabilityCase:
     web_dependent: bool = False
     digest_tag: str = ""
     rubric: tuple[str, ...] = ()
+    artifact_rubric: tuple[str, ...] = ()
     visual_rubric: tuple[str, ...] = ()
     member_key: str | None = None
     workspace_files: tuple[WorkspaceFile, ...] = ()
@@ -314,7 +315,9 @@ class CapabilityCase:
         }
         if self.visual_rubric:
             payload["visualRubric"] = list(self.visual_rubric)
-        if self.rubric or self.visual_rubric:
+        if self.artifact_rubric:
+            payload["artifactRubric"] = list(self.artifact_rubric)
+        if self.rubric or self.artifact_rubric or self.visual_rubric:
             payload["judgeRevision"] = JUDGE_REVISION
         if self.member_key is not None:
             payload["memberKey"] = self.member_key
@@ -444,6 +447,7 @@ async def run_capability_case(case: CapabilityCase, target: CapabilityTarget) ->
         "message": case.message,
         "grading": grading_statement(case.grader) or None,
         "rubric": list(case.rubric),
+        "artifactRubric": list(case.artifact_rubric),
         "visualRubric": list(case.visual_rubric),
         "memberKey": case.member_key,
         "webDependent": case.web_dependent,
@@ -535,7 +539,7 @@ async def sample_capability(case: CapabilityCase, target: CapabilityTarget) -> C
             if not result.clean:
                 return CapabilitySample(result.output, _unclean_verdict(result), result.trajectory)
     deterministic = await case.grader(result.output)
-    if not deterministic.passed or not (case.rubric or case.visual_rubric):
+    if not deterministic.passed or not (case.rubric or case.artifact_rubric or case.visual_rubric):
         return CapabilitySample(result.output, deterministic, result.trajectory)
     if target.judge is None:
         return CapabilitySample(
@@ -548,6 +552,25 @@ async def sample_capability(case: CapabilityCase, target: CapabilityTarget) -> C
         verdicts.append(
             await rubric_pass(case.message, result.output.response, case.rubric, target.judge)
         )
+    if case.artifact_rubric:
+        markdown = tuple(
+            artifact
+            for artifact in result.output.artifacts
+            if artifact.name.lower().endswith(".md")
+        )
+        if not markdown:
+            verdicts.append(RubricVerdict(False, "no shared Markdown artifact to judge"))
+        else:
+            try:
+                answer = "\n\n".join(
+                    f"# {artifact.name}\n\n{artifact.content.decode()}" for artifact in markdown
+                )
+            except UnicodeDecodeError:
+                verdicts.append(RubricVerdict(False, "shared Markdown artifact is not UTF-8"))
+            else:
+                verdicts.append(
+                    await rubric_pass(case.message, answer, case.artifact_rubric, target.judge)
+                )
     if case.visual_rubric:
         pages = _page_images(result.output.artifacts)
         verdicts.append(

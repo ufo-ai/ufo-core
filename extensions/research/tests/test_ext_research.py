@@ -287,9 +287,17 @@ def test_registers_the_research_and_deep_research_profiles() -> None:
     assert {RESEARCH_PROFILE.name, DEEP_RESEARCH_PROFILE.name} == {"research", "deep_research"}
     assert RESEARCH_PROFILE.model == DEEP_RESEARCH_PROFILE.model == RESEARCH_MODEL
     assert RESEARCH_MODEL == "claude-sonnet-4-6"
-    assert RESEARCH_PROFILE.input_model.model_validate(
-        {"user_description": TOOL_NARRATION, "objective": "size the market"}
-    ).objective
+    assert (
+        RESEARCH_PROFILE.input_model.model_validate({"objective": "x" * 10_000}).objective
+        == "x" * 10_000
+    )
+    assert (
+        "maxLength"
+        not in RESEARCH_PROFILE.input_model.model_json_schema()["properties"]["objective"]
+    )
+    assert (
+        "maxLength" not in RESEARCH_PROFILE.output_model.model_json_schema()["properties"]["result"]
+    )
     for tool_name in ("search_web", "search_vertical", "fetch_url"):
         assert tool_name in RESEARCH_TOOL_NAMES
     assert "ask_user" not in RESEARCH_TOOL_NAMES

@@ -9,7 +9,7 @@ real work — invoke, reconstruct, grade — is what the tests assert, read back
 import asyncio
 from base64 import b64encode, urlsafe_b64decode
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from functools import partial
 from json import dumps, loads
@@ -124,11 +124,12 @@ from evals.registry import (
 )
 from evals.response_register import CASES as REGISTER_CASES
 from evals.response_register import (
+    DELEGATED_CASES,
     Shape,
     conversational_scorer,
+    delegated_split_delivery_scorer,
     measure,
-    report_scorer,
-    substantive_scorer,
+    split_delivery_scorer,
 )
 from ufo.accounting import Pricing
 from ufo.blob import FilesystemBlobStore, S3BlobStore
@@ -255,6 +256,8 @@ def test_registry_pins_judge_and_simulator_models_by_workload() -> None:
     assert tasks["document_visual"].simulator_model is None
     assert tasks["response_register"].judge_model == SEMANTIC_JUDGE_MODEL
     assert tasks["response_register"].simulator_model is None
+    assert tasks["delegated_response_register"].judge_model == SEMANTIC_JUDGE_MODEL
+    assert tasks["delegated_response_register"].simulator_model is None
     assert tasks["closing_message"].judge_model == SEMANTIC_JUDGE_MODEL
     assert tasks["slack_message_block"].judge_model == SEMANTIC_JUDGE_MODEL
     assert tasks["slack_message_block"].simulator_model is None
@@ -274,6 +277,7 @@ def test_registry_pins_judge_and_simulator_models_by_workload() -> None:
             "object_tools_flows",
             "document_visual",
             "response_register",
+            "delegated_response_register",
             "closing_message",
             "slack_message_block",
             "onboarding_help",
@@ -3042,44 +3046,232 @@ async def test_conversational_scorer_flags_a_reply_spread_over_too_many_lines() 
     assert "words over" not in verdict.reason
 
 
-async def test_substantive_scorer_rejects_a_clipped_contradiction() -> None:
-    clipped = CapabilityOutput("No, that's wrong. NULLs are distinct.", ())
-    verdict = await substantive_scorer(min_words=90)(clipped)
+async def test_split_delivery_scorer_requires_a_short_summary_and_shared_report() -> None:
+    scorer = split_delivery_scorer(25, 120, 6, 200, 3)
+    inline = CapabilityOutput(" ".join(["word"] * 250), ())
+    verdict = await scorer(inline)
     assert not verdict.passed
-    assert "clipped to 6 words, under the 90 floor" in verdict.reason
-    assert verdict.evidence == {"words": 6, "lines": 1, "headers": 0, "bullets": 0}
-    argued = CapabilityOutput(" ".join(["because"] * 90), ())
-    passing = await substantive_scorer(min_words=90)(argued)
+    assert "summary has 250 words over the 120 budget" in verdict.reason
+    assert "did not deliver exactly one Markdown report" in verdict.reason
+    body = " ".join(["word"] * 70)
+    report = f"## One\n{body}\n\n## Two\n{body}\n\n## Three\n{body}".encode()
+    summary = " ".join(["summary"] * 40)
+    delivered = CapabilityOutput(
+        summary,
+        (
+            ToolInvocation(
+                "share_file",
+                {"file_path": "/workspace/report.md"},
+                '{"name":"report.md"}',
+                has_result=True,
+            ),
+        ),
+        artifacts=(SharedArtifact("report.md", report),),
+    )
+    passing = await scorer(delivered)
     assert passing.passed
-    assert "substantive: 90 words" in passing.reason
+    assert passing.evidence["summary"] == {
+        "words": 40,
+        "lines": 1,
+        "headers": 0,
+        "bullets": 0,
+    }
+    assert passing.evidence["report"] == {
+        "name": "report.md",
+        "words": 216,
+        "lines": 6,
+        "headers": 3,
+        "bullets": 0,
+    }
 
 
-async def test_report_scorer_requires_length_and_sections() -> None:
-    unsectioned = CapabilityOutput(" ".join(["word"] * 250), ())
-    verdict = await report_scorer(min_words=250, min_headers=3)(unsectioned)
+async def test_split_delivery_scorer_rejects_a_stub_report() -> None:
+    scorer = split_delivery_scorer(25, 120, 6, 200, 3)
+    stub = b"## One\nshort\n\n## Two\nshort\n\n## Three\nshort"
+    output = CapabilityOutput(
+        " ".join(["summary"] * 40),
+        (
+            ToolInvocation(
+                "share_file",
+                {"file_path": "/workspace/report.md"},
+                '{"name":"report.md"}',
+                has_result=True,
+            ),
+        ),
+        artifacts=(SharedArtifact("report.md", stub),),
+    )
+
+    verdict = await scorer(output)
+
     assert not verdict.passed
-    assert "0 headers under the 3 floor" in verdict.reason
-    assert "words under" not in verdict.reason
-    body = " ".join(["word"] * 84)
-    sectioned = CapabilityOutput(f"## One\n{body}\n\n## Two\n{body}\n\n## Three\n{body}", ())
-    assert (await report_scorer(min_words=250, min_headers=3)(sectioned)).passed
+    assert "report has 9 words under the 200 floor" in verdict.reason
 
 
-async def test_report_scorer_flags_a_sectioned_reply_that_is_too_short() -> None:
-    """Headers over a stub is the shape a report register must not be scored as satisfying."""
-    stub = CapabilityOutput("## One\nshort\n\n## Two\nshort\n\n## Three\nshort", ())
-    verdict = await report_scorer(min_words=250, min_headers=3)(stub)
+async def test_split_delivery_scorer_keeps_the_summary_and_header_floors() -> None:
+    scorer = split_delivery_scorer(25, 120, 6, 200, 3)
+    report = " ".join(["word"] * 210).encode()
+    output = CapabilityOutput(
+        " ".join(["summary"] * 10),
+        (
+            ToolInvocation(
+                "share_file",
+                {"file_path": "/workspace/report.md"},
+                '{"name":"report.md"}',
+                has_result=True,
+            ),
+        ),
+        artifacts=(SharedArtifact("report.md", report),),
+    )
+
+    verdict = await scorer(output)
+
     assert not verdict.passed
-    assert "9 words under the 250 floor" in verdict.reason
-    assert "headers under" not in verdict.reason
+    assert "summary has 10 words under the 25 floor" in verdict.reason
+    assert "report has 0 headers under the 3 floor" in verdict.reason
 
 
-async def test_report_scorer_reports_both_floors_when_both_fall_short() -> None:
-    chatty = CapabilityOutput("## One\n" + " ".join(["word"] * 20), ())
-    verdict = await report_scorer(min_words=250, min_headers=3)(chatty)
-    assert not verdict.passed
-    assert "22 words under the 250 floor" in verdict.reason
-    assert "1 headers under the 3 floor" in verdict.reason
+async def test_delegated_split_delivery_scorer_proves_all_three_hops() -> None:
+    report_path = "/workspace/evidence.md"
+    sources = ("/workspace/note.md", "/workspace/code.py")
+    scorer = delegated_split_delivery_scorer(report_path, sources, 160, 100, 6, 25, 120, 6, 200, 3)
+    report = (
+        "## Evidence\n"
+        + " ".join(["fact"] * 70)
+        + "\n\n## Uncertainty\n"
+        + " ".join(["unknown"] * 70)
+        + "\n\n## Conclusion\n"
+        + " ".join(["result"] * 70)
+    )
+    task = f"Read note.md and repo/code.py. Write the complete report to {report_path}."
+    child_summary = (
+        "The note contradicts the implemented credential precedence, while the incident remains "
+        f"unknown. Complete evidence and source comparison are in {report_path}."
+    )
+    child = dumps({"result": child_summary})
+    spawn = ToolInvocation(
+        "spawn_subagent",
+        {
+            "profile": "general_purpose",
+            "payload": {"task": task},
+        },
+        child,
+        has_result=True,
+    )
+    share = ToolInvocation(
+        "share_file", {"file_path": report_path}, '{"name":"evidence.md"}', has_result=True
+    )
+    write = ToolInvocation(
+        "write", {"file_path": report_path, "content": report}, "ok", has_result=True
+    )
+    output = CapabilityOutput(
+        (
+            "A matching connected account takes precedence over the workspace key. These files "
+            "do not establish what happened to this incident. The evidence is in evidence.md."
+        ),
+        (spawn, share, write),
+        artifacts=(SharedArtifact("evidence.md", report.encode()),),
+    )
+
+    verdict = await scorer(output)
+
+    assert verdict.passed
+    assert verdict.evidence["delegatedSummary"]["words"] == 10
+    assert verdict.evidence["subagentSummary"]["words"] == 20
+    child_shared = await scorer(replace(output, calls=(spawn, write, share)))
+    assert not child_shared.passed
+    assert "parent did not share" in child_shared.reason
+    background = replace(
+        spawn,
+        input={**spawn.input, "background": True},
+        result="spawned general_purpose subagent (turn child-id)",
+    )
+    not_collected = await scorer(replace(output, calls=(background, share, write)))
+    assert not not_collected.passed
+    assert "delegation returned no prose result" in not_collected.reason
+
+    def with_task(value: object) -> ToolInvocation:
+        return replace(spawn, input={**spawn.input, "payload": {"task": value}})
+
+    def with_result(value: object) -> ToolInvocation:
+        return replace(spawn, result=dumps({"result": value}))
+
+    missing_sources = await scorer(
+        replace(
+            output,
+            calls=(
+                with_task(f"Write the complete report to {report_path}."),
+                share,
+                write,
+            ),
+        )
+    )
+    for path in sources:
+        assert f"does not reference {path}" in missing_sources.reason
+
+    failures = (
+        (replace(output, calls=(share, write)), "expected one general-purpose delegation"),
+        (
+            replace(output, calls=(with_task(None), share, write)),
+            "delegation has no prose task",
+        ),
+        (
+            replace(
+                output,
+                calls=(with_task(f"{task} " + " ".join(["word"] * 160)), share, write),
+            ),
+            "delegated summary has 170 words over the 160 budget",
+        ),
+        (
+            replace(output, calls=(with_task(f"# Work\n{task}"), share, write)),
+            "delegated summary uses document structure",
+        ),
+        (
+            replace(output, calls=(with_task("Read note.md and repo/code.py."), share, write)),
+            f"does not reference {report_path}",
+        ),
+        (
+            replace(
+                output,
+                calls=(
+                    with_result(" ".join(["result"] * 100) + f" {report_path}"),
+                    share,
+                    write,
+                ),
+            ),
+            "subagent summary has 101 words over the 100 budget",
+        ),
+        (
+            replace(
+                output,
+                calls=(with_result("\n".join(["line"] * 6 + [report_path])), share, write),
+            ),
+            "subagent summary has 7 lines over the 6 budget",
+        ),
+        (
+            replace(
+                output,
+                calls=(with_result(f"# Result\nComplete report: {report_path}"), share, write),
+            ),
+            "subagent summary uses document structure",
+        ),
+        (
+            replace(output, calls=(with_result("Done."), share, write)),
+            "subagent summary does not reference its report",
+        ),
+        (replace(output, calls=(spawn, share)), "expected one subagent report write"),
+        (replace(output, calls=(spawn, write)), "expected one parent report share"),
+        (
+            replace(
+                output,
+                artifacts=(SharedArtifact("evidence.md", report.encode() + b" changed"),),
+            ),
+            "member did not receive the subagent's report bytes",
+        ),
+    )
+    for changed, reason in failures:
+        verdict = await scorer(changed)
+        assert not verdict.passed
+        assert reason in verdict.reason
 
 
 def test_measure_counts_every_structure_marker() -> None:
@@ -3087,12 +3279,24 @@ def test_measure_counts_every_structure_marker() -> None:
     assert shape == Shape(words=11, lines=5, headers=1, bullets=3)
 
 
-def test_the_register_suite_keeps_its_opposing_pairs() -> None:
-    """The suite is only meaningful while both directions are graded: strip the length floors and
-    it becomes a pure-brevity eval that rewards clipping a disagreement."""
+def test_register_length_floors_keep_brevity_from_rewarding_clipped_disputes() -> None:
     gradings = [grading_statement(case.grader) for case in REGISTER_CASES]
-    assert sum("at most" in grading for grading in gradings) == 5
-    assert sum("at least" in grading for grading in gradings) == 4
+    assert sum("at most" in grading for grading in gradings) == 10
+    assert sum("at least" in grading for grading in gradings) == 5
+    assert sum("shared Markdown report" in grading for grading in gradings) == 5
+
+
+def test_delegated_register_grades_the_unknown_incident_and_exact_task_budget() -> None:
+    (case,) = DELEGATED_CASES
+
+    assert "at most 100 words" in grading_statement(case.grader)
+    assert "one parent-facing subagent result of at most 60 words" in grading_statement(case.grader)
+    assert "over at most 6 lines" in grading_statement(case.grader)
+    assert "at most 80 words" in grading_statement(case.grader)
+    assert "member-visible terms" in case.rubric[0]
+    assert "do not establish what happened to this Drive sync" in case.rubric[1]
+    assert "That rule is not implementation evidence" in case.rubric[2]
+    assert "possible causes are implementation evidence or hypotheses" in case.rubric[2]
 
 
 async def test_rubric_parser_accepts_an_exactly_fenced_verdict() -> None:
@@ -3505,6 +3709,51 @@ async def test_visual_case_fails_closed_without_a_model_judge() -> None:
     assert "semantic rubric requires a model judge" in result.reason
 
 
+async def test_artifact_case_judges_the_shared_markdown_separately() -> None:
+    judge = RecordingJudge()
+    case = CapabilityCase(
+        "report",
+        "write the analysis",
+        exact_scorer("shared"),
+        artifact_rubric=("develops the evidence",),
+    )
+
+    result = await run_capability_case(
+        case,
+        ArtifactTarget(
+            (SharedArtifact("analysis.md", b"## Evidence\n\nDetailed finding."),), judge
+        ),
+    )
+
+    assert result.passed
+    prompt = judge.messages[0].content
+    assert isinstance(prompt, str)
+    payload = loads(prompt.splitlines()[1])
+    assert payload == {
+        "instruction": "write the analysis",
+        "candidateAnswer": "# analysis.md\n\n## Evidence\n\nDetailed finding.",
+        "rubric": ["develops the evidence"],
+    }
+    assert result.evidence["artifactRubric"] == ["develops the evidence"]
+
+
+async def test_artifact_case_fails_before_the_model_without_shared_markdown() -> None:
+    case = CapabilityCase(
+        "report",
+        "write the analysis",
+        exact_scorer("shared"),
+        artifact_rubric=("develops the evidence",),
+    )
+
+    result = await run_capability_case(
+        case,
+        ArtifactTarget((SharedArtifact("analysis.pdf", b"pdf"),), UncalledJudge()),
+    )
+
+    assert not result.passed
+    assert "no shared Markdown artifact to judge" in result.reason
+
+
 def test_linked_artifacts_embed_bounded_data_uris() -> None:
     png = b"\x89PNG\r\n\x1a\n" + b"x" * 32
     docx = b"PK\x03\x04" + b"y" * 32
@@ -3630,6 +3879,20 @@ def test_capability_task_requires_a_judge_for_a_visual_rubric() -> None:
     task = capability_task("visual", cases, judge_model=VISUAL_JUDGE_MODEL)
     assert task.judge_model == VISUAL_JUDGE_MODEL
     assert task.judge_revision == JUDGE_REVISION
+
+
+def test_capability_task_requires_a_judge_for_an_artifact_rubric() -> None:
+    case = CapabilityCase("report", "write it", exact_scorer("done"), artifact_rubric=("complete",))
+    cases = (case,)
+
+    with pytest.raises(ValueError, match="semantic rubrics but no judge model"):
+        capability_task("artifact", cases)
+
+    task = capability_task("artifact", cases, judge_model=SEMANTIC_JUDGE_MODEL)
+    assert task.judge_model == SEMANTIC_JUDGE_MODEL
+    assert task.judge_revision == JUDGE_REVISION
+    assert case.payload()["artifactRubric"] == ["complete"]
+    assert case.payload()["judgeRevision"] == JUDGE_REVISION
 
 
 def test_visual_case_payload_pins_the_revision_and_records_the_rubric() -> None:
@@ -4324,6 +4587,7 @@ def test_eval_run_archive_renders_debug_evidence_and_escapes_script_data(tmp_pat
     assert "Grading criteria" in html
     assert "[grader] ${grading}" in html
     assert "[judge rubric] ${value}" in html
+    assert "[artifact rubric] ${value}" in html
     assert '"grading":"the final ANSWER equals ' in html
     assert "Tool errors" in html
     assert "Grader evidence" in html

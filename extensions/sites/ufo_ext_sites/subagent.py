@@ -15,7 +15,7 @@ workspace is the handoff, read back by the parent with `glob` and `read` in the 
 
 from pathlib import Path
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ufo.sdk.manifest import SubagentProfile
 from ufo_ext_sites.tools import PUBLISH_WEBSITE_TOOL, SITES_TOOL_NAMES
@@ -44,14 +44,18 @@ WEBSITE_BUILDING_TOOL_NAMES = (
 
 
 class WebsiteBuildingTask(BaseModel):
-    objective: str
+    objective: str = Field(
+        description="Freeform task governed by the shared delivery register.",
+    )
     task_name: str | None = None
     preload_skills: tuple[str, ...] | None = None
     extended_context: bool | None = None
 
 
 class WebsiteBuildingResult(BaseModel):
-    result: str
+    result: str = Field(
+        description="Freeform result governed by the shared delivery register.",
+    )
 
 
 WEBSITE_BUILDING_PROFILE = SubagentProfile(

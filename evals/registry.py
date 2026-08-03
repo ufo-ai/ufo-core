@@ -61,6 +61,11 @@ DEFAULT_TASKS: tuple[EvalTask, ...] = (
 )
 TASKS: tuple[EvalTask, ...] = (
     *DEFAULT_TASKS,
+    capability_task(
+        "delegated_response_register",
+        response_register.DELEGATED_CASES,
+        judge_model=SEMANTIC_JUDGE_MODEL,
+    ),
     scenario_task(
         "scenario_env",
         (

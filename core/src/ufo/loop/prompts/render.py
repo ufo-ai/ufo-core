@@ -3,8 +3,8 @@
 A profile template is core-shipped prose with slots the renderer fills: {{agent-prompt}} (the
 agent's own instructions — only the shell carries this slot), {{skill_index}} (the loadable-skill
 <available_skills> block), {{sections}} (the capability sections packs contribute — the seam),
-{{citation}} (the one shared citation block, kept in citation.md and injected here), and
-{{knowledge_cutoff}} (the resolved model's knowledge boundary from knowledge_cutoff.md — the
+{{citation}} (the one shared citation block, kept in citation.md and injected here),
+and {{knowledge_cutoff}} (the resolved model's knowledge boundary from knowledge_cutoff.md — the
 `ModelSpec.knowledge_cutoff` fact, which every registered model declares).
 
 Vars ({{under_scored}}) inside the agent prompt are substituted from a caller-supplied mapping under
@@ -27,11 +27,15 @@ AGENT_PROMPT_SLOT = "{{agent-prompt}}"
 SKILL_INDEX_SLOT = "{{skill_index}}"
 SECTIONS_SLOT = "{{sections}}"
 CITATION_SLOT = "{{citation}}"
+DELIVERY_REGISTER_SLOT = "{{delivery_register}}"
 KNOWLEDGE_CUTOFF_SLOT = "{{knowledge_cutoff}}"
 CUTOFF_VAR = "{{cutoff}}"
 
 _PROMPTS_DIR = Path(__file__).parent
-SHELL = (_PROMPTS_DIR / "shell.md").read_text()
+DELIVERY_REGISTER_BLOCK = (_PROMPTS_DIR / "delivery_register.md").read_text().strip()
+SHELL = (
+    (_PROMPTS_DIR / "shell.md").read_text().replace(DELIVERY_REGISTER_SLOT, DELIVERY_REGISTER_BLOCK)
+)
 CITATION_BLOCK = (_PROMPTS_DIR / "citation.md").read_text().strip()
 KNOWLEDGE_CUTOFF_BLOCK = (_PROMPTS_DIR / "knowledge_cutoff.md").read_text().strip()
 COMPACTION_SYSTEM_PROMPT = (_PROMPTS_DIR / "compaction.md").read_text().strip()

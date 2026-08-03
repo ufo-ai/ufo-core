@@ -721,6 +721,7 @@ def test_sample_subagent_profile_flows_through_the_loader_into_the_registry() ->
     registry = SubagentRegistry(turn_subagents((manifest,)))
     profile = registry.get(sample.SUBAGENT_NAME)
     assert profile.tool_names == (sample.TOOL_NAME,)
+    assert "maxLength" not in profile.input_model.model_json_schema()["properties"]["task"]
     assert subagent_system_prompt(profile).endswith(FINISH_CONTRACT)
 
 

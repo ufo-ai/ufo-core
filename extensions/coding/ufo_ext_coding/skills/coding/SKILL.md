@@ -71,19 +71,11 @@ When a task involves both discovery and coding (e.g., "find tickets and implemen
 
 "Discovery" means finding the repo URL, reading tickets/issues, and gathering user requirements. It does NOT mean reading source code, understanding the architecture, or exploring the codebase. That is the subagent's job.
 
-## Post-Completion
+## Returned files
 
-After a coding subagent completes:
-
-1. Read the subagent's full response carefully
-2. Read the workspace files it produced
-3. Summarize for the user:
-   - **What was done**: What was implemented, fixed, or analyzed — mention specific changes, files modified, and approach taken
-   - **Testing**: What tests were added or run, and their results
-   - **Key decisions**: Any notable design decisions or trade-offs made
-4. `share_file` what the member should keep — a report, a patch, a generated asset. The subagent has no `share_file` of its own: the workspace is the handoff, and you decide what reaches the member. A workspace with a git credential can `git push` a branch; opening a PR additionally needs the GitHub connector, which is what `gh` authenticates through. Without those, work comes back as files and patches in the workspace.
-
-The summary should give the user a clear picture of the work without them needing to read the full diff. Be specific — mention function names, file paths, and concrete changes rather than vague descriptions.
+A coding subagent has no `share_file`. Its files remain in the shared `/workspace` for the parent to
+deliver under the shared delivery register. A push uses the workspace's git connection; opening a
+PR additionally needs the GitHub connector.
 
 ## Examples
 

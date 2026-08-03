@@ -822,6 +822,9 @@ def test_browser_profile_registers_and_is_spawnable() -> None:
     registry = SubagentRegistry(turn_subagents((browser_manifest.manifest(),)))
     profile = registry.get(BROWSER_SUBAGENT_NAME)
     assert profile.tool_names == BROWSER_SUBAGENT_TOOL_NAMES
+    assert profile.input_model.model_validate({"task": "x" * 10_000}).task == "x" * 10_000
+    assert "maxLength" not in profile.input_model.model_json_schema()["properties"]["task"]
+    assert "maxLength" not in profile.output_model.model_json_schema()["properties"]["result"]
     # Browser primitives + core builtins + the cross-extension search_web the prompt tells the agent
     # to prefer over navigating to a search engine (resolves only when research/exa is installed).
     available = set(BROWSER_TOOL_NAMES) | {tool.name for tool in BUILTIN_TOOLS} | {"search_web"}

@@ -13,6 +13,7 @@ from ufo.config import Config
 from ufo.db import workspace_tx
 from ufo.ext.manifest import SUBAGENT_ROUND_LIMIT, SubagentProfile
 from ufo.loop.profiles import CORE_SUBAGENT_PROFILES, GENERAL_PURPOSE
+from ufo.loop.prompts.render import DELIVERY_REGISTER_BLOCK
 from ufo.loop.queue import _load_turn
 from ufo.loop.subagents import (
     FINISH_CONTRACT,
@@ -72,6 +73,8 @@ def test_registry_get_returns_named_profile() -> None:
 def test_system_prompt_carries_instructions_and_the_finish_contract() -> None:
     prompt = subagent_system_prompt(_profile("research"))
     assert "research instructions" in prompt
+    assert prompt.count(DELIVERY_REGISTER_BLOCK) == 1
+    assert "result returned to a parent" in prompt
     assert prompt.endswith(FINISH_CONTRACT)
 
 
@@ -81,6 +84,18 @@ def test_core_ships_a_general_purpose_profile_the_registry_resolves() -> None:
     assert profile.name == GENERAL_PURPOSE
     assert profile.input_model.model_validate({"task": "look into X"}).task == "look into X"
     assert profile.output_model.model_validate({"result": "done"}).result == "done"
+    assert (
+        "shared delivery register"
+        in profile.input_model.model_json_schema()["properties"]["task"]["description"]
+    )
+    assert (
+        "shared delivery register"
+        in profile.output_model.model_json_schema()["properties"]["result"]["description"]
+    )
+    assert "maxLength" not in profile.input_model.model_json_schema()["properties"]["task"]
+    assert "maxLength" not in profile.output_model.model_json_schema()["properties"]["result"]
+    assert profile.input_model.model_validate({"task": "x" * 10_000}).task == "x" * 10_000
+    assert profile.output_model.model_validate({"result": "x" * 10_000}).result == "x" * 10_000
 
 
 def test_general_purpose_carries_the_subagent_round_budget() -> None:
@@ -150,11 +165,15 @@ def test_the_sandbox_skill_names_the_container_a_subagent_turn_inherits() -> Non
     assert "a subagent turn runs in the container of the turn that spawned it" in body
 
 
-def test_the_shared_shell_leaves_a_child_without_share_file_a_way_to_hand_a_file_over() -> None:
+def test_the_shared_delivery_selects_the_artifact_carrier_by_agent_boundary() -> None:
     prompt = subagent_system_prompt(_profile("research"))
-    assert "Surface a produced file with share_file when your tool set has it" in prompt
-    assert "leave the file in /workspace and name its path in your result" in prompt
-    assert "surface a produced file with share_file." not in prompt
+    prose = " ".join(prompt.split())
+    assert "Between agents that share /workspace" in prose
+    assert "name its absolute path without share_file" in prose
+    assert "Never delete another agent's files" in prose
+    assert "clean up the workspace after completing the task" in prose
+    assert "Delete other files only when required by the task" in prose
+    assert "share_file so the parent" not in prose
 
 
 def test_the_sandbox_skill_answers_a_subagent_that_holds_no_share_file() -> None:

@@ -7,7 +7,7 @@ workspace for the parent agent to read back."""
 
 from pathlib import Path
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ufo.sdk.manifest import SubagentProfile
 from ufo_ext_browser.tools import BROWSER_TOOL_NAMES
@@ -18,13 +18,17 @@ BROWSER_SUBAGENT_TOOL_NAMES = (*BROWSER_TOOL_NAMES, "read", "write", "edit", "se
 
 
 class BrowserTask(BaseModel):
-    task: str
+    task: str = Field(
+        description="Freeform task governed by the shared delivery register.",
+    )
     url: str | None = None
     task_name: str | None = None
 
 
 class BrowserResult(BaseModel):
-    result: str
+    result: str = Field(
+        description="Freeform result governed by the shared delivery register.",
+    )
 
 
 BROWSER_PROFILE = SubagentProfile(

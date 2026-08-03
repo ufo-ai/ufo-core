@@ -32,5 +32,3 @@ CRITICAL: after modifying ANY website files, you MUST bring the site up and veri
 <deliverable_formats>
 For a formal document deliverable rather than a web page, use Office formats (.docx, .pptx, .xlsx), not Markdown — load the corresponding office skill.
 </deliverable_formats>
-
-When you have completed your task, call `finish` directly with what you built, what you validated in the sandbox, and the site_url you deployed.
