@@ -79,7 +79,7 @@ async def ensure_serve_role(admin_dsn: str) -> None
 
 **Purpose**: Creates or refreshes the restricted PostgreSQL role used by the serving application. It also grants the role the basic database access it needs and prepares a companion database if it does not exist.
 
-**Data flow**: It receives an administrator database connection string. It connects to PostgreSQL, computes the serving role password, sets a lock timeout, and then either creates ufo_serve or updates its password. It grants permission for that role to set the app.workspace_id session value, applies an idle transaction timeout to key roles, grants table and sequence access through _grant_serve_role, checks the current database name, and asks _ensure_database to create a related database if needed. Finally, it closes the connection.
+**Data flow**: It receives an administrator database connection string. It connects to PostgreSQL, computes the serving role password, sets a lock timeout, and then either creates ufo_serve or updates its password. It applies an idle transaction timeout to key roles, grants table and sequence access through _grant_serve_role, checks the current database name, and asks _ensure_database to create a related database if needed. Finally, it closes the connection.
 
 **Call relations**: This is one of the main setup routines in the file. It calls serve_password to get the expected password, _grant_serve_role to apply permissions, and _ensure_database to create the extra database. It uses asyncpg to talk directly to PostgreSQL during bootstrap.
 

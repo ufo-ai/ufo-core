@@ -41,6 +41,7 @@ from ufo_control.main import main
 from ufo_control.rls import (
     PG_ROLE_SEED_ENV,
     POSTGRES_OWNER_DSN_ENV,
+    SERVE_ROLE,
     WORKSPACE_GUC,
     bootstrap_policies,
     ensure_serve_role,
@@ -99,7 +100,9 @@ async def _reset(database: str) -> None:
             if await connection.fetchval("select 1 from pg_roles where rolname = $1", role):
                 await connection.execute(f'drop owned by "{role}"')
                 await connection.execute(f'drop role "{role}"')
-        await connection.execute(f"create role \"{OWNER_ROLE}\" login password '{OWNER_PASSWORD}'")
+        await connection.execute(
+            f"create role \"{OWNER_ROLE}\" login password '{OWNER_PASSWORD}' createrole createdb"
+        )
         await connection.execute(f'create database "{database}" owner "{OWNER_ROLE}"')
     finally:
         await connection.close()
@@ -163,7 +166,7 @@ def shared_role_env() -> Iterator[SharedRoleEnv]:
     owner_dsn = _owner_app_dsn("postgresql", APP_DATABASE)
     asyncio.run(shape_control_schema(owner_dsn))
     asyncio.run(bootstrap_policies(owner_dsn))
-    asyncio.run(ensure_serve_role(ADMIN_APP_DSN))
+    asyncio.run(ensure_serve_role(owner_dsn))
     workspaces = (str(uuid4()), str(uuid4()))
     asyncio.run(_seed_workspaces(owner_dsn, workspaces))
     init_db(serve_dsn(POSTGRES_HOST, APP_DATABASE))
@@ -181,7 +184,7 @@ def shared_role_env() -> Iterator[SharedRoleEnv]:
 
 def test_rls_bootstrap_cli_is_idempotent(shared_role_env: SharedRoleEnv) -> None:
     previous = os.environ.get(POSTGRES_OWNER_DSN_ENV)
-    os.environ[POSTGRES_OWNER_DSN_ENV] = ADMIN_APP_DSN
+    os.environ[POSTGRES_OWNER_DSN_ENV] = shared_role_env.owner_dsn
     try:
         result = CliRunner().invoke(main, ["rls-bootstrap"])
     finally:
@@ -191,6 +194,37 @@ def test_rls_bootstrap_cli_is_idempotent(shared_role_env: SharedRoleEnv) -> None
             os.environ[POSTGRES_OWNER_DSN_ENV] = previous
     assert result.exit_code == 0, result.output
     assert "rls policies at head" in result.output
+
+
+async def test_rds_style_owner_bootstraps_serve_role(shared_role_env: SharedRoleEnv) -> None:
+    owner = await asyncpg.connect(shared_role_env.owner_dsn)
+    try:
+        role = await owner.fetchrow(
+            "select rolsuper, rolcreaterole, rolcreatedb, "
+            "pg_has_role(current_user, $1, 'SET'), pg_has_role(current_user, $1, 'USAGE') "
+            "from pg_roles where rolname = current_user",
+            SERVE_ROLE,
+        )
+        assert role == (False, True, True, True, False)
+        assert (
+            await owner.fetchval(
+                "select pg_get_userbyid(datdba) from pg_database where datname = $1",
+                f"{APP_DATABASE}_dbos",
+            )
+            == SERVE_ROLE
+        )
+    finally:
+        await owner.close()
+    await ensure_serve_role(shared_role_env.owner_dsn)
+    serve = await asyncpg.connect(_libpq(serve_dsn(POSTGRES_HOST, APP_DATABASE)))
+    try:
+        workspace_id = str(uuid4())
+        assert (
+            await serve.fetchval(f"select set_config('{WORKSPACE_GUC}', $1, false)", workspace_id)
+            == workspace_id
+        )
+    finally:
+        await serve.close()
 
 
 async def test_bootstrap_fails_loud_on_an_unpoliced_table() -> None:
@@ -294,7 +328,7 @@ async def test_new_tables_receive_no_serve_grant_before_policy_bootstrap(
             await serve.close()
 
         await bootstrap_policies(shared_role_env.owner_dsn)
-        await ensure_serve_role(ADMIN_APP_DSN)
+        await ensure_serve_role(shared_role_env.owner_dsn)
 
         serve = await asyncpg.connect(_libpq(serve_dsn(POSTGRES_HOST, APP_DATABASE)))
         try:

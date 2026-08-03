@@ -49,7 +49,9 @@ async def ensure_serve_role(admin_dsn: str) -> None:
             await connection.execute(
                 f"alter role \"{SERVE_ROLE}\" with login password '{password}'"
             )
-        await connection.execute(f'grant set on parameter {WORKSPACE_GUC} to "{SERVE_ROLE}"')
+        await connection.execute(
+            f'grant "{SERVE_ROLE}" to "{OWNER_ROLE}" with set true, inherit false'
+        )
         for role in (SERVE_ROLE, OWNER_ROLE):
             await connection.execute(
                 f'alter role "{role}" set idle_in_transaction_session_timeout = '
