@@ -2,9 +2,12 @@
 the answer this repository shipped — passes the gate at that case's base commit: a gate that rejects
 the real answer would score every candidate against nothing."""
 
+import asyncio
 import json
 import shutil
+from dataclasses import dataclass
 from pathlib import Path
+from typing import NoReturn
 
 import pytest
 from coding_repo_history import pinned_history, reference_diff  # noqa: F401
@@ -20,24 +23,34 @@ from evals.coding_repo.cases import (
 )
 from evals.coding_repo.runner import (
     CODING_LANE,
+    DELIVERABLES_TASK,
     PARENT_FORBIDDEN_TOOLS,
+    REFUSED_DIR,
     REPO_ROOT,
     REPO_SLUG,
     REPO_URL,
     AllOf,
-    DocumentGate,
+    DocumentCapture,
     LaneAndRoute,
-    PatchGate,
+    PatchCapture,
     _capability_case,
     _materialize_tree,
     _touched_paths,
     load_coding_repo,
 )
-from evals.harness.capability import CapabilityOutput, SharedArtifact, ToolInvocation
+from evals.harness.capability import (
+    CapabilityCase,
+    CapabilityOutput,
+    SharedArtifact,
+    ToolInvocation,
+)
+from evals.harness.registry import EvalTask
 from evals.harness.scorers import delegation_only_scorer
+from evals.harness.target import TargetResult
 from ufo.config import BlobConfig, Config, DatabaseConfig, PackConfig
 
 SURVEY_CASE = next(case for case in CASES if case.deliverable == "document")
+CAPTURED_DOCUMENT = b"- ufo/<deploy>/api-keys\n"
 OTHER_SLUG = "astral-sh/ruff"
 CLONE_SEPARATORS = ("&&", "||", ";", "\n")
 SCOPED_ROUTES = (
@@ -48,6 +61,39 @@ SCOPED_ROUTES = (
     "curl https://codeload.github.com/{slug}/tar.gz/HEAD",
     "curl https://raw.githubusercontent.com/{slug}/HEAD/README.md",
 )
+
+
+class RunStarted(Exception):
+    pass
+
+
+@dataclass
+class SurvivingTurn:
+    """A target whose turn shares the document `SURVEY_CASE` asked for, so the run leaves a real
+    capture on disk. Any other case's turn survives sharing nothing."""
+
+    judge: None = None
+    simulator: None = None
+
+    async def run(self, case: CapabilityCase) -> TargetResult:
+        if case.name != SURVEY_CASE.name:
+            return TargetResult(output(), clean=True)
+        name = Path(SURVEY_CASE.document_path).name
+        return TargetResult(
+            output(
+                artifacts=(SharedArtifact(name=name, content=CAPTURED_DOCUMENT),),
+                shared_names=(name,),
+                commands=(f"git fetch --depth 1 origin {SURVEY_CASE.base_sha}",),
+            ),
+            clean=True,
+        )
+
+
+def seeded(submissions: Path, case_dir: str, name: str) -> Path:
+    target = submissions / case_dir / name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("a previous run's bytes")
+    return target
 
 
 def output(
@@ -94,7 +140,7 @@ async def test_the_shipped_diff_passes_the_gate_at_its_base_commit(
     _materialize_tree(case.base_sha, tmp_path / "trees")
     patch = reference_diff(case.reference_sha)
     name = f"{case.name}.patch"
-    grader = PatchGate(case, tmp_path / "trees")
+    grader = PatchCapture(case, tmp_path / "submissions", tmp_path / "trees")
     verdict = await grader(
         output(
             artifacts=(SharedArtifact(name=name, content=patch),),
@@ -105,6 +151,7 @@ async def test_the_shipped_diff_passes_the_gate_at_its_base_commit(
     assert verdict.evidence["appliesClean"] is True
     assert verdict.evidence["expectedPathsTouched"]
     assert verdict.evidence["sizeBytes"] == len(patch)
+    assert (tmp_path / "submissions" / case.name / name).read_bytes() == patch
 
 
 async def test_an_off_target_patch_is_refused_though_it_applies(tmp_path: Path) -> None:
@@ -113,7 +160,7 @@ async def test_an_off_target_patch_is_refused_though_it_applies(tmp_path: Path) 
     case, other = PATCH_CASES[0], PATCH_CASES[2]
     _materialize_tree(case.base_sha, tmp_path / "trees")
     name = f"{case.name}.patch"
-    grader = PatchGate(case, tmp_path / "trees")
+    grader = PatchCapture(case, tmp_path / "submissions", tmp_path / "trees")
     verdict = await grader(
         output(
             artifacts=(SharedArtifact(name=name, content=reference_diff(other.reference_sha)),),
@@ -141,7 +188,7 @@ async def test_a_patch_whose_context_is_not_in_the_pinned_tree_is_refused(tmp_pa
         "+an added line\n"
     ).encode()
     name = f"{case.name}.patch"
-    grader = PatchGate(case, tmp_path / "trees")
+    grader = PatchCapture(case, tmp_path / "submissions", tmp_path / "trees")
     verdict = await grader(
         output(artifacts=(SharedArtifact(name=name, content=patch),), shared_names=(name,))
     )
@@ -164,7 +211,7 @@ async def test_a_patch_touching_no_expected_path_fails(tmp_path: Path) -> None:
         b"+a line\n"
     )
     name = f"{case.name}.patch"
-    grader = PatchGate(case, tmp_path / "trees")
+    grader = PatchCapture(case, tmp_path / "submissions", tmp_path / "trees")
     verdict = await grader(
         output(artifacts=(SharedArtifact(name=name, content=patch),), shared_names=(name,))
     )
@@ -177,7 +224,7 @@ async def test_a_patch_touching_no_expected_path_fails(tmp_path: Path) -> None:
 async def test_an_unshared_patch_is_refused(tmp_path: Path) -> None:
     case = PATCH_CASES[0]
     name = f"{case.name}.patch"
-    grader = PatchGate(case, tmp_path / "trees")
+    grader = PatchCapture(case, tmp_path / "submissions", tmp_path / "trees")
     verdict = await grader(output(artifacts=(SharedArtifact(name=name, content=b"diff"),)))
     assert not verdict.passed
     assert "did not share" in verdict.reason
@@ -223,7 +270,7 @@ async def test_the_lane_gate_refuses_a_historyless_route() -> None:
 
 
 async def test_the_document_gate_wants_the_file_the_brief_named(tmp_path: Path) -> None:
-    grader = DocumentGate(SURVEY_CASE)
+    grader = DocumentCapture(SURVEY_CASE, tmp_path / "submissions")
     name = Path(SURVEY_CASE.document_path).name
     verdict = await grader(
         output(
@@ -260,7 +307,7 @@ def test_touched_paths_reads_every_diff_header() -> None:
 
 def test_the_envelope_pins_the_commit_and_names_the_deliverable(tmp_path: Path) -> None:
     case = PATCH_CASES[0]
-    capability = _capability_case(case, tmp_path / "trees")
+    capability = _capability_case(case, tmp_path / "submissions", tmp_path / "trees")
     assert capability.message.startswith(case.brief)
     assert case.base_sha in capability.message
     assert f"{case.name}.patch" in capability.message
@@ -273,12 +320,12 @@ def test_the_envelope_states_the_setup_without_commands_to_run(tmp_path: Path) -
     had the evaluated turn run the envelope's `git init` itself before delegating — into its own
     workspace, which no child can see."""
     for case in (PATCH_CASES[0], RESEARCH_CASES[0]):
-        envelope = _capability_case(case, tmp_path / "trees").message
+        envelope = _capability_case(case, tmp_path / "submissions", tmp_path / "trees").message
         envelope = envelope[envelope.index("Evaluation setup") :]
         assert "to pass on to whoever does the work" in envelope
         for command in ("git init", "git remote add", "git fetch", "git checkout", "cd repo"):
             assert command not in envelope, f"{case.name} envelope spells out {command!r}"
-    reply = _capability_case(RESEARCH_CASES[0], tmp_path / "trees")
+    reply = _capability_case(RESEARCH_CASES[0], tmp_path / "submissions", tmp_path / "trees")
     assert reply.rubric == RESEARCH_CASES[0].criteria
     assert "Change no files." in reply.message
 
@@ -364,9 +411,11 @@ def test_a_case_states_what_its_kind_requires() -> None:
         )
 
 
-def test_load_splits_the_suite_by_how_a_case_is_measured(tmp_path: Path) -> None:
+def test_load_splits_the_suite_by_where_a_case_can_be_judged(tmp_path: Path) -> None:
     tasks = load_coding_repo(
-        case_names=(RESEARCH_CASES[0].name, PATCH_CASES[0].name), trees_root=tmp_path / "trees"
+        case_names=(RESEARCH_CASES[0].name, PATCH_CASES[0].name),
+        submissions_root=tmp_path / "submissions",
+        trees_root=tmp_path / "trees",
     )
     assert [task.name for task in tasks] == ["coding_repo_answers", "coding_repo_deliverables"]
     answers, deliverables = tasks
@@ -379,6 +428,59 @@ def test_load_splits_the_suite_by_how_a_case_is_measured(tmp_path: Path) -> None
         load_coding_repo(case_names=("nope",))
 
 
+def test_a_case_essential_must_index_its_own_criteria() -> None:
+    with pytest.raises(ValueError, match="essential must index its own criteria"):
+        CodingCase(
+            name="bad", kind="research", base_sha="0" * 40, brief="b", criteria=("c",), essential=3
+        )
+
+
+def test_a_patch_case_asks_for_the_note_beside_the_diff(tmp_path: Path) -> None:
+    """A diff cannot state what was verified or what remains uncertain, so a patch case hands over
+    both and the judge reads them together."""
+    case = PATCH_CASES[0]
+    envelope = _capability_case(case, tmp_path / "submissions", tmp_path / "trees").message
+    assert f"{case.name}.patch" in envelope
+    assert case.notes_name in envelope
+    assert "what remains uncertain" in envelope
+
+
+async def test_the_note_is_captured_beside_the_patch(tmp_path: Path) -> None:
+    case = PATCH_CASES[0]
+    _materialize_tree(case.base_sha, tmp_path / "trees")
+    patch_name, notes_name = f"{case.name}.patch", case.notes_name
+    grader = PatchCapture(case, tmp_path / "submissions", tmp_path / "trees")
+    verdict = await grader(
+        output(
+            artifacts=(
+                SharedArtifact(name=patch_name, content=reference_diff(case.reference_sha)),
+                SharedArtifact(name=notes_name, content=b"Verified by rerunning the slack tests."),
+            ),
+            shared_names=(patch_name, notes_name),
+        )
+    )
+    assert verdict.passed, verdict.reason
+    assert verdict.evidence["notes"] == 38
+    assert (tmp_path / "submissions" / case.name / notes_name).is_file()
+
+
+async def test_a_patch_without_its_note_still_passes_the_gate(tmp_path: Path) -> None:
+    """The note is scored, not gated: a missing note costs the criteria that needed it rather than
+    suppressing judgment of the diff that did arrive."""
+    case = PATCH_CASES[0]
+    _materialize_tree(case.base_sha, tmp_path / "trees")
+    name = f"{case.name}.patch"
+    grader = PatchCapture(case, tmp_path / "submissions", tmp_path / "trees")
+    verdict = await grader(
+        output(
+            artifacts=(SharedArtifact(name=name, content=reference_diff(case.reference_sha)),),
+            shared_names=(name,),
+        )
+    )
+    assert verdict.passed, verdict.reason
+    assert verdict.evidence["notes"] is None
+
+
 async def test_a_materialized_tree_is_its_own_work_tree(tmp_path: Path) -> None:
     """A trees root inside a repository lets `git apply` discover the enclosing work tree and skip
     the patch with exit 0, which reads as applies-clean. Each tree owns its git dir so it cannot."""
@@ -387,7 +489,7 @@ async def test_a_materialized_tree_is_its_own_work_tree(tmp_path: Path) -> None:
     try:
         tree = _materialize_tree(case.base_sha, inside)
         assert (tree / ".git").is_dir()
-        grader = PatchGate(case, inside)
+        grader = PatchCapture(case, tmp_path / "submissions", inside)
         target = case.expected_paths[0]
         patch = (
             f"diff --git a/{target} b/{target}\n"
@@ -451,7 +553,7 @@ async def test_the_route_gate_reads_only_calls_that_act(tmp_path: Path) -> None:
     """A spawn payload relays the envelope, whose own words name the pinned fetch. Reading it would
     pass a run that fetched nothing."""
     case = PATCH_CASES[0]
-    envelope = _capability_case(case, tmp_path / "t").message
+    envelope = _capability_case(case, tmp_path / "s", tmp_path / "t").message
     relayed = CapabilityOutput(
         response="done",
         calls=(
@@ -487,8 +589,13 @@ def test_the_cli_refuses_coding_repo_under_the_wrong_pack(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """The suite needs the pack that carries the coding subagent; another pack is a startup error,
-    not a run that delegates to a profile no manifest registers. One reply case selects the run, so
-    the guard is reached without materializing a pinned tree."""
+    not a run that delegates to a profile no manifest registers. Neither selected case delivers a
+    patch, so the guard is reached without materializing a pinned tree — and the refusal leaves an
+    earlier run's capture alone, because no turn of this run will replace it."""
+    submissions = tmp_path / "submissions"
+    stale = submissions / SURVEY_CASE.name / Path(SURVEY_CASE.document_path).name
+    stale.parent.mkdir(parents=True)
+    stale.write_text("a previous run's bytes")
     config = Config(
         database=DatabaseConfig(url="sqlite+aiosqlite:///tenant.db"),
         blob=BlobConfig(backend="filesystem", root=tmp_path / "blobs"),
@@ -501,11 +608,16 @@ def test_the_cli_refuses_coding_repo_under_the_wrong_pack(
                 "--coding-repo",
                 "--coding-repo-case",
                 RESEARCH_CASES[0].name,
+                "--coding-repo-case",
+                SURVEY_CASE.name,
+                "--coding-repo-submissions",
+                str(submissions),
                 "--out",
                 str(tmp_path),
             ]
         )
     assert "coding_repo requires [pack] name in" in capsys.readouterr().err
+    assert stale.is_file()
 
 
 async def test_the_route_gate_reads_only_the_arguments_a_call_reaches_a_target_through() -> None:
@@ -636,10 +748,203 @@ async def test_a_fetch_whose_call_errored_does_not_name_the_pin() -> None:
     assert "no call fetches" in verdict.reason
 
 
+async def test_a_refused_patch_is_set_aside_out_of_the_offline_judges_reach(tmp_path: Path) -> None:
+    """A patch that fails the gate stays on disk to read, and not where grading looks: a deliverable
+    earns a judge only once the run proves it real, so the note beside it is set aside too rather
+    than becoming the whole submission."""
+    case = PATCH_CASES[0]
+    submissions = tmp_path / "submissions"
+    patch_name, notes_name = f"{case.name}.patch", case.notes_name
+    grader = PatchCapture(case, submissions, tmp_path / "trees")
+    verdict = await grader(
+        output(
+            artifacts=(
+                SharedArtifact(name=patch_name, content=b"prose, not a diff\n"),
+                SharedArtifact(name=notes_name, content=b"What was verified.\n"),
+            ),
+            shared_names=(patch_name, notes_name),
+        )
+    )
+    assert not verdict.passed
+    assert "carries no unified diff" in verdict.reason
+    refused = submissions / case.name / REFUSED_DIR
+    assert verdict.evidence["refused"] == str(refused)
+    assert (refused / patch_name).read_bytes() == b"prose, not a diff\n"
+    assert (refused / notes_name).is_file()
+    assert not (submissions / case.name / patch_name).exists()
+    assert not (submissions / case.name / notes_name).exists()
+
+
+async def test_the_submissions_root_reaches_both_capture_graders(tmp_path: Path) -> None:
+    """The root the suite is loaded with is the root the graders write under — for a patch with its
+    note, and for a document."""
+    case = PATCH_CASES[0]
+    submissions, trees = tmp_path / "submissions", tmp_path / "trees"
+    _materialize_tree(case.base_sha, trees)
+    patch_name, notes_name = f"{case.name}.patch", case.notes_name
+    patch = reference_diff(case.reference_sha)
+    verdict = await _capability_case(case, submissions, trees).grader(
+        output(
+            artifacts=(
+                SharedArtifact(name=patch_name, content=patch),
+                SharedArtifact(name=notes_name, content=b"Verified by rerunning the tests."),
+            ),
+            shared_names=(patch_name, notes_name),
+            commands=(f"git fetch --depth 1 origin {case.base_sha}",),
+        )
+    )
+    assert verdict.passed, verdict.reason
+    assert (submissions / case.name / patch_name).read_bytes() == patch
+    assert (submissions / case.name / notes_name).is_file()
+    assert verdict.evidence["submission"] == str(submissions / case.name / patch_name)
+
+    survey_name = Path(SURVEY_CASE.document_path).name
+    body = b"- ufo/<deploy>/api-keys\n"
+    survey = await _capability_case(SURVEY_CASE, submissions, trees).grader(
+        output(
+            artifacts=(SharedArtifact(name=survey_name, content=body),),
+            shared_names=(survey_name,),
+            commands=(f"git fetch --depth 1 origin {SURVEY_CASE.base_sha}",),
+        )
+    )
+    assert survey.passed, survey.reason
+    saved = submissions / SURVEY_CASE.name / survey_name
+    assert saved.read_bytes() == body
+    assert survey.evidence["submission"] == str(saved)
+
+
+async def test_a_first_run_captures_and_keeps_what_its_turn_shared(
+    tmp_path: Path,
+) -> None:
+    """The drop belongs before the turns and only where a capture exists."""
+    submissions = tmp_path / "submissions"
+    (task,) = load_coding_repo(
+        case_names=(SURVEY_CASE.name,),
+        submissions_root=submissions,
+        trees_root=tmp_path / "trees",
+    )
+    report = await task.run(SurvivingTurn(), asyncio.Semaphore(1))
+    assert report.cases[0].passed, report.cases[0].reason
+    saved = submissions / SURVEY_CASE.name / Path(SURVEY_CASE.document_path).name
+    assert saved.read_bytes() == CAPTURED_DOCUMENT
+
+
+async def test_the_run_drops_every_selected_case_whole_and_no_other(tmp_path: Path) -> None:
+    """Offline grading reads whatever sits under the submissions root, so the drop reaches each
+    selected case's `refused/` bytes as well as its deliverables, and a case this run did not select
+    keeps its patch, its notes and its refused bytes."""
+    submissions = tmp_path / "submissions"
+    selected_patch, unselected = PATCH_CASES[0], PATCH_CASES[1]
+    survey_leftover = seeded(submissions, SURVEY_CASE.name, "an-earlier-run.md")
+    patch_leftover = seeded(submissions, selected_patch.name, f"{selected_patch.name}.patch")
+    patch_refused = seeded(submissions, f"{selected_patch.name}/{REFUSED_DIR}", "old.patch")
+    kept = (
+        seeded(submissions, unselected.name, f"{unselected.name}.patch"),
+        seeded(submissions, unselected.name, unselected.notes_name),
+        seeded(submissions, f"{unselected.name}/{REFUSED_DIR}", "old.patch"),
+    )
+    (task,) = load_coding_repo(
+        case_names=(SURVEY_CASE.name, selected_patch.name),
+        submissions_root=submissions,
+        trees_root=tmp_path / "trees",
+    )
+    await task.run(SurvivingTurn(), asyncio.Semaphore(1))
+    assert not survey_leftover.exists()
+    assert not patch_leftover.exists()
+    assert not patch_refused.exists()
+    saved = submissions / SURVEY_CASE.name / Path(SURVEY_CASE.document_path).name
+    assert saved.read_bytes() == CAPTURED_DOCUMENT
+    for path in kept:
+        assert path.is_file(), path
+
+
+async def test_a_run_that_names_no_case_still_drops_every_case_it_holds(tmp_path: Path) -> None:
+    """`--coding-repo` alone names no case, so the drop follows the cases the task holds. A
+    directory under the root that is no case of this suite is left alone."""
+    submissions = tmp_path / "submissions"
+    stale = seeded(submissions, SURVEY_CASE.name, "an-earlier-run.md")
+    refused = seeded(submissions, f"{PATCH_CASES[0].name}/{REFUSED_DIR}", "old.patch")
+    kept = seeded(submissions, "not-a-case-of-this-suite", "old.patch")
+    tasks = load_coding_repo(submissions_root=submissions, trees_root=tmp_path / "trees")
+    deliverables = next(task for task in tasks if task.name == DELIVERABLES_TASK)
+    assert len(deliverables.cases) > 1, "the whole suite delivers more than one file"
+    await deliverables.run(SurvivingTurn(), asyncio.Semaphore(1))
+    assert not stale.exists()
+    assert not refused.exists()
+    saved = submissions / SURVEY_CASE.name / Path(SURVEY_CASE.document_path).name
+    assert saved.read_bytes() == CAPTURED_DOCUMENT
+    assert kept.is_file()
+
+
+async def test_a_capture_that_cannot_be_dropped_stops_the_run(tmp_path: Path) -> None:
+    """A removal that failed silently would leave the last run's bytes to be scored as this run's,
+    so the run stops instead. Something squatting the case's own path is how that happens."""
+    submissions = tmp_path / "submissions"
+    submissions.mkdir()
+    (submissions / SURVEY_CASE.name).write_text("a file where the case directory belongs")
+    (task,) = load_coding_repo(
+        case_names=(SURVEY_CASE.name,),
+        submissions_root=submissions,
+        trees_root=tmp_path / "trees",
+    )
+    with pytest.raises(NotADirectoryError):
+        await task.run(SurvivingTurn(), asyncio.Semaphore(1))
+
+
+def test_the_cli_drops_captures_under_the_root_it_is_given_once_the_run_starts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--coding-repo-submissions` names the root the suite drops and captures under, and nothing
+    before the run touches it — every read-only mode and every startup guard runs first."""
+    submissions = tmp_path / "submissions"
+    leftover = submissions / SURVEY_CASE.name / "an-earlier-run.md"
+    leftover.parent.mkdir(parents=True)
+    leftover.write_text("a previous run's bytes")
+    config = Config(
+        database=DatabaseConfig(url="sqlite+aiosqlite:///tenant.db"),
+        blob=BlobConfig(backend="filesystem", root=tmp_path / "blobs"),
+        pack=PackConfig(name="assistant"),
+    )
+    monkeypatch.setattr("evals.__main__.load_config", lambda: config)
+    survived: list[bool] = []
+
+    async def reached(_config: object, tasks: tuple[EvalTask, ...], *_rest: object) -> NoReturn:
+        survived.append(leftover.is_file())
+        for task in tasks:
+            await task.run(SurvivingTurn(), asyncio.Semaphore(1))
+        raise RunStarted
+
+    monkeypatch.setattr("evals.__main__._run", reached)
+    with pytest.raises(RunStarted):
+        evals_main(
+            [
+                "--coding-repo",
+                "--coding-repo-case",
+                SURVEY_CASE.name,
+                "--coding-repo-submissions",
+                str(submissions),
+                "--out",
+                str(tmp_path / "out"),
+            ]
+        )
+    assert survived == [True], "no startup step may destroy a capture"
+    assert not leftover.exists()
+    saved = submissions / SURVEY_CASE.name / Path(SURVEY_CASE.document_path).name
+    assert saved.read_bytes() == CAPTURED_DOCUMENT
+
+
 async def test_the_delegation_gate_refuses_a_turn_that_worked_the_repository_itself() -> None:
+    """The gate reads `own_tools`, not the merged trajectory: a parent that delegated cleanly passes
+    even though the child it spawned ran `bash` all over the repository, and a parent that ran the
+    forbidden tool itself fails whatever its merged calls say."""
     grader = delegation_only_scorer(PARENT_FORBIDDEN_TOOLS)
     verdict = await grader(output(own_tools=("read", "bash", "edit")))
     assert not verdict.passed
     assert "did the work itself with bash, edit" in verdict.reason
     assert verdict.evidence["ownTools"] == ["read", "bash", "edit"]
     assert (await grader(output(own_tools=("read", "share_file")))).passed
+    merged = await grader(
+        output(commands=("git fetch --depth 1 origin HEAD",), own_tools=("spawn_subagent", "write"))
+    )
+    assert merged.passed, merged.reason
+    assert merged.evidence["ownTools"] == ["spawn_subagent", "write"]

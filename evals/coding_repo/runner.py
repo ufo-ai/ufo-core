@@ -2,10 +2,11 @@
 a fixed envelope states the commit to fetch and the deliverable to hand back, and the graders read
 what the delegated child actually did.
 
-The suite splits by how its cases are measured. A `reply` case carries its criteria as the harness's
-own semantic rubric and is judged inside the run. A `patch` or `document` case hands back a file and
-is gated deterministically here — delegated to the coding lane, worked at the pinned commit, and for
-a patch, applying to that commit's tree and touching the paths the real change touched.
+The suite splits by where its cases can be judged. A `reply` case carries its criteria as the
+harness's own semantic rubric and is judged inside the run. A `patch` or `document` case is gated
+deterministically here — delegated to the coding lane, worked at the pinned commit, and for a patch,
+applying to that commit's tree and touching the paths the real change touched — and its bytes are
+captured under the submissions root for `evals.coding_repo.grading` to score offline.
 
 Base trees are materialized and every pin verified against the local clone at load time, before a
 turn runs, so a missing commit is a startup error and never a grader that fails a case for the
@@ -22,7 +23,7 @@ from dataclasses import dataclass, replace
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
 
-from evals.coding_repo.cases import CASES, CodingCase
+from evals.coding_repo.cases import CASES, DOCUMENT_SUFFIX, CodingCase
 from evals.harness.capability import (
     CapabilityCase,
     CapabilityOutput,
@@ -31,21 +32,25 @@ from evals.harness.capability import (
     grading_statement,
 )
 from evals.harness.capability import Grader as HarnessGrader
-from evals.harness.harness import JsonObject
-from evals.harness.registry import EvalTask, capability_task
+from evals.harness.harness import EvalReport, JsonObject
+from evals.harness.registry import EvalRunner, EvalTask, capability_task
 from evals.harness.scorers import delegation_only_scorer
+from evals.harness.target import CapabilityTarget
 
 REPO_SLUG = "metalcraftai/ufo"
 REPO_URL = f"https://github.com/{REPO_SLUG}.git"
 REPO_ROOT = Path(__file__).resolve().parents[2]
-TREES_ROOT = Path(".local/coding_repo/trees")
+LOCAL_ROOT = Path(".local/coding_repo")
+SUBMISSIONS_ROOT = LOCAL_ROOT / "submissions"
+TREES_ROOT = LOCAL_ROOT / "trees"
+REFUSED_DIR = "refused"
 CODING_REPO_PACKS = ("assistant", "assistant_hosted")
 ANSWERS_TASK = "coding_repo_answers"
 DELIVERABLES_TASK = "coding_repo_deliverables"
 CODING_LANE = "coding"
 BACKGROUND_ACK = "spawned "
 WORKFLOW_WAIT_SECONDS = 3_600.0
-ENVELOPE_REVISION = "pinned-fetch-share-deliverable-4"
+ENVELOPE_REVISION = "pinned-fetch-share-deliverable-5"
 GIT_TIMEOUT_SECONDS = 300.0
 FORBIDDEN_ROUTES = (
     f"{REPO_SLUG}/zipball",
@@ -73,7 +78,9 @@ JUDGE_MODEL = "gpt-5.4-mini"
 
 
 def load_coding_repo(
-    case_names: tuple[str, ...] = (), trees_root: Path = TREES_ROOT
+    case_names: tuple[str, ...] = (),
+    submissions_root: Path = SUBMISSIONS_ROOT,
+    trees_root: Path = TREES_ROOT,
 ) -> tuple[EvalTask, ...]:
     """The suite's tasks over the selected cases, with every pin verified and every base tree
     materialized first."""
@@ -89,10 +96,14 @@ def load_coding_repo(
         if case.deliverable == "patch":
             _materialize_tree(case.base_sha, trees_root)
     answers = tuple(
-        _capability_case(case, trees_root) for case in selected if not case.delivers_a_file
+        _capability_case(case, submissions_root, trees_root)
+        for case in selected
+        if not case.delivers_a_file
     )
     deliverables = tuple(
-        _capability_case(case, trees_root) for case in selected if case.delivers_a_file
+        _capability_case(case, submissions_root, trees_root)
+        for case in selected
+        if case.delivers_a_file
     )
     tasks: tuple[EvalTask, ...] = ()
     if answers:
@@ -103,7 +114,14 @@ def load_coding_repo(
             ),
         )
     if deliverables:
-        tasks += (replace(capability_task(DELIVERABLES_TASK, deliverables), pin_runtime=True),)
+        captured = capability_task(DELIVERABLES_TASK, deliverables)
+        tasks += (
+            replace(
+                captured,
+                run=_dropping_captures(captured, submissions_root),
+                pin_runtime=True,
+            ),
+        )
     return tasks
 
 
@@ -150,15 +168,15 @@ def _materialize_tree(sha: str, trees_root: Path = TREES_ROOT) -> Path:
     return target
 
 
-def _capability_case(case: CodingCase, trees_root: Path) -> CapabilityCase:
+def _capability_case(case: CodingCase, submissions_root: Path, trees_root: Path) -> CapabilityCase:
     graders: list[Grader] = [
         LaneAndRoute(case.base_sha),
         delegation_only_scorer(PARENT_FORBIDDEN_TOOLS),
     ]
     if case.deliverable == "patch":
-        graders.append(PatchGate(case, trees_root))
+        graders.append(PatchCapture(case, submissions_root, trees_root))
     elif case.deliverable == "document":
-        graders.append(DocumentGate(case))
+        graders.append(DocumentCapture(case, submissions_root))
     return CapabilityCase(
         name=case.name,
         message=case.brief + _envelope(case),
@@ -176,13 +194,16 @@ def _envelope(case: CodingCase) -> str:
     deliverable = {
         "reply": "Deliverable: your findings in this conversation's reply. Change no files.",
         "patch": (
-            f"Deliverable: /workspace/{case.name}.patch — the complete unified diff of the change "
-            "relative to the fetched commit, whether or not the work was committed along the way, "
-            "delivered with share_file. Only a shared file reaches the graders."
+            "Two deliverables, both through share_file, because only shared files are scored:\n"
+            f"1. /workspace/{case.name}.patch — the complete unified diff of the change relative "
+            "to the fetched commit, whether or not the work was committed along the way.\n"
+            f"2. /workspace/{case.notes_name} — a short note on the change: what it does and why, "
+            "what was verified and how, what remains uncertain, and anything it reassigns or "
+            "breaks. A diff cannot say those things, and they are read as part of the work."
         ),
         "document": (
-            f"Deliverable: {case.document_path}, delivered with share_file. Only a shared file "
-            "reaches the graders."
+            f"Deliverable: {case.document_path}, delivered with share_file. Only a shared file is "
+            "scored."
         ),
     }[case.deliverable]
     return (
@@ -196,7 +217,22 @@ def _envelope(case: CodingCase) -> str:
     )
 
 
-type Grader = LaneAndRoute | PatchGate | DocumentGate | HarnessGrader
+def _dropping_captures(task: EvalTask, submissions_root: Path) -> EvalRunner:
+    """The task's run with each of its own cases' captured deliverables dropped as it starts, so a
+    case that shares nothing this run scores as having shared nothing rather than on the last run's
+    bytes. A failed removal raises: a capture that survives is read as this run's."""
+
+    async def dropping(target: CapabilityTarget, slots: asyncio.Semaphore) -> EvalReport:
+        for name in task.cases:
+            case_dir = submissions_root / name
+            if case_dir.exists():
+                await asyncio.to_thread(shutil.rmtree, case_dir)
+        return await task.run(target, slots)
+
+    return dropping
+
+
+type Grader = LaneAndRoute | PatchCapture | DocumentCapture | HarnessGrader
 
 
 @dataclass(frozen=True)
@@ -309,10 +345,12 @@ class LaneAndRoute:
 
 
 @dataclass(frozen=True)
-class DocumentGate:
-    """The document the brief asked for: shared under the name the brief named, and not empty."""
+class DocumentCapture:
+    """The document the brief asked for, captured for offline grading: shared under the name the
+    brief named, and not empty."""
 
     case: CodingCase
+    submissions_root: Path = SUBMISSIONS_ROOT
 
     @property
     def grading(self) -> str:
@@ -326,18 +364,24 @@ class DocumentGate:
         text = selected.content.decode("utf-8", errors="replace").strip()
         if not text:
             return CapabilityVerdict(False, f"{selected.name} is empty")
+        saved = await _save(self.submissions_root / self.case.name, selected)
         return CapabilityVerdict(
-            True, f"shared {selected.name} ({len(text)} chars)", {"words": len(text.split())}
+            True,
+            f"captured {selected.name} ({len(text)} chars)",
+            {"submission": str(saved), "words": len(text.split())},
         )
 
 
 @dataclass(frozen=True)
-class PatchGate:
+class PatchCapture:
     """The candidate patch, gated on being a real change to the pinned tree before its quality is
     anybody's question: it parses as a unified diff, it applies to the commit the child worked from,
-    and it touches at least one file the reference change touched."""
+    and it touches at least one file the reference change touched. The bytes are saved either way,
+    so a patch that fails the gate is still there to read — under `REFUSED_DIR`, out of the offline
+    judge's reach, because a deliverable earns a judge only once the run proves it real."""
 
     case: CodingCase
+    submissions_root: Path = SUBMISSIONS_ROOT
     trees_root: Path = TREES_ROOT
 
     @property
@@ -351,32 +395,50 @@ class PatchGate:
         selected, failure = _delivered(output, self.case.deliverable_suffix)
         if selected is None:
             return CapabilityVerdict(False, failure)
-        evidence: JsonObject = {"sizeBytes": len(selected.content)}
+        notes, _ = _delivered(output, DOCUMENT_SUFFIX, self.case.notes_name)
+        shared = (selected,) if notes is None else (selected, notes)
+        evidence: JsonObject = {
+            "sizeBytes": len(selected.content),
+            "notes": None if notes is None else len(notes.content),
+        }
         text = selected.content.decode("utf-8", errors="replace")
         touched = _touched_paths(text)
         evidence["touchedPaths"] = list(touched)
         if not touched:
-            return CapabilityVerdict(False, f"{selected.name} carries no unified diff", evidence)
+            return await self._refused(shared, f"{selected.name} carries no unified diff", evidence)
         applied, detail = await _applies(self.trees_root, self.case.base_sha, selected.content)
         evidence["appliesClean"] = applied
         if not applied:
-            return CapabilityVerdict(
-                False,
+            return await self._refused(
+                shared,
                 f"{selected.name} does not apply to {self.case.base_sha[:12]}: {detail}",
                 evidence,
             )
         overlap = tuple(path for path in touched if path in self.case.expected_paths)
         evidence["expectedPathsTouched"] = list(overlap)
         if not overlap:
-            return CapabilityVerdict(
-                False,
+            return await self._refused(
+                shared,
                 f"{selected.name} touches {', '.join(touched)}, none of the paths the reference "
                 f"change touched",
                 evidence,
             )
+        case_dir = self.submissions_root / self.case.name
+        evidence["submission"] = str(await _save(case_dir, selected))
+        if notes is not None:
+            await _save(case_dir, notes)
         return CapabilityVerdict(
-            True, f"{selected.name} applies clean and touches {', '.join(overlap)}", evidence
+            True, f"captured {selected.name}: applies clean, touches {', '.join(overlap)}", evidence
         )
+
+    async def _refused(
+        self, shared: tuple[SharedArtifact, ...], reason: str, evidence: JsonObject
+    ) -> CapabilityVerdict:
+        refused = self.submissions_root / self.case.name / REFUSED_DIR
+        for artifact in shared:
+            await _save(refused, artifact)
+        evidence["refused"] = str(refused)
+        return CapabilityVerdict(False, reason, evidence)
 
 
 def _delivered(
@@ -454,3 +516,10 @@ async def _applies(trees_root: Path, base_sha: str, patch: bytes) -> tuple[bool,
     if process.returncode == 0:
         return True, ""
     return False, stderr.decode(errors="replace").strip()[:240]
+
+
+async def _save(directory: Path, artifact: SharedArtifact) -> Path:
+    await asyncio.to_thread(directory.mkdir, parents=True, exist_ok=True)
+    target = directory / PurePosixPath(artifact.name).name
+    await asyncio.to_thread(target.write_bytes, artifact.content)
+    return target

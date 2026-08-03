@@ -9,12 +9,21 @@ is a commit in this clone.
 The lane, not just the answer: every case reaches the agent as a member's message, and the agent is
 expected to route it to the `coding` subagent, which fetches the pinned commit and works there.
 
-| Kind | Cases | Deliverable | Measured |
+| Kind | Cases | Deliverable | Scored |
 | --- | --- | --- | --- |
-| research | 3 | the reply | judged in the run against the case's criteria |
-| research | 1 | a written survey | gated in the run: shared under the name the brief named, not empty |
-| fix | 3 | a unified diff | gated in the run: applies to the pinned tree, touches a path the merged diff touched |
-| feature | 3 | a unified diff | gated in the run: applies to the pinned tree, touches a path the merged diff touched |
+| research | 3 | the reply | in the run, against the case's criteria |
+| research | 1 | a written survey | offline, against the case's criteria |
+| fix | 3 | a unified diff and a note | offline, against the criteria, with the merged diff as reference |
+| feature | 3 | a unified diff and a note | offline, against the criteria, with the merged diff as reference |
+
+A patch case hands over a note beside its diff, because a diff cannot say what was verified, what
+remains uncertain, or what the change reassigns — the reasoning the real pull requests recorded in
+their descriptions, and what a third of these criteria ask for. The note is scored, not gated: a
+missing note costs the criteria that needed it rather than suppressing judgment of the diff.
+
+A case that has one names the criterion without which the answer is wrong — the root cause for a fix,
+the core requirement for a feature. Grading reports it beside the score, so a respectable fraction
+cannot hide a missed root cause.
 
 A brief carries only what the requester knew — a symptom, an observation, an intent, and in one case
 a lead that is wrong. The mechanism and the shape of the answer live in the criteria, which are drawn
@@ -35,7 +44,9 @@ with no `.git` at all, and a clone of this repository, which carries every commi
 clone from a local path is neither — that is how the coding skill gives a second child its own
 checkout of an already-pinned tree.
 
-## Gates
+## Gates before judgment
+
+A captured deliverable earns a judge only after the run proves it is real:
 
 - delegated to the `coding` lane, and that delegation succeeded
 - a call that succeeded fetches the pinned commit, and no call cloned this repository or reached it
@@ -61,11 +72,64 @@ ufoctl credential set github_git_token   # a fine-grained PAT with Contents: rea
 uv run python -m evals --coding-repo --workspace <uuid> --concurrency 4
 ```
 
-`--coding-repo-case <case>` (repeatable) narrows the run. Base trees materialize under
-`.local/coding_repo/trees/`, one per pinned commit. Every pin is verified against this clone before a
-turn starts, so a commit this clone lacks is a startup error rather than a failed case.
+`--coding-repo-case <case>` (repeatable) narrows the run, and `--coding-repo-submissions` moves the
+capture root. Base trees materialize under `.local/coding_repo/trees/`, one per pinned commit, and
+captured deliverables land under `.local/coding_repo/submissions/<case>/`. Every pin is verified when
+the suite loads, so a commit this clone lacks is a startup error rather than a failed case. Each
+selected case's captured bytes are dropped when the run starts, so a startup abort destroys no
+capture that no turn will replace, while a case that shares nothing this run still scores as having
+shared nothing rather than on the last run's bytes. A patch the gate refused is kept under
+`<case>/refused/`, readable but out of the offline judge's reach.
 
 The suite splits into two tasks: `coding_repo_answers`, judged in the run against each case's
-criteria, and `coding_repo_deliverables`, gated in the run against the file the case asked for. Both
-pin the runtime into their digest, so scores compare only across runs of the same pack, prompt, and
-model.
+criteria, and `coding_repo_deliverables`, gated in the run and judged offline. Both pin the runtime
+into their digest, so scores compare only across runs of the same pack, prompt, and model.
+
+## Handoff
+
+Whether a delegated child finished terse is a property of the run, not of the answer, so it is
+reported over the archive rather than gated inside a case verdict. A run on a prompt that fails the
+constraint still produces its quality scores — suppressing the judgment would spend the turn and
+learn nothing.
+
+```bash
+uv run python -m evals.coding_repo.handoff --metric-stdout
+```
+
+The finish contract says never write a final prose message before `finish`. The finishing round is
+not durable — the engine returns the moment `finish` validates — so what is read is the last
+message the child left standing and the payload it returned, which is where a regenerated report
+shows up. Overlap is counted over word shingles, so working narration reads near 0% and a rewritten
+report near 100%.
+
+Forbidding the message moves the second copy rather than removing it: a child can write the report
+to a file, read it back, and summarize that into the payload, leaving the closing numbers clean. So
+every document the child wrote is read too — its bytes, its re-reads, its write errors, and its
+overlap with the payload — and a document the case never asked for, read back and restated, counts
+as `rerouted-to-file`. Every one, because a patch case's own note is asked-for prose and usually the
+largest thing the child wrote: reading one document would report every rerouted patch case as
+compliant.
+
+`coding_repo_handoff: <share>` is the fraction of children that were none of verbose, duplicating,
+or rerouted to a file. The reported handoff cost is the closing message, the payload, and each
+rerouted copy — never the deliverable, which is the work rather than the price of handing it over.
+
+A run that recorded no handoff at all reports no metric and exits non-zero: absent data is not
+compliance.
+
+## Grade
+
+Offline and re-runnable, so criteria and prompt can be iterated against work already captured:
+
+```bash
+uv run python -m evals.coding_repo.grading --metric-stdout --judge judge.json
+```
+
+`--judge` names a JSON spec — `{"name": …, "argv": […], "timeout_seconds": …}` — whose command
+reads `{"system","prompt"}` on stdin and writes the verdict on stdout. Each case scores the fraction
+of its criteria the deliverable satisfies, and flags the case whose essential criterion failed.
+Per-case verdicts and the report land in `.local/coding_repo/grades/`; `--metric-stdout` ends stdout
+with `coding_repo_quality: <mean>`, the line an optimizer loop reads. A case that captured nothing
+scores zero through the same path rather than being dropped from the mean; a case the judge could
+not answer for is not scored at all, so `report.json` names it under `unscored` and states no mean,
+and the run exits non-zero and prints no metric.

@@ -105,10 +105,37 @@ def test_a_report_routed_through_a_file_is_still_measured() -> None:
     record = handoff_record(CONVERSATION, messages, REPORT)
     assert record.closing_chars == len("Wrote the findings.")
     assert record.duplication == 0.0, "the old signal reads clean — this is why it was a false pass"
-    assert record.document == "/workspace/findings.md"
-    assert record.document_chars == len(REPORT)
-    assert record.document_reads == 1
-    assert record.document_duplication == 1.0
+    (document,) = record.documents
+    assert document.path == "/workspace/findings.md"
+    assert document.chars == len(REPORT)
+    assert document.reads == 1
+    assert document.duplication == 1.0
+
+
+def test_every_document_is_reported_largest_first() -> None:
+    """A child that wrote the file it was asked for and a second copy of its report hands both over:
+    reporting only the largest would let the deliverable stand in front of the scaffolding, so the
+    caller that knows which file was asked for never sees the other one."""
+    deliverable = "diff --git a/x b/x\n" + "+one changed line of source\n" * 40
+    messages = (
+        wrote("/workspace/fix.patch", deliverable),
+        wrote("/workspace/scaffold.md", REPORT, call_id="w2"),
+        *read_back("/workspace/scaffold.md"),
+        assistant("Done.", tool="bash"),
+    )
+    record = handoff_record(CONVERSATION, messages, REPORT)
+    assert [document.path for document in record.documents] == [
+        "/workspace/fix.patch",
+        "/workspace/scaffold.md",
+    ]
+    assert [document.chars for document in record.documents] == [len(deliverable), len(REPORT)]
+    assert [document.reads for document in record.documents] == [0, 1]
+    assert [document.duplication for document in record.documents] == [0.0, 1.0]
+
+
+def test_a_child_that_wrote_nothing_reports_no_document() -> None:
+    record = handoff_record(CONVERSATION, (assistant(NARRATION, tool="bash"),), REPORT)
+    assert record.documents == ()
 
 
 def test_an_edit_counts_the_text_it_inserted() -> None:
@@ -129,9 +156,9 @@ def test_an_edit_counts_the_text_it_inserted() -> None:
         ),
         *read_back("/workspace/notes.md"),
     )
-    record = handoff_record(CONVERSATION, messages, REPORT)
-    assert record.document_chars == len(REPORT)
-    assert record.document_reads == 1
+    (document,) = handoff_record(CONVERSATION, messages, REPORT).documents
+    assert document.chars == len(REPORT)
+    assert document.reads == 1
 
 
 def test_a_failed_write_is_counted() -> None:
@@ -141,9 +168,9 @@ def test_a_failed_write_is_counted() -> None:
             role="user", content=(ToolResultBlock(tool_use_id="w1", content="EIO", is_error=True),)
         ),
     )
-    record = handoff_record(CONVERSATION, messages, REPORT)
-    assert record.document_errors == 1
-    assert record.document_chars == len(REPORT)
+    (document,) = handoff_record(CONVERSATION, messages, REPORT).documents
+    assert document.errors == 1
+    assert document.chars == len(REPORT)
 
 
 def test_a_failed_read_back_is_counted_against_the_document() -> None:
@@ -153,9 +180,9 @@ def test_a_failed_read_back_is_counted_against_the_document() -> None:
         wrote("/workspace/findings.md", REPORT),
         *read_back("/workspace/findings.md", is_error=True),
     )
-    record = handoff_record(CONVERSATION, messages, REPORT)
-    assert record.document_reads == 1
-    assert record.document_errors == 1
+    (document,) = handoff_record(CONVERSATION, messages, REPORT).documents
+    assert document.reads == 1
+    assert document.errors == 1
 
 
 def test_a_restatement_behind_a_long_preamble_is_seen() -> None:

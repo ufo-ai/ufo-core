@@ -1,15 +1,16 @@
 """The pinned coding corpus: tasks this repository already answered, each fixed to the commit its
 work started from.
 
-A case names the base commit the child fetches, the merged commit that answered it, and the criteria
-that merged commit's own reasoning established. The base is the parent of the
+A case names the base commit the child fetches, the merged commit the offline judge scores against,
+and the criteria that merged commit's own reasoning established. The base is the parent of the
 squash the work landed as, so the defect is present and the answer is absent — and the child fetches
 exactly that one commit, so no later commit, and never the fix, is reachable from the sandbox.
 
-What a case delivers decides how it is measured. A `reply` case answers in the turn's own text and
-is judged against its criteria inside the run. A `patch` or `document` case hands back a file, which
-the run gates deterministically: fetched at the pin, and for a patch, applying to that tree and
-touching the paths the real change touched.
+What a case delivers decides where it is judged, because a judge scores only what it can read. A
+`reply` case answers in the turn's own text and is judged inside the run. A `patch` or `document`
+case hands back a file: the run gates it deterministically — fetched at the pin, and for a patch,
+applies to that tree and touches the paths the real change touched — and `evals.coding_repo.grading`
+scores the captured bytes offline, where the deliverable is not bounded by a reply's length.
 
 A brief carries only what the requester knew — a symptom, an observation, an intent, sometimes a
 lead that is wrong. The mechanism, the file, and the shape of the answer are what the case measures,
@@ -25,6 +26,7 @@ SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
 MAX_CRITERIA_PER_CASE = 12
 DOCUMENT_SUFFIX = ".md"
 PATCH_SUFFIX = ".patch"
+NOTES_SUFFIX = "-notes.md"
 
 type CodingKind = Literal["research", "feature", "fix"]
 type CodingDeliverable = Literal["reply", "patch", "document"]
@@ -33,10 +35,12 @@ type CodingDeliverable = Literal["reply", "patch", "document"]
 @dataclass(frozen=True)
 class CodingCase:
     """One pinned task. `base_sha` is what the child fetches; `reference_sha` is the merged commit
-    that answered it, whose own diff is what the gate is proven against, and `expected_paths` are
-    the source files that commit changed, tests excluded — the deterministic floor a candidate patch
-    must reach. `document_path` is the workspace path a document case is asked to write, so the gate
-    checks the file the brief named rather than any shared file."""
+    the judge reads as the reference answer, and `expected_paths` are the source files that commit
+    changed, tests excluded — the deterministic floor a candidate patch must reach before its
+    quality is worth judging. `document_path` is the workspace path a document case is asked to
+    write, so the gate checks the file the brief named rather than any shared file. `essential`
+    names the criterion without which the answer is wrong, so a respectable fraction cannot hide a
+    missed root cause."""
 
     name: str
     kind: CodingKind
@@ -47,6 +51,14 @@ class CodingCase:
     reference_sha: str = ""
     expected_paths: tuple[str, ...] = ()
     document_path: str = ""
+    essential: int | None = None
+
+    @property
+    def notes_name(self) -> str:
+        """The note a patch case hands over beside its diff. A diff cannot state what was verified,
+        what remains uncertain, or what the change reassigns — the reasoning this repository records
+        in a pull request — so a patch case is asked for both and the judge reads them together."""
+        return f"{self.name}{NOTES_SUFFIX}"
 
     @property
     def deliverable_suffix(self) -> str:
@@ -66,6 +78,8 @@ class CodingCase:
                 f"{self.name}: {len(self.criteria)} criteria exceeds the judge's "
                 f"{MAX_CRITERIA_PER_CASE}"
             )
+        if self.essential is not None and not 0 <= self.essential < len(self.criteria):
+            raise ValueError(f"{self.name}: essential must index its own criteria")
         if (self.deliverable == "patch") != (self.kind in ("feature", "fix")):
             raise ValueError(f"{self.name}: a {self.kind} case delivers a {self.deliverable}")
         if self.deliverable == "patch":
@@ -252,6 +266,7 @@ RESEARCH_CASES: tuple[CodingCase, ...] = (
 FIX_CASES: tuple[CodingCase, ...] = (
     CodingCase(
         name="fix-progress-post-after-commit",
+        essential=0,
         kind="fix",
         deliverable="patch",
         base_sha="931fc84d43f4a546725339ebd164e2bbb9802d2a",
@@ -292,6 +307,7 @@ FIX_CASES: tuple[CodingCase, ...] = (
     ),
     CodingCase(
         name="fix-status-cleared-on-shutdown",
+        essential=0,
         kind="fix",
         deliverable="patch",
         base_sha="2d1bdc506676c83015af907f7942b0c686c5ccf0",
@@ -331,6 +347,7 @@ FIX_CASES: tuple[CodingCase, ...] = (
     ),
     CodingCase(
         name="fix-sqlite-journal-mode",
+        essential=0,
         kind="fix",
         deliverable="patch",
         base_sha="b956e7abf726464c04da6eb768eacc5d8fe99f07",
@@ -370,6 +387,7 @@ FIX_CASES: tuple[CodingCase, ...] = (
 FEATURE_CASES: tuple[CodingCase, ...] = (
     CodingCase(
         name="feature-progress-step-summaries",
+        essential=0,
         kind="feature",
         deliverable="patch",
         base_sha="2c4cce5e0bef004acd7760f7b51486bf9dcc826b",
@@ -408,6 +426,7 @@ FEATURE_CASES: tuple[CodingCase, ...] = (
     ),
     CodingCase(
         name="feature-bounded-error-class",
+        essential=0,
         kind="feature",
         deliverable="patch",
         base_sha="5ccafe058001313155e81693b04a657f4843c81a",
@@ -450,6 +469,7 @@ FEATURE_CASES: tuple[CodingCase, ...] = (
     ),
     CodingCase(
         name="feature-short-site-label",
+        essential=0,
         kind="feature",
         deliverable="patch",
         base_sha="e0876ff14607373ec22b1f3d684eadc5f9f18206",

@@ -5175,7 +5175,7 @@ async def test_capability_merge_records_one_handoff_for_a_followed_up_conversati
     assert handoff.conversation_id == worker.child_conversation_id
     assert handoff.closing_chars == len("done")
     assert handoff.result_chars == len("Done.")
-    assert handoff.document_chars == 0
+    assert handoff.documents == ()
 
 
 def test_a_childs_terminal_yields_its_payload_or_its_text() -> None:

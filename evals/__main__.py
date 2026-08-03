@@ -34,6 +34,9 @@ from evals.coding_repo.runner import (
     load_coding_repo,
 )
 from evals.coding_repo.runner import (
+    SUBMISSIONS_ROOT as CODING_REPO_SUBMISSIONS_ROOT,
+)
+from evals.coding_repo.runner import (
     WORKFLOW_WAIT_SECONDS as CODING_REPO_WORKFLOW_WAIT_SECONDS,
 )
 from evals.compaction.runner import CompactionRun, load_compaction
@@ -192,6 +195,12 @@ def main(argv: list[str] | None = None) -> None:
         help="run the pinned coding suite over this repository's own merged work",
     )
     parser.add_argument("--coding-repo-case", action="append", default=[], metavar="CASE")
+    parser.add_argument(
+        "--coding-repo-submissions",
+        type=Path,
+        default=CODING_REPO_SUBMISSIONS_ROOT,
+        metavar="DIR",
+    )
     parser.add_argument("--jobbench", type=Path, metavar="SNAPSHOT")
     parser.add_argument("--jobbench-case", action="append", default=[], metavar="CASE_ID")
     parser.add_argument(
@@ -320,7 +329,11 @@ def main(argv: list[str] | None = None) -> None:
             else None
         )
         coding_repo_tasks = (
-            load_coding_repo(tuple(args.coding_repo_case)) if args.coding_repo else None
+            load_coding_repo(
+                tuple(args.coding_repo_case), submissions_root=args.coding_repo_submissions
+            )
+            if args.coding_repo
+            else None
         )
         wandr_tasks = (
             load_wandr_boundary(

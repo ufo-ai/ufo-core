@@ -9,21 +9,19 @@ paid for the report twice and handed over one copy.
 
 The same waste moves rather than disappears when a contract forbids the final message: a child can
 write the report into a file, read it back, and summarize that into the payload. So a handoff is
-also read through the documents the child wrote and re-read — the name, the bytes, the re-reads, and
-the errors. Whether such a document was legitimately asked for is the suite's
-question, not this module's: a case knows its own deliverables, so the name is reported and the
-policy applied where the case is known.
+also read through every document the child wrote — the name, the bytes, the re-reads, the errors,
+and how much of it reappears in the payload. Whether a document was legitimately asked for is the
+suite's question, not this module's: a case knows its own deliverables, so every document is
+reported and the policy applied where the case is known. Reporting one document would let an
+asked-for deliverable hide a report routed through a second file.
 
-So a handoff is read as two numbers and their overlap: how much prose the child left standing before
-finishing, how much payload it returned, and how much of the first reappears in the second. Overlap
-is counted over word shingles, which is what makes a regenerated report legible as one — ordinary
-working narration ("running the tests now") shares almost nothing with a result, while a rewritten
-report shares most of itself."""
+Overlap is counted over word shingles, which is what makes a regenerated report legible as one —
+ordinary working narration ("running the tests now") shares almost nothing with a result, while a
+rewritten report shares most of itself."""
 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -37,24 +35,33 @@ SHINGLE_WORDS = 8
 WORD_PATTERN = re.compile(r"[a-z0-9]+")
 
 
+class HandoffDocument(BaseModel):
+    """One file the child wrote: the bytes it wrote, how often it read the file back, how many calls
+    touching it errored, and the share of it that reappears in the payload."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    path: str
+    chars: int = Field(ge=0)
+    reads: int = Field(default=0, ge=0)
+    errors: int = Field(default=0, ge=0)
+    duplication: float = Field(default=0.0, ge=0.0, le=1.0)
+
+
 class SubagentHandoff(BaseModel):
     """One delegated conversation's closing shape. `closing_chars` is the prose the child left
     standing as its last durable message; `result_chars` is the payload that reached the parent;
-    `duplication`
-    is the share of the closing's word shingles that reappear in the payload. The prose is counted,
-    never stored: a transcript carries private handoffs every other archive path redacts."""
+    `duplication` is the share of the closing's word shingles that reappear in the payload; and
+    `documents` is every file it wrote, largest first. The prose is counted, never stored: a
+    transcript carries private handoffs every other archive path redacts."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     conversation_id: UUID
     closing_chars: int = Field(ge=0)
     result_chars: int = Field(ge=0)
     duplication: float = Field(ge=0.0, le=1.0)
-    document: str = ""
-    document_chars: int = Field(default=0, ge=0)
-    document_reads: int = Field(default=0, ge=0)
-    document_errors: int = Field(default=0, ge=0)
-    document_duplication: float = Field(default=0.0, ge=0.0, le=1.0)
+    documents: tuple[HandoffDocument, ...] = ()
 
 
 def shingle_overlap(before: str, after: str) -> float:
@@ -87,34 +94,19 @@ def handoff_record(
     turn carried, so a conversation a `message_subagent` follow-up extended is counted once and
     whole rather than attributed to its final turn."""
     closing = _last_assistant_text(messages)
-    written = _documents(messages)
-    largest = max(written, key=lambda entry: entry.chars, default=None)
     return SubagentHandoff(
         conversation_id=conversation_id,
         closing_chars=len(closing),
         result_chars=len(result),
         duplication=shingle_overlap(closing, result),
-        document="" if largest is None else largest.path,
-        document_chars=0 if largest is None else largest.chars,
-        document_reads=0 if largest is None else largest.reads,
-        document_errors=0 if largest is None else largest.errors,
-        document_duplication=0.0 if largest is None else shingle_overlap(largest.body, result),
+        documents=_documents(messages, result),
     )
 
 
-@dataclass(frozen=True)
-class _Document:
-    path: str
-    body: str
-    chars: int
-    reads: int
-    errors: int
-
-
-def _documents(messages: tuple[Message, ...]) -> tuple[_Document, ...]:
-    """Every file the child wrote, with the bytes it wrote, how often it read the file back, and how
-    many calls touching it errored. `edit` counts the text it inserted, since an edit that grows a
-    report by a section paid for that section."""
+def _documents(messages: tuple[Message, ...], result: str) -> tuple[HandoffDocument, ...]:
+    """Every file the child wrote, largest first, with how often it read the file back, how many
+    calls touching it errored, and how much of it the payload restates. `edit` counts the text it
+    inserted, since an edit that grows a report by a section paid for that section."""
     bodies: dict[str, list[str]] = {}
     reads: dict[str, int] = {}
     errors: dict[str, int] = {}
@@ -142,14 +134,20 @@ def _documents(messages: tuple[Message, ...]) -> tuple[_Document, ...]:
                 case _:
                     continue
     return tuple(
-        _Document(
-            path=path,
-            body="\n".join(parts),
-            chars=sum(len(part) for part in parts),
-            reads=reads.get(path, 0),
-            errors=errors.get(path, 0),
+        sorted(
+            (
+                HandoffDocument(
+                    path=path,
+                    chars=sum(len(part) for part in parts),
+                    reads=reads.get(path, 0),
+                    errors=errors.get(path, 0),
+                    duplication=shingle_overlap("\n".join(parts), result),
+                )
+                for path, parts in bodies.items()
+            ),
+            key=lambda document: document.chars,
+            reverse=True,
         )
-        for path, parts in bodies.items()
     )
 
 
