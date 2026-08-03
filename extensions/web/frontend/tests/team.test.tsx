@@ -34,6 +34,31 @@ test("the roster names each member, who administers, and who holds a seat", asyn
   expect(plain.closest("tr")?.textContent).toContain("No seat");
 });
 
+test("the roster is summed above the table: members, admins, seated", async () => {
+  wire({
+    "/workspace/team": () =>
+      json({
+        ...ROSTER,
+        members: ROSTER.members.concat({
+          email: "third@example.com",
+          admin: false,
+          seated: true,
+        }),
+      }),
+  });
+  render(<App agents={[AGENT]} member={ADMIN} />);
+
+  await screen.findByText("lead@example.com");
+  expect(screen.getByText("members").previousElementSibling?.textContent).toBe("3");
+  expect(screen.getByText("admins").previousElementSibling?.textContent).toBe("1");
+  expect(screen.getByText("seated").previousElementSibling?.textContent).toBe("2");
+  const table = screen.getByRole("table");
+  expect(
+    screen.getByText("members").compareDocumentPosition(table) &
+      Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
+});
+
 test("an admin adds a member by email, optionally as an admin, through the intent lane", async () => {
   const bodies: string[] = [];
   wire({

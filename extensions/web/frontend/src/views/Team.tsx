@@ -6,11 +6,32 @@ import { Checkbox, Input } from "@/components/ui/field";
 import { Table, Td, Th } from "@/components/ui/table";
 import { Notice, Panel, usePanelRead } from "@/kernel/panel";
 import { postIntent } from "@/lib/api";
+import { cn } from "@/lib/cn";
 import { useMainAgent } from "@/lib/mainAgent";
 
 type Member = { email: string; admin: boolean; seated: boolean };
 
 type Roster = { members: Member[]; can_add: boolean; domain: string | null };
+
+function Strip({ figures }: { figures: { value: number; label: string }[] }) {
+  return (
+    <div className="mb-lg flex w-fit flex-wrap items-baseline">
+      {figures.map((figure, index) => (
+        <div
+          key={figure.label}
+          className={cn(
+            "flex items-baseline gap-xs px-2xl",
+            index === 0 && "pl-0",
+            index > 0 && "border-l border-edge-soft",
+          )}
+        >
+          <span className="font-strong tabular-nums">{figure.value}</span>
+          <span className="text-small opacity-(--muted)">{figure.label}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
 
 export function Team({
   place,
@@ -48,6 +69,13 @@ export function Team({
     <Panel state={state}>
       {({ members, can_add, domain }) => (
         <>
+          <Strip
+            figures={[
+              { value: members.length, label: "members" },
+              { value: members.filter((entry) => entry.admin).length, label: "admins" },
+              { value: members.filter((entry) => entry.seated).length, label: "seated" },
+            ]}
+          />
           <Table>
             <thead>
               <tr>

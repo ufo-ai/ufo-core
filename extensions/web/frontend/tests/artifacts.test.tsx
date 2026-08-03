@@ -315,3 +315,26 @@ test("closing the viewer discards a body still in flight", async () => {
   expect(screen.queryByText("the first body")).toBeNull();
   expect(screen.getByRole("button", { name: "notes.txt" })).toBeTruthy();
 });
+
+test("the artifacts listing renders as rows — name, meta, date — with no table", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string) => {
+      if (url.includes("/workspace/artifacts")) return json({ artifacts: [artifact()] });
+      return new Response("x");
+    }),
+  );
+  render(
+    <MainAgentProvider agents={[AGENT]}>
+      <Workspace view="artifacts" />
+    </MainAgentProvider>,
+  );
+
+  const item = (await screen.findAllByRole("listitem")).find((entry) =>
+    entry.textContent?.includes("notes.txt"),
+  );
+  expect(item?.querySelector('[data-part="primary"]')?.textContent).toBe("notes.txt");
+  expect(item?.querySelector('[data-part="meta"]')?.textContent).toBe("notes · text/plain · 12 B");
+  expect(item?.querySelector('[data-part="when"]')?.textContent).toBe("2026-07-31 09:00");
+  expect(screen.queryAllByRole("columnheader")).toEqual([]);
+});

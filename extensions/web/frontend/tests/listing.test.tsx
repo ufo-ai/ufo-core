@@ -1,9 +1,9 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
-import { expect, test } from "vitest";
+import { beforeEach, expect, test } from "vitest";
 
-import { Listing, type ListingSpec } from "@/kernel/listing";
+import { LISTING_CONTROLS, Listing, type ListingSpec } from "@/kernel/listing";
 import type { Placement } from "@/kernel/pager";
 import { MainAgentProvider } from "@/lib/mainAgent";
 import { ARTIFACTS } from "@/views/Artifacts";
@@ -16,6 +16,10 @@ import { AGENT, MEMBER, json, wire } from "./harness";
 
 type Row = { name: string; count: number; note: string | null };
 
+beforeEach(() => {
+  LISTING_CONTROLS.clear();
+});
+
 type Payload = { rows: Row[]; available?: boolean; newer?: string | null; older?: string | null };
 
 const ROWS: Row[] = [
@@ -23,7 +27,9 @@ const ROWS: Row[] = [
   { name: "beta", count: 5, note: "seen" },
 ];
 
-function spec(over: Partial<ListingSpec<Payload, Row>> = {}): ListingSpec<Payload, Row> {
+type TableSpec = Extract<ListingSpec<Payload, Row>, { columns: unknown }>;
+
+function spec(over: Partial<Omit<TableSpec, "list">> = {}): ListingSpec<Payload, Row> {
   return {
     read: "/workspace/probe",
     rows: (payload) => payload.rows,
@@ -74,8 +80,8 @@ function cellsOf(name: string): string[] {
 }
 
 test("the declaration alone proves nothing — it is the renderer that must be pinned", () => {
-  expect(SITES.columns.map((column) => column.field)).toEqual(["name", "summary"]);
-  expect(SOURCES.columns.map((column) => column.label)).toEqual([
+  expect(SITES.list?.primary.field).toBe("name");
+  expect(SOURCES.columns?.map((column) => column.label)).toEqual([
     "source",
     "streams",
     "owner",
@@ -300,8 +306,12 @@ test("the sites declaration binds to the payload the workspace route answers", a
     </MainAgentProvider>,
   );
 
-  await waitFor(() => expect(headers()).toEqual(["site", "summary"]));
-  expect(cellsOf("docs")).toEqual(["docs", "one page"]);
+  const item = (await screen.findAllByRole("listitem")).find((entry) =>
+    entry.textContent?.includes("docs"),
+  );
+  expect(item?.querySelector('[data-part="primary"]')?.textContent).toBe("docs");
+  expect(item?.querySelector('[data-part="meta"]')?.textContent).toBe("one page");
+  expect(screen.queryAllByRole("columnheader")).toEqual([]);
 });
 
 test("the sources declaration projects a binding and a bare stream into one uniform table", async () => {
@@ -547,7 +557,7 @@ test("share flips the value it carries, and remove posts no spec at all", async 
   });
 });
 
-test("the artifacts declaration binds its columns to the artifact payload", async () => {
+test("the artifacts declaration binds its parts to the artifact payload", async () => {
   wire({
     "/workspace/artifacts": () =>
       json({
@@ -569,14 +579,15 @@ test("the artifacts declaration binds its columns to the artifact payload", asyn
     </MainAgentProvider>,
   );
 
-  await waitFor(() => expect(headers()).toEqual(["file", "subject", "type", "size", "date"]));
-  expect(cellsOf("report.txt")).toEqual([
-    "report.txt",
-    "member@example.com",
-    "text/plain",
-    "2 kB",
-    "2026-08-01 06:00",
-  ]);
+  const item = (await screen.findAllByRole("listitem")).find((entry) =>
+    entry.textContent?.includes("report.txt"),
+  );
+  expect(item?.querySelector('[data-part="primary"]')?.textContent).toBe("report.txt");
+  expect(item?.querySelector('[data-part="meta"]')?.textContent).toBe(
+    "member@example.com · text/plain · 2 kB",
+  );
+  expect(item?.querySelector('[data-part="when"]')?.textContent).toBe("2026-08-01 06:00");
+  expect(screen.queryAllByRole("columnheader")).toEqual([]);
 });
 
 test("an outcome released after the member left never resets the view they are on", async () => {
@@ -667,3 +678,440 @@ test("every declaration keys its rows on fields its own payload carries", () => 
     }).map(SOURCES.rowKey),
   ).toEqual(["notion-main"]);
 });
+
+test("refresh re-reads the listing in place", async () => {
+  let served = 0;
+  wire({
+    "/workspace/probe": () => {
+      served += 1;
+      return json({ rows: served > 1 ? [{ name: "gamma", count: 1, note: null }] : ROWS });
+    },
+  });
+  mount(spec());
+
+  await screen.findByText("alpha");
+  await userEvent.click(screen.getByRole("button", { name: "Refresh" }));
+
+  expect(await screen.findByText("gamma")).toBeTruthy();
+  expect(screen.queryByText("alpha")).toBeNull();
+});
+
+test("a listing that declares no search offers no search box", async () => {
+  wire({ "/workspace/probe": () => json({ rows: ROWS }) });
+  mount(spec());
+
+  await screen.findByText("alpha");
+  expect(screen.queryByRole("searchbox")).toBeNull();
+});
+
+test("search narrows rows to matches and states when nothing matches", async () => {
+  wire({ "/workspace/probe": () => json({ rows: ROWS }) });
+  mount(spec({ search: (row) => row.name }));
+
+  await screen.findByText("alpha");
+  await userEvent.type(screen.getByRole("searchbox"), "bet");
+  expect(screen.queryByText("alpha")).toBeNull();
+  expect(screen.getByText("beta")).toBeTruthy();
+
+  await userEvent.clear(screen.getByRole("searchbox"));
+  await userEvent.type(screen.getByRole("searchbox"), "zzz");
+  expect(await screen.findByText("Nothing matches.")).toBeTruthy();
+  expect(screen.queryByText("Nothing listed yet.")).toBeNull();
+  expect(screen.getByRole("searchbox")).toBeTruthy();
+});
+
+test("chips count the loaded rows live, filter on press, and toggle back off", async () => {
+  wire({ "/workspace/probe": () => json({ rows: ROWS }) });
+  mount(spec({ chips: [{ label: "Noted", has: (row) => row.note !== null }] }));
+
+  await userEvent.click(await screen.findByRole("button", { name: "Noted 1" }));
+  expect(screen.queryByText("alpha")).toBeNull();
+  expect(screen.getByText("beta")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Noted 1" }).getAttribute("aria-pressed")).toBe(
+    "true",
+  );
+
+  await userEvent.click(screen.getByRole("button", { name: "Noted 1" }));
+  expect(await screen.findByText("alpha")).toBeTruthy();
+});
+
+test("a pressed chip and a search term compose", async () => {
+  wire({
+    "/workspace/probe": () =>
+      json({ rows: ROWS.concat({ name: "gamma", count: 7, note: "seen" }) }),
+  });
+  mount(
+    spec({
+      search: (row) => row.name,
+      chips: [{ label: "Noted", has: (row) => row.note !== null }],
+    }),
+  );
+
+  await screen.findByText("alpha");
+  await userEvent.click(screen.getByRole("button", { name: "Noted 2" }));
+  await userEvent.type(screen.getByRole("searchbox"), "gam");
+
+  expect(screen.queryByText("beta")).toBeNull();
+  expect(screen.queryByText("alpha")).toBeNull();
+  expect(screen.getByText("gamma")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Noted 1" })).toBeTruthy();
+});
+
+test("a chip's count reads the searched set, so its number equals what pressing it shows", async () => {
+  wire({ "/workspace/probe": () => json({ rows: ROWS }) });
+  mount(
+    spec({
+      search: (row) => row.name,
+      chips: [{ label: "Noted", has: (row) => row.note !== null }],
+    }),
+  );
+
+  await screen.findByText("alpha");
+  await userEvent.type(screen.getByRole("searchbox"), "alpha");
+  expect(screen.getByRole("button", { name: "Noted 0" })).toBeTruthy();
+
+  await userEvent.click(screen.getByRole("button", { name: "Noted 0" }));
+  expect(await screen.findByText("Nothing matches.")).toBeTruthy();
+});
+
+test("refresh hides while loading and on an unavailable payload, and recovers a failed read", async () => {
+  let served = 0;
+  wire({
+    "/workspace/probe": () => {
+      served += 1;
+      return served === 1 ? new Response("no", { status: 500 }) : json({ rows: ROWS });
+    },
+  });
+  mount(spec());
+
+  expect(screen.queryByRole("button", { name: "Refresh" })).toBeNull();
+  expect(await screen.findByText("Error 500 — reload to retry.")).toBeTruthy();
+  await userEvent.click(screen.getByRole("button", { name: "Refresh" }));
+  expect(await screen.findByText("alpha")).toBeTruthy();
+});
+
+test("an unavailable listing offers no refresh, where re-reading cannot change the answer", async () => {
+  wire({ "/workspace/probe": () => json({ rows: [], available: false }) });
+  mount(spec({ unavailable: (payload) => (payload.available ? null : "Not installed.") }));
+
+  expect(await screen.findByText("Not installed.")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Refresh" })).toBeNull();
+});
+
+test("an applied intent keeps the pressed chip and the typed search term", async () => {
+  wire({
+    "/workspace/sources": () =>
+      json({
+        sources: [
+          {
+            name: "notion-main",
+            backend: "notion",
+            stream: "pages",
+            account_id: "acct",
+            base_url: null,
+            owner_email: "member@example.com",
+            shared: false,
+            consecutive_errors: 0,
+            next_sync_at: "2026-08-01T06:00:00",
+          },
+        ],
+      }),
+    "/intents": () => json({ applied: true, message: "Resync queued." }),
+  });
+  render(
+    <MainAgentProvider agents={[AGENT]}>
+      <Workspace view="sources" />
+    </MainAgentProvider>,
+  );
+
+  await userEvent.click(await screen.findByRole("button", { name: "Private 1" }));
+  await userEvent.type(screen.getByRole("searchbox"), "notion");
+  await userEvent.click(screen.getByRole("button", { name: "Resync" }));
+
+  expect(await screen.findByText("Resync queued.")).toBeTruthy();
+  expect((screen.getByRole("searchbox") as HTMLInputElement).value).toBe("notion");
+  expect(screen.getByRole("button", { name: "Private 1" }).getAttribute("aria-pressed")).toBe(
+    "true",
+  );
+});
+
+test("a row listing renders primary and separator-joined meta, skipping empty parts — no table", async () => {
+  wire({ "/workspace/probe": () => json({ rows: ROWS }) });
+  mount({
+    read: "/workspace/probe",
+    rows: (payload: Payload) => payload.rows,
+    rowKey: (row: Row) => row.name,
+    empty: "Nothing listed yet.",
+    list: { primary: { field: "name" }, meta: [{ field: "note" }, { field: "count" }] },
+  });
+
+  const items = await screen.findAllByRole("listitem");
+  expect(screen.queryAllByRole("columnheader")).toEqual([]);
+  const beta = items.find((item) => item.textContent?.includes("beta"));
+  expect(beta?.textContent).toContain("seen · 5");
+  const alpha = items.find((item) => item.textContent?.includes("alpha"));
+  expect(alpha?.textContent).not.toContain("·");
+});
+
+test("a row listing reads each part through its own render and keeps actions and detail", async () => {
+  wire({ "/workspace/probe": () => json({ rows: ROWS }) });
+  mount({
+    read: "/workspace/probe",
+    rows: (payload: Payload) => payload.rows,
+    rowKey: (row: Row) => row.name,
+    empty: "Nothing listed yet.",
+    list: {
+      primary: {
+        field: "name",
+        render: (name, row, { open }) => (
+          <button type="button" onClick={() => open(row)}>
+            {name}
+          </button>
+        ),
+      },
+      meta: [{ field: "note" }],
+      when: { field: "count", render: (count) => "×" + String(count) },
+    },
+    actions: (row, { act }) => (
+      <button type="button" onClick={() => act({ verb: "poke", name: row.name })}>
+        Poke {row.name}
+      </button>
+    ),
+    detail: (row, close) => (
+      <div>
+        <span>detail of {row.name}</span>
+        <button type="button" onClick={close}>
+          Close
+        </button>
+      </div>
+    ),
+  });
+
+  expect(await screen.findByText("×5")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Poke alpha" })).toBeTruthy();
+  await userEvent.click(screen.getByRole("button", { name: "beta" }));
+  expect(screen.getByText("detail of beta")).toBeTruthy();
+});
+
+test("the sources declaration searches and filters by access with live counts", async () => {
+  wire({
+    "/workspace/sources": () =>
+      json({
+        sources: [
+          {
+            name: "notion-main",
+            backend: "notion",
+            stream: "pages",
+            account_id: "acct",
+            base_url: null,
+            owner_email: "member@example.com",
+            shared: false,
+            consecutive_errors: 0,
+            next_sync_at: "2026-08-01T06:00:00",
+          },
+          {
+            name: null,
+            backend: "rss",
+            stream: "feed",
+            account_id: null,
+            base_url: "https://example.com/feed",
+            owner_email: null,
+            shared: true,
+            consecutive_errors: 0,
+            next_sync_at: "2026-08-02T09:30:00",
+          },
+        ],
+      }),
+  });
+  render(
+    <MainAgentProvider agents={[AGENT]}>
+      <Workspace view="sources" />
+    </MainAgentProvider>,
+  );
+
+  await userEvent.click(await screen.findByRole("button", { name: "Shared 1" }));
+  expect(screen.queryByText("notion")).toBeNull();
+  expect(screen.getByText("rss")).toBeTruthy();
+
+  await userEvent.click(screen.getByRole("button", { name: "Shared 1" }));
+  await userEvent.type(screen.getByRole("searchbox"), "notion");
+  expect(await screen.findByText("notion")).toBeTruthy();
+  expect(screen.queryByText("rss")).toBeNull();
+  expect(screen.getByRole("button", { name: "Private 1" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Shared 0" })).toBeTruthy();
+});
+
+test("a refresh keeps the controls row and the caretted search box while the re-read is in flight", async () => {
+  let release: (value: Response) => void = () => {};
+  let served = 0;
+  wire({
+    "/workspace/probe": () => {
+      served += 1;
+      if (served === 1) return json({ rows: ROWS });
+      return new Promise<Response>((resolve) => {
+        release = resolve;
+      });
+    },
+  });
+  mount(spec({ search: (row) => row.name }));
+
+  await screen.findByText("alpha");
+  await userEvent.type(screen.getByRole("searchbox"), "a");
+  await userEvent.click(screen.getByRole("button", { name: "Refresh" }));
+
+  expect((screen.getByRole("searchbox") as HTMLInputElement).value).toBe("a");
+  expect(screen.getByRole("button", { name: "Refresh" })).toBeTruthy();
+  expect(document.activeElement).not.toBe(document.body);
+
+  release(Response.json({ rows: ROWS }));
+  expect(await screen.findByText("alpha")).toBeTruthy();
+});
+
+test("a chip alone survives an applied intent, with no search term typed", async () => {
+  wire({
+    "/workspace/sources": () =>
+      json({
+        sources: [
+          {
+            name: "notion-main",
+            backend: "notion",
+            stream: "pages",
+            account_id: "acct",
+            base_url: null,
+            owner_email: "member@example.com",
+            shared: false,
+            consecutive_errors: 0,
+            next_sync_at: "2026-08-01T06:00:00",
+          },
+        ],
+      }),
+    "/intents": () => json({ applied: true, message: "Resync queued." }),
+  });
+  render(
+    <MainAgentProvider agents={[AGENT]}>
+      <Workspace view="sources" />
+    </MainAgentProvider>,
+  );
+
+  await userEvent.click(await screen.findByRole("button", { name: "Private 1" }));
+  await userEvent.click(screen.getByRole("button", { name: "Resync" }));
+
+  expect(await screen.findByText("Resync queued.")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Private 1" }).getAttribute("aria-pressed")).toBe(
+    "true",
+  );
+});
+
+test("leaving the view releases its controls, so a return starts unfiltered", async () => {
+  wire({
+    "/workspace/sources": () =>
+      json({
+        sources: [
+          {
+            name: "notion-main",
+            backend: "notion",
+            stream: "pages",
+            account_id: "acct",
+            base_url: null,
+            owner_email: "member@example.com",
+            shared: false,
+            consecutive_errors: 0,
+            next_sync_at: "2026-08-01T06:00:00",
+          },
+          {
+            name: null,
+            backend: "rss",
+            stream: "feed",
+            account_id: null,
+            base_url: "https://example.com/feed",
+            owner_email: null,
+            shared: true,
+            consecutive_errors: 0,
+            next_sync_at: "2026-08-02T09:30:00",
+          },
+        ],
+      }),
+    "/workspace/team": () => json({ members: [], can_add: false, domain: null }),
+  });
+  const view = render(
+    <MainAgentProvider agents={[AGENT]}>
+      <Workspace view="sources" />
+    </MainAgentProvider>,
+  );
+
+  await userEvent.click(await screen.findByRole("button", { name: "Shared 1" }));
+  await userEvent.type(screen.getByRole("searchbox"), "rss");
+
+  view.rerender(
+    <MainAgentProvider agents={[AGENT]}>
+      <Workspace view="team" />
+    </MainAgentProvider>,
+  );
+  await waitFor(() => expect(screen.queryByRole("searchbox")).toBeNull());
+
+  view.rerender(
+    <MainAgentProvider agents={[AGENT]}>
+      <Workspace view="sources" />
+    </MainAgentProvider>,
+  );
+
+  expect(await screen.findByText("notion")).toBeTruthy();
+  expect(screen.getByText("rss")).toBeTruthy();
+  expect(((await screen.findByRole("searchbox")) as HTMLInputElement).value).toBe("");
+  expect(screen.getByRole("button", { name: "Shared 1" }).getAttribute("aria-pressed")).toBe(
+    "false",
+  );
+});
+
+test("leaving the workspace entirely also releases held controls", async () => {
+  location.hash = "#/workspace/sources";
+  wire({
+    "/workspace/sources": () =>
+      json({
+        sources: [
+          {
+            name: "notion-main",
+            backend: "notion",
+            stream: "pages",
+            account_id: "acct",
+            base_url: null,
+            owner_email: "member@example.com",
+            shared: false,
+            consecutive_errors: 0,
+            next_sync_at: "2026-08-01T06:00:00",
+          },
+          {
+            name: null,
+            backend: "rss",
+            stream: "feed",
+            account_id: null,
+            base_url: "https://example.com/feed",
+            owner_email: null,
+            shared: true,
+            consecutive_errors: 0,
+            next_sync_at: "2026-08-02T09:30:00",
+          },
+        ],
+      }),
+    "/transcript": () => json({ messages: [] }),
+    "/api/admin": () => new Response("no", { status: 404 }),
+  });
+  render(<App agents={[AGENT]} member={MEMBER} />);
+
+  await userEvent.type(await screen.findByRole("searchbox"), "rss");
+  location.hash = "#/agents/" + AGENT.id + "/chat";
+  await waitFor(() => expect(screen.queryByRole("searchbox")).toBeNull());
+  location.hash = "#/workspace/sources";
+
+  expect(await screen.findByText("notion")).toBeTruthy();
+  expect(((await screen.findByRole("searchbox")) as HTMLInputElement).value).toBe("");
+
+  await userEvent.type(screen.getByRole("searchbox"), "rss");
+  location.hash = "#/admin";
+  await waitFor(() => expect(screen.queryByRole("searchbox")).toBeNull());
+  location.hash = "#/workspace/sources";
+
+  expect(await screen.findByText("notion")).toBeTruthy();
+  expect(((await screen.findByRole("searchbox")) as HTMLInputElement).value).toBe("");
+});
+

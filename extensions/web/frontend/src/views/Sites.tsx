@@ -8,10 +8,7 @@ export const SITES: ListingSpec<SitesPayload, Site> = {
   read: "/workspace/sites",
   rows: (payload) => payload.sites,
   rowKey: (site) => site.name,
-  columns: [
-    { field: "name", label: "site" },
-    { field: "summary", label: "summary" },
-  ],
+  list: { primary: { field: "name" }, meta: [{ field: "summary" }] },
   empty: "No sites are hosted.",
   unavailable: (payload) => (payload.available ? null : "No sites extension is installed."),
 };

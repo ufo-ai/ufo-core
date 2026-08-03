@@ -35,10 +35,9 @@ export const ARTIFACTS: ListingSpec<ArtifactsPayload, Artifact> = {
   paged: true,
   rows: (payload) => payload.artifacts,
   rowKey: (entry) => entry.created_at + "|" + entry.filename,
-  columns: [
-    {
+  list: {
+    primary: {
       field: "filename",
-      label: "file",
       render: (filename, entry, { open }) =>
         entry.url ? (
           <button
@@ -53,11 +52,13 @@ export const ARTIFACTS: ListingSpec<ArtifactsPayload, Artifact> = {
           filename
         ),
     },
-    { field: "subject", label: "subject" },
-    { field: "media_type", label: "type" },
-    { field: "size_bytes", label: "size", render: (bytes) => formatSize(bytes) },
-    { field: "created_at", label: "date", render: (stamp) => day(stamp) },
-  ],
+    meta: [
+      { field: "subject" },
+      { field: "media_type" },
+      { field: "size_bytes", render: (bytes) => formatSize(bytes) },
+    ],
+    when: { field: "created_at", render: (stamp) => day(stamp) },
+  },
   empty: "No shared files yet.",
   detail: (entry, close) => <Viewer entry={entry} onClose={close} />,
 };

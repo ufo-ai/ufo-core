@@ -1,5 +1,6 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
+import { LISTING_CONTROLS } from "@/kernel/listing";
 import type { Placement } from "@/kernel/pager";
 import type { WorkspaceTab } from "@/lib/route";
 import { WORKSPACE_VIEWS } from "@/views/registry";
@@ -10,7 +11,11 @@ export function Workspace({ view }: { view: WorkspaceTab }) {
   const [placed, setPlaced] = useState<Placed>({ view, place: {}, acts: 0 });
   const shown = useRef(view);
   shown.current = view;
-  if (placed.view !== view) setPlaced({ view, place: {}, acts: 0 });
+  useEffect(() => () => LISTING_CONTROLS.clear(), []);
+  if (placed.view !== view) {
+    LISTING_CONTROLS.clear();
+    setPlaced({ view, place: {}, acts: 0 });
+  }
 
   const registered = WORKSPACE_VIEWS[view];
   const key = registered.remountOnPlace

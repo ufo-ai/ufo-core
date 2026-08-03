@@ -91,6 +91,11 @@ export const SOURCES: ListingSpec<SourcesPayload, SourceRow> = {
   read: "/workspace/sources",
   rows,
   rowKey: (row) => row.key,
+  search: (row) => [row.name ?? "", row.backend, row.streams, row.owner].join(" "),
+  chips: [
+    { label: "Private", has: (row) => !row.shared },
+    { label: "Shared", has: (row) => row.shared },
+  ],
   columns: [
     { field: "backend", label: "source" },
     { field: "streams", label: "streams" },
