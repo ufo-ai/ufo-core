@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useRef, useState, type FormEvent, type ReactNode, type RefObject } from "react";
 
 import { CredentialPromptForm } from "@/views/CredentialPrompt";
 import { Button } from "@/components/ui/button";
@@ -16,9 +16,13 @@ export function formatSize(bytes: number): string {
   return bytes + " B";
 }
 
+const PIN_THRESHOLD_PX = 40;
+
 export function Chat({ agent }: { agent: Agent }) {
   const state = useChat(agent.id);
   const log = useRef<HTMLDivElement>(null);
+  const pinned = useRef(true);
+  const composer = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (chatState(agent.id).messages !== null) return;
@@ -47,8 +51,12 @@ export function Chat({ agent }: { agent: Agent }) {
 
   useEffect(() => {
     const pane = log.current;
-    if (pane) pane.scrollTop = pane.scrollHeight;
+    if (pane && pinned.current) pane.scrollTop = pane.scrollHeight;
   }, [state]);
+
+  const repin = () => {
+    pinned.current = true;
+  };
 
   const messages = state.messages;
   const showEmpty = messages !== null && !messages.length && !state.busy && !state.live;
@@ -59,6 +67,12 @@ export function Chat({ agent }: { agent: Agent }) {
     <>
       <div
         ref={log}
+        onScroll={() => {
+          const pane = log.current;
+          if (!pane) return;
+          pinned.current =
+            pane.scrollTop + pane.clientHeight >= pane.scrollHeight - PIN_THRESHOLD_PX;
+        }}
         className="flex flex-1 flex-col gap-md overflow-y-auto p-2xl"
         data-testid="log"
       >
@@ -116,7 +130,15 @@ export function Chat({ agent }: { agent: Agent }) {
           </Handoff>
         ) : null}
         {state.handoffs.question ? (
-          <Question agent={agent} question={state.handoffs.question} />
+          <Question
+            agent={agent}
+            question={state.handoffs.question}
+            held={state.busy || state.messages === null}
+            onAct={() => {
+              repin();
+              composer.current?.focus();
+            }}
+          />
         ) : null}
         {showEmpty ? (
           <div className="m-auto max-w-empty text-center opacity-(--muted-soft)">
@@ -124,7 +146,7 @@ export function Chat({ agent }: { agent: Agent }) {
           </div>
         ) : null}
       </div>
-      <Composer agent={agent} />
+      <Composer agent={agent} input={composer} onSend={repin} />
     </>
   );
 }
@@ -186,7 +208,17 @@ function buttonable(entry: QuestionEntry): boolean {
   );
 }
 
-function Question({ agent, question }: { agent: Agent; question: ChatQuestion }) {
+function Question({
+  agent,
+  question,
+  held,
+  onAct,
+}: {
+  agent: Agent;
+  question: ChatQuestion;
+  held: boolean;
+  onAct: () => void;
+}) {
   const asked: QuestionEntry[] = question.questions ?? [];
   const answered = question.answered ?? [];
   return (
@@ -203,16 +235,18 @@ function Question({ agent, question }: { agent: Agent; question: ChatQuestion })
                     key={option.label}
                     variant="option"
                     title={option.description}
-                    onClick={() =>
-                      answerQuestion(
+                    onClick={() => {
+                      if (held) return;
+                      onAct();
+                      void answerQuestion(
                         agent.id,
                         question.turn_id,
                         index,
                         asked.length === 1
                           ? option.label
                           : option.label + " · " + entry.question,
-                      )
-                    }
+                      );
+                    }}
                   >
                     {option.label}
                   </Button>
@@ -239,11 +273,23 @@ function Question({ agent, question }: { agent: Agent; question: ChatQuestion })
   );
 }
 
-function Composer({ agent }: { agent: Agent }) {
+function Composer({
+  agent,
+  input,
+  onSend,
+}: {
+  agent: Agent;
+  input: RefObject<HTMLInputElement | null>;
+  onSend: () => void;
+}) {
   const state = useChat(agent.id);
   const [text, setText] = useState("");
   const files = useRef<HTMLInputElement>(null);
   const disabled = state.busy || state.messages === null;
+
+  useEffect(() => {
+    input.current?.focus();
+  }, [input]);
 
   function submit(event: FormEvent) {
     event.preventDefault();
@@ -260,6 +306,8 @@ function Composer({ agent }: { agent: Agent }) {
       body = form;
     }
     if (files.current) files.current.value = "";
+    onSend();
+    input.current?.focus();
     sendMessage(agent.id, body, shown);
   }
 
@@ -272,7 +320,7 @@ function Composer({ agent }: { agent: Agent }) {
         <input ref={files} type="file" multiple hidden />+
       </label>
       <input
-        ref={(node) => node?.focus()}
+        ref={input}
         value={text}
         onChange={(event) => setText(event.target.value)}
         autoComplete="off"

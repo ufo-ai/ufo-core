@@ -22,6 +22,11 @@ export function Admin() {
   return (
     <Panel
       state={state}
+      loading={() => (
+        <main className="flex flex-col gap-3xl overflow-y-auto p-2xl">
+          <PanelEmpty>Loading…</PanelEmpty>
+        </main>
+      )}
       failed={(message) => (
         <main className="flex flex-col gap-3xl overflow-y-auto p-2xl">
           <PanelEmpty>{message}</PanelEmpty>

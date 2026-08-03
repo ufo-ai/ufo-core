@@ -245,3 +245,11 @@ test("a read whose body fails mid-stream reports the failure instead of rejectin
     message: "Network error — try again.",
   });
 });
+
+test("a loading panel says so instead of rendering nothing", () => {
+  render(
+    <Panel state={{ phase: "loading" }}>{() => <div>never</div>}</Panel>,
+  );
+  expect(screen.getByText("Loading…")).toBeTruthy();
+  expect(screen.queryByText("never")).toBeNull();
+});

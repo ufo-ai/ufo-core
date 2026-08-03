@@ -33,16 +33,19 @@ export function usePanelRead<T>(path: string | null, reloads: number = 0): Panel
 
 export function Panel<T>({
   state,
+  loading,
   failed,
   empty,
   children,
 }: {
   state: PanelState<T>;
+  loading?: () => ReactNode;
   failed?: (message: string) => ReactNode;
   empty?: (payload: T) => ReactNode;
   children: (payload: T) => ReactNode;
 }) {
-  if (state.phase === "loading") return null;
+  if (state.phase === "loading")
+    return loading ? loading() : <PanelEmpty>Loading…</PanelEmpty>;
   if (state.phase === "failed")
     return failed ? failed(state.message) : <PanelEmpty>{state.message}</PanelEmpty>;
   const nothing = empty?.(state.payload);

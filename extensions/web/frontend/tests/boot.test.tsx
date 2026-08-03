@@ -161,3 +161,21 @@ test("a failed administration read stays inside the scrolling frame the view own
   const message = await screen.findByText("Error 500 — reload to retry.");
   expect(message.closest("main")).not.toBeNull();
 });
+
+test("a boot still reading says Loading… rather than rendering an empty page", () => {
+  vi.stubGlobal("fetch", () => new Promise(() => {}));
+  render(<Portal />);
+
+  expect(screen.getByText("Loading…")).toBeTruthy();
+});
+
+test("the admin loading arm keeps the padded frame its other arms own", async () => {
+  wire({
+    "/api/admin": () => new Promise<Response>(() => {}),
+  });
+  location.hash = "#/admin";
+  render(<App agents={[AGENT]} member={{ ...MEMBER, admin: true }} />);
+
+  const loading = await screen.findByText("Loading…");
+  expect(loading.closest("main")).not.toBeNull();
+});

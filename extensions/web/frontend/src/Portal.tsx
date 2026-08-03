@@ -47,7 +47,8 @@ export function Portal() {
     };
   }, []);
 
-  if (boot.phase === "loading") return null;
+  if (boot.phase === "loading")
+    return <div className="m-auto max-w-empty text-center opacity-(--muted-soft)">Loading…</div>;
   if (boot.phase === "signed-out") return <TokenCard />;
   if (boot.phase === "failed") {
     return (

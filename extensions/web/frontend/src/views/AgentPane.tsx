@@ -42,7 +42,7 @@ export function AgentPane({ agent, tab, tabs, onTab }: AgentPaneProps) {
         ))}
       </div>
       {tab === "chat" ? (
-        <Chat agent={agent} />
+        <Chat key={agent.id} agent={agent} />
       ) : (
         <div className="flex-1 overflow-y-auto p-2xl" data-testid="panel">
           {tab === "overview" ? <Overview agent={agent} /> : null}

@@ -4,7 +4,7 @@ import { beforeEach, expect, test } from "vitest";
 
 import { App } from "@/App";
 
-import { AGENT, MEMBER, StreamFake, TURN_ID, json, useStreamFake, wire } from "./harness";
+import { AGENT, MEMBER, SECOND, StreamFake, TURN_ID, json, useStreamFake, wire } from "./harness";
 
 beforeEach(() => {
   useStreamFake();
@@ -164,4 +164,219 @@ test("a credential handoff stores a value and drops the prompt it answered", asy
 
   expect(await screen.findByText("Stored notion_token.")).toBeTruthy();
   expect(screen.queryByPlaceholderText("notion_token")).toBeNull();
+});
+
+test("a streamed chunk never steals focus from where the member put it", async () => {
+  wire({ ...transcript(), "/chat": () => json({ turn_id: TURN_ID }) });
+  open();
+  await screen.findByText("No conversation with assistant yet.");
+  await userEvent.type(screen.getByLabelText("Message the agent"), "hi");
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+
+  const elsewhere = screen.getByRole("button", { name: /assistant/ });
+  elsewhere.focus();
+  StreamFake.last().emit("message", { text: "chunk" });
+  await screen.findByText("chunk");
+  expect(document.activeElement).toBe(elsewhere);
+});
+
+test("streaming keeps the log pinned at the bottom but never yanks a reader back down", async () => {
+  const { fireEvent } = await import("@testing-library/react");
+  wire({ ...transcript(), "/chat": () => json({ turn_id: TURN_ID }) });
+  open();
+  await screen.findByText("No conversation with assistant yet.");
+  await userEvent.type(screen.getByLabelText("Message the agent"), "hi");
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+
+  const log = screen.getByTestId("log");
+  Object.defineProperty(log, "scrollHeight", { configurable: true, value: 1000 });
+  Object.defineProperty(log, "clientHeight", { configurable: true, value: 300 });
+
+  log.scrollTop = 100;
+  fireEvent.scroll(log);
+  StreamFake.last().emit("message", { text: "while reading" });
+  await screen.findByText("while reading");
+  expect(log.scrollTop).toBe(100);
+
+  log.scrollTop = 700;
+  fireEvent.scroll(log);
+  StreamFake.last().emit("message", { text: " more" });
+  await screen.findByText(/more/);
+  expect(log.scrollTop).toBe(1000);
+});
+
+test("sending while scrolled up re-pins the log to the bottom", async () => {
+  const { fireEvent } = await import("@testing-library/react");
+  wire({ ...transcript(), "/chat": () => json({ turn_id: TURN_ID }) });
+  open();
+  await screen.findByText("No conversation with assistant yet.");
+
+  const log = screen.getByTestId("log");
+  Object.defineProperty(log, "scrollHeight", { configurable: true, value: 1000 });
+  Object.defineProperty(log, "clientHeight", { configurable: true, value: 300 });
+  log.scrollTop = 100;
+  fireEvent.scroll(log);
+
+  await userEvent.type(screen.getByLabelText("Message the agent"), "back to now");
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
+  await screen.findByText("back to now");
+  expect(log.scrollTop).toBe(1000);
+});
+
+test("answering a question while scrolled up re-pins the log to the bottom", async () => {
+  const { fireEvent } = await import("@testing-library/react");
+  wire({
+    ...transcript({
+      messages: [{ role: "assistant", text: "asking" }],
+      question: {
+        turn_id: TURN_ID,
+        title: "Pick one",
+        questions: [{ question: "Which?", options: [{ label: "left" }, { label: "right" }] }],
+      },
+    }),
+    "/chat": () => json({ turn_id: "44444444-4444-4444-8444-444444444444", body: "left" }),
+  });
+  open();
+  await screen.findByText("asking");
+
+  const log = screen.getByTestId("log");
+  Object.defineProperty(log, "scrollHeight", { configurable: true, value: 1000 });
+  Object.defineProperty(log, "clientHeight", { configurable: true, value: 300 });
+  log.scrollTop = 100;
+  fireEvent.scroll(log);
+
+  await userEvent.click(screen.getByRole("button", { name: "left" }));
+  await screen.findByText("left");
+  expect(log.scrollTop).toBe(1000);
+});
+
+test("switching agents remounts the log so scroll state never leaks across", async () => {
+  const { fireEvent } = await import("@testing-library/react");
+  wire({ ...transcript(), "/chat": () => json({ turn_id: TURN_ID }) });
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} />);
+  await screen.findByText("No conversation with assistant yet.");
+
+  const first = screen.getByTestId("log");
+  Object.defineProperty(first, "scrollHeight", { configurable: true, value: 1000 });
+  Object.defineProperty(first, "clientHeight", { configurable: true, value: 300 });
+  first.scrollTop = 100;
+  fireEvent.scroll(first);
+
+  await userEvent.click(screen.getByRole("button", { name: /second/ }));
+  await screen.findByText("No conversation with second yet.");
+  expect(document.activeElement).toBe(screen.getByLabelText("Message the agent"));
+  const fresh = screen.getByTestId("log");
+  expect(fresh).not.toBe(first);
+
+  Object.defineProperty(fresh, "scrollHeight", { configurable: true, value: 1000 });
+  Object.defineProperty(fresh, "clientHeight", { configurable: true, value: 300 });
+  await userEvent.type(screen.getByLabelText("Message the agent"), "hello there");
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
+  await screen.findByText("hello there");
+  expect(fresh.scrollTop).toBe(1000);
+});
+
+test("the log opens pinned: loading a transcript lands at the bottom untouched", async () => {
+  let release: (value: Response) => void = () => {};
+  wire({
+    "/transcript": () => new Promise<Response>((resolve) => (release = resolve)),
+    "/chat": () => json({ turn_id: TURN_ID }),
+  });
+  open();
+
+  const log = screen.getByTestId("log");
+  Object.defineProperty(log, "scrollHeight", { configurable: true, value: 1000 });
+  Object.defineProperty(log, "clientHeight", { configurable: true, value: 300 });
+
+  release(json({ messages: [{ role: "assistant", text: "history" }] }));
+  await screen.findByText("history");
+  expect(log.scrollTop).toBe(1000);
+});
+
+test("a reader inside the tolerance band still counts as at the bottom", async () => {
+  const { fireEvent } = await import("@testing-library/react");
+  wire({ ...transcript(), "/chat": () => json({ turn_id: TURN_ID }) });
+  open();
+  await screen.findByText("No conversation with assistant yet.");
+  await userEvent.type(screen.getByLabelText("Message the agent"), "hi");
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+
+  const log = screen.getByTestId("log");
+  Object.defineProperty(log, "scrollHeight", { configurable: true, value: 1000 });
+  Object.defineProperty(log, "clientHeight", { configurable: true, value: 300 });
+  log.scrollTop = 690;
+  fireEvent.scroll(log);
+
+  StreamFake.last().emit("message", { text: "nudged" });
+  await screen.findByText("nudged");
+  expect(log.scrollTop).toBe(1000);
+});
+
+test("sending returns focus to the composer instead of stranding it on the page", async () => {
+  wire({ ...transcript(), "/chat": () => json({ turn_id: TURN_ID }) });
+  open();
+  await screen.findByText("No conversation with assistant yet.");
+  const input = screen.getByLabelText("Message the agent");
+  await userEvent.type(input, "hi");
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+  expect(document.activeElement).toBe(input);
+});
+
+test("answering a question returns focus to the composer", async () => {
+  wire({
+    ...transcript({
+      messages: [{ role: "assistant", text: "asking" }],
+      question: {
+        turn_id: TURN_ID,
+        title: "Pick one",
+        questions: [{ question: "Which?", options: [{ label: "left" }, { label: "right" }] }],
+      },
+    }),
+    "/chat": () => json({ turn_id: "44444444-4444-4444-8444-444444444444", body: "left" }),
+  });
+  open();
+  await userEvent.click(await screen.findByRole("button", { name: "left" }));
+  await screen.findByText("left");
+  expect(document.activeElement).toBe(screen.getByLabelText("Message the agent"));
+});
+
+test("a second answer clicked mid-stream neither posts nor yanks the reader", async () => {
+  const { fireEvent } = await import("@testing-library/react");
+  const posts: string[] = [];
+  wire({
+    ...transcript({
+      messages: [{ role: "assistant", text: "asking" }],
+      question: {
+        turn_id: TURN_ID,
+        title: "Two things",
+        questions: [
+          { question: "First?", options: [{ label: "alpha" }, { label: "beta" }] },
+          { question: "Second?", options: [{ label: "gamma" }, { label: "delta" }] },
+        ],
+      },
+    }),
+    "/chat": (url) => {
+      posts.push(url);
+      return json({ turn_id: "44444444-4444-4444-8444-444444444444", body: "alpha" });
+    },
+  });
+  open();
+  await userEvent.click(await screen.findByRole("button", { name: "alpha" }));
+  await waitFor(() => expect(posts.length).toBe(1));
+
+  const log = screen.getByTestId("log");
+  Object.defineProperty(log, "scrollHeight", { configurable: true, value: 1000 });
+  Object.defineProperty(log, "clientHeight", { configurable: true, value: 300 });
+  log.scrollTop = 100;
+  fireEvent.scroll(log);
+
+  await userEvent.click(screen.getByRole("button", { name: "gamma" }));
+  expect(posts.length).toBe(1);
+  StreamFake.last().emit("message", { text: "still streaming" });
+  await screen.findByText(/still streaming/);
+  expect(log.scrollTop).toBe(100);
 });
