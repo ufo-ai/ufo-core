@@ -380,3 +380,33 @@ test("a second answer clicked mid-stream neither posts nor yanks the reader", as
   await screen.findByText(/still streaming/);
   expect(log.scrollTop).toBe(100);
 });
+
+test("agent markdown renders as elements while the member's text stays literal", async () => {
+  wire({ ...transcript(), "/chat": () => json({ turn_id: TURN_ID }) });
+  open();
+  await screen.findByText("No conversation with assistant yet.");
+  await userEvent.type(screen.getByLabelText("Message the agent"), "**hi**");
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+
+  expect(screen.getByText("**hi**")).toBeTruthy();
+  StreamFake.last().emit("message", { text: "see [docs][ref]\n\n" });
+  StreamFake.last().emit("message", { text: "**mid**" });
+  expect((await screen.findByText("mid")).tagName).toBe("STRONG");
+  StreamFake.last().emit("message", { text: "\n\n**bold**\n\n[ref]: https://example.com/d\n" });
+  StreamFake.last().emit("terminal", {
+    status: "done",
+    model: "opus",
+    tokens: 1,
+    cost_micro_usd: 0,
+  });
+
+  expect((await screen.findByText("bold")).tagName).toBe("STRONG");
+  const agentSide = screen.getByText("bold").closest("[data-role=agent]")!;
+  expect(agentSide.className).not.toContain("whitespace-pre-wrap");
+  const mineSide = screen.getByText("**hi**").closest("[data-role=me]")!;
+  expect(mineSide.className).toContain("whitespace-pre-wrap");
+  const link = await screen.findByRole("link", { name: "docs" });
+  expect(link.getAttribute("href")).toBe("https://example.com/d");
+  expect(screen.getByText("**hi**").textContent).toBe("**hi**");
+});

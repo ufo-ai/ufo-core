@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { getJson } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { chatState, updateChat, useChat, type Bubble, type ToolEvent } from "@/lib/chatStore";
+import { Markdown, StreamingBody } from "@/lib/markdown";
 import { answerQuestion, eventLabel, sendMessage } from "@/lib/turnStream";
 import type { Agent, ChatFile, ChatQuestion, QuestionEntry, Transcript } from "@/lib/types";
 
@@ -81,7 +82,7 @@ export function Chat({ agent }: { agent: Agent }) {
             <Meta key={index}>{message.text}</Meta>
           ) : (
             <Speech key={index} mine={message.role === "user"}>
-              {message.text}
+              {message.role === "user" ? message.text : <Markdown text={message.text} />}
               {message.events ? <ToolFold events={message.events} /> : null}
               {message.files ? <Files files={message.files} /> : null}
               {message.connectUrl ? <ConnectLink url={message.connectUrl} /> : null}
@@ -91,7 +92,7 @@ export function Chat({ agent }: { agent: Agent }) {
         )}
         {state.live ? (
           <Speech mine={false} entering>
-            {state.live.text}
+            <StreamingBody text={state.live.text} />
             {state.live.files ? <Files files={state.live.files} /> : null}
             {state.live.connectUrl ? <ConnectLink url={state.live.connectUrl} /> : null}
             {state.live.activity ? <Working>{state.live.activity}</Working> : null}
@@ -167,7 +168,7 @@ function Speech({
         "break-words [&_a]:text-link",
         mine
           ? "max-w-bubble self-end whitespace-pre-wrap rounded-bubble bg-fill px-lg py-sm"
-          : "w-full max-w-bubble self-start whitespace-pre-wrap text-body leading-reading",
+          : "w-full max-w-bubble self-start text-body leading-reading",
         entering && "animate-appear",
       )}
       data-role={mine ? "me" : "agent"}

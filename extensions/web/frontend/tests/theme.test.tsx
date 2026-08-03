@@ -66,6 +66,7 @@ test("every colour the portal paints resolves through the system-colour tokens",
     "--color-ink": "CanvasText",
     "--color-field": "Field",
     "--color-field-ink": "FieldText",
+    "--color-link": "LinkText",
   };
   for (const [token, system] of Object.entries(basis)) {
     expect(new RegExp(`${token}:\\s*${system}\\b`).test(css)).toBe(true);

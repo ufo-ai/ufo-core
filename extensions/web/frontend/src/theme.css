@@ -12,6 +12,8 @@
   --color-edge-control: color-mix(in srgb, CanvasText 25%, transparent);
   --color-edge-control-strong: color-mix(in srgb, CanvasText 35%, transparent);
 
+  --color-link: LinkText;
+
   --color-fill-subtle: color-mix(in srgb, CanvasText 6%, transparent);
   --color-fill-hover: color-mix(in srgb, CanvasText 8%, transparent);
   --color-fill: color-mix(in srgb, CanvasText 12%, transparent);
