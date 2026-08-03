@@ -363,6 +363,25 @@ def _facets(reported: dict[str, object]) -> set[str]:
     return named | {"host"} if reported.get("host_name") else named
 
 
+def test_platform_addons_wait_for_the_load_balancer_webhook() -> None:
+    source = _code((ROOT / "infra" / "modules" / "platform" / "addons.tf").read_text())
+    controller = _terraform_block(source, "resource", "aws_load_balancer_controller")
+    assert "wait             = true" in controller
+    for name in ("cert_manager", "external_secrets", "external_dns"):
+        addon = _terraform_block(source, "resource", name)
+        assert "depends_on = [helm_release.aws_load_balancer_controller]" in addon
+    external_dns = _terraform_block(source, "resource", "external_dns")
+    assert "wait             = false" in external_dns
+    assert "atomic" not in external_dns
+
+
+def test_webhook_addons_install_atomically() -> None:
+    source = _code((ROOT / "infra" / "modules" / "platform" / "addons.tf").read_text())
+    for name in ("aws_load_balancer_controller", "cert_manager", "external_secrets"):
+        addon = _terraform_block(source, "resource", name)
+        assert "atomic           = true" in addon
+
+
 @pytest.mark.parametrize("environment", DEPLOY_ENVIRONMENTS)
 def test_database_storage_monitor_tracks_allocation(environment: str) -> None:
     assert _monitor_attribute("db_storage_low", "query", environment) == STORAGE_QUERY

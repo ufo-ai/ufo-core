@@ -7,6 +7,8 @@ resource "helm_release" "aws_load_balancer_controller" {
   version          = "1.10.1"
   namespace        = "kube-system"
   create_namespace = false
+  wait             = true
+  atomic           = true
 
   set {
     name  = "clusterName"
@@ -39,6 +41,7 @@ resource "helm_release" "cert_manager" {
   version          = "v1.16.2"
   namespace        = "cert-manager"
   create_namespace = true
+  atomic           = true
 
   set {
     name  = "crds.enabled"
@@ -49,7 +52,7 @@ resource "helm_release" "cert_manager" {
     value = "cert-manager"
   }
 
-  depends_on = [module.eks]
+  depends_on = [helm_release.aws_load_balancer_controller]
 }
 
 # The env's ClusterIssuer (ufo.tf) solves DNS-01 through this token (same token external-dns uses) —
@@ -71,6 +74,7 @@ resource "helm_release" "external_secrets" {
   version          = "0.10.7"
   namespace        = "external-secrets"
   create_namespace = true
+  atomic           = true
 
   set {
     name  = "installCRDs"
@@ -85,7 +89,7 @@ resource "helm_release" "external_secrets" {
     value = module.irsa_external_secrets.iam_role_arn
   }
 
-  depends_on = [module.eks]
+  depends_on = [helm_release.aws_load_balancer_controller]
 }
 
 # external-dns publishes records into the authoritative Cloudflare zone for the domain — Cloudflare
@@ -124,7 +128,7 @@ resource "helm_release" "external_dns" {
     }]
   })]
 
-  depends_on = [module.eks]
+  depends_on = [helm_release.aws_load_balancer_controller]
 }
 
 resource "kubernetes_secret" "cloudflare_api_token" {
