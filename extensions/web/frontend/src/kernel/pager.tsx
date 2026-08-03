@@ -21,7 +21,7 @@ export function Pager({
             key={label}
             type="button"
             onClick={() =>
-              onPlace({ after: cursor })
+              onPlace({ after: cursor, open: undefined })
             }
             className="border border-edge-control rounded-control bg-transparent px-sm py-hair text-inherit"
           >

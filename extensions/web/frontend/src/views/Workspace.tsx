@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type { Placement } from "@/kernel/pager";
 import type { PlaceStep } from "@/lib/route";
@@ -18,8 +18,6 @@ export function Workspace({
   onPlace: (view: WorkspaceTab, place: WorkspacePlace, step: PlaceStep) => void;
 }) {
   const [outcome, setOutcome] = useState<Outcome>({ view, notice: undefined, acts: 0 });
-  const shown = useRef(view);
-  shown.current = view;
   if (outcome.view !== view) setOutcome({ view, notice: undefined, acts: 0 });
 
   const registered = WORKSPACE_VIEWS[view];
@@ -31,13 +29,24 @@ export function Workspace({
   const live = useRef(place);
   live.current = place;
   const pushedOpen = useRef(false);
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
+  const epoch = useRef(0);
+  const seen = useRef(view);
+  if (seen.current !== view) {
+    seen.current = view;
+    epoch.current += 1;
+    pushedOpen.current = false;
+  }
+  const issued = epoch.current;
 
-  /** A view names only the keys it moves; the rest ride the live place, so a placement that
-   *  resolves after the member typed does not overwrite what they typed. Opening a row, paging,
-   *  and narrowing a kind are places to come back from; closing unwinds the entry opening
-   *  pushed, and a filter never becomes an entry at all. */
   const record = (patch: Placement) => {
-    if (shown.current !== view) return;
+    if (!alive.current || issued !== epoch.current) return;
     if (patch.notice !== undefined) {
       setOutcome((prev) => ({ view, notice: patch.notice, acts: prev.acts + 1 }));
     } else if (outcome.notice !== undefined) {
@@ -51,15 +60,15 @@ export function Workspace({
       chip: "chip" in patch ? patch.chip : held.chip,
       open: "open" in patch ? patch.open : held.open,
     };
-    const opening = next.open !== undefined && next.open !== held.open;
-    const closing = next.open === undefined && held.open !== undefined;
-    const stepped =
-      opening ||
+    const moved =
       (next.after !== undefined && next.after !== held.after) ||
       (next.kind !== undefined && next.kind !== held.kind);
+    const opened = next.open !== undefined && held.open === undefined;
+    const closed = !moved && next.open === undefined && held.open !== undefined;
     const step: PlaceStep =
-      closing && pushedOpen.current ? "back" : stepped ? "push" : "replace";
-    pushedOpen.current = opening;
+      closed && pushedOpen.current ? "back" : opened || moved ? "push" : "replace";
+    if (opened) pushedOpen.current = true;
+    if (closed || moved) pushedOpen.current = false;
     onPlace(view, next, step);
   };
 

@@ -73,6 +73,20 @@ export function Memory({
       <Panel
         state={state}
         empty={(payload) => (payload.available ? null : "This deploy has no memory extension.")}
+        failed={
+          place.after
+            ? (message) => (
+                <>
+                  <PanelEmpty>{message}</PanelEmpty>
+                  <div className="mb-lg flex gap-xs">
+                    <Button variant="row" onClick={() => onPlace({ after: undefined })}>
+                      First page
+                    </Button>
+                  </div>
+                </>
+              )
+            : undefined
+        }
       >
         {(payload) => (
           <>

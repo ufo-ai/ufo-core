@@ -124,7 +124,11 @@ export function Listing<Payload, Row>({
               ))
             : null}
           {state.phase === "failed" && place.after ? (
-            <Button variant="row" className="m-0" onClick={() => onPlace({ after: undefined })}>
+            <Button
+              variant="row"
+              className="m-0"
+              onClick={() => onPlace({ after: undefined, open: undefined })}
+            >
               First page
             </Button>
           ) : null}

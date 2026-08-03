@@ -210,6 +210,108 @@ test("a cursor the surface refuses leaves a way back to the first page", async (
   expect(location.hash).toBe("#/workspace/artifacts");
 });
 
+test("a second row opened behind the sheet still closes to the listing", async () => {
+  location.hash = "#/agents";
+  location.hash = workspaceHash("artifacts", { after: "c-older" });
+  serve();
+  render(<App agents={[AGENT]} member={MEMBER} />);
+
+  await userEvent.click(await screen.findByRole("button", { name: "notes.txt" }));
+  expect(await screen.findByText("file body")).toBeTruthy();
+  await userEvent.click(screen.getByRole("button", { name: "notes.txt" }));
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
+
+  await waitFor(() => expect(location.hash).not.toContain("open="));
+  expect(screen.queryByText("file body")).toBeNull();
+  expect(location.hash).toContain("after=c-older");
+
+  history.back();
+  await waitFor(() => expect(location.hash).toBe("#/agents"));
+});
+
+test("paging away from an open row carries no dead open key", async () => {
+  location.hash = workspaceHash("artifacts");
+  serve();
+  render(<App agents={[AGENT]} member={MEMBER} />);
+
+  await userEvent.click(await screen.findByRole("button", { name: "report.txt" }));
+  expect(await screen.findByText("file body")).toBeTruthy();
+  await userEvent.click(screen.getByRole("button", { name: "Older" }));
+
+  expect(await screen.findByRole("button", { name: "notes.txt" })).toBeTruthy();
+  expect(location.hash).not.toContain("open=");
+  expect(screen.queryByText("That item is not on this page.")).toBeNull();
+});
+
+test("a placement from a pane the member already left never writes its dead place back", async () => {
+  let release: ((value: Response) => void) | null = null;
+  location.hash = workspaceHash("sources", { q: "rss" });
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string) => {
+      if (url.includes("/intents")) {
+        return new Promise<Response>((resolve) => {
+          release = resolve;
+        });
+      }
+      if (url.includes("/workspace/sources")) {
+        return json({
+          sources: [
+            {
+              name: "rss-feed",
+              backend: "rss",
+              stream: "feed",
+              account_id: null,
+              base_url: "https://example.com/feed",
+              owner_email: null,
+              shared: true,
+              consecutive_errors: 0,
+              next_sync_at: "2026-08-01T06:00:00",
+            },
+          ],
+        });
+      }
+      if (url.includes("/api/chats")) return json({ chats: [] });
+      if (url.includes("/transcript")) return json({ messages: [] });
+      return json({ members: [], can_add: false, domain: null });
+    }),
+  );
+  render(<App agents={[AGENT]} member={MEMBER} />);
+
+  await userEvent.click(await screen.findByRole("button", { name: "Resync" }));
+  await waitFor(() => expect(release).not.toBeNull());
+  await userEvent.click(screen.getByRole("tab", { name: "Team" }));
+  await userEvent.click(screen.getByRole("tab", { name: "Sources" }));
+  await waitFor(() => expect(location.hash).toBe("#/workspace/sources"));
+
+  release!(json({ applied: true, message: "Resync queued." }));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(location.hash).toBe("#/workspace/sources");
+  expect(((await screen.findByRole("searchbox")) as HTMLInputElement).value).toBe("");
+  expect(screen.queryByText("Resync queued.")).toBeNull();
+});
+
+test("a refused memory cursor leaves a way back to the first page", async () => {
+  location.hash = workspaceHash("memory", { after: "not-a-cursor" });
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string) => {
+      if (url.includes("after=")) return new Response("malformed listing cursor", { status: 400 });
+      if (url.includes("/workspace/memory")) {
+        return json({ available: true, kinds: ["fact"], matches: [] });
+      }
+      if (url.includes("/api/chats")) return json({ chats: [] });
+      return json({ messages: [] });
+    }),
+  );
+  render(<App agents={[AGENT]} member={MEMBER} />);
+
+  await userEvent.click(await screen.findByRole("button", { name: "First page" }));
+
+  await waitFor(() => expect(location.hash).toBe("#/workspace/memory"));
+  expect(await screen.findByText("No memories yet.")).toBeTruthy();
+});
+
 test("a hash naming a filter or a memory class that does not exist says so", async () => {
   location.hash = workspaceHash("sources", { chip: "Nonexistent" });
   serve();
