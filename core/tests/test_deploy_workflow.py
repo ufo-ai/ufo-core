@@ -2395,7 +2395,9 @@ def test_production_deploy_applies_guarded_foundation_then_runtime() -> None:
         "aws eks update-kubeconfig \\\n"
         '  --region "$AWS_REGION" \\\n'
         '  --name "$(terraform -chdir="$TF_DIR" output -raw cluster_name)"\n'
-        'NAMESPACE="$(terraform -chdir="$TF_DIR" output -raw system_namespace)"\n'
+        'NAMESPACE="$(terraform -chdir="$TF_DIR" show -json '
+        '"$RUNNER_TEMP/production.tfplan" \\\n'
+        "  | jq -er '.planned_values.outputs.system_namespace.value')\"\n"
         "python infra/production_secret_sync.py \\\n"
         '  "$NAMESPACE" "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"\n'
     )
@@ -2425,6 +2427,59 @@ def test_production_deploy_applies_guarded_foundation_then_runtime() -> None:
         rollout,
     )
     assert all(steps.index(before) < steps.index(after) for before, after in pairwise(order))
+
+
+def test_production_refresh_reads_the_planned_namespace(tmp_path: Path) -> None:
+    script = _step("deploy", "Refresh production runtime secrets", "deploy-production.yml")["run"]
+    terraform = tmp_path / "terraform"
+    terraform.write_text(
+        "#!/bin/sh\n"
+        'printf \'%s\\n\' "$*" >> "$TERRAFORM_CALLS"\n'
+        'case "$*" in\n'
+        "  *'output -raw cluster_name') printf 'prod-cluster\\n' ;;\n"
+        "  *'show -json '*production.tfplan) "
+        'printf \'{"planned_values":{"outputs":{"system_namespace":'
+        '{"value":"ufo-system"}}}}\' ;;\n'
+        "  *) exit 42 ;;\n"
+        "esac\n"
+    )
+    terraform.chmod(0o755)
+    aws = tmp_path / "aws"
+    aws.write_text('#!/bin/sh\nprintf \'%s\\n\' "$*" > "$AWS_CALL"\n')
+    aws.chmod(0o755)
+    python = tmp_path / "python"
+    python.write_text('#!/bin/sh\nprintf \'%s\\n\' "$*" > "$PYTHON_CALL"\n')
+    python.chmod(0o755)
+    terraform_calls = tmp_path / "terraform-calls"
+    aws_call = tmp_path / "aws-call"
+    python_call = tmp_path / "python-call"
+
+    subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", script],
+        check=True,
+        env={
+            "AWS_CALL": str(aws_call),
+            "AWS_REGION": "us-east-1",
+            "GITHUB_RUN_ATTEMPT": "2",
+            "GITHUB_RUN_ID": "30774596746",
+            "PATH": f"{tmp_path}:{os.environ['PATH']}",
+            "PYTHON_CALL": str(python_call),
+            "RUNNER_TEMP": str(tmp_path),
+            "TERRAFORM_CALLS": str(terraform_calls),
+            "TF_DIR": "infra/envs/prod",
+        },
+    )
+
+    assert terraform_calls.read_text().splitlines() == [
+        "-chdir=infra/envs/prod output -raw cluster_name",
+        f"-chdir=infra/envs/prod show -json {tmp_path}/production.tfplan",
+    ]
+    assert aws_call.read_text().strip() == (
+        "eks update-kubeconfig --region us-east-1 --name prod-cluster"
+    )
+    assert python_call.read_text().strip() == (
+        "infra/production_secret_sync.py ufo-system 30774596746-2"
+    )
 
 
 @pytest.mark.parametrize(
