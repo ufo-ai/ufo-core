@@ -981,10 +981,17 @@ class SurfaceContext:
         return None if found is None else found.id
 
     async def conversation_for(
-        self, queue_key: str, audience: Audience, agent_id: UUID | None = None
+        self,
+        queue_key: str,
+        audience: Audience,
+        agent_id: UUID | None = None,
+        conversation_id: UUID | None = None,
     ) -> UUID:
         """Get-or-create the conversation this surface keys by `queue_key`, outside any admission
-        transaction; a lost creation race re-reads the surviving row. A new conversation binds
+        transaction; a lost creation race re-reads the surviving row. A caller may name the new
+        conversation's id so state it keys by that id can be written before the conversation
+        exists — a crash between the two leaves inert keyed state, never a conversation missing
+        its state; an existing conversation keeps its own id regardless. A new conversation binds
         permanently to the surface's agent — an explicit `agent_id` when the surface's member
         picks the agent (the web portal, after its own audience check), else the surface's
         installation binding when one exists, else the workspace's main agent — and admission
@@ -1013,7 +1020,7 @@ class SurfaceContext:
                     )
                 return await self.conversation_for(queue_key, audience)
             return found.id
-        conversation_id = uuid4()
+        conversation_id = conversation_id or uuid4()
         if agent_id is None:
             agent_id = await self._surface_agent()
         else:
@@ -1794,14 +1801,22 @@ class SurfaceContext:
         )
 
     async def list_agent_conversations(
-        self, agent_id: UUID, member_id: UUID, *, admin: bool, limit: int
+        self,
+        agent_id: UUID,
+        member_id: UUID,
+        *,
+        admin: bool,
+        limit: int,
+        surface: str | None = None,
     ) -> tuple[ListedConversation, ...]:
         """One agent's conversations as the portal lists them, newest activity first and bounded:
         the member's own plus the workspace-shared ones, every one of the agent's for an admin.
-        Each entry carries `readable` (content this viewer reads now) and `disclosable` (an admin
-        may acknowledge and read another member's private one — `record_transcript_access` is the
-        act). Subagent conversations are absent: they are the agent's own work on a request, listed
-        nested under the turn that spawned them, never beside it."""
+        `surface` narrows to one surface's conversations in the query, before the bound, so a
+        member's rows are never displaced by another surface's newer traffic under the cap. Each
+        entry carries `readable` (content this viewer reads now) and `disclosable` (an admin may
+        acknowledge and read another member's private one — `record_transcript_access` is the
+        act). Subagent conversations are absent: they are the agent's own work on a request,
+        listed nested under the turn that spawned them, never beside it."""
         activity = (
             sa.select(
                 tables.turn.c.conversation_id,
@@ -1838,6 +1853,8 @@ class SurfaceContext:
             )
             .limit(limit)
         )
+        if surface is not None:
+            query = query.where(tables.conversation.c.surface == surface)
         if not admin:
             query = query.where(
                 tables.conversation.c.audience.in_(_readable_audience_values(member_id))

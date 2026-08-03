@@ -396,7 +396,7 @@ allocation, delivery registration, and enqueue recovery remain one implementatio
 | Surface | Home | Delivery | Identity | Conversation key |
 |---|---|---|---|---|
 | CLI | core | live (hub tail) | member token | session (private) |
-| Web | `extensions/web` | live (hub tail) | web session → member (adopted from CLI) | agent/email (private; one chat conversation per member per selected agent) + intent/agent/email (the member's prepared-intent lane to that agent) |
+| Web | `extensions/web` | live (hub tail) | web session → member (adopted from CLI) | agent/email (private; the member's default conversation with that agent, opened on first message — the shipped page's one lane) + agent/email/hex (private; a further conversation opened behind `conversation=new`) + intent/agent/email (the member's prepared-intent lane to that agent) |
 | Slackbot | `extensions/slack` | durable (writeback) | Slack user → member (linked; a Slack-confirmed same-domain email joins as new) | channel:thread_ts; public = shared, private channel/MPIM = room, DM = member, Slack Connect = foreign |
 | Debug | `extensions/debugger` | live (hub tail) | gateway bearer whose email domain is `OPERATOR_EMAIL_DOMAIN`; `?ws=` re-scopes to any workspace | — (read-only; admits nothing) |
 | Memory explorer | `extensions/memory` | live (page + JSON read) | gateway bearer whose email domain is `OPERATOR_EMAIL_DOMAIN`; `?ws=` re-scopes to any workspace | — (read-only; admits nothing) |
@@ -420,7 +420,9 @@ composition a turn loads), its connector accounts, its conversations, its config
 (prompt, spec, bound surfaces, the deploy's ceilings — answering the agent's whole web audience,
 with the grant list inside it the admin's), and its rolling-window spend beside its agent-scoped
 caps — the ledger spans every member's turns, so spend answers an admin or a member whose
-explicit grant holds the agent, never the main-agent default alone. The conversations view lists
+explicit grant holds the agent, never the main-agent default alone. Beside the per-agent reads,
+`api/chats` lists the member's own web conversations across their audience agents — the rail's
+projection, each row titled from its first message. The conversations view lists
 the member's own plus the workspace-shared ones and opens each as its turns, the turns those
 spawned nested beneath them (a subagent runs in its own conversation carrying the parent's
 audience, in the spawning turn's sandbox), and the live workspace files; an admin lists every

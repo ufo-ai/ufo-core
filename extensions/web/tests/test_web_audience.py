@@ -17,7 +17,7 @@ from ufo_ext_web.audience import (
     web_extension,
 )
 from ufo_ext_web.manifest import NAME
-from ufo_ext_web.surface import SURFACE_WEB
+from ufo_ext_web.surface import SURFACE_WEB, _open_conversation
 from ufo_testsupport.surfaces import EMPTY_SKILL_REGISTRY, no_user_skills
 
 from ufo.blob import FilesystemBlobStore
@@ -372,6 +372,30 @@ def test_the_disclosure_tool_promises_a_record_it_does_not_promise_a_reader() ->
     assert "Records who read it, whose it was, and when." in described
     assert "read in the portal, not here" in described
     assert "can read that record" not in described
+
+
+async def test_open_conversation_lands_a_lost_race_on_the_winner_and_its_row(
+    db: None, tmp_path
+) -> None:
+    """Two first messages racing one queue key converge: the loser's pre-written chat row is
+    deleted, the winner's conversation and row stand, and the loser's caller receives the
+    winner's identity and title."""
+    workspace_id, main_agent, _second = await _seed()
+    member_id = await _member(workspace_id, MEMBER_EMAIL)
+    with ws(workspace_id):
+        surface = _surface(workspace_id, tmp_path)
+        store = context_for(NAME, frozenset()).store
+        key = f"{main_agent}/{MEMBER_EMAIL}"
+        winner, winner_title = await _open_conversation(
+            surface, store, main_agent, member_id, MEMBER_EMAIL, key, "first words", ()
+        )
+        loser, loser_title = await _open_conversation(
+            surface, store, main_agent, member_id, MEMBER_EMAIL, key, "second words", ()
+        )
+        assert (loser, loser_title) == (winner, winner_title)
+        assert winner_title == "first words"
+        rows = await store.list("chat/")
+        assert [key for key, _ in rows] == [f"chat/{winner}"]
 
 
 async def test_every_web_access_tool_takes_a_required_user_description() -> None:

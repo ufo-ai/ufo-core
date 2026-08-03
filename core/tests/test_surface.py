@@ -417,6 +417,24 @@ async def test_writeback_due_index_is_installed(db: None) -> None:
     assert "claimed" in predicate
 
 
+async def test_conversation_for_takes_a_caller_named_id_only_at_creation(
+    db: None, tmp_path
+) -> None:
+    """A caller may name the new conversation's id, so state keyed by that id can precede the
+    conversation; an existing conversation keeps its own id, so a lost creation race lands on the
+    survivor."""
+    workspace_id, _, _member_id = await _seed(member_email="bee@example.com")
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+    named = uuid4()
+    assert await context.conversation_for("C1:1.0", SHARED_AUDIENCE, conversation_id=named) == (
+        named
+    )
+    other = uuid4()
+    assert await context.conversation_for("C1:1.0", SHARED_AUDIENCE, conversation_id=other) == (
+        named
+    )
+
+
 async def test_admit_queues_a_turn_and_registers_a_writeback(db: None, tmp_path) -> None:
     workspace_id, _, member_id = await _seed(member_email="bee@example.com")
     dbos = StubDbos()

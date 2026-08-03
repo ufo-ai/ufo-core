@@ -1,10 +1,11 @@
 """The web portal on the core surface seam, in its live mode: the authenticated shell around the
 member's agents — the page and the one POST that opens its session, per-agent chat with
-cookie-authenticated turn admission and an SSE tail of each turn's live frames, read projections
-(the agent index, per-agent transcripts, overviews, scheduled tasks, skills, per-agent usage,
-and connections) beside the workspace-level views every member holds — sources, credential
-slots, memory (latest first, searched across every reachable agent), shared artifacts, hosted
-sites, and usage (their own window, plus the workspace rollup for an admin) — plus the
+cookie-authenticated turn admission (each member holds any number of conversations per agent,
+opened by the first message and listed for the rail) and an SSE tail of each turn's live frames,
+read projections (the agent index, conversation transcripts, overviews, scheduled tasks, skills,
+per-agent usage, and connections) beside the workspace-level views every member holds — sources,
+credential slots, memory (latest first, searched across every reachable agent), shared artifacts,
+hosted sites, and usage (their own window, plus the workspace rollup for an admin) — plus the
 administration view for a workspace admin, and prepared intents, the panels' one mutation path.
 
 The `ufo_session` cookie carries the signed HMAC member bearer the gateway or `ufoctl init` mints
@@ -25,11 +26,13 @@ from collections.abc import AsyncIterator
 from datetime import datetime
 from hashlib import sha256
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
+
+from pydantic import BaseModel
 
 from ufo.sdk.audience import audience_subjects, conversation_audience
 from ufo.sdk.bearer import verify_token, workspace_claim
-from ufo.sdk.context import SourceReader
+from ufo.sdk.context import ScopedStore, SourceReader
 from ufo.sdk.http import (
     FormData,
     FormParserError,
@@ -81,6 +84,9 @@ MEMORY_RECENT_LIMIT = 100
 MEMORY_RESULT_LIMIT = 100
 ARTIFACT_LIST_LIMIT = 100
 CONVERSATION_LIST_LIMIT = 100
+CHAT_STORE_PREFIX = "chat/"
+NEW_CONVERSATION = "new"
+MAX_CHAT_TITLE_CHARS = 60
 SITE_KIND = "site"
 SPEND_WINDOW_DEFAULT_SECONDS = 86_400
 MAX_USAGE_WINDOW_SECONDS = 31_536_000
@@ -244,16 +250,100 @@ def _agent_param(request: Request) -> UUID | None:
         return None
 
 
-def _conversation_key(agent_id: UUID, email: str) -> str:
-    return f"{agent_id}/{email}"
+def _chat_row_key(conversation_id: UUID) -> str:
+    return f"{CHAT_STORE_PREFIX}{conversation_id}"
+
+
+TITLE_DANGLERS = frozenset(
+    "a an and are as at be but by for if in is it its my of on or our so that the their then "
+    "this to we what when with you your".split()
+)
+
+
+def _chat_title(text: str, paths: tuple[str, ...]) -> str:
+    """A conversation's rail label, cut from its first message at a word boundary — or from the
+    attached filenames when the message is files alone. A cut title sheds trailing punctuation
+    and dangling connectives ("…what files you see, then" ends at "see"); the rail's own overflow
+    ellipsis marks any further cut, so the stored title carries none."""
+    collapsed = " ".join(text.split())
+    if not collapsed:
+        collapsed = ", ".join(path.removeprefix(f"{WEB_INBOX_DIR}/") for path in paths)
+    if len(collapsed) <= MAX_CHAT_TITLE_CHARS:
+        return collapsed
+    cut = collapsed[:MAX_CHAT_TITLE_CHARS]
+    words = cut.split(" ")[:-1] or [cut]
+    while words:
+        trimmed = words[-1].rstrip(".,;:!?—-")
+        if (trimmed and trimmed.lower() not in TITLE_DANGLERS) or len(words) == 1:
+            words[-1] = trimmed or words[-1]
+            break
+        words.pop()
+    return " ".join(words)
+
+
+class ChatRecord(BaseModel):
+    """One conversation this surface opened, as its store row persists it: the (agent, member)
+    binding the chat gate checks and the title the rail shows. Validated at construction — a row
+    that fails to parse is a fault, never a silent "no chat"."""
+
+    agent_id: UUID
+    email: str
+    title: str
+
+
+async def _open_conversation(
+    ctx: SurfaceContext,
+    store: ScopedStore,
+    agent_id: UUID,
+    member_id: UUID,
+    email: str,
+    queue_key: str,
+    text: str,
+    paths: tuple[str, ...],
+) -> tuple[UUID, str]:
+    """Open a conversation under `queue_key`, its chat row written first, keyed by the id the
+    conversation is then created with — a crash between the two leaves an inert row, never a
+    conversation the rail must carry rowless. A lost creation race on the queue key lands on the
+    surviving conversation, whose winner wrote its row."""
+    title = _chat_title(text, paths)
+    minted = uuid4()
+    await store.put(
+        _chat_row_key(minted),
+        ChatRecord(agent_id=agent_id, email=email, title=title).model_dump(mode="json"),
+    )
+    conversation_id = await ctx.conversation_for(
+        queue_key, conversation_audience(member_id), agent_id=agent_id, conversation_id=minted
+    )
+    if conversation_id != minted:
+        await store.delete(_chat_row_key(minted))
+        record = await _own_chat(store, agent_id, email, conversation_id)
+        if record is None:
+            raise RuntimeError(f"conversation {conversation_id} has no chat row")
+        return conversation_id, record.title
+    return conversation_id, title
+
+
+async def _own_chat(
+    store: ScopedStore, agent_id: UUID, email: str, conversation_id: UUID
+) -> ChatRecord | None:
+    """The requested conversation's chat record, when it is this member's own chat with this
+    agent. Anything else — another member's, another agent's, a room's, an unknown id — is None,
+    and every caller answers not-found."""
+    value = await store.get(_chat_row_key(conversation_id))
+    if value is None:
+        return None
+    record = ChatRecord.model_validate(value)
+    if record.agent_id != agent_id or record.email != email:
+        return None
+    return record
 
 
 def _chat_source(public_base_url: str | None, agent_id: UUID, email: str) -> str:
-    """Where a portal message was said, as the agent carries it into anything it creates: the portal
-    URL that opens this agent's chat, plus who asked. The portal routes on the fragment
-    (`#/agents/<id>`), so the link lands on the conversation rather than the shell. A deploy whose
-    public base is unset or empty has no address to give, and names the client and the member
-    instead."""
+    """Where a portal message was said, as the agent carries it into anything it creates: the
+    portal URL that opens this agent's chat, plus who asked. The portal routes on the fragment
+    (`#/agents/<id>`), so the link lands on the conversation rather than the shell. A deploy
+    whose public base is unset or empty has no address to give, and names the client and the
+    member instead."""
     if not public_base_url:
         return f"{SOURCE} ({email})"
     return f"{public_base_url.rstrip('/')}{PORTAL_PATH}#/agents/{agent_id} ({email})"
@@ -411,22 +501,28 @@ async def _upload_chunks(upload: UploadFile) -> AsyncIterator[bytes]:
         yield chunk
 
 
-def _answer_key(request: Request, queue_key: str) -> str | None | Response:
-    """The idempotency key an answer click admits under — per question, so a double click or a
-    second tab joins the turn the first click won — or None for an ordinary message."""
+def _answer_headers(request: Request) -> tuple[UUID, int] | None | Response:
+    """The question an answer click names — validated before any conversation is opened, so a
+    malformed answer leaves nothing behind — or None for an ordinary message. The answer admits
+    under a per-question idempotency key, so a double click or a second tab joins the turn the
+    first click won."""
     answer_turn = request.headers.get(ANSWER_TURN_HEADER, "").strip()
     if not answer_turn:
         return None
     raw_index = request.headers.get(ANSWER_QUESTION_HEADER, "0").strip()
     try:
-        asking_turn = UUID(answer_turn)
-        question_index = int(raw_index)
+        return UUID(answer_turn), int(raw_index)
     except ValueError:
         return Response("malformed answer headers", status_code=400)
-    return f"{queue_key}:{asking_turn}:answer:{question_index}"
 
 
 async def chat(ctx: SurfaceContext, request: Request) -> Response:
+    """Admit one member message. A `conversation` query parameter continues that conversation —
+    gated to the member's own chat with this agent — and the `new` sentinel opens a fresh one: the
+    chat POST is the chat transport, so opening a conversation rides the first message rather than
+    a separate mutation, and the response names the conversation it landed in. Absent, the
+    member's default conversation with this agent takes the message, opened on first contact —
+    the contract the shipped page calls on."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
@@ -444,13 +540,39 @@ async def chat(ctx: SurfaceContext, request: Request) -> Response:
     inbound = _files_note(text, paths) if paths else text
     if len(inbound) > MAX_INBOUND_CHARS:
         return Response(f"message exceeds {MAX_INBOUND_CHARS} characters", status_code=413)
-    queue_key = _conversation_key(agent_id, email)
-    key = _answer_key(request, queue_key)
-    if isinstance(key, Response):
-        return key
-    conversation_id = await ctx.conversation_for(
-        queue_key, conversation_audience(member_id), agent_id=agent_id
-    )
+    answer = _answer_headers(request)
+    if isinstance(answer, Response):
+        return answer
+    store = web_extension().store
+    requested = request.query_params.get("conversation", "").strip()
+    if requested and requested != NEW_CONVERSATION:
+        try:
+            conversation_id = UUID(requested)
+        except ValueError:
+            return Response("no such conversation", status_code=404)
+        record = await _own_chat(store, agent_id, email, conversation_id)
+        if record is None:
+            return Response("no such conversation", status_code=404)
+        title = record.title
+    elif requested == NEW_CONVERSATION:
+        if answer is not None:
+            return Response("an answer names the conversation it was asked in", status_code=400)
+        conversation_id, title = await _open_conversation(
+            ctx, store, agent_id, member_id, email, f"{agent_id}/{email}/{uuid4().hex}", text, paths
+        )
+    else:
+        found = await ctx.find_conversation(f"{agent_id}/{email}")
+        if found is not None:
+            record = await _own_chat(store, agent_id, email, found)
+            if record is None:
+                raise RuntimeError(f"conversation {found} has no chat row")
+            conversation_id = found
+            title = record.title
+        else:
+            conversation_id, title = await _open_conversation(
+                ctx, store, agent_id, member_id, email, f"{agent_id}/{email}", text, paths
+            )
+    key = None if answer is None else f"{conversation_id}:{answer[0]}:answer:{answer[1]}"
     await _deliver_uploads(ctx, conversation_id, uploads, paths)
     admitted = await ctx.admit(
         conversation_id,
@@ -461,7 +583,11 @@ async def chat(ctx: SurfaceContext, request: Request) -> Response:
         idempotency_key=key,
         speaker_member_id=member_id,
     )
-    payload: dict[str, str | None] = {"turn_id": str(admitted.turn_id)}
+    payload: dict[str, str | None] = {
+        "turn_id": str(admitted.turn_id),
+        "conversation_id": str(conversation_id),
+        "title": title,
+    }
     if key is not None:
         payload["body"] = await ctx.admitted_body(key)
     return JSONResponse(payload)
@@ -481,9 +607,10 @@ def _rendered_text(message: Message) -> str:
 
 
 async def transcript(ctx: SurfaceContext, request: Request) -> Response:
-    """The member's exchange with one agent as the portal renders it on load: text only, the
-    engine's `<context>` framing stripped, tool traffic elided — a projection of the durable
-    transcript, never a second store."""
+    """One conversation of the member's with this agent, as the portal renders it on load: text
+    only, the engine's `<context>` framing stripped, tool traffic elided — a projection of the
+    durable transcript, never a second store. The `conversation` parameter names which one, gated
+    to the member's own like the chat POST that writes it."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
@@ -491,9 +618,19 @@ async def transcript(ctx: SurfaceContext, request: Request) -> Response:
     agent_id = _agent_param(request)
     if agent_id is None or not audience.allows(agent_id):
         return Response("no such agent", status_code=404)
-    conversation_id = await ctx.find_conversation(_conversation_key(agent_id, email))
-    if conversation_id is None:
-        return JSONResponse({"messages": []})
+    requested = request.query_params.get("conversation", "").strip()
+    if requested:
+        try:
+            conversation_id = UUID(requested)
+        except ValueError:
+            return Response("no such conversation", status_code=404)
+        if await _own_chat(web_extension().store, agent_id, email, conversation_id) is None:
+            return Response("no such conversation", status_code=404)
+    else:
+        found = await ctx.find_conversation(f"{agent_id}/{email}")
+        if found is None:
+            return JSONResponse({"messages": []})
+        conversation_id = found
     recorded = await ctx.read_transcript(conversation_id)
     rendered = (
         []
@@ -533,6 +670,43 @@ async def _open_handoffs(ctx: SurfaceContext, turn_id: UUID) -> dict[str, object
     if files:
         handoffs["files"] = files
     return handoffs
+
+
+async def chats_index(ctx: SurfaceContext, request: Request) -> Response:
+    """The rail: every conversation this member opened here, across the agents their web audience
+    holds, newest activity first — the surface narrowing runs inside the core read, under its
+    bound, so another surface's newer traffic never displaces a rail row. Titles come from the
+    chat rows this surface writes before each conversation exists — a crash between the two
+    leaves an inert row, never a rowless conversation. One same-surface conversation carries no
+    chat row and is dropped after taking a slot under the bound: the member's prepared-intent
+    lane."""
+    resolved = await _audience_for(ctx, request)
+    if isinstance(resolved, Response):
+        return resolved
+    member_id, _email, audience = resolved
+    store = web_extension().store
+    rows: list[dict[str, object]] = []
+    for agent in audience.agents:
+        listed = await ctx.list_agent_conversations(
+            agent.id, member_id, admin=False, limit=CONVERSATION_LIST_LIMIT, surface=SURFACE_WEB
+        )
+        records = await store.get_many([_chat_row_key(entry.summary.id) for entry in listed])
+        for entry in listed:
+            value = records.get(_chat_row_key(entry.summary.id))
+            if value is None:
+                continue
+            record = ChatRecord.model_validate(value)
+            rows.append(
+                {
+                    "conversation_id": str(entry.summary.id),
+                    "agent_id": str(agent.id),
+                    "agent_name": agent.name,
+                    "title": record.title,
+                    "last_at": _iso(entry.summary.last_turn_at or entry.summary.created_at),
+                }
+            )
+    rows.sort(key=lambda row: (str(row["last_at"]), str(row["conversation_id"])), reverse=True)
+    return JSONResponse({"chats": rows})
 
 
 async def _panel_gate(
@@ -1258,6 +1432,7 @@ ROUTES = (
     SurfaceRoute(method="POST", path="", handler=open_session),
     SurfaceRoute(method="GET", path="static/{asset:path}", handler=static_asset),
     SurfaceRoute(method="GET", path="api/agents", handler=agents_index),
+    SurfaceRoute(method="GET", path="api/chats", handler=chats_index),
     SurfaceRoute(method="GET", path="api/admin", handler=admin_index),
     SurfaceRoute(method="POST", path="agents/{agent_id}/chat", handler=chat),
     SurfaceRoute(method="GET", path="agents/{agent_id}/transcript", handler=transcript),

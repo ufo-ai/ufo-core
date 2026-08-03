@@ -171,12 +171,10 @@ def test_apply_migrations_rejects_duplicate_revision_ids(
 
 
 def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None:
-    """The migration seam's schema invariant: each table-owning extension's version location layers
-    over core's — `apply_migrations` ran clean in the fixture — and the graph has exactly one head
-    per owner (core's chain plus each extension branch), so `upgrade heads` is deterministic,
-    core-first. The base-pinned index_default and memory extensions own their chunk and memory_item
-    tables, the sample probe owns its note table, skill_create owns the user_skill table,
-    eval_env owns the fake mailbox and calendar tables, and sites owns the hosted_site table.
+    """The migration seam's schema invariant: each extension's version location layers over
+    core's — `apply_migrations` ran clean in the fixture — and the graph has exactly one head per
+    owner (core's chain plus each extension branch), so `upgrade heads` is deterministic,
+    core-first.
 
     Every revision id is unique: two files claiming one id collapse into a single graph node, so a
     deploy already stamped with that id plans nothing and the losing file's DDL is skipped while
@@ -202,8 +200,9 @@ def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None
         "skill_create_0002",
         "eval_env_0001",
         "sites_0001",
+        "web_0001",
     } <= set(heads)
-    assert len(heads) == 7
+    assert len(heads) == 8
 
 
 @pytest.mark.parametrize("graph_installed", [False, True])

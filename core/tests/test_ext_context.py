@@ -197,6 +197,27 @@ async def test_scoped_store_isolates_extensions(db: None) -> None:
         assert await other.get("shared_key") is None
 
 
+async def test_get_many_returns_exactly_the_named_keys_within_its_scopes(db: None) -> None:
+    """One query for exactly `keys`: absent keys are omitted, another extension's and another
+    workspace's rows under the same keys stay invisible, and an empty key set answers empty. The
+    foreign extension sorts after `sample`, so a query missing its extension predicate would
+    return the foreign row last and overwrite the right one rather than hide beneath it."""
+    first, second = await _workspace(), await _workspace()
+    with ws(first):
+        sample = ScopedStore(extension="sample")
+        zeta = ScopedStore(extension="zeta")
+        await sample.put("chat/a", {"title": "one"})
+        await sample.put("chat/b", {"title": "two"})
+        await sample.put("chat/c", {"title": "three"})
+        await zeta.put("chat/a", {"title": "foreign extension"})
+    with ws(second):
+        await ScopedStore(extension="sample").put("chat/a", {"title": "foreign workspace"})
+    with ws(first):
+        found = await ScopedStore(extension="sample").get_many(["chat/a", "chat/b", "chat/x"])
+        assert found == {"chat/a": {"title": "one"}, "chat/b": {"title": "two"}}
+        assert await ScopedStore(extension="sample").get_many([]) == {}
+
+
 async def test_scoped_store_scopes_to_the_bound_workspace(db: None) -> None:
     """The store reads the ambient workspace, so rebinding to another workspace never sees the
     first's rows — the isolation is the `with ws(...)` scope, not a field the caller passes."""

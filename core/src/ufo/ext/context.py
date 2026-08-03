@@ -10,7 +10,7 @@ index/embed backends, a transaction over the extension's own tables, governed pr
 invoke, without reshaping what handlers already hold."""
 
 import json
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -93,6 +93,23 @@ class ScopedStore:
                 )
             ).one_or_none()
         return None if row is None else row.value
+
+    async def get_many(self, keys: Sequence[str]) -> dict[str, JsonValue]:
+        """The stored values for exactly `keys`, absent keys omitted — one query, so a listing
+        joins its rows without reading the extension's whole key space."""
+        if not keys:
+            return {}
+        async with workspace_tx() as connection:
+            rows = (
+                await connection.execute(
+                    sa.select(tables.ext_store.c.key, tables.ext_store.c.value).where(
+                        tables.ext_store.c.workspace_id == self.workspace_id,
+                        tables.ext_store.c.extension == self.extension,
+                        tables.ext_store.c.key.in_(tuple(keys)),
+                    )
+                )
+            ).all()
+        return {row.key: row.value for row in rows}
 
     async def put(self, key: str, value: JsonValue) -> None:
         async with workspace_tx() as connection:
