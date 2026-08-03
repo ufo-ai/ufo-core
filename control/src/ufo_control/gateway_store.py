@@ -92,21 +92,44 @@ class OnboardStore:
             invite_id=row["invite_id"],
         )
 
-    async def record_attempt(self, claim_id: UUID, attempts: int) -> None:
-        await self._update("attempts = $2", claim_id, attempts)
+    async def record_attempt(self, claim_id: UUID, attempts: int) -> bool:
+        async with self.pool.acquire() as connection:
+            recorded = await connection.fetchval(
+                f"update {TABLE} set attempts = attempts + 1 "
+                "where id = $1 and attempts = $2 and verified_at is null returning true",
+                claim_id,
+                attempts,
+            )
+        return recorded is True
 
-    async def mark_verified(self, claim_id: UUID) -> None:
-        await self._update("verified_at = now()", claim_id)
+    async def record_verification(self, claim_id: UUID, attempts: int) -> bool:
+        async with self.pool.acquire() as connection:
+            recorded = await connection.fetchval(
+                f"update {TABLE} set attempts = attempts + 1, verified_at = now() "
+                "where id = $1 and attempts = $2 and verified_at is null returning true",
+                claim_id,
+                attempts,
+            )
+        return recorded is True
 
     async def complete(self, claim_id: UUID, resulting_workspace_id: str) -> None:
-        await self._update("resulting_workspace_id = $2", claim_id, resulting_workspace_id)
+        async with self.pool.acquire() as connection:
+            await connection.execute(
+                f"update {TABLE} set resulting_workspace_id = $2 where id = $1",
+                claim_id,
+                resulting_workspace_id,
+            )
 
     async def delete_claim(self, claim_id: UUID) -> None:
         async with self.pool.acquire() as connection:
             await connection.execute(f"delete from {TABLE} where id = $1", claim_id)
 
-    async def _update(self, assignment: str, claim_id: UUID, *values: object) -> None:
+    async def delete_unverified_claim(self, claim_id: UUID, attempts: int) -> bool:
         async with self.pool.acquire() as connection:
-            await connection.execute(
-                f"update {TABLE} set {assignment} where id = $1", claim_id, *values
+            deleted = await connection.fetchval(
+                f"delete from {TABLE} "
+                "where id = $1 and attempts = $2 and verified_at is null returning true",
+                claim_id,
+                attempts,
             )
+        return deleted is True

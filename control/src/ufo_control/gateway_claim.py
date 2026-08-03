@@ -16,16 +16,11 @@ logger = logging.getLogger(__name__)
 CODE_DIGITS = 6
 CODE_TTL = timedelta(minutes=15)
 MAX_ATTEMPTS = 5
+VERIFICATION_CHANGED = "Another verification attempt changed this session."
 
 
 class ClaimError(RuntimeError):
-    """A claim could not start or verify: expired, attempts exhausted, or a code mismatch. The
-    onboarding flow turns this into an in-channel message; the code never leaves as anything but a
-    hash."""
-
-
-class ClaimRestart(ClaimError):
-    pass
+    """The onboarding flow renders the message; verification codes remain hashed."""
 
 
 def hash_code(code: str) -> str:
@@ -66,13 +61,19 @@ class ClaimWorkflow:
         return domain
 
     async def verify(self, claim: OnboardClaim, code: str) -> None:
-        if claim.attempts >= self.max_attempts:
-            await self.store.delete_claim(claim.claim_id)
-            raise ClaimRestart("Too many attempts. Start onboarding again.")
         if datetime.now(UTC) >= claim.expires_at:
-            await self.store.delete_claim(claim.claim_id)
-            raise ClaimRestart("The verification code expired. Start onboarding again.")
-        await self.store.record_attempt(claim.claim_id, claim.attempts + 1)
-        if not hmac.compare_digest(claim.code_hash, hash_code(code)):
+            if await self.store.delete_unverified_claim(claim.claim_id, claim.attempts):
+                raise ClaimError("The verification code expired. Start onboarding again.")
+            raise ClaimError(VERIFICATION_CHANGED)
+        attempts = claim.attempts + 1
+        if hmac.compare_digest(claim.code_hash, hash_code(code)):
+            if await self.store.record_verification(claim.claim_id, claim.attempts):
+                return
+            raise ClaimError(VERIFICATION_CHANGED)
+        if attempts >= self.max_attempts:
+            if await self.store.delete_unverified_claim(claim.claim_id, claim.attempts):
+                raise ClaimError("Too many attempts. Start onboarding again.")
+            raise ClaimError(VERIFICATION_CHANGED)
+        if await self.store.record_attempt(claim.claim_id, claim.attempts):
             raise ClaimError("The verification code is incorrect.")
-        await self.store.mark_verified(claim.claim_id)
+        raise ClaimError(VERIFICATION_CHANGED)

@@ -3,8 +3,8 @@ denylist, hash-only storage, the TTL, the attempt cap, and the recording email s
 a test read the minted code back."""
 
 import re
-from dataclasses import dataclass, field
-from datetime import timedelta
+from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import asyncpg
@@ -94,16 +94,88 @@ async def test_attempt_cap_exhausts(store: OnboardStore) -> None:
         store=store, email_policy=WorkEmailPolicy(), email_sender=sender, max_attempts=2
     )
     await workflow.start("me@acme.com", "ufo", "sess-1")
-    for _ in range(2):
-        claim = await store.live_claim("ufo", "sess-1")
-        assert claim is not None
-        with pytest.raises(ClaimError, match="incorrect"):
-            await workflow.verify(claim, "000000")
-    exhausted = await store.live_claim("ufo", "sess-1")
-    assert exhausted is not None
+    claim = await store.live_claim("ufo", "sess-1")
+    assert claim is not None
+    code = sender.last_code("me@acme.com")
+    wrong = "000000" if code != "000000" else "000001"
+    with pytest.raises(ClaimError, match="incorrect"):
+        await workflow.verify(claim, wrong)
+    retry = await store.live_claim("ufo", "sess-1")
+    assert retry is not None
     with pytest.raises(ClaimError, match="Too many attempts"):
-        await workflow.verify(exhausted, sender.last_code("me@acme.com"))
+        await workflow.verify(retry, wrong)
     assert await store.live_claim("ufo", "sess-1") is None
+
+
+async def test_stale_correct_attempt_cannot_overwrite_newer_attempt(store: OnboardStore) -> None:
+    sender = RecordingSender()
+    workflow = ClaimWorkflow(store=store, email_policy=WorkEmailPolicy(), email_sender=sender)
+    await workflow.start("me@acme.com", "ufo", "sess-1")
+    stale = await store.live_claim("ufo", "sess-1")
+    assert stale is not None
+    code = sender.last_code("me@acme.com")
+    wrong = "000000" if code != "000000" else "000001"
+    with pytest.raises(ClaimError, match="incorrect"):
+        await workflow.verify(stale, wrong)
+    with pytest.raises(ClaimError, match="changed this session"):
+        await workflow.verify(stale, code)
+    current = await store.live_claim("ufo", "sess-1")
+    assert current is not None and current.attempts == 1 and current.verified_at is None
+
+
+async def test_stale_wrong_attempt_cannot_overwrite_newer_attempt(store: OnboardStore) -> None:
+    sender = RecordingSender()
+    workflow = ClaimWorkflow(store=store, email_policy=WorkEmailPolicy(), email_sender=sender)
+    await workflow.start("me@acme.com", "ufo", "sess-1")
+    stale = await store.live_claim("ufo", "sess-1")
+    assert stale is not None
+    code = sender.last_code("me@acme.com")
+    wrong = "000000" if code != "000000" else "000001"
+    with pytest.raises(ClaimError, match="incorrect"):
+        await workflow.verify(stale, wrong)
+    with pytest.raises(ClaimError, match="changed this session"):
+        await workflow.verify(stale, wrong)
+    current = await store.live_claim("ufo", "sess-1")
+    assert current is not None and current.attempts == 1 and current.verified_at is None
+
+
+async def test_stale_expiry_cannot_delete_newer_attempt(store: OnboardStore) -> None:
+    sender = RecordingSender()
+    workflow = ClaimWorkflow(store=store, email_policy=WorkEmailPolicy(), email_sender=sender)
+    await workflow.start("me@acme.com", "ufo", "sess-1")
+    claim = await store.live_claim("ufo", "sess-1")
+    assert claim is not None
+    expired = replace(claim, expires_at=datetime.now(UTC) - timedelta(seconds=1))
+    code = sender.last_code("me@acme.com")
+    wrong = "000000" if code != "000000" else "000001"
+    with pytest.raises(ClaimError, match="incorrect"):
+        await workflow.verify(claim, wrong)
+    with pytest.raises(ClaimError, match="changed this session"):
+        await workflow.verify(expired, code)
+    current = await store.live_claim("ufo", "sess-1")
+    assert current is not None and current.attempts == 1 and current.verified_at is None
+
+
+async def test_stale_exhausting_attempt_does_not_delete_verified_claim(
+    store: OnboardStore,
+) -> None:
+    sender = RecordingSender()
+    workflow = ClaimWorkflow(
+        store=store, email_policy=WorkEmailPolicy(), email_sender=sender, max_attempts=1
+    )
+    await workflow.start("me@acme.com", "ufo", "sess-1")
+    stale = await store.live_claim("ufo", "sess-1")
+    assert stale is not None
+    code = sender.last_code("me@acme.com")
+    await workflow.verify(stale, code)
+    wrong = "000000" if code != "000000" else "000001"
+    with pytest.raises(ClaimError, match="changed this session"):
+        await workflow.verify(stale, wrong)
+    verified = await store.live_claim("ufo", "sess-1")
+    assert verified is not None and verified.verified_at is not None
+    assert not await store.record_attempt(verified.claim_id, verified.attempts)
+    assert not await store.record_verification(verified.claim_id, verified.attempts)
+    assert not await store.delete_unverified_claim(verified.claim_id, verified.attempts)
 
 
 async def test_expired_code_is_rejected(store: OnboardStore) -> None:
@@ -143,6 +215,9 @@ async def test_invite_redeems_once_and_stamps_the_claim(store: OnboardStore) -> 
     assert isinstance(accepted, InviteAccepted)
     assert accepted.object_number == 7
     assert accepted.consumed_at.tzinfo is not None
+    repeated = await invites.redeem(claim.email_domain, claim.claim_id)
+    assert isinstance(repeated, InviteAccepted)
+    assert repeated.invite_id == accepted.invite_id
     stamped = await store.live_claim("ufo", "sess-1")
     assert stamped is not None and stamped.invite_id == accepted.invite_id
 

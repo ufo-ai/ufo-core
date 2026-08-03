@@ -26,7 +26,6 @@ from ufo_control.gateway import (
     WORKSPACE_BASE_URL_ENV,
     gateway_app,
 )
-from ufo_control.gateway_claim import MAX_ATTEMPTS
 from ufo_control.gateway_directives import PROMPT, directive, render
 from ufo_control.gateway_email import (
     AWS_ROLE_ARN_ENV,
@@ -301,39 +300,30 @@ def test_terminal_expired_code_returns_to_email_prompt(
     assert "Enter the code:" in restarted.text
 
 
-def test_terminal_exhausted_claim_returns_to_email_prompt(
+def test_terminal_exhausting_code_returns_to_email_prompt(
     gateway_postgres: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     _configure(monkeypatch, tmp_path, gateway_postgres)
     sender = RecordingSender()
     monkeypatch.setattr(gateway, "email_sender_from_env", lambda: sender)
     session = str(uuid.uuid4())
-    email = "pilot@exhausted.io"
+    email = "pilot@exhausting.io"
     headers = {"x-ufo-session": session, "x-ufo-installed": "1"}
 
     with TestClient(gateway_app()) as client:
         client.post("/v1/onboard/ufo", headers=headers, content="")
         client.post("/v1/onboard/ufo", headers=headers, content=email)
-
-        async def exhaust() -> None:
-            connection = await asyncpg.connect(gateway_postgres)
-            try:
-                await connection.execute(
-                    "update ufo_control.onboard_claim set attempts = $2 "
-                    "where surface = 'ufo' and surface_ref = $1",
-                    session,
-                    MAX_ATTEMPTS,
-                )
-            finally:
-                await connection.close()
-
-        asyncio.run(exhaust())
-        exhausted = client.post("/v1/onboard/ufo", headers=headers, content="000000")
+        code = sender.sent[email]
+        wrong = "000000" if code != "000000" else "000001"
+        for _ in range(4):
+            retryable = client.post("/v1/onboard/ufo", headers=headers, content=wrong)
+            assert "Enter the code:" in retryable.text
+        exhausted = client.post("/v1/onboard/ufo", headers=headers, content=wrong)
+        assert "Too many attempts. Start onboarding again." in exhausted.text
+        assert "Enter your work email:" in exhausted.text
+        assert "Enter the code:" not in exhausted.text
         restarted = client.post("/v1/onboard/ufo", headers=headers, content=email)
 
-    assert "Too many attempts. Start onboarding again." in exhausted.text
-    assert "Enter your work email:" in exhausted.text
-    assert "Enter the code:" not in exhausted.text
     assert "Enter the code:" in restarted.text
 
 

@@ -6,7 +6,7 @@ object's domain and emails it the invitation. Redeeming consumes the grant —
 ``consumed_at`` claimed under a row lock while still null, so two concurrent flows can never both
 open a workspace on one grant — and stamps the claim's ``invite_id`` in the same transaction, so a
 crash can never leave a consumed grant detached from its claim. The consumption lands before the
-workspace write, and a resolution retry proceeds without consulting the ledger again.
+workspace write; repeated redemption by that claim is accepted.
 
 A grant names a domain rather than travelling as a bearer secret. The member proves the granted
 domain by verifying their own email, so the invitation carries nothing to retype, a forwarded
@@ -156,6 +156,18 @@ class InviteCodes:
                 if row is None:
                     return InviteUnknown()
                 if row["consumed_at"] is not None:
+                    attached = await connection.fetchval(
+                        f"select exists(select 1 from {gateway_store.TABLE} "
+                        "where id = $1 and invite_id = $2)",
+                        claim_id,
+                        row["id"],
+                    )
+                    if attached:
+                        return InviteAccepted(
+                            invite_id=row["id"],
+                            object_number=row["object_number"],
+                            consumed_at=row["consumed_at"],
+                        )
                     return InviteConsumed()
                 if datetime.now(UTC) >= row["expires_at"]:
                     return InviteExpired(expires_at=row["expires_at"])
