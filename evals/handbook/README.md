@@ -79,7 +79,8 @@ Omit `--handbook-task` to run all 65. Cases run one at a time regardless of `--c
 holds the whole workspace's `mcp_servers` slot — and each turn is allowed up to an hour, matching
 upstream's own budget. `--handbook-ingest STAGING` indexes each task's policy documents as a synced
 source before its turn and withholds them from the workspace, which is the deployment a company
-running ufo would have; it covers the tasks whose rubrics do not assert on a document filename.
+running ufo would have; it covers the tasks whose rubrics do not assert on a document filename and
+whose workspace stages something other than documents.
 
 The verdict is in-run and deterministic: no judge, no offline grading step. Each case's evidence
 carries upstream's full scorecard, so the viewer shows which rubrics failed and why.

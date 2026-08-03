@@ -34,7 +34,7 @@ HANDBOOK_PACKS = ("assistant", "assistant_eval")
 # must serve `/workspace` from a host directory. `local` and `docker` both bind the conversation
 # directory; an off-cluster carrier (E2B) keeps `/workspace` on its own disk and cannot be graded.
 HANDBOOK_BACKENDS = ("local", "docker")
-ENVELOPE_REVISION = "workspace-only-scratch-3"
+ENVELOPE_REVISION = "workspace-only-scratch-4"
 WORKSPACE_ROOT = "/workspace"
 WORKFLOW_WAIT_SECONDS = 3_600.0
 
@@ -95,23 +95,28 @@ def load_handbook(
 def _scorable_ingested(
     tasks: tuple[HandbookTask, ...], requested: bool
 ) -> tuple[HandbookTask, ...]:
-    """The ingested arm withholds the policy documents, so a task whose rubrics assert on one
-    cannot be scored in it. Naming such a task is an error worth raising; sweeping the corpus is
-    not, so those tasks are dropped — and named, because a silently smaller corpus reads as a real
-    result."""
+    """The ingested arm withholds the policy documents, so a task whose rubrics assert on one — or
+    whose workspace holds nothing else — cannot be scored in it. Naming such a task is an error
+    worth raising; sweeping the corpus is not, so those tasks are dropped — and named, because a
+    silently smaller corpus reads as a real result."""
     scorable: list[HandbookTask] = []
-    skipped: list[HandbookTask] = []
+    skipped: list[str] = []
     for task in tasks:
-        (skipped if _rubrics_need_the_documents(task) else scorable).append(task)
+        if _rubrics_need_the_documents(task):
+            skipped.append(f"{task.task_id} (its rubrics assert on a policy document)")
+        elif _stages_only_documents(task):
+            skipped.append(f"{task.task_id} (it stages nothing but documents)")
+        else:
+            scorable.append(task)
     if skipped and requested:
         raise ValueError(
-            "these HANDBOOK.md tasks have rubrics that assert on a policy document the ingested "
-            f"arm withholds: {', '.join(task.task_id for task in skipped)}"
+            "these HANDBOOK.md tasks cannot be scored in the ingested arm, which withholds the "
+            f"policy documents: {', '.join(skipped)}"
         )
     if skipped:
         print(
-            f"handbook: ingested arm skips {len(skipped)} of {len(tasks)} tasks whose rubrics "
-            f"assert on a policy document: {', '.join(task.task_id for task in skipped)}"
+            f"handbook: ingested arm skips {len(skipped)} of {len(tasks)} tasks it cannot score: "
+            f"{', '.join(skipped)}"
         )
     if not scorable:
         raise ValueError("no HANDBOOK.md task can be scored in the ingested arm")
@@ -186,6 +191,13 @@ def _rubrics_need_the_documents(task: HandbookTask) -> tuple[str, ...]:
     )
 
 
+def _stages_only_documents(task: HandbookTask) -> bool:
+    """`load_handbook` builds every case up front, so a task the ingested arm cannot stage raises
+    before any case in its lane runs and takes the innocent ones with it."""
+    files = [path for path in task.workspace_root.rglob("*") if path.is_file()]
+    return bool(files) and all(path.suffix.lower() in DOCUMENT_SUFFIXES for path in files)
+
+
 def _envelope(paths: tuple[str, ...], ingested: bool = False) -> str:
     """Upstream's preamble names `/workdir` as the filesystem, which is where its own harness mounts
     the task's files. Here they are in the sandbox at `WORKSPACE_ROOT`, so the envelope says so and
@@ -209,8 +221,7 @@ def _envelope(paths: tuple[str, ...], ingested: bool = False) -> str:
         f"{SERVER_NAME!r} MCP server; call `list_mcp_tools` first and use each tool's own argument "
         "schema rather than the real product's API parameter names. Edit the workspace files in "
         f"place where the task calls for it, and keep anything you generate under {WORKSPACE_ROOT} "
-        "— nothing outside it is readable, including /tmp. Complete the work; do not ask for more "
-        "information."
+        "— nothing outside it is readable, including /tmp."
     )
 
 

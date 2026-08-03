@@ -2,6 +2,7 @@
 verification path without the upstream repository."""
 
 import json
+import shutil
 from hashlib import sha256
 from pathlib import Path
 
@@ -12,10 +13,12 @@ from evals.handbook.corpus import PinnedTask, UpstreamPin, tree_digest
 
 REVISION = "0" * 40
 TASK_ID = "finance_meridian_partners_19d57538"
+DOCUMENTS_ONLY_TASK_ID = "insurance_vanguard_shield_mutual_82da8d17"
 INSTRUCTION = "Process invoice INV-1 through the AP workflow and update ap_ledger.xlsx."
 SYSTEM_PROMPT = "Today's date is, May, 21, 2025. You are an office assistant."
 HANDBOOK = "<html><body>Hold any invoice whose variance exceeds 2%.</body></html>"
 LEDGER = b"not really a spreadsheet, but stable bytes"
+POLICY_PDF = b"%PDF-1.4 not really a pdf, but stable bytes"
 VERIFIER_SOURCE = "print('scored')\n"
 
 
@@ -43,7 +46,20 @@ def fabricate_checkout(root: Path, rubrics: int = 2) -> Path:
     return root
 
 
-def fabricate_pin(checkout: Path, rubrics: int = 2) -> UpstreamPin:
+def fabricate_documents_only_task(checkout: Path) -> str:
+    """A second task whose seeded workspace holds policy documents and nothing else — three upstream
+    insurance tasks have this shape, and it is the one the ingested arm has nothing left to stage
+    for."""
+    task = checkout / "tasks" / DOCUMENTS_ONLY_TASK_ID
+    shutil.copytree(checkout / "tasks" / TASK_ID, task)
+    (task / "environment" / "initial_workspace" / "ap_ledger.xlsx").unlink()
+    (task / "environment" / "initial_workspace" / "Appeals_Policy.pdf").write_bytes(POLICY_PDF)
+    return DOCUMENTS_ONLY_TASK_ID
+
+
+def fabricate_pin(
+    checkout: Path, rubrics: int = 2, task_ids: tuple[str, ...] = (TASK_ID,)
+) -> UpstreamPin:
     return UpstreamPin(
         repository=REPOSITORY,
         revision=REVISION,
@@ -51,12 +67,13 @@ def fabricate_pin(checkout: Path, rubrics: int = 2) -> UpstreamPin:
         tool_sets=TOOL_SETS,
         file_tool_sets=FILE_TOOL_SETS,
         verifier_sha256=f"sha256:{sha256(VERIFIER_SOURCE.encode()).hexdigest()}",
-        tasks=(
+        tasks=tuple(
             PinnedTask(
-                task_id=TASK_ID,
+                task_id=task_id,
                 rubrics=rubrics,
-                tree_sha256=tree_digest(checkout / "tasks" / TASK_ID),
-            ),
+                tree_sha256=tree_digest(checkout / "tasks" / task_id),
+            )
+            for task_id in task_ids
         ),
     )
 

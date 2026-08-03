@@ -21,6 +21,7 @@ from handbook_corpus import (
     TASK_ID,
     VERIFIER_SOURCE,
     fabricate_checkout,
+    fabricate_documents_only_task,
     fabricate_pin,
     install_pin,
 )
@@ -843,6 +844,59 @@ def test_the_ingested_arm_returns_the_tasks_it_can_still_score(
         f"handbook.{second_id}"
     ]
     assert TASK_ID in capsys.readouterr().out
+
+
+def test_the_ingested_arm_drops_a_task_that_stages_nothing_but_documents(
+    checkout: Path,
+    credentials: CredentialStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Withholding the documents from a workspace that holds only documents leaves nothing to stage,
+    and every case is built up front — so one such task raised and killed its whole lane, taking the
+    scorable cases beside it. Rubrics that assert on a document are a different fact, so the two
+    reasons stay distinguishable."""
+    documents_only = fabricate_documents_only_task(checkout)
+    install_pin(fabricate_pin(checkout, task_ids=(TASK_ID, documents_only)), monkeypatch)
+    deps = IngestDeps(
+        staging_root=tmp_path,
+        blob=cast("BlobStore", None),
+        index=cast("IndexBackend", None),
+        embed=cast("EmbedClient", None),
+        manifests=(),
+        postgres=False,
+    )
+    assert [task.name for task in load_handbook(checkout, credentials, (), deps)] == [
+        f"handbook.{TASK_ID}"
+    ]
+    assert f"{documents_only} (it stages nothing but documents)" in capsys.readouterr().out
+    with pytest.raises(ValueError, match="stages nothing but documents"):
+        load_handbook(checkout, credentials, (documents_only,), deps)
+
+
+def test_a_task_that_stages_nothing_at_all_stays_loud_in_the_ingested_arm(
+    checkout: Path,
+    credentials: CredentialStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty workspace is a corpus fault both arms raise on, not a limit of this one. Reading it
+    as documents-only would drop the task and report a clean sweep of what was never staged."""
+    workspace = checkout / "tasks" / TASK_ID / "environment" / "initial_workspace"
+    for path in workspace.iterdir():
+        path.unlink()
+    install_pin(fabricate_pin(checkout), monkeypatch)
+    deps = IngestDeps(
+        staging_root=tmp_path,
+        blob=cast("BlobStore", None),
+        index=cast("IndexBackend", None),
+        embed=cast("EmbedClient", None),
+        manifests=(),
+        postgres=False,
+    )
+    with pytest.raises(ValueError, match="stages no workspace files"):
+        load_handbook(checkout, credentials, (), deps)
 
 
 async def test_a_case_starts_without_the_previous_cases_notes(
