@@ -251,7 +251,6 @@ def run() -> None:
     app.state.hub = hub
     app.state.dbos = dbos_client
     app.state.instance_id = instance_id
-    app.state.recovery = ExecutorRecovery(dbos=dbos)
     app.state.durable_surfaces = durable_surfaces(manifests)
     app.state.writeback_poller = None
     app.state.blob = blob
@@ -876,19 +875,18 @@ def _mount_shared_surfaces(
 @asynccontextmanager
 async def _serve_lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Run this instance's app-loop background work: the executor-recovery sweep that re-dispatches
-    workflows stranded by a dead peer or by a claim this process no longer executes — `run` builds
-    it, holding the DBOS instance whose active workflows answer that second question — the cancel
-    reconciler that cascades a cancel to the descendant turns it spawned (cancelling any turn left
-    live under a cancelled ancestor), and, when a durable surface is installed, the writeback
-    poller, the durable half of surface delivery off the hub and off the turn loop. The shared
-    poller binds each selected workspace before delivery. The heartbeat is NOT here: liveness must
+    workflows stranded by dead peers, the cancel reconciler that cascades a cancel to the descendant
+    turns it spawned (cancelling any turn left live under a cancelled ancestor), and, when a durable
+    surface is installed, the writeback poller, the durable half of surface delivery off the hub and
+    off the turn loop. The shared poller binds each selected workspace before delivery. The
+    heartbeat is NOT here: liveness must
     span the whole boot (jobs enqueue under this executor id before uvicorn starts) and survive an
     app-loop stall, so `run` drives it on a dedicated thread from the moment the seat exists, and
     retires the seat only after `DBOS.destroy` has stopped all execution — a seat freed while
     queued workflows still run would hand a peer a second live execution."""
     async with asyncio.TaskGroup() as group:
         tasks = [
-            group.create_task(app.state.recovery.run()),
+            group.create_task(ExecutorRecovery().run()),
             group.create_task(CancelReconciler(client=app.state.dbos).run()),
         ]
         poller = app.state.writeback_poller

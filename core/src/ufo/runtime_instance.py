@@ -8,19 +8,17 @@ keeps only its own row fresh.
 The instance id doubles as the process's DBOS executor id, which is what makes the row a liveness
 signal for durable work: a queued workflow (a turn, a job) stays PENDING under the executor id that
 dispatched it, so a workflow whose executor has no fresh row is stranded — its process is gone —
-and the sweep re-dispatches it through DBOS recovery. A fresh row says the process is alive, which
-is not the same as executing: only the process holding a claim can tell whether a task is still
-running that workflow, so each process answers for its own claims and never for a peer's —
-recovering a peer's live workflow would start a second concurrent execution, whose loser parks
-forever in DBOS's duplicate-execution wait."""
+and the sweep re-dispatches it through DBOS recovery. An executor with a fresh row is alive and
+mid-execution; recovering it would start a second concurrent execution of a live workflow, whose
+loser parks forever in DBOS's duplicate-execution wait — the sweep never touches it."""
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import sqlalchemy as sa
-from dbos import DBOS, DBOSClient, WorkflowStatus
+from dbos import DBOS, DBOSClient
 from dbos import error as dbos_error
 
 from ufo.cancellation import cancel_one_turn
@@ -100,29 +98,20 @@ class Heartbeat:
 
 @dataclass(frozen=True)
 class ExecutorRecovery:
-    """Re-dispatch queued workflows whose execution is gone: on an interval, read the PENDING
-    workflows in this deploy's DBOS store and return the claimed-but-unexecuted ones to their queue,
-    where each resumes from its last recorded step under the same workflow id. Two kinds of claim
-    qualify, and a claim is only ever judged by the process that took it or by the absence of that
-    process:
+    """Re-dispatch queued workflows stranded by dead processes: on an interval, read the executor
+    ids still holding PENDING workflows in this deploy's DBOS store, subtract the executors with a
+    fresh `runtime_instance` heartbeat, and run DBOS recovery for the rest — each stranded turn or
+    job re-enters its queue and resumes from its last recorded step. Every serve process runs this
+    loop, so any survivor reclaims a crashed peer's work; executor ids are unique per process, so a
+    freshly re-dispatched workflow immediately carries a live executor's id and a concurrent sweep
+    on another instance cannot re-steal it. An executor with no seat row at all is dead by
+    definition — a seat outlives its process only until the sweep next runs, and a process that
+    retired its seat on graceful shutdown left nothing PENDING or is recovered all the same. A
+    failed tick is logged and the loop continues, mirroring the heartbeat: recovery must survive a
+    transient database or DBOS error, and a sustained outage stalls every peer's sweep equally."""
 
-    A dead peer's — its executor id holds PENDING rows and has no fresh `runtime_instance`
-    heartbeat, so DBOS recovery runs for that executor. An executor with no seat row at all is dead
-    by definition; a seat outlives its process only until the sweep next runs, and a process that
-    retired its seat on graceful shutdown left nothing PENDING or is recovered all the same.
-
-    This process's own — the row is PENDING under this process's executor id while nothing here is
-    executing it. Every serve process runs this loop, so any survivor reclaims a crashed peer's work
-    and each reclaims the claims it abandoned; executor ids are unique per process, so a freshly
-    re-dispatched workflow immediately carries a live executor's id and a concurrent sweep on
-    another instance cannot re-steal it. A failed tick is logged and the loop continues, mirroring
-    the heartbeat: recovery must survive a transient database or DBOS error, and a sustained outage
-    stalls every peer's sweep equally."""
-
-    dbos: DBOS
     interval_seconds: float = EXECUTOR_RECOVERY_INTERVAL_SECONDS
     stale_after_seconds: float = STALE_AFTER_SECONDS
-    unexecuted: set[str] = field(default_factory=set)
 
     async def run(self) -> None:
         while True:
@@ -133,20 +122,18 @@ class ExecutorRecovery:
                 log("instance.executor_recovery_failed", error_class=type(error).__name__)
 
     async def sweep(self) -> None:
-        pending = await self._pending_workflows()
-        claiming = {status.executor_id for status in pending if status.executor_id}
-        for executor in sorted(claiming - await self._live_executors()):
+        stranded = await self._pending_executors() - await self._live_executors()
+        for executor in sorted(stranded):
             recovered = await asyncio.to_thread(DBOS._recover_pending_workflows, [executor])
             log(
                 "instance.executor_recovered",
                 executor=executor,
                 workflows=len(recovered),
             )
-        await self._release_unexecuted_claims(pending)
 
-    async def _pending_workflows(self) -> list[WorkflowStatus]:
-        """Every PENDING workflow, oldest first so a scan that hits the limit still reaches the
-        longest-stranded work; a hit limit is logged, never silently truncated."""
+    async def _pending_executors(self) -> set[str]:
+        """Executor ids holding PENDING workflows, oldest first so a scan that hits the limit still
+        reaches the longest-stranded work; a hit limit is logged, never silently truncated."""
         pending = await asyncio.to_thread(
             DBOS.list_workflows,
             status="PENDING",
@@ -156,7 +143,7 @@ class ExecutorRecovery:
         )
         if len(pending) == PENDING_WORKFLOW_SCAN_LIMIT:
             log("instance.pending_scan_at_limit", limit=PENDING_WORKFLOW_SCAN_LIMIT)
-        return pending
+        return {status.executor_id for status in pending if status.executor_id}
 
     async def _live_executors(self) -> set[str]:
         cutoff = datetime.now(UTC) - timedelta(seconds=self.stale_after_seconds)
@@ -169,44 +156,6 @@ class ExecutorRecovery:
                 )
             ).all()
         return {str(row.id) for row in rows}
-
-    async def _release_unexecuted_claims(self, pending: list[WorkflowStatus]) -> None:
-        """Return this process's claims that nothing here is executing to their queue. A PENDING row
-        is this process's word that a task is running that workflow, and a task that dies without
-        writing an outcome — cancelled, or destroyed while the process lives on — leaves that word
-        standing: no peer may act on a heartbeating executor's claim, and nothing else revisits it.
-        On the conversation-partitioned turns queue the dead claim also holds the partition's only
-        slot, so the queue has no room to start the very workflow holding it.
-
-        DBOS's active-workflow set is what this process can read to tell whether a task is running
-        a claimed workflow, and one absence from it settles nothing: a workflow dequeued moments ago
-        has not reached its first step, and one that just finished released its entry before writing
-        its outcome. So a claim is released only where two sweeps in a row find it absent, and a
-        sighting is spent the moment this sweep reaches it — the set is read again at the release,
-        and whether that read leaves the claim alone, the release lands, or the release raises, the
-        next release needs a fresh pair of sightings. The count is written before any release runs,
-        so no path out of the loop can leave a spent sighting standing.
-
-        Releasing is DBOS's own recovery action for a queued workflow: the row returns to ENQUEUED
-        under the same workflow id, freeing its partition slot and re-dispatching it with its
-        recorded steps intact, so the resumed execution replays completed work instead of redoing
-        it. Every workflow here is queued — a turn on the turns queue, a job fan-out on the jobs
-        queue, a job tick on DBOS's internal one — so returning the row to its queue is the whole
-        release."""
-        abandoned = {
-            status.workflow_id for status in pending if status.executor_id == DBOS.executor_id
-        } - self._executing()
-        sighted_twice = sorted(abandoned & self.unexecuted)
-        self.unexecuted.clear()
-        self.unexecuted.update(abandoned - set(sighted_twice))
-        for workflow_id in sighted_twice:
-            if workflow_id in self._executing():
-                continue
-            await asyncio.to_thread(self.dbos._sys_db.clear_queue_assignment, workflow_id)
-            log("instance.claim_released", workflow=workflow_id)
-
-    def _executing(self) -> set[str]:
-        return set(self.dbos._active_workflows_set.activeList())
 
 
 @dataclass(frozen=True)
