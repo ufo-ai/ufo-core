@@ -6,12 +6,15 @@ from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError
+from ufo_ext_repl.manifest import JS_REPL_TOOL, XLSX_REPL_TOOL
+from ufo_ext_research.tools import FETCH_URL_TOOL, SEARCH_VERTICAL_TOOL, SEARCH_WEB_TOOL
 from ufo_ext_sites import manifest as sites_manifest
 from ufo_ext_sites.delegation import BuildWebsiteInput, _build_website
 from ufo_ext_sites.objects import CONVERSATION_DIGEST_HEX, site_object_name
 from ufo_ext_sites.store import SITE_NAME_MAX, InvalidSiteName, site_name
 from ufo_ext_sites.subagent import WEBSITE_BUILDING_PROFILE, WebsiteBuildingResult
 from ufo_ext_sites.tools import (
+    SITES_TOOL_NAMES,
     StartServerInput,
     WebsiteInput,
     start_server,
@@ -26,6 +29,7 @@ from ufo.sandbox.session import ExecResult
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience
 from ufo.skills.runtime import mount_skill
+from ufo.tools.builtins import BUILTIN_TOOLS
 from ufo.tools.context import SpawnResult, ToolContext
 
 TOOL_NARRATION = "building the site"
@@ -107,8 +111,9 @@ def test_manifest_declares_the_tools_the_profile_and_the_section() -> None:
     )
     (profile,) = manifest.subagents
     assert profile.name == "website_building"
-    assert not {"deploy_website", "publish_website"} & set(profile.tool_names)
-    assert "cannot be hosted from here" in build.description
+    assert "deploy_website" in profile.tool_names
+    assert "publish_website" not in profile.tool_names
+    assert "this conversation's sandbox" in build.description
     (section,) = manifest.prompt_sections
     assert section.name == "sites" and "<sites>" in section.body
 
@@ -224,8 +229,25 @@ async def test_the_webapp_child_declares_its_parent_and_mounts_it_nested() -> No
 
 
 def test_the_website_building_profile_names_only_meaningful_tools() -> None:
+    """It builds, serves, validates and hosts — and delivers nothing itself. `share_file` exists to
+    hand the member a copy, and the child has no member to hand one to: the workspace it shares with
+    the parent is the handoff, read back with `glob` and `read`."""
     names = set(WEBSITE_BUILDING_PROFILE.tool_names)
-    assert {"website", "start_server", "write", "share_file", "js_repl"} <= names
+    # The queue projects the profile by filtering the live tool set on these names, so a name that
+    # resolves to nothing is dropped in silence — a typo would leave the child short of a tool and
+    # every test green. Whatever this profile names has to exist somewhere that ships.
+    available = (
+        set(SITES_TOOL_NAMES)
+        | {tool.name for tool in BUILTIN_TOOLS}
+        | {JS_REPL_TOOL, XLSX_REPL_TOOL}
+        | {SEARCH_WEB_TOOL, SEARCH_VERTICAL_TOOL, FETCH_URL_TOOL}
+    )
+    assert names <= available
+    # Named, not merely resolvable: the containment above passes just as well with a tool dropped,
+    # and the two REPLs are what the child drives a page and a workbook with.
+    assert {JS_REPL_TOOL, XLSX_REPL_TOOL} <= names
+    assert {"website", "start_server", "write", "js_repl", "deploy_website"} <= names
+    assert "share_file" not in names
     assert WEBSITE_BUILDING_PROFILE.input_model.model_validate(
         {"user_description": TOOL_NARRATION, "objective": "build a landing page"}
     ).objective

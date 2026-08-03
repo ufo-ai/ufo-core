@@ -56,12 +56,6 @@ VISIBILITY_NEEDS_A_SPEAKER = (
     "changing who can open a site is a disclosure act and needs a live member: re-deploy without a "
     "visibility argument, or have the member say what it should be"
 )
-SUBAGENT_CANNOT_HOST = (
-    "a subagent turn cannot host a site: its sandbox and workspace are its own and a link into "
-    "them dies with them, and the parent cannot reach these files either. Bring the site up with "
-    "start_server, validate it, and share_file the built output — whatever the member is meant to "
-    "open is built in the member's own conversation."
-)
 VISIBILITY_DESCRIPTION = (
     "Who may open the hosted link: private (you alone), workspace (any member), or public (anyone "
     "with the link). Omit unless the member asked — a new site defaults from where it was built, "
@@ -173,23 +167,29 @@ async def _serve(
     return {"url": f"http://localhost:{port}", "port": port, "log": log}
 
 
-async def _host(
+async def _refuse_before_serving(
     ctx: ToolContext, raw_name: str, port: int, visibility: Visibility | None
-) -> dict[str, object]:
-    """Register the running port as a hosted site and describe the link it now answers on. Nothing
-    is written until the link exists and every refusal has fired: a site needs an owner, so a turn
-    with no acting member cannot host one; a turn acting for a member hosts as that member, whoever
-    queued it, but only a turn with a live speaker may name a `visibility` — the column is a
-    disclosure decision and a background turn never makes one.
+) -> str:
+    """Raise anything hosting would raise, while the member's site is still up, and answer with the
+    slugged name.
 
-    A subagent turn cannot host at all. The link resolves a conversation to the sandbox serving it,
-    and a subagent runs in its own conversation with its own sandbox and its own workspace, derived
-    from the one parent turn that spawned it — so a site registered there dies with that sandbox and
-    a rebuild mints a different link. Hosting belongs to the conversation the member is in."""
+    Serving kills whatever holds the port in a container the member's own turns share, and
+    registering only afterwards is what keeps a refusal from costing them that site. The other
+    order — claim the row first — trades the refusal case for a worse one: a build that fails after
+    the write leaves the displaced row deleted and a live row pointing at a dead port. So every
+    refusal is asked here, nothing is written, and `_host` asks the same set again when it does
+    write.
+
+    Asking first is also what lets the unhost rule stay strict. Taking a port retires the site on
+    it, which needs the member to have asked, and a subagent carries no speaker — but a refused
+    deploy now costs it nothing, so the delegate reports what it built and leaves the standing site
+    up. What it is not told to do is re-deploy under that site's name: that act succeeds, since a
+    same-name deploy displaces nothing, and it would repoint the member's live link at a build
+    nobody asked to put there. Reading the child's own profile as authority would not work anyway:
+    a scheduled fire holds `build_website`, so a timer would escalate through the child it
+    spawns."""
     if ctx.ext is None:
         raise RuntimeError("the website tools dispatched without their ExtensionContext")
-    if ctx.turn.subagent_profile is not None:
-        raise RuntimeError(SUBAGENT_CANNOT_HOST)
     creator_member_id = ctx.acting_member_id
     if creator_member_id is None:
         raise RuntimeError("a hosted site needs an owner: no member is acting on this turn")
@@ -197,15 +197,49 @@ async def _host(
         raise RuntimeError(VISIBILITY_NEEDS_A_SPEAKER)
     workspace_id = ctx.ext.store.workspace_id
     name = site_name(raw_name)
-    link = site_url(ctx.public_base_url, workspace_id, ctx.turn.conversation_id, name)
-    site = await HostedSites(workspace_id, ctx.ext.transaction).register(
-        ctx.turn.conversation_id,
+    site_url(ctx.public_base_url, workspace_id, ctx.sandbox.handle.conversation_id, name)
+    await HostedSites(workspace_id, ctx.ext.transaction).refuse_or_pass(
+        ctx.sandbox.handle.conversation_id,
         name,
         port,
         creator_member_id,
-        ctx.speaker_member_id,
+        visibility,
+        ctx.speaker_member_id is not None,
+    )
+    return name
+
+
+async def _host(
+    ctx: ToolContext, raw_name: str, port: int, visibility: Visibility | None
+) -> dict[str, object]:
+    """Register the port a deploy just left serving as a hosted site, and describe the link it
+    answers on. The refusals ran in `_refuse_before_serving`; `register` asks the same set again
+    here, since this is the write and a concurrent deploy may have moved since.
+
+    The site is registered against the conversation whose sandbox is serving it, which is the one
+    the handle names rather than the one this turn belongs to. For a member's own turn they are the
+    same. For a subagent they are not: it runs in the sandbox of the turn that spawned it, so the
+    port it brings up is served by the member's sandbox and the link belongs to the member's
+    conversation — where it outlives the child turn, and where a rebuild lands on the same link."""
+    if ctx.ext is None:
+        raise RuntimeError("the website tools dispatched without their ExtensionContext")
+    creator_member_id = ctx.acting_member_id
+    if creator_member_id is None:
+        raise RuntimeError("a hosted site needs an owner: no member is acting on this turn")
+    if visibility is not None and ctx.speaker_member_id is None:
+        raise RuntimeError(VISIBILITY_NEEDS_A_SPEAKER)
+    workspace_id = ctx.ext.store.workspace_id
+    name = site_name(raw_name)
+    serving = ctx.sandbox.handle.conversation_id
+    link = site_url(ctx.public_base_url, workspace_id, serving, name)
+    site = await HostedSites(workspace_id, ctx.ext.transaction).register(
+        serving,
+        name,
+        port,
+        creator_member_id,
         visibility,
         ctx.audience,
+        ctx.speaker_member_id is not None,
     )
     return {
         "site_name": site.name,
@@ -235,14 +269,16 @@ async def start_server(ctx: ToolContext, args: StartServerInput) -> ToolResult:
 
 
 async def deploy_website(ctx: ToolContext, args: DeployWebsiteInput) -> ToolResult:
+    name = await _refuse_before_serving(ctx, args.site_name, APP_SERVE_PORT, args.visibility)
     command = f"python3 -m http.server {APP_SERVE_PORT} --bind 0.0.0.0"
     log = f"/tmp/deploy-{APP_SERVE_PORT}.log"
     served = await _serve(ctx, command, args.project_path, APP_SERVE_PORT, log)
-    hosted = await _host(ctx, args.site_name, APP_SERVE_PORT, args.visibility)
+    hosted = await _host(ctx, name, APP_SERVE_PORT, args.visibility)
     return _json_result({**served, **hosted, "entry_point": args.entry_point})
 
 
 async def publish_website(ctx: ToolContext, args: PublishWebsiteInput) -> ToolResult:
+    name = await _refuse_before_serving(ctx, args.app_name, APP_SERVE_PORT, args.visibility)
     if args.install_command:
         install = await ctx.sandbox.bash(
             f"cd {shlex.quote(args.project_path)} && {args.install_command}",
@@ -254,7 +290,7 @@ async def publish_website(ctx: ToolContext, args: PublishWebsiteInput) -> ToolRe
     project = args.project_path if args.run_command else args.dist_path
     log = f"/tmp/publish-{APP_SERVE_PORT}.log"
     served = await _serve(ctx, command, project, APP_SERVE_PORT, log)
-    hosted = await _host(ctx, args.app_name, APP_SERVE_PORT, args.visibility)
+    hosted = await _host(ctx, name, APP_SERVE_PORT, args.visibility)
     return _json_result({**served, **hosted})
 
 
@@ -286,7 +322,3 @@ SITES_TOOLS: tuple[ToolDef, ...] = (
 )
 
 SITES_TOOL_NAMES: tuple[str, ...] = tuple(tool.name for tool in SITES_TOOLS)
-HOSTING_TOOL_NAMES: tuple[str, ...] = (DEPLOY_WEBSITE_TOOL, PUBLISH_WEBSITE_TOOL)
-BUILD_ONLY_TOOL_NAMES: tuple[str, ...] = tuple(
-    name for name in SITES_TOOL_NAMES if name not in HOSTING_TOOL_NAMES
-)

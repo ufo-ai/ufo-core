@@ -12,7 +12,7 @@ verifies."""
 import json
 import re
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -61,7 +61,7 @@ from ufo.sandbox.ingress_token import (
     verify_ingress_token,
 )
 from ufo.sandbox.local import LocalCarrier
-from ufo.sandbox.session import ExecResult, ProxyEndpoint
+from ufo.sandbox.session import ExecResult, ProxyEndpoint, SandboxHandle
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import (
@@ -90,10 +90,32 @@ SITE = "marketing"
 @dataclass
 class FakeSandbox:
     """Every command succeeds, so the readiness probe passes and registration runs. It records
-    nothing: what the tools said to the sandbox is not the contract these tests hold."""
+    nothing: what the tools said to the sandbox is not the contract these tests hold.
+
+    It carries a `handle` because the real session does, and the hosting tools read the conversation
+    off it: a site is registered against whichever conversation's sandbox serves the port, which for
+    a subagent is the one that spawned it rather than its own."""
+
+    handle: SandboxHandle = field(
+        default_factory=lambda: SandboxHandle(conversation_id=uuid4(), container_id="c1")
+    )
 
     async def bash(self, command: str, timeout_s: int = 120) -> ExecResult:
         return ExecResult(stdout="", stderr="", exit_code=0)
+
+
+@dataclass(frozen=True)
+class RefusingSandbox:
+    """Stands in for the member's container on a deploy that must be refused before it is touched.
+    Serving kills whatever holds the port, so a command reaching here at all is the defect — the
+    stand-in refuses the act rather than recording it for a test to read back."""
+
+    handle: SandboxHandle = field(
+        default_factory=lambda: SandboxHandle(conversation_id=uuid4(), container_id="c1")
+    )
+
+    async def bash(self, command: str, timeout_s: int = 120) -> ExecResult:
+        raise AssertionError(f"a refused deploy ran {command!r} in the member's container")
 
 
 @dataclass(frozen=True)
@@ -257,15 +279,30 @@ def _tool(name: str, audience: Audience) -> tuple[ToolDef, ToolContext]:
 
 
 def _bind(
-    ctx: ToolContext, workspace: Workspace, conversation_id: UUID, speaker_member_id: UUID | None
+    ctx: ToolContext,
+    workspace: Workspace,
+    conversation_id: UUID,
+    speaker_member_id: UUID | None,
+    *,
+    serving_conversation_id: UUID | None = None,
+    subagent_profile: str | None = None,
 ) -> ToolContext:
+    """The turn and the sandbox it runs in, bound together. `serving_conversation_id` is the
+    conversation whose sandbox is answering — the turn's own unless this is a subagent turn, which
+    runs in the sandbox of the turn that spawned it."""
     return replace(
         ctx,
+        sandbox=FakeSandbox(
+            handle=SandboxHandle(
+                conversation_id=serving_conversation_id or conversation_id, container_id="c1"
+            )
+        ),
         turn=ctx.turn.model_copy(
             update={
                 "workspace_id": workspace.id,
                 "conversation_id": conversation_id,
                 "agent_id": workspace.agent_id,
+                "subagent_profile": subagent_profile,
             }
         ),
         speaker_member_id=speaker_member_id,
@@ -505,22 +542,36 @@ async def test_a_speakerless_turn_cannot_unhost_a_site(db: None) -> None:
     assert len(await _stored(workspace)) == 1
 
 
-async def test_a_subagent_turn_cannot_host_a_site(db: None) -> None:
-    """A subagent runs in its own conversation with its own disposable sandbox, and the link
-    resolves a conversation to the sandbox serving it — so a site registered there would die with
-    that sandbox and a rebuild would mint a different link. The refusal names where to deploy
-    instead, and nothing is written."""
+async def test_a_subagent_hosts_against_the_conversation_whose_sandbox_serves_it(db: None) -> None:
+    """A subagent runs in the sandbox of the turn that spawned it, so the port it brings up is
+    answered by the member's own sandbox — and the site has to be registered against that
+    conversation, not the child's. Registered against the child, the ingress would resolve the
+    child's conversation, find no sandbox handle on it, and answer that the site is gone; the link
+    would also move on every rebuild, since each spawn is a new conversation. The child's own
+    conversation is deliberately different here, which is what makes the assertion mean anything.
+
+    Shaped as a real subagent turn: no speaker, acting on behalf of the member. A subagent never
+    carries a speaker and cannot be given one, so binding one here would prove the path for a turn
+    shape that does not exist."""
     workspace = await _seed_workspace()
     member_id, _token = await _seed_member(workspace, OWNER_EMAIL)
     audience = conversation_audience(member_id)
-    conversation_id = await _seed_conversation(workspace, audience, member_id)
+    member_conversation = await _seed_conversation(workspace, audience, member_id)
+    child_conversation = await _seed_conversation(workspace, audience, member_id)
     tool, ctx = _tool(DEPLOY_WEBSITE_TOOL, audience)
-    child = _bind(ctx, workspace, conversation_id, member_id)
     child = replace(
-        child, turn=child.turn.model_copy(update={"subagent_profile": "website_building"})
+        _bind(
+            ctx,
+            workspace,
+            child_conversation,
+            None,
+            serving_conversation_id=member_conversation,
+            subagent_profile="website_building",
+        ),
+        on_behalf_of_member_id=member_id,
     )
 
-    with ws(workspace.id), pytest.raises(RuntimeError, match="subagent turn cannot host"):
+    with ws(workspace.id):
         await _dispatch(
             tool,
             child,
@@ -529,7 +580,9 @@ async def test_a_subagent_turn_cannot_host_a_site(db: None) -> None:
             entry_point="index.html",
         )
 
-    assert await _stored(workspace) == ()
+    (row,) = await _stored(workspace)
+    assert row.conversation_id == member_conversation
+    assert row.conversation_id != child_conversation
 
 
 async def test_a_teammate_cannot_unhost_a_site_by_taking_its_port(db: None) -> None:
@@ -550,28 +603,57 @@ async def test_a_teammate_cannot_unhost_a_site_by_taking_its_port(db: None) -> N
     assert (row.name, row.creator_member_id) == ("marketing", creator_id)
 
 
-async def test_a_speakerless_turn_cannot_take_a_port_from_a_site(db: None) -> None:
-    """Even the creator's own scheduled turn cannot displace their site: unhosting needs a live
-    member, and taking the port is unhosting."""
+async def test_a_subagent_rebuilds_its_site_but_cannot_unhost_another(db: None) -> None:
+    """Taking a port retires the site on it, and that retire needs the member to have asked. A
+    subagent carries no speaker and cannot be given one, and reading its profile as authority would
+    not work: a scheduled fire holds `build_website`, so a timer would escalate through the child it
+    spawns. So the rule stays a live speaker — which costs the delegate nothing it needs, because
+    re-deploying the site it was asked to build displaces nothing, and the refusal it does get comes
+    before the port dies, leaving the standing site up for the member to decide about."""
     workspace = await _seed_workspace()
     creator_id, _token = await _seed_member(workspace, OWNER_EMAIL)
     audience = conversation_audience(creator_id)
     conversation_id = await _seed_conversation(workspace, audience, creator_id)
     await _deploy(workspace, conversation_id, audience, creator_id, site="marketing")
-    tool, ctx = _tool(DEPLOY_WEBSITE_TOOL, audience)
-    scheduled = replace(
-        _bind(ctx, workspace, conversation_id, None), on_behalf_of_member_id=creator_id
-    )
 
-    with ws(workspace.id), pytest.raises(UnhostNeedsASpeaker, match="needs a live member"):
+    tool, ctx = _tool(DEPLOY_WEBSITE_TOOL, audience)
+    child = replace(
+        _bind(ctx, workspace, conversation_id, None, subagent_profile="website_building"),
+        sandbox=RefusingSandbox(
+            handle=SandboxHandle(conversation_id=conversation_id, container_id="c1")
+        ),
+        on_behalf_of_member_id=creator_id,
+    )
+    with ws(workspace.id), pytest.raises(UnhostNeedsASpeaker, match="unhost") as refusal:
         await _dispatch(
             tool,
-            scheduled,
+            child,
             project_path="/workspace/dist",
             site_name="pricing",
             entry_point="index.html",
         )
+    (row,) = await _stored(workspace)
+    assert row.name == "marketing"
+    # The refusal names the standing site so the delegate can report it, and directs no deploy
+    # under that name: a same-name deploy displaces nothing, so it passes this gate and repoints
+    # the member's live link at the build they were refused. Advising the act would be worse than
+    # the refusal it softens, so the text is pinned here and not only in the message constant.
+    assert "marketing" in str(refusal.value)
+    assert "deploy under" not in str(refusal.value)
 
+    tool, ctx = _tool(DEPLOY_WEBSITE_TOOL, audience)
+    rebuild = replace(
+        _bind(ctx, workspace, conversation_id, None, subagent_profile="website_building"),
+        on_behalf_of_member_id=creator_id,
+    )
+    with ws(workspace.id):
+        await _dispatch(
+            tool,
+            rebuild,
+            project_path="/workspace/dist",
+            site_name="marketing",
+            entry_point="index.html",
+        )
     (row,) = await _stored(workspace)
     assert row.name == "marketing"
 
@@ -1068,3 +1150,140 @@ async def _get(
     fetched = yaml.safe_load(result.content[0].text)
     assert isinstance(fetched, dict)
     return fetched
+
+
+async def test_a_refused_deploy_never_touches_the_members_running_site(db: None) -> None:
+    """Serving mutates a container the member's own turns share: it kills whatever holds the port,
+    which is the member's site. So every refusal hosting can raise without the port has to fire
+    first — otherwise it leaves the member with a killed server, no replacement, and a link that
+    resolves to nothing. The refusal driven here is a `visibility` argument on a turn with no live
+    speaker: naming a disclosure is the member's to make. Both hosting tools take that path, so both
+    are driven; the stand-in refuses any command rather than recording one for a test to read back,
+    so what proves the ordering is the sandbox itself."""
+    workspace = await _seed_workspace()
+    member_id, _token = await _seed_member(workspace, OWNER_EMAIL)
+    audience = conversation_audience(member_id)
+    conversation_id = await _seed_conversation(workspace, audience, member_id)
+    await _deploy(workspace, conversation_id, audience, member_id, site="marketing")
+    for tool_name, args in (
+        (DEPLOY_WEBSITE_TOOL, {"site_name": "pricing", "entry_point": "index.html"}),
+        (
+            PUBLISH_WEBSITE_TOOL,
+            {"app_name": "pricing", "dist_path": "dist", "run_command": "node server.js"},
+        ),
+    ):
+        tool, ctx = _tool(tool_name, audience)
+        child = replace(
+            _bind(ctx, workspace, conversation_id, None, subagent_profile="website_building"),
+            sandbox=RefusingSandbox(),
+            on_behalf_of_member_id=member_id,
+        )
+        with ws(workspace.id), pytest.raises(RuntimeError, match="needs a live member"):
+            await _dispatch(
+                tool, child, project_path="/workspace/dist", visibility="public", **args
+            )
+
+    (row,) = await _stored(workspace)
+    assert row.name == "marketing"
+
+
+@dataclass(frozen=True)
+class FailingSandbox:
+    """A sandbox whose serve never comes up — the readiness probe's failure, which is what a broken
+    build looks like from here."""
+
+    handle: SandboxHandle = field(
+        default_factory=lambda: SandboxHandle(conversation_id=uuid4(), container_id="c1")
+    )
+
+    async def bash(self, command: str, timeout_s: int = 120) -> ExecResult:
+        return ExecResult(stdout="", stderr="port never opened", exit_code=1)
+
+
+async def test_a_build_that_never_comes_up_leaves_the_members_site_alone(db: None) -> None:
+    """Registering writes the row and retires whatever held the port, and that write commits. So it
+    happens after the serve, not before: a build that fails its readiness probe must not have
+    already deleted the member's site and left a live row pointing at a dead port. The refusals
+    still run first — that is `_refuse_before_serving` — but the row is only claimed once something
+    is actually answering on the port."""
+    workspace = await _seed_workspace()
+    member_id, _token = await _seed_member(workspace, OWNER_EMAIL)
+    audience = conversation_audience(member_id)
+    conversation_id = await _seed_conversation(workspace, audience, member_id)
+    await _deploy(workspace, conversation_id, audience, member_id, site="marketing")
+    tool, ctx = _tool(DEPLOY_WEBSITE_TOOL, audience)
+    broken = replace(_bind(ctx, workspace, conversation_id, member_id), sandbox=FailingSandbox())
+
+    with ws(workspace.id), pytest.raises(RuntimeError):
+        await _dispatch(
+            tool,
+            broken,
+            project_path="/workspace/dist",
+            site_name="pricing",
+            entry_point="index.html",
+        )
+
+    (row,) = await _stored(workspace)
+    assert row.name == "marketing"
+
+
+@dataclass(frozen=True)
+class FailingInstallSandbox:
+    """A sandbox whose install step fails — `publish_website`'s first mutation, and its earliest
+    point of no return once a row has been written."""
+
+    handle: SandboxHandle = field(
+        default_factory=lambda: SandboxHandle(conversation_id=uuid4(), container_id="c1")
+    )
+
+    async def bash(self, command: str, timeout_s: int = 120) -> ExecResult:
+        if "npm install" in command:
+            return ExecResult(stdout="", stderr="install failed", exit_code=1)
+        return ExecResult(stdout="", stderr="", exit_code=0)
+
+
+async def test_publish_leaves_the_members_site_alone_when_it_cannot_come_up(db: None) -> None:
+    """`publish_website` has two mutations after the refusals pass — the install command and the
+    serve — and registering before either would delete the member's row and leave a live row on a
+    port that never opened. Both are driven here, because the deploy path's test does not reach
+    this call site. The app is published under a different name from the member's live site, so a
+    premature write would displace it: registering under the same name is an update and would
+    survive either ordering, proving nothing.
+
+    The serve case passes no `install_command`, which is what makes it a second point rather than a
+    repeat of the first: `FailingSandbox` fails every command, so given one it would raise at the
+    install and never reach `_serve`, leaving a `_host` placed between the two uncovered."""
+    workspace = await _seed_workspace()
+    member_id, _token = await _seed_member(workspace, OWNER_EMAIL)
+    audience = conversation_audience(member_id)
+    conversation_id = await _seed_conversation(workspace, audience, member_id)
+
+    for sandbox, install_command in (
+        (
+            FailingInstallSandbox(
+                handle=SandboxHandle(conversation_id=conversation_id, container_id="c1")
+            ),
+            "npm install",
+        ),
+        (
+            FailingSandbox(
+                handle=SandboxHandle(conversation_id=conversation_id, container_id="c1")
+            ),
+            None,
+        ),
+    ):
+        await _deploy(workspace, conversation_id, audience, member_id, site="marketing")
+        tool, ctx = _tool(PUBLISH_WEBSITE_TOOL, audience)
+        broken = replace(_bind(ctx, workspace, conversation_id, member_id), sandbox=sandbox)
+        with ws(workspace.id), pytest.raises(RuntimeError):
+            await _dispatch(
+                tool,
+                broken,
+                project_path="/workspace/app",
+                dist_path="dist",
+                app_name="pricing",
+                install_command=install_command,
+                run_command="node server.js",
+            )
+        (row,) = await _stored(workspace)
+        assert row.name == "marketing"

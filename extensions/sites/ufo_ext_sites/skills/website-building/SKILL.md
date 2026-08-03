@@ -34,7 +34,7 @@ If the user says just "website" or "site" with no detail, ask what type or defau
 
 Pass `visibility` (`private`, `workspace`, `public`) only when the user asked for one: a new site defaults from where it was built (a direct conversation is private, a workspace room is workspace-wide) and an existing one keeps what it has.
 
-**If you are a website-building subagent** (no `deploy_website` in your tool set), you host nothing: bring the site up with `start_server`, validate it, `share_file` the built output, and report what you built. Hosting belongs to the conversation the member is in.
+**If you are a website-building subagent**, you host too: you run in the delegating conversation's sandbox, so `deploy_website` registers the link against that conversation and it outlives your turn. Deploy under the name of the site you were asked to build, and no other — that updates it behind the same link when it is the one already up. The conversation serves one site on this port, so a deploy of a different site is refused: build it, say so, and hand back. Never take the existing site's name to get around that, which would replace a site nobody asked you to touch. Never pass `visibility` — your turn has no live speaker, so naming one is refused; the site takes the conversation's default and the agent that delegated to you changes it if the user asked. Validate the page, deploy it, and report the `site_url`. You hold neither `publish_website` — an app with a backend is the parent's to publish, so hand it back — nor `share_file`: the workspace is shared with the parent agent, which reads what you wrote with `glob` and `read`, so leave every file in place and let the parent deliver any copy the member wants.
 
 ---
 

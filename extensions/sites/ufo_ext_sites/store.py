@@ -39,10 +39,6 @@ PORT_HELD_BY_ANOTHER_MEMBER = (
     "that port is already serving a site another member deployed, and taking it over would unhost "
     "theirs: deploy under that site's name to update it, or ask them to unhost it"
 )
-PORT_UNHOST_NEEDS_A_SPEAKER = (
-    "taking over that port would unhost the site already on it, which needs a live member: "
-    "re-deploy under that site's name instead"
-)
 SITE_NAME_MAX = 48
 _NAME_RUN = re.compile(r"[^a-z0-9]+")
 
@@ -61,17 +57,26 @@ hosted_site = sa.Table(
 )
 
 
+PORT_UNHOST_NEEDS_A_SPEAKER = (
+    "taking over that port would unhost the site already on it, and only the member can ask for "
+    "that: report what you built and leave the site up"
+)
+
+
+class UnhostNeedsASpeaker(ValueError):
+    """A deploy would have retired the site holding its port on a turn with no live speaker. Taking
+    a port from a site is unhosting it, and neither a scheduled fire nor a subagent acting on
+    someone's behalf is that member asking — so the conversation keeps the site it has. The message
+    stops at that: telling the refused turn to re-deploy under the standing site's name would name
+    an act that succeeds, since a same-name deploy displaces nothing, and repoint a live link at a
+    build nobody asked to put there."""
+
+
 class NotTheSiteCreator(ValueError):
     """A deploy tried to re-gate or displace a site someone else created. Visibility is a disclosure
     decision with one owner and unhosting is a revocation, so re-deploying — under the same name or
     onto the same port — is not a second door to either. Surfaced to the model as a tool error,
     which is how the agent learns to ask the creator."""
-
-
-class UnhostNeedsASpeaker(ValueError):
-    """A deploy would have retired the site holding its port on a turn with no live member. Taking a
-    port from a site is unhosting it, and a revocation needs a member who asked for it — never a
-    background turn acting on someone's behalf."""
 
 
 class InvalidSiteName(ValueError):
@@ -140,36 +145,25 @@ class HostedSites:
         name: str,
         port: int,
         creator_member_id: UUID,
-        speaker_member_id: UUID | None,
         visibility: Visibility | None,
         audience: Audience,
+        may_unhost: bool,
     ) -> HostedSite:
         """Register the site a deploy just left running and return the row it resolves by. A port
         serves one origin, so any other site on this conversation's port is retired first —
         otherwise the older name would keep serving the newer deploy's bytes. That retire is an
         unhost, so it answers to the unhost rule rather than riding in behind a deploy: the port's
-        current site must be the acting member's own, and a turn with no live speaker cannot take a
-        port at all. An explicit
+        current site must be the acting member's own. An explicit
         `visibility` is written, and only its creator may write it: the column has one
         authorization rule and a re-deploy is not a way around it. Without one, an existing site
         keeps the visibility it has — so a teammate re-deploying never resets what the creator
         chose — and a new site takes the conversation audience's default. The name arrives already
         slugged by `site_name`, because its caller needs it to mint the link before it writes."""
         async with self.transaction() as connection:
-            existing = await self._read(connection, conversation_id, name)
-            if (
-                existing is not None
-                and visibility is not None
-                and visibility != existing.visibility
-                and existing.creator_member_id != creator_member_id
-            ):
-                raise NotTheSiteCreator(f"{SITE_VISIBILITY_GATE} ({name!r})")
-            displaced = await self._on_port(connection, conversation_id, port, name)
+            displaced = await self._refuse(
+                connection, conversation_id, name, port, creator_member_id, visibility, may_unhost
+            )
             if displaced is not None:
-                if displaced.creator_member_id != creator_member_id:
-                    raise NotTheSiteCreator(f"{PORT_HELD_BY_ANOTHER_MEMBER} ({displaced.name!r})")
-                if speaker_member_id is None:
-                    raise UnhostNeedsASpeaker(f"{PORT_UNHOST_NEEDS_A_SPEAKER} ({displaced.name!r})")
                 await connection.execute(
                     sa.delete(hosted_site).where(
                         hosted_site.c.workspace_id == self.workspace_id,
@@ -252,6 +246,57 @@ class HostedSites:
                     hosted_site.c.name == name,
                 )
             )
+
+    async def refuse_or_pass(
+        self,
+        conversation_id: UUID,
+        name: str,
+        port: int,
+        creator_member_id: UUID,
+        visibility: Visibility | None,
+        may_unhost: bool,
+    ) -> None:
+        """Raise whatever `register` would raise for these arguments, writing nothing.
+
+        A deploy serves before it registers, and serving kills whatever holds the port — the
+        member's own site, in a container their turns share. So the caller asks here first, while
+        that site is still up, and `register` asks again inside the write: one set of refusals, one
+        answer, checked where a refusal is free and enforced where the row is decided."""
+        async with self.transaction() as connection:
+            await self._refuse(
+                connection, conversation_id, name, port, creator_member_id, visibility, may_unhost
+            )
+
+    async def _refuse(
+        self,
+        connection: AsyncConnection,
+        conversation_id: UUID,
+        name: str,
+        port: int,
+        creator_member_id: UUID,
+        visibility: Visibility | None,
+        may_unhost: bool,
+    ) -> HostedSite | None:
+        """Every refusal a registration can raise, and the site this one would displace.
+
+        Retiring the site on the port is an unhost, so it answers to the unhost rule rather than
+        riding in behind a deploy: the port's current site must be the acting member's own, and the
+        turn must be one that may unhost."""
+        existing = await self._read(connection, conversation_id, name)
+        if (
+            existing is not None
+            and visibility is not None
+            and visibility != existing.visibility
+            and existing.creator_member_id != creator_member_id
+        ):
+            raise NotTheSiteCreator(f"{SITE_VISIBILITY_GATE} ({name!r})")
+        displaced = await self._on_port(connection, conversation_id, port, name)
+        if displaced is not None:
+            if displaced.creator_member_id != creator_member_id:
+                raise NotTheSiteCreator(f"{PORT_HELD_BY_ANOTHER_MEMBER} ({displaced.name!r})")
+            if not may_unhost:
+                raise UnhostNeedsASpeaker(f"{PORT_UNHOST_NEEDS_A_SPEAKER} ({displaced.name!r})")
+        return displaced
 
     async def _on_port(
         self, connection: AsyncConnection, conversation_id: UUID, port: int, name: str

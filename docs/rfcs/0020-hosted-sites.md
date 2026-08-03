@@ -178,18 +178,19 @@ member-supplied name is slugged to the object-name grammar on the way in, bounde
 object name that carries it stays addressable.
 
 **Registration**: `deploy_website` and `publish_website`, after their readiness probe, mint the
-link, upsert the row, and return `site_url` beside the sandbox-local `url` — in that order, so a
-deploy that cannot address a site (no `[connect] public_base_url`) writes nothing rather than leaving
-a row no verb can read. `start_server` registers nothing; a scratch server is not a deliverable.
-Creator is `ctx.acting_member_id` (raise without one — a site needs an owner), and a subagent turn
-cannot register at all: its conversation, sandbox, and workspace are its own, so a link into them
-dies with the turn.
+link, upsert the row, and return `site_url` beside the sandbox-local `url`. `start_server` registers nothing; a scratch server is not a deliverable.
+Creator is `ctx.acting_member_id` (raise without one — a site needs an owner), and the site is
+registered against the conversation whose sandbox is serving the port — for a subagent, the one it
+inherited at admission, which is the member's however deep the spawn chain runs.
 
 A port serves one origin, so registering retires any other site row on the same
 `(conversation, port)` — otherwise an older name would silently serve the newer deploy's content.
 Retiring is unhosting, so it carries the unhost rule rather than riding in behind a deploy: the
-port's current site must be the acting member's own, and a speakerless turn cannot take a port from
-any site, its own included. Default visibility from `ctx.audience`:
+port's current site must be the acting member's own, and the turn must be one that may unhost —
+a member speaking. A subagent carries no speaker, so it re-deploys under the site's own name rather
+than taking a different one's port; that refusal costs it nothing, because every refusal hosting can
+raise needs only the row and so fires before the port is taken. Default visibility from
+`ctx.audience`:
 
 | audience | default |
 |---|---|
@@ -264,16 +265,18 @@ permanent link opens.
 
 ## Dependencies and named risks
 
-- **A site is registered by the conversation that deploys it, and a subagent turn cannot register
-  one.** The link resolves a conversation to the sandbox serving it, and a subagent runs in its own
-  conversation with its own disposable sandbox and workspace, keyed to the single parent turn that
-  spawned it: a site hosted there would die with that sandbox and a rebuild would mint a different
-  link. So the website-building subagent holds no hosting tool — it builds, brings the site up
-  locally, validates it, and `share_file`s the built output — the only way anything leaves that
-  subtree, since the parent's sandbox cannot read it either. What the pack does not do is turn that
-  shared file back into a deploy: materializing it through the `artifact` kind and serving it from
-  the parent's workspace would be its own unit, unproven here. So a site the member can open is one
-  the parent agent built in the member's own conversation.
+- **A site is registered against the conversation whose sandbox serves it, which is what lets a
+  subagent host one.** A subagent runs in the sandbox of the turn that spawned it, up the chain to
+  the member's, so the port it brings up is answered by the member's own sandbox and the site is
+  registered there — the link outlives the child turn and a rebuild lands on the same link, because
+  each spawn is a new conversation but not a new sandbox. Registering against the child instead would
+  resolve a conversation with no handle on it and answer that the site is gone. The website-building
+  subagent therefore holds the hosting tools: it builds, brings the site up, validates it against a
+  real browser, and deploys, all in the conversation the member is in. It cannot replace a site
+  already serving that conversation's port under a different name: retiring a live link is an
+  unhost, and the child carries no speaker. Gating on the chain's root would admit the delegate of
+  a speaking member and still exclude a scheduled fire, but nothing in the extension seam sees the
+  root, so the rule is the turn's own speaker and the child hands a rename back.
 - **The idle reaper (being moved to the docker extension in a separate change).** Today
   `SandboxReaper` (`core/src/ufo/jobs.py:280`) destroys idle sandboxes on *any* backend at 30
   minutes and clears `sandbox_handle` — which kills a hosted site. Until that change lands, a

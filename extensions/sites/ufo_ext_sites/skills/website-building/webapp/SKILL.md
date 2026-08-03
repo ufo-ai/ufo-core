@@ -239,7 +239,7 @@ The template's Express server serves the built client **and** the `/api/...` rou
 1. Build: `npm run build`
 2. Publish: `publish_website(project_path="<project>", dist_path="dist/public", app_name="...", install_command="npm install", run_command="NODE_ENV=production node dist/index.cjs")`
 
-`publish_website` installs dependencies, runs the production server, and returns the reachable `http://localhost:<port>` URL inside the sandbox. Because client and API share one origin, requests use relative `/api/...` paths — no URL rewriting. Read `.skills/website-building/shared/19-backend.md` for details.
+`publish_website` installs dependencies, runs the production server, and returns the reachable `http://localhost:<port>` URL inside the sandbox. A website-building subagent does not hold `publish_website`: build and validate through step 1, then stop and report that the app is built and needs publishing — the agent that delegated to you reads these same files and publishes them. Because client and API share one origin, requests use relative `/api/...` paths — no URL rewriting. Read `.skills/website-building/shared/19-backend.md` for details.
 
 ## Config File Guidance
 

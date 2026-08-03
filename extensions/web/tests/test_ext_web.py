@@ -1185,18 +1185,18 @@ async def test_sites_view_answers_through_the_kinds_own_gate(
             "landing",
             3000,
             member_m,
-            member_m,
             "workspace",
             conversation_audience(member_m),
+            True,
         )
         await sites.register(
             conversation_id,
             "draft",
             3001,
             member_m,
-            member_m,
             "private",
             conversation_audience(member_m),
+            True,
         )
     path = "/surface/web/workspace/sites"
     m_view = (await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_m}"})).json()

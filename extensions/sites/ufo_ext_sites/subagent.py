@@ -3,17 +3,22 @@
 Its prompt is the website-building instructions; the core subagent shell wraps the shared citation
 and output discipline around it, so this profile carries only the workflow that is distinct to
 building and validating a site. Its tool subset is the core file builtins it edits with, the build
-and local-serve tools, and the Node REPL it uses to drive and verify a running page — but not
-`deploy_website` or `publish_website`: those host a site at a permanent link, and a link into a
-subagent's own disposable sandbox dies with it, so hosting stays in the conversation the member is
-in."""
+and local-serve tools, the Node REPL it uses to drive and verify a running page, and the hosting
+tools, minus `publish_website`: a subagent runs in the sandbox of the turn that spawned it, so a
+port it brings up is served by the member's own sandbox and the `deploy_website` link it registers
+belongs to the member's conversation, outliving this turn.
+
+Two tools it does not hold. `publish_website` stands up an app with a backend and is the parent's to
+call — the child reports what it built and control returns to the turn the member is talking to.
+`share_file` delivers a copy to that member, and the child has no member to deliver to: the
+workspace is the handoff, read back by the parent with `glob` and `read` in the same filesystem."""
 
 from pathlib import Path
 
 from pydantic import BaseModel
 
 from ufo.sdk.manifest import SubagentProfile
-from ufo_ext_sites.tools import BUILD_ONLY_TOOL_NAMES
+from ufo_ext_sites.tools import PUBLISH_WEBSITE_TOOL, SITES_TOOL_NAMES
 
 WEBSITE_BUILDING_NAME = "website_building"
 WEBSITE_BUILDING_PROMPT = (
@@ -27,10 +32,10 @@ WEBSITE_BUILDING_TOOL_NAMES = (
     "edit",
     "glob",
     "grep",
-    "share_file",
     "load_skill",
-    *BUILD_ONLY_TOOL_NAMES,
+    *(name for name in SITES_TOOL_NAMES if name != PUBLISH_WEBSITE_TOOL),
     "js_repl",
+    "xlsx_repl",
     # Web reference-gathering (source website_building set); resolves if research is installed.
     "search_web",
     "search_vertical",
