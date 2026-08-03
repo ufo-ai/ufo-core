@@ -1,9 +1,8 @@
 """The web renderer of the onboarding machine: the JSON directive wire, the sign-in page's
 self-containment, and the full email → code walk over the real `onboard_claim` table and
-`SharedWorkspaces` through `POST /v1/onboard/web` — one machine, a second renderer. Both terminal
-shapes are asserted, since the page can only end on one of them: the signed-in card, and a gate
-refusal that ends on `exit`. The `debugger` directive is asserted at both poles: emitted with the
-exact URL for an operator-domain email, absent for everyone else."""
+`SharedWorkspaces`. Both terminal shapes are asserted, since the page can only end on one of them:
+the signed-in card and a gate refusal that ends on `exit`. The `debugger` directive is asserted at
+both poles: emitted with the exact URL for an operator-domain email, absent for everyone else."""
 
 import asyncio
 import re
@@ -27,6 +26,7 @@ from ufo_control.gateway import (
     WORKSPACE_BASE_URL_ENV,
     gateway_app,
 )
+from ufo_control.gateway_claim import MAX_ATTEMPTS
 from ufo_control.gateway_directives import PROMPT, directive, render
 from ufo_control.gateway_email import (
     AWS_ROLE_ARN_ENV,
@@ -259,6 +259,82 @@ def test_web_and_terminal_sessions_never_share_a_claim(
             content="",
         )
         assert "Enter your work email:" in terminal.text
+
+
+def test_terminal_expired_code_returns_to_email_prompt(
+    gateway_postgres: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _configure(monkeypatch, tmp_path, gateway_postgres)
+    sender = RecordingSender()
+    monkeypatch.setattr(gateway, "email_sender_from_env", lambda: sender)
+    session = str(uuid.uuid4())
+    email = "pilot@expired.io"
+    headers = {"x-ufo-session": session, "x-ufo-installed": "1"}
+
+    with TestClient(gateway_app()) as client:
+        client.post("/v1/onboard/ufo", headers=headers, content="")
+        coded = client.post("/v1/onboard/ufo", headers=headers, content=email)
+        assert "Enter the code:" in coded.text
+        code = sender.sent[email]
+        wrong = "000000" if code != "000000" else "000001"
+        incorrect = client.post("/v1/onboard/ufo", headers=headers, content=wrong)
+        assert "Enter the code:" in incorrect.text
+
+        async def expire() -> None:
+            connection = await asyncpg.connect(gateway_postgres)
+            try:
+                await connection.execute(
+                    "update ufo_control.onboard_claim set expires_at = now() - interval '1 second' "
+                    "where surface = 'ufo' and surface_ref = $1",
+                    session,
+                )
+            finally:
+                await connection.close()
+
+        asyncio.run(expire())
+        expired = client.post("/v1/onboard/ufo", headers=headers, content=code)
+        restarted = client.post("/v1/onboard/ufo", headers=headers, content=email)
+
+    assert "The verification code expired. Start onboarding again." in expired.text
+    assert "Enter your work email:" in expired.text
+    assert "Enter the code:" not in expired.text
+    assert "Enter the code:" in restarted.text
+
+
+def test_terminal_exhausted_claim_returns_to_email_prompt(
+    gateway_postgres: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _configure(monkeypatch, tmp_path, gateway_postgres)
+    sender = RecordingSender()
+    monkeypatch.setattr(gateway, "email_sender_from_env", lambda: sender)
+    session = str(uuid.uuid4())
+    email = "pilot@exhausted.io"
+    headers = {"x-ufo-session": session, "x-ufo-installed": "1"}
+
+    with TestClient(gateway_app()) as client:
+        client.post("/v1/onboard/ufo", headers=headers, content="")
+        client.post("/v1/onboard/ufo", headers=headers, content=email)
+
+        async def exhaust() -> None:
+            connection = await asyncpg.connect(gateway_postgres)
+            try:
+                await connection.execute(
+                    "update ufo_control.onboard_claim set attempts = $2 "
+                    "where surface = 'ufo' and surface_ref = $1",
+                    session,
+                    MAX_ATTEMPTS,
+                )
+            finally:
+                await connection.close()
+
+        asyncio.run(exhaust())
+        exhausted = client.post("/v1/onboard/ufo", headers=headers, content="000000")
+        restarted = client.post("/v1/onboard/ufo", headers=headers, content=email)
+
+    assert "Too many attempts. Start onboarding again." in exhausted.text
+    assert "Enter your work email:" in exhausted.text
+    assert "Enter the code:" not in exhausted.text
+    assert "Enter the code:" in restarted.text
 
 
 def test_debugger_directive_lands_only_for_the_operator_domain(

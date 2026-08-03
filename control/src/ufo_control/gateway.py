@@ -16,7 +16,7 @@ from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, R
 from ufo.db import dispose_db, init_db, workspace_tx
 from ufo.ext.surface import OPERATOR_EMAIL_DOMAIN
 
-from ufo_control.gateway_claim import ClaimError, ClaimWorkflow
+from ufo_control.gateway_claim import ClaimError, ClaimRestart, ClaimWorkflow
 from ufo_control.gateway_directives import PROMPT, directive, first_run_install, render
 from ufo_control.gateway_email import (
     DEFAULT_PUBLIC_BASE_URL,
@@ -114,9 +114,10 @@ class Onboarding:
         try:
             await self.claims.verify(claim, body)
         except ClaimError as error:
-            return render(
-                install, directive("say", str(error)), directive("ask", "Enter the code:")
+            prompt = (
+                "Enter your work email:" if isinstance(error, ClaimRestart) else "Enter the code:"
             )
+            return render(install, directive("say", str(error)), directive("ask", prompt))
         return await self._resolve(claim, install)
 
     async def _resolve(self, claim: OnboardClaim, install: bytes) -> bytes:

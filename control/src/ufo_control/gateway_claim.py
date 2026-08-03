@@ -24,6 +24,10 @@ class ClaimError(RuntimeError):
     hash."""
 
 
+class ClaimRestart(ClaimError):
+    pass
+
+
 def hash_code(code: str) -> str:
     return sha256(code.encode()).hexdigest()
 
@@ -64,10 +68,10 @@ class ClaimWorkflow:
     async def verify(self, claim: OnboardClaim, code: str) -> None:
         if claim.attempts >= self.max_attempts:
             await self.store.delete_claim(claim.claim_id)
-            raise ClaimError("Too many attempts. Start onboarding again.")
+            raise ClaimRestart("Too many attempts. Start onboarding again.")
         if datetime.now(UTC) >= claim.expires_at:
             await self.store.delete_claim(claim.claim_id)
-            raise ClaimError("The verification code expired. Start onboarding again.")
+            raise ClaimRestart("The verification code expired. Start onboarding again.")
         await self.store.record_attempt(claim.claim_id, claim.attempts + 1)
         if not hmac.compare_digest(claim.code_hash, hash_code(code)):
             raise ClaimError("The verification code is incorrect.")
