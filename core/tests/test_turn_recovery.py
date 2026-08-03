@@ -550,3 +550,51 @@ def test_booting_peer_leaves_live_turn_alone_then_recovers_it_after_death(
         for proc in (incumbent, thief):
             if proc is not None and proc.poll() is None:
                 proc.kill()
+
+
+STRAND_TIMEOUT_SECONDS = 180
+STRANDED_CLAIM_LINE = "stranded: "
+
+
+@pytest.mark.serial
+def test_a_live_executors_own_stranded_claim_is_released_and_the_turn_finishes(
+    database_url: str, tmp_path: Path
+) -> None:
+    """The wedge with no dead process to blame: one live serve process runs a turn, its workflow's
+    task dies mid-round-two, and the PENDING claim outlives it under an executor that keeps
+    heartbeating. No peer may recover a live executor's claim, and the claim holds the only slot of
+    its conversation's queue partition, so nothing but this process can free it. Its own sweep has
+    to, and the turn has to finish in that same process — with round one replayed from its recorded
+    step rather than re-run, which the single line in the workspace's hits log is what shows."""
+    if not database_url.startswith("postgresql"):
+        pytest.skip("prod-topology recovery proof runs on postgres")
+    system_url = _reset_private_system_db(database_url)
+    env = _worker_env(database_url, system_url, tmp_path / "blobs")
+    ids = json.loads(env["RECOVERY_TEST_IDS"])
+    hits = tmp_path / "workspaces" / ids["conversation"] / HITS_LOG
+
+    stranded = subprocess.run(
+        [sys.executable, str(WORKER), "strand"],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=STRAND_TIMEOUT_SECONDS,
+    )
+
+    assert stranded.returncode == 0, (
+        f"the stranded claim was never released: rc={stranded.returncode}\n"
+        f"{stranded.stdout}\n{stranded.stderr}"
+    )
+    reported = next(
+        line for line in stranded.stdout.splitlines() if line.startswith(STRANDED_CLAIM_LINE)
+    )
+    claim = json.loads(reported.removeprefix(STRANDED_CLAIM_LINE))
+    assert claim["status"] == "PENDING"
+    assert claim["executor"] == claim["own_executor"]
+    assert claim["executing"] == []
+    assert '"status": "done"' in stranded.stdout
+    assert '"text": "recovered"' in stranded.stdout
+    assert hits.read_text() == "hi\n"
+    attempts, steps = _workflow_attempts_and_steps(system_url, ids["turn"])
+    assert attempts == 2
+    assert ROUND_ONE_DISPATCH_STEP in steps

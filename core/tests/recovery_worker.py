@@ -63,9 +63,11 @@ CRASH_WAIT_SECONDS = 60
 INCUMBENT_WAIT_SECONDS = 600
 THIEF_WAIT_SECONDS = 600
 RECOVERY_WAIT_SECONDS = 30
+STRAND_WAIT_SECONDS = 90
 INCUMBENT_ROUND_TWO_SECONDS = 6.0
 THIEF_ROUND_TWO_SECONDS = 12.0
 BASH_USER_DESCRIPTION = "running a check"
+HITS_LOG = "hits.log"
 
 
 def _rounds_completed(request: ModelRequest) -> int:
@@ -150,6 +152,37 @@ class _CrashModel:
 
 
 @dataclass(frozen=True)
+class _StrandModel:
+    """Round one appends a line to the workspace — the side effect that shows the recorded step
+    replaying rather than re-running. Round two streams until the task executing the workflow is
+    cancelled out from under it, and answers when the released claim is re-dispatched."""
+
+    round_two: threading.Event
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        if not _tool_result_seen(request):
+            yield ToolCallStart(id="c1", name="bash")
+            yield ToolCallDelta(
+                id="c1",
+                partial_json=json.dumps(
+                    {
+                        "command": f"echo hi >> {HITS_LOG}",
+                        "user_description": BASH_USER_DESCRIPTION,
+                    }
+                ),
+            )
+            yield Usage(input_tokens=2, output_tokens=2)
+            return
+        if not self.round_two.is_set():
+            self.round_two.set()
+            while True:
+                yield TextDelta(text="pacing ")
+                await asyncio.sleep(0.2)
+        yield TextDelta(text="recovered")
+        yield Usage(input_tokens=1, output_tokens=1)
+
+
+@dataclass(frozen=True)
 class _AnswerModel:
     """The recovered process's model: round two answers; round one never runs live (replayed)."""
 
@@ -192,7 +225,9 @@ class _Env:
         )
 
 
-def _install_runtime(env: _Env, model: _CrashModel | _AnswerModel) -> None:
+def _install_runtime(
+    env: _Env, model: _CrashModel | _PacedModel | _StrandModel | _AnswerModel
+) -> None:
     config = Config(
         database=DatabaseConfig(url=env.app_url, system_url=env.system_url),
         blob=BlobConfig(backend="filesystem", root=env.blob_root),
@@ -240,7 +275,7 @@ def _in_daemon_thread(factory: Callable[[], Coroutine[object, object, None]]) ->
     threading.Thread(target=lambda: asyncio.run(factory()), daemon=True).start()
 
 
-def _launch_dbos(env: _Env) -> None:
+def _launch_dbos(env: _Env) -> DBOS:
     """Boot the way serve boots: a unique instance id doubling as the DBOS executor id, a seat row
     written before launch, then the heartbeat and executor-recovery loops at their shipped pace —
     the same pace that bounds production's crash-to-redispatch latency."""
@@ -260,7 +295,7 @@ def _launch_dbos(env: _Env) -> None:
 
     asyncio.run(seat())
     _in_daemon_thread(Heartbeat(instance_id=instance_id).run)
-    DBOS(
+    dbos = DBOS(
         config={
             "name": DBOS_APP_NAME,
             "application_version": DBOS_APP_VERSION,
@@ -270,7 +305,8 @@ def _launch_dbos(env: _Env) -> None:
         }
     )
     DBOS.launch()
-    _in_daemon_thread(ExecutorRecovery().run)
+    _in_daemon_thread(ExecutorRecovery(dbos=dbos).run)
+    return dbos
 
 
 async def _seed(env: _Env) -> None:
@@ -426,6 +462,76 @@ def recover(env: _Env) -> int:
     return TIMEOUT_EXIT_CODE
 
 
+def strand(env: _Env) -> int:
+    """One live process whose claim outlives its execution: the turn runs to mid-round-two, then the
+    task executing its workflow is cancelled on the DBOS background loop while this process keeps
+    heartbeating. DBOS writes no outcome for a cancelled task, so the row stays PENDING under a live
+    executor — the state no peer is allowed to touch — and the claim also holds the only slot of its
+    conversation's queue partition. This process's own sweep is the one thing that can see the claim
+    has no execution, so the turn must reach its terminal here, without a restart."""
+    init_db(env.app_url)
+    asyncio.run(_seed(env))
+    round_two = threading.Event()
+    _install_runtime(env, _StrandModel(round_two=round_two))
+    dbos = _launch_dbos(env)
+    _enqueue_like_admission(env)
+    if not round_two.wait(CRASH_WAIT_SECONDS):
+        print("turn never reached round two", flush=True)
+        return 3
+    _cancel_workflow_tasks(dbos)
+    print(f"stranded: {json.dumps(_claim(dbos, env))}", flush=True)
+    waited = 0.0
+    while waited < STRAND_WAIT_SECONDS:
+        terminal = asyncio.run(_read_terminal(env))
+        if terminal is not None:
+            print(f"terminal: {json.dumps(terminal)}", flush=True)
+            return RECOVERED_EXIT_CODE
+        threading.Event().wait(0.2)
+        waited += 0.2
+    print("stranded claim was never released — dumping DBOS background loop", flush=True)
+    _dump_background_loop_tasks()
+    return TIMEOUT_EXIT_CODE
+
+
+def _cancel_workflow_tasks(dbos: DBOS) -> None:
+    """Kill the execution without killing the process, the way a cancelled task dies: the workflow
+    coroutines run as tasks on DBOS's background loop, and cancelling them there unwinds each
+    execution while every thread, seat and heartbeat of this process carries on."""
+    loop = dbos._background_event_loop._loop
+    if loop is None:
+        raise RuntimeError("DBOS background loop never started")
+    tasks = list(dbos._workflow_tasks)
+    cancelled = threading.Event()
+
+    def cancel() -> None:
+        for task in tasks:
+            task.cancel()
+        cancelled.set()
+
+    loop.call_soon_threadsafe(cancel)
+    if not cancelled.wait(5):
+        raise RuntimeError("DBOS background loop never ran the cancellation")
+    waited = 0.0
+    while dbos._active_workflows_set.activeList():
+        if waited > 10:
+            raise RuntimeError("cancelled workflow tasks never unwound")
+        threading.Event().wait(0.1)
+        waited += 0.1
+    print(f"cancelled {len(tasks)} workflow tasks", flush=True)
+
+
+def _claim(dbos: DBOS, env: _Env) -> dict[str, object]:
+    """What the sweep has to act on: the workflow row still claimed by this live executor, and the
+    set of workflows this process is actually executing, which no longer holds it."""
+    (status,) = DBOS.list_workflows(workflow_ids=[str(env.turn_id)], load_input=False)
+    return {
+        "status": status.status,
+        "executor": status.executor_id,
+        "own_executor": DBOS.executor_id,
+        "executing": dbos._active_workflows_set.activeList(),
+    }
+
+
 def main() -> int:
     faulthandler.register(signal.SIGUSR1)
     env = _Env.load()
@@ -439,6 +545,8 @@ def main() -> int:
             return recover(env)
         case "thief":
             return thief(env)
+        case "strand":
+            return strand(env)
         case phase:
             raise SystemExit(f"unknown phase: {phase}")
 

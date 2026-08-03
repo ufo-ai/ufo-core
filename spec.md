@@ -631,7 +631,7 @@ extension involved is the Redis hub.
 | Concern | Multi-instance behavior |
 |---|---|
 | Database | Postgres required; SQLite is single-instance-only. |
-| Turns, queues, jobs | DBOS coordinates through Postgres: any instance pulls. Each process's DBOS executor id is its instance id, so in-flight work is attributable to a heartbeat: the executor-recovery sweep re-dispatches workflows whose executor has no fresh `runtime_instance` row, and never touches a live peer's — recovering a live workflow would double-execute it. |
+| Turns, queues, jobs | DBOS coordinates through Postgres: any instance pulls. Each process's DBOS executor id is its instance id, so in-flight work is attributable to a heartbeat: the executor-recovery sweep re-dispatches workflows whose executor has no fresh `runtime_instance` row, and each process also re-dispatches its own claims that it is no longer executing — DBOS's active-workflow set is the only witness for that, so a claim is judged by the process holding it or by the absence of that process, never by a peer, whose recovery of a live workflow would double-execute it. A claim is released to its queue rather than reassigned: it returns to ENQUEUED under the same workflow id, so it is dispatchable again and its recorded steps still replay. |
 | Live deltas | Shared hub required (Redis hub extension); terminal frames stay durable in Postgres. |
 | Blobs | S3 backend required; the filesystem backend is single-instance-only. |
 | Sandboxes | Per-conversation, resumed across instances from the durable `sandbox_handle`; an in-cluster carrier needs its workspace root on storage every instance reaches. |
@@ -647,7 +647,8 @@ Two invariants make this safe, and they hold even single-instance:
 
 Misconfiguration fails loud at boot: the shared owner DSN must be set and no surface may claim a
 reserved onboarding route. Instances heartbeat a `runtime_instance` row so the fleet tracks its live
-executors; a peer that stops heartbeating has its in-flight turns recovered by the survivors.
+executors; a peer that stops heartbeating has its in-flight turns recovered by the survivors, and a
+turn whose executing task died inside a live instance is recovered by that instance.
 
 ### Roles — the split that's already paid for
 

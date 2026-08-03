@@ -5,9 +5,13 @@ from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
+from dbos import DBOS, DBOSClient, EnqueueOptions, WorkflowStatus
+from dbos._dbos import _get_dbos_instance
 
 from ufo import runtime_instance
+from ufo.config import Config
 from ufo.db import workspace_tx
+from ufo.loop.queue import TURN_QUEUE
 from ufo.runtime_instance import (
     STALE_AFTER_SECONDS,
     CancelReconciler,
@@ -16,7 +20,7 @@ from ufo.runtime_instance import (
     record_fleet_seat,
 )
 from ufo.schema import tables
-from ufo.schema.records import TerminalFrame
+from ufo.schema.records import TURN_QUEUE_NAME, TURN_WORKFLOW_NAME, TerminalFrame
 
 
 async def _workspace() -> UUID:
@@ -128,7 +132,9 @@ async def test_heartbeat_refreshes_a_stale_row_and_retire_removes_it(
     assert not await _row_present(instance_id)
 
 
-async def test_fleet_seat_has_no_workspace_and_counts_as_a_live_executor(db: None) -> None:
+async def test_fleet_seat_has_no_workspace_and_counts_as_a_live_executor(
+    db: None, dbos_launched: Config
+) -> None:
     """The shared fleet's seat: recorded with no workspace (it serves them all), refreshed by the
     same heartbeat, and read as live by the executor-recovery sweep — so a booting fleet process is
     never swept as stranded and its retirement frees the seat like any instance's."""
@@ -143,13 +149,197 @@ async def test_fleet_seat_has_no_workspace_and_counts_as_a_live_executor(db: Non
             )
         ).one()
     assert row.workspace_id is None
-    assert str(instance_id) in await ExecutorRecovery()._live_executors()
+    sweep = ExecutorRecovery(dbos=_get_dbos_instance())
+    assert str(instance_id) in await sweep._live_executors()
     heartbeat = Heartbeat(instance_id=instance_id)
     await heartbeat.beat()
     assert await _row_live(instance_id)
     await heartbeat.retire()
     assert not await _row_present(instance_id)
-    assert str(instance_id) not in await ExecutorRecovery()._live_executors()
+    assert str(instance_id) not in await sweep._live_executors()
+
+
+UNDEQUEUEABLE_APP_VERSION = "claim-liveness-probe"
+
+
+async def _workflow_status(workflow_id: str) -> str:
+    (status,) = await asyncio.to_thread(
+        DBOS.list_workflows, workflow_ids=[workflow_id], load_input=False, load_output=False
+    )
+    return status.status
+
+
+async def _claim_a_workflow(system_url: str) -> str:
+    """A real claim nothing executes: DBOS's own dequeue takes an enqueued workflow under this
+    executor id, on an app version this deploy's queue workers never dequeue, so the row is PENDING
+    and no task ever runs it."""
+    workflow_id = str(uuid4())
+    client = DBOSClient(system_database_url=system_url)
+    try:
+        options: EnqueueOptions = {
+            "queue_name": TURN_QUEUE_NAME,
+            "workflow_name": TURN_WORKFLOW_NAME,
+            "workflow_id": workflow_id,
+            "queue_partition_key": workflow_id,
+            "app_version": UNDEQUEUEABLE_APP_VERSION,
+        }
+        await client.enqueue_async(options, str(uuid4()), workflow_id)
+    finally:
+        client.destroy()
+    await _dequeue(workflow_id)
+    return workflow_id
+
+
+async def _dequeue(workflow_id: str) -> None:
+    dequeued = await asyncio.to_thread(
+        _get_dbos_instance()._sys_db.start_queued_workflows,
+        TURN_QUEUE,
+        DBOS.executor_id,
+        UNDEQUEUEABLE_APP_VERSION,
+        workflow_id,
+        0,
+    )
+    assert dequeued == [workflow_id]
+    assert await _workflow_status(workflow_id) == "PENDING"
+
+
+async def _own_claims(sweep: ExecutorRecovery, *workflow_ids: str) -> list[WorkflowStatus]:
+    return [
+        status for status in await sweep._pending_workflows() if status.workflow_id in workflow_ids
+    ]
+
+
+@pytest.mark.serial
+async def test_a_claim_is_released_only_where_consecutive_sweeps_find_no_execution(
+    dbos_launched: Config,
+) -> None:
+    """One absence from the active-workflow set settles nothing — a workflow dequeued moments before
+    a sweep has not reached its first step — so a claim survives a single sighting, and a sweep that
+    finds the workflow executing starts the count over rather than leaving a sighting to pair with a
+    later one. The release is read back as the ENQUEUED row the queue can dispatch again."""
+    dbos = _get_dbos_instance()
+    workflow_id = await _claim_a_workflow(dbos_launched.database.system_url)
+    sweep = ExecutorRecovery(dbos=dbos)
+
+    await sweep._release_unexecuted_claims(await _own_claims(sweep, workflow_id))
+    assert await _workflow_status(workflow_id) == "PENDING"
+
+    dbos._active_workflows_set.acquire(workflow_id, TURN_QUEUE_NAME, workflow_id)
+    await sweep._release_unexecuted_claims(await _own_claims(sweep, workflow_id))
+    dbos._active_workflows_set.release(workflow_id)
+    assert await _workflow_status(workflow_id) == "PENDING"
+
+    await sweep._release_unexecuted_claims(await _own_claims(sweep, workflow_id))
+    assert await _workflow_status(workflow_id) == "PENDING"
+    await sweep._release_unexecuted_claims(await _own_claims(sweep, workflow_id))
+    assert await _workflow_status(workflow_id) == "ENQUEUED"
+
+
+@pytest.mark.serial
+async def test_a_re_dispatched_claim_gets_its_own_two_sweeps(dbos_launched: Config) -> None:
+    """A released claim starts its count over: the row the queue dispatches next is a fresh claim in
+    the dequeue-to-first-step gap, and carrying the released id would let one sighting release it —
+    re-enqueueing a workflow whose execution is starting."""
+    dbos = _get_dbos_instance()
+    workflow_id = await _claim_a_workflow(dbos_launched.database.system_url)
+    sweep = ExecutorRecovery(dbos=dbos)
+    for _ in range(2):
+        await sweep._release_unexecuted_claims(await _own_claims(sweep, workflow_id))
+    assert await _workflow_status(workflow_id) == "ENQUEUED"
+
+    await _dequeue(workflow_id)
+
+    await sweep._release_unexecuted_claims(await _own_claims(sweep, workflow_id))
+    assert await _workflow_status(workflow_id) == "PENDING"
+    await sweep._release_unexecuted_claims(await _own_claims(sweep, workflow_id))
+    assert await _workflow_status(workflow_id) == "ENQUEUED"
+
+
+@pytest.mark.serial
+async def test_a_claim_that_starts_executing_mid_sweep_keeps_it_and_starts_over(
+    dbos_launched: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A claim absent when the sweep listed it can be executing by the time the sweep reaches it —
+    its dequeue-to-first-step gap closing while an earlier release runs — which is why the set is
+    read again at the release. That claim is left alone, and the sighting it spent there is gone, so
+    the sweep after it starts a fresh pair rather than releasing on one absence. The interleaving is
+    the real one: a second workflow acquires its active-set entry while the first release runs."""
+    dbos = _get_dbos_instance()
+    first, second = sorted(
+        [
+            await _claim_a_workflow(dbos_launched.database.system_url),
+            await _claim_a_workflow(dbos_launched.database.system_url),
+        ]
+    )
+    sweep = ExecutorRecovery(dbos=dbos)
+    await sweep._release_unexecuted_claims(await _own_claims(sweep, first, second))
+    assert await _workflow_status(second) == "PENDING"
+
+    release_queue_assignment = dbos._sys_db.clear_queue_assignment
+
+    def start_second(workflow_id: str) -> None:
+        if workflow_id == first:
+            dbos._active_workflows_set.acquire(second, TURN_QUEUE_NAME, second)
+        release_queue_assignment(workflow_id)
+
+    monkeypatch.setattr(dbos._sys_db, "clear_queue_assignment", start_second)
+    await sweep._release_unexecuted_claims(await _own_claims(sweep, first, second))
+    monkeypatch.undo()
+    dbos._active_workflows_set.release(second)
+
+    assert await _workflow_status(first) == "ENQUEUED"
+    assert await _workflow_status(second) == "PENDING"
+    await sweep._release_unexecuted_claims(await _own_claims(sweep, second))
+    assert await _workflow_status(second) == "PENDING"
+    await sweep._release_unexecuted_claims(await _own_claims(sweep, second))
+    assert await _workflow_status(second) == "ENQUEUED"
+
+
+@pytest.mark.serial
+async def test_a_release_that_fails_spends_its_sighting(
+    dbos_launched: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The count is written before any release runs, so a release that raises — the tick dies, the
+    loop logs it — leaves no sighting to pair with the next absence: a fresh pair releases the
+    claim, never the single absence that follows the failure."""
+    dbos = _get_dbos_instance()
+    workflow_id = await _claim_a_workflow(dbos_launched.database.system_url)
+    sweep = ExecutorRecovery(dbos=dbos)
+    await sweep._release_unexecuted_claims(await _own_claims(sweep, workflow_id))
+
+    def refuse(workflow_id: str) -> None:
+        raise sa.exc.SQLAlchemyError("connection reset releasing the claim")
+
+    monkeypatch.setattr(dbos._sys_db, "clear_queue_assignment", refuse)
+    with pytest.raises(sa.exc.SQLAlchemyError):
+        await sweep._release_unexecuted_claims(await _own_claims(sweep, workflow_id))
+    monkeypatch.undo()
+    assert await _workflow_status(workflow_id) == "PENDING"
+
+    await sweep._release_unexecuted_claims(await _own_claims(sweep, workflow_id))
+    assert await _workflow_status(workflow_id) == "PENDING"
+    await sweep._release_unexecuted_claims(await _own_claims(sweep, workflow_id))
+    assert await _workflow_status(workflow_id) == "ENQUEUED"
+
+
+@pytest.mark.serial
+async def test_an_executing_claim_is_never_sighted(dbos_launched: Config) -> None:
+    """A claim the sweep finds executing is not sighted at all, so the pair it needs starts once the
+    execution is gone. Counting it would pair that sighting with the moment a finishing workflow
+    has released its entry and not yet written its outcome — one absence releasing a claim whose
+    workflow was executing throughout."""
+    dbos = _get_dbos_instance()
+    workflow_id = await _claim_a_workflow(dbos_launched.database.system_url)
+    sweep = ExecutorRecovery(dbos=dbos)
+
+    dbos._active_workflows_set.acquire(workflow_id, TURN_QUEUE_NAME, workflow_id)
+    await sweep._release_unexecuted_claims(await _own_claims(sweep, workflow_id))
+    dbos._active_workflows_set.release(workflow_id)
+
+    await sweep._release_unexecuted_claims(await _own_claims(sweep, workflow_id))
+    assert await _workflow_status(workflow_id) == "PENDING"
+    await sweep._release_unexecuted_claims(await _own_claims(sweep, workflow_id))
+    assert await _workflow_status(workflow_id) == "ENQUEUED"
 
 
 @dataclass
