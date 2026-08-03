@@ -28,6 +28,7 @@ from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.context import context_for
 from ufo.ext.loader import turn_tools
+from ufo.loop.engine import MAX_TOOL_RESULT_CHARS, TOOL_RESULT_PREVIEW_CHARS
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import Audience, conversation_audience, foreign_room_audience, room_audience
@@ -674,6 +675,21 @@ async def test_page_get_bounds_an_oversized_body(db: None, tmp_path: Path) -> No
         assert fetched["spec"]["body"] == "x" * (PAGE_BODY_MAX_BYTES - 1)
         assert "�" not in fetched["spec"]["body"]
         assert fetched["spec"]["body_truncated"] is True
+
+
+async def test_page_get_flags_truncation_inside_the_engine_preview(
+    db: None, tmp_path: Path
+) -> None:
+    state = await _workspace()
+    blob = FilesystemBlobStore(root=tmp_path)
+    with ws(state.workspace_id):
+        source_id = await _seed_source(state, "asana")
+        page_id = await _seed_page(state, source_id, blob, body="x" * (PAGE_BODY_MAX_BYTES + 1))
+        rendered = await _text(
+            _TOOLS["object_get"], _context(state, blob), kind=PAGE_KIND, name=str(page_id)
+        )
+        assert len(rendered) > MAX_TOOL_RESULT_CHARS
+        assert "body_truncated: true" in rendered[:TOOL_RESULT_PREVIEW_CHARS]
 
 
 async def test_page_get_rejects_corrupted_utf8(db: None, tmp_path: Path) -> None:

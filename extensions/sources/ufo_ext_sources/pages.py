@@ -55,8 +55,8 @@ class PageSpec(BaseModel):
     subject: str = Field(description="The page's visibility subject: 'shared' or 'member:<id>'.")
     digest: str = Field(description="The content digest of the page body at last sync.")
     body_ref: str = Field(description="Reference to the page body in the blob store.")
-    body: str = Field(description="The page body, bounded to the first 65,536 UTF-8 bytes.")
     body_truncated: bool = Field(description="Whether the body exceeded the object read bound.")
+    body: str = Field(description="The page body, bounded to the first 65,536 UTF-8 bytes.")
 
 
 def _require_ext(ctx: ToolContext) -> ExtensionContext:
@@ -120,8 +120,8 @@ class _Page:
             subject=self.subject,
             digest=self.digest,
             body_ref=self.body_ref,
-            body=body,
             body_truncated=body_truncated,
+            body=body,
         )
 
     def summary(self) -> str:
