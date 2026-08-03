@@ -4,8 +4,8 @@ import { CredentialPromptForm } from "@/views/CredentialPrompt";
 import { Button } from "@/components/ui/button";
 import { getJson } from "@/lib/api";
 import { cn } from "@/lib/cn";
-import { chatState, updateChat, useChat, type Bubble } from "@/lib/chatStore";
-import { answerQuestion, sendMessage } from "@/lib/turnStream";
+import { chatState, updateChat, useChat, type Bubble, type ToolEvent } from "@/lib/chatStore";
+import { answerQuestion, eventLabel, sendMessage } from "@/lib/turnStream";
 import type { Agent, ChatFile, ChatQuestion, QuestionEntry, Transcript } from "@/lib/types";
 
 const MAX_ANSWER_BUTTONS = 10;
@@ -82,6 +82,7 @@ export function Chat({ agent }: { agent: Agent }) {
           ) : (
             <Speech key={index} mine={message.role === "user"}>
               {message.text}
+              {message.events ? <ToolFold events={message.events} /> : null}
               {message.files ? <Files files={message.files} /> : null}
               {message.connectUrl ? <ConnectLink url={message.connectUrl} /> : null}
               {message.meta ? <Meta>{message.meta}</Meta> : null}
@@ -93,7 +94,7 @@ export function Chat({ agent }: { agent: Agent }) {
             {state.live.text}
             {state.live.files ? <Files files={state.live.files} /> : null}
             {state.live.connectUrl ? <ConnectLink url={state.live.connectUrl} /> : null}
-            {state.live.activity ? <Meta>{state.live.activity}</Meta> : null}
+            {state.live.activity ? <Working>{state.live.activity}</Working> : null}
             {state.live.meter ? <Meta>{state.live.meter}</Meta> : null}
             {state.live.meta ? <Meta>{state.live.meta}</Meta> : null}
           </Speech>
@@ -167,6 +168,30 @@ function Speech({ mine, children }: { mine: boolean; children: ReactNode }) {
 
 function Meta({ children }: { children: ReactNode }) {
   return <div className="mt-2xs font-mono text-small opacity-(--muted)">{children}</div>;
+}
+
+function Working({ children }: { children: ReactNode }) {
+  return (
+    <div className="mt-2xs flex items-center gap-sm font-mono text-small opacity-(--muted)">
+      <span aria-hidden className="h-xs w-xs animate-working rounded-full bg-ink motion-reduce:animate-none" />
+      {children}
+    </div>
+  );
+}
+
+function ToolFold({ events }: { events: ToolEvent[] }) {
+  return (
+    <details className="mt-2xs font-mono text-small opacity-(--muted)">
+      <summary className="cursor-pointer">
+        {events.length === 1 ? "1 tool call" : events.length + " tool calls"}
+      </summary>
+      <ul className="m-0 mt-2xs flex list-none flex-col gap-hair p-0 pl-lg">
+        {events.map((event, index) => (
+          <li key={index}>{eventLabel(event, "done")}</li>
+        ))}
+      </ul>
+    </details>
+  );
 }
 
 function Handoff({ children }: { children: ReactNode }) {

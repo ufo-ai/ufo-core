@@ -26,7 +26,10 @@ beforeEach(() => {
 test("a tool frame reports its description, and its tool and preview when it has none", async () => {
   const stream = await streaming();
   stream.emit("tool", { description: "Reading the calendar", tool: "cal", preview: "list" });
-  expect(await screen.findByText("Reading the calendar")).toBeTruthy();
+  const dock = await screen.findByText("Reading the calendar");
+  const dot = dock.parentElement?.querySelector("span[aria-hidden]");
+  expect(dot?.className).toContain("animate-working");
+  expect(dot?.className).toContain("motion-reduce:animate-none");
   stream.emit("tool", { tool: "bash", preview: "ls -la" });
   expect(await screen.findByText("bash ls -la")).toBeTruthy();
 });
@@ -34,7 +37,55 @@ test("a tool frame reports its description, and its tool and preview when it has
 test("a skill frame names the skill being loaded", async () => {
   const stream = await streaming();
   stream.emit("skill", { skill: "calendar-triage" });
-  expect(await screen.findByText("loading skill: calendar-triage")).toBeTruthy();
+  expect(await screen.findByText("Loading skill · calendar-triage")).toBeTruthy();
+});
+
+test("a settled turn folds its tool calls behind a count that expands to its lines", async () => {
+  const stream = await streaming();
+  stream.emit("tool", { tool: "bash", preview: "ls" });
+  stream.emit("tool", { tool: "read", preview: "notes.md" });
+  stream.emit("skill", { skill: "calendar-triage" });
+  stream.emit("terminal", {
+    status: "done",
+    text: "Looked it over.",
+    model: "opus",
+    tokens: 5,
+    cost_micro_usd: 1_000_000,
+  });
+
+  const summary = await screen.findByText("3 tool calls");
+  expect(summary.tagName).toBe("SUMMARY");
+  expect(screen.getByText("bash ls").closest("details")).toBe(summary.closest("details"));
+  expect(screen.getByText("bash ls")).toBeTruthy();
+  expect(screen.getByText("read notes.md")).toBeTruthy();
+  expect(screen.getByText("Loaded skill · calendar-triage")).toBeTruthy();
+  expect(screen.queryByText("Loading skill · calendar-triage")).toBeNull();
+});
+
+test("a single tool call folds behind singular copy", async () => {
+  const stream = await streaming();
+  stream.emit("tool", { tool: "bash", preview: "ls" });
+  stream.emit("terminal", {
+    status: "done",
+    text: "Done.",
+    model: "opus",
+    tokens: 5,
+    cost_micro_usd: 1_000_000,
+  });
+  expect((await screen.findByText("1 tool call")).tagName).toBe("SUMMARY");
+});
+
+test("a turn with no tool calls renders no fold", async () => {
+  const stream = await streaming();
+  stream.emit("terminal", {
+    status: "done",
+    text: "Just words.",
+    model: "opus",
+    tokens: 5,
+    cost_micro_usd: 1_000_000,
+  });
+  expect(await screen.findByText("Just words.")).toBeTruthy();
+  expect(screen.queryByText(/tool calls?$/)).toBeNull();
 });
 
 test("a cost frame meters tokens and priced spend", async () => {

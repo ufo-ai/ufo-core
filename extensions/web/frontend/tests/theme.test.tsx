@@ -91,6 +91,11 @@ test("a table scrolls its own overflow instead of squeezing the page", () => {
   expect(table.className).not.toContain("overflow");
 });
 
+test("the working pulse yields to reduced motion in the built sheet", () => {
+  const css = builtStyles().replace(/\s+/g, "");
+  expect(/@media\(prefers-reduced-motion:reduce\)\{[^}]*\.motion-reduce\\:animate-none\{animation:none/.test(css)).toBe(true);
+});
+
 test("the wordmark reads as one word in the sidebar", async () => {
   wire({});
   render(<App agents={[AGENT]} member={MEMBER} />);

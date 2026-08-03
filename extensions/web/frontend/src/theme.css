@@ -1,4 +1,4 @@
-@import "tailwindcss";
+@import "tailwindcss" source(".");
 
 @theme {
   --color-surface: Canvas;
@@ -67,6 +67,16 @@
   --media-tall: 60vh;
   --size-thumb: 96px;
   --marker-width: 2px;
+}
+
+@theme {
+  --animate-working: working 1.4s ease-in-out infinite;
+
+  @keyframes working {
+    50% {
+      opacity: 0.35;
+    }
+  }
 }
 
 @layer base {

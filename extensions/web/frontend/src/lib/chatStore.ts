@@ -2,10 +2,18 @@ import { useSyncExternalStore } from "react";
 
 import type { ChatFile, ChatQuestion, CredentialRequest, Message } from "@/lib/types";
 
+export type ToolEvent = {
+  kind: "tool" | "skill";
+  name: string;
+  preview: string;
+  description: string;
+};
+
 export type Bubble = Message & {
   meta?: string;
   files?: ChatFile[];
   connectUrl?: string;
+  events?: ToolEvent[];
 };
 
 export type LiveTurn = {
@@ -15,6 +23,7 @@ export type LiveTurn = {
   meta: string | null;
   files: ChatFile[] | null;
   connectUrl: string | null;
+  events: ToolEvent[];
 };
 
 export type Handoffs = {
@@ -45,7 +54,15 @@ export function updateChat(agentId: string, change: (state: ChatState) => ChatSt
 }
 
 export function liveTurn(): LiveTurn {
-  return { text: "", activity: null, meter: null, meta: null, files: null, connectUrl: null };
+  return {
+    text: "",
+    activity: null,
+    meter: null,
+    meta: null,
+    files: null,
+    connectUrl: null,
+    events: [],
+  };
 }
 
 export function useChat(agentId: string): ChatState {

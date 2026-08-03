@@ -1,9 +1,17 @@
 import { BASE } from "@/lib/api";
 import { money } from "@/lib/money";
-import { chatState, liveTurn, updateChat, type LiveTurn } from "@/lib/chatStore";
+import { chatState, liveTurn, updateChat, type LiveTurn, type ToolEvent } from "@/lib/chatStore";
 import type { ChatFile, ChatQuestion } from "@/lib/types";
 
 const MAX_STREAM_RETRIES = 5;
+
+export function eventLabel(event: ToolEvent, phase: "active" | "done"): string {
+  if (event.description) return event.description;
+  if (event.kind === "skill") {
+    return (phase === "active" ? "Loading skill" : "Loaded skill") + " · " + event.name;
+  }
+  return event.preview ? event.name + " " + event.preview : event.name;
+}
 
 export function streamTurn(agentId: string, turnId: string, answering: boolean): EventSource {
   const source = new EventSource(BASE + "/turns/" + turnId + "/stream");
@@ -25,6 +33,7 @@ export function streamTurn(agentId: string, turnId: string, answering: boolean):
           ...(live.meta ? { meta: live.meta } : {}),
           ...(live.files ? { files: live.files } : {}),
           ...(live.connectUrl ? { connectUrl: live.connectUrl } : {}),
+          ...(live.events.length ? { events: live.events } : {}),
         }),
       };
     });
@@ -63,15 +72,27 @@ export function streamTurn(agentId: string, turnId: string, answering: boolean):
 
   source.addEventListener("tool", (event) => {
     const frame = JSON.parse((event as MessageEvent).data);
+    const entry: ToolEvent = {
+      kind: "tool",
+      name: frame.tool,
+      preview: frame.preview ?? "",
+      description: frame.description ?? "",
+    };
     onLive((live) => ({
       ...live,
-      activity: frame.description || frame.tool + " " + frame.preview,
+      events: live.events.concat(entry),
+      activity: eventLabel(entry, "active"),
     }));
   });
 
   source.addEventListener("skill", (event) => {
     const frame = JSON.parse((event as MessageEvent).data);
-    onLive((live) => ({ ...live, activity: "loading skill: " + frame.skill }));
+    const entry: ToolEvent = { kind: "skill", name: frame.skill, preview: "", description: "" };
+    onLive((live) => ({
+      ...live,
+      events: live.events.concat(entry),
+      activity: eventLabel(entry, "active"),
+    }));
   });
 
   source.addEventListener("cost", (event) => {
