@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test } from "vitest";
 
 import { App } from "@/App";
+import { tokens } from "@/lib/turnStream";
 
 import { AGENT, MEMBER, StreamFake, TURN_ID, json, useStreamFake, wire } from "./harness";
 
@@ -91,7 +92,7 @@ test("a turn with no tool calls renders no fold", async () => {
 test("a cost frame meters tokens and priced spend", async () => {
   const stream = await streaming();
   stream.emit("cost", { tokens: 1200, cost_micro_usd: 34500 });
-  expect(await screen.findByText("1200 tok · $0.03")).toBeTruthy();
+  expect(await screen.findByText("1,200 tok · $0.03")).toBeTruthy();
 });
 
 test("a connect frame offers the consent link, and a connect_error states the failure", async () => {
@@ -240,4 +241,9 @@ test("an answer the server refuses states its status rather than hanging", async
 
   await userEvent.click(await screen.findByRole("button", { name: "Work" }));
   expect(await screen.findByText("Error 503 — try again.")).toBeTruthy();
+});
+
+test("token counts group their thousands", () => {
+  expect(tokens(12)).toBe("12");
+  expect(tokens(66_473)).toBe("66,473");
 });

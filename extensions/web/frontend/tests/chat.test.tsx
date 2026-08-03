@@ -67,24 +67,6 @@ test("the composer is disabled while a turn streams and re-enabled when it lands
   await waitFor(() => expect((send as HTMLButtonElement).disabled).toBe(false));
 });
 
-test("a stream that stalls past its retries states the loss and keeps what streamed", async () => {
-  wire({ ...transcript(), "/chat": () => json({ turn_id: TURN_ID }) });
-  open();
-  await screen.findByText("No conversation with assistant yet.");
-  await userEvent.type(screen.getByLabelText("Message the agent"), "hi");
-  await userEvent.click(screen.getByRole("button", { name: "Send" }));
-  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
-
-  const stream = StreamFake.last();
-  stream.emit("message", { text: "partial" });
-  for (let attempt = 0; attempt < 4; attempt += 1) stream.fail();
-  expect(screen.queryByText("Connection lost — reload to see the reply.")).toBeNull();
-
-  stream.fail();
-  expect(await screen.findByText("Connection lost — reload to see the reply.")).toBeTruthy();
-  expect(screen.getByText("partial")).toBeTruthy();
-});
-
 test("a failed post states the error instead of opening a stream", async () => {
   wire({
     ...transcript(),

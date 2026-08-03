@@ -24,6 +24,7 @@ export type LiveTurn = {
   files: ChatFile[] | null;
   connectUrl: string | null;
   events: ToolEvent[];
+  reconnecting: boolean;
 };
 
 export type Handoffs = {
@@ -32,14 +33,17 @@ export type Handoffs = {
   files?: ChatFile[] | null;
 };
 
+export type StreamingTurn = { id: string; answering: boolean };
+
 export type ChatState = {
   messages: Bubble[] | null;
   busy: boolean;
   live: LiveTurn | null;
+  turn: StreamingTurn | null;
   handoffs: Handoffs;
 };
 
-const EMPTY: ChatState = { messages: null, busy: false, live: null, handoffs: {} };
+const EMPTY: ChatState = { messages: null, busy: false, live: null, turn: null, handoffs: {} };
 
 const states = new Map<string, ChatState>();
 const listeners = new Set<() => void>();
@@ -62,6 +66,7 @@ export function liveTurn(): LiveTurn {
     files: null,
     connectUrl: null,
     events: [],
+    reconnecting: false,
   };
 }
 

@@ -78,6 +78,21 @@ test("the drawer fills a narrow viewport rather than overflowing it", () => {
   expect(builtStyles().replace(/\s+/g, "")).toContain("min(520px,100vw)");
 });
 
+test("the page height tracks the visible viewport and respects device insets", () => {
+  const css = builtStyles().replace(/\s+/g, "");
+  expect(css).toContain(".h-dvh{height:100dvh}");
+  expect(css).toContain("box-sizing:border-box;height:100dvh;padding-top:env(safe-area-inset-top)");
+  expect(css).toContain("env(safe-area-inset-bottom)");
+  const page = readFileSync(join(STATIC, "index.html"), "utf8");
+  expect(page).toContain("viewport-fit=cover");
+});
+
+test("reply headings carry an emitted scale, not just declared tokens", () => {
+  const css = builtStyles().replace(/\s+/g, "");
+  expect(css).toContain("h2{font-size:var(--text-subtitle)");
+  expect(css).toContain("font-size:var(--text-ui)");
+});
+
 test("a table scrolls its own overflow instead of squeezing the page", () => {
   render(
     <Table>

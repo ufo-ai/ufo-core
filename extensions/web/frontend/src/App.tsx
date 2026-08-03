@@ -54,7 +54,7 @@ export function App({ agents, member }: AppProps) {
 
   return (
     <MainAgentProvider agents={agents}>
-    <div className="grid h-screen grid-cols-[var(--container-sidebar)_1fr] max-narrow:grid-cols-1 max-narrow:grid-rows-[auto_1fr]">
+    <div className="grid h-dvh grid-cols-[var(--container-sidebar)_1fr] max-narrow:grid-cols-1 max-narrow:grid-rows-[auto_1fr]">
       <nav className="flex min-h-0 flex-col border-r border-edge max-narrow:flex-row max-narrow:items-center max-narrow:border-r-0 max-narrow:border-b">
         <div className="px-2xl py-lg font-strong max-narrow:px-lg max-narrow:py-md">
           ufo
@@ -112,6 +112,7 @@ export function App({ agents, member }: AppProps) {
       ) : selected ? (
         <AgentPane
           agent={selected}
+          member={member}
           tab={route.tab}
           tabs={AGENT_TABS}
           onTab={(tab) => openAgent(selected.id, tab)}

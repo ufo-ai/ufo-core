@@ -182,7 +182,7 @@ const PROSE = [
   "[&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
   "[&_p]:my-sm",
   "[&_:is(h1,h2,h3,h4,h5,h6)]:mt-lg [&_:is(h1,h2,h3,h4,h5,h6)]:mb-sm [&_:is(h1,h2,h3,h4,h5,h6)]:font-strong",
-  "[&_h1]:text-title [&_:is(h2,h3,h4,h5,h6)]:text-body",
+  "[&_h1]:text-title [&_h2]:text-subtitle [&_h3]:text-body [&_:is(h4,h5,h6)]:text-ui",
   "[&_:is(ul,ol)]:my-sm [&_:is(ul,ol)]:pl-4xl [&_li]:my-hair",
   "[&_code]:font-mono [&_code]:text-label [&_code]:bg-fill-subtle [&_code]:rounded-sm [&_code]:px-2xs",
   "[&_pre]:my-sm [&_pre]:overflow-x-auto [&_pre]:rounded-panel [&_pre]:bg-fill-subtle [&_pre]:p-lg",

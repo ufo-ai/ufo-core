@@ -1,9 +1,40 @@
-import { BASE } from "@/lib/api";
+import { BASE, getJson } from "@/lib/api";
 import { money } from "@/lib/money";
 import { chatState, liveTurn, updateChat, type LiveTurn, type ToolEvent } from "@/lib/chatStore";
-import type { ChatFile, ChatQuestion } from "@/lib/types";
+import type { ChatFile, ChatQuestion, Transcript } from "@/lib/types";
 
-const MAX_STREAM_RETRIES = 5;
+const REATTACH_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000];
+
+export function tokens(count: number): string {
+  return count.toLocaleString("en-US");
+}
+
+const RESYNC_EPOCH = new Map<string, number>();
+
+function bumpEpoch(agentId: string): void {
+  RESYNC_EPOCH.set(agentId, (RESYNC_EPOCH.get(agentId) ?? 0) + 1);
+}
+
+const SOURCES = new Map<string, EventSource>();
+const REATTACHES = new Map<string, number>();
+const TIMERS = new Map<string, ReturnType<typeof setTimeout>>();
+
+type Timer = (fn: () => void, ms: number) => ReturnType<typeof setTimeout>;
+const NATIVE_TIMER: Timer = (fn, ms) => setTimeout(fn, ms);
+let reattachTimer: Timer = NATIVE_TIMER;
+
+export function setReattachTimer(timer: Timer): void {
+  reattachTimer = timer;
+}
+
+export function resetStreams(): void {
+  for (const source of SOURCES.values()) source.close();
+  for (const timer of TIMERS.values()) clearTimeout(timer);
+  SOURCES.clear();
+  REATTACHES.clear();
+  TIMERS.clear();
+  reattachTimer = NATIVE_TIMER;
+}
 
 export function eventLabel(event: ToolEvent, phase: "active" | "done"): string {
   if (event.description) return event.description;
@@ -13,10 +44,18 @@ export function eventLabel(event: ToolEvent, phase: "active" | "done"): string {
   return event.preview ? event.name + " " + event.preview : event.name;
 }
 
-export function streamTurn(agentId: string, turnId: string, answering: boolean): EventSource {
+export function streamTurn(agentId: string, turnId: string, answering: boolean): void {
+  REATTACHES.delete(agentId);
+  updateChat(agentId, (state) => ({ ...state, turn: { id: turnId, answering } }));
+  attach(agentId, turnId, answering, false);
+}
+
+function attach(agentId: string, turnId: string, answering: boolean, reattach: boolean): void {
+  TIMERS.delete(agentId);
+  let redrawOnOpen = reattach;
   const source = new EventSource(BASE + "/turns/" + turnId + "/stream");
+  SOURCES.set(agentId, source);
   let sawFiles = false;
-  let stalled = 0;
 
   const onLive = (change: (live: LiveTurn) => LiveTurn) =>
     updateChat(agentId, (state) => ({ ...state, live: change(state.live ?? liveTurn()) }));
@@ -40,11 +79,18 @@ export function streamTurn(agentId: string, turnId: string, answering: boolean):
 
   const close = () => {
     source.close();
-    updateChat(agentId, (state) => ({ ...state, busy: false, live: null }));
+    SOURCES.delete(agentId);
+    updateChat(agentId, (state) => ({ ...state, busy: false, live: null, turn: null }));
   };
 
   source.addEventListener("open", () => {
-    stalled = 0;
+    REATTACHES.delete(agentId);
+    if (redrawOnOpen) {
+      redrawOnOpen = false;
+      updateChat(agentId, (state) => ({ ...state, live: liveTurn() }));
+    } else {
+      onLive((live) => ({ ...live, reconnecting: false }));
+    }
   });
 
   source.onmessage = (event) => {
@@ -99,7 +145,7 @@ export function streamTurn(agentId: string, turnId: string, answering: boolean):
     const frame = JSON.parse((event as MessageEvent).data);
     onLive((live) => ({
       ...live,
-      meter: frame.tokens + " tok · " + money(frame.cost_micro_usd),
+      meter: tokens(frame.tokens) + " tok · " + money(frame.cost_micro_usd),
     }));
   });
 
@@ -121,8 +167,8 @@ export function streamTurn(agentId: string, turnId: string, answering: boolean):
       let text = live.text;
       let meta = live.meta;
       if (frame.status === "done") {
-        if (frame.text && !text) text = frame.text;
-        meta = frame.model + " · " + frame.tokens + " tok · " + money(frame.cost_micro_usd);
+        if (frame.text) text = frame.text;
+        meta = frame.model + " · " + tokens(frame.tokens) + " tok · " + money(frame.cost_micro_usd);
         if (frame.question) {
           handoffs.question = { turn_id: turnId, ...frame.question };
         } else if (!answering) {
@@ -150,20 +196,76 @@ export function streamTurn(agentId: string, turnId: string, answering: boolean):
   });
 
   source.onerror = () => {
-    stalled += 1;
-    if (source.readyState !== EventSource.CLOSED && stalled < MAX_STREAM_RETRIES) return;
-    record();
-    updateChat(agentId, (state) => ({
-      ...state,
-      messages: (state.messages ?? []).concat({
-        role: "error",
-        text: "Connection lost — reload to see the reply.",
-      }),
-    }));
-    close();
+    if (source.readyState !== EventSource.CLOSED) {
+      onLive((live) => ({ ...live, reconnecting: true }));
+      return;
+    }
+    source.close();
+    SOURCES.delete(agentId);
+    const attempts = (REATTACHES.get(agentId) ?? 0) + 1;
+    if (attempts > REATTACH_DELAYS_MS.length) {
+      record();
+      updateChat(agentId, (state) => ({
+        ...state,
+        messages: (state.messages ?? []).concat({
+          role: "error",
+          text: "Connection lost — reload to see the reply.",
+        }),
+      }));
+      close();
+      return;
+    }
+    REATTACHES.set(agentId, attempts);
+    onLive((live) => ({ ...live, reconnecting: true }));
+    TIMERS.set(
+      agentId,
+      reattachTimer(() => attach(agentId, turnId, answering, true), REATTACH_DELAYS_MS[attempts - 1]),
+    );
   };
+}
 
-  return source;
+export function resyncChat(agentId: string): void {
+  const state = chatState(agentId);
+  if (state.turn) {
+    const source = SOURCES.get(agentId);
+    if (source && source.readyState !== EventSource.CLOSED) return;
+    const timer = TIMERS.get(agentId);
+    if (timer !== undefined) clearTimeout(timer);
+    attach(agentId, state.turn.id, state.turn.answering, true);
+    return;
+  }
+  if (state.busy || state.messages === null) return;
+  void refreshTranscript(agentId);
+}
+
+export async function refreshTranscript(agentId: string, onlyIfEmpty = false): Promise<void> {
+  if (onlyIfEmpty && chatState(agentId).messages !== null) return;
+  const epoch = RESYNC_EPOCH.get(agentId) ?? 0;
+  const result = await getJson<Transcript>("/agents/" + agentId + "/transcript");
+  if (!result.ok && !onlyIfEmpty) return;
+  const payload: Transcript = result.ok ? result.payload : { messages: [] };
+  updateChat(agentId, (current) => {
+    if (onlyIfEmpty && current.messages !== null) return current;
+    if ((RESYNC_EPOCH.get(agentId) ?? 0) !== epoch) return current;
+    if (!onlyIfEmpty && (current.busy || current.turn)) return current;
+    const incoming = ("question" in payload && payload.question) || null;
+    const held = current.handoffs.question ?? null;
+    const question =
+      incoming === null
+        ? held
+        : held && held.turn_id === incoming.turn_id
+          ? { ...incoming, answered: held.answered }
+          : incoming;
+    return {
+      ...current,
+      messages: payload.messages,
+      handoffs: {
+        question,
+        credentials: ("credentials" in payload && payload.credentials) || null,
+        files: ("files" in payload && payload.files) || null,
+      },
+    };
+  });
 }
 
 export async function sendMessage(
@@ -171,6 +273,7 @@ export async function sendMessage(
   body: string | FormData,
   shown: string,
 ): Promise<void> {
+  bumpEpoch(agentId);
   updateChat(agentId, (state) => ({
     ...state,
     busy: true,
@@ -210,6 +313,7 @@ export async function answerQuestion(
 ): Promise<void> {
   const state = chatState(agentId);
   if (state.busy || state.messages === null) return;
+  bumpEpoch(agentId);
   updateChat(agentId, (current) => ({ ...current, busy: true, live: liveTurn() }));
   let res: Response;
   try {

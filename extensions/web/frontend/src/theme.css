@@ -66,6 +66,7 @@
   --text-label: 13px;
   --text-ui: 14px;
   --text-body: 15px;
+  --text-subtitle: 16px;
   --text-title: 18px;
 
   --leading-chrome: 1.5;
@@ -106,7 +107,9 @@
   }
 
   body {
-    height: 100vh;
+    box-sizing: border-box;
+    height: 100dvh;
+    padding-top: env(safe-area-inset-top);
     margin: 0;
     background: var(--color-surface);
     color: var(--color-ink);

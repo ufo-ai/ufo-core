@@ -19,3 +19,4 @@ test("dollar amounts round to cents", () => {
   expect(money(2_000_000)).toBe("$2.00");
   expect(money(34_500)).toBe("$0.03");
 });
+

@@ -2,12 +2,12 @@ import { useEffect, useRef, useState, type FormEvent, type ReactNode, type RefOb
 
 import { CredentialPromptForm } from "@/views/CredentialPrompt";
 import { Button } from "@/components/ui/button";
-import { getJson } from "@/lib/api";
 import { cn } from "@/lib/cn";
-import { chatState, updateChat, useChat, type Bubble, type ToolEvent } from "@/lib/chatStore";
 import { Markdown, StreamingBody } from "@/lib/markdown";
-import { answerQuestion, eventLabel, sendMessage } from "@/lib/turnStream";
-import type { Agent, ChatFile, ChatQuestion, QuestionEntry, Transcript } from "@/lib/types";
+import { updateChat, useChat, type ToolEvent } from "@/lib/chatStore";
+import { clearDraft, installDraftFlush, readDraft, writeDraft } from "@/lib/drafts";
+import { answerQuestion, eventLabel, refreshTranscript, resyncChat, sendMessage } from "@/lib/turnStream";
+import type { Agent, ChatFile, ChatQuestion, Member, QuestionEntry } from "@/lib/types";
 
 const MAX_ANSWER_BUTTONS = 10;
 
@@ -19,34 +19,25 @@ export function formatSize(bytes: number): string {
 
 const PIN_THRESHOLD_PX = 40;
 
-export function Chat({ agent }: { agent: Agent }) {
+export function Chat({ agent, member }: { agent: Agent; member: Member }) {
   const state = useChat(agent.id);
   const log = useRef<HTMLDivElement>(null);
   const pinned = useRef(true);
   const composer = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    if (chatState(agent.id).messages !== null) return;
-    let live = true;
-    getJson<Transcript>("/agents/" + agent.id + "/transcript").then((result) => {
-      if (!live) return;
-      const payload = result.ok ? result.payload : { messages: [] as Bubble[] };
-      updateChat(agent.id, (current) =>
-        current.messages !== null
-          ? current
-          : {
-              ...current,
-              messages: payload.messages as Bubble[],
-              handoffs: {
-                question: ("question" in payload && payload.question) || null,
-                credentials: ("credentials" in payload && payload.credentials) || null,
-                files: ("files" in payload && payload.files) || null,
-              },
-            },
-      );
-    });
+    void refreshTranscript(agent.id, true);
+  }, [agent.id]);
+
+  useEffect(() => {
+    const sync = () => {
+      if (document.visibilityState === "visible") resyncChat(agent.id);
+    };
+    window.addEventListener("focus", sync);
+    document.addEventListener("visibilitychange", sync);
     return () => {
-      live = false;
+      window.removeEventListener("focus", sync);
+      document.removeEventListener("visibilitychange", sync);
     };
   }, [agent.id]);
 
@@ -95,7 +86,11 @@ export function Chat({ agent }: { agent: Agent }) {
             <StreamingBody text={state.live.text} />
             {state.live.files ? <Files files={state.live.files} /> : null}
             {state.live.connectUrl ? <ConnectLink url={state.live.connectUrl} /> : null}
-            {state.live.activity ? <Working>{state.live.activity}</Working> : null}
+            {state.live.reconnecting ? (
+              <Working>Reconnecting…</Working>
+            ) : state.live.activity ? (
+              <Working>{state.live.activity}</Working>
+            ) : null}
             {state.live.meter ? <Meta>{state.live.meter}</Meta> : null}
             {state.live.meta ? <Meta>{state.live.meta}</Meta> : null}
           </Speech>
@@ -148,7 +143,7 @@ export function Chat({ agent }: { agent: Agent }) {
           </div>
         ) : null}
       </div>
-      <Composer agent={agent} input={composer} onSend={repin} />
+      <Composer agent={agent} draftKey={member.id + "/" + agent.id} input={composer} onSend={repin} />
     </>
   );
 }
@@ -314,15 +309,17 @@ function Question({
 
 function Composer({
   agent,
+  draftKey,
   input,
   onSend,
 }: {
   agent: Agent;
+  draftKey: string;
   input: RefObject<HTMLInputElement | null>;
   onSend: () => void;
 }) {
   const state = useChat(agent.id);
-  const [text, setText] = useState("");
+  const [text, setText] = useState(() => readDraft(draftKey));
   const files = useRef<HTMLInputElement>(null);
   const disabled = state.busy || state.messages === null;
 
@@ -330,12 +327,15 @@ function Composer({
     input.current?.focus();
   }, [input]);
 
+  useEffect(() => installDraftFlush(), []);
+
   function submit(event: FormEvent) {
     event.preventDefault();
     const attached = Array.from(files.current?.files ?? []);
     const trimmed = text.trim();
     if ((!trimmed && !attached.length) || disabled) return;
     setText("");
+    clearDraft(draftKey);
     const shown = trimmed || attached.map((file) => file.name).join(", ");
     let body: string | FormData = trimmed;
     if (attached.length) {
@@ -351,7 +351,7 @@ function Composer({
   }
 
   return (
-    <form onSubmit={submit} className="flex gap-sm border-t border-edge px-2xl py-lg">
+    <form onSubmit={submit} className="flex gap-sm border-t border-edge px-2xl pt-lg pb-[max(var(--spacing-lg),env(safe-area-inset-bottom))]">
       <label
         title="Attach files"
         className="flex cursor-pointer items-center rounded-panel border border-edge-control px-lg font-strong"
@@ -361,7 +361,10 @@ function Composer({
       <input
         ref={input}
         value={text}
-        onChange={(event) => setText(event.target.value)}
+        onChange={(event) => {
+          setText(event.target.value);
+          writeDraft(draftKey, event.target.value);
+        }}
         autoComplete="off"
         placeholder="Message the agent…"
         aria-label="Message the agent"
