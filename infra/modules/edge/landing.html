@@ -34,13 +34,8 @@
     color:var(--hull);
     text-shadow:0 0 12px currentColor;
     user-select:none;
-    cursor:pointer;            /* every craft is a door to the ledger */
-    transition:filter .2s;
+    pointer-events:none;       /* the fleet is decoration; the join sits above it */
   }
-  .craft:hover{filter:brightness(1.4)}
-  /* The morph replaces every glyph each frame. A press that lands on one destroys its own
-     target before the release, and the click never resolves — so only the craft is hit-tested. */
-  .craft span{pointer-events:none}
   .craft .hull {color:var(--hull); text-shadow:0 0 6px #8b8fb855}
   .craft .lit  {color:var(--gold); text-shadow:0 0 10px var(--gold)}
   .craft .spark{color:var(--spark);text-shadow:0 0 12px var(--spark)}
@@ -49,21 +44,10 @@
     .craft{text-shadow:0 0 6px currentColor}
   }
 
-  /* The hail: the keyboard route to the same panel a craft opens. */
-  .hail{
-    position:fixed; left:50%; bottom:clamp(18px,5vh,42px);
-    transform:translateX(-50%);
-    background:none; border:0; padding:6px 10px;
-    font-family:var(--mono); font-size:13px; letter-spacing:.08em;
-    color:var(--hull); text-shadow:0 0 10px currentColor;
-    cursor:pointer; opacity:.8;
-    transition:opacity .25s, color .25s;
-  }
-  .hail:hover,.hail:focus-visible{opacity:1; color:var(--gold)}
-
-  /* The panel: the curl card's join, rendered for a browser. */
+  /* The panel: the curl card's join, rendered for a browser — always in the layout. */
   .panel{
-    margin:auto;
+    position:fixed; left:50%; top:50%;
+    transform:translate(-50%,-50%);
     width:min(92vw,30rem);
     padding:clamp(18px,4vw,28px);
     border:1px solid var(--hull);
@@ -72,7 +56,6 @@
     font-family:var(--mono); font-size:14px; line-height:1.6;
     color:var(--hull);
   }
-  .panel::backdrop{background:#000000cc}
   .panel .head{margin:0 0 14px; color:var(--gray); letter-spacing:.08em}
   .panel .field{display:flex; align-items:center; gap:.6ch; margin:0}
   .panel input{
@@ -102,20 +85,17 @@
 </head>
 <body>
   <div id="sky" aria-hidden="true"></div>
-  <button id="hail" class="hail" type="button">Join Waitlist</button>
-  <dialog id="panel" class="panel" aria-label="Join Waitlist">
-    <form id="join" action="/waitlist" method="post">
-      <p class="head">Join Waitlist</p>
-      <p class="field">
-        <span class="prompt" aria-hidden="true">&gt;</span>
-        <input id="email" name="email" type="email" required maxlength="254"
-               placeholder="email@work.com" autocomplete="email" spellcheck="false"
-               aria-label="Email address" />
-      </p>
-      <button id="go" class="go" type="submit">join</button>
-      <p id="ack" class="ack" role="status"></p>
-    </form>
-  </dialog>
+  <form id="join" class="panel" action="/waitlist" method="post" aria-labelledby="join-head">
+    <p class="head" id="join-head">Join Waitlist</p>
+    <p class="field">
+      <span class="prompt" aria-hidden="true">&gt;</span>
+      <input id="email" name="email" type="email" required maxlength="254"
+             placeholder="email@work.com" autocomplete="email" spellcheck="false"
+             aria-label="Email address" />
+    </p>
+    <button id="go" class="go" type="submit">join</button>
+    <p id="ack" class="ack" role="status"></p>
+  </form>
   <span hidden aria-hidden="true">Terminal interface: curl https://__HOSTNAME__</span>
 
 <script>
@@ -603,27 +583,11 @@ const MAX_FLEET = 100;
 const sky = document.getElementById('sky');
 const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-// ── the ledger panel: the same join the curl card offers ────────────────
-const panel = document.getElementById('panel');
+// ── the panel: the same join the curl card offers, always on the page ───
 const join = document.getElementById('join');
 const email = document.getElementById('email');
 const go = document.getElementById('go');
 const ack = document.getElementById('ack');
-
-function hail(){ if(!panel.open) panel.showModal(); }
-
-document.getElementById('hail').addEventListener('click', hail);
-// Delegated, because the fleet gathers: press one craft and release on another and the click
-// resolves to the sky they share. Empty sky is zero-height, so only a craft can carry one here.
-sky.addEventListener('click', hail);
-// The dialog's own padding belongs to the dialog element, so the target alone cannot tell a
-// backdrop click from one just inside the edge. Only a press outside the panel's box releases.
-panel.addEventListener('click', e => {
-  const box = panel.getBoundingClientRect();
-  const inside = e.clientX >= box.left && e.clientX <= box.right &&
-                 e.clientY >= box.top  && e.clientY <= box.bottom;
-  if(!inside) panel.close();
-});
 
 function report(message, bad){
   ack.textContent = message;
@@ -846,8 +810,6 @@ function stepMotion(craft, dtSec){
 
   craft.el.style.transform = `translate(${craft.x}px,${craft.y}px)`;
   craft.el.style.opacity = craft.opacity.toFixed(3);
-  // a cloaked craft is not a door — it must not swallow the click
-  craft.el.style.pointerEvents = craft.opacity < CLOAKED_BELOW ? 'none' : 'auto';
 }
 
 const fleet = Array.from({length:COUNT}, (_,i) => makeCraft(i));

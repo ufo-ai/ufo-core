@@ -1,6 +1,3 @@
-// The landing page's behaviour, executed. A browser is the real dependency here: the panel's
-// release rule is geometric and the craft are clickable only because of how the morph redraws
-// them — neither survives being asserted against the HTML source.
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import test, { after, before } from "node:test";
@@ -66,7 +63,6 @@ async function open(craft = 1) {
   await page.waitForFunction(() => document.querySelector(".craft")?.style.opacity === "1");
   return page;
 }
-const isOpen = (page) => page.locator("#panel").evaluate((d) => d.open);
 
 // A press and a release, far enough apart to straddle a redraw, like a hand.
 async function press(page, x, y, hold = 140) {
@@ -76,102 +72,62 @@ async function press(page, x, y, hold = 140) {
   await page.mouse.up();
   await page.waitForTimeout(80);
 }
-const centreOf = (page, selector) =>
-  page.locator(selector).first().evaluate((el) => {
-    const b = el.getBoundingClientRect();
-    return { x: b.x + b.width / 2, y: b.y + b.height / 2 };
-  });
 
-test("a craft opens the panel even though the morph redraws it mid-click", async () => {
+test("the join stands in the middle of the page, above the fleet", async () => {
   const page = await open(6);
-  let opened = 0;
-  for (let attempt = 0; attempt < 12; attempt++) {
-    const spot = await centreOf(page, ".craft");
-    await press(page, spot.x, spot.y, 60 + attempt * 25);
-    if (await isOpen(page)) {
-      opened++;
-      await page.keyboard.press("Escape");
-      await page.waitForTimeout(100);
-    }
-  }
-  // Hit-testing the glyphs instead of the craft drops this to roughly a quarter.
-  assert.equal(opened, 12);
+  const placed = await page.locator("#join").evaluate((el) => {
+    const b = el.getBoundingClientRect();
+    const middle = document.elementFromPoint(b.x + b.width / 2, b.y + b.height / 2);
+    return {
+      tag: el.tagName,
+      drawn: b.width > 0 && b.height > 0,
+      offCentre: Math.max(
+        Math.abs(b.x + b.width / 2 - innerWidth / 2),
+        Math.abs(b.y + b.height / 2 - innerHeight / 2),
+      ),
+      reachable: middle?.closest("#join") === el,
+    };
+  });
+  assert.equal(placed.tag, "FORM");
+  assert.equal(placed.drawn, true);
+  assert.ok(placed.offCentre < 1, `the block sits ${placed.offCentre}px off centre`);
+  assert.equal(placed.reachable, true);
   await page.close();
 });
 
-// The sky moves while the hand does: craft drift under the speed cap (300 px/s), the press's own
-// pointermove pulls them toward the cursor, and a cloaked craft is pointer-events:none — invisible
-// to elementFromPoint — yet fades back in where it stands. So "empty" is measured as distance from
-// every craft's box (cloaked included) and the hail button, with a margin no craft can close inside
-// the ~150 ms between the hit-test and the release: 300 px/s × 0.15 s ≈ 45 px, taken ×3.
-const EMPTY_KEEPOUT_PX = 130;
-
-test("empty sky is not a door", async () => {
-  const page = await open(2);
-  for (let attempt = 0; attempt < 8; attempt++) {
-    const empty = await page.evaluate((keepout) => {
-      const boxes = [...document.querySelectorAll(".craft"), document.getElementById("hail")].map(
-        (el) => el.getBoundingClientRect(),
-      );
-      const clear = (x, y) =>
-        boxes.every(
-          (b) =>
-            x < b.left - keepout ||
-            x > b.right + keepout ||
-            y < b.top - keepout ||
-            y > b.bottom + keepout,
-        );
-      for (let tries = 0; tries < 500; tries++) {
-        const x = 40 + Math.random() * 1120;
-        const y = 40 + Math.random() * 600;
-        if (clear(x, y)) return { x, y };
+test("a craft is drawn, not a door", async () => {
+  const page = await open(6);
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const clearCraft = await page.waitForFunction(() => {
+      const block = document.getElementById("join").getBoundingClientRect();
+      for (const el of document.querySelectorAll(".craft")) {
+        const b = el.getBoundingClientRect();
+        const clearOfBlock =
+          b.right < block.left ||
+          b.left > block.right ||
+          b.bottom < block.top ||
+          b.top > block.bottom;
+        if (!clearOfBlock) continue;
+        const x = b.x + b.width / 2;
+        const y = b.y + b.height / 2;
+        return { x, y, onCraft: Boolean(document.elementFromPoint(x, y)?.closest(".craft")) };
       }
       return null;
-    }, EMPTY_KEEPOUT_PX);
-    if (!empty) continue;
-    await press(page, empty.x, empty.y, 90);
-    assert.equal(await isOpen(page), false);
+    });
+    const spot = await clearCraft.jsonValue();
+    assert.equal(spot.onCraft, false);
+    await press(page, spot.x, spot.y, 60 + attempt * 25);
+    assert.equal(await page.evaluate(() => document.activeElement.tagName), "BODY");
+    assert.equal(await page.textContent("#ack"), "");
   }
-  await page.close();
-});
-
-test("a click in the panel's own padding does not discard what was typed", async () => {
-  const page = await open();
-  await page.click("#hail");
-  await page.fill("#email", "half@typed.com");
-  const edge = await page.locator("#panel").evaluate((el) => {
-    const b = el.getBoundingClientRect();
-    return { x: b.x + 6, y: b.y + 6 };
-  });
-  // The padding belongs to the dialog element, so this is the click the target check got wrong.
-  assert.equal(
-    await page.evaluate(([x, y]) => document.elementFromPoint(x, y).tagName, [edge.x, edge.y]),
-    "DIALOG",
-  );
-  await press(page, edge.x, edge.y, 90);
-  assert.equal(await isOpen(page), true);
-  assert.equal(await page.inputValue("#email"), "half@typed.com");
-  await page.close();
-});
-
-test("a click on the backdrop releases you", async () => {
-  const page = await open();
-  await page.click("#hail");
-  const outside = await page.locator("#panel").evaluate((el) => {
-    const b = el.getBoundingClientRect();
-    return { x: b.x / 2, y: b.y / 2 };
-  });
-  await press(page, outside.x, outside.y, 90);
-  assert.equal(await isOpen(page), false);
   await page.close();
 });
 
 test("the panel copy is the fixed join: Title Case label, terminal prompt, join verb", async () => {
   const page = await open();
-  assert.equal((await page.textContent("#hail")).trim(), "Join Waitlist");
-  await page.click("#hail");
   assert.equal((await page.textContent("#join .head")).trim(), "Join Waitlist");
-  assert.equal(await page.getAttribute("#panel", "aria-label"), "Join Waitlist");
+  assert.equal(await page.getAttribute("#join", "aria-labelledby"), "join-head");
+  assert.equal(await page.getAttribute("#join .head", "id"), "join-head");
   assert.equal(await page.getAttribute("#email", "placeholder"), "email@work.com");
   assert.equal((await page.textContent("#join .prompt")).trim(), ">");
   // The prompt is plain terminal text: the panel's own color, no glow.
@@ -193,7 +149,6 @@ test("the panel copy is the fixed join: Title Case label, terminal prompt, join 
 test("the join posts to the worker and renders its ack verbatim", async () => {
   const page = await open();
   const before = queued.length;
-  await page.click("#hail");
   await page.fill("#email", "Pilot@YourCo.com");
   await page.keyboard.press("Enter");
   await page.waitForFunction(() =>
@@ -204,6 +159,7 @@ test("the join posts to the worker and renders its ack verbatim", async () => {
     /^#\d+ on the waitlist\. We will email you when access opens\.$/,
   );
   assert.equal(await page.locator("#email").isDisabled(), true);
+  assert.equal(await page.locator("#go").isDisabled(), true);
   assert.equal(queued.length, before + 1);
   assert.equal(queued.at(-1).email, "pilot@yourco.com");
   await page.close();
@@ -211,7 +167,6 @@ test("the join posts to the worker and renders its ack verbatim", async () => {
 
 test("an address the browser rejects never reaches the worker", async () => {
   const page = await open();
-  await page.click("#hail");
   let posts = 0;
   page.on("request", (r) => r.url().endsWith("/waitlist") && r.method() === "POST" && posts++);
   await page.fill("#email", "not-an-address");
@@ -224,7 +179,6 @@ test("an address the browser rejects never reaches the worker", async () => {
 
 test("an address the browser allows but the worker refuses can be corrected", async () => {
   const page = await open();
-  await page.click("#hail");
   let posted = 0;
   page.on("request", (r) => r.url().endsWith("/waitlist") && r.method() === "POST" && posted++);
   // Native email validation does not require a dot in the domain. The worker's regex does, so
@@ -251,7 +205,6 @@ test("an address the browser allows but the worker refuses can be corrected", as
 
 test("a body that dies after its headers hands the button back", async () => {
   const page = await open();
-  await page.click("#hail");
   await page.evaluate(() => {
     window.fetch = async () => ({ ok: true, text: () => Promise.reject(new Error("stream died")) });
   });
@@ -265,17 +218,15 @@ test("a body that dies after its headers hands the button back", async () => {
   await page.close();
 });
 
-test("the join is reachable without a pointer, and Escape leaves", async () => {
+test("the entry is the first tab stop and nothing takes the block away", async () => {
   const page = await open();
   await page.keyboard.press("Tab");
-  assert.equal(await page.evaluate(() => document.activeElement.id), "hail");
-  await page.keyboard.press("Enter");
-  await page.waitForTimeout(150);
-  assert.equal(await isOpen(page), true);
   assert.equal(await page.evaluate(() => document.activeElement.id), "email");
+  await page.keyboard.type("typed@yourco.com");
   await page.keyboard.press("Escape");
   await page.waitForTimeout(150);
-  assert.equal(await isOpen(page), false);
+  assert.equal(await page.locator("#join").isVisible(), true);
+  assert.equal(await page.inputValue("#email"), "typed@yourco.com");
   await page.close();
 });
 
@@ -322,10 +273,8 @@ async function ackAfter(page, address) {
 test("every word the page shows carries no ufo metaphor", async () => {
   const page = await open();
   const shown = [await page.innerText("body")];
-  await page.click("#hail");
-  shown.push(await page.innerText("#panel"));
+  shown.push(await page.innerText("#join"));
   shown.push(await page.getAttribute("#email", "placeholder"));
-  shown.push(await page.getAttribute("#panel", "aria-label"));
   // The worker's 400 copy: native validation passes a dotless domain, its regex does not.
   shown.push(await ackAfter(page, "pilot@localhost"));
   // The dead-body path, the one ack no server can produce.
@@ -335,9 +284,8 @@ test("every word the page shows carries no ufo metaphor", async () => {
   shown.push(await ackAfter(page, "cut@lexicon.com"));
   await page.reload();
   await page.waitForFunction(() => document.querySelector(".craft")?.style.opacity === "1");
-  await page.click("#hail");
   shown.push(await ackAfter(page, "lexicon@yourco.com"));
-  assert.ok(shown.length === 7 && shown.every((copy) => copy && copy.length > 0), shown.join("|"));
+  assert.ok(shown.length === 6 && shown.every((copy) => copy && copy.length > 0), shown.join("|"));
   for (const copy of shown) {
     assert.doesNotMatch(copy, BANNED_METAPHOR);
   }

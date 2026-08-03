@@ -145,7 +145,7 @@ test("signup is positional, idempotent, and normalizes the email", async () => {
 test("the browser panel joins over the same wire the card documents", async () => {
   // Drive the worker with exactly what the page declares and sends, so a change to either
   // end of the panel's request has to keep landing on a route the worker actually serves.
-  const [, action] = LANDING_PAGE.match(/<form id="join" action="([^"]+)" method="post">/);
+  const [, action] = LANDING_PAGE.match(/<form id="join"[^>]* action="([^"]+)"/);
   const [, contentType] = LANDING_PAGE.match(/'content-type': '([^']+)'/);
   const fresh = await importWorker("panel-join");
   const reply = await fresh.fetch(
@@ -160,19 +160,22 @@ test("the browser panel joins over the same wire the card documents", async () =
   assert.match((await reply.text()).trim(), /^#1 on the waitlist\./);
 });
 
-test("a craft's click survives the morph that is redrawing it", () => {
-  // The animation replaces every glyph each frame: a press landing on one destroys its own
-  // target before the release, so the click never resolves. Only the craft is hit-tested, and
-  // the handler sits on the sky they share — the fleet gathers, so press and release can land
-  // on two different craft. Without both, clicking a craft works about a quarter of the time.
-  assert.match(LANDING_PAGE, /\.craft span\{pointer-events:none\}/);
-  assert.match(LANDING_PAGE, /sky\.addEventListener\('click', hail\);/);
+test("the sky is decoration the pointer passes straight through", () => {
+  assert.match(LANDING_PAGE, /<div id="sky" aria-hidden="true"><\/div>/);
+  assert.match(LANDING_PAGE, /\.craft\{[^}]*pointer-events:none/);
+  assert.doesNotMatch(LANDING_PAGE, /addEventListener\('click'/);
 });
 
-test("the sky is decoration and the join is reachable without a pointer", () => {
-  assert.match(LANDING_PAGE, /<div id="sky" aria-hidden="true"><\/div>/);
-  assert.match(LANDING_PAGE, /<button id="hail" class="hail" type="button">/);
+test("the join is a block in the page, submittable with nothing to open", () => {
+  assert.doesNotMatch(LANDING_PAGE, /dialog|showModal|aria-modal|::backdrop/i);
+  assert.match(
+    LANDING_PAGE,
+    /<form id="join" class="panel" action="\/waitlist" method="post" aria-labelledby="join-head">/,
+  );
+  assert.match(LANDING_PAGE, /<p class="head" id="join-head">Join Waitlist<\/p>/);
   assert.match(LANDING_PAGE, /<input id="email" name="email" type="email" required maxlength="254"/);
+  assert.match(LANDING_PAGE, /<button id="go" class="go" type="submit">join<\/button>/);
+  assert.match(LANDING_PAGE, /<p id="ack" class="ack" role="status"><\/p>/);
 });
 
 test("a first join queues and delivers one confirmation email", async () => {
