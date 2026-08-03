@@ -217,8 +217,42 @@ test("connections flip and revoke a grant, and a 404 usage read says it is not s
   await waitFor(() => expect(posted.length).toBe(1));
   expect(posted[0]).toMatchObject({ verb: "apply", kind: "connector_grant", name: "g1" });
 
-  await userEvent.click(screen.getByRole("tab", { name: "usage" }));
+  await userEvent.click(screen.getByRole("tab", { name: "Usage" }));
   expect(await screen.findByText("Usage for this agent is not shared with you.")).toBeTruthy();
+});
+
+test("a workspace-shared conversation reads as shared, in its row and its detail heading", async () => {
+  const shared = "5c0be3aa-0000-4000-8000-000000000003";
+  wire({
+    "/turns": () => json({ turns: [], subagent_turns: [] }),
+    "/files": () => json({ files: [] }),
+    "/conversations": () =>
+      json({
+        conversations: [
+          {
+            id: shared,
+            surface: "slack",
+            member_email: null,
+            turn_count: 3,
+            created_at: "2026-07-30T10:00:00",
+            last_turn_at: null,
+            readable: true,
+            disclosable: false,
+          },
+        ],
+      }),
+    "/transcript": () => json({ messages: [] }),
+  });
+  location.hash = "#/agents/" + AGENT_ID + "/conversations";
+  render(<App agents={[AGENT]} member={MEMBER} />);
+
+  const label = "Shared · " + shared.slice(0, 8);
+  const row = (await screen.findByText("slack")).closest("tr")!;
+  expect(row.querySelector("td")!.textContent).toBe(label);
+  expect(row.textContent).not.toContain("Channel or room");
+
+  await userEvent.click(screen.getByRole("button", { name: "Open" }));
+  expect(await screen.findByText("slack · " + label)).toBeTruthy();
 });
 
 test("conversations open a turn tree that nests a subagent under the turn that spawned it", async () => {
@@ -259,7 +293,6 @@ test("conversations open a turn tree that nests a subagent under the turn that s
           {
             id: "c1",
             surface: "web",
-            queue_key: "q",
             member_email: "member@example.com",
             turn_count: 2,
             created_at: "2026-07-30T10:00:00",
@@ -288,12 +321,20 @@ test("a conversation nobody shared offers no opener", async () => {
       json({
         conversations: [
           {
-            id: "c2",
+            id: "7ae41c02-0000-4000-8000-000000000001",
             surface: "slack",
-            queue_key: "room",
             member_email: null,
             turn_count: 4,
             created_at: "2026-07-30T10:00:00",
+            last_turn_at: null,
+            readable: false,
+          },
+          {
+            id: "31bd9f77-0000-4000-8000-000000000002",
+            surface: "slack",
+            member_email: null,
+            turn_count: 2,
+            created_at: "2026-07-30T11:00:00",
             last_turn_at: null,
             readable: false,
           },
@@ -303,8 +344,13 @@ test("a conversation nobody shared offers no opener", async () => {
   });
   location.hash = "#/agents/" + AGENT_ID + "/conversations";
   render(<App agents={[AGENT]} member={MEMBER} />);
-  expect(await screen.findByText("not shared with you")).toBeTruthy();
+  expect((await screen.findAllByText("not shared with you")).length).toBe(2);
   expect(screen.queryByRole("button", { name: "Open" })).toBeNull();
+  const rows = screen.getAllByText("slack").map((cell) => cell.closest("tr")!);
+  const labels = rows.map((row) => row.querySelector("td")!.textContent ?? "");
+  expect(labels.every((label) => label.startsWith("Channel or room · "))).toBe(true);
+  expect(new Set(labels).size).toBe(labels.length);
+  expect(labels.some((label) => label.startsWith("Shared"))).toBe(false);
 });
 
 test("the sources listing groups a binding's streams and acts on the main agent's lane", async () => {
@@ -344,7 +390,7 @@ test("the sources listing groups a binding's streams and acts on the main agent'
   });
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <Workspace view="sources" />
+      <Workspace view="sources" onView={() => {}} />
     </MainAgentProvider>,
   );
 
@@ -381,7 +427,7 @@ test("a workspace usage read shows the member's own spend and the admin rollup w
   });
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <Workspace view="usage" />
+      <Workspace view="usage" onView={() => {}} />
     </MainAgentProvider>,
   );
 
@@ -393,17 +439,26 @@ test("a workspace usage read shows the member's own spend and the admin rollup w
   expect(screen.getByText("member@example.com")).toBeTruthy();
 });
 
-test("the workspace sidebar routes by hash and the agent list marks the one selected", async () => {
-  wire({ "/transcript": () => json({ messages: [] }), "/workspace/sites": () => json({ available: false, sites: [] }) });
+test("the sidebar routes agents and the workspace by hash and marks the section selected", async () => {
+  wire({
+    "/transcript": () => json({ messages: [] }),
+    "/overview": () => json(OVERVIEW),
+    "/workspace/team": () => json({ members: [], can_add: false, domain: null }),
+    "/workspace/sites": () => json({ available: false, sites: [] }),
+  });
   render(<App agents={[AGENT, SECOND]} member={MEMBER} />);
 
-  const second = screen.getByRole("button", { name: /second/ });
-  await userEvent.click(second);
-  expect(location.hash).toBe("#/agents/" + SECOND.id);
-  expect(second.getAttribute("aria-current")).toBe("true");
-  expect(screen.getByRole("button", { name: /assistant/ }).getAttribute("aria-current")).toBe("false");
+  await userEvent.click(screen.getByRole("button", { name: "Agents" }));
+  expect(location.hash).toBe("#/agents");
+  expect(screen.getByRole("button", { name: "Agents" }).getAttribute("aria-current")).toBe("true");
 
-  await userEvent.click(screen.getByRole("button", { name: "Sites" }));
+  await userEvent.click(screen.getByRole("button", { name: /second/ }));
+  expect(location.hash).toBe("#/agents/" + SECOND.id);
+  expect(screen.getByRole("button", { name: "Agents" }).getAttribute("aria-current")).toBe("true");
+
+  await userEvent.click(screen.getByRole("button", { name: "Workspace" }));
+  expect(location.hash).toBe("#/workspace/team");
+  await userEvent.click(screen.getByRole("tab", { name: "Sites" }));
   expect(location.hash).toBe("#/workspace/sites");
   expect(await screen.findByText("No sites extension is installed.")).toBeTruthy();
 });
@@ -420,7 +475,7 @@ test("the agent tab strip opens the tab named in the hash", async () => {
   render(<App agents={[AGENT]} member={MEMBER} />);
 
   expect(await screen.findByText("No member-authored skills for assistant.")).toBeTruthy();
-  expect(screen.getByRole("tab", { name: "skills" }).getAttribute("aria-selected")).toBe("true");
+  expect(screen.getByRole("tab", { name: "Skills" }).getAttribute("aria-selected")).toBe("true");
 });
 
 test("the model field offers the deploy's models, which its schema alone cannot supply", async () => {
@@ -515,7 +570,7 @@ test("empty caps say so on both the workspace and the agent views", async () => 
   });
   const workspace = render(
     <MainAgentProvider agents={[AGENT]}>
-      <Workspace view="usage" />
+      <Workspace view="usage" onView={() => {}} />
     </MainAgentProvider>,
   );
   expect(await screen.findByText("No caps are set on you.")).toBeTruthy();

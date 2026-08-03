@@ -245,6 +245,24 @@ test("the new-conversation control targets the main agent, or picks among severa
   expect(await screen.findByText("Message second to start.")).toBeTruthy();
 });
 
+test("the agent page and the agents index both offer a new conversation", async () => {
+  location.hash = "#/agents/" + AGENT_ID + "/skills";
+  wire({ "/skills": () => json({ skills: [] }) });
+  render(<App agents={[AGENT]} member={MEMBER} />);
+  await userEvent.click(
+    within(await screen.findByRole("main")).getByRole("button", { name: "New conversation" }),
+  );
+  expect(location.hash).toBe("#/new/" + AGENT_ID);
+  expect(await screen.findByText("Message assistant to start.")).toBeTruthy();
+
+  location.hash = "#/agents";
+  await screen.findByRole("button", { name: "assistant · main agent" });
+  await userEvent.click(
+    within(screen.getByRole("main")).getByRole("button", { name: "New conversation" }),
+  );
+  expect(location.hash).toBe("#/new/" + AGENT_ID);
+});
+
 test("the chat header names the agent and opens its page", async () => {
   wire({
     "/api/chats": () => json({ chats: [CHAT_ROW] }),
@@ -259,7 +277,7 @@ test("the chat header names the agent and opens its page", async () => {
   );
 
   expect(location.hash).toBe("#/agents/" + AGENT_ID);
-  expect(await screen.findByRole("tab", { name: "overview" })).toBeTruthy();
+  expect(await screen.findByRole("tab", { name: "Overview" })).toBeTruthy();
 });
 
 test("a deep link is not blamed while the rail is the thing that failed", async () => {
@@ -307,6 +325,53 @@ test("a linked conversation past the rail's bound resolves by id", async () => {
 
   expect(await screen.findByText("linked words")).toBeTruthy();
   expect(await screen.findByRole("button", { name: /Pick one thread/ })).toBeTruthy();
+});
+
+test("a hash naming an agent this member cannot reach reports it", async () => {
+  location.hash = "#/agents/99999999-9999-4999-8999-999999999999/skills";
+  wire({});
+  render(<App agents={[AGENT]} member={MEMBER} />);
+
+  expect(await screen.findByText("No such agent.")).toBeTruthy();
+  expect(screen.queryByRole("tab", { name: "Skills" })).toBeNull();
+});
+
+test("the sidebar marks the section the member is in and leaves the others off", async () => {
+  wire({
+    "/workspace/team": () => json({ members: [], can_add: false, domain: null }),
+    "/workspace/sites": () => json({ available: false, sites: [] }),
+    "/overview": () => new Response("nope", { status: 503 }),
+  });
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} />);
+
+  await userEvent.click(screen.getByRole("button", { name: "Workspace" }));
+  expect(screen.getByRole("button", { name: "Workspace" }).getAttribute("aria-current")).toBe(
+    "true",
+  );
+  expect(screen.getByRole("button", { name: "Agents" }).getAttribute("aria-current")).toBe(
+    "false",
+  );
+  expect(await screen.findByRole("tab", { name: "Team" })).toBeTruthy();
+  expect(screen.getByRole("tab", { name: "Team" }).getAttribute("aria-selected")).toBe("true");
+  expect(screen.getByRole("tab", { name: "Sites" }).getAttribute("aria-selected")).toBe("false");
+
+  await userEvent.click(screen.getByRole("tab", { name: "Sites" }));
+  await waitFor(() =>
+    expect(screen.getByRole("tab", { name: "Sites" }).getAttribute("aria-selected")).toBe("true"),
+  );
+  expect(screen.getByRole("tab", { name: "Team" }).getAttribute("aria-selected")).toBe("false");
+
+  await userEvent.click(screen.getByRole("button", { name: "Agents" }));
+  expect(screen.getByRole("button", { name: "Agents" }).getAttribute("aria-current")).toBe(
+    "true",
+  );
+  expect(screen.getByRole("button", { name: "Workspace" }).getAttribute("aria-current")).toBe(
+    "false",
+  );
+  const index = within(await screen.findByRole("main"));
+  expect(index.getAllByText("opus").length).toBe(2);
+  expect(index.getByRole("button", { name: "assistant · main agent" })).toBeTruthy();
+  expect(index.getByRole("button", { name: "second" })).toBeTruthy();
 });
 
 test("a failed rail read states it and retries on demand", async () => {

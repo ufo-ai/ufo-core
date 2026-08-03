@@ -27,6 +27,7 @@ function serve() {
     vi.fn(async (url: string) => {
       if (url.includes("/workspace/artifacts")) return json({ artifacts: [ARTIFACT] });
       if (url.includes("/workspace/sites")) return json({ available: false, sites: [] });
+      if (url.includes("/workspace/team")) return json({ members: [], can_add: false, domain: null });
       if (url.includes("/api/chats")) return json({ chats: [] });
       if (url.includes("/transcript")) return json({ messages: [] });
       return new Response("file body");
@@ -38,11 +39,12 @@ test("the artifact viewer is torn down when the member navigates to another view
   serve();
   render(<App agents={[AGENT]} member={MEMBER} />);
 
-  await userEvent.click(screen.getByRole("button", { name: "Artifacts" }));
+  await userEvent.click(screen.getByRole("button", { name: "Workspace" }));
+  await userEvent.click(await screen.findByRole("tab", { name: "Artifacts" }));
   await userEvent.click(await screen.findByRole("button", { name: "notes.txt" }));
   expect(await screen.findByText("file body")).toBeTruthy();
 
-  await userEvent.click(screen.getByRole("button", { name: "Sites" }));
+  await userEvent.click(screen.getByRole("tab", { name: "Sites" }));
 
   await waitFor(() => expect(screen.queryByText("file body")).toBeNull());
   expect(screen.queryByRole("button", { name: "Close" })).toBeNull();
@@ -53,7 +55,8 @@ test("the artifact viewer is torn down when the member returns to a conversation
   serve();
   render(<App agents={[AGENT]} member={MEMBER} />);
 
-  await userEvent.click(screen.getByRole("button", { name: "Artifacts" }));
+  await userEvent.click(screen.getByRole("button", { name: "Workspace" }));
+  await userEvent.click(await screen.findByRole("tab", { name: "Artifacts" }));
   await userEvent.click(await screen.findByRole("button", { name: "notes.txt" }));
   expect(await screen.findByText("file body")).toBeTruthy();
 

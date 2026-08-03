@@ -302,7 +302,7 @@ test("the sites declaration binds to the payload the workspace route answers", a
   });
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <Workspace view="sites" />
+      <Workspace view="sites" onView={() => {}} />
     </MainAgentProvider>,
   );
 
@@ -357,7 +357,7 @@ test("the sources declaration projects a binding and a bare stream into one unif
   });
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <Workspace view="sources" />
+      <Workspace view="sources" onView={() => {}} />
     </MainAgentProvider>,
   );
 
@@ -405,7 +405,7 @@ test("a shared binding is offered no Share control", async () => {
   });
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <Workspace view="sources" />
+      <Workspace view="sources" onView={() => {}} />
     </MainAgentProvider>,
   );
 
@@ -450,7 +450,7 @@ test("resync posts the binding whole, account and base url included", async () =
   });
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <Workspace view="sources" />
+      <Workspace view="sources" onView={() => {}} />
     </MainAgentProvider>,
   );
 
@@ -494,7 +494,7 @@ test("an applied outcome states itself under the listing that produced it", asyn
   });
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <Workspace view="sources" />
+      <Workspace view="sources" onView={() => {}} />
     </MainAgentProvider>,
   );
 
@@ -529,7 +529,7 @@ test("share flips the value it carries, and remove posts no spec at all", async 
   });
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <Workspace view="sources" />
+      <Workspace view="sources" onView={() => {}} />
     </MainAgentProvider>,
   );
 
@@ -575,7 +575,7 @@ test("the artifacts declaration binds its parts to the artifact payload", async 
   });
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <Workspace view="artifacts" />
+      <Workspace view="artifacts" onView={() => {}} />
     </MainAgentProvider>,
   );
 
@@ -820,7 +820,7 @@ test("an applied intent keeps the pressed chip and the typed search term", async
   });
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <Workspace view="sources" />
+      <Workspace view="sources" onView={() => {}} />
     </MainAgentProvider>,
   );
 
@@ -925,7 +925,7 @@ test("the sources declaration searches and filters by access with live counts", 
   });
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <Workspace view="sources" />
+      <Workspace view="sources" onView={() => {}} />
     </MainAgentProvider>,
   );
 
@@ -989,7 +989,7 @@ test("a chip alone survives an applied intent, with no search term typed", async
   });
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <Workspace view="sources" />
+      <Workspace view="sources" onView={() => {}} />
     </MainAgentProvider>,
   );
 
@@ -1035,7 +1035,7 @@ test("leaving the view releases its controls, so a return starts unfiltered", as
   });
   const view = render(
     <MainAgentProvider agents={[AGENT]}>
-      <Workspace view="sources" />
+      <Workspace view="sources" onView={() => {}} />
     </MainAgentProvider>,
   );
 
@@ -1044,14 +1044,14 @@ test("leaving the view releases its controls, so a return starts unfiltered", as
 
   view.rerender(
     <MainAgentProvider agents={[AGENT]}>
-      <Workspace view="team" />
+      <Workspace view="team" onView={() => {}} />
     </MainAgentProvider>,
   );
   await waitFor(() => expect(screen.queryByRole("searchbox")).toBeNull());
 
   view.rerender(
     <MainAgentProvider agents={[AGENT]}>
-      <Workspace view="sources" />
+      <Workspace view="sources" onView={() => {}} />
     </MainAgentProvider>,
   );
 

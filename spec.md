@@ -442,7 +442,7 @@ pull that content into a context that summarizes, embeds, and recalls it, turnin
 disclosure into an unbounded one. A room or an externally-shared channel remains content nobody
 reads here, admin included, because participation there is the peer surface's live roster and no
 portal read can check it. What the data never scoped to an
-agent reads — and, where a verb exists, mutates — beside the agent list instead of under one:
+agent reads — and, where a verb exists, mutates:
 the team roster, source bindings, the deploy's member-fillable credential slots, memory, shared
 files, hosted sites, and usage. The team view is the workspace roster — every member reads who
 their colleagues are, which of them administer the workspace, and who holds a seat, exactly what

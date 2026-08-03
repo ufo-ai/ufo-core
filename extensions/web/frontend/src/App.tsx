@@ -2,8 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { Admin } from "@/views/Admin";
 import { AgentPane } from "@/views/AgentPane";
+import { Agents } from "@/views/Agents";
 import { ChatPane } from "@/views/ChatPane";
-import { WORKSPACE_VIEWS } from "@/views/registry";
 import { Workspace } from "@/views/Workspace";
 import { MainAgentProvider } from "@/lib/mainAgent";
 import { getJson } from "@/lib/api";
@@ -19,7 +19,6 @@ import {
 } from "@/lib/rail";
 import {
   AGENT_TABS,
-  WORKSPACE_TABS,
   agentHash,
   chatHash,
   newChatHash,
@@ -80,6 +79,8 @@ export function App({ agents, member }: AppProps) {
     (agentId: string) => go(newChatHash(agentId), { kind: "new-chat", agentId }),
     [go],
   );
+
+  const openAgents = useCallback(() => go("#/agents", { kind: "agents" }), [go]);
 
   const openAgent = useCallback(
     (agentId: string, tab: AgentTab = "overview") =>
@@ -156,34 +157,22 @@ export function App({ agents, member }: AppProps) {
             />
           </div>
           <ul className="m-0 list-none border-t border-edge py-2xs max-narrow:flex max-narrow:overflow-y-hidden max-narrow:overflow-x-auto max-narrow:border-t-0 max-narrow:p-0">
-            {agents.map((agent) => (
-              <li key={agent.id} data-id={agent.id}>
-                <SidebarButton
-                  current={route.kind === "agent" && route.agentId === agent.id}
-                  onClick={() => openAgent(agent.id)}
-                >
-                  <span>
-                    {agent.name}
-                    {agent.main ? " ·" : ""}
-                  </span>
-                  <span className="block font-mono text-mono opacity-(--muted-strong) max-narrow:hidden">
-                    {agent.model}
-                  </span>
-                </SidebarButton>
-              </li>
-            ))}
-          </ul>
-          <ul className="m-0 list-none border-t border-edge py-2xs max-narrow:flex max-narrow:overflow-y-hidden max-narrow:overflow-x-auto max-narrow:border-t-0 max-narrow:p-0">
-            {WORKSPACE_TABS.map((name) => (
-              <li key={name} data-tab={name}>
-                <SidebarButton
-                  current={route.kind === "workspace" && route.view === name}
-                  onClick={() => openWorkspace(name)}
-                >
-                  {WORKSPACE_VIEWS[name].label}
-                </SidebarButton>
-              </li>
-            ))}
+            <li>
+              <SidebarButton
+                current={route.kind === "agents" || route.kind === "agent"}
+                onClick={openAgents}
+              >
+                Agents
+              </SidebarButton>
+            </li>
+            <li>
+              <SidebarButton
+                current={route.kind === "workspace"}
+                onClick={() => openWorkspace("team")}
+              >
+                Workspace
+              </SidebarButton>
+            </li>
           </ul>
           <footer className="flex flex-col gap-2xs border-t border-edge px-2xl py-lg font-mono text-mono max-narrow:ml-auto max-narrow:border-t-0 max-narrow:px-lg max-narrow:py-md">
             <span className="max-narrow:hidden">
@@ -210,6 +199,8 @@ export function App({ agents, member }: AppProps) {
           onCreated={created}
           onActivity={activity}
           onOpenAgent={openAgent}
+          onNewChat={openNewChat}
+          onWorkspace={openWorkspace}
           sought={sought}
         />
       </div>
@@ -226,6 +217,8 @@ function Pane({
   onCreated,
   onActivity,
   onOpenAgent,
+  onNewChat,
+  onWorkspace,
   sought,
 }: {
   route: Route;
@@ -236,12 +229,17 @@ function Pane({
   onCreated: (agent: Agent, conversationId: string, title: string) => void;
   onActivity: (conversationId: string) => void;
   onOpenAgent: (agentId: string, tab?: AgentTab) => void;
+  onNewChat: (agentId: string) => void;
+  onWorkspace: (view: WorkspaceTab) => void;
   sought: readonly string[];
 }) {
   if (route.kind === "admin") return <Admin />;
-  if (route.kind === "workspace") return <Workspace view={route.view} />;
+  if (route.kind === "workspace") return <Workspace view={route.view} onView={onWorkspace} />;
+  if (route.kind === "agents") {
+    return <Agents agents={agents} onOpen={onOpenAgent} onNewChat={onNewChat} />;
+  }
   if (route.kind === "agent") {
-    const agent = agents.find((entry) => entry.id === route.agentId) ?? mainAgent;
+    const agent = agents.find((entry) => entry.id === route.agentId);
     if (!agent) return <PaneNote>No such agent.</PaneNote>;
     return (
       <AgentPane
@@ -249,6 +247,7 @@ function Pane({
         tab={route.tab}
         tabs={AGENT_TABS}
         onTab={(tab) => onOpenAgent(agent.id, tab)}
+        onNewChat={onNewChat}
       />
     );
   }

@@ -4524,7 +4524,7 @@ async def test_conversations_list_by_audience_and_the_agent_wall(
     by_id = {entry["id"]: entry for entry in rows}
     assert by_id[str(mine)]["member_email"] == "m@example.com"
     assert by_id[str(shared)]["surface"] == "slack"
-    assert by_id[str(shared)]["queue_key"] == "C1:1.0"
+    assert "queue_key" not in by_id[str(shared)]
     assert by_id[str(shared)]["member_email"] is None
 
     admin_view = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_admin}"})

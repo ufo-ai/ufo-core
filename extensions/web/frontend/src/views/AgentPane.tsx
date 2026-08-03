@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import { Connections } from "@/views/Connections";
 import { Conversations } from "@/views/Conversations";
 import { Overview } from "@/views/Overview";
@@ -8,19 +9,32 @@ import { cn } from "@/lib/cn";
 import type { AgentTab } from "@/lib/route";
 import type { Agent } from "@/lib/types";
 
+const TAB_LABELS: Record<AgentTab, string> = {
+  overview: "Overview",
+  conversations: "Conversations",
+  tasks: "Tasks",
+  connections: "Connections",
+  skills: "Skills",
+  usage: "Usage",
+};
+
 export type AgentPaneProps = {
   agent: Agent;
   tab: AgentTab;
   tabs: readonly AgentTab[];
   onTab: (tab: AgentTab) => void;
+  onNewChat: (agentId: string) => void;
 };
 
-export function AgentPane({ agent, tab, tabs, onTab }: AgentPaneProps) {
+export function AgentPane({ agent, tab, tabs, onTab, onNewChat }: AgentPaneProps) {
   return (
     <main className="flex min-h-0 min-w-0 flex-col">
       <div className="flex items-baseline gap-md px-2xl pt-lg">
         <h1 className="m-0 text-title font-strong">{agent.name}</h1>
         <span className="font-mono text-mono opacity-(--muted-strong)">{agent.model}</span>
+        <span className="ml-auto">
+          <Button onClick={() => onNewChat(agent.id)}>New conversation</Button>
+        </span>
       </div>
       <div role="tablist" className="flex gap-2xs border-b border-edge px-lg pt-xs">
         {tabs.map((name) => (
@@ -36,7 +50,7 @@ export function AgentPane({ agent, tab, tabs, onTab }: AgentPaneProps) {
               name === tab && "border-b-ink font-strong opacity-100",
             )}
           >
-            {name}
+            {TAB_LABELS[name]}
           </button>
         ))}
       </div>

@@ -127,7 +127,7 @@ test("a read whose body is not json states the failure rather than hanging", asy
   expect(await screen.findByText("Network error — try again.")).toBeTruthy();
 });
 
-test("the sidebar offers Team, and selecting it reads the roster", async () => {
+test("the sidebar offers the workspace, which opens on the roster", async () => {
   location.hash = "";
   const { calls } = wire({
     "/workspace/team": () => json(ROSTER),
@@ -135,7 +135,7 @@ test("the sidebar offers Team, and selecting it reads the roster", async () => {
   });
   render(<App agents={[AGENT]} member={ADMIN} />);
 
-  await userEvent.click(await screen.findByRole("button", { name: "Team" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Workspace" }));
   await waitFor(() => expect(calls.some((url) => url.includes("/workspace/team"))).toBe(true));
   expect(await screen.findByText("lead@example.com")).toBeTruthy();
 });
@@ -160,17 +160,17 @@ test("an outcome notice does not follow the member to another view", async () =>
   });
   render(<App agents={[AGENT]} member={ADMIN} />);
 
-  await userEvent.click(await screen.findByRole("button", { name: "Team" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Workspace" }));
   await userEvent.type(await screen.findByPlaceholderText("email@example.com"), "new@example.com");
   await userEvent.click(screen.getByRole("button", { name: "Add member" }));
   expect(await screen.findByText("Added member@example.com.")).toBeTruthy();
 
-  await userEvent.click(screen.getByRole("button", { name: "Credentials" }));
+  await userEvent.click(screen.getByRole("tab", { name: "Credentials" }));
 
   expect(await screen.findByText("OPENAI_API_KEY")).toBeTruthy();
   expect(screen.queryByText("Added member@example.com.")).toBeNull();
 
-  await userEvent.click(screen.getByRole("button", { name: "Team" }));
+  await userEvent.click(screen.getByRole("tab", { name: "Team" }));
 
   expect(await screen.findByText("lead@example.com")).toBeTruthy();
   expect(screen.queryByText("Added member@example.com.")).toBeNull();

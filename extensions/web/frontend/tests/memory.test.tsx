@@ -17,7 +17,7 @@ const MATCH = {
 function open(view: "memory" = "memory") {
   return render(
     <MainAgentProvider agents={[AGENT]}>
-      <Workspace view={view} />
+      <Workspace view={view} onView={() => {}} />
     </MainAgentProvider>,
   );
 }

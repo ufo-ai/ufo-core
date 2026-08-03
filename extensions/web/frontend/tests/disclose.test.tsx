@@ -11,7 +11,6 @@ const ADMIN = { ...MEMBER, admin: true };
 const PRIVATE = {
   id: "c1",
   surface: "slack",
-  queue_key: "dm:u1",
   member_email: "owner@example.com",
   turn_count: 3,
   created_at: "2026-07-30T10:00:00",
@@ -20,7 +19,7 @@ const PRIVATE = {
   disclosable: true,
 };
 
-const WALLED = { ...PRIVATE, id: "c2", queue_key: "dm:u2", disclosable: false };
+const WALLED = { ...PRIVATE, id: "c2", disclosable: false };
 
 const conversations = (entries: unknown[]) => ({
   "/conversations": () => json({ conversations: entries }),
@@ -75,6 +74,7 @@ test("acknowledging posts the transcript intent and opens the conversation it na
     conversation_id: "c1",
   });
   expect(await screen.findByText("No turns in this conversation yet.")).toBeTruthy();
+  expect(screen.getByRole("heading", { name: "slack · owner@example.com" })).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Open transcript" })).toBeNull();
 });
 

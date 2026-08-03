@@ -33,7 +33,7 @@ test("switching tabs discards the read left behind rather than painting it", asy
 
   await waitFor(() => expect(releaseSkills).not.toBeNull());
 
-  await userEvent.click(screen.getByRole("tab", { name: "tasks" }));
+  await userEvent.click(screen.getByRole("tab", { name: "Tasks" }));
   expect(await screen.findByText("No scheduled tasks for this agent.")).toBeTruthy();
 
   releaseSkills!(json({ skills: [{ name: "stale", description: "stale skill", origin: "member" }] }));
@@ -96,7 +96,7 @@ test("a slow read for a filter the member left never paints over the filter they
 
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <Workspace view="memory" />
+      <Workspace view="memory" onView={() => {}} />
     </MainAgentProvider>,
   );
 

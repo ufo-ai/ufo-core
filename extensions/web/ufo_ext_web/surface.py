@@ -971,7 +971,6 @@ async def conversations(ctx: SurfaceContext, request: Request) -> Response:
                 {
                     "id": str(entry.summary.id),
                     "surface": entry.summary.surface,
-                    "queue_key": entry.summary.queue_key,
                     "member_email": entry.summary.member_email,
                     "turn_count": entry.summary.turn_count,
                     "created_at": _iso(entry.summary.created_at),

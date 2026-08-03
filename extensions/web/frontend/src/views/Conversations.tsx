@@ -15,7 +15,6 @@ const MAX_PREVIEW_BYTES = 256 * 1024;
 type Conversation = {
   id: string;
   surface: string;
-  queue_key: string;
   member_email: string | null;
   turn_count: number;
   created_at: string;
@@ -102,7 +101,7 @@ function Disclose({
         All conversations
       </Button>
       <h2 className="text-label m-0 opacity-(--muted-soft)">
-        {conversation.surface} · {conversation.member_email || conversation.queue_key}
+        {conversation.surface} · {who(conversation)}
       </h2>
       <p className="max-w-hint">
         This conversation is private to {owner} and may contain private information. Opening it
@@ -116,6 +115,16 @@ function Disclose({
       <OutcomeNotice state={outcome} />
     </div>
   );
+}
+
+/** Who a conversation belongs to, as a member reads it: the member's own address, or — for the
+ *  two audiences that name no member — what it is, since a room's content nobody reads here and
+ *  a workspace-shared conversation everybody does. The short id distinguishes two of a kind; the
+ *  queue key is never a member-facing name. */
+function who(entry: Conversation): string {
+  if (entry.member_email) return entry.member_email;
+  const kind = entry.readable ? "Shared" : "Channel or room";
+  return kind + " · " + entry.id.slice(0, 8);
 }
 
 export function Conversations({ agent }: { agent: Agent }) {
@@ -153,7 +162,7 @@ export function Conversations({ agent }: { agent: Agent }) {
           <Table>
             <thead>
               <tr>
-                {["conversation", "surface", "turns", "last activity", ""].map((column, index) => (
+                {["member", "surface", "turns", "last activity", ""].map((column, index) => (
                   <Th key={index}>{column}</Th>
                 ))}
               </tr>
@@ -161,7 +170,7 @@ export function Conversations({ agent }: { agent: Agent }) {
             <tbody>
               {entries.map((entry) => (
                 <tr key={entry.id}>
-                  <Td>{entry.member_email || entry.queue_key}</Td>
+                  <Td>{who(entry)}</Td>
                   <Td>{entry.surface}</Td>
                   <Td>{String(entry.turn_count)}</Td>
                   <Td>{day(entry.last_turn_at) || day(entry.created_at)}</Td>
@@ -206,7 +215,7 @@ function ConversationDetail({
         All conversations
       </Button>
       <Heading>
-        {conversation.surface} · {conversation.member_email || conversation.queue_key}
+        {conversation.surface} · {who(conversation)}
       </Heading>
       <Panel
         state={state}

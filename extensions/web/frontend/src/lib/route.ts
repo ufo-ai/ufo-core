@@ -24,6 +24,7 @@ export type Route =
   | { kind: "home" }
   | { kind: "chat"; conversationId: string }
   | { kind: "new-chat"; agentId: string }
+  | { kind: "agents" }
   | { kind: "agent"; agentId: string; tab: AgentTab }
   | { kind: "workspace"; view: WorkspaceTab }
   | { kind: "admin" };
@@ -43,6 +44,7 @@ function isWorkspaceTab(name: string): name is WorkspaceTab {
 
 export function parseHash(hash: string): Route {
   if (hash === "#/admin") return { kind: "admin" };
+  if (hash === "#/agents") return { kind: "agents" };
   const chat = hash.match(CHAT_HASH);
   if (chat) return { kind: "chat", conversationId: chat[1] };
   const fresh = hash.match(NEW_CHAT_HASH);

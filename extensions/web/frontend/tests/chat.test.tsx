@@ -170,7 +170,7 @@ test("a streamed chunk never steals focus from where the member put it", async (
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
 
-  const elsewhere = screen.getByRole("button", { name: /assistant ·/ });
+  const elsewhere = screen.getByRole("button", { name: "Agents" });
   elsewhere.focus();
   StreamFake.last().emit("message", { text: "chunk" });
   await screen.findByText("chunk");
