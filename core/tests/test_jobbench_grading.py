@@ -7,9 +7,9 @@ from pathlib import Path
 import openpyxl
 import pytest
 
+from evals.harness.judge import SubprocessJudge
 from evals.jobbench.grading import (
     MAX_FILE_TEXT_CHARS,
-    SubprocessJudge,
     grade_case,
     submission_views,
 )

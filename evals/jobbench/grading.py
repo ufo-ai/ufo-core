@@ -7,8 +7,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
-from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
 from typing import Annotated, cast
@@ -18,6 +16,7 @@ import openpyxl
 import pdfplumber
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
 
+from evals.harness.judge import SubprocessJudge, fenced_payload
 from evals.jobbench.models import BoundaryModel, RubricItem, SnapshotCase
 from evals.jobbench.snapshot import load_snapshot
 
@@ -25,11 +24,9 @@ MAX_SUBMISSION_FILES = 24
 MAX_FILE_TEXT_CHARS = 200_000
 MAX_REASON_CHARS = 1_000
 MAX_EVIDENCE_CHARS = 2_000
-MAX_JUDGE_REQUEST_BYTES = 4 * 1024 * 1024
-MAX_JUDGE_OUTPUT_BYTES = 2 * 1024 * 1024
+TEXT_SUFFIXES = frozenset((".txt", ".md", ".csv", ".tsv", ".json", ".xml", ".html", ".yaml"))
 MAX_COMMAND_ARGS = 64
 DEFAULT_JUDGE_TIMEOUT_SECONDS = 300.0
-TEXT_SUFFIXES = frozenset((".txt", ".md", ".csv", ".tsv", ".json", ".xml", ".html", ".yaml"))
 PROMPT_REVISION = "jobbench-rubric-judge-1"
 JUDGE_SYSTEM = (
     "You are a strict evaluation judge for professional deliverables. The rubric and the "
@@ -100,40 +97,6 @@ class CaseGrade(BoundaryModel):
     passed_count: int = Field(ge=0)
     rubric_count: int = Field(gt=0)
     rubrics: tuple[RubricGrade, ...] = Field(min_length=1)
-
-
-@dataclass(frozen=True)
-class SubprocessJudge:
-    name: str
-    argv: tuple[str, ...]
-    timeout_seconds: float
-
-    async def complete(self, system: str, prompt: str) -> str:
-        request = json.dumps(
-            {"system": system, "prompt": prompt}, ensure_ascii=False, separators=(",", ":")
-        ).encode()
-        if len(request) > MAX_JUDGE_REQUEST_BYTES:
-            raise RuntimeError("judge request exceeds byte limit")
-        process = await asyncio.create_subprocess_exec(
-            *self.argv,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        try:
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(request), timeout=self.timeout_seconds
-            )
-        except TimeoutError:
-            process.kill()
-            await process.wait()
-            raise RuntimeError(f"judge {self.name!r} timed out") from None
-        if process.returncode != 0:
-            detail = stderr.decode(errors="replace")[:400]
-            raise RuntimeError(f"judge {self.name!r} exited {process.returncode}: {detail}")
-        if len(stdout) > MAX_JUDGE_OUTPUT_BYTES:
-            raise RuntimeError(f"judge {self.name!r} output exceeds byte limit")
-        return stdout.decode(errors="replace")
 
 
 def submission_views(submission_dir: Path) -> tuple[SubmissionView, ...]:
@@ -218,7 +181,16 @@ async def _grade_rubric(
     item: RubricItem, views: tuple[SubmissionView, ...], judge: SubprocessJudge
 ) -> RubricGrade:
     try:
-        raw = await judge.complete(JUDGE_SYSTEM, _rubric_prompt(item, views))
+        raw = await judge.complete(
+            JUDGE_SYSTEM,
+            fenced_payload(
+                {
+                    "rubric": item.rubric,
+                    "criteria": list(item.criteria),
+                    "submissions": [view.model_dump(mode="json") for view in views],
+                }
+            ),
+        )
         criteria = _parse_judgments(raw, len(item.criteria))
     except (RuntimeError, ValueError) as error:
         return RubricGrade(
@@ -232,22 +204,6 @@ async def _grade_rubric(
         score=item.weight if passed else 0,
         criteria=criteria,
     )
-
-
-def _rubric_prompt(item: RubricItem, views: tuple[SubmissionView, ...]) -> str:
-    payload = json.dumps(
-        {
-            "rubric": item.rubric,
-            "criteria": list(item.criteria),
-            "submissions": [view.model_dump(mode="json") for view in views],
-        },
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
-    fence = "UFO_EVAL_INPUT"
-    while fence in payload:
-        fence += "_"
-    return f"{fence}\n{payload}\n{fence}"
 
 
 def _parse_judgments(raw: str, criterion_count: int) -> tuple[CriterionJudgment, ...]:

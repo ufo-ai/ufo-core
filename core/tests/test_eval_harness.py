@@ -80,7 +80,7 @@ from evals.harness.judge import (
     CriterionVerdict,
     JudgeLeg,
     ModelJudge,
-    _extract_json_object,
+    extract_json_object,
     rubric_pass,
     visual_rubric_pass,
 )
@@ -3181,12 +3181,12 @@ async def test_visual_rubric_leads_with_the_page_images_and_fences_the_request()
 
 def test_extract_json_object_pulls_the_balanced_object_out_of_prose() -> None:
     payload = '{"items":[{"passed":true,"reason":"a } brace in a string"}]}'
-    assert _extract_json_object(f"Here is my review:\n```json\n{payload}\n```") == payload
-    assert _extract_json_object(payload) == payload
-    assert _extract_json_object("no json here") == "no json here"
-    assert _extract_json_object(f"The header box {{ rounded }} is fine. {payload}") == payload
-    assert _extract_json_object(f'The 12" gap is otherwise fine. {payload}') == payload
-    assert _extract_json_object(f'{payload}\nNote: this covers all "items" requested.') == payload
+    assert extract_json_object(f"Here is my review:\n```json\n{payload}\n```") == payload
+    assert extract_json_object(payload) == payload
+    assert extract_json_object("no json here") == "no json here"
+    assert extract_json_object(f"The header box {{ rounded }} is fine. {payload}") == payload
+    assert extract_json_object(f'The 12" gap is otherwise fine. {payload}') == payload
+    assert extract_json_object(f'{payload}\nNote: this covers all "items" requested.') == payload
 
 
 def test_extract_json_object_takes_the_final_verdict_over_an_earlier_valid_one() -> None:
@@ -3194,22 +3194,22 @@ def test_extract_json_object_takes_the_final_verdict_over_an_earlier_valid_one()
     echoed = '{"items":[{"passed":true,"reason":"brief evidence"}]}'
     draft = '{"items":[{"passed":true,"reason":"looks fine"}]}'
 
-    assert _extract_json_object(f"I will respond in the shape {echoed}. Now: {final}") == final
-    assert _extract_json_object(f"Draft: {draft}\nWait, on closer look: {final}") == final
+    assert extract_json_object(f"I will respond in the shape {echoed}. Now: {final}") == final
+    assert extract_json_object(f"Draft: {draft}\nWait, on closer look: {final}") == final
     wrapped = f'{{"final": {final}}}'
-    assert _extract_json_object(f"Draft: {draft} then corrected: {wrapped}") == final
+    assert extract_json_object(f"Draft: {draft} then corrected: {wrapped}") == final
 
 
 def test_extract_json_object_rejects_a_stray_fragment_when_the_real_answer_is_malformed() -> None:
     raw = '{"items":[{"passed":false,"reason":"said "clip {"items":[{"passed":true}]}" here"}]}'
 
-    assert _extract_json_object(raw, expected=2) == raw
+    assert extract_json_object(raw, expected=2) == raw
 
 
 def test_extract_json_object_survives_deeply_nested_input() -> None:
     raw = '{"a":' + "[" * 40000 + "]" * 40000 + "}"
 
-    assert _extract_json_object(raw) == raw
+    assert extract_json_object(raw) == raw
 
 
 async def test_visual_rubric_fails_before_the_model_when_no_pages_were_shared() -> None:

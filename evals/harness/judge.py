@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from json import JSONDecodeError, JSONDecoder, dumps
@@ -27,6 +28,8 @@ from ufo.sdk.models import (
     TextBlock,
 )
 
+MAX_JUDGE_REQUEST_BYTES = 4 * 1024 * 1024
+MAX_JUDGE_OUTPUT_BYTES = 2 * 1024 * 1024
 MAX_INSTRUCTION_CHARS = 12_000
 MAX_ANSWER_CHARS = 24_000
 MAX_CRITERIA = 12
@@ -126,7 +129,7 @@ async def rubric_pass(
     boundary_error = _boundary_error(instruction, answer, rubric)
     if boundary_error:
         return RubricVerdict(False, boundary_error)
-    prompt = _fenced_payload(
+    prompt = fenced_payload(
         {"instruction": instruction, "candidateAnswer": answer, "rubric": list(rubric)}
     )
     try:
@@ -145,16 +148,16 @@ async def visual_rubric_pass(
     boundary_error = _visual_boundary_error(instruction, pages, rubric)
     if boundary_error:
         return RubricVerdict(False, boundary_error)
-    prompt = _fenced_payload({"instruction": instruction, "rubric": list(rubric)})
+    prompt = fenced_payload({"instruction": instruction, "rubric": list(rubric)})
     content: tuple[ImageBlock | TextBlock, ...] = (*pages, TextBlock(text=prompt))
     try:
         raw = await judge.complete(VISUAL_JUDGE_SYSTEM, (Message(role="user", content=content),))
     except ModelResponseTruncated:
         return RubricVerdict(False, "judge response truncated")
-    return _parse_verdict(_extract_json_object(raw, len(rubric)), rubric)
+    return _parse_verdict(extract_json_object(raw, len(rubric)), rubric)
 
 
-def _extract_json_object(raw: str, expected: int | None = None) -> str:
+def extract_json_object(raw: str, expected: int | None = None) -> str:
     """The judge's verdict object, tolerant of narration and a fence around it. A reasoning judge
     reasons in its thinking block and answers with the object, but may narrate on either side —
     arbitrary prose with unbalanced braces or a stray inch mark like `12"`, and sometimes a second
@@ -184,7 +187,45 @@ def _extract_json_object(raw: str, expected: int | None = None) -> str:
     return verdict or raw
 
 
-def _fenced_payload(data: Mapping[str, object]) -> str:
+@dataclass(frozen=True)
+class SubprocessJudge:
+    """An offline judge as one declared command: the request goes in on stdin as
+    `{"system", "prompt"}` and the verdict comes back on stdout, so the grading identity is pinned
+    beside the verdict it produced and no offline grader carries a provider client of its own."""
+
+    name: str
+    argv: tuple[str, ...]
+    timeout_seconds: float
+
+    async def complete(self, system: str, prompt: str) -> str:
+        request = dumps(
+            {"system": system, "prompt": prompt}, ensure_ascii=False, separators=(",", ":")
+        ).encode()
+        if len(request) > MAX_JUDGE_REQUEST_BYTES:
+            raise RuntimeError("judge request exceeds byte limit")
+        process = await asyncio.create_subprocess_exec(
+            *self.argv,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(request), timeout=self.timeout_seconds
+            )
+        except TimeoutError:
+            process.kill()
+            await process.wait()
+            raise RuntimeError(f"judge {self.name!r} timed out") from None
+        if process.returncode != 0:
+            detail = stderr.decode(errors="replace")[:400]
+            raise RuntimeError(f"judge {self.name!r} exited {process.returncode}: {detail}")
+        if len(stdout) > MAX_JUDGE_OUTPUT_BYTES:
+            raise RuntimeError(f"judge {self.name!r} output exceeds byte limit")
+        return stdout.decode(errors="replace")
+
+
+def fenced_payload(data: Mapping[str, object]) -> str:
     payload = dumps(data, ensure_ascii=False, separators=(",", ":"))
     fence = "UFO_EVAL_INPUT"
     while fence in payload:
