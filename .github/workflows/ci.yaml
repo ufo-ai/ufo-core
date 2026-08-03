@@ -107,6 +107,9 @@ jobs:
           --health-retries 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          # the coding suite's tests read pinned commits; a shallow checkout has none
+          fetch-depth: 0
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.12"

@@ -176,6 +176,7 @@ class CapabilityOutput:
     tokens: int = 0
     cost_micro_usd: int = 0
     workspace_dir: Path | None = None
+    own_tools: tuple[str, ...] = ()
     timing: CaseTiming | None = None
     handoffs: tuple[SubagentHandoff, ...] = ()
 
@@ -409,6 +410,7 @@ async def run_capability_case(case: CapabilityCase, target: CapabilityTarget) ->
                 "artifactError": sample_output.artifact_error or None,
                 "tokens": sample_output.tokens,
                 "costMicroUsd": sample_output.cost_micro_usd,
+                "ownTools": list(sample_output.own_tools),
                 "handoffs": [handoff.model_dump(mode="json") for handoff in sample_output.handoffs]
                 or None,
                 "timing": (

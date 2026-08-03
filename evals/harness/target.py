@@ -313,6 +313,7 @@ class InProcessTarget:
                 )
             )
         output = capability_output(trajectory.messages)
+        output = replace(output, own_tools=tuple(call.name for call in output.calls))
         status = await self._turn_status(turn_id)
         snapshot = trajectory_snapshot(conversation_id, turn_id, status, trajectory.messages)
         output, descendant_ids, missing_child = await self._merge_descendants(turn_id, output)

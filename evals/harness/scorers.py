@@ -372,6 +372,30 @@ def lane_scorer(acceptable: frozenset[str]) -> Grader:
     )
 
 
+def delegation_only_scorer(forbidden: tuple[str, ...]) -> Grader:
+    """Pass iff the evaluated turn did the delegating and none of the work itself.
+
+    Reads `own_tools` — the evaluated turn's own calls, before a child's are merged in — because a
+    delegated case's merged trajectory cannot tell whose call a `bash` was. The child shares the
+    spawning turn's sandbox, so parent-side repository work is not futile; it is simply the wrong
+    agent doing it. The coding skill is explicit that the main agent explores and edits nothing
+    itself, and this grades that rule rather than restating it."""
+
+    async def grade(output: CapabilityOutput) -> CapabilityVerdict:
+        used = tuple(tool for tool in forbidden if tool in output.own_tools)
+        evidence: JsonObject = {"ownTools": list(output.own_tools)}
+        if used:
+            return CapabilityVerdict(
+                False,
+                f"the evaluated turn did the work itself with {', '.join(used)} instead of "
+                "delegating it",
+                evidence,
+            )
+        return CapabilityVerdict(True, "delegated without working the repository itself", evidence)
+
+    return DescribedGrader(f"the evaluated turn calls none of {', '.join(forbidden)} itself", grade)
+
+
 def combine(*graders: Grader) -> Grader:
     """Pass iff every grader passes; the reason concatenates each grader's reason so a failure names
     which dimension (answer, trajectory, ...) fell short."""

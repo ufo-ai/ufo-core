@@ -29,6 +29,13 @@ from httpx import AsyncClient, Timeout
 from pydantic import ValidationError
 from ufo_ext_memory.events import MEMORY_RECALL_EVENT
 
+from evals.coding_repo.runner import (
+    CODING_REPO_PACKS,
+    load_coding_repo,
+)
+from evals.coding_repo.runner import (
+    WORKFLOW_WAIT_SECONDS as CODING_REPO_WORKFLOW_WAIT_SECONDS,
+)
 from evals.compaction.runner import CompactionRun, load_compaction
 from evals.compaction.target import CompactionTarget
 from evals.cos_workflows import COS_WORKFLOWS_PACKS
@@ -179,6 +186,12 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--gdpval-100", type=Path, metavar="SNAPSHOT")
     parser.add_argument("--gdpval-treatment", choices=TREATMENTS)
     parser.add_argument("--gdpval-task", action="append", default=[], metavar="TASK_ID")
+    parser.add_argument(
+        "--coding-repo",
+        action="store_true",
+        help="run the pinned coding suite over this repository's own merged work",
+    )
+    parser.add_argument("--coding-repo-case", action="append", default=[], metavar="CASE")
     parser.add_argument("--jobbench", type=Path, metavar="SNAPSHOT")
     parser.add_argument("--jobbench-case", action="append", default=[], metavar="CASE_ID")
     parser.add_argument(
@@ -251,6 +264,8 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("--handbook-task requires --handbook")
     if args.handbook_ingest is not None and args.handbook is None:
         parser.error("--handbook-ingest requires --handbook")
+    if args.coding_repo_case and not args.coding_repo:
+        parser.error("--coding-repo-case requires --coding-repo")
     if args.skill_loading_case and "skill_loading" not in names:
         parser.error("--skill-loading-case requires --only skill_loading")
     if (args.wandr_subset is not None or args.wandr_case) and args.wandr is None:
@@ -269,6 +284,7 @@ def main(argv: list[str] | None = None) -> None:
             args.wandr,
             args.issue_recall,
             args.handbook,
+            args.coding_repo or None,
         )
     )
     if requested_runs > 1:
@@ -303,6 +319,9 @@ def main(argv: list[str] | None = None) -> None:
             if args.jobbench is not None
             else None
         )
+        coding_repo_tasks = (
+            load_coding_repo(tuple(args.coding_repo_case)) if args.coding_repo else None
+        )
         wandr_tasks = (
             load_wandr_boundary(
                 args.wandr, args.wandr_subset, tuple(args.wandr_case), args.wandr_submissions
@@ -330,6 +349,7 @@ def main(argv: list[str] | None = None) -> None:
             jobbench_tasks,
             wandr_tasks,
             handbook_tasks,
+            coding_repo_tasks,
             args.mcp_atlas_data,
             args.mcp_atlas_samples,
             hle_run,
@@ -419,6 +439,10 @@ def main(argv: list[str] | None = None) -> None:
         parser.error(
             f"jobbench requires [pack] name in {JOBBENCH_PACKS}, found {config.pack.name!r}"
         )
+    if coding_repo_tasks is not None and config.pack.name not in CODING_REPO_PACKS:
+        parser.error(
+            f"coding_repo requires [pack] name in {CODING_REPO_PACKS}, found {config.pack.name!r}"
+        )
     if wandr_tasks is not None and config.pack.name not in WANDR_PACKS:
         parser.error(f"wandr requires [pack] name in {WANDR_PACKS}, found {config.pack.name!r}")
     if handbook_tasks is not None and config.pack.name not in HANDBOOK_PACKS:
@@ -472,6 +496,8 @@ def main(argv: list[str] | None = None) -> None:
         workflow_wait_seconds = WANDR_WORKFLOW_WAIT_SECONDS
     if handbook_tasks is not None:
         workflow_wait_seconds = HANDBOOK_WORKFLOW_WAIT_SECONDS
+    if coding_repo_tasks is not None:
+        workflow_wait_seconds = CODING_REPO_WORKFLOW_WAIT_SECONDS
     if tasks and all(task.name == "document_visual" for task in tasks):
         workflow_wait_seconds = DOCUMENT_VISUAL_WORKFLOW_WAIT_SECONDS
     reports, agent_prompt = asyncio.run(
@@ -873,6 +899,7 @@ def _tasks(
     jobbench_tasks: tuple[EvalTask, ...] | None = None,
     wandr_tasks: tuple[EvalTask, ...] | None = None,
     handbook_tasks: tuple[EvalTask, ...] | None = None,
+    coding_repo_tasks: tuple[EvalTask, ...] | None = None,
     mcp_atlas_data: Path | None = None,
     mcp_atlas_samples: int | None = None,
     hle_run: HLEGoldRun | None = None,
@@ -887,6 +914,8 @@ def _tasks(
         return selected_tasks(wandr_tasks, names)
     if handbook_tasks is not None:
         return selected_tasks(handbook_tasks, names)
+    if coding_repo_tasks is not None:
+        return selected_tasks(coding_repo_tasks, names)
     mcp_atlas = (
         (load_mcp_atlas_task(mcp_atlas_data, mcp_atlas_samples),)
         if mcp_atlas_data is not None
