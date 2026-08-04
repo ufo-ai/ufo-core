@@ -20,7 +20,7 @@ import yaml
 from pydantic import ValidationError
 from ufo_ext_embed_openai import EMBED_DIM
 from ufo_ext_index_default import DefaultIndex
-from ufo_ext_memory.condenser import FactDeriver
+from ufo_ext_memory.condenser import FACT_EXTRACT_TOOL, FactDeriver
 from ufo_ext_memory.manifest import manifest as memory_manifest
 from ufo_ext_memory.objects import MEMORY_KIND, MEMORY_OBJECT
 from ufo_ext_memory.store import memory_item, store_for
@@ -35,6 +35,7 @@ from ufo.blob import FilesystemBlobStore
 from ufo.conversations import CONVERSATION_KIND, CONVERSATION_OBJECT
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, context_for
+from ufo.models.interface import Message, ToolUseBlock
 from ufo.objects import (
     BoundKind,
     ObjectLink,
@@ -81,8 +82,17 @@ class _ExtractionModel:
     def __init__(self, page_id: UUID) -> None:
         self._page_id = page_id
 
-    async def complete(self, request: object) -> str:
-        return json.dumps({"facts": [{"page_id": str(self._page_id), **EXTRACTION}]})
+    async def turn(self, request: object) -> Message:
+        return Message(
+            role="assistant",
+            content=(
+                ToolUseBlock(
+                    id="call-1",
+                    name=FACT_EXTRACT_TOOL,
+                    input={"facts": [{"page_id": str(self._page_id), **EXTRACTION}]},
+                ),
+            ),
+        )
 
 
 async def _unavailable_spawn(

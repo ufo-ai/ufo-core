@@ -14,7 +14,6 @@ embed payload is bounded next to its call, and each model call runs before the w
 never holding it open."""
 
 import json
-import logging
 import math
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -27,7 +26,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from ufo.sdk.context import ModelAccess
 from ufo.sdk.index import EmbedClient
-from ufo.sdk.models import Message, ModelRequest
+from ufo.sdk.models import Message, ModelRequest, ToolSchema, ToolUseBlock
 from ufo.sdk.sources import PageChange
 from ufo_ext_memory.store import (
     DEFAULT_CONFIDENCE,
@@ -42,22 +41,22 @@ from ufo_ext_memory.store import (
     memory_item,
 )
 
-logger = logging.getLogger(__name__)
-
 MAX_PAGE_BODY_CHARS = 8_000
 MIN_PAGE_BODY_CHARS = 40
 EXTRACT_PAGE_BATCH = 10
 FACT_EXTRACT_MAX_TOKENS = 16_384
-FACT_EXTRACT_REASONING: Literal["low"] = "low"
 EXTRACT_KEEP_NOTABILITY = frozenset({"high", "medium"})
+FACT_EXTRACT_TOOL = "record_facts"
+FACT_EXTRACT_TOOL_DESCRIPTION = (
+    "Record every fact worth keeping from the source pages, one entry per fact."
+)
 FACT_EXTRACT_SYSTEM = (
     "Distill durable, standalone facts from the source pages the user sends as JSON "
     '({"pages":[{"page_id":"...","body":"..."}]}). For each candidate fact judge its notability '
     "high, medium, or low and emit only high and medium ones. Write each fact as a concise "
     "third-person claim that stands alone without the page, carrying its source page_id, a "
-    "memory_kind (one of fact, preference, decision, event, task), and a confidence 1-10. Return "
-    'JSON only, no prose: {"facts":[{"page_id":"<id>","notability":"high","memory_kind":"fact",'
-    '"confidence":7,"body":"..."}]}.'
+    "memory_kind (one of fact, preference, decision, event, task), and a confidence 1-10. Record "
+    f"them with the {FACT_EXTRACT_TOOL} tool."
 )
 
 CLUSTER_THRESHOLD = 0.85
@@ -92,6 +91,14 @@ class ExtractedFact(BaseModel):
     confidence: int = Field(default=DEFAULT_CONFIDENCE, ge=1, le=MAX_CONFIDENCE)
 
 
+class ExtractedFacts(BaseModel):
+    """The arguments of the extraction's `record_facts` call — the shape whose JSON schema is the
+    tool contract the model records against, so the facts arrive as arguments the provider decoded
+    rather than as JSON this code reads out of prose."""
+
+    facts: tuple[ExtractedFact, ...]
+
+
 @dataclass(frozen=True)
 class FactDeriver:
     """Distill each replayed source-page change into durable `fact` memory_items and retire what
@@ -101,11 +108,14 @@ class FactDeriver:
     page goes through one bounded metered model pass per bounded group of substantial live pages —
     whose committed facts are the only thing that authorizes retiring the revisions they replace.
     Removal is conditional on the replacement's committed result, not merely later than it: a page
-    the pass leaves without a fact (a body too thin to send, an extraction carrying none, a reply it
-    could not read) keeps every fact it has, fenced out of recall by its revision until a derivation
-    supersedes it. Once-delivery is the cursor's guarantee — each changed page reaches this handler
-    once; the content-addressed commit dedups an identical re-derivation onto the same row, and the
-    retirement finds nothing left on a replay, so a replayed batch settles on the same rows."""
+    the pass leaves without a fact (a body too thin to send, an extraction carrying none) keeps
+    every fact it has, fenced out of recall by its revision until a derivation supersedes it. An
+    extraction the pass cannot read is no settlement either, and settles nothing by raising: like a
+    batch with no model wired, it holds the cursor where it stands so the next tick replays those
+    pages, rather than advancing past facts nothing will ever derive again. Once-delivery is the
+    cursor's guarantee — each changed page reaches this handler once; the content-addressed commit
+    dedups an identical re-derivation onto the same row, and the retirement finds nothing left on a
+    replay, so a replayed batch settles on the same rows."""
 
     store: MemoryStore
     model: ModelAccess
@@ -129,10 +139,7 @@ class FactDeriver:
     async def _derive(self, pages: tuple[PageChange, ...]) -> tuple[PageChange, ...]:
         """Commit the kept facts of one bounded model pass over the pages still exactly where the
         change found them, and return the pages a fact actually landed for — the only pages whose
-        other revisions now have a replacement to retire. A reply the extraction cannot read settles
-        nothing for the group: no page in it can be told apart from one that holds nothing, so the
-        pass records the unreadable reply and moves on, leaving every fact in place and the cursor
-        free to advance past a page one model reply could otherwise hold forever."""
+        other revisions now have a replacement to retire."""
         current = await self.store.page_states(tuple(page.page_id for page in pages))
         authorized = tuple(
             page
@@ -143,16 +150,7 @@ class FactDeriver:
         )
         if not authorized:
             return ()
-        reply = await self._extract(authorized)
-        try:
-            extracted = _parse_facts(reply)
-        except ValueError:
-            logger.error(
-                "memory.derive_facts.unreadable_extraction pages=%s",
-                [str(page.page_id) for page in authorized],
-                exc_info=True,
-            )
-            return ()
+        extracted = await self._extract(authorized)
         by_id = {str(page.page_id): page for page in authorized}
         settled: dict[UUID, PageChange] = {}
         for fact in extracted:
@@ -178,10 +176,16 @@ class FactDeriver:
             settled[page.page_id] = page
         return tuple(settled.values())
 
-    async def _extract(self, pages: tuple[PageChange, ...]) -> str:
-        """The one bounded metered model pass over a group, returning the raw completion its caller
-        parses — so an unreadable reply is a decision the pass makes about that group, not an
-        exception thrown through the batch."""
+    async def _extract(self, pages: tuple[PageChange, ...]) -> tuple[ExtractedFact, ...]:
+        """The one bounded metered model pass over a group, returning the facts it recorded. The
+        pass compels one `record_facts` call whose input schema is `ExtractedFacts`, so the model's
+        answer is arguments the provider decoded — never structured data sliced out of a completion,
+        where one character the model failed to escape costs the whole group its facts. Each entry
+        is validated on its own, so an entry the contract does not satisfy drops without taking the
+        rest with it, while a reply carrying no recorded facts at all raises: it is not the same
+        answer as "these pages hold nothing", and the caller must settle nothing for the group.
+        A forced tool choice runs with reasoning off — the provider rejects it under extended
+        thinking."""
         payload = {
             "pages": [
                 {"page_id": str(page.page_id), "body": page.body[:MAX_PAGE_BODY_CHARS]}
@@ -193,9 +197,38 @@ class FactDeriver:
             system=FACT_EXTRACT_SYSTEM,
             messages=(Message(role="user", content=json.dumps(payload, separators=(",", ":"))),),
             max_tokens=FACT_EXTRACT_MAX_TOKENS,
-            reasoning=FACT_EXTRACT_REASONING,
+            tools=(
+                ToolSchema(
+                    name=FACT_EXTRACT_TOOL,
+                    description=FACT_EXTRACT_TOOL_DESCRIPTION,
+                    input_schema=ExtractedFacts.model_json_schema(),
+                ),
+            ),
+            tool_choice=FACT_EXTRACT_TOOL,
+            reasoning="off",
         )
-        return await self.model.complete(request)
+        reply = await self.model.turn(request)
+        blocks = () if isinstance(reply.content, str) else reply.content
+        recorded = next(
+            (
+                block
+                for block in blocks
+                if isinstance(block, ToolUseBlock) and block.name == FACT_EXTRACT_TOOL
+            ),
+            None,
+        )
+        if recorded is None:
+            raise ValueError(f"fact extraction recorded no {FACT_EXTRACT_TOOL} call")
+        entries = recorded.input.get("facts")
+        if not isinstance(entries, list):
+            raise ValueError(f"{FACT_EXTRACT_TOOL} arguments carry no facts list")
+        facts: list[ExtractedFact] = []
+        for entry in entries:
+            try:
+                facts.append(ExtractedFact.model_validate(entry))
+            except ValidationError:
+                continue
+        return tuple(facts)
 
 
 @dataclass(frozen=True)
@@ -389,30 +422,3 @@ def _cosine(left: tuple[float, ...], right: tuple[float, ...]) -> float:
     if denom == 0:
         return 0.0
     return sum(a * b for a, b in zip(left, right, strict=True)) / denom
-
-
-def _parse_facts(text: str) -> tuple[ExtractedFact, ...]:
-    """Slice the first JSON object out of the model's completion and validate its `facts` list one
-    item at a time, dropping any single item that fails validation so one malformed fact never
-    fails the whole batch. A completion carrying no readable `facts` list at all raises instead: it
-    is not the same answer as "these pages hold nothing", so the caller settles nothing for the
-    group rather than reading a settlement into a reply it could not parse."""
-    start = text.find("{")
-    if start < 0:
-        raise ValueError("fact extraction returned no JSON object")
-    try:
-        payload, _end = json.JSONDecoder().raw_decode(text[start:])
-    except json.JSONDecodeError as error:
-        raise ValueError("fact extraction returned malformed JSON") from error
-    raw = payload.get("facts") if isinstance(payload, dict) else None
-    if not isinstance(raw, list):
-        raise ValueError("fact extraction returned no facts list")
-    facts: list[ExtractedFact] = []
-    for item in raw:
-        if not isinstance(item, dict):
-            continue
-        try:
-            facts.append(ExtractedFact.model_validate(item))
-        except ValidationError:
-            continue
-    return tuple(facts)

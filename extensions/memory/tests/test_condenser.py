@@ -9,7 +9,6 @@ store. The seam test proves the memory extension registers two independent page_
 
 import hashlib
 import json
-import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -21,6 +20,7 @@ import ufo_ext_memory.manifest as memory_manifest
 from ufo_ext_embed_openai import EMBED_DIM
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.condenser import (
+    FACT_EXTRACT_TOOL,
     MIN_CLUSTER_FACTS,
     MIN_OLDEST_AGE,
     FactDeriver,
@@ -51,7 +51,14 @@ from ufo.ext.manifest import (
 from ufo.indexing import OWNER_KIND_MEMORY_ITEM, Chunk, Hit, IndexScope, TextChunker
 from ufo.jobs import PageChangeRunner, TurnDispatcher, core_jobs
 from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
-from ufo.models.interface import ModelClient, ModelEvent, ModelRequest, TextDelta
+from ufo.models.interface import (
+    ModelClient,
+    ModelEvent,
+    ModelRequest,
+    TextDelta,
+    ToolCallDelta,
+    ToolCallStart,
+)
 from ufo.models.registry import ModelRegistry
 from ufo.schema import tables
 from ufo.schema.records import Usage
@@ -103,17 +110,51 @@ class StubModelClient:
 
 
 @dataclass
-class ScriptedModelClient:
-    """Streams one canned completion per call, in order, repeating the last — the two-phase
-    derivations a page edit drives need a different reply for the page's new revision."""
+class ExtractionModelClient:
+    """Streams one canned `record_facts` call — the compelled tool the fact extraction offers — and
+    one usage event, counting completions so a test can witness that a resumed cursor replays
+    nothing. `arguments` is the raw argument JSON the provider streams, so a test can also hand the
+    seam arguments no decoder can read."""
+
+    arguments: str
+    usage: Usage
+    calls: int = 0
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        self.calls += 1
+        yield ToolCallStart(id=f"call-{self.calls}", name=FACT_EXTRACT_TOOL)
+        yield ToolCallDelta(id=f"call-{self.calls}", partial_json=self.arguments)
+        yield self.usage
+
+
+@dataclass
+class RecordingExtractionClient:
+    """Streams one canned `record_facts` call and keeps the requests it was asked with, so a test
+    reads the tools, forced choice, and reasoning the extraction actually sent."""
+
+    arguments: str
+    requests: list[ModelRequest] = field(default_factory=list)
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        self.requests.append(request)
+        yield ToolCallStart(id="call-1", name=FACT_EXTRACT_TOOL)
+        yield ToolCallDelta(id="call-1", partial_json=self.arguments)
+        yield Usage(input_tokens=10, output_tokens=5)
+
+
+@dataclass
+class ScriptedExtractionClient:
+    """Streams one canned `record_facts` call per completion, in order, repeating the last — the
+    two-phase derivations a page edit drives need different facts for the page's new revision."""
 
     payloads: tuple[str, ...]
     calls: int = 0
 
     async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
-        payload = self.payloads[min(self.calls, len(self.payloads) - 1)]
+        arguments = self.payloads[min(self.calls, len(self.payloads) - 1)]
         self.calls += 1
-        yield TextDelta(text=payload)
+        yield ToolCallStart(id=f"call-{self.calls}", name=FACT_EXTRACT_TOOL)
+        yield ToolCallDelta(id=f"call-{self.calls}", partial_json=arguments)
         yield Usage(input_tokens=10, output_tokens=5)
 
 
@@ -448,7 +489,7 @@ def _derive_consumer(runner: PageChangeRunner) -> object:
 def _scripted(store: MemoryStore, *payloads: str) -> FactDeriver:
     return FactDeriver(
         store=store,
-        model=ModelAccess(_Resolver(AUTO_MODEL, CORE_PRICING, ScriptedModelClient(payloads))),
+        model=ModelAccess(_Resolver(AUTO_MODEL, CORE_PRICING, ScriptedExtractionClient(payloads))),
     )
 
 
@@ -567,7 +608,7 @@ async def test_derive_facts_writes_subject_scoped_facts_through_page_change(
             ]
         }
     )
-    client = StubModelClient(payload, Usage(input_tokens=50, output_tokens=20))
+    client = ExtractionModelClient(payload, Usage(input_tokens=50, output_tokens=20))
     runner = _runner(blob, vec((0, 1.0)), _registry(client))
     with ws(workspace_id):
         await runner.drive(_derive_consumer(runner))
@@ -603,7 +644,7 @@ async def test_derive_facts_rides_its_own_cursor_independent_of_the_indexer(
             ]
         }
     )
-    client = StubModelClient(payload, Usage(input_tokens=50, output_tokens=20))
+    client = ExtractionModelClient(payload, Usage(input_tokens=50, output_tokens=20))
     runner = _runner(blob, vec((1, 1.0)), _registry(client))
     consumers = {c.discriminator: c for c in runner.consumers()}
 
@@ -659,7 +700,7 @@ async def test_derive_facts_is_idempotent(db: None) -> None:
         changed_at=WHEN,
     )
     await _seed_page_authority(workspace_id, page_id, source_id, subject)
-    deriver = FactDeriver(store=_store(workspace_id, vec((2, 1.0))), model=_model(payload))
+    deriver = _scripted(_store(workspace_id, vec((2, 1.0))), payload)
     with ws(workspace_id):
         await deriver.apply((change,))
         await deriver.apply((change,))
@@ -693,7 +734,7 @@ async def test_derive_facts_binds_each_fact_to_its_pages_source(db: None) -> Non
     )
     change = _change(page_id, source_id, SHARED_SUBJECT, PAGE_BODY, 1, "sha256:page")
     await _seed_page_authority(workspace_id, page_id, source_id, SHARED_SUBJECT)
-    deriver = FactDeriver(store=_store(workspace_id, vec((2, 1.0))), model=_model(payload))
+    deriver = _scripted(_store(workspace_id, vec((2, 1.0))), payload)
     with ws(workspace_id):
         await deriver.apply((change,))
     async with workspace_tx() as connection:
@@ -732,7 +773,7 @@ async def test_fact_deriver_ignores_a_stale_private_payload_after_sanitization(
             ]
         }
     )
-    client = StubModelClient(payload, Usage(input_tokens=10, output_tokens=5))
+    client = ExtractionModelClient(payload, Usage(input_tokens=10, output_tokens=5))
     model = ModelAccess(_Resolver(AUTO_MODEL, CORE_PRICING, client))
     private_subject = member_subject(uuid4())
     private = PageChange(
@@ -788,13 +829,51 @@ async def test_derive_facts_without_a_model_holds_its_cursor_instead_of_skipping
         assert await scoped.get("page_change_cursor:derive_facts") is None
 
 
-async def test_an_unreadable_reply_for_a_new_revision_keeps_the_prior_revisions_fact(
+async def test_the_extraction_compels_the_recording_tool_instead_of_asking_for_json_prose(
     db: None, tmp_path: object
 ) -> None:
-    """A reply the extraction cannot read is not "this page holds nothing": the edited page's live
-    revision is settled by nothing, so the fact bound to the revision before the edit survives
-    untouched for the tick that reads a usable reply. Removal is conditional on the replacement, so
-    a pass that derives nothing destroys nothing."""
+    """The facts are a tool contract, never structured data read out of a completion: the pass
+    offers the recording tool alone, compels it, and runs with reasoning off (a forced choice cannot
+    run under extended thinking), so the entries arrive as arguments the provider decoded. A body
+    carrying the quote and newline that break a hand-decoded reply lands verbatim."""
+    workspace_id = await _workspace()
+    blob = FilesystemBlobStore(root=tmp_path)
+    page_id, _source_id = await _seed_page(
+        blob, workspace_id, 'The buyer said "polaris" is the codename, on two lines.'
+    )
+    body = 'the buyer calls the deal "polaris"\nand closes it in Q3'
+    client = RecordingExtractionClient(_extraction(page_id, body))
+    runner = _runner(blob, vec((21, 1.0)), _registry(client))
+    with ws(workspace_id):
+        await runner.drive(_derive_consumer(runner))
+
+    request = client.requests[0]
+    assert [tool.name for tool in request.tools] == [FACT_EXTRACT_TOOL]
+    assert request.tool_choice == FACT_EXTRACT_TOOL
+    assert request.reasoning == "off"
+    assert request.tools[0].input_schema["properties"]["facts"]["type"] == "array"
+    assert await _page_facts(page_id) == {body: 1}
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        None,
+        '{"facts":[{"page_id":"x","body":"the buyer said "polaris" is the codename"}]}',
+        '{"notes":[]}',
+        '{"facts":"polaris"}',
+    ],
+    ids=["no-recorded-call", "arguments-no-decoder-reads", "facts-absent", "facts-not-a-list"],
+)
+async def test_an_extraction_it_cannot_read_holds_the_cursor_instead_of_dropping_the_pages_facts(
+    db: None, tmp_path: object, arguments: str | None
+) -> None:
+    """Every way an extraction can come back unreadable is the same answer — not "this page holds
+    nothing" — and none of them may cost the page its facts. A reply that records no call at all,
+    one whose arguments no decoder reads, one carrying no `facts` key, and one whose `facts` is not
+    a list each raise, so the cursor stays where it stands and the fact bound to the revision before
+    the edit survives. A pass that settled the group and advanced would strand the live revision
+    behind a derivation that never comes, unretried and invisible."""
     workspace_id = await _workspace()
     blob = FilesystemBlobStore(root=tmp_path)
     page_id, source_id = await _seed_page(
@@ -810,71 +889,74 @@ async def test_an_unreadable_reply_for_a_new_revision_keeps_the_prior_revisions_
             source_id=source_id,
         )
     )
-    revision = await _rewrite_page(page_id, "sha256:edited")
-    assert revision > 1
-    client = StubModelClient(
-        "I'm sorry, I can't help with that.", Usage(input_tokens=10, output_tokens=5)
+    assert await _rewrite_page(page_id, "sha256:edited") > 1
+    client: ModelClient = (
+        StubModelClient(
+            "I'm sorry, I can't help with that.", Usage(input_tokens=10, output_tokens=5)
+        )
+        if arguments is None
+        else ExtractionModelClient(arguments, Usage(input_tokens=10, output_tokens=5))
     )
     runner = _runner(blob, vec((12, 1.0)), _registry(client))
-    with ws(workspace_id):
+    with ws(workspace_id), pytest.raises(ValueError):
         await runner.drive(_derive_consumer(runner))
 
+    with ws(workspace_id):
+        assert (
+            await ScopedStore(extension=memory_manifest.NAME).get("page_change_cursor:derive_facts")
+            is None
+        )
     assert await _page_facts(page_id) == {"the acquisition codename is polaris": 1}
 
 
-async def test_an_unreadable_reply_settles_its_group_and_lets_the_next_page_through(
-    db: None, tmp_path: object, caplog: pytest.LogCaptureFixture
+async def test_the_tick_after_an_unreadable_extraction_derives_the_pages_the_last_one_held(
+    db: None, tmp_path: object
 ) -> None:
-    """One page whose reply the extraction cannot read must not hold the workspace: the pass records
-    the unreadable reply — naming the pages so an operator can find the poison one — settles nothing
-    for that group, and the cursor advances, so the next changed page is derived on the following
-    tick instead of every page in the workspace waiting behind a reply that will never parse."""
+    """The held cursor is what makes the loss recoverable: the pages an unreadable extraction left
+    underived are exactly the pages the next tick replays, so the facts of the edited page land one
+    tick late instead of never, and the revision they replace retires then."""
     workspace_id = await _workspace()
     blob = FilesystemBlobStore(root=tmp_path)
-    poison_id, _source_id = await _seed_page(
+    page_id, source_id = await _seed_page(
         blob, workspace_id, "The acquisition codename is polaris and the deal closes in Q3."
     )
-    poisoned = _runner(
+    store = _store(workspace_id, vec((17, 1.0)))
+    await store.commit(
+        MemoryWrite(
+            subject=SHARED_SUBJECT,
+            body="the acquisition codename is polaris",
+            created_from_page_id=page_id,
+            created_from_page_revision=1,
+            source_id=source_id,
+        )
+    )
+    revision = await _rewrite_page(page_id, "sha256:edited")
+    unreadable = _runner(
         blob,
         vec((17, 1.0)),
         _registry(
-            StubModelClient(
-                "I'm sorry, I can't help with that.", Usage(input_tokens=10, output_tokens=5)
+            ExtractionModelClient(
+                '{"facts":[{"page_id":"x","body":"the buyer said "polaris""}]}',
+                Usage(input_tokens=10, output_tokens=5),
             )
         ),
     )
-    with ws(workspace_id), caplog.at_level(logging.ERROR, logger="ufo_ext_memory.condenser"):
-        await poisoned.drive(_derive_consumer(poisoned))
-        cursor = await ScopedStore(extension=memory_manifest.NAME).get(
-            "page_change_cursor:derive_facts"
-        )
-    assert isinstance(cursor, str)
-    assert await _page_facts(poison_id) == {}
-    logged = [
-        record
-        for record in caplog.records
-        if record.getMessage().startswith("memory.derive_facts.unreadable_extraction")
-    ]
-    assert len(logged) == 1
-    assert str(poison_id) in logged[0].getMessage()
-    assert logged[0].exc_info is not None
+    with ws(workspace_id), pytest.raises(ValueError):
+        await unreadable.drive(_derive_consumer(unreadable))
 
-    healthy_id, _source_id = await _seed_page(
-        blob, workspace_id, "Beatrix leads the platform team from Berlin as of this quarter."
-    )
-    healthy = _runner(
+    readable = _runner(
         blob,
         vec((17, 1.0)),
         _registry(
-            StubModelClient(
-                _extraction(healthy_id, "Beatrix leads the platform team"),
+            ExtractionModelClient(
+                _extraction(page_id, "the acquisition codename is meridian"),
                 Usage(input_tokens=10, output_tokens=5),
             )
         ),
     )
     with ws(workspace_id):
-        await healthy.drive(_derive_consumer(healthy))
-    assert await _page_facts(healthy_id) == {"Beatrix leads the platform team": 2}
+        await readable.drive(_derive_consumer(readable))
+    assert await _page_facts(page_id) == {"the acquisition codename is meridian": revision}
 
 
 async def test_a_body_too_thin_to_derive_keeps_the_pages_prior_fact(db: None) -> None:
@@ -1599,50 +1681,6 @@ def test_two_page_change_hooks_sharing_a_discriminator_fail_loud(tmp_path: objec
         runner.consumers()
 
 
-@pytest.mark.parametrize(
-    "reply",
-    [
-        "I'm sorry, I can't help with that.",
-        '{"facts": [{"page_id": "x", "body": "b"',
-        '{"notes": []}',
-        '{"facts": "polaris"}',
-    ],
-    ids=["no-json-object", "malformed-json", "facts-absent", "facts-not-a-list"],
-)
-async def test_no_readable_facts_list_settles_nothing_however_the_reply_is_unreadable(
-    db: None, tmp_path: object, reply: str
-) -> None:
-    """Each way a completion can carry no readable `facts` list is the same answer — not "this page
-    holds nothing". A reply with no JSON object at all, one whose object never closes, one carrying
-    no `facts` key, and one whose `facts` is not a list all leave the edited revision settled by
-    nothing, so the fact bound to the revision before the edit survives."""
-    workspace_id = await _workspace()
-    blob = FilesystemBlobStore(root=tmp_path)
-    page_id, source_id = await _seed_page(
-        blob, workspace_id, "The acquisition codename is polaris and the deal closes in Q3."
-    )
-    store = _store(workspace_id, vec((12, 1.0)))
-    await store.commit(
-        MemoryWrite(
-            subject=SHARED_SUBJECT,
-            body="the acquisition codename is polaris",
-            created_from_page_id=page_id,
-            created_from_page_revision=1,
-            source_id=source_id,
-        )
-    )
-    assert await _rewrite_page(page_id, "sha256:edited") > 1
-    runner = _runner(
-        blob,
-        vec((12, 1.0)),
-        _registry(StubModelClient(reply, Usage(input_tokens=10, output_tokens=5))),
-    )
-    with ws(workspace_id):
-        await runner.drive(_derive_consumer(runner))
-
-    assert await _page_facts(page_id) == {"the acquisition codename is polaris": 1}
-
-
 async def test_one_pass_settles_only_the_pages_its_own_facts_replace(
     db: None, tmp_path: object
 ) -> None:
@@ -1678,7 +1716,7 @@ async def test_one_pass_settles_only_the_pages_its_own_facts_replace(
     runner = _runner(
         blob,
         vec((12, 1.0)),
-        _registry(StubModelClient(reply, Usage(input_tokens=10, output_tokens=5))),
+        _registry(ExtractionModelClient(reply, Usage(input_tokens=10, output_tokens=5))),
     )
     with ws(workspace_id):
         await runner.drive(_derive_consumer(runner))

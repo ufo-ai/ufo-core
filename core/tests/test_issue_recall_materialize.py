@@ -20,6 +20,7 @@ import pytest
 import sqlalchemy as sa
 import ufo_ext_memory.manifest as memory_manifest
 from ufo_ext_index_default import DefaultIndex
+from ufo_ext_memory.condenser import FACT_EXTRACT_TOOL
 from ufo_ext_memory.events import MAX_RECALLED_MEMORY_IDS
 from ufo_ext_memory.store import MemoryStore, memory_item, recall_subjects
 
@@ -40,7 +41,7 @@ from ufo.blob import FilesystemBlobStore
 from ufo.db import apply_migrations, dispose_db, init_db, workspace_tx
 from ufo.ext.context import SourceReader, context_for
 from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
-from ufo.models.interface import ModelEvent, ModelRequest, TextDelta
+from ufo.models.interface import ModelEvent, ModelRequest, ToolCallDelta, ToolCallStart
 from ufo.models.registry import ModelRegistry
 from ufo.schema import tables
 from ufo.schema.records import Usage
@@ -89,7 +90,8 @@ class PageEchoModelClient:
             }
             for page in payload["pages"]
         ]
-        yield TextDelta(text=json.dumps({"facts": facts}))
+        yield ToolCallStart(id=f"call-{self.calls}", name=FACT_EXTRACT_TOOL)
+        yield ToolCallDelta(id=f"call-{self.calls}", partial_json=json.dumps({"facts": facts}))
         yield Usage(input_tokens=100, output_tokens=50)
 
 
