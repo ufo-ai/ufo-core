@@ -19,7 +19,7 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 from ufo_ext_sources import googlesheets
-from ufo_ext_sources.googlesheets import GoogleSheetsConnector
+from ufo_ext_sources.googlesheets import VALUES_BATCH_SIZE, GoogleSheetsConnector, _range_title
 
 from ufo.connectors import Credential
 from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig, StreamPage
@@ -68,7 +68,12 @@ SPREADSHEET_META = {
 }
 
 
-def _handler(seen_queries: list[str] | None = None) -> Callable[[httpx.Request], httpx.Response]:
+def _handler(
+    seen_queries: list[str] | None = None,
+    value_requests: list[httpx.Request] | None = None,
+    spreadsheet_meta: dict[str, Any] = SPREADSHEET_META,
+    values_response: Callable[[httpx.Request], httpx.Response] | None = None,
+) -> Callable[[httpx.Request], httpx.Response]:
     def handle(request: httpx.Request) -> httpx.Response:
         if request.url.host == "www.googleapis.com" and request.url.path == "/drive/v3/files":
             if seen_queries is not None:
@@ -76,18 +81,25 @@ def _handler(seen_queries: list[str] | None = None) -> Callable[[httpx.Request],
             return httpx.Response(200, json={"files": [SPREADSHEET_FILE], "nextPageToken": None})
         if request.url.host == "sheets.googleapis.com":
             if request.url.path == "/v4/spreadsheets/s1":
-                return httpx.Response(200, json=SPREADSHEET_META)
-            if request.url.path == "/v4/spreadsheets/s1/values/Summary":
+                return httpx.Response(200, json=spreadsheet_meta)
+            if request.url.path == "/v4/spreadsheets/s1/values:batchGet":
+                if value_requests is not None:
+                    value_requests.append(request)
+                if values_response is not None:
+                    return values_response(request)
                 return httpx.Response(
                     200,
                     json={
-                        "range": "Summary!A1:B2",
-                        "majorDimension": "ROWS",
-                        "values": [["Metric", "Value"], ["Revenue", "100"]],
+                        "valueRanges": [
+                            {
+                                "range": "Summary!A1:B2",
+                                "majorDimension": "ROWS",
+                                "values": [["Metric", "Value"], ["Revenue", "100"]],
+                            },
+                            {"range": "Detail", "values": []},
+                        ]
                     },
                 )
-            if request.url.path == "/v4/spreadsheets/s1/values/Detail":
-                return httpx.Response(200, json={"range": "Detail", "values": []})
         return httpx.Response(404, json={"path": request.url.path})
 
     return handle
@@ -189,7 +201,25 @@ def _listing_handler(
                     "nextPageToken": None,
                 },
             )
-        file_id, _, tab = request.url.path.removeprefix("/v4/spreadsheets/").partition("/values/")
+        resource = request.url.path.removeprefix("/v4/spreadsheets/")
+        if resource.endswith("/values:batchGet"):
+            file_id = resource.removesuffix("/values:batchGet")
+            requested = request.url.params.get_list("ranges")
+            if values_refused is not None:
+                refused_tab = next(
+                    (title for title in requested if (file_id, title) in values_refused), None
+                )
+                if refused_tab is not None:
+                    return httpx.Response(403, json=values_refused[(file_id, refused_tab)])
+            return httpx.Response(
+                200,
+                json={
+                    "valueRanges": [
+                        {"range": title, "values": [[title, file_id]]} for title in requested
+                    ]
+                },
+            )
+        file_id, _, tab = resource.partition("/values/")
         if refused is not None and file_id in refused:
             return httpx.Response(403, json=refused[file_id])
         if tab:
@@ -273,6 +303,177 @@ async def test_sheet_values_reads_each_tab_grid_into_render() -> None:
     body = next(page.body for page in result.pages if page.source_ref == "sheet_values/s1:0:values")
     assert "Metric | Value" in body
     assert "Revenue | 100" in body
+
+
+async def test_sheet_values_reads_every_tab_in_one_batched_request() -> None:
+    value_requests: list[httpx.Request] = []
+    await _fetch("sheet_values", _handler(value_requests=value_requests))
+
+    assert len(value_requests) == 1
+    assert value_requests[0].url.params.get_list("ranges") == ["Summary", "Detail"]
+
+
+async def test_sheet_values_skips_the_batch_endpoint_for_a_spreadsheet_without_tabs() -> None:
+    value_requests: list[httpx.Request] = []
+    metadata = {**SPREADSHEET_META, "sheets": []}
+
+    result = await _fetch(
+        "sheet_values", _handler(value_requests=value_requests, spreadsheet_meta=metadata)
+    )
+
+    assert result.pages == ()
+    assert value_requests == []
+
+
+async def test_sheet_values_skips_malformed_tabs_and_reads_the_valid_one() -> None:
+    value_requests: list[httpx.Request] = []
+    metadata = {
+        **SPREADSHEET_META,
+        "sheets": [
+            None,
+            {"properties": {"sheetId": 1}},
+            {"properties": {"title": "No id"}},
+            {"properties": {"sheetId": 2, "title": "Valid"}},
+        ],
+    }
+
+    def valid_range(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"valueRanges": [{"range": "Valid", "values": []}]})
+
+    result = await _fetch(
+        "sheet_values",
+        _handler(
+            value_requests=value_requests,
+            spreadsheet_meta=metadata,
+            values_response=valid_range,
+        ),
+    )
+
+    assert value_requests[0].url.params.get_list("ranges") == ["Valid"]
+    assert [page.source_ref for page in result.pages] == ["sheet_values/s1:2:values"]
+
+
+async def test_sheet_values_chunks_tabs_and_matches_each_returned_range_by_title() -> None:
+    tab_count = VALUES_BATCH_SIZE + 1
+    metadata = {
+        **SPREADSHEET_META,
+        "sheets": [
+            {"properties": {"sheetId": index, "title": f"Tab {index}"}}
+            for index in range(tab_count)
+        ],
+    }
+    value_requests: list[httpx.Request] = []
+
+    def reversed_ranges(request: httpx.Request) -> httpx.Response:
+        requested = request.url.params.get_list("ranges")
+        return httpx.Response(
+            200,
+            json={
+                "valueRanges": [
+                    {"range": f"{title}!A1", "values": [[f"value for {title}"]]}
+                    for title in reversed(requested)
+                ]
+            },
+        )
+
+    result = await _fetch(
+        "sheet_values",
+        _handler(
+            value_requests=value_requests,
+            spreadsheet_meta=metadata,
+            values_response=reversed_ranges,
+        ),
+    )
+
+    assert [len(request.url.params.get_list("ranges")) for request in value_requests] == [
+        VALUES_BATCH_SIZE,
+        1,
+    ]
+    assert len(result.pages) == tab_count
+    for index, page in enumerate(result.pages):
+        assert page.source_ref == f"sheet_values/s1:{index}:values"
+        assert f"value for Tab {index}" in page.body
+
+
+async def test_sheet_values_matches_a_quoted_returned_range_to_its_tab() -> None:
+    metadata = {
+        **SPREADSHEET_META,
+        "sheets": [{"properties": {"sheetId": 7, "title": "Owner's View"}}],
+    }
+
+    def quoted_range(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"valueRanges": [{"range": "'Owner''s View'!A1", "values": [["mine"]]}]},
+        )
+
+    result = await _fetch(
+        "sheet_values", _handler(spreadsheet_meta=metadata, values_response=quoted_range)
+    )
+
+    assert result.pages[0].source_ref == "sheet_values/s1:7:values"
+    assert "mine" in result.pages[0].body
+
+
+def test_unqualified_quoted_range_unescapes_its_title() -> None:
+    assert _range_title("'Owner''s View'") == "Owner's View"
+
+
+@pytest.mark.parametrize("value", (None, "", "'Owner!A1", "'Owner'X!A1"))
+def test_invalid_range_titles_fail_loud(value: object) -> None:
+    with pytest.raises(ValueError, match="invalid value range"):
+        _range_title(value)
+
+
+async def test_sheet_values_rejects_duplicate_returned_ranges() -> None:
+    def duplicate(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "valueRanges": [
+                    {"range": "Summary!A1", "values": []},
+                    {"range": "Summary!A2", "values": []},
+                ]
+            },
+        )
+
+    with pytest.raises(ValueError, match="returned duplicate 'Summary'"):
+        await _fetch("sheet_values", _handler(values_response=duplicate))
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        {},
+        {"valueRanges": [{"range": "Summary", "values": []}]},
+        {"valueRanges": [{"range": "Summary", "values": []}, None]},
+    ),
+)
+async def test_sheet_values_rejects_missing_short_or_non_object_ranges(
+    payload: dict[str, Any],
+) -> None:
+    def malformed(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    with pytest.raises(ValueError, match="values:batchGet"):
+        await _fetch("sheet_values", _handler(values_response=malformed))
+
+
+async def test_sheet_values_rejects_an_extra_returned_range() -> None:
+    def extra(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "valueRanges": [
+                    {"range": "Summary", "values": []},
+                    {"range": "Detail", "values": []},
+                    {"range": "Extra", "values": []},
+                ]
+            },
+        )
+
+    with pytest.raises(ValueError, match="ranges differ from requested tabs"):
+        await _fetch("sheet_values", _handler(values_response=extra))
 
 
 async def _pages(
@@ -556,8 +757,11 @@ def _sheets_refusing_handler(
 def _older_spreadsheet(request: httpx.Request) -> httpx.Response | None:
     if request.url.path == "/v4/spreadsheets/s0":
         return httpx.Response(200, json=OLDER_META)
-    if request.url.path == "/v4/spreadsheets/s0/values/Totals":
-        return httpx.Response(200, json={"range": "Totals", "values": [["Total", "3"]]})
+    if request.url.path == "/v4/spreadsheets/s0/values:batchGet":
+        return httpx.Response(
+            200,
+            json={"valueRanges": [{"range": "Totals", "values": [["Total", "3"]]}]},
+        )
     return None
 
 
@@ -584,7 +788,7 @@ def _values_refusing_handler(
                 return canned
         if request.url.path == "/v4/spreadsheets/s1":
             return httpx.Response(200, json=SPREADSHEET_META)
-        if request.url.path.startswith("/v4/spreadsheets/s1/values/"):
+        if request.url.path.startswith("/v4/spreadsheets/s1/values"):
             return httpx.Response(status, json=error)
         return httpx.Response(404, json={"path": request.url.path})
 
@@ -592,7 +796,7 @@ def _values_refusing_handler(
 
 
 def _first_tab_refusing_handler(
-    status: int, error: dict[str, Any]
+    status: int, error: dict[str, Any], tab_error: dict[str, Any] | None = None
 ) -> Callable[[httpx.Request], httpx.Response]:
     def handle(request: httpx.Request) -> httpx.Response:
         for canned in (_drive_list(request), _older_spreadsheet(request)):
@@ -600,8 +804,10 @@ def _first_tab_refusing_handler(
                 return canned
         if request.url.path == "/v4/spreadsheets/s1":
             return httpx.Response(200, json=SPREADSHEET_META)
-        if request.url.path == "/v4/spreadsheets/s1/values/Summary":
+        if request.url.path == "/v4/spreadsheets/s1/values:batchGet":
             return httpx.Response(status, json=error)
+        if request.url.path == "/v4/spreadsheets/s1/values/Summary":
+            return httpx.Response(status, json=tab_error if tab_error is not None else error)
         if request.url.path == "/v4/spreadsheets/s1/values/Detail":
             return httpx.Response(200, json={"range": "Detail", "values": [["Region", "West"]]})
         return httpx.Response(404, json={"path": request.url.path})
@@ -719,6 +925,15 @@ async def test_a_refused_tab_keeps_a_later_tab_of_the_same_spreadsheet(
     assert "Region | West" in next(
         page.body for page in result.pages if page.source_ref == "sheet_values/s1:1:values"
     )
+
+
+async def test_a_quota_refusal_during_tab_fallback_fails_the_run() -> None:
+    with pytest.raises(httpx.HTTPStatusError) as raised:
+        await _fetch(
+            "sheet_values", _first_tab_refusing_handler(403, PERMISSION_ERROR, QUOTA_ERROR)
+        )
+
+    assert raised.value.response.json() == QUOTA_ERROR
 
 
 REFUSED_FILES = {"v1": "2026-05-01T00:00:00.000Z", "v2": "2026-06-01T00:00:00.000Z"}
