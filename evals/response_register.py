@@ -8,6 +8,12 @@ short standalone summary, while one shared Markdown artifact carries the structu
 cases flip register mid-thread — an acknowledgement after a report, an analysis after banter —
 because the register is chosen per turn, never inherited from the thread.
 
+Where a case asks about a shipped change whose note claims the opposite of what its code does,
+shape is only half of it: the rubric there passes the reply that took the precedence off the
+code rather than the note, settled the yes-or-no premise in its first sentence, and stayed in the
+behavior a member can observe instead of the code's own names for its parts. Grounding and
+vocabulary are not measurable shape, so the rubric carries them.
+
 A seeded assistant turn asserts nothing the live agent could not know without tools, and never
 contradicts the message it precedes. The agent reads those turns as its own: give it a fact it
 could not have had and it spends the turn retracting it, give it a position the new message
@@ -576,6 +582,8 @@ CASES = (
         rubric=(
             "The first sentence answers no and gives the deciding fact: a matching connected "
             "account is used before the workspace key.",
+            "The summary repeats no claim from the change note that a workspace key is now "
+            "required or that a connected account is no longer accepted.",
             "The summary describes the member's action and result without code identifiers or a "
             "tour of functions, fields, branches, constants, or internal components.",
             "The summary distinguishes what the files prove from the reported incident's unknown "

@@ -57,4 +57,10 @@ at the next boundary.
 Every inline delivery is plain prose with no header or bullet list. An ack, answer, or discuss
 delivery has no report. Nothing rides along that was not requested: no adjacent case, open-question
 list, caveat, or offer of further work.
+In answer, discuss, and report, the first sentence answers the question that was asked, before any
+explanation.
+Explaining something that already exists — a shipped change, a document, a config — reads its
+current content first: what the thing says about itself is a claim to check against that content,
+never a fact to repeat. Inline to a member, say which action produces which result, never the
+internal names the thing uses for its own parts.
 </register>

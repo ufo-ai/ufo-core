@@ -124,7 +124,9 @@ from evals.registry import (
 )
 from evals.response_register import CASES as REGISTER_CASES
 from evals.response_register import (
+    CHANGE_NOTE,
     DELEGATED_CASES,
+    SOURCE_CREDENTIALS,
     Shape,
     conversational_scorer,
     delegated_split_delivery_scorer,
@@ -3284,6 +3286,34 @@ def test_register_length_floors_keep_brevity_from_rewarding_clipped_disputes() -
     assert sum("at most" in grading for grading in gradings) == 10
     assert sum("at least" in grading for grading in gradings) == 5
     assert sum("shared Markdown report" in grading for grading in gradings) == 5
+
+
+def test_the_grounding_case_stages_a_note_its_code_contradicts() -> None:
+    """Both grounding cases measure grounding only while the note claims the opposite of the code:
+    align the two, or unstage either file, and a reply that read neither still satisfies the
+    rubric."""
+    (case,) = [item for item in REGISTER_CASES if item.name == "pushback-artifact-self-description"]
+    (delegated,) = DELEGATED_CASES
+    note = CHANGE_NOTE.content.decode()
+    code = SOURCE_CREDENTIALS.content.decode()
+    connected = (
+        "    if claimed:\n"
+        "        return Resolved(account=claimed[0].account_id, connection_id=claimed[0].id)\n"
+    )
+    workspace = (
+        "    if credential_slot.is_set(source.provider):\n"
+        "        return Resolved(account=DIRECT_ACCOUNT, connection_id=None)\n"
+    )
+
+    assert case.workspace_files == (CHANGE_NOTE, SOURCE_CREDENTIALS)
+    assert delegated.workspace_files == (CHANGE_NOTE, SOURCE_CREDENTIALS)
+    assert "connected account is no longer accepted" in note
+    assert "asks for the workspace key instead" in note
+    assert "claimed = [item for item in connections if item.provider == source.provider]" in code
+    assert connected in code
+    assert workspace in code
+    assert code.index(connected) < code.index(workspace)
+    assert "connect a {source.provider!r} account" in code
 
 
 def test_delegated_register_grades_the_unknown_incident_and_exact_task_budget() -> None:

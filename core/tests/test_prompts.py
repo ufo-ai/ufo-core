@@ -71,6 +71,15 @@ def test_shell_splits_long_delivery_between_chat_and_one_markdown_report() -> No
     assert "full structure, because the content is genuinely report-shaped" not in SHELL
 
 
+def test_shell_answers_first_and_grounds_an_explanation_in_current_content() -> None:
+    prose = " ".join(SHELL.split())
+    assert "In answer, discuss, and report, the first sentence answers the question" in prose
+    assert "reads its current content first" in prose
+    assert "a claim to check against that content, never a fact to repeat" in prose
+    assert "Inline to a member, say which action produces which result" in prose
+    assert "never the internal names the thing uses for its own parts" in prose
+
+
 def test_digest_is_stable_for_equal_content_and_shifts_with_it() -> None:
     first = render_system_prompt("A", (), knowledge_cutoff="2026-01")
     again = render_system_prompt("A", (), knowledge_cutoff="2026-01")
